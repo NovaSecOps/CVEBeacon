@@ -16,6 +16,7 @@ from .engine import QueryEngine
 from .errors import CVEBeaconError, SourceError
 from .http import HttpClient
 from .inventory import inspect_inventory, load_inventory
+from .identity import normalize_asset, identity_conflict
 from .models import Asset, HealthStatus
 from .notifications import GraphMailNotifier, TeamsNotifier, alert_items, configured_channels
 from .reporting import write_json, write_xlsx
@@ -29,14 +30,15 @@ LOG = logging.getLogger("cvebeacon")
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cvebeacon", description="Conservative vulnerability monitoring for product inventories")
+    parser = argparse.ArgumentParser(prog="cvebeacon", description="Conservative vulnerability monitoring for component inventories")
     parser.add_argument("--config", default="cvebeacon.toml", help="path to TOML configuration")
     parser.add_argument("--verbose", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
     scan = commands.add_parser("scan", help="scan the configured inventory and commit monitoring state")
     scan.add_argument("--report", choices=("xlsx", "json"), help="write an on-demand report")
-    query = commands.add_parser("query", help="query a product without changing monitoring or delivery state")
-    query.add_argument("--vendor", required=True); query.add_argument("--product", required=True); query.add_argument("--version", required=True)
+    query = commands.add_parser("query", help="query a product or package without changing monitoring or delivery state")
+    for field in ("vendor", "product", "version", "ecosystem", "purl", "cpe", "repository", "commit"):
+        query.add_argument("--" + field, default="")
     query.add_argument("--asset-id", default="manual-query")
     asset = commands.add_parser("asset", help="query one configured inventory asset")
     asset.add_argument("asset_id")
@@ -44,8 +46,9 @@ def _parser() -> argparse.ArgumentParser:
     inventory_sub = inventory.add_subparsers(dest="inventory_command", required=True)
     inspect = inventory_sub.add_parser("inspect"); inspect.add_argument("path", nargs="?")
     validate = inventory_sub.add_parser("validate"); validate.add_argument("path", nargs="?")
+    validate.add_argument("--identities", action="store_true", help="show the selected identity path for each asset")
     history = commands.add_parser("history", help="show material finding history")
-    history.add_argument("--asset-id"); history.add_argument("--cve-id"); history.add_argument("--limit", type=int, default=100)
+    history.add_argument("--asset-id"); history.add_argument("--cve-id", "--advisory-id", dest="cve_id"); history.add_argument("--limit", type=int, default=100)
     export = commands.add_parser("export", help="run a current query and write a report without committing state")
     export.add_argument("--format", choices=("xlsx", "json"), default="xlsx")
     export.add_argument("--output")
@@ -59,6 +62,9 @@ def _parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="serve the monitoring dashboard")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
+    serve.add_argument("--allow-unauthenticated-remote", action="store_true", help="acknowledge remote access without built-in authentication")
+    dashboard = commands.add_parser("dashboard", help="dashboard security helpers")
+    dashboard.add_subparsers(dest="dashboard_command", required=True).add_parser("hash-password", help="prompt privately and emit a password hash")
     schedule = commands.add_parser("schedule", help="manage the native recurring scan")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
     add = schedule_sub.add_parser("install"); add.add_argument("--every"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
@@ -128,6 +134,14 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
             return payload
 
         operations = []
+        if config.sources.osv_enabled:
+            from .sources.osv import OSVSource
+            def osv_check():
+                asset = Asset("connectivity", ecosystem="PyPI", product="requests", version="2.31.0")
+                result = OSVSource(http).query_many([asset])[asset.target_key]
+                if result.error:
+                    raise SourceError("osv", result.error)
+            operations.append(("osv", osv_check))
         if config.sources.nvd_enabled:
             operations.append(("nvd", nvd_check))
         if config.sources.cve_enabled:
@@ -151,6 +165,10 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.command == "dashboard":
+        from .dashboard_auth import hash_password
+        print(hash_password())
+        return 0
     if args.command == "inventory" and args.inventory_command == "inspect" and args.path:
         print(json.dumps(inspect_inventory(args.path), indent=2))
         return 0
@@ -181,7 +199,7 @@ def run(args: argparse.Namespace) -> int:
 def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=None) -> int:
     if args.command == "serve":
         from .dashboard import serve
-        serve(config, host=args.host, port=args.port)
+        serve(config, host=args.host, port=args.port, allow_unauthenticated_remote=args.allow_unauthenticated_remote)
         return 0
     if args.command == "inventory":
         if args.inventory_command == "inspect":
@@ -189,6 +207,9 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         else:
             inventory_config = replace(config.inventory, path=Path(args.path).expanduser().resolve()) if args.path else config.inventory
             assets = load_inventory(inventory_config); print(f"valid: {len(assets)} asset(s)")
+            if args.identities:
+                for asset in assets:
+                    print(f"{asset.asset_id}: {asset.identity_path}" + (" (conflicting identities require review)" if identity_conflict(asset) else ""))
         return 0
     if args.command == "asset":
         asset = next((item for item in load_inventory(config.inventory) if item.asset_id.casefold() == args.asset_id.casefold()), None)
@@ -196,9 +217,12 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         result = _run_query(config, [asset])
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
     if args.command == "query":
-        if any(not value.strip() for value in (args.asset_id, args.vendor, args.product, args.version)):
-            raise CVEBeaconError("query asset ID, vendor, product and version cannot be blank")
-        result = _run_query(config, [Asset(args.asset_id, args.vendor, args.product, args.version)])
+        try:
+            asset = normalize_asset(Asset(args.asset_id.strip(), **{field: getattr(args, field).strip() for field in
+                ("vendor", "product", "version", "ecosystem", "purl", "cpe", "repository", "commit")}))
+        except ValueError as exc:
+            raise CVEBeaconError(str(exc)) from exc
+        result = _run_query(config, [asset])
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
     if args.command in {"scan", "export"}:
         assets = load_inventory(config.inventory)

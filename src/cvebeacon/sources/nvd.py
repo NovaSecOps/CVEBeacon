@@ -144,3 +144,17 @@ class NVDSource:
             details={"configurations": raw.get("configurations", []), "affected": raw.get("affected", []), "metrics": metrics},
         )
         return vuln, evidence
+
+    @source_payload("nvd")
+    def by_id(self, identifier: str) -> list[tuple[Vulnerability, Evidence]]:
+        from dataclasses import replace
+        found = []
+        for page in self._pages(CVE_URL, {"cveId": identifier}, 2000):
+            for wrapped in page["vulnerabilities"]:
+                parsed = self.parse_cve(wrapped["cve"])
+                if not parsed or parsed[0].cve_id != identifier:
+                    raise SourceError("nvd", "CVE lookup identity mismatch")
+                vuln, evidence = parsed
+                found.append((vuln, replace(evidence, role="cve_enrichment",
+                    statement="NVD metadata for an authoritative CVE alias; no CPE/package equivalence inferred")))
+        return found

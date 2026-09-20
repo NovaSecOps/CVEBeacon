@@ -29,12 +29,28 @@ class HealthStatus(StrEnum):
 @dataclass(frozen=True, slots=True)
 class Asset:
     asset_id: str
-    vendor: str
-    product: str
-    version: str
+    vendor: str = ""
+    product: str = ""
+    version: str = ""
+    category: str = ""
+    system_id: str = ""
+    ecosystem: str = ""
+    purl: str = ""
+    cpe: str = ""
+    repository: str = ""
+    commit: str = ""
 
     @property
-    def target_key(self) -> tuple[str, str, str]:
+    def identity_path(self) -> str:
+        return "purl" if self.purl else "cpe" if self.cpe else "ecosystem" if self.ecosystem else "commit" if self.commit else "product"
+
+    @property
+    def target_key(self) -> tuple[str, ...]:
+        if self.identity_path != "product":
+            # Labels/grouping never change applicability. Preserve package case
+            # and every explicit qualifier; do not deduplicate unlike identities.
+            return (self.identity_path, self.purl, self.cpe, self.ecosystem,
+                    self.product, self.version, self.repository, self.commit)
         return (
             self.vendor.casefold().strip(),
             self.product.casefold().strip(),
@@ -55,7 +71,7 @@ class Evidence:
 
 @dataclass(frozen=True, slots=True)
 class Vulnerability:
-    cve_id: str
+    cve_id: str | None = None
     summary: str | None = None
     published: str | None = None
     modified: str | None = None
@@ -69,6 +85,18 @@ class Vulnerability:
     cisa_kev: bool | None = None
     eu_kev: bool | None = None
     references: tuple[str, ...] = ()
+    advisory_id: str = ""
+    aliases: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    fixed_versions: tuple[str, ...] = ()
+
+    @property
+    def primary_id(self) -> str:
+        return self.advisory_id or self.cve_id or ""
+
+    @property
+    def identifiers(self) -> tuple[str, ...]:
+        return tuple(sorted({value for value in (self.primary_id, self.cve_id, *self.aliases, *self.source_ids) if value}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +111,7 @@ class Finding:
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
+        value["vulnerability"]["advisory_id"] = self.vulnerability.primary_id
         value["applicability"] = self.applicability.value
         if self.vulnerability.epss_date:
             value["vulnerability"]["epss_date"] = self.vulnerability.epss_date.isoformat()

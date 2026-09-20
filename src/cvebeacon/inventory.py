@@ -15,7 +15,8 @@ import yaml
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
-from .config import CANONICAL_FIELDS, InventoryConfig
+from .config import CANONICAL_FIELDS, OPTIONAL_FIELDS, InventoryConfig
+from .identity import normalize_asset
 from .errors import InventoryValidationError, ValidationIssue
 from .models import Asset
 
@@ -84,19 +85,24 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
             issues.append(ValidationIssue("record must be an object", location))
             continue
         values: dict[str, str] = {}
-        if any(name not in row for name in columns.values()):
+        mapped = {name: columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
+        advanced = any(row.get(mapped[name]) for name in ("purl", "cpe", "ecosystem", "commit"))
+        required = ("asset_id",) if advanced else CANONICAL_FIELDS
+        if any(mapped[name] not in row for name in required):
             issues.append(ValidationIssue("record is missing mapped fields", location))
             continue
         row_has_value = False
-        for canonical in CANONICAL_FIELDS:
-            source_name = columns[canonical]
+        for canonical in CANONICAL_FIELDS + OPTIONAL_FIELDS:
+            source_name = mapped[canonical]
             raw = row.get(source_name)
             if raw not in (None, ""):
                 row_has_value = True
             try:
                 if raw is not None and not isinstance(raw, str):
                     raise ValueError("must be text; numeric, date, boolean and compound values cannot preserve inventory spelling")
-                values[canonical] = (raw or "").strip() if canonical == "version" else _normalized(raw)
+                # Exact package identifiers must not undergo compatibility
+                # Unicode normalization (which can change registry identity).
+                values[canonical] = _normalized(raw) if canonical in {"asset_id", "category", "system_id"} or (not advanced and canonical in {"vendor", "product"}) else (raw or "").strip()
                 if "\x00" in values[canonical]:
                     raise ValueError("contains a null character")
             except (TypeError, ValueError) as exc:
@@ -106,10 +112,10 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
                 values[canonical] = ""
         if not row_has_value:
             continue
-        for canonical, value in values.items():
-            if not value:
-                issues.append(ValidationIssue(f"blank required field: {canonical}", location))
-        if any(not value for value in values.values()):
+        try:
+            asset = normalize_asset(Asset(**values))
+        except ValueError as exc:
+            issues.append(ValidationIssue(str(exc), location))
             continue
         duplicate_key = values["asset_id"].casefold()
         if duplicate_key in seen_ids:
@@ -120,7 +126,7 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
             )
             continue
         seen_ids[duplicate_key] = location
-        assets.append(Asset(**values))
+        assets.append(asset)
     if issues:
         raise InventoryValidationError(issues)
     if not assets:
@@ -164,7 +170,9 @@ def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]
                 [ValidationIssue("header row contains duplicate column names")]
             )
         header_lookup = {name.casefold(): name for name in headers}
-        missing = [name for name in config.columns.values() if name.casefold() not in header_lookup]
+        mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
+        required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
+        missing = [mapped[name] for name in required if mapped[name].casefold() not in header_lookup]
         if missing:
             raise InventoryValidationError(
                 [ValidationIssue("mapped columns not found: " + ", ".join(missing))]
@@ -174,12 +182,12 @@ def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]
             start=config.header_row + 1,
         ):
             raw_cells = dict(zip(headers, values))
-            if any(raw_cells[header_lookup[name.casefold()]].data_type == "f" for name in config.columns.values()):
+            if any(raw_cells[header_lookup[name.casefold()]].data_type == "f" for name in mapped.values() if name.casefold() in header_lookup):
                 raise InventoryValidationError([ValidationIssue("mapped inventory cells must contain text, not formulas", f"row {row_number}")])
             raw = {name: cell.value for name, cell in raw_cells.items()}
             yield f"sheet {worksheet.title!r}, row {row_number}", {
                 configured: raw.get(header_lookup[configured.casefold()])
-                for configured in config.columns.values()
+                for configured in mapped.values() if configured.casefold() in header_lookup
             }
     finally:
         workbook.close()
@@ -202,7 +210,9 @@ def _csv_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]]
                 )
             reader.fieldnames = headers
             header_lookup = {name.casefold(): name for name in headers}
-            missing = [name for name in config.columns.values() if name.casefold() not in header_lookup]
+            mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
+            required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
+            missing = [mapped[name] for name in required if mapped[name].casefold() not in header_lookup]
             if missing:
                 raise InventoryValidationError(
                     [ValidationIssue("mapped columns not found: " + ", ".join(missing))]
@@ -212,7 +222,7 @@ def _csv_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]]
                     raise InventoryValidationError([ValidationIssue("CSV row has more fields than its header", f"row {row_number}")])
                 yield f"row {row_number}", {
                     configured: row.get(header_lookup[configured.casefold()])
-                    for configured in config.columns.values()
+                    for configured in mapped.values() if configured.casefold() in header_lookup
                 }
         except csv.Error as exc:
             raise InventoryValidationError(

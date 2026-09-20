@@ -10,11 +10,13 @@ from .applicability import Decision, evaluate_cve_evidence, evaluate_nvd_evidenc
 from .config import AppConfig
 from .errors import SourceError
 from .http import HttpClient
+from .identity import identity_conflict, normalize_asset
 from .models import Applicability, Asset, Evidence, HealthStatus, QueryResult, SourceHealth, Vulnerability
 from .reconcile import merge_vulnerabilities, reconcile
 from .sources import CVEListSource, EPSSSource, EUVDSource, KEVSource, NVDSource
 from .sources.common import now_health, as_float
 from .sources.epss import EPSS_URL
+from .sources.osv import OSVSource, OSVResult
 
 
 class QueryEngine:
@@ -28,6 +30,7 @@ class QueryEngine:
         self.euvd = EUVDSource(self.http)
         self.kev = KEVSource(self.http)
         self.epss = EPSSSource(self.http)
+        self.osv = OSVSource(self.http)
         self._catalogs: dict[str, dict[str, Evidence] | SourceError] = {}
         self._cve_records: dict[str, tuple[Evidence, ...] | SourceError] = {}
 
@@ -42,6 +45,8 @@ class QueryEngine:
         self.close()
 
     def _configured_cpe(self, asset: Asset) -> str | None:
+        if asset.cpe:
+            return asset.cpe
         for mapping in self.config.product_mappings:
             if identity_text(mapping.vendor) == identity_text(asset.vendor) and identity_text(mapping.product) == identity_text(asset.product):
                 return mapping.cpe
@@ -99,6 +104,26 @@ class QueryEngine:
         return cached
 
     def query_asset(self, asset: Asset) -> QueryResult:
+        asset = normalize_asset(asset)
+        if identity_conflict(asset):
+            return QueryResult(asset, (), (), Applicability.NEEDS_REVIEW, "explicit identity systems require authoritative equivalence evidence")
+        if asset.identity_path in {"purl", "ecosystem", "commit"}:
+            if not self.config.sources.osv_enabled:
+                return QueryResult(asset, (), (now_health("osv", HealthStatus.DISABLED, "disabled by configuration"),),
+                                   Applicability.COVERAGE_UNKNOWN, "required package source OSV is disabled")
+            from .package_query import query_package
+            data = getattr(self, "_osv_results", {}).get(asset.target_key)
+            if data is None:
+                data = self.osv.query_many([asset])[asset.target_key]
+            records = {record["id"]: record for record in data.records}
+            error = data.error
+            for identifier in getattr(self, "_known_package_ids", {}).get(asset.target_key, ()):
+                if identifier not in records:
+                    try:
+                        records[identifier] = self.osv.record(identifier)
+                    except SourceError as exc:
+                        error = str(exc)
+            return query_package(self, asset, OSVResult(tuple(records.values()), error, data.matched_ids))
         health: list[SourceHealth] = []
         claims: dict[str, list[Vulnerability]] = defaultdict(list)
         evidence: dict[str, list[Evidence]] = defaultdict(list)
@@ -237,10 +262,17 @@ class QueryEngine:
         return QueryResult(asset, tuple(findings), tuple(health), coverage, reason)
 
     def scan(self, assets: Iterable[Asset], *, known_findings: Iterable[dict] = ()) -> list[QueryResult]:
+        assets = [normalize_asset(asset) for asset in assets]
         self._known_targets: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+        self._known_package_ids = defaultdict(set)
         for item in known_findings:
             previous_asset = Asset(**item["asset"])
-            self._known_targets[previous_asset.target_key].add(item["vulnerability"]["cve_id"])
+            if previous_asset.identity_path in {"purl", "ecosystem", "commit"}:
+                self._known_package_ids[previous_asset.target_key].update(item["vulnerability"].get("source_ids", ()))
+            else:
+                self._known_targets[previous_asset.target_key].add(item["vulnerability"]["cve_id"])
+        package_assets = {asset.target_key: asset for asset in assets if asset.identity_path in {"purl", "ecosystem", "commit"} and not identity_conflict(asset)}
+        self._osv_results = self.osv.query_many(list(package_assets.values())) if package_assets and self.config.sources.osv_enabled else {}
         cached: dict[tuple[str, str, str], QueryResult] = {}
         output: list[QueryResult] = []
         for asset in assets:

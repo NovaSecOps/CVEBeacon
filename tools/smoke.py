@@ -19,13 +19,14 @@ from urllib.parse import urlencode
 from urllib.request import build_opener, HTTPCookieProcessor, ProxyHandler, Request
 
 from openpyxl import load_workbook
+from werkzeug.security import generate_password_hash
 
 
 def prepare(directory: Path) -> Path:
     root = Path(__file__).resolve().parents[1]
     shutil.copytree(root / "examples", directory / "examples")
     text = (root / "cvebeacon.example.toml").read_text(encoding="utf-8")
-    for source in ("nvd", "cve", "euvd", "cisa_kev", "eu_kev", "epss"):
+    for source in ("nvd", "cve", "euvd", "cisa_kev", "eu_kev", "epss", "osv"):
         text = text.replace(f"{source}_enabled = true", f"{source}_enabled = false")
     config = directory / "offline.toml"
     config.write_text(text, encoding="utf-8")
@@ -38,6 +39,7 @@ def smoke(directory: Path, executable: Path | None) -> None:
     env = dict(os.environ)
     for name in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
         env.pop(name, None)
+    env.pop("CVEBEACON_DASHBOARD_PASSWORD_HASH", None)
     if executable:
         env["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32") if os.name == "nt" else "/usr/bin:/bin"
 
@@ -53,6 +55,8 @@ def smoke(directory: Path, executable: Path | None) -> None:
     for sample in ("offline.toml", "examples/json.toml", "examples/yaml.toml", "examples/xlsx.toml"):
         assert "valid:" in check(["--config", sample, "inventory", "validate"])
     assert json.loads(check(common + ["doctor"]))["state"] == "ok"
+    for args in (["--purl", "pkg:pypi/requests@2.31.0"], ["--ecosystem", "Maven", "--product", "org.apache.logging.log4j:log4j-core", "--version", "2.14.1"]):
+        assert json.loads(check(common + ["query", *args]))["coverage"] == "coverage_unknown"
     check(common + ["scan", "--report", "xlsx"], 4)
     check(common + ["history"])
     health = json.loads(check(common + ["source-status"]))
@@ -72,9 +76,12 @@ def smoke(directory: Path, executable: Path | None) -> None:
         assert db.execute("SELECT status FROM runs").fetchone()[0] == "failed"
         assert db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] == 0
     serve_smoke(directory, prefix, common, env)
+    password = "Synthetic package smoke password"
+    env["CVEBEACON_DASHBOARD_PASSWORD_HASH"] = generate_password_hash(password)
+    serve_smoke(directory, prefix, common, env, password=password)
 
 
-def serve_smoke(directory, prefix, common, env):
+def serve_smoke(directory, prefix, common, env, password=None):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -95,23 +102,36 @@ def serve_smoke(directory, prefix, common, env):
             while True:
                 assert process.poll() is None, "dashboard exited before readiness"
                 try:
-                    assert "Monitoring overview" in get("/")
+                    assert ("Dashboard login" if password else "Monitoring overview") in get("/")
                     break
                 except URLError:
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(.2)
+            if password:
+                for path in ("/findings", "/history", "/assets", "/sources", "/query", "/reports"):
+                    assert "Dashboard login" in get(path)
+                token = re.search(r'name="csrf" value="([^"]+)"', get("/login"))[1]
+                with opener.open(Request(base + "/login", data=urlencode({"csrf": token, "password": password}).encode("ascii")), timeout=15) as response:
+                    assert "Monitoring overview" in response.read().decode("utf-8")
             for path in ("/findings", "/history", "/assets", "/query", "/reports", "/sources", "/static/dashboard.css"):
                 get(path)
             before = state()
-            for path, fields in (("/query", {"vendor": "Acme", "product": "Widget", "version": "unknown"}), ("/reports", {"format": "json"})):
+            for path, fields in (("/query", {"vendor": "Acme", "product": "Widget", "version": "unknown"}),
+                ("/query?mode=package", {"mode": "package", "ecosystem": "PyPI", "product": "requests", "version": "2.31.0"}),
+                ("/query?mode=purl", {"mode": "purl", "purl": "pkg:pypi/requests@2.31.0"}), ("/reports", {"format": "json"})):
                 token = re.search(r'name="csrf" value="([^"]+)"', get(path))[1]
                 request = Request(base + path, data=urlencode({"csrf": token, **fields}).encode("ascii"))
                 with opener.open(request, timeout=15) as response:
                     assert response.status == 200
                     assert "coverage_unknown" in response.read().decode("utf-8")
             assert state() == before, "web investigation modified monitoring state"
-            print("PASS serve: pages, static assets, manual query, report and monitoring-state isolation")
+            if password:
+                token = re.search(r'name="csrf" value="([^"]+)"', get("/"))[1]
+                with opener.open(Request(base + "/logout", data=urlencode({"csrf": token}).encode("ascii")), timeout=15) as response:
+                    assert "Dashboard login" in response.read().decode("utf-8")
+                assert "Dashboard login" in get("/findings")
+            print("PASS serve: pages, static assets, manual query, report, monitoring-state isolation; auth=" + str(bool(password)))
         finally:
             if os.name == "nt" and process.poll() is None:
                 # A one-file bundle has a bootloader parent and an application child.

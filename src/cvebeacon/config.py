@@ -12,6 +12,7 @@ from typing import Any
 from .errors import ConfigurationError
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
+OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit")
 
 
 def _resolve(base: Path, value: str | Path) -> Path:
@@ -46,6 +47,7 @@ class HttpConfig:
 
 @dataclass(frozen=True, slots=True)
 class SourceConfig:
+    osv_enabled: bool = True
     nvd_enabled: bool = True
     cve_enabled: bool = True
     euvd_enabled: bool = True
@@ -80,6 +82,13 @@ class EmailConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DashboardConfig:
+    password_hash_env: str = "CVEBEACON_DASHBOARD_PASSWORD_HASH"
+    session_lifetime_seconds: int = 3600
+    secure_cookie: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     config_path: Path
     inventory: InventoryConfig
@@ -90,6 +99,7 @@ class AppConfig:
     product_mappings: tuple[ProductMapping, ...] = ()
     teams: TeamsConfig = field(default_factory=TeamsConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
 
     def secret(self, env_name: str, *, required: bool = False) -> str | None:
         value = os.environ.get(env_name)
@@ -140,7 +150,9 @@ def load_config(path: str | Path) -> AppConfig:
     columns = inv.get("columns", {name: name for name in CANONICAL_FIELDS})
     if not isinstance(columns, dict):
         raise ConfigurationError("inventory.columns must be a table")
-    missing = [name for name in CANONICAL_FIELDS if not columns.get(name)]
+    missing = [name for name in columns if name in CANONICAL_FIELDS + OPTIONAL_FIELDS and not columns.get(name)]
+    if not columns.get("asset_id"):
+        missing.append("asset_id")
     if missing:
         raise ConfigurationError(
             "inventory.columns is missing mappings for: " + ", ".join(missing)
@@ -161,6 +173,15 @@ def load_config(path: str | Path) -> AppConfig:
     output = _table(data, "output")
     http_data = _table(data, "http")
     source_data = _table(data, "sources")
+    dashboard_data = _table(data, "dashboard")
+    if set(dashboard_data) - {"password_hash_env", "session_lifetime_seconds", "secure_cookie"}:
+        raise ConfigurationError("unknown dashboard setting; supply the password hash only through its environment variable")
+    hash_env = dashboard_data.get("password_hash_env", "CVEBEACON_DASHBOARD_PASSWORD_HASH")
+    if not isinstance(hash_env, str) or not hash_env.strip():
+        raise ConfigurationError("dashboard.password_hash_env must be a nonempty environment variable name")
+    lifetime = dashboard_data.get("session_lifetime_seconds", 3600)
+    if isinstance(lifetime, bool) or not isinstance(lifetime, int) or not 60 <= lifetime <= 86400:
+        raise ConfigurationError("dashboard.session_lifetime_seconds must be an integer from 60 to 86400")
     notification_data = _table(data, "notifications")
     teams_data = notification_data.get("teams", {})
     email_data = notification_data.get("email", {})
@@ -224,7 +245,7 @@ def load_config(path: str | Path) -> AppConfig:
             records_path=inv.get("records_path"),
             delimiter=delimiter,
             encoding=str(inv.get("encoding", "utf-8-sig")),
-            columns={name: str(columns[name]) for name in CANONICAL_FIELDS},
+            columns={name: str(value) for name, value in columns.items() if name in CANONICAL_FIELDS + OPTIONAL_FIELDS},
         ),
         database_path=_resolve(base, state.get("database", ".cvebeacon/state.db")),
         output_dir=_resolve(base, output.get("directory", "reports")),
@@ -242,6 +263,7 @@ def load_config(path: str | Path) -> AppConfig:
             user_agent=user_agent,
         ),
         sources=SourceConfig(
+            osv_enabled=_boolean(source_data, "osv_enabled", True),
             nvd_enabled=_boolean(source_data, "nvd_enabled", True),
             cve_enabled=_boolean(source_data, "cve_enabled", True),
             euvd_enabled=_boolean(source_data, "euvd_enabled", True),
@@ -255,6 +277,7 @@ def load_config(path: str | Path) -> AppConfig:
             ),
         ),
         product_mappings=tuple(mappings),
+        dashboard=DashboardConfig(hash_env.strip(), lifetime, _boolean(dashboard_data, "secure_cookie", False)),
         teams=TeamsConfig(
             enabled=teams_enabled,
             webhook_env=str(
