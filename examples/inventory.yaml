@@ -1,0 +1,5 @@
+assets:
+  - asset_id: asset-001
+    vendor: Example Vendor
+    product: Example Product
+    version: 1.0.0

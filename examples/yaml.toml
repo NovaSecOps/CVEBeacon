@@ -1,0 +1,16 @@
+[inventory]
+path = "inventory.yaml"
+format = "yaml"
+records_path = "assets"
+
+[inventory.columns]
+asset_id = "asset_id"
+vendor = "vendor"
+product = "product"
+version = "version"
+
+[state]
+database = "../.cvebeacon/state.db"
+
+[output]
+directory = "../reports"

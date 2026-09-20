@@ -1,0 +1,52 @@
+[inventory]
+path = "examples/inventory.csv"
+format = "auto"
+delimiter = ","
+encoding = "utf-8-sig"
+
+[inventory.columns]
+asset_id = "asset_id"
+vendor = "vendor"
+product = "product"
+version = "version"
+
+[state]
+database = ".cvebeacon/state.db"
+
+[output]
+directory = "reports"
+
+[http]
+connect_timeout = 10
+read_timeout = 30
+retries = 3
+backoff_seconds = 1
+user_agent = "CVEBeacon/0.1"
+
+[sources]
+nvd_enabled = true
+cve_enabled = true
+euvd_enabled = true
+cisa_kev_enabled = true
+eu_kev_enabled = true
+epss_enabled = true
+nvd_api_key_env = "NVD_API_KEY"
+minimum_request_interval = 6
+
+[notifications.teams]
+enabled = false
+webhook_env = "CVEBEACON_TEAMS_WEBHOOK_URL"
+
+[notifications.email]
+enabled = false
+tenant_id_env = "CVEBEACON_M365_TENANT_ID"
+client_id_env = "CVEBEACON_M365_CLIENT_ID"
+client_secret_env = "CVEBEACON_M365_CLIENT_SECRET"
+sender = "scanner@example.invalid"
+recipients = ["security@example.invalid"]
+
+# Optional exact product mapping. Verify the CPE before use.
+# [[product_mappings]]
+# vendor = "Example Vendor"
+# product = "Example Product"
+# cpe = "cpe:2.3:a:example:product:*:*:*:*:*:*:*:*"

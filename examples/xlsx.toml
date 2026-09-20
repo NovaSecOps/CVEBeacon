@@ -1,0 +1,17 @@
+[inventory]
+path = "inventory.xlsx"
+format = "xlsx"
+worksheet = "Assets"
+header_row = 1
+
+[inventory.columns]
+asset_id = "Asset ID"
+vendor = "Vendor"
+product = "Product"
+version = "Version"
+
+[state]
+database = "../.cvebeacon/state.db"
+
+[output]
+directory = "../reports"
