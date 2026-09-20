@@ -1,0 +1,91 @@
+name: Cross-platform validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests / ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade "pip>=26.2"
+      - run: python -m pip install ".[dev]"
+      - run: python -m pip check
+      - run: python tools/test_offline.py -q
+      - run: python tools/smoke.py
+      - name: Native scheduler lifecycle
+        if: matrix.python == '3.12'
+        run: python tools/scheduler_smoke.py
+
+  packages:
+    name: Packages / ${{ matrix.os }}
+    needs: tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m venv .venv
+      - name: Linux build and isolated smoke checks
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          .venv/bin/python -m pip install --upgrade 'pip>=26.2'
+          .venv/bin/python -m pip install '.[dev]'
+          .venv/bin/python -m pip check
+          sh scripts/build-linux.sh
+          .venv/bin/python tools/smoke.py --executable dist/onedir/cvebeacon/cvebeacon
+          .venv/bin/python tools/smoke.py --executable dist/cvebeacon
+          .venv/bin/python tools/inspect_package.py dist/onedir/cvebeacon/cvebeacon dist/cvebeacon
+          tar -czf dist/cvebeacon-linux-x64.tar.gz -C dist cvebeacon onedir
+      - name: Windows build and isolated smoke checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .venv/Scripts/python -m pip install --upgrade "pip>=26.2"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv/Scripts/python -m pip install ".[dev]"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv/Scripts/python -m pip check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./scripts/build-windows.ps1
+          .venv/Scripts/python tools/smoke.py --executable dist/cvebeacon/cvebeacon.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv/Scripts/python tools/smoke.py --executable dist/cvebeacon.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv/Scripts/python tools/inspect_package.py dist/cvebeacon/cvebeacon.exe dist/cvebeacon.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Compress-Archive -Path dist/cvebeacon,dist/cvebeacon.exe -DestinationPath dist/cvebeacon-windows-x64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cvebeacon-${{ runner.os }}-x64
+          path: |
+            dist/cvebeacon-*.zip
+            dist/cvebeacon-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
