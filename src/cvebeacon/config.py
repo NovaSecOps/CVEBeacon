@@ -12,6 +12,7 @@ from typing import Any
 from .errors import ConfigurationError
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
+OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit")
 
 
 def _resolve(base: Path, value: str | Path) -> Path:
@@ -148,7 +149,9 @@ def load_config(path: str | Path) -> AppConfig:
     columns = inv.get("columns", {name: name for name in CANONICAL_FIELDS})
     if not isinstance(columns, dict):
         raise ConfigurationError("inventory.columns must be a table")
-    missing = [name for name in CANONICAL_FIELDS if not columns.get(name)]
+    missing = [name for name in columns if name in CANONICAL_FIELDS + OPTIONAL_FIELDS and not columns.get(name)]
+    if not columns.get("asset_id"):
+        missing.append("asset_id")
     if missing:
         raise ConfigurationError(
             "inventory.columns is missing mappings for: " + ", ".join(missing)
@@ -241,7 +244,7 @@ def load_config(path: str | Path) -> AppConfig:
             records_path=inv.get("records_path"),
             delimiter=delimiter,
             encoding=str(inv.get("encoding", "utf-8-sig")),
-            columns={name: str(columns[name]) for name in CANONICAL_FIELDS},
+            columns={name: str(value) for name, value in columns.items() if name in CANONICAL_FIELDS + OPTIONAL_FIELDS},
         ),
         database_path=_resolve(base, state.get("database", ".cvebeacon/state.db")),
         output_dir=_resolve(base, output.get("directory", "reports")),

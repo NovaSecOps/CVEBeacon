@@ -29,12 +29,28 @@ class HealthStatus(StrEnum):
 @dataclass(frozen=True, slots=True)
 class Asset:
     asset_id: str
-    vendor: str
-    product: str
-    version: str
+    vendor: str = ""
+    product: str = ""
+    version: str = ""
+    category: str = ""
+    system_id: str = ""
+    ecosystem: str = ""
+    purl: str = ""
+    cpe: str = ""
+    repository: str = ""
+    commit: str = ""
 
     @property
-    def target_key(self) -> tuple[str, str, str]:
+    def identity_path(self) -> str:
+        return "purl" if self.purl else "cpe" if self.cpe else "ecosystem" if self.ecosystem else "commit" if self.commit else "product"
+
+    @property
+    def target_key(self) -> tuple[str, ...]:
+        if self.identity_path != "product":
+            # Labels/grouping never change applicability. Preserve package case
+            # and every explicit qualifier; do not deduplicate unlike identities.
+            return (self.identity_path, self.purl, self.cpe, self.ecosystem,
+                    self.product, self.version, self.repository, self.commit)
         return (
             self.vendor.casefold().strip(),
             self.product.casefold().strip(),

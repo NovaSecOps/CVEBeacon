@@ -10,6 +10,7 @@ from .applicability import Decision, evaluate_cve_evidence, evaluate_nvd_evidenc
 from .config import AppConfig
 from .errors import SourceError
 from .http import HttpClient
+from .identity import identity_conflict, normalize_asset
 from .models import Applicability, Asset, Evidence, HealthStatus, QueryResult, SourceHealth, Vulnerability
 from .reconcile import merge_vulnerabilities, reconcile
 from .sources import CVEListSource, EPSSSource, EUVDSource, KEVSource, NVDSource
@@ -42,6 +43,8 @@ class QueryEngine:
         self.close()
 
     def _configured_cpe(self, asset: Asset) -> str | None:
+        if asset.cpe:
+            return asset.cpe
         for mapping in self.config.product_mappings:
             if identity_text(mapping.vendor) == identity_text(asset.vendor) and identity_text(mapping.product) == identity_text(asset.product):
                 return mapping.cpe
@@ -99,6 +102,11 @@ class QueryEngine:
         return cached
 
     def query_asset(self, asset: Asset) -> QueryResult:
+        asset = normalize_asset(asset)
+        if identity_conflict(asset):
+            return QueryResult(asset, (), (), Applicability.NEEDS_REVIEW, "explicit identity systems require authoritative equivalence evidence")
+        if asset.identity_path in {"purl", "ecosystem", "commit"}:
+            return QueryResult(asset, (), (), Applicability.COVERAGE_UNKNOWN, "package-native source evaluation is unavailable")
         health: list[SourceHealth] = []
         claims: dict[str, list[Vulnerability]] = defaultdict(list)
         evidence: dict[str, list[Evidence]] = defaultdict(list)
