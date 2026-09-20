@@ -113,12 +113,23 @@ def serve_smoke(directory, prefix, common, env):
             assert state() == before, "web investigation modified monitoring state"
             print("PASS serve: pages, static assets, manual query, report and monitoring-state isolation")
         finally:
-            process.terminate()
+            if os.name == "nt" and process.poll() is None:
+                # A one-file bundle has a bootloader parent and an application child.
+                # Stop only this test's tree, so the child cannot retain the listener/log.
+                stopped = subprocess.run([str(Path(os.environ["SystemRoot"]) / "System32/taskkill.exe"),
+                                          "/PID", str(process.pid), "/T", "/F"], capture_output=True,
+                                         creationflags=subprocess.CREATE_NO_WINDOW)
+                assert stopped.returncode == 0 or process.poll() is not None, "could not stop test process tree"
+            elif process.poll() is None:
+                process.terminate()
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=10)
+            with socket.socket() as probe:
+                probe.settimeout(2)
+                assert probe.connect_ex(("127.0.0.1", port)) != 0, "test dashboard listener remains running"
 
 
 if __name__ == "__main__":
