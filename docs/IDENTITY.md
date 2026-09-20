@@ -12,7 +12,7 @@ Legacy `asset_id`, `vendor`, `product`, `version` inventories continue to work i
 
 Precedence is PURL, CPE, ecosystem, commit, then product. Contradictory versions or package names fail validation. Supplying CPE with PURL/ecosystem, or commit with another strong identity, requires review: similar names do not establish equivalence. Categories never resolve a conflict. Repository names alone are not commit identities.
 
-Use `inventory inspect` to see source headers and samples, then `inventory validate --identities` to see each selected path. Versions must be literal text. Numeric/date/boolean values, formulas, control characters, and duplicate asset IDs are rejected. Package spelling is preserved according to ecosystem rules; there is no universal lowercasing. PyPI uses its normalized-name convention; Maven and Go retain case; npm preserves grandfathered mixed-case names; NuGet comparisons ignore case.
+Use `inventory inspect` to see source headers and samples, then `inventory validate --identities` to see each selected path. Versions must be literal text. Numeric/date/boolean values, formulas, control characters, and duplicate asset IDs are rejected. Package spelling is preserved according to ecosystem rules; there is no universal lowercasing. PyPI uses its normalized-name convention; Maven and Go retain case; npm preserves grandfathered mixed-case names; NuGet comparisons ignore case, but OSV API lookups require registry spelling (for example `Newtonsoft.Json`). A different query spelling may return no records and therefore unknown coverage.
 
 Examples (these versions are demonstration inputs, not upgrade recommendations):
 

@@ -341,7 +341,10 @@ class StateStore:
         if cve_id:
             if cve_id.casefold().startswith("cve-"):
                 cve_id = cve_id.upper()
-            clauses.append("(cve_id=? OR cve_id IN (SELECT primary_id FROM advisory_aliases WHERE alias=? AND advisory_aliases.asset_id=events.asset_id))")
+            clauses.append("""(cve_id=? OR EXISTS (
+                SELECT 1 FROM advisory_aliases requested JOIN advisory_aliases historical
+                ON requested.asset_id=historical.asset_id AND requested.primary_id=historical.primary_id
+                WHERE requested.asset_id=events.asset_id AND requested.alias=? AND historical.alias=events.cve_id))""")
             values.extend((cve_id, cve_id))
         if before_event_id is not None:
             if type(before_event_id) is not int or not 1 <= before_event_id <= 2**63 - 1:

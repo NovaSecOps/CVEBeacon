@@ -14,6 +14,8 @@ The workflow validates inventory, runs product and PURL queries, performs a moni
 
 The package matrix checks current anonymous OSV records across PyPI, npm, Maven, Go, crates.io, NuGet and Debian. For each selected source range, test an affected version and its exact fixed boundary. Record advisory IDs, aliases, source timestamps and actual decisions. Include a non-CVE record when available, invalid identity rejection and unresolved identity behavior. A fixed result applies to that advisory and range, not the whole component's security status.
 
+Use `--stage matrix`, `--stage workflow`, or `--stage non-cve` to repeat a bounded part in a new output directory. The non-CVE stage exercises current Debian evidence through the full engine, reports and local history, and verifies that an identical repeated scan creates no new events. `--stage all` is the default. These procedures never configure real notification delivery or install schedules.
+
 General software samples exercise a network appliance, operating system, infrastructure, server application, Samba and database using the same generic engine. Some public identities or custom versions may require review; preserve that uncertainty. Do not add product-specific production logic to make examples pass.
 
 Review the resulting evidence before acceptance. A failed service call is not proof that integration works; repeat in a new versioned directory after diagnosing it. A successful HTTP response alone is not proof of exact applicability. Keep raw returned evidence alongside the decisions and distinguish source availability, application behavior, and coverage limitations.

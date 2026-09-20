@@ -30,7 +30,11 @@ def query_identity(asset):
             return None
         return {"package": {"purl": purl_string(purl._replace(version=None))}}
     if asset.ecosystem:
-        return {"package": {"ecosystem": asset.ecosystem, "name": name_key(asset.ecosystem, asset.product)}}
+        # OSV lookups are case-sensitive even for case-insensitive registries.
+        # Keep registry spelling in requests, but compare returned identities
+        # with the ecosystem's name_key.
+        name = name_key(asset.ecosystem, asset.product) if asset.ecosystem == "PyPI" else asset.product
+        return {"package": {"ecosystem": asset.ecosystem, "name": name}}
     return None
 
 

@@ -182,6 +182,8 @@ def test_alias_reconciliation_keeps_original_history_rows(tmp_path):
     merged = replace(first, vulnerability=replace(first.vulnerability, aliases=(second.vulnerability.primary_id,)))
     assert not store.record_scan([QueryResult(first.asset, (merged,), ())], channels=("email",))[1]
     assert len(store.latest_findings()) == 1
+    assert len(store.history(cve_id=first.vulnerability.primary_id)) == 2
+    assert len(store.history(cve_id=second.vulnerability.primary_id)) == 2
     with closing(store._connect()) as db:
         assert before == [tuple(row) for row in db.execute("SELECT * FROM events")]
         assert deliveries == [tuple(row) for row in db.execute("SELECT * FROM deliveries")]

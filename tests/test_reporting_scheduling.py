@@ -36,6 +36,7 @@ def test_advisory_report_preserves_identity_and_formula_safety(tmp_path):
     workbook = load_workbook(write_xlsx([QueryResult(asset, (finding,), ())], tmp_path / "report.xlsx"))
     assert workbook["Findings"]["E2"].value == "GHSA-test-only"
     assert workbook["Identities"]["F2"].value == asset.purl
+    assert workbook["Summary"]["I2"].value == "'=1+1"
     assert workbook["Advisory Details"]["D2"].value == "PYSEC-2099-1"
     assert not any(cell.data_type == "f" for sheet in workbook for row in sheet for cell in row)
 

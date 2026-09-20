@@ -85,6 +85,12 @@ def test_identity_mismatch_and_withdrawal():
     assert evaluate_osv(asset, record("npm", name="Example", withdrawn="2026-09-20T00:00:00Z")).state == A.NEEDS_REVIEW
 
 
+def test_nuget_lookup_preserves_registry_case_but_comparison_is_insensitive():
+    asset = Asset("a", ecosystem="NuGet", product="Newtonsoft.Json", version="1.0.0")
+    assert query_identity(asset) == {"package": {"ecosystem": "NuGet", "name": "Newtonsoft.Json"}}
+    assert evaluate_osv(asset, record("NuGet", name="newtonsoft.json")).state == A.AFFECTED
+
+
 def test_exact_commit_requires_query_and_repository_evidence():
     asset = Asset("a", repository="https://example.invalid/repo", commit="a" * 40)
     value = record()

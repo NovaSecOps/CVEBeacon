@@ -151,6 +151,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
             assets = {}
             data["inventory_error"] = True
         data["inventory"] = assets
+        data["categories"] = Counter(asset.category or "Uncategorized" for asset in assets.values())
         latest, attempt = data["latest"], data["attempt"]
         data["stale"] = latest is None or _old(latest["completed_at"], now)
         data["failed"] = bool(latest and latest["status"] != "completed") or bool(attempt and attempt["status"] != "completed")
@@ -168,7 +169,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         current = [row["finding"] for row in data["findings"] if row["current_inventory"]]
         counts = Counter(row["applicability"] for row in current)
         data["counts"] = {"Assets": len(assets), "Affected findings": counts["affected"], "Needs review": counts["needs_review"],
-            "Coverage unknown assets": sum(bool(row["coverage"]) for row in data["coverage"]),
+            "Coverage unknown assets": sum(row["coverage"] == "coverage_unknown" for row in data["coverage"]),
+            "Assets needing coverage review": sum(row["coverage"] == "needs_review" for row in data["coverage"]),
             "CISA KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"]["cisa_kev"] is True}),
             "EU KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"]["eu_kev"] is True})}
         return data

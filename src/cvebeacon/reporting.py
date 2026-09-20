@@ -90,13 +90,14 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
     workbook = Workbook()
     summary = workbook.active
     summary.title = "Summary"
-    summary.append(["Asset ID", "Vendor", "Product", "Version", "Findings", "Affected", "Needs Review", "Coverage"])
+    summary.append(["Asset ID", "Vendor", "Product", "Version", "Findings", "Affected", "Needs Review", "Coverage", "Category", "System", "Ecosystem"])
     for result in values:
         summary.append([_safe(value) for value in [
             result.asset.asset_id, result.asset.vendor, result.asset.product, result.asset.version,
             len(result.findings), sum(x.applicability == Applicability.AFFECTED for x in result.findings),
             sum(x.applicability == Applicability.NEEDS_REVIEW for x in result.findings),
             result.coverage.value if result.coverage else "evaluated",
+            result.asset.category, result.asset.system_id, result.asset.ecosystem,
         ]])
     findings = workbook.create_sheet("Findings")
     findings.append(["Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability", "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile", "EPSS Date", "CISA KEV", "EU KEV", "Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts"])

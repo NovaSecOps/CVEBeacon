@@ -30,13 +30,13 @@ LOG = logging.getLogger("cvebeacon")
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cvebeacon", description="Conservative vulnerability monitoring for product inventories")
+    parser = argparse.ArgumentParser(prog="cvebeacon", description="Conservative vulnerability monitoring for component inventories")
     parser.add_argument("--config", default="cvebeacon.toml", help="path to TOML configuration")
     parser.add_argument("--verbose", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
     scan = commands.add_parser("scan", help="scan the configured inventory and commit monitoring state")
     scan.add_argument("--report", choices=("xlsx", "json"), help="write an on-demand report")
-    query = commands.add_parser("query", help="query a product without changing monitoring or delivery state")
+    query = commands.add_parser("query", help="query a product or package without changing monitoring or delivery state")
     for field in ("vendor", "product", "version", "ecosystem", "purl", "cpe", "repository", "commit"):
         query.add_argument("--" + field, default="")
     query.add_argument("--asset-id", default="manual-query")
