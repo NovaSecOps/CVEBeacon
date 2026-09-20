@@ -51,7 +51,7 @@ def smoke(directory: Path, executable: Path | None) -> None:
     health = json.loads(check(common + ["source-status"]))
     assert health and all(row["status"] == "disabled" for row in health)
     schedule = check(common + ["schedule", "install", "--every", "4", "--dry-run"])
-    assert str(config) in schedule
+    assert str(config.resolve()) in schedule, schedule
     if executable:
         assert str(executable) in schedule
     for fmt in ("json", "xlsx"):
