@@ -1,0 +1,23 @@
+{% macro status(data) %}
+{% if data.inventory_error %}<p class="warning" role="alert">Inventory unavailable. Current asset coverage cannot be established; inspect scanner configuration and logs.</p>{% endif %}
+{% if not data.latest %}<p class="warning" role="alert">No scan results recorded. Coverage is unknown.</p>
+{% elif data.stale %}<p class="warning" role="alert">Stale scan data: the last result is over 24 hours old or its timestamp cannot be trusted. Current coverage is unknown.</p>{% endif %}
+{% if data.failed %}<p class="warning" role="alert">{% if data.unfinished %}A scan has no recorded completion. It may be running or interrupted; check the scanner process.{% else %}The latest scan or delivery failed, or coverage was incomplete.{% endif %} Retained observations are not proof of current coverage.</p>{% endif %}
+{% endmacro %}
+{% macro kev(value) %}{{ 'Unknown' if value is none else 'Yes' if value else 'No' }}{% endmacro %}
+{% macro finding_detail(f) %}
+<p><strong>{{ f.applicability }}</strong> · Confidence: {{ f.confidence }}</p><p>{{ f.reason }}</p>{% if f.vulnerability.summary %}<p>{{ f.vulnerability.summary }}</p>{% endif %}
+<dl><dt>CVSS</dt><dd>{{ f.vulnerability.cvss_score if f.vulnerability.cvss_score is not none else 'Unknown' }} · {{ f.vulnerability.cvss_version or 'Version unknown' }} · {{ f.vulnerability.cvss_vector or 'No vector' }}</dd>
+<dt>EPSS</dt><dd>{{ f.vulnerability.epss_score if f.vulnerability.epss_score is not none else 'Unknown' }} · Percentile {{ f.vulnerability.epss_percentile if f.vulnerability.epss_percentile is not none else 'unknown' }} · Date {{ f.vulnerability.epss_date or 'unknown' }}</dd>
+<dt>Known exploitation</dt><dd>CISA KEV: {{ kev(f.vulnerability.cisa_kev) }} · EU KEV: {{ kev(f.vulnerability.eu_kev) }}</dd></dl>
+{% for conflict in f.conflicts %}<p class="warning">{{ conflict }}</p>{% endfor %}
+{% for e in f.evidence %}<details><summary>{{ e.source }} · {{ e.role }} · {{ e.statement }}</summary><p>Retrieved {{ e.retrieved_at }} · Source timestamp {{ e.source_timestamp or 'unknown' }}</p><p class="break">{{ e.source_url or 'No source URL' }}</p><pre>{{ e.details | tojson(indent=2) }}</pre></details>{% else %}<p>No supporting evidence recorded; treat applicability with caution.</p>{% endfor %}
+{% endmacro %}
+{% macro findings_table(rows) %}
+<div class="table-wrap"><table><thead><tr><th>Asset / version</th><th>CVE</th><th>Applicability</th><th>CVSS</th><th>CISA / EU KEV</th><th>Observation and evidence</th></tr></thead><tbody>
+{% for row in rows %}{% set f = row.finding %}<tr><td>{{ f.asset.asset_id }}<br>{{ f.asset.vendor }} · {{ f.asset.product }}<br>{{ f.asset.version }}{% if not row.current_inventory %}<p class="warning">Inventory changed or asset removed — historical observation</p>{% endif %}</td><td>{{ f.vulnerability.cve_id }}</td><td><span class="badge {{ f.applicability }}">{{ f.applicability }}</span></td><td>{{ f.vulnerability.cvss_score if f.vulnerability.cvss_score is not none else 'Unknown' }}</td><td>{{ kev(f.vulnerability.cisa_kev) }} / {{ kev(f.vulnerability.eu_kev) }}</td><td>Last observed {{ row.last_seen }}{% if row.stale %}<p class="warning">Retained observation; not refreshed in the latest scan or over 24 hours old.</p>{% endif %}<details><summary>Evidence and assessment</summary>{{ finding_detail(f) }}</details></td></tr>
+{% else %}<tr><td colspan="6">No matching observations. This is not proof of complete vulnerability coverage.</td></tr>{% endfor %}</tbody></table></div>
+{% endmacro %}
+{% macro health_table(rows) %}
+<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Source</th><th>Last check result</th><th>Freshness</th><th>Checked / source timestamp</th><th>Detail</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ row.asset_id }}</td><td>{{ row.source }}</td><td>{{ row.status }}</td><td>{{ row.freshness | default('query observation') }}</td><td>{{ row.checked_at }}<br>{{ row.freshness_at or 'Source timestamp unavailable' }}</td><td>{{ row.message }}</td></tr>{% else %}<tr><td colspan="6">No source observations recorded. Availability is unknown.</td></tr>{% endfor %}</tbody></table></div>
+{% endmacro %}

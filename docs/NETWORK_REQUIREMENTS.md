@@ -25,4 +25,6 @@ Source installation and executable builds may require HTTPS access to the config
 
 ## Inbound traffic
 
-There is no inbound runtime requirement. CVEBeacon does not include a web dashboard or listening service.
+CLI scans do not open an inbound service. The optional `cvebeacon serve` dashboard listens on `127.0.0.1:8787` by default. A deliberate `--host 0.0.0.0 --port 8787` binding enables IPv4 network access; configure firewall and access controls before using it. The dashboard has no built-in authentication or TLS termination. Use a trusted network or an authenticated TLS reverse proxy for remote access.
+
+Dashboard overview/history/findings/source views read local inventory and SQLite state. Manual queries and report generation contact the same enabled outbound sources as the CLI. They do not send notifications. No additional outbound service is required by the dashboard. See [dashboard deployment](DASHBOARD.md) for host-header handling.

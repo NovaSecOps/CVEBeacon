@@ -4,12 +4,19 @@ import argparse
 from contextlib import closing
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
+import socket
+from http.cookiejar import CookieJar
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import build_opener, HTTPCookieProcessor, ProxyHandler, Request
 
 from openpyxl import load_workbook
 
@@ -64,6 +71,54 @@ def smoke(directory: Path, executable: Path | None) -> None:
     with closing(sqlite3.connect(directory / ".cvebeacon/state.db")) as db:
         assert db.execute("SELECT status FROM runs").fetchone()[0] == "failed"
         assert db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] == 0
+    serve_smoke(directory, prefix, common, env)
+
+
+def serve_smoke(directory, prefix, common, env):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
+    base = f"http://127.0.0.1:{port}"
+    def get(path):
+        with opener.open(base + path, timeout=10) as response:
+            assert response.status == 200
+            return response.read().decode("utf-8")
+    def state():
+        with closing(sqlite3.connect(directory / ".cvebeacon/state.db")) as db:
+            return list(db.iterdump())
+    with (directory / "serve.log").open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(prefix + common + ["serve", "--port", str(port)], cwd=directory, env=env,
+                                   stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        try:
+            deadline = time.monotonic() + 45
+            while True:
+                assert process.poll() is None, "dashboard exited before readiness"
+                try:
+                    assert "Monitoring overview" in get("/")
+                    break
+                except URLError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(.2)
+            for path in ("/findings", "/history", "/assets", "/query", "/reports", "/sources", "/static/dashboard.css"):
+                get(path)
+            before = state()
+            for path, fields in (("/query", {"vendor": "Acme", "product": "Widget", "version": "unknown"}), ("/reports", {"format": "json"})):
+                token = re.search(r'name="csrf" value="([^"]+)"', get(path))[1]
+                request = Request(base + path, data=urlencode({"csrf": token, **fields}).encode("ascii"))
+                with opener.open(request, timeout=15) as response:
+                    assert response.status == 200
+                    assert "coverage_unknown" in response.read().decode("utf-8")
+            assert state() == before, "web investigation modified monitoring state"
+            print("PASS serve: pages, static assets, manual query, report and monitoring-state isolation")
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
 
 
 if __name__ == "__main__":

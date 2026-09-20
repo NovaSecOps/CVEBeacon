@@ -7,6 +7,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import closing, contextmanager
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -14,7 +15,7 @@ from typing import Iterator, Sequence
 from .errors import StateError
 from .models import Finding, QueryResult, HealthStatus
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _timestamp() -> str:
@@ -144,15 +145,31 @@ class StateStore:
                     PRIMARY KEY(event_id, channel)
                 );
                 CREATE INDEX IF NOT EXISTS events_asset_cve ON events(asset_id, cve_id, occurred_at);
+                CREATE TABLE IF NOT EXISTS scan_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
+                    run_id TEXT REFERENCES runs(run_id),
+                    message TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS scan_assets (
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    asset_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY(run_id, asset_id)
+                );
                 """
             )
             row = db.execute("SELECT version FROM schema_info LIMIT 1").fetchone()
             if row is None:
                 db.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
+            elif row["version"] == 1:
+                db.execute("UPDATE schema_info SET version=?", (SCHEMA_VERSION,))
             elif row["version"] != SCHEMA_VERSION:
                 raise StateError(f"unsupported state schema version {row['version']}")
 
-    def record_scan(self, results: Sequence[QueryResult], *, channels: Sequence[str] = ()) -> tuple[str, list[int]]:
+    def record_scan(self, results: Sequence[QueryResult], *, channels: Sequence[str] = (), attempt_id: str | None = None) -> tuple[str, list[int]]:
         self.initialize()
         run_id = str(uuid.uuid4())
         started = completed = _timestamp()
@@ -165,6 +182,11 @@ class StateStore:
                     (run_id, started, completed, "failed" if any(result.coverage is not None or any(health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for health in result.source_health) for result in results) else "completed", len(results), len(findings), sum(result.coverage is not None for result in results)),
                 )
                 for result in results:
+                    db.execute("INSERT INTO scan_assets VALUES (?,?,?)", (
+                        run_id, result.asset.asset_id, json.dumps({"asset": asdict(result.asset),
+                            "coverage": result.coverage.value if result.coverage else None,
+                            "coverage_reason": result.coverage_reason}, ensure_ascii=False),
+                    ))
                     for health in result.source_health:
                         db.execute(
                             "INSERT INTO source_health VALUES (?,?,?,?,?,?,?)",
@@ -219,9 +241,50 @@ class StateStore:
                                     "INSERT INTO deliveries(event_id,channel,state,updated_at) VALUES (?,?,?,?)",
                                     (event_id, channel, "pending", completed),
                                 )
+                if attempt_id:
+                    db.execute("UPDATE scan_attempts SET run_id=? WHERE attempt_id=?", (run_id, attempt_id))
         except (sqlite3.Error, OSError) as exc:
             raise StateError(f"scan state transaction failed: {exc}") from exc
         return run_id, event_ids
+
+    def start_scan(self) -> str:
+        self.initialize()
+        identifier = str(uuid.uuid4())
+        with self.transaction() as db:
+            db.execute("INSERT INTO scan_attempts VALUES (?,?,NULL,'running',NULL,?)",
+                       (identifier, _timestamp(), "Scan in progress; completion not yet recorded"))
+        return identifier
+
+    def finish_scan(self, identifier: str, *, successful: bool) -> None:
+        with self.transaction() as db:
+            db.execute("UPDATE scan_attempts SET completed_at=?,status=?,message=? WHERE attempt_id=?",
+                       (_timestamp(), "completed" if successful else "failed",
+                        "Scan and configured deliveries completed" if successful else "Scan failed, coverage was incomplete, or delivery failed; inspect scanner logs", identifier))
+
+    def dashboard_snapshot(self) -> dict:
+        """Read one consistent view without changing findings, events or delivery state."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            db.execute("BEGIN")
+            def one(sql):
+                row = db.execute(sql).fetchone()
+                return dict(row) if row else None
+            latest = one("SELECT * FROM runs ORDER BY completed_at DESC LIMIT 1")
+            run_id = latest["run_id"] if latest else ""
+            snapshot = {
+                "latest": latest,
+                "successful": one("SELECT * FROM runs WHERE status='completed' ORDER BY completed_at DESC LIMIT 1"),
+                "attempt": one("SELECT * FROM scan_attempts ORDER BY started_at DESC LIMIT 1"),
+                "findings": [{"finding": json.loads(row["payload_json"]), "first_seen": row["first_seen"], "last_seen": row["last_seen"]}
+                             for row in db.execute("SELECT * FROM current_findings ORDER BY asset_id,cve_id")],
+                "assets": [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM scan_assets WHERE run_id=?", (run_id,))],
+                "health": [dict(row) for row in db.execute("SELECT asset_id,source,status,checked_at,message,freshness_at FROM source_health WHERE run_id=? ORDER BY asset_id,source", (run_id,))],
+                "events": [dict(row) for row in db.execute("SELECT event_id,occurred_at,asset_id,cve_id,event_type FROM events ORDER BY event_id DESC LIMIT 20")],
+                "deliveries": [dict(row) for row in db.execute("SELECT d.event_id,d.channel,d.state,d.attempts,d.updated_at,e.asset_id,e.cve_id FROM deliveries d JOIN events e ON e.event_id=d.event_id ORDER BY d.updated_at DESC LIMIT 20")],
+                "delivery_counts": [dict(row) for row in db.execute("SELECT channel,state,COUNT(*) AS count FROM deliveries GROUP BY channel,state")],
+            }
+            db.rollback()
+            return snapshot
 
     def pending_events(self, channel: str) -> list[sqlite3.Row]:
         self.initialize()
@@ -242,7 +305,7 @@ class StateStore:
                 (state, _timestamp(), error, channel, *event_ids),
             )
 
-    def history(self, *, asset_id: str | None = None, cve_id: str | None = None, limit: int = 100) -> list[dict[str, object]]:
+    def history(self, *, asset_id: str | None = None, cve_id: str | None = None, limit: int = 100, before_event_id: int | None = None) -> list[dict[str, object]]:
         self.initialize()
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
             raise StateError("history limit must be an integer from 1 through 10000")
@@ -251,6 +314,10 @@ class StateStore:
             clauses.append("asset_id=?"); values.append(asset_id)
         if cve_id:
             clauses.append("cve_id=?"); values.append(cve_id.upper())
+        if before_event_id is not None:
+            if type(before_event_id) is not int or not 1 <= before_event_id <= 2**63 - 1:
+                raise StateError("history cursor must be a positive event ID")
+            clauses.append("event_id<?"); values.append(before_event_id)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with closing(self._connect()) as db:
             rows = db.execute(f"SELECT event_id,run_id,occurred_at,asset_id,cve_id,event_type FROM events{where} ORDER BY event_id DESC LIMIT ?", (*values, limit)).fetchall()
@@ -260,3 +327,10 @@ class StateStore:
         self.initialize()
         with closing(self._connect()) as db:
             return [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM current_findings ORDER BY asset_id,cve_id")]
+
+    def history_event(self, event_id: int) -> dict | None:
+        self.initialize()
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT event_id,occurred_at,event_type,payload_json FROM events WHERE event_id=?", (event_id,)).fetchone()
+            return {"event_id": row["event_id"], "occurred_at": row["occurred_at"], "event_type": row["event_type"],
+                    "finding": json.loads(row["payload_json"])} if row else None

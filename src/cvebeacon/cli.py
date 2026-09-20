@@ -56,6 +56,9 @@ def _parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor", help="validate configuration, inventory, and local state access")
     doctor.add_argument("--live", action="store_true", help="also test enabled public source connectivity")
     commands.add_parser("source-status", help="show source health from the most recent scan")
+    serve = commands.add_parser("serve", help="serve the monitoring dashboard")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8787)
     schedule = commands.add_parser("schedule", help="manage the native recurring scan")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
     add = schedule_sub.add_parser("install"); add.add_argument("--every"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
@@ -160,6 +163,26 @@ def run(args: argparse.Namespace) -> int:
         return 0
     config = load_config(args.config)
     store = StateStore(config.database_path)
+    if args.command == "scan":
+        attempt_id = store.start_scan()
+        try:
+            code = _run_configured(args, config, store, attempt_id=attempt_id)
+        except BaseException:
+            try:
+                store.finish_scan(attempt_id, successful=False)
+            except CVEBeaconError:
+                LOG.error("scan completion status could not be recorded")
+            raise
+        store.finish_scan(attempt_id, successful=code == 0)
+        return code
+    return _run_configured(args, config, store)
+
+
+def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=None) -> int:
+    if args.command == "serve":
+        from .dashboard import serve
+        serve(config, host=args.host, port=args.port)
+        return 0
     if args.command == "inventory":
         if args.inventory_command == "inspect":
             print(json.dumps(inspect_inventory(args.path or config.inventory.path, header_row=config.inventory.header_row, encoding=config.inventory.encoding, delimiter=config.inventory.delimiter), indent=2))
@@ -182,7 +205,7 @@ def run(args: argparse.Namespace) -> int:
         results = _run_query(config, assets, known_findings=store.latest_findings()) if args.command == "scan" else _run_query(config, assets)
         if args.command == "scan":
             channels = configured_channels(config)
-            run_id, events = store.record_scan(results, channels=channels)
+            run_id, events = store.record_scan(results, channels=channels, attempt_id=attempt_id)
             failures = []
             with HttpClient(config.http) as http:
                 for channel in channels:
