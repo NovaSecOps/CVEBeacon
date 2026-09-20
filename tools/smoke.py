@@ -55,6 +55,8 @@ def smoke(directory: Path, executable: Path | None) -> None:
     for sample in ("offline.toml", "examples/json.toml", "examples/yaml.toml", "examples/xlsx.toml"):
         assert "valid:" in check(["--config", sample, "inventory", "validate"])
     assert json.loads(check(common + ["doctor"]))["state"] == "ok"
+    for args in (["--purl", "pkg:pypi/requests@2.31.0"], ["--ecosystem", "Maven", "--product", "org.apache.logging.log4j:log4j-core", "--version", "2.14.1"]):
+        assert json.loads(check(common + ["query", *args]))["coverage"] == "coverage_unknown"
     check(common + ["scan", "--report", "xlsx"], 4)
     check(common + ["history"])
     health = json.loads(check(common + ["source-status"]))
@@ -115,7 +117,9 @@ def serve_smoke(directory, prefix, common, env, password=None):
             for path in ("/findings", "/history", "/assets", "/query", "/reports", "/sources", "/static/dashboard.css"):
                 get(path)
             before = state()
-            for path, fields in (("/query", {"vendor": "Acme", "product": "Widget", "version": "unknown"}), ("/reports", {"format": "json"})):
+            for path, fields in (("/query", {"vendor": "Acme", "product": "Widget", "version": "unknown"}),
+                ("/query?mode=package", {"mode": "package", "ecosystem": "PyPI", "product": "requests", "version": "2.31.0"}),
+                ("/query?mode=purl", {"mode": "purl", "purl": "pkg:pypi/requests@2.31.0"}), ("/reports", {"format": "json"})):
                 token = re.search(r'name="csrf" value="([^"]+)"', get(path))[1]
                 request = Request(base + path, data=urlencode({"csrf": token, **fields}).encode("ascii"))
                 with opener.open(request, timeout=15) as response:

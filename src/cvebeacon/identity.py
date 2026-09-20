@@ -17,6 +17,9 @@ PURL_ECOSYSTEMS = {"pypi": "PyPI", "npm": "npm", "maven": "Maven", "golang": "Go
 def parse_purl(value: str) -> PackageURL:
     if re.search(r"%(?![0-9a-fA-F]{2})", value) or any(ord(c) < 32 for c in value):
         raise ValueError("invalid PURL encoding")
+    decoded = unquote(value, errors="strict")
+    if any(ord(char) < 32 or ord(char) == 127 for char in decoded):
+        raise ValueError("invalid PURL control character")
     parsed = PackageURL.from_string(value)
     errors = [message for message in parsed.validate() if message.severity == ValidationSeverity.ERROR]
     if errors:

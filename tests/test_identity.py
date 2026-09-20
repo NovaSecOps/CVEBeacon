@@ -118,3 +118,7 @@ def test_exact_unicode_identity_preserved_and_nontext_rejected(tmp_path):
     path.write_text('[{"asset_id":"a","purl":"pkg:pypi/requests@1","system_id":123}]', encoding="utf-8")
     with pytest.raises(InventoryValidationError, match="must be text"):
         load_inventory(InventoryConfig(path))
+@pytest.mark.parametrize("value", ["pkg:pypi/a%0Ab@1", "pkg:pypi/a%7Fb@1", "pkg:pypi/a%FF@1"])
+def test_encoded_purl_controls_and_invalid_utf8_rejected(value):
+    with pytest.raises(ValueError):
+        normalize_asset(Asset("a", purl=value))

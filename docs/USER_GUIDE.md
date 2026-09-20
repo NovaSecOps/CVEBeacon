@@ -2,7 +2,7 @@
 
 ## 1. Purpose and operating model
 
-CVEBeacon reads a current product inventory, asks primary vulnerability sources about each distinct vendor/product/version target, preserves the returned evidence, and records material finding changes. The inventory remains the source of truth; the SQLite database is monitoring history, not an asset database.
+CVEBeacon reads a supplied component inventory, asks primary vulnerability sources about each distinct product or explicit package identity, preserves the returned evidence, and records material finding changes. The inventory remains the source of truth; the SQLite database is monitoring history, not an asset database.
 
 The tool is deliberately conservative. A missing CPE, empty search result, unsupported version scheme, disagreement, or source outage never becomes an automatic clean result.
 
@@ -45,7 +45,7 @@ product = "product"
 version = "version"
 ```
 
-`asset_id`, `vendor`, `product`, and `version` are required text fields and cannot be blank. Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
+The legacy product path requires `asset_id`, `vendor`, `product`, and `version` as nonblank text. Explicit package/PURL/CPE/commit identities may omit generic fields; see [identity rules and optional mappings](IDENTITY.md). Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
 
 Source controls, retry/timeouts, output paths, optional exact CPE mappings, and notification settings are illustrated in the example configuration. A configured product CPE must be a complete CPE 2.3 name with a wildcard version; verify it against NVD before use.
 
@@ -55,7 +55,7 @@ The file extension selects XLSX, CSV, JSON, or YAML when `format = "auto"`. A di
 
 ### XLSX
 
-Set `worksheet`, `header_row`, and the four source column names. Mapped inventory cells must contain literal text; formulas are rejected because their cached results may be stale. Inspect all worksheet names and headers first:
+Set `worksheet`, `header_row`, and the source column names. Mapped inventory cells must contain literal text; formulas are rejected because their cached results may be stale. Inspect all worksheet names and headers first:
 
 ```console
 cvebeacon inventory inspect inventory.xlsx
@@ -75,7 +75,7 @@ Inspect and validate before scanning:
 
 ```console
 cvebeacon inventory inspect examples/inventory.json
-cvebeacon inventory validate
+cvebeacon inventory validate --identities
 cvebeacon inventory validate path/to/alternate.csv
 ```
 
@@ -89,11 +89,13 @@ Run a complete monitoring scan and create an XLSX report:
 cvebeacon --config cvebeacon.toml scan --report xlsx
 ```
 
-The run queries each identical vendor/product/version target once, then associates results with each asset ID. Completed findings, source health, events, and pending notification work are committed together. A run that fails before commit does not appear as successful state. Notification attempts occur after this commit so failures can retry safely.
+The run queries each identical component identity/version target once, then associates results with each asset ID. Completed findings, source health, events, and pending notification work are committed together. A run that fails before commit does not appear as successful state. Notification attempts occur after this commit so failures can retry safely.
 
 The first scan may be slow without an NVD API key because the default respects NVD’s public-client pacing guidance. Set the configured API-key environment variable to use a key; never put the key in TOML.
 
 Exit codes are `0` for a successful operation, `2` for validation/operational failure, `3` for notification failure, and `4` for a scan with uncertain coverage or degraded sources. A completed scan can contain useful findings and still exit `4`; review its report and `source-status`. Notification failure takes precedence if both occur.
+
+Package/PURL identities, category and system grouping work in all four input formats; `examples/general.toml` demonstrates a mixed inventory. No accounts or credentials are needed for core scans.
 
 ## 6. Queries and assets
 
@@ -128,7 +130,7 @@ cvebeacon export --format xlsx
 cvebeacon export --format json --output report.json
 ```
 
-XLSX reports contain Summary, Findings, Uncertainty, Evidence, and Source Health sheets. They are generated on demand rather than maintained as a vulnerability mirror.
+XLSX reports contain Summary, Findings, Uncertainty, Evidence, Source Health, Identities, and Advisory Details sheets. They are generated on demand rather than maintained as a vulnerability mirror.
 
 ## 8. Applicability and coverage states
 
@@ -139,17 +141,17 @@ XLSX reports contain Summary, Findings, Uncertainty, Evidence, and Source Health
 
 `not_affected` is never inferred from zero search results. Human-oriented or custom version ranges are preserved but not forced through a generic comparator. A known-exploitation catalog entry is prioritization evidence; it does not by itself prove product-version applicability. EPSS is predictive and remains distinct from known exploitation.
 
-SemVer and Python version ranges use their respective ordering rules. Other schemes and partial-version wildcards require review. Product punctuation is significant; automatic CPE resolution allows CPE underscores to represent spaces, but does not guess vendor aliases. Configure a verified mapping when names differ. Configured edition, update, and platform fields are retained. NVD AND/negated/environment-dependent configurations and CVE platform-scoped claims require review when the inventory cannot establish those conditions. A CPE API search hit alone does not prove the full configuration applies.
+SemVer and Python version ranges use their respective ordering rules. Generic product schemes and partial-version wildcards without a supported comparator require review. Package-native ranges additionally support declared ecosystem ordering; see [supported semantics](IDENTITY.md). Product punctuation is significant; automatic CPE resolution allows CPE underscores to represent spaces, but does not guess vendor aliases. Configure a verified mapping when names differ. Configured edition, update, and platform fields are retained. NVD AND/negated/environment-dependent configurations and CVE platform-scoped claims require review when the inventory cannot establish those conditions. A CPE API search hit alone does not prove the full configuration applies.
 
 ## 9. Material changes
 
 Notifications are created for a new finding or a meaningful change to applicability, affected evidence, rejection/withdrawal state, CVSS, CISA KEV membership, EU KEV membership, or a comparable remediation-relevant claim. Upstream modification timestamps and ordinary EPSS movement are stored when available but do not independently trigger alerts.
 
-Any change in the selected CVSS score/vector/version is material. When sources provide different scores, the highest reported base score and its associated vector/version are displayed together; the conflict and original metrics remain in the evidence. Reordering equivalent evidence does not create an alert. Upgrading from an earlier fingerprint policy can cause a one-time material event on the next complete refresh.
+Any change in the selected CVSS score/vector/version is material. When sources provide different scores, the highest reported base score and its associated vector/version are displayed together; the conflict and original metrics remain in the evidence. Reordering equivalent evidence does not create an alert. Schema 3 preserves legacy fingerprints and alias-only changes do not produce an upgrade alert storm. Changed source claims still produce material events.
 
 ## 10. Degraded sources and diagnostics
 
-Source health is recorded per asset and source. If NVD fails, official record or EUVD evidence may still be reported, but coverage remains degraded. If EPSS fails, applicability can remain valid while the score is unavailable. KEV outages degrade prioritization enrichment. Notification channels do not depend on one another.
+Source health is recorded per asset and source. For generic product targets, an NVD failure degrades discovery coverage while independent evidence remains available. For exact packages, OSV is required and NVD/CVE/EUVD are optional enrichment; an enrichment outage does not invalidate native applicability. If EPSS fails, applicability can remain valid while the score is unavailable. KEV outages degrade prioritization enrichment. Notification channels do not depend on one another.
 
 Empty independent product searches and disabled core sources leave coverage unconfirmed. KEV membership is `null` when unavailable, `false` when a healthy catalogue does not list the CVE, and `true` when listed. None of these values implies absence of exploitation outside that catalogue. Reports are fresh query results; they do not contain notification delivery state. Inspect SQLite deliveries for channel acceptance details.
 
@@ -238,4 +240,4 @@ The standalone executable accepts the same commands, for example `cvebeacon.exe 
 
 The dashboard uses the same executable and configuration: `cvebeacon serve` listens at `http://127.0.0.1:8787` without login by default. Optional password authentication uses `cvebeacon dashboard hash-password` and an environment-supplied hash. Sessions expire after one hour by default and can be revoked with Log out. Remote binding without authentication requires `--allow-unauthenticated-remote`; remote password sessions need HTTPS to resist interception. See the [dashboard guide](DASHBOARD.md) for setup, secure cookies, reverse proxies, findings, history, manual queries, exports, and source freshness. No dashboard password or public-source API key is required for core CLI monitoring.
 
-State schema version 2 adds scan-attempt and per-asset coverage metadata. Existing findings, material events, and delivery state are preserved transactionally. Back up the database while the scanner and dashboard are stopped before upgrading; to roll back to an older application, restore that matching backup. Historical scans do not acquire invented coverage or attempt metadata.
+State schema version 3 retains version 2 scan-attempt and coverage metadata and adds an advisory alias index. Existing findings, material events, and delivery state are preserved transactionally. Back up the database while the scanner and dashboard are stopped before upgrading; to roll back to an older application, restore that matching backup. Historical scans do not acquire invented coverage or attempt metadata.

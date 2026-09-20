@@ -21,6 +21,7 @@ from .config import AppConfig
 from .dashboard_auth import DashboardAuth, password_hash
 from .errors import CVEBeaconError
 from .inventory import load_inventory
+from .identity import normalize_asset
 from .models import Applicability, Asset
 from .reporting import write_json, write_xlsx
 from .state import StateStore
@@ -179,7 +180,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     @app.get("/findings")
     def findings():
         data = snapshot()
-        filters = {key: _text(request.args, key) for key in ("q", "asset", "vendor", "product", "version", "cve", "applicability", "cvss", "severity", "cisa", "eu")}
+        filters = {key: _text(request.args, key) for key in ("q", "asset", "vendor", "product", "version", "category", "system_id", "ecosystem", "purl", "advisory", "cve", "applicability", "cvss", "severity", "cisa", "eu")}
         if filters["applicability"] not in {"", *(item.value for item in Applicability)}:
             abort(400)
         if filters["severity"] not in {"", "critical", "high", "medium", "low", "none", "unknown"}:
@@ -196,7 +197,9 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         for row in data["findings"]:
             finding = row["finding"]
             asset, vuln = finding["asset"], finding["vulnerability"]
-            fields = {"asset": asset["asset_id"], "vendor": asset["vendor"], "product": asset["product"], "version": asset["version"], "cve": vuln["cve_id"]}
+            identifiers = {value for value in (vuln.get("advisory_id"), vuln.get("cve_id"), *vuln.get("aliases", []), *vuln.get("source_ids", [])) if value}
+            fields = {"asset": asset["asset_id"], **{key: asset.get(key, "") for key in ("vendor", "product", "version", "category", "system_id", "ecosystem", "purl")},
+                      "advisory": " ".join(sorted(identifiers)), "cve": " ".join(sorted(value for value in identifiers if value.startswith("CVE-")))}
             if any(filters[key].casefold() not in str(value).casefold() for key, value in fields.items()):
                 continue
             if filters["q"].casefold() not in " ".join(str(value) for value in fields.values()).casefold():
@@ -215,11 +218,11 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
                 continue
             rows.append(row)
         data["coverage"] = [row for row in data["coverage"] if row["coverage"] and
-            filters["applicability"] in {"", "coverage_unknown"} and not filters["cve"] and not filters["cvss"] and
+            filters["applicability"] in {"", row["coverage"]} and not filters["cve"] and not filters["advisory"] and not filters["cvss"] and
             filters["severity"] in {"", "unknown"} and
             all(filters[key] in {"", "unknown"} for key in ("cisa", "eu")) and
-            all(filters[key].casefold() in row["asset"][field].casefold() for key, field in
-                (("asset", "asset_id"), ("vendor", "vendor"), ("product", "product"), ("version", "version"))) and
+            all(filters[key].casefold() in row["asset"].get(field, "").casefold() for key, field in
+                (("asset", "asset_id"), *((key, key) for key in ("vendor", "product", "version", "category", "system_id", "ecosystem", "purl")))) and
             filters["q"].casefold() in " ".join(row["asset"].values()).casefold()]
         return render_template("findings.html", data=data, rows=rows, filters=filters)
 
@@ -262,14 +265,22 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     @app.route("/query", methods=["GET", "POST"])
     def query():
         result = None
-        values = {key: "" for key in ("vendor", "product", "version")}
+        mode = _text(request.form if request.method == "POST" else request.args, "mode") or "product"
+        if mode not in {"product", "package", "purl"}:
+            abort(400)
+        keys = {"product": ("vendor", "product", "version"), "package": ("ecosystem", "product", "version"), "purl": ("purl",)}[mode]
+        values = {key: "" for key in keys}
         if request.method == "POST":
-            values = {key: _text(request.form, key, required=True) for key in values}
+            values = {key: _text(request.form, key, required=True, limit=2048 if key == "purl" else 256) for key in values}
+            try:
+                target = normalize_asset(Asset("manual-query", **values))
+            except ValueError:
+                abort(400)
             from .cli import _run_query
-            result = _run_query(config, [Asset("manual-query", **values)])[0].to_dict()
+            result = _run_query(config, [target])[0].to_dict()
             for health in result["source_health"]:
                 health["asset_id"] = result["asset"]["asset_id"]
-        return render_template("query.html", result=result, values=values)
+        return render_template("query.html", result=result, values=values, mode=mode)
 
     @app.route("/reports", methods=["GET", "POST"])
     def reports():

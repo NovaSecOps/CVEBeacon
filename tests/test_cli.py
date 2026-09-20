@@ -66,3 +66,26 @@ def test_export_cannot_overwrite_operational_files(local_config, monkeypatch, ta
 def test_live_doctor_failure_exits_nonzero(local_config, monkeypatch):
     monkeypatch.setattr(cli, "_live_source_checks", lambda config: {"nvd": "failed: timeout"})
     assert cli.main(["--config", str(local_config), "doctor", "--live"]) == 2
+
+
+@pytest.mark.parametrize("args,path", [(["--ecosystem", "PyPI", "--product", "requests", "--version", "2.31.0"], "ecosystem"),
+    (["--purl", "pkg:npm/%40scope/MixedCase@1.2.3"], "purl"),
+    (["--cpe", "cpe:2.3:a:acme:widget:1:*:*:*:*:*:*:*"], "cpe")])
+def test_explicit_queries_are_normalized_without_state(local_config, monkeypatch, capsys, args, path):
+    def query(config, assets):
+        assert assets[0].identity_path == path
+        return [QueryResult(assets[0], (), (), Applicability.COVERAGE_UNKNOWN)]
+    monkeypatch.setattr(cli, "_run_query", query)
+    assert cli.main(["--config", str(local_config), "query", *args]) == 0
+    assert not (local_config.parent / "state.db").exists()
+
+
+@pytest.mark.parametrize("args", [["--purl", "not-a-purl"], ["--purl", "pkg:pypi/requests@1", "--version", "2"],
+    ["--ecosystem", "PyPI", "--product", "requests"], ["--vendor", " ", "--product", "a", "--version", "1"]])
+def test_invalid_queries_fail_before_network(local_config, args):
+    assert cli.main(["--config", str(local_config), "query", *args]) == 2
+
+
+def test_validate_explains_identity(local_config, capsys):
+    assert cli.main(["--config", str(local_config), "inventory", "validate", "--identities"]) == 0
+    assert "a: product" in capsys.readouterr().out

@@ -70,3 +70,7 @@ Loopback bindings validate the requested host. Wildcard bindings accept numeric 
 Forms use CSRF protection, output is escaped, errors omit sensitive details, and downloads cannot select filesystem paths. Configuration and credential values are not rendered. Report/query operations are synchronous; avoid submitting repeated requests while an investigation is running.
 
 The same SQLite database stores monitoring state and dashboard metadata. Before an upgrade, stop the scanner/dashboard and back up that database. Schema upgrades preserve existing observations and delivery records; an older application requires its corresponding pre-upgrade backup.
+
+## Package identities and advisory views
+
+The manual query page has Product, Package (ecosystem/name/version), and Explicit PURL modes. Each uses the CLI assessment engine and preserves monitoring/event/delivery state. Findings can be filtered by category, system, ecosystem, PURL, advisory ID and CVE alias. Asset and evidence details show supplied identities, aliases and fixed boundaries. Fixed boundaries require review of the branch and source range before choosing an upgrade. Reports include separate Identities and Advisory Details sheets to keep Findings compact. Authentication and CSRF protection apply equally to all query modes.

@@ -18,7 +18,7 @@ def test_xlsx_has_practical_sheets(tmp_path):
     health = SourceHealth("nvd", HealthStatus.OK, utc_now(), "ok")
     path = write_xlsx([QueryResult(asset, (finding,), (health,))], tmp_path / "report.xlsx")
     workbook = load_workbook(path)
-    assert workbook.sheetnames == ["Summary", "Findings", "Uncertainty", "Evidence", "Source Health"]
+    assert workbook.sheetnames == ["Summary", "Findings", "Uncertainty", "Evidence", "Source Health", "Identities", "Advisory Details"]
     assert workbook["Findings"]["E2"].value == "CVE-2026-1234"
 
 
@@ -27,6 +27,17 @@ def test_xlsx_neutralizes_formula_like_inventory_values(tmp_path):
     path = write_xlsx([QueryResult(asset, (), ())], tmp_path / "safe.xlsx")
     workbook = load_workbook(path, data_only=False)
     assert all(workbook["Summary"].cell(2, column).data_type != "f" for column in range(1, 5))
+
+
+def test_advisory_report_preserves_identity_and_formula_safety(tmp_path):
+    asset = Asset("a", product="requests", version="1", purl="pkg:pypi/requests@1", category="=1+1", system_id="@group")
+    vuln = Vulnerability(advisory_id="GHSA-test-only", aliases=("PYSEC-2099-1",), fixed_versions=("+1",))
+    finding = Finding(asset, vuln, Applicability.AFFECTED, "high", "range")
+    workbook = load_workbook(write_xlsx([QueryResult(asset, (finding,), ())], tmp_path / "report.xlsx"))
+    assert workbook["Findings"]["E2"].value == "GHSA-test-only"
+    assert workbook["Identities"]["F2"].value == asset.purl
+    assert workbook["Advisory Details"]["D2"].value == "PYSEC-2099-1"
+    assert not any(cell.data_type == "f" for sheet in workbook for row in sheet for cell in row)
 
 
 @pytest.mark.parametrize("prefix", ["=", "+", "-", "@"])
