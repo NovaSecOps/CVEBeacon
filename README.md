@@ -54,6 +54,6 @@ cvebeacon schedule install --every 4
 
 Notifications are optional and obtain credentials only from environment variables. Native schedules default to every four hours and require confirmation unless `--yes` is supplied. The web dashboard is not included; all supported workflows are available through the CLI.
 
-See the [user guide](docs/USER_GUIDE.md), [source notes](docs/SOURCES.md), [network requirements](docs/NETWORK_REQUIREMENTS.md), and [scheduling guide](docs/SCHEDULING.md).
+See the [user guide](docs/USER_GUIDE.md), [source notes](docs/SOURCES.md), [network requirements](docs/NETWORK_REQUIREMENTS.md), [scheduling guide](docs/SCHEDULING.md), and [validation workflow](docs/VALIDATION.md).
 
 No license has been selected. Choose and add a license before publication or distribution.
