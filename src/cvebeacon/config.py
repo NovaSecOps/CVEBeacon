@@ -47,6 +47,7 @@ class HttpConfig:
 
 @dataclass(frozen=True, slots=True)
 class SourceConfig:
+    osv_enabled: bool = True
     nvd_enabled: bool = True
     cve_enabled: bool = True
     euvd_enabled: bool = True
@@ -262,6 +263,7 @@ def load_config(path: str | Path) -> AppConfig:
             user_agent=user_agent,
         ),
         sources=SourceConfig(
+            osv_enabled=_boolean(source_data, "osv_enabled", True),
             nvd_enabled=_boolean(source_data, "nvd_enabled", True),
             cve_enabled=_boolean(source_data, "cve_enabled", True),
             euvd_enabled=_boolean(source_data, "euvd_enabled", True),

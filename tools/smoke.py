@@ -26,7 +26,7 @@ def prepare(directory: Path) -> Path:
     root = Path(__file__).resolve().parents[1]
     shutil.copytree(root / "examples", directory / "examples")
     text = (root / "cvebeacon.example.toml").read_text(encoding="utf-8")
-    for source in ("nvd", "cve", "euvd", "cisa_kev", "eu_kev", "epss"):
+    for source in ("nvd", "cve", "euvd", "cisa_kev", "eu_kev", "epss", "osv"):
         text = text.replace(f"{source}_enabled = true", f"{source}_enabled = false")
     config = directory / "offline.toml"
     config.write_text(text, encoding="utf-8")

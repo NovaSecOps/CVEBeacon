@@ -20,11 +20,12 @@ def test_v1_upgrade_preserves_existing_monitoring_data(tmp_path):
         before = {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table}")] for table in tables}
         db.execute("DROP TABLE scan_attempts")
         db.execute("DROP TABLE scan_assets")
+        db.execute("DROP TABLE advisory_aliases")
         db.execute("UPDATE schema_info SET version=1")
     store.initialize()
     with closing(store._connect()) as db:
         assert {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table}")] for table in tables} == before
-        assert db.execute("SELECT version FROM schema_info").fetchone()[0] == 2
+        assert db.execute("SELECT version FROM schema_info").fetchone()[0] == 3
     assert store.dashboard_snapshot()["assets"] == []  # Legacy coverage is unknown, not invented.
 
 

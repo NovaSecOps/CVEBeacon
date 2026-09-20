@@ -7,7 +7,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import closing, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -15,7 +15,7 @@ from typing import Iterator, Sequence
 from .errors import StateError
 from .models import Finding, QueryResult, HealthStatus
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _timestamp() -> str:
@@ -25,7 +25,7 @@ def _timestamp() -> str:
 def material_fingerprint(finding: Finding) -> str:
     """Hash fields that should produce an alert; EPSS and timestamp churn are excluded."""
     value = {
-        "cve_id": finding.vulnerability.cve_id,
+        "cve_id": finding.vulnerability.primary_id,
         "applicability": finding.applicability.value,
         "rejected": finding.vulnerability.rejected,
         "cvss": [finding.vulnerability.cvss_score, finding.vulnerability.cvss_vector, finding.vulnerability.cvss_version],
@@ -159,12 +159,18 @@ class StateStore:
                     payload_json TEXT NOT NULL,
                     PRIMARY KEY(run_id, asset_id)
                 );
+                CREATE TABLE IF NOT EXISTS advisory_aliases (
+                    asset_id TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    primary_id TEXT NOT NULL,
+                    PRIMARY KEY(asset_id, alias)
+                );
                 """
             )
             row = db.execute("SELECT version FROM schema_info LIMIT 1").fetchone()
             if row is None:
                 db.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
-            elif row["version"] == 1:
+            elif row["version"] in {1, 2}:
                 db.execute("UPDATE schema_info SET version=?", (SCHEMA_VERSION,))
             elif row["version"] != SCHEMA_VERSION:
                 raise StateError(f"unsupported state schema version {row['version']}")
@@ -193,20 +199,33 @@ class StateStore:
                             (run_id, result.asset.asset_id, health.source, health.status.value, health.checked_at.isoformat(), health.message, health.freshness_at.isoformat() if health.freshness_at else None),
                         )
                     for finding in result.findings:
+                        identifiers = finding.vulnerability.identifiers
+                        if not identifiers:
+                            raise StateError("finding requires a primary advisory identifier")
+                        # Prefer an existing persisted identity. A later CVE alias
+                        # must not turn a known advisory into a new alert.
+                        marks = ",".join("?" for _ in identifiers)
+                        linked = {row[0] for row in db.execute(
+                            f"SELECT primary_id FROM advisory_aliases WHERE asset_id=? AND alias IN ({marks})",
+                            (finding.asset.asset_id, *identifiers))}
+                        candidates = sorted(set(identifiers) | linked)
+                        marks = ",".join("?" for _ in candidates)
+                        previous_rows = db.execute(
+                            f"SELECT cve_id,fingerprint,first_seen,payload_json FROM current_findings WHERE asset_id=? AND cve_id IN ({marks}) ORDER BY first_seen,cve_id",
+                            (finding.asset.asset_id, *candidates)).fetchall()
+                        previous = previous_rows[0] if previous_rows else None
+                        primary = previous["cve_id"] if previous else finding.vulnerability.primary_id
+                        finding = replace(finding, vulnerability=replace(finding.vulnerability, advisory_id=primary))
                         payload = json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=False)
                         fingerprint = material_fingerprint(finding)
-                        previous = db.execute(
-                            "SELECT fingerprint, first_seen, payload_json FROM current_findings WHERE asset_id=? AND cve_id=?",
-                            (finding.asset.asset_id, finding.vulnerability.cve_id),
-                        ).fetchone()
                         failed_sources = {health.source for health in result.source_health if health.status != HealthStatus.OK}
-                        core_incomplete = any(health.source in {"nvd", "cve_list", "euvd"} and health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for health in result.source_health)
+                        core_sources = {"osv"} if result.asset.identity_path in {"purl", "ecosystem", "commit"} else {"nvd", "cve_list", "euvd"}
+                        core_incomplete = any(health.source in core_sources and health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for health in result.source_health)
                         if previous and core_incomplete and not finding.vulnerability.rejected:
                             # Retain the last observation rather than turn a failed
                             # applicability refresh into a resolution or new baseline.
                             continue
                         if previous and failed_sources.intersection({"cisa_kev", "eu_kev", "epss"}):
-                            from dataclasses import replace
                             old = json.loads(previous["payload_json"])
                             old_vuln = old["vulnerability"]
                             updates = {}
@@ -222,17 +241,24 @@ class StateStore:
                             fingerprint = material_fingerprint(finding)
                         event_type = "new" if previous is None else ("changed" if previous["fingerprint"] != fingerprint else None)
                         first_seen = previous["first_seen"] if previous else completed
+                        # Keep historical finding/event/delivery rows byte-for-byte.
+                        # The alias index selects a single current representative.
+                        for alias in set(candidates) | {primary}:
+                            db.execute("UPDATE advisory_aliases SET primary_id=? WHERE asset_id=? AND primary_id=?",
+                                       (primary, finding.asset.asset_id, alias))
+                            db.execute("INSERT INTO advisory_aliases VALUES (?,?,?) ON CONFLICT(asset_id,alias) DO UPDATE SET primary_id=excluded.primary_id",
+                                       (finding.asset.asset_id, alias, primary))
                         db.execute(
                             """INSERT INTO current_findings(asset_id,cve_id,first_seen,last_seen,fingerprint,payload_json)
                                VALUES (?,?,?,?,?,?)
                                ON CONFLICT(asset_id,cve_id) DO UPDATE SET
                                  last_seen=excluded.last_seen, fingerprint=excluded.fingerprint, payload_json=excluded.payload_json""",
-                            (finding.asset.asset_id, finding.vulnerability.cve_id, first_seen, completed, fingerprint, payload),
+                            (finding.asset.asset_id, primary, first_seen, completed, fingerprint, payload),
                         )
                         if event_type:
                             cursor = db.execute(
                                 "INSERT INTO events(run_id,occurred_at,asset_id,cve_id,event_type,fingerprint,payload_json) VALUES (?,?,?,?,?,?,?)",
-                                (run_id, completed, finding.asset.asset_id, finding.vulnerability.cve_id, event_type, fingerprint, payload),
+                                (run_id, completed, finding.asset.asset_id, primary, event_type, fingerprint, payload),
                             )
                             event_id = int(cursor.lastrowid)
                             event_ids.append(event_id)
@@ -276,7 +302,7 @@ class StateStore:
                 "successful": one("SELECT * FROM runs WHERE status='completed' ORDER BY completed_at DESC LIMIT 1"),
                 "attempt": one("SELECT * FROM scan_attempts ORDER BY started_at DESC LIMIT 1"),
                 "findings": [{"finding": json.loads(row["payload_json"]), "first_seen": row["first_seen"], "last_seen": row["last_seen"]}
-                             for row in db.execute("SELECT * FROM current_findings ORDER BY asset_id,cve_id")],
+                             for row in db.execute("SELECT * FROM current_findings f WHERE NOT EXISTS (SELECT 1 FROM advisory_aliases a WHERE a.asset_id=f.asset_id AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY asset_id,cve_id")],
                 "assets": [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM scan_assets WHERE run_id=?", (run_id,))],
                 "health": [dict(row) for row in db.execute("SELECT asset_id,source,status,checked_at,message,freshness_at FROM source_health WHERE run_id=? ORDER BY asset_id,source", (run_id,))],
                 "events": [dict(row) for row in db.execute("SELECT event_id,occurred_at,asset_id,cve_id,event_type FROM events ORDER BY event_id DESC LIMIT 20")],
@@ -313,7 +339,10 @@ class StateStore:
         if asset_id:
             clauses.append("asset_id=?"); values.append(asset_id)
         if cve_id:
-            clauses.append("cve_id=?"); values.append(cve_id.upper())
+            if cve_id.casefold().startswith("cve-"):
+                cve_id = cve_id.upper()
+            clauses.append("(cve_id=? OR cve_id IN (SELECT primary_id FROM advisory_aliases WHERE alias=? AND advisory_aliases.asset_id=events.asset_id))")
+            values.extend((cve_id, cve_id))
         if before_event_id is not None:
             if type(before_event_id) is not int or not 1 <= before_event_id <= 2**63 - 1:
                 raise StateError("history cursor must be a positive event ID")
@@ -326,7 +355,7 @@ class StateStore:
     def latest_findings(self) -> list[dict[str, object]]:
         self.initialize()
         with closing(self._connect()) as db:
-            return [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM current_findings ORDER BY asset_id,cve_id")]
+            return [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM current_findings f WHERE NOT EXISTS (SELECT 1 FROM advisory_aliases a WHERE a.asset_id=f.asset_id AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY asset_id,cve_id")]
 
     def history_event(self, event_id: int) -> dict | None:
         self.initialize()

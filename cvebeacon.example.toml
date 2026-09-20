@@ -24,6 +24,7 @@ backoff_seconds = 1
 user_agent = "CVEBeacon/0.1"
 
 [sources]
+osv_enabled = true
 nvd_enabled = true
 cve_enabled = true
 euvd_enabled = true
