@@ -5,21 +5,25 @@ import pytest
 from cvebeacon import cli
 from cvebeacon.config import load_config
 from cvebeacon.errors import CVEBeaconError
-from cvebeacon.models import Applicability, Asset, QueryResult
+from cvebeacon.models import Applicability, Asset, Finding, QueryResult, Vulnerability
 from cvebeacon.state import StateStore
 
 
 def test_v1_upgrade_preserves_existing_monitoring_data(tmp_path):
     store = StateStore(tmp_path / "state.db")
-    store.record_scan([QueryResult(Asset("a", "Acme", "Widget", "1"), (), (), Applicability.COVERAGE_UNKNOWN, "unknown")])
+    asset = Asset("a", "Acme", "Widget", "1")
+    finding = Finding(asset, Vulnerability("CVE-2026-1234"), Applicability.NEEDS_REVIEW, "limited", "unknown range")
+    _, ids = store.record_scan([QueryResult(asset, (finding,), (), Applicability.COVERAGE_UNKNOWN, "unknown")], channels=("teams", "email"))
+    store.mark_delivery("teams", ids, accepted=True)
+    tables = ("runs", "current_findings", "events", "source_health", "deliveries")
     with store.transaction() as db:
-        before = [tuple(row) for row in db.execute("SELECT * FROM runs")]
+        before = {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table}")] for table in tables}
         db.execute("DROP TABLE scan_attempts")
         db.execute("DROP TABLE scan_assets")
         db.execute("UPDATE schema_info SET version=1")
     store.initialize()
     with closing(store._connect()) as db:
-        assert [tuple(row) for row in db.execute("SELECT * FROM runs")] == before
+        assert {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table}")] for table in tables} == before
         assert db.execute("SELECT version FROM schema_info").fetchone()[0] == 2
     assert store.dashboard_snapshot()["assets"] == []  # Legacy coverage is unknown, not invented.
 

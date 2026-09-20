@@ -39,7 +39,7 @@ def linux(config: Path, token: str) -> None:
     scheduling.CRON_BEGIN = f"# BEGIN CVEBEACON CI {token}"
     scheduling.CRON_END = f"# END CVEBEACON CI {token}"
     original = scheduling._read_crontab()
-    sentinel = f"# unrelated CI sentinel {token}"
+    sentinel = f"0 0 1 1 * : # unrelated CI sentinel {token}"
     baseline = original.rstrip() + "\n" + sentinel + "\n"
     assert command(["crontab", "-"], input=baseline).returncode == 0
     try:
