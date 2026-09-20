@@ -49,7 +49,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - run: python -m venv .venv
       - name: Linux build and isolated smoke checks
         if: runner.os == 'Linux'
