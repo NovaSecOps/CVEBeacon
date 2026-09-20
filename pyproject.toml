@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "cvebeacon"
 version = "0.1.0"
 description = "Conservative vulnerability monitoring and lookup for product inventories"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 authors = [{ name = "NovaSecOps" }]
 maintainers = [{ name = "NovaSecOps" }]
@@ -15,6 +17,8 @@ dependencies = [
   "openpyxl>=3.1,<4",
   "packaging>=24,<27",
   "PyYAML>=6,<7",
+  "Flask>=3.1.2,<4",
+  "waitress>=3.0.2,<4",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +36,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cvebeacon = ["templates/*.html", "static/*.css"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

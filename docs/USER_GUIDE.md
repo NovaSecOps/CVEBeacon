@@ -236,4 +236,6 @@ Ensure the scheduled account can read the inventory/configuration, write state/r
 
 The standalone executable accepts the same commands, for example `cvebeacon.exe scan` on Windows and `./cvebeacon scan` on Linux. Keep configuration and inventory outside the executable directory so upgrades do not replace operator data. Back up the SQLite file before a version upgrade. Run `doctor`, an inventory validation, and a dry-run schedule proposal after replacement. Reinstall the native schedule if the executable path changed.
 
-No browser dashboard is included. This avoids an inbound service and keeps the supported operational surface to the CLI, reports, notifications, and native scheduler.
+The dashboard uses the same executable and configuration: `cvebeacon serve` listens at `http://127.0.0.1:8787`. See the [dashboard guide](DASHBOARD.md) for findings, history, manual queries, exports, source freshness, and network binding.
+
+State schema version 2 adds scan-attempt and per-asset coverage metadata. Existing findings, material events, and delivery state are preserved transactionally. Back up the database while the scanner and dashboard are stopped before upgrading; to roll back to an older application, restore that matching backup. Historical scans do not acquire invented coverage or attempt metadata.

@@ -1,6 +1,6 @@
 # Release checklist
 
-- Select and add an appropriate license before publication or distribution.
+- Confirm distributions include the Apache-2.0 `LICENSE` and project attribution `NOTICE`.
 - Run the deterministic test suite on every supported Python version.
 - Build and smoke-test the standalone executable separately on Windows and Linux.
 - Review dependency versions and vulnerability advisories.
