@@ -11,3 +11,8 @@ foreach ($Mode in @("onedir", "onefile")) {
     & $Executable --help
     if ($LASTEXITCODE -ne 0) { throw "Executable smoke test failed ($Mode)." }
 }
+foreach ($LicenseFile in @("LICENSE", "NOTICE")) {
+    $Source = Join-Path $PSScriptRoot "..\$LicenseFile"
+    Copy-Item -LiteralPath $Source -Destination (Join-Path $OutputDirectory $LicenseFile)
+    Copy-Item -LiteralPath $Source -Destination (Join-Path $OutputDirectory "cvebeacon\$LicenseFile")
+}

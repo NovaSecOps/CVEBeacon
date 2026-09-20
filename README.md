@@ -58,4 +58,6 @@ Notifications are optional and obtain credentials only from environment variable
 
 See the [user guide](docs/USER_GUIDE.md), [source notes](docs/SOURCES.md), [network requirements](docs/NETWORK_REQUIREMENTS.md), [scheduling guide](docs/SCHEDULING.md), and [validation workflow](docs/VALIDATION.md).
 
-No license has been selected. Choose and add a license before publication or distribution.
+## License
+
+CVEBeacon is licensed under the [Apache License 2.0](LICENSE) (`Apache-2.0`). Project attribution is preserved in [NOTICE](NOTICE).

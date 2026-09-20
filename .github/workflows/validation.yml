@@ -62,7 +62,7 @@ jobs:
           .venv/bin/python tools/smoke.py --executable dist/onedir/cvebeacon/cvebeacon
           .venv/bin/python tools/smoke.py --executable dist/cvebeacon
           .venv/bin/python tools/inspect_package.py dist/onedir/cvebeacon/cvebeacon dist/cvebeacon
-          tar -czf dist/cvebeacon-linux-x64.tar.gz -C dist cvebeacon onedir
+          tar -czf dist/cvebeacon-linux-x64.tar.gz -C dist cvebeacon onedir LICENSE NOTICE
       - name: Windows build and isolated smoke checks
         if: runner.os == 'Windows'
         shell: pwsh
@@ -80,7 +80,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           .venv/Scripts/python tools/inspect_package.py dist/cvebeacon/cvebeacon.exe dist/cvebeacon.exe
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          Compress-Archive -Path dist/cvebeacon,dist/cvebeacon.exe -DestinationPath dist/cvebeacon-windows-x64.zip
+          Compress-Archive -Path dist/cvebeacon,dist/cvebeacon.exe,dist/LICENSE,dist/NOTICE -DestinationPath dist/cvebeacon-windows-x64.zip
       - uses: actions/upload-artifact@v7
         with:
           name: cvebeacon-${{ runner.os }}-x64
