@@ -59,6 +59,9 @@ def _parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="serve the monitoring dashboard")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
+    serve.add_argument("--allow-unauthenticated-remote", action="store_true", help="acknowledge remote access without built-in authentication")
+    dashboard = commands.add_parser("dashboard", help="dashboard security helpers")
+    dashboard.add_subparsers(dest="dashboard_command", required=True).add_parser("hash-password", help="prompt privately and emit a password hash")
     schedule = commands.add_parser("schedule", help="manage the native recurring scan")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
     add = schedule_sub.add_parser("install"); add.add_argument("--every"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
@@ -151,6 +154,10 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.command == "dashboard":
+        from .dashboard_auth import hash_password
+        print(hash_password())
+        return 0
     if args.command == "inventory" and args.inventory_command == "inspect" and args.path:
         print(json.dumps(inspect_inventory(args.path), indent=2))
         return 0
@@ -181,7 +188,7 @@ def run(args: argparse.Namespace) -> int:
 def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=None) -> int:
     if args.command == "serve":
         from .dashboard import serve
-        serve(config, host=args.host, port=args.port)
+        serve(config, host=args.host, port=args.port, allow_unauthenticated_remote=args.allow_unauthenticated_remote)
         return 0
     if args.command == "inventory":
         if args.inventory_command == "inspect":

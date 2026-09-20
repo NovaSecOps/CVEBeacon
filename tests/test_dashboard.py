@@ -262,7 +262,7 @@ def test_server_binding_and_debug_disabled(setup, monkeypatch, capsys, host, por
         calls.append(kwargs)
         return Server()
     monkeypatch.setattr(waitress, "create_server", create)
-    dashboard.serve(setup[0], host=host, port=port)
+    dashboard.serve(setup[0], host=host, port=port, allow_unauthenticated_remote=True)
     assert calls[0]["host"] == host and calls[0]["port"] == port
     assert calls[0]["expose_tracebacks"] is False and calls[-1] == "close"
     assert str(port) in capsys.readouterr().out
@@ -278,9 +278,11 @@ def test_cli_serve_defaults_and_options(setup, monkeypatch):
     calls = []
     monkeypatch.setattr(dashboard, "serve", lambda config, **kwargs: calls.append(kwargs))
     assert cli.main(["--config", str(setup[0].config_path), "serve"]) == 0
-    assert calls[-1] == {"host": "127.0.0.1", "port": 8787}
+    assert calls[-1] == {"host": "127.0.0.1", "port": 8787, "allow_unauthenticated_remote": False}
     assert cli.main(["--config", str(setup[0].config_path), "serve", "--host", "0.0.0.0", "--port", "8989"]) == 0
-    assert calls[-1] == {"host": "0.0.0.0", "port": 8989}
+    assert calls[-1] == {"host": "0.0.0.0", "port": 8989, "allow_unauthenticated_remote": False}
+    assert cli.main(["--config", str(setup[0].config_path), "serve", "--host", "0.0.0.0", "--allow-unauthenticated-remote"]) == 0
+    assert calls[-1]["allow_unauthenticated_remote"] is True
 
 
 def test_coverage_filter_applies_to_unscanned_assets(setup):
@@ -313,5 +315,5 @@ def test_non_loopback_binding_warns_about_access_control(setup, monkeypatch, cap
         def run(self): pass
         def close(self): pass
     monkeypatch.setattr(waitress, "create_server", lambda *args, **kwargs: Server())
-    dashboard.serve(setup[0], host="0.0.0.0")
+    dashboard.serve(setup[0], host="0.0.0.0", allow_unauthenticated_remote=True)
     assert "no built-in authentication" in caplog.text

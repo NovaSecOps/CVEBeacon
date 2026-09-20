@@ -14,10 +14,11 @@ import re
 import secrets
 import tempfile
 
-from flask import Flask, abort, render_template, request, send_file, session
+from flask import Flask, abort, redirect, render_template, request, send_file, session, url_for
 from werkzeug.exceptions import HTTPException, SecurityError
 
 from .config import AppConfig
+from .dashboard_auth import DashboardAuth, password_hash
 from .errors import CVEBeaconError
 from .inventory import load_inventory
 from .models import Applicability, Asset
@@ -54,18 +55,25 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
 
 
 def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
+    encoded = password_hash(config)
+    auth = DashboardAuth(encoded, config.dashboard.session_lifetime_seconds) if encoded else None
     app = Flask(__name__)
+    app.extensions["dashboard_auth"] = auth
     wildcard = host in {"0.0.0.0", "::"}
     app.config.update(
         SECRET_KEY=secrets.token_bytes(32), DEBUG=False, TESTING=False,
         MAX_CONTENT_LENGTH=8192, MAX_FORM_MEMORY_SIZE=8192,
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
+        SESSION_COOKIE_SECURE=config.dashboard.secure_cookie,
+        SESSION_COOKIE_NAME="cvebeacon_session",
         TRUSTED_HOSTS=None if wildcard else list({host, "localhost", "127.0.0.1", "[::1]"}),
     )
     store = StateStore(config.database_path)
 
     @app.before_request
     def protect_request():
+        if isinstance(request.routing_exception, SecurityError):
+            raise request.routing_exception
         if wildcard:
             from urllib.parse import urlsplit
             hostname = urlsplit("//" + request.host).hostname
@@ -74,6 +82,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
                     ipaddress.ip_address(hostname or "")
                 except ValueError:
                     abort(400)
+        if auth and request.endpoint not in {"login", "static"}:
+            if not auth.valid(session.get("auth_id")):
+                session.clear()
+                return redirect(url_for("login"), code=303)
         if request.method == "POST":
             token = _text(request.form, "csrf", required=True)
             if not re.fullmatch(r"[0-9a-f]{64}", token) or not secrets.compare_digest(token, session.get("csrf", "")):
@@ -83,7 +95,32 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     def shared():
         if "csrf" not in session:
             session["csrf"] = secrets.token_hex(32)
-        return {"csrf": session["csrf"]}
+        return {"csrf": session["csrf"], "auth_enabled": auth is not None,
+                "authenticated": bool(auth and auth.valid(session.get("auth_id")))}
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if auth is None:
+            return redirect(url_for("overview"), code=303)
+        failed = False
+        if request.method == "POST":
+            values = request.form.getlist("password")
+            identifier = auth.login(request.remote_addr or "unknown", values[0] if len(values) == 1 else None)
+            if identifier:
+                auth.logout(session.get("auth_id"))
+                session.clear()
+                session["auth_id"] = identifier
+                session["csrf"] = secrets.token_hex(32)
+                return redirect(url_for("overview"), code=303)
+            failed = True
+        return render_template("login.html", failed=failed), 401 if failed else 200
+
+    @app.post("/logout")
+    def logout():
+        if auth:
+            auth.logout(session.get("auth_id"))
+        session.clear()
+        return redirect(url_for("login" if auth else "overview"), code=303)
 
     @app.after_request
     def headers(response):
@@ -257,7 +294,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     return app
 
 
-def serve(config: AppConfig, *, host="127.0.0.1", port=8787) -> None:
+def serve(config: AppConfig, *, host="127.0.0.1", port=8787, allow_unauthenticated_remote=False) -> None:
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise CVEBeaconError("dashboard port must be from 1 through 65535")
     if not isinstance(host, str) or not host or len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9.:-]+", host):
@@ -267,7 +304,12 @@ def serve(config: AppConfig, *, host="127.0.0.1", port=8787) -> None:
     except ValueError:
         loopback = host.casefold() == "localhost"
     if not loopback:
-        LOG.warning("Dashboard has no built-in authentication; network and access control are the deployer's responsibility")
+        if not password_hash(config):
+            if not allow_unauthenticated_remote:
+                raise CVEBeaconError("remote dashboard without authentication requires --allow-unauthenticated-remote")
+            LOG.warning("Dashboard has no built-in authentication; network and access control are the deployer's responsibility")
+        else:
+            LOG.warning("Remote password authentication requires browser-facing HTTPS to protect passwords and cookies from interception")
     from waitress import create_server
     app = create_app(config, host=host)
     try:

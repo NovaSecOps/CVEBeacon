@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 from urllib.request import build_opener, HTTPCookieProcessor, ProxyHandler, Request
 
 from openpyxl import load_workbook
+from werkzeug.security import generate_password_hash
 
 
 def prepare(directory: Path) -> Path:
@@ -38,6 +39,7 @@ def smoke(directory: Path, executable: Path | None) -> None:
     env = dict(os.environ)
     for name in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
         env.pop(name, None)
+    env.pop("CVEBEACON_DASHBOARD_PASSWORD_HASH", None)
     if executable:
         env["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32") if os.name == "nt" else "/usr/bin:/bin"
 
@@ -72,9 +74,12 @@ def smoke(directory: Path, executable: Path | None) -> None:
         assert db.execute("SELECT status FROM runs").fetchone()[0] == "failed"
         assert db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] == 0
     serve_smoke(directory, prefix, common, env)
+    password = "Synthetic package smoke password"
+    env["CVEBEACON_DASHBOARD_PASSWORD_HASH"] = generate_password_hash(password)
+    serve_smoke(directory, prefix, common, env, password=password)
 
 
-def serve_smoke(directory, prefix, common, env):
+def serve_smoke(directory, prefix, common, env, password=None):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -95,12 +100,18 @@ def serve_smoke(directory, prefix, common, env):
             while True:
                 assert process.poll() is None, "dashboard exited before readiness"
                 try:
-                    assert "Monitoring overview" in get("/")
+                    assert ("Dashboard login" if password else "Monitoring overview") in get("/")
                     break
                 except URLError:
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(.2)
+            if password:
+                for path in ("/findings", "/history", "/assets", "/sources", "/query", "/reports"):
+                    assert "Dashboard login" in get(path)
+                token = re.search(r'name="csrf" value="([^"]+)"', get("/login"))[1]
+                with opener.open(Request(base + "/login", data=urlencode({"csrf": token, "password": password}).encode("ascii")), timeout=15) as response:
+                    assert "Monitoring overview" in response.read().decode("utf-8")
             for path in ("/findings", "/history", "/assets", "/query", "/reports", "/sources", "/static/dashboard.css"):
                 get(path)
             before = state()
@@ -111,7 +122,12 @@ def serve_smoke(directory, prefix, common, env):
                     assert response.status == 200
                     assert "coverage_unknown" in response.read().decode("utf-8")
             assert state() == before, "web investigation modified monitoring state"
-            print("PASS serve: pages, static assets, manual query, report and monitoring-state isolation")
+            if password:
+                token = re.search(r'name="csrf" value="([^"]+)"', get("/"))[1]
+                with opener.open(Request(base + "/logout", data=urlencode({"csrf": token}).encode("ascii")), timeout=15) as response:
+                    assert "Dashboard login" in response.read().decode("utf-8")
+                assert "Dashboard login" in get("/findings")
+            print("PASS serve: pages, static assets, manual query, report, monitoring-state isolation; auth=" + str(bool(password)))
         finally:
             if os.name == "nt" and process.poll() is None:
                 # A one-file bundle has a bootloader parent and an application child.

@@ -80,6 +80,13 @@ class EmailConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DashboardConfig:
+    password_hash_env: str = "CVEBEACON_DASHBOARD_PASSWORD_HASH"
+    session_lifetime_seconds: int = 3600
+    secure_cookie: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     config_path: Path
     inventory: InventoryConfig
@@ -90,6 +97,7 @@ class AppConfig:
     product_mappings: tuple[ProductMapping, ...] = ()
     teams: TeamsConfig = field(default_factory=TeamsConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
 
     def secret(self, env_name: str, *, required: bool = False) -> str | None:
         value = os.environ.get(env_name)
@@ -161,6 +169,15 @@ def load_config(path: str | Path) -> AppConfig:
     output = _table(data, "output")
     http_data = _table(data, "http")
     source_data = _table(data, "sources")
+    dashboard_data = _table(data, "dashboard")
+    if set(dashboard_data) - {"password_hash_env", "session_lifetime_seconds", "secure_cookie"}:
+        raise ConfigurationError("unknown dashboard setting; supply the password hash only through its environment variable")
+    hash_env = dashboard_data.get("password_hash_env", "CVEBEACON_DASHBOARD_PASSWORD_HASH")
+    if not isinstance(hash_env, str) or not hash_env.strip():
+        raise ConfigurationError("dashboard.password_hash_env must be a nonempty environment variable name")
+    lifetime = dashboard_data.get("session_lifetime_seconds", 3600)
+    if isinstance(lifetime, bool) or not isinstance(lifetime, int) or not 60 <= lifetime <= 86400:
+        raise ConfigurationError("dashboard.session_lifetime_seconds must be an integer from 60 to 86400")
     notification_data = _table(data, "notifications")
     teams_data = notification_data.get("teams", {})
     email_data = notification_data.get("email", {})
@@ -255,6 +272,7 @@ def load_config(path: str | Path) -> AppConfig:
             ),
         ),
         product_mappings=tuple(mappings),
+        dashboard=DashboardConfig(hash_env.strip(), lifetime, _boolean(dashboard_data, "secure_cookie", False)),
         teams=TeamsConfig(
             enabled=teams_enabled,
             webhook_env=str(
