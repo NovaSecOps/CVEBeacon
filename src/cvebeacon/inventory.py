@@ -84,6 +84,9 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
             issues.append(ValidationIssue("record must be an object", location))
             continue
         values: dict[str, str] = {}
+        if any(name not in row for name in columns.values()):
+            issues.append(ValidationIssue("record is missing mapped fields", location))
+            continue
         row_has_value = False
         for canonical in CANONICAL_FIELDS:
             source_name = columns[canonical]
@@ -91,7 +94,11 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
             if raw not in (None, ""):
                 row_has_value = True
             try:
-                values[canonical] = _normalized(raw)
+                if raw is not None and not isinstance(raw, str):
+                    raise ValueError("must be text; numeric, date, boolean and compound values cannot preserve inventory spelling")
+                values[canonical] = (raw or "").strip() if canonical == "version" else _normalized(raw)
+                if "\x00" in values[canonical]:
+                    raise ValueError("contains a null character")
             except (TypeError, ValueError) as exc:
                 issues.append(
                     ValidationIssue(f"{canonical} cannot be normalized: {exc}", location)
@@ -123,7 +130,7 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
 
 def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]]]:
     try:
-        workbook = load_workbook(config.path, read_only=True, data_only=True)
+        workbook = load_workbook(config.path, read_only=True, data_only=False)
     except (OSError, ValueError, BadZipFile, InvalidFileException) as exc:
         raise InventoryValidationError(
             [ValidationIssue(f"cannot read XLSX workbook: {exc}")]
@@ -163,10 +170,13 @@ def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]
                 [ValidationIssue("mapped columns not found: " + ", ".join(missing))]
             )
         for row_number, values in enumerate(
-            worksheet.iter_rows(min_row=config.header_row + 1, values_only=True),
+            worksheet.iter_rows(min_row=config.header_row + 1),
             start=config.header_row + 1,
         ):
-            raw = dict(zip(headers, values))
+            raw_cells = dict(zip(headers, values))
+            if any(raw_cells[header_lookup[name.casefold()]].data_type == "f" for name in config.columns.values()):
+                raise InventoryValidationError([ValidationIssue("mapped inventory cells must contain text, not formulas", f"row {row_number}")])
+            raw = {name: cell.value for name, cell in raw_cells.items()}
             yield f"sheet {worksheet.title!r}, row {row_number}", {
                 configured: raw.get(header_lookup[configured.casefold()])
                 for configured in config.columns.values()
@@ -198,6 +208,8 @@ def _csv_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]]
                     [ValidationIssue("mapped columns not found: " + ", ".join(missing))]
                 )
             for row_number, row in enumerate(reader, start=2):
+                if None in row:
+                    raise InventoryValidationError([ValidationIssue("CSV row has more fields than its header", f"row {row_number}")])
                 yield f"row {row_number}", {
                     configured: row.get(header_lookup[configured.casefold()])
                     for configured in config.columns.values()

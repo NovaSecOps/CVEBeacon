@@ -9,7 +9,7 @@ from typing import Any, Iterator
 from ..http import HttpClient
 from ..errors import SourceError
 from ..models import Asset, Evidence, Vulnerability
-from .common import as_float, cve_id
+from .common import as_float, cve_id, source_payload
 
 CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 CPE_URL = "https://services.nvd.nist.gov/rest/json/cpes/2.0"
@@ -28,7 +28,7 @@ def _unescape(value: str) -> str:
     return re.sub(r"\\(.)", r"\1", value)
 
 
-def split_cpe23(value: str) -> tuple[str, ...]:
+def split_cpe23(value: str, *, keep_escapes: bool = False) -> tuple[str, ...]:
     if not value.startswith("cpe:2.3:"):
         return ()
     fields: list[str] = []
@@ -41,12 +41,13 @@ def split_cpe23(value: str) -> tuple[str, ...]:
         elif char == "\\":
             escaped = True
         elif char == ":":
-            fields.append(_unescape("".join(current)))
+            fields.append("".join(current) if keep_escapes else _unescape("".join(current)))
             current = []
         else:
             current.append(char)
-    current.append("\\") if escaped else None
-    fields.append(_unescape("".join(current)))
+    if escaped:
+        return ()
+    fields.append("".join(current) if keep_escapes else _unescape("".join(current)))
     return tuple(fields)
 
 
@@ -71,13 +72,17 @@ class NVDSource:
             collection = "products" if url == CPE_URL else "vulnerabilities"
             if not isinstance(payload.get(collection), list) or "totalResults" not in payload or "resultsPerPage" not in payload:
                 raise SourceError("nvd", f"source response omitted required {collection} pagination fields")
+            count, total, offset = (payload.get(key) for key in ("resultsPerPage", "totalResults", "startIndex"))
+            if any(type(value) is not int or value < 0 for value in (count, total, offset)) or offset != start:
+                raise SourceError("nvd", "source returned invalid pagination metadata")
+            if len(payload[collection]) != count or start + count > total or (count == 0 and start < total):
+                raise SourceError("nvd", "source returned an incomplete page")
             yield payload
-            count = int(payload.get("resultsPerPage") or 0)
-            total = int(payload.get("totalResults") or 0)
-            if count <= 0 or start + count >= total:
+            if start + count >= total:
                 return
             start += count
 
+    @source_payload("nvd")
     def resolve_cpes(self, asset: Asset) -> list[CPECandidate]:
         result: list[CPECandidate] = []
         keyword = f"{asset.vendor} {asset.product}"
@@ -86,7 +91,9 @@ class NVDSource:
                 cpe = wrapped.get("cpe", {}) if isinstance(wrapped, dict) else {}
                 name = str(cpe.get("cpeName") or "")
                 parts = split_cpe23(name)
-                if len(parts) < 4:
+                if len(parts) != 11:
+                    raise SourceError("nvd", "source returned an invalid CPE name")
+                if cpe.get("deprecated"):
                     continue
                 titles = cpe.get("titles") or []
                 title = next(
@@ -96,6 +103,7 @@ class NVDSource:
                 result.append(CPECandidate(name, title, parts[0], parts[1], parts[2]))
         return result
 
+    @source_payload("nvd")
     def vulnerabilities(self, *, cpe_name: str) -> list[tuple[Vulnerability, Evidence]]:
         found: list[tuple[Vulnerability, Evidence]] = []
         for page in self._pages(CVE_URL, {"cpeName": cpe_name, "isVulnerable": ""}, 2000):
@@ -104,6 +112,8 @@ class NVDSource:
                 parsed = self.parse_cve(raw)
                 if parsed:
                     found.append(parsed)
+                else:
+                    raise SourceError("nvd", "source returned a vulnerability without a valid identifier")
         return found
 
     @staticmethod
@@ -131,6 +141,6 @@ class NVDSource:
         evidence = Evidence(
             "nvd", "applicability_and_enrichment", "NVD returned this CVE for the exact CPE name",
             f"{CVE_URL}?cveId={identifier}", raw.get("lastModified"),
-            details={"configurations": raw.get("configurations", []), "affected": raw.get("affected", [])},
+            details={"configurations": raw.get("configurations", []), "affected": raw.get("affected", []), "metrics": metrics},
         )
         return vuln, evidence

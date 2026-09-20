@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
 
 from ..http import HttpClient
 from ..errors import SourceError
 from ..models import Evidence, Vulnerability
-from .common import as_float, cve_id
+from .common import as_float, cve_id, source_payload
 
 SEARCH_URL = "https://euvdservices.enisa.europa.eu/api/search"
 
@@ -16,9 +17,10 @@ class EUVDSource:
     def __init__(self, http: HttpClient) -> None:
         self.http = http
 
+    @source_payload("euvd")
     def search(self, vendor: str, product: str) -> list[tuple[Vulnerability, Evidence]]:
         page = 0
-        found: dict[str, tuple[Vulnerability, Evidence]] = {}
+        found: list[tuple[Vulnerability, Evidence]] = []
         while True:
             payload = self.http.get_json(
                 SEARCH_URL, source="euvd", params={"vendor": vendor, "product": product, "page": page, "size": 100}
@@ -31,15 +33,23 @@ class EUVDSource:
                     raise SourceError("euvd", "source returned a non-object search item")
                 parsed = self.parse_item(item)
                 if parsed:
-                    found[parsed[0].cve_id] = parsed
+                    aliases = item.get("aliases") or []
+                    if isinstance(aliases, str):
+                        aliases = aliases.replace(",", " ").split()
+                    identifiers = {value for alias in aliases if (value := cve_id(alias))} or {parsed[0].cve_id}
+                    found.extend((replace(parsed[0], cve_id=identifier), parsed[1]) for identifier in sorted(identifiers))
             try:
-                total = int(payload.get("total") or 0)
+                total = payload["total"]
+                if type(total) is not int or total < 0:
+                    raise ValueError("invalid count")
             except (TypeError, ValueError) as exc:
                 raise SourceError("euvd", "source returned an invalid total count") from exc
-            if not items or (page + 1) * 100 >= total:
+            if len(items) != min(100, max(total - page * 100, 0)):
+                raise SourceError("euvd", "source returned an incomplete page")
+            if (page + 1) * 100 >= total:
                 break
             page += 1
-        return list(found.values())
+        return found
 
     @staticmethod
     def parse_item(item: dict[str, Any]) -> tuple[Vulnerability, Evidence] | None:
@@ -63,7 +73,8 @@ class EUVDSource:
         products = item.get("enisaIdProduct") or []
         evidence = Evidence(
             "euvd", "independent_enrichment", "EUVD returned product/version evidence",
+            source_url=f"https://euvd.enisa.europa.eu/vulnerability/{item.get('id', '')}",
             source_timestamp=item.get("dateUpdated"),
-            details={"euvd_id": item.get("id"), "products": products, "vendors": item.get("enisaIdVendor") or []},
+            details={"euvd_id": item.get("id"), "products": products, "vendors": item.get("enisaIdVendor") or [], "cvss": {key: item.get(key) for key in ("baseScore", "baseScoreVector", "baseScoreVersion")}},
         )
         return vuln, evidence

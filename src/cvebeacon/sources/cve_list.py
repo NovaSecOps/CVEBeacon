@@ -7,7 +7,7 @@ from typing import Any
 from ..http import HttpClient
 from ..errors import SourceError
 from ..models import Evidence
-from .common import cve_id
+from .common import cve_id, source_payload
 
 RAW_BASE = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves"
 
@@ -25,6 +25,7 @@ class CVEListSource:
     def __init__(self, http: HttpClient) -> None:
         self.http = http
 
+    @source_payload("cve_list")
     def record(self, identifier: str) -> dict[str, Any]:
         normalized = cve_id(identifier)
         payload = self.http.get_json(record_url(identifier), source="cve_list")
@@ -32,11 +33,14 @@ class CVEListSource:
             raise SourceError("cve_list", "official record is not a JSON object")
         metadata = payload.get("cveMetadata")
         version = str(payload.get("dataVersion") or "")
-        if not isinstance(metadata, dict) or cve_id(metadata.get("cveId")) != normalized or not version.startswith("5."):
+        if not isinstance(metadata, dict) or cve_id(metadata.get("cveId")) != normalized or version not in {"5.0", "5.0.0", "5.1", "5.1.0", "5.1.1", "5.2", "5.2.0"}:
             raise SourceError("cve_list", "official record omitted required CVE JSON 5 metadata")
+        if metadata.get("state") not in {"PUBLISHED", "REJECTED"} or not isinstance(payload.get("containers"), dict) or not isinstance(payload["containers"].get("cna"), dict):
+            raise SourceError("cve_list", "official record omitted its state or CNA container")
         return payload
 
     @staticmethod
+    @source_payload("cve_list")
     def evidence(record: dict[str, Any]) -> tuple[Evidence, ...]:
         metadata = record.get("cveMetadata", {})
         identifier = cve_id(metadata.get("cveId"))
@@ -58,9 +62,15 @@ class CVEListSource:
 
     @staticmethod
     def _container_evidence(identifier: str, role: str, container: dict[str, Any], state: str) -> Evidence:
+        for key in ("affected", "references", "metrics", "descriptions"):
+            if key in container and not isinstance(container[key], list):
+                raise SourceError("cve_list", "official record has an invalid container collection")
         affected = container.get("affected") or []
         statement = "official CVE record rejected" if state == "REJECTED" else "official CVE affected-product evidence"
         return Evidence(
             "cve_list", role, statement, record_url(identifier),
-            details={"state": state, "affected": affected, "rejected_reasons": container.get("rejectedReasons", [])},
+            source_timestamp=container.get("providerMetadata", {}).get("dateUpdated"),
+            details={"state": state, "affected": affected, "rejected_reasons": container.get("rejectedReasons", []),
+                     "provider": container.get("providerMetadata", {}), "references": container.get("references", []),
+                     "metrics": container.get("metrics", []), "descriptions": container.get("descriptions", [])},
         )

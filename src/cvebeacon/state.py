@@ -6,13 +6,13 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
 from .errors import StateError
-from .models import Finding, QueryResult
+from .models import Finding, QueryResult, HealthStatus
 
 SCHEMA_VERSION = 1
 
@@ -29,23 +29,32 @@ def material_fingerprint(finding: Finding) -> str:
         "rejected": finding.vulnerability.rejected,
         "cvss": [finding.vulnerability.cvss_score, finding.vulnerability.cvss_vector, finding.vulnerability.cvss_version],
         "kev": [finding.vulnerability.cisa_kev, finding.vulnerability.eu_kev],
-        "evidence": sorted(
+        "evidence": sorted(set(
             (
                 item.source,
                 item.role,
                 json.dumps(
-                    {key: item.details.get(key) for key in ("state", "affected", "products", "sources") if key in item.details},
+                    _canonical({key: item.details[key] for key in ("state", "affected", "products", "sources", "configurations") if item.details.get(key) is not None}),
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=False,
                 ),
             )
             for item in finding.evidence
-        ),
+            if any(item.details.get(key) is not None for key in ("state", "affected", "products", "sources", "configurations"))
+        )),
         "conflicts": sorted(finding.conflicts),
     }
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _canonical(value):
+    if isinstance(value, dict):
+        return {key: _canonical(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return sorted((_canonical(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True))
+    return value
 
 
 class StateStore:
@@ -60,7 +69,7 @@ class StateStore:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
             return connection
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
             raise StateError(f"cannot open state database {self.path}: {exc}") from exc
 
     @contextmanager
@@ -70,6 +79,9 @@ class StateStore:
             connection.execute("BEGIN IMMEDIATE")
             yield connection
             connection.commit()
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise StateError(f"state transaction failed: {exc}") from exc
         except Exception:
             connection.rollback()
             raise
@@ -80,6 +92,7 @@ class StateStore:
         with self.transaction() as db:
             db.executescript(
                 """
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS schema_info (
                     version INTEGER NOT NULL
                 );
@@ -149,7 +162,7 @@ class StateStore:
                 findings = [item for result in results for item in result.findings]
                 db.execute(
                     "INSERT INTO runs VALUES (?,?,?,?,?,?,?)",
-                    (run_id, started, completed, "completed", len(results), len(findings), sum(result.coverage is not None for result in results)),
+                    (run_id, started, completed, "failed" if any(result.coverage is not None or any(health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for health in result.source_health) for result in results) else "completed", len(results), len(findings), sum(result.coverage is not None for result in results)),
                 )
                 for result in results:
                     for health in result.source_health:
@@ -161,9 +174,30 @@ class StateStore:
                         payload = json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=False)
                         fingerprint = material_fingerprint(finding)
                         previous = db.execute(
-                            "SELECT fingerprint, first_seen FROM current_findings WHERE asset_id=? AND cve_id=?",
+                            "SELECT fingerprint, first_seen, payload_json FROM current_findings WHERE asset_id=? AND cve_id=?",
                             (finding.asset.asset_id, finding.vulnerability.cve_id),
                         ).fetchone()
+                        failed_sources = {health.source for health in result.source_health if health.status != HealthStatus.OK}
+                        core_incomplete = any(health.source in {"nvd", "cve_list", "euvd"} and health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for health in result.source_health)
+                        if previous and core_incomplete and not finding.vulnerability.rejected:
+                            # Retain the last observation rather than turn a failed
+                            # applicability refresh into a resolution or new baseline.
+                            continue
+                        if previous and failed_sources.intersection({"cisa_kev", "eu_kev", "epss"}):
+                            from dataclasses import replace
+                            old = json.loads(previous["payload_json"])
+                            old_vuln = old["vulnerability"]
+                            updates = {}
+                            for source, fields in (("cisa_kev", ("cisa_kev",)), ("eu_kev", ("eu_kev",))):
+                                if source in failed_sources:
+                                    updates.update({field: old_vuln[field] for field in fields})
+                            # Historical KEV claims keep their original retrieval
+                            # time; source_health describes the failed refresh.
+                            from .models import Evidence
+                            old_evidence = tuple(Evidence(**{**item, "retrieved_at": datetime.fromisoformat(item["retrieved_at"])}) for item in old["evidence"] if item["source"] in failed_sources.intersection({"cisa_kev", "eu_kev"}))
+                            finding = replace(finding, vulnerability=replace(finding.vulnerability, **updates), evidence=tuple(item for item in finding.evidence if item.source not in failed_sources.intersection({"cisa_kev", "eu_kev"})) + old_evidence)
+                            payload = json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=False)
+                            fingerprint = material_fingerprint(finding)
                         event_type = "new" if previous is None else ("changed" if previous["fingerprint"] != fingerprint else None)
                         first_seen = previous["first_seen"] if previous else completed
                         db.execute(
@@ -191,7 +225,7 @@ class StateStore:
 
     def pending_events(self, channel: str) -> list[sqlite3.Row]:
         self.initialize()
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             return list(db.execute(
                 """SELECT e.*, d.state, d.attempts FROM events e JOIN deliveries d ON d.event_id=e.event_id
                    WHERE d.channel=? AND d.state IN ('pending','failed') ORDER BY e.event_id""", (channel,)
@@ -218,11 +252,11 @@ class StateStore:
         if cve_id:
             clauses.append("cve_id=?"); values.append(cve_id.upper())
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             rows = db.execute(f"SELECT event_id,run_id,occurred_at,asset_id,cve_id,event_type FROM events{where} ORDER BY event_id DESC LIMIT ?", (*values, limit)).fetchall()
             return [dict(row) for row in rows]
 
     def latest_findings(self) -> list[dict[str, object]]:
         self.initialize()
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             return [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM current_findings ORDER BY asset_id,cve_id")]

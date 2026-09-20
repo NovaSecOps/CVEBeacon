@@ -7,7 +7,7 @@ from typing import Iterable
 
 from ..http import HttpClient
 from ..errors import SourceError
-from .common import as_float, cve_id
+from .common import as_float, cve_id, source_payload
 
 EPSS_URL = "https://api.first.org/data/v1/epss"
 
@@ -36,12 +36,15 @@ class EPSSSource:
     def __init__(self, http: HttpClient) -> None:
         self.http = http
 
+    @source_payload("epss")
     def scores(self, identifiers: Iterable[str]) -> dict[str, tuple[float, float, date]]:
         output: dict[str, tuple[float, float, date]] = {}
         for batch in batches(identifiers):
-            payload = self.http.get_json(EPSS_URL, source="epss", params={"cve": ",".join(batch)})
+            payload = self.http.get_json(EPSS_URL, source="epss", params={"cve": ",".join(batch), "limit": len(batch)})
             if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
                 raise SourceError("epss", "source returned an invalid response envelope")
+            if payload.get("status", "OK") != "OK" or ("total" in payload and payload["total"] != len(payload["data"])):
+                raise SourceError("epss", "source returned an incomplete score response")
             for item in payload["data"]:
                 if not isinstance(item, dict):
                     raise SourceError("epss", "source returned a non-object score entry")
@@ -50,7 +53,9 @@ class EPSSSource:
                 try:
                     score_date = date.fromisoformat(str(item.get("date")))
                 except ValueError:
-                    continue
-                if identifier and score is not None and percentile is not None:
+                    raise SourceError("epss", "score entry has an invalid date")
+                if identifier in batch and score is not None and percentile is not None and 0 <= score <= 1 and 0 <= percentile <= 1:
                     output[identifier] = (score, percentile, score_date)
+                else:
+                    raise SourceError("epss", "source returned an invalid probability or identifier")
         return output

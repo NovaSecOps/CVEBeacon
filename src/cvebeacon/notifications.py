@@ -106,6 +106,7 @@ class GraphMailNotifier:
                 f"https://graph.microsoft.com/v1.0/users/{quote(self.sender, safe='')}/sendMail",
                 source="graph_mail", headers={"Authorization": f"Bearer {access_token}"},
                 json=message, expected=(202,), max_retries=0,
+                decode_json=False,
             )
         except SourceError as exc:
             raise NotificationError(f"Graph mail channel did not accept the alert: {exc}") from exc

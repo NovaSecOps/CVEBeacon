@@ -29,6 +29,19 @@ def test_xlsx_neutralizes_formula_like_inventory_values(tmp_path):
     assert all(workbook["Summary"].cell(2, column).data_type != "f" for column in range(1, 5))
 
 
+@pytest.mark.parametrize("prefix", ["=", "+", "-", "@"])
+def test_xlsx_neutralizes_upstream_strings_on_every_sheet(tmp_path, prefix):
+    text = prefix + "SUM(1,2)"
+    asset = Asset("a1", "Acme", "Widget", "1")
+    evidence = Evidence("nvd", text, text, source_url=text, source_timestamp=text, details={"value": text})
+    finding = Finding(asset, Vulnerability("CVE-2026-1234", summary=text, references=(text,)), Applicability.NEEDS_REVIEW, "limited", text, (evidence,), (text,))
+    health = SourceHealth("nvd", HealthStatus.FAILED, utc_now(), text)
+    path = write_xlsx([QueryResult(asset, (finding,), (health,), Applicability.COVERAGE_UNKNOWN, text)], tmp_path / "safe.xlsx")
+    workbook = load_workbook(path, data_only=False)
+    assert not any(cell.data_type == "f" for sheet in workbook for row in sheet for cell in row)
+    assert len(workbook["Findings"]["A"]) == 2
+
+
 def test_cron_removal_preserves_unrelated_entries():
     text = f"MAILTO=x\n{CRON_BEGIN}\n0 */4 * * * cvebeacon scan\n{CRON_END}\n15 2 * * * backup\n"
     clean = _without_managed_block(text)

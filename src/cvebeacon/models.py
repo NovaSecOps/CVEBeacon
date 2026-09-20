@@ -38,7 +38,7 @@ class Asset:
         return (
             self.vendor.casefold().strip(),
             self.product.casefold().strip(),
-            self.version.casefold().strip(),
+            self.version.strip(),
         )
 
 
@@ -66,8 +66,8 @@ class Vulnerability:
     epss_score: float | None = None
     epss_percentile: float | None = None
     epss_date: date | None = None
-    cisa_kev: bool = False
-    eu_kev: bool = False
+    cisa_kev: bool | None = None
+    eu_kev: bool | None = None
     references: tuple[str, ...] = ()
 
 

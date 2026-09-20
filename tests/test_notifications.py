@@ -35,12 +35,13 @@ def test_teams_failure_is_not_automatically_retried():
     assert len(requests) == 1
 
 
-def test_graph_token_then_mail_202():
+@pytest.mark.parametrize("body", ["", "accepted"])
+def test_graph_token_then_mail_202(body):
     requests = []
     def handler(request):
         requests.append(request)
         if "oauth2" in str(request.url): return httpx.Response(200, json={"access_token": "token"})
-        return httpx.Response(202)
+        return httpx.Response(202, text=body)
     http = HttpClient(HttpConfig(retries=1), client=httpx.Client(transport=httpx.MockTransport(handler)))
     GraphMailNotifier(http, tenant_id="tenant", client_id="client", client_secret="secret", sender="sender@example.invalid", recipients=("recipient@example.invalid",)).send([ITEM])
     assert len(requests) == 2

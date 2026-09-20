@@ -20,6 +20,7 @@ CVEBeacon requires Python 3.11 or newer for a source installation. On Windows Po
 
 ```console
 python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2"
 .venv\Scripts\python.exe -m pip install .
 copy cvebeacon.example.toml cvebeacon.toml
 .venv\Scripts\cvebeacon.exe inventory validate
@@ -30,6 +31,7 @@ On Linux:
 
 ```console
 python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade 'pip>=26.2'
 .venv/bin/python -m pip install .
 cp cvebeacon.example.toml cvebeacon.toml
 .venv/bin/cvebeacon inventory validate

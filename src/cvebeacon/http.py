@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import email.utils
 import logging
+import math
 import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -70,7 +71,9 @@ class HttpClient:
     def _retry_after(value: str | None, fallback: float, ceiling: float = 120.0) -> float:
         if value:
             try:
-                return min(max(float(value), 0), ceiling)
+                number = float(value)
+                if math.isfinite(number):
+                    return min(max(number, 0), ceiling)
             except ValueError:
                 try:
                     parsed = email.utils.parsedate_to_datetime(value)
@@ -102,7 +105,8 @@ class HttpClient:
             self._pace(source, minimum_interval)
             try:
                 response = self._client.request(
-                    method, url, params=params, headers=headers, data=data, json=json
+                    method, url, params=params, headers=headers, data=data, json=json,
+                    follow_redirects=False,
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
@@ -120,8 +124,8 @@ class HttpClient:
                 except ValueError as exc:
                     raise SourceError(source, "source returned invalid JSON") from exc
             if response.status_code not in RETRYABLE_STATUS or attempt >= retry_count:
-                message = response.headers.get("message") or response.reason_phrase
-                raise SourceError(source, f"HTTP {response.status_code}: {message}")
+                # Upstream headers/reason phrases can echo secret URLs or tokens.
+                raise SourceError(source, f"HTTP {response.status_code}")
             delay = self.config.backoff_seconds * (2**attempt)
             self._sleep(self._retry_after(response.headers.get("Retry-After"), delay))
         failure_type = type(last_error).__name__ if last_error else "transport failure"

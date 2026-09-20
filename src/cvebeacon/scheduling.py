@@ -42,6 +42,8 @@ def make_plan(config_path: str | Path, every_hours: int, *, system: str = "auto"
         raise SchedulingError("platform must be auto, windows, or linux")
     if requested != detected and not allow_incompatible:
         raise SchedulingError(f"cannot manage a {requested} schedule on a {detected} host")
+    if requested == "linux" and 24 % every_hours:
+        raise SchedulingError("Linux cron intervals must divide 24: choose 2, 3, 4, 6, 8, 12, or 24 hours")
     if executable:
         target, module_mode = Path(executable).resolve(), False
     elif getattr(sys, "frozen", False):
@@ -57,6 +59,8 @@ def make_plan(config_path: str | Path, every_hours: int, *, system: str = "auto"
     config_target = Path(config_path).expanduser().resolve()
     if any(character in str(value) for value in (config_target, target) for character in "\r\n"):
         raise SchedulingError("schedule paths cannot contain line breaks")
+    if requested == "linux" and any("%" in str(value) for value in (config_target, target)):
+        raise SchedulingError("Linux cron paths cannot contain percent characters")
     return SchedulePlan(requested, every_hours, config_target, target, module_mode)
 
 
@@ -77,9 +81,11 @@ def _cron_line(plan: SchedulePlan) -> str:
 
 def _read_crontab(run=subprocess.run) -> str:
     result = run(["crontab", "-l"], capture_output=True, text=True, check=False)
-    if result.returncode not in (0, 1):
+    if result.returncode == 1 and not result.stdout and result.stderr.strip().casefold().startswith("no crontab for "):
+        return ""
+    if result.returncode != 0:
         raise SchedulingError(f"cannot read user crontab: {result.stderr.strip()}")
-    return result.stdout if result.returncode == 0 else ""
+    return result.stdout
 
 
 def _without_managed_block(text: str) -> str:

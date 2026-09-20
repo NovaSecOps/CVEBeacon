@@ -9,7 +9,7 @@ ASSET = Asset("a1", "Acme Corp", "Widget-Pro", "1.5.0")
 
 
 def evidence(versions, default=None):
-    product = {"vendor": "Acme Corp", "product": "Widget Pro", "versions": versions}
+    product = {"vendor": "Acme Corp", "product": "Widget-Pro", "versions": versions}
     if default: product["defaultStatus"] = default
     return Evidence("cve_list", "cna", "affected evidence", details={"affected": [product]})
 

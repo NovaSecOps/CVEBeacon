@@ -1,6 +1,13 @@
+param([string]$OutputDirectory = (Join-Path $PSScriptRoot "..\dist"),
+      [string]$WorkDirectory = (Join-Path $PSScriptRoot "..\build"))
 $ErrorActionPreference = "Stop"
 $Python = Join-Path $PSScriptRoot "..\.venv\Scripts\python.exe"
-& $Python -m PyInstaller --noconfirm --clean --onedir --name cvebeacon --paths (Join-Path $PSScriptRoot "..\src") (Join-Path $PSScriptRoot "cvebeacon_entry.py")
-& (Join-Path $PSScriptRoot "..\dist\cvebeacon\cvebeacon.exe") --help
-& $Python -m PyInstaller --noconfirm --clean --onefile --name cvebeacon --paths (Join-Path $PSScriptRoot "..\src") (Join-Path $PSScriptRoot "cvebeacon_entry.py")
-& (Join-Path $PSScriptRoot "..\dist\cvebeacon.exe") --help
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+$WorkDirectory = [IO.Path]::GetFullPath($WorkDirectory)
+foreach ($Mode in @("onedir", "onefile")) {
+    & $Python -m PyInstaller --noconfirm --clean "--$Mode" --name cvebeacon --distpath $OutputDirectory --workpath (Join-Path $WorkDirectory $Mode) --specpath $WorkDirectory --paths (Join-Path $PSScriptRoot "..\src") (Join-Path $PSScriptRoot "cvebeacon_entry.py")
+    if ($LASTEXITCODE -ne 0) { throw "Executable build failed ($Mode)." }
+    $Executable = if ($Mode -eq "onedir") { Join-Path $OutputDirectory "cvebeacon\cvebeacon.exe" } else { Join-Path $OutputDirectory "cvebeacon.exe" }
+    & $Executable --help
+    if ($LASTEXITCODE -ne 0) { throw "Executable smoke test failed ($Mode)." }
+}

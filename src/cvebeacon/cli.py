@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ from .engine import QueryEngine
 from .errors import CVEBeaconError, SourceError
 from .http import HttpClient
 from .inventory import inspect_inventory, load_inventory
-from .models import Asset
+from .models import Asset, HealthStatus
 from .notifications import GraphMailNotifier, TeamsNotifier, alert_items, configured_channels
 from .reporting import write_json, write_xlsx
 from .scheduling import describe, install, make_plan, remove, status
@@ -86,10 +87,10 @@ def _notify_pending(config: AppConfig, store: StateStore, http: HttpClient, chan
     return len(items)
 
 
-def _run_query(config: AppConfig, assets: list[Asset]):
+def _run_query(config: AppConfig, assets: list[Asset], *, known_findings=()):
     LOG.info("querying %d asset record(s)", len(assets))
     with QueryEngine(config) as engine:
-        results = engine.scan(assets)
+        results = engine.scan(assets, known_findings=known_findings)
     LOG.info("query complete: %d finding(s), %d coverage warning(s)", sum(len(x.findings) for x in results), sum(x.coverage is not None for x in results))
     return results
 
@@ -101,8 +102,8 @@ def _report_path(config: AppConfig, kind: str) -> Path:
 
 def _source_status(store: StateStore) -> list[dict[str, object]]:
     store.initialize()
-    with store._connect() as db:
-        row = db.execute("SELECT run_id FROM runs WHERE status='completed' ORDER BY completed_at DESC LIMIT 1").fetchone()
+    with closing(store._connect()) as db:
+        row = db.execute("SELECT run_id FROM runs ORDER BY completed_at DESC LIMIT 1").fetchone()
         return [] if row is None else [dict(x) for x in db.execute("SELECT asset_id,source,status,checked_at,message,freshness_at FROM source_health WHERE run_id=? ORDER BY asset_id,source", (row[0],))]
 
 
@@ -172,11 +173,13 @@ def run(args: argparse.Namespace) -> int:
         result = _run_query(config, [asset])
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
     if args.command == "query":
+        if any(not value.strip() for value in (args.asset_id, args.vendor, args.product, args.version)):
+            raise CVEBeaconError("query asset ID, vendor, product and version cannot be blank")
         result = _run_query(config, [Asset(args.asset_id, args.vendor, args.product, args.version)])
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
     if args.command in {"scan", "export"}:
         assets = load_inventory(config.inventory)
-        results = _run_query(config, assets)
+        results = _run_query(config, assets, known_findings=store.latest_findings()) if args.command == "scan" else _run_query(config, assets)
         if args.command == "scan":
             channels = configured_channels(config)
             run_id, events = store.record_scan(results, channels=channels)
@@ -191,12 +194,16 @@ def run(args: argparse.Namespace) -> int:
                 path = _report_path(config, args.report)
                 (write_xlsx if args.report == "xlsx" else write_json)(results, path)
                 print(path)
-            print(f"run {run_id}: {len(assets)} assets, {sum(len(x.findings) for x in results)} findings, {len(events)} material changes")
+            warnings = sum(result.coverage is not None for result in results)
+            degraded = any(health.status in {HealthStatus.DEGRADED, HealthStatus.FAILED} for result in results for health in result.source_health)
+            print(f"run {run_id}: {len(assets)} assets, {sum(len(x.findings) for x in results)} findings, {len(events)} material changes, {warnings} coverage warnings")
             if failures:
                 for failure in failures: print(f"notification warning: {failure}", file=sys.stderr)
                 return 3
-            return 0
+            return 4 if warnings or degraded else 0
         path = Path(args.output).resolve() if args.output else _report_path(config, args.format)
+        if path in {config.inventory.path, config.config_path, config.database_path}:
+            raise CVEBeaconError("report output cannot overwrite inventory, configuration or state")
         (write_xlsx if args.format == "xlsx" else write_json)(results, path); print(path); return 0
     if args.command == "history":
         print(json.dumps(store.history(asset_id=args.asset_id, cve_id=args.cve_id, limit=args.limit), indent=2)); return 0
@@ -216,7 +223,9 @@ def run(args: argparse.Namespace) -> int:
         checks = {"configuration": "ok", "inventory": f"ok ({len(assets)} assets)", "state": "ok", "teams_secret": "not required" if not config.teams.enabled else ("set" if config.secret(config.teams.webhook_env) else "missing"), "email_secrets": "not required" if not config.email.enabled else ("set" if all(config.secret(x) for x in (config.email.tenant_id_env, config.email.client_id_env, config.email.client_secret_env)) else "missing")}
         if args.live:
             checks["live_sources"] = _live_source_checks(config)
-        print(json.dumps(checks, indent=2)); return 0 if "missing" not in checks.values() else 2
+        print(json.dumps(checks, indent=2))
+        failed_live = any(value != "ok" for value in checks.get("live_sources", {}).values())
+        return 2 if "missing" in checks.values() or failed_live else 0
     if args.command == "source-status": print(json.dumps(_source_status(store), indent=2)); return 0
     if args.command == "schedule":
         if args.every is None:

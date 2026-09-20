@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,7 +109,7 @@ def _positive_number(value: Any, name: str, *, minimum: float = 0) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigurationError(f"{name} must be a number")
     number = float(value)
-    if number <= minimum:
+    if not math.isfinite(number) or number <= minimum:
         raise ConfigurationError(f"{name} must be greater than {minimum}")
     return number
 

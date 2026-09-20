@@ -14,6 +14,7 @@ Windows PowerShell:
 
 ```console
 python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2"
 .venv\Scripts\python.exe -m pip install .
 .venv\Scripts\cvebeacon.exe --help
 ```
@@ -22,6 +23,7 @@ Linux:
 
 ```console
 python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade 'pip>=26.2'
 .venv/bin/python -m pip install .
 .venv/bin/cvebeacon --help
 ```
@@ -43,7 +45,7 @@ product = "product"
 version = "version"
 ```
 
-`asset_id`, `vendor`, `product`, and `version` are required and cannot be blank. Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory.
+`asset_id`, `vendor`, `product`, and `version` are required text fields and cannot be blank. Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
 
 Source controls, retry/timeouts, output paths, optional exact CPE mappings, and notification settings are illustrated in the example configuration. A configured product CPE must be a complete CPE 2.3 name with a wildcard version; verify it against NVD before use.
 
@@ -53,7 +55,7 @@ The file extension selects XLSX, CSV, JSON, or YAML when `format = "auto"`. A di
 
 ### XLSX
 
-Set `worksheet`, `header_row`, and the four source column names. Formulas are read from their cached values; do not rely on CVEBeacon to calculate a workbook. Inspect all worksheet names and headers first:
+Set `worksheet`, `header_row`, and the four source column names. Mapped inventory cells must contain literal text; formulas are rejected because their cached results may be stale. Inspect all worksheet names and headers first:
 
 ```console
 cvebeacon inventory inspect inventory.xlsx
@@ -90,6 +92,8 @@ cvebeacon --config cvebeacon.toml scan --report xlsx
 The run queries each identical vendor/product/version target once, then associates results with each asset ID. Completed findings, source health, events, and pending notification work are committed together. A run that fails before commit does not appear as successful state. Notification attempts occur after this commit so failures can retry safely.
 
 The first scan may be slow without an NVD API key because the default respects NVD’s public-client pacing guidance. Set the configured API-key environment variable to use a key; never put the key in TOML.
+
+Exit codes are `0` for a successful operation, `2` for validation/operational failure, `3` for notification failure, and `4` for a scan with uncertain coverage or degraded sources. A completed scan can contain useful findings and still exit `4`; review its report and `source-status`. Notification failure takes precedence if both occur.
 
 ## 6. Queries and assets
 
@@ -135,13 +139,21 @@ XLSX reports contain Summary, Findings, Uncertainty, Evidence, and Source Health
 
 `not_affected` is never inferred from zero search results. Human-oriented or custom version ranges are preserved but not forced through a generic comparator. A known-exploitation catalog entry is prioritization evidence; it does not by itself prove product-version applicability. EPSS is predictive and remains distinct from known exploitation.
 
+SemVer and Python version ranges use their respective ordering rules. Other schemes and partial-version wildcards require review. Product punctuation is significant; automatic CPE resolution allows CPE underscores to represent spaces, but does not guess vendor aliases. Configure a verified mapping when names differ. Configured edition, update, and platform fields are retained. NVD AND/negated/environment-dependent configurations and CVE platform-scoped claims require review when the inventory cannot establish those conditions. A CPE API search hit alone does not prove the full configuration applies.
+
 ## 9. Material changes
 
 Notifications are created for a new finding or a meaningful change to applicability, affected evidence, rejection/withdrawal state, CVSS, CISA KEV membership, EU KEV membership, or a comparable remediation-relevant claim. Upstream modification timestamps and ordinary EPSS movement are stored when available but do not independently trigger alerts.
 
+Any change in the selected CVSS score/vector/version is material. When sources provide different scores, the highest reported base score and its associated vector/version are displayed together; the conflict and original metrics remain in the evidence. Reordering equivalent evidence does not create an alert. Upgrading from an earlier fingerprint policy can cause a one-time material event on the next complete refresh.
+
 ## 10. Degraded sources and diagnostics
 
 Source health is recorded per asset and source. If NVD fails, official record or EUVD evidence may still be reported, but coverage remains degraded. If EPSS fails, applicability can remain valid while the score is unavailable. KEV outages degrade prioritization enrichment. Notification channels do not depend on one another.
+
+Empty independent product searches and disabled core sources leave coverage unconfirmed. KEV membership is `null` when unavailable, `false` when a healthy catalogue does not list the CVE, and `true` when listed. None of these values implies absence of exploitation outside that catalogue. Reports are fresh query results; they do not contain notification delivery state. Inspect SQLite deliveries for channel acceptance details.
+
+An incomplete core refresh retains prior stored findings rather than marking them resolved. Failed KEV refreshes retain previous membership and its original evidence timestamps in monitoring state. Missing findings are never automatically resolved or deleted. Previously observed CVEs for the same product/version are refreshed even if discovery no longer returns them, allowing rejected records to produce material events. Source health must be read alongside stored findings. There is no persistent offline source cache; retained findings are historical observations, not fresh source responses.
 
 Validate local configuration and state access:
 
@@ -151,7 +163,7 @@ cvebeacon doctor --live
 cvebeacon source-status
 ```
 
-`doctor --live` also performs a bounded query against enabled public sources without committing state. `source-status` reports the last completed scan’s per-asset source outcome. Use `--verbose` for additional local diagnostics. Secrets and full webhook URLs are not printed.
+`doctor --live` also performs a bounded query against enabled public sources without committing scan state and returns a nonzero status if any check fails. `source-status` reports the latest persisted scan’s per-asset source outcome, including failed refreshes. An incomplete scan is recorded with run status `failed` and retains its source-health evidence and useful partial findings. Use `--verbose` for additional local diagnostics. Secrets and full webhook URLs are not printed.
 
 Common failures:
 
@@ -179,6 +191,8 @@ cvebeacon notify test --channel teams
 
 Treat the webhook URL as a secret. Workflow lifecycle and ownership remain Microsoft tenant administration concerns.
 
+The Teams integration sends the secret URL without an Entra bearer token. Use a workflow trigger configured to accept that request mode; triggers restricted to tenant-authenticated callers require an authentication flow this integration does not implement. Test the actual tenant workflow before enabling scheduled alerts.
+
 ## 12. Microsoft 365 email
 
 Register an Entra application, grant the Microsoft Graph `Mail.Send` application permission, obtain administrator consent, and limit mailbox scope with Exchange controls where appropriate. Configure only non-secret sender and recipient values in TOML:
@@ -203,6 +217,8 @@ Graph HTTP 202 means Microsoft accepted the request for processing; it is not pr
 
 Enable both channel tables to send one consolidated alert independently to each channel. On split success, the successful channel stays accepted and only the failed channel retries on a later scan. Use `cvebeacon notify test` to test all enabled channels.
 
+Remote acceptance and local SQLite acknowledgement are separate operations. A crash after remote acceptance but before local acknowledgement, or overlapping scanner processes, can produce a duplicate on retry. Delivery is at least once, not exactly once; run only one scheduled scanner per state database. Large notifications summarize the first 50 Teams items or 100 email items and direct the operator to history for the remaining changes.
+
 ## 13. Automatic scheduling
 
 Preview and install the default four-hour schedule:
@@ -212,7 +228,7 @@ cvebeacon --config /absolute/path/cvebeacon.toml schedule install --dry-run
 cvebeacon --config /absolute/path/cvebeacon.toml schedule install
 ```
 
-The interactive setup asks for an interval, defaults to four hours, shows the proposal, and requires confirmation. For automation, provide a value such as `--every 4h --yes`; the accepted range is 2 through 24 whole hours. Inspect and remove with `schedule status` and `schedule remove`. See [scheduling](SCHEDULING.md) for exact ownership and safe manual native scheduling.
+The interactive setup asks for an interval, defaults to four hours, shows the proposal, and requires confirmation. For automation, provide a value such as `--every 4h --yes`; Windows accepts 2 through 24 whole hours, while Linux cron accepts 2, 3, 4, 6, 8, 12, or 24. Inspect and remove with `schedule status` and `schedule remove`. See [scheduling](SCHEDULING.md) for exact ownership and safe manual native scheduling.
 
 Ensure the scheduled account can read the inventory/configuration, write state/reports, reach source endpoints, and obtain notification environment variables.
 

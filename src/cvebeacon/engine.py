@@ -6,14 +6,14 @@ from collections import defaultdict
 from dataclasses import replace
 from typing import Iterable
 
-from .applicability import Decision, evaluate_cve_evidence, exact_cpe_version, identity_text
+from .applicability import Decision, evaluate_cve_evidence, evaluate_nvd_evidence, exact_cpe_version, identity_text
 from .config import AppConfig
 from .errors import SourceError
 from .http import HttpClient
 from .models import Applicability, Asset, Evidence, HealthStatus, QueryResult, SourceHealth, Vulnerability
 from .reconcile import merge_vulnerabilities, reconcile
 from .sources import CVEListSource, EPSSSource, EUVDSource, KEVSource, NVDSource
-from .sources.common import now_health
+from .sources.common import now_health, as_float
 from .sources.epss import EPSS_URL
 
 
@@ -57,13 +57,19 @@ class QueryEngine:
         candidates = self.nvd.resolve_cpes(asset)
         exact = [
             item for item in candidates
-            if identity_text(item.vendor) == identity_text(asset.vendor)
-            and identity_text(item.product) == identity_text(asset.product)
+            if identity_text(item.vendor.replace("_", " ")) == identity_text(asset.vendor)
+            and identity_text(item.product.replace("_", " ")) == identity_text(asset.product)
         ]
-        identities = {(item.part, identity_text(item.vendor), identity_text(item.product)) for item in exact}
+        identities = {(item.part, item.vendor.casefold(), item.product.casefold()) for item in exact}
         if len(identities) != 1:
             return None, "no unambiguous exact CPE identity" if not identities else "multiple exact CPE identities require an explicit product mapping"
         try:
+            # Automatic resolution establishes product identity only. Qualifiers
+            # remain unknown and must be checked against each configuration.
+            from .sources.nvd import split_cpe23
+            fields = split_cpe23(exact[0].name)
+            if any(field != "*" for field in fields[4:]):
+                return None, "CPE edition or platform requires an explicit product mapping"
             return exact_cpe_version(exact[0].name, asset.version), "unique exact NVD CPE identity"
         except ValueError as exc:
             return None, str(exc)
@@ -99,6 +105,8 @@ class QueryEngine:
         decisions: dict[str, list[Decision]] = defaultdict(list)
         nvd_ids: set[str] = set()
         cpe: str | None = None
+        for identifier in getattr(self, "_known_targets", {}).get(asset.target_key, ()):
+            claims[identifier].append(Vulnerability(identifier))
         if self.config.sources.nvd_enabled:
             try:
                 cpe, resolution = self._resolve_cpe(asset)
@@ -106,6 +114,7 @@ class QueryEngine:
                     for vuln, item in self.nvd.vulnerabilities(cpe_name=cpe):
                         claims[vuln.cve_id].append(vuln)
                         evidence[vuln.cve_id].append(item)
+                        decisions[vuln.cve_id].append(evaluate_nvd_evidence(cpe, item))
                         nvd_ids.add(vuln.cve_id)
                     health.append(now_health("nvd", HealthStatus.OK, f"{resolution}; {len(nvd_ids)} exact-version matches"))
                 else:
@@ -121,7 +130,8 @@ class QueryEngine:
                 for vuln, item in values:
                     claims[vuln.cve_id].append(vuln)
                     evidence[vuln.cve_id].append(item)
-                health.append(now_health("euvd", HealthStatus.OK, f"{len(values)} product search results"))
+                status = HealthStatus.OK if values else HealthStatus.DEGRADED
+                health.append(now_health("euvd", status, f"{len(values)} product search results" + ("; independent discovery coverage is unconfirmed" if not values else "")))
             except SourceError as exc:
                 health.append(now_health("euvd", HealthStatus.FAILED, str(exc)))
         else:
@@ -134,11 +144,22 @@ class QueryEngine:
                 try:
                     for item in self._official_evidence(identifier):
                         evidence[identifier].append(item)
+                        metrics = item.details.get("metrics", [])
+                        for metric in metrics if isinstance(metrics, list) else []:
+                            if not isinstance(metric, dict):
+                                continue
+                            for key in ("cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2_0"):
+                                data = metric.get(key)
+                                if isinstance(data, dict):
+                                    claims[identifier].append(Vulnerability(identifier, cvss_score=as_float(data.get("baseScore")), cvss_vector=data.get("vectorString"), cvss_version=data.get("version")))
+                        references = item.details.get("references", [])
+                        claims[identifier].append(Vulnerability(identifier, references=tuple(ref["url"] for ref in references if isinstance(ref, dict) and isinstance(ref.get("url"), str))))
                         decisions[identifier].append(evaluate_cve_evidence(asset, item))
                         if item.details.get("state") == "REJECTED":
                             claims[identifier] = [replace(vuln, rejected=True) for vuln in claims[identifier]]
                 except (SourceError, ValueError):
                     failures += 1
+                    decisions[identifier].append(Decision(Applicability.NEEDS_REVIEW, "official CVE applicability record could not be retrieved or parsed"))
             status = HealthStatus.OK if failures == 0 else HealthStatus.DEGRADED
             health.append(now_health("cve_list", status, f"{len(identifiers) - failures}/{len(identifiers)} records retrieved"))
         else:
@@ -179,6 +200,9 @@ class QueryEngine:
         findings = []
         for identifier in identifiers:
             vuln = merge_vulnerabilities(claims[identifier])
+            vuln = replace(vuln,
+                cisa_kev=(identifier in cisa) if any(h.source == "cisa_kev" and h.status == HealthStatus.OK for h in health) else None,
+                eu_kev=(identifier in eu) if any(h.source == "eu_kev" and h.status == HealthStatus.OK for h in health) else None)
             if identifier in cisa:
                 vuln = replace(vuln, cisa_kev=True)
                 evidence[identifier].append(cisa[identifier])
@@ -193,9 +217,15 @@ class QueryEngine:
                     EPSS_URL, score_date.isoformat(),
                     details={"score": score, "percentile": percentile, "score_date": score_date.isoformat()},
                 ))
-            findings.append(reconcile(asset, vuln, evidence[identifier], decisions[identifier], nvd_exact_match=identifier in nvd_ids))
+            if any(item.source in {"nvd", "cve_list", "euvd"} and item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for item in health):
+                decisions[identifier].append(Decision(Applicability.NEEDS_REVIEW, "core applicability sources are incomplete"))
+            finding = reconcile(asset, vuln, evidence[identifier], decisions[identifier])
+            severities = {(value.cvss_score, value.cvss_vector, value.cvss_version) for value in claims[identifier] if value.cvss_score is not None}
+            if len(severities) > 1:
+                finding = replace(finding, conflicts=finding.conflicts + ("CVSS claims differ; the highest reported base score is displayed; see source evidence",))
+            findings.append(finding)
         findings.sort(key=lambda item: (not item.vulnerability.cisa_kev, not item.vulnerability.eu_kev, -(item.vulnerability.cvss_score or -1), item.vulnerability.cve_id))
-        any_failed = any(item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for item in health)
+        any_failed = any(item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} or (item.source in {"nvd", "cve_list", "euvd"} and item.status == HealthStatus.DISABLED) for item in health)
         if not cpe:
             coverage, reason = Applicability.COVERAGE_UNKNOWN, "product identity could not be resolved unambiguously"
         elif any_failed:
@@ -206,7 +236,11 @@ class QueryEngine:
             coverage, reason = None, None
         return QueryResult(asset, tuple(findings), tuple(health), coverage, reason)
 
-    def scan(self, assets: Iterable[Asset]) -> list[QueryResult]:
+    def scan(self, assets: Iterable[Asset], *, known_findings: Iterable[dict] = ()) -> list[QueryResult]:
+        self._known_targets: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+        for item in known_findings:
+            previous_asset = Asset(**item["asset"])
+            self._known_targets[previous_asset.target_key].add(item["vulnerability"]["cve_id"])
         cached: dict[tuple[str, str, str], QueryResult] = {}
         output: list[QueryResult] = []
         for asset in assets:

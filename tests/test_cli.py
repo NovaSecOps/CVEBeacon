@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from cvebeacon import cli
 from cvebeacon.models import Applicability, Asset, QueryResult
+import pytest
 
 
 def test_manual_query_does_not_create_monitoring_state(tmp_path, monkeypatch, capsys):
@@ -42,3 +43,26 @@ def test_schedule_interactive_default_is_four_hours(tmp_path, monkeypatch, capsy
     assert cli.main(["--config", str(config), "schedule", "install"]) == 0
     assert installed[0].every_hours == 4
     assert "Interval: every 4 hours" in capsys.readouterr().out
+
+
+@pytest.fixture
+def local_config(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text("[inventory]\npath='inventory.csv'\n[state]\ndatabase='state.db'\n[output]\ndirectory='reports'\n", encoding="utf-8")
+    (tmp_path / "inventory.csv").write_text("asset_id,vendor,product,version\na,Acme,Widget,1\n", encoding="utf-8")
+    return config
+
+
+@pytest.mark.parametrize("target", ["config.toml", "inventory.csv", "state.db"])
+def test_export_cannot_overwrite_operational_files(local_config, monkeypatch, target):
+    monkeypatch.setattr(cli, "_run_query", lambda config, assets: [])
+    path = local_config.parent / target
+    if not path.exists(): path.write_bytes(b"preserved")
+    original = path.read_bytes()
+    assert cli.main(["--config", str(local_config), "export", "--format", "json", "--output", str(path)]) == 2
+    assert path.read_bytes() == original
+
+
+def test_live_doctor_failure_exits_nonzero(local_config, monkeypatch):
+    monkeypatch.setattr(cli, "_live_source_checks", lambda config: {"nvd": "failed: timeout"})
+    assert cli.main(["--config", str(local_config), "doctor", "--live"]) == 2
