@@ -98,7 +98,9 @@ inject `CVEBEACON_DASHBOARD_PASSWORD_HASH` through a trusted runtime environment
 or secret manager. The sample forwards it by name, keeping its value out of YAML
 and command arguments. Core does not implement a `_FILE` convention: mounting a
 secret file alone does not enable authentication. Never bake hashes into images
-or commit local environment files. Avoid printing expanded Compose configuration
+or commit local environment files. Runtime environment values are visible to
+operators with Docker inspection access; restrict access to the Docker daemon.
+Avoid printing expanded Compose configuration
 or runtime environments.
 
 ```console

@@ -25,8 +25,8 @@ A snapshot is a UTF-8 JSON list, directly accepted by the existing core JSON
 loader, plus `<snapshot>.manifest.json`. Records use `asset_id`, `vendor`,
 `product`, `version`, `category`, `system_id`, `ecosystem`, `purl`, `cpe`,
 `repository`, `commit`. Values are strings; optional values serialize as empty
-strings. Unknown fields are rejected in the exchange contract. IDs are unique
-under core normalization and case-insensitive comparison. Version spelling and
+strings. Unknown fields and empty records are rejected in the exchange contract.
+IDs are unique under core normalization and case-insensitive comparison. Version spelling and
 explicit identity qualifiers are preserved.
 
 Core `cvebeacon.inventory.validate_records` is the semantic authority and shares

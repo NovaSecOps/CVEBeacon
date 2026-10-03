@@ -211,6 +211,7 @@ def load_sbom_map(path: Path) -> dict[str, Path]:
 def enrich(observations: list[dict], mapping: dict[str, Path], *, source_id: str):
     rows, reviews, cache = [], [], {}
     input_bytes = 0
+    retained_bytes = 3
     for observation in observations:
         if not observation["running"]:
             continue
@@ -233,7 +234,14 @@ def enrich(observations: list[dict], mapping: dict[str, Path], *, source_id: str
         components, skipped = cache[reference]
         if len(rows) + len(components) > MAX_RECORDS:
             raise ExtensionError("enriched inventory exceeds record limit")
-        rows.extend(dict(row, system_id=instance, asset_id=stable_id(instance, row["asset_id"])) for row in components)
+        for component in components:
+            row = dict(component, system_id=instance, asset_id=stable_id(instance, component["asset_id"]))
+            # Exact pretty-printed array size for flat canonical string rows:
+            # two extra spaces per line, separators and array delimiters.
+            retained_bytes += len(json_bytes(row)) + 2 * (len(row) + 2) + 1
+            if retained_bytes > MAX_BYTES:
+                raise ExtensionError("enriched inventory exceeds size limit")
+            rows.append(row)
         if skipped:
             reviews.append(dict(pod=observation["pod"], namespace=observation["namespace"],
                                 container=observation["container"], reason="sbom-review-required", count=len(skipped)))
