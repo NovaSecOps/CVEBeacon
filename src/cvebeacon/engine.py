@@ -265,10 +265,15 @@ class QueryEngine:
         assets = [normalize_asset(asset) for asset in assets]
         self._known_targets: dict[tuple[str, str, str], set[str]] = defaultdict(set)
         self._known_package_ids = defaultdict(set)
+        self._known_package_aliases = defaultdict(list)
         for item in known_findings:
             previous_asset = Asset(**item["asset"])
             if previous_asset.identity_path in {"purl", "ecosystem", "commit"}:
                 self._known_package_ids[previous_asset.target_key].update(item["vulnerability"].get("source_ids", ()))
+                vulnerability = item["vulnerability"]
+                self._known_package_aliases[previous_asset.target_key].append({identifier for identifier in (
+                    vulnerability.get("advisory_id"), vulnerability.get("cve_id"),
+                    *vulnerability.get("aliases", ()), *vulnerability.get("source_ids", ())) if identifier})
             else:
                 self._known_targets[previous_asset.target_key].add(item["vulnerability"]["cve_id"])
         package_assets = {asset.target_key: asset for asset in assets if asset.identity_path in {"purl", "ecosystem", "commit"} and not identity_conflict(asset)}

@@ -131,6 +131,16 @@ def evaluate_osv(asset, record, *, commit_match=False):
                 except (ValueError, TypeError):
                     return Decision(A.NEEDS_REVIEW, "OSV package has a malformed supplementary PURL identity")
                 source_ecosystem = PURL_ECOSYSTEMS.get(source_purl.type)
+                if not source_ecosystem:
+                    distro_type, distro_vendor = (
+                        ("deb", "debian") if ecosystem.startswith("Debian:") else
+                        ("rpm", "almalinux") if ecosystem.startswith("AlmaLinux:") else
+                        ("rpm", "rocky") if ecosystem.startswith("Rocky Linux:") else
+                        ("rpm", "redhat") if ecosystem.startswith("Red Hat:") else (None, None)
+                    )
+                    if (source_purl.type != distro_type or source_purl.namespace != distro_vendor or
+                            source_purl.name != name or source_purl.version or source_purl.subpath):
+                        return Decision(A.NEEDS_REVIEW, "OSV supplementary PURL does not establish the declared package identity")
                 # Distro PURLs have source/architecture qualifiers and do not
                 # encode the OSV release ecosystem. Do not guess that mapping.
                 if source_ecosystem and (source_ecosystem != ecosystem or
