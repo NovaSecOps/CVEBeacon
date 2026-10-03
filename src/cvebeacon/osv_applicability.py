@@ -104,8 +104,13 @@ def evaluate_osv(asset, record, *, commit_match=False):
     if record.get("withdrawn"):
         return Decision(A.NEEDS_REVIEW, "OSV advisory was withdrawn; retained for review")
     if asset.identity_path == "commit":
-        matches = [r for item in record.get("affected", []) for r in item.get("ranges", [])
-                   if isinstance(r, dict) and r.get("type") == "GIT" and r.get("repo") == asset.repository]
+        git_ranges = [r for item in record.get("affected", []) for r in item.get("ranges", [])
+                      if isinstance(r, dict) and r.get("type") == "GIT"]
+        matches = [r for r in git_ranges if r.get("repo") == asset.repository]
+        # The commit-query response identifies the advisory, not which range
+        # matched. Membership cannot select among different repositories.
+        if matches and commit_match and any(r.get("repo") != asset.repository for r in git_ranges):
+            return Decision(A.NEEDS_REVIEW, "OSV commit membership cannot be attributed to one of multiple repository ranges")
         return Decision(A.AFFECTED if matches and commit_match else A.COVERAGE_UNKNOWN,
                         "OSV exact commit query and repository range match" if matches and commit_match else "exact repository/commit applicability was not established")
     ecosystem, name = asset.ecosystem, asset.product
@@ -120,6 +125,18 @@ def evaluate_osv(asset, record, *, commit_match=False):
         if not isinstance(package, dict):
             return Decision(A.NEEDS_REVIEW, "malformed OSV package identity")
         if package.get("ecosystem") == ecosystem and isinstance(package.get("name"), str) and name_key(ecosystem, package["name"]) == name_key(ecosystem, name):
+            if package.get("purl"):
+                try:
+                    source_purl = parse_purl(package["purl"])
+                except (ValueError, TypeError):
+                    return Decision(A.NEEDS_REVIEW, "OSV package has a malformed supplementary PURL identity")
+                source_ecosystem = PURL_ECOSYSTEMS.get(source_purl.type)
+                # Distro PURLs have source/architecture qualifiers and do not
+                # encode the OSV release ecosystem. Do not guess that mapping.
+                if source_ecosystem and (source_ecosystem != ecosystem or
+                        name_key(ecosystem, package_name(source_purl)) != name_key(ecosystem, name) or
+                        source_purl.version or source_purl.qualifiers or source_purl.subpath):
+                    return Decision(A.NEEDS_REVIEW, "OSV package and supplementary PURL do not establish one unqualified identity")
             matches.append(item)
     if not matches:
         return Decision(A.COVERAGE_UNKNOWN, "OSV record does not establish this exact ecosystem/package identity")

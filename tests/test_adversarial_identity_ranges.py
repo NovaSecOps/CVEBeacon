@@ -97,3 +97,34 @@ def test_multiple_limit_union_and_version_list_union():
     assert range_state("3.0.0", value, "npm") is False
     record = osv_record("npm", "example", [{"introduced": "0"}, {"fixed": "1.0.0"}], versions=("2.0.0",))
     assert evaluate_osv(Asset("a", ecosystem="npm", product="example", version="2.0.0"), record).state == A.AFFECTED
+
+
+@pytest.mark.parametrize("source_purl", [
+    "pkg:npm/different", "pkg:pypi/different", "pkg:pypi/example@1.0",
+    "pkg:pypi/example?arch=arm64", "pkg:pypi/example#src", "pkg:pypi/example%ZZ",
+])
+def test_contradictory_source_purl_cannot_establish_exclusion(source_purl):
+    record = osv_record("PyPI", "example", [{"introduced": "0"}, {"fixed": "1.0"}])
+    record["affected"][0]["package"]["purl"] = source_purl
+    asset = Asset("a", ecosystem="PyPI", product="example", version="2.0")
+    assert evaluate_osv(asset, record).state == A.NEEDS_REVIEW
+
+
+@pytest.mark.parametrize("ecosystem,name,purl", [
+    ("PyPI", "example", "pkg:pypi/example"),
+    ("Debian:12", "openssl", "pkg:deb/debian/openssl?arch=source&distro=bookworm"),
+])
+def test_consistent_source_identity_keeps_declared_ecosystem_ranges(ecosystem, name, purl):
+    record = osv_record(ecosystem, name, [{"introduced": "0"}, {"fixed": "1.0"}])
+    record["affected"][0]["package"]["purl"] = purl
+    assert evaluate_osv(Asset("a", ecosystem=ecosystem, product=name, version="2.0"), record).state == A.NOT_AFFECTED
+
+
+def test_commit_membership_in_multi_repository_record_is_ambiguous():
+    repo = "https://example.invalid/first"
+    record = {"affected": [{"ranges": [
+        {"type": "GIT", "repo": repo, "events": [{"introduced": "a" * 40}, {"fixed": "b" * 40}]},
+        {"type": "GIT", "repo": "https://example.invalid/second", "events": [{"introduced": "0"}]},
+    ]}]}
+    asset = Asset("a", repository=repo, commit="c" * 40)
+    assert evaluate_osv(asset, record, commit_match=True).state == A.NEEDS_REVIEW
