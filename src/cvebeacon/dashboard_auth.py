@@ -37,7 +37,7 @@ def hash_password():
         raise CVEBeaconError("password must contain 12–1024 characters and not be all whitespace")
     if not secrets.compare_digest(password.encode("utf-8"), confirmation.encode("utf-8")):
         raise CVEBeaconError("password confirmation does not match")
-    return generate_password_hash(password)
+    return generate_password_hash(password, method="scrypt:32768:8:1")
 
 
 class DashboardAuth:
@@ -58,8 +58,13 @@ class DashboardAuth:
         with self.lock:
             self.attempts = {key: value for key, value in self.attempts.items() if value[2] > now}
             failures, next_try, _ = self.attempts.get(origin, (0, 0, 0))
-            if now < next_try or (origin not in self.attempts and len(self.attempts) >= self.max_origins):
+            if now < next_try:
                 return None
+            if origin not in self.attempts and len(self.attempts) >= self.max_origins:
+                # A full table must not lock out all unrelated clients for
+                # fifteen minutes. Evict the least recently attempted origin.
+                oldest = min(self.attempts, key=lambda key: self.attempts[key][2])
+                self.attempts.pop(oldest)
             failures = min(failures + 1, 7)
             # Reserve before expensive hashing, so concurrent requests cannot
             # bypass the delay. No sleeps occupy the server's worker threads.

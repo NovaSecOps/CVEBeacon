@@ -24,27 +24,32 @@ def _timestamp() -> str:
 
 def material_fingerprint(finding: Finding) -> str:
     """Hash fields that should produce an alert; EPSS and timestamp churn are excluded."""
+    return _payload_fingerprint(finding.to_dict())
+
+
+def _payload_fingerprint(finding: dict) -> str:
+    vulnerability = finding["vulnerability"]
     value = {
-        "cve_id": finding.vulnerability.primary_id,
-        "applicability": finding.applicability.value,
-        "rejected": finding.vulnerability.rejected,
-        "cvss": [finding.vulnerability.cvss_score, finding.vulnerability.cvss_vector, finding.vulnerability.cvss_version],
-        "kev": [finding.vulnerability.cisa_kev, finding.vulnerability.eu_kev],
+        "cve_id": vulnerability.get("advisory_id") or vulnerability.get("cve_id"),
+        "applicability": finding["applicability"],
+        "rejected": vulnerability["rejected"],
+        "cvss": [vulnerability[key] for key in ("cvss_score", "cvss_vector", "cvss_version")],
+        "kev": [vulnerability[key] for key in ("cisa_kev", "eu_kev")],
         "evidence": sorted(set(
             (
-                item.source,
-                item.role,
+                item["source"],
+                item["role"],
                 json.dumps(
-                    _canonical({key: item.details[key] for key in ("state", "affected", "products", "sources", "configurations") if item.details.get(key) is not None}),
+                    _canonical({key: item["details"][key] for key in ("state", "affected", "products", "sources", "configurations") if item["details"].get(key) is not None}),
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=False,
                 ),
             )
-            for item in finding.evidence
-            if any(item.details.get(key) is not None for key in ("state", "affected", "products", "sources", "configurations"))
+            for item in finding["evidence"]
+            if item["role"] != "cve_enrichment" and any(item["details"].get(key) is not None for key in ("state", "affected", "products", "sources", "configurations"))
         )),
-        "conflicts": sorted(finding.conflicts),
+        "conflicts": sorted(finding["conflicts"]),
     }
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -167,7 +172,10 @@ class StateStore:
                 );
                 """
             )
-            row = db.execute("SELECT version FROM schema_info LIMIT 1").fetchone()
+            rows = db.execute("SELECT version FROM schema_info").fetchall()
+            if len(rows) > 1:
+                raise StateError("ambiguous state schema metadata; expected one version row")
+            row = rows[0] if rows else None
             if row is None:
                 db.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
             elif row["version"] in {1, 2}:
@@ -239,7 +247,15 @@ class StateStore:
                             finding = replace(finding, vulnerability=replace(finding.vulnerability, **updates), evidence=tuple(item for item in finding.evidence if item.source not in failed_sources.intersection({"cisa_kev", "eu_kev"})) + old_evidence)
                             payload = json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=False)
                             fingerprint = material_fingerprint(finding)
-                        event_type = "new" if previous is None else ("changed" if previous["fingerprint"] != fingerprint else None)
+                        # Recompute existing enrichment-bearing observations
+                        # with the same material policy to avoid an upgrade
+                        # alert storm. Historical payloads/events stay intact.
+                        previous_fingerprint = previous["fingerprint"] if previous else None
+                        if previous:
+                            old_payload = json.loads(previous["payload_json"])
+                            if any(item["role"] == "cve_enrichment" for item in old_payload["evidence"]):
+                                previous_fingerprint = _payload_fingerprint(old_payload)
+                        event_type = "new" if previous is None else ("changed" if previous_fingerprint != fingerprint else None)
                         first_seen = previous["first_seen"] if previous else completed
                         # Keep historical finding/event/delivery rows byte-for-byte.
                         # The alias index selects a single current representative.

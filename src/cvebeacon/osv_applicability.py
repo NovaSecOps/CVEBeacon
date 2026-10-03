@@ -1,7 +1,9 @@
 """Conservative OSV evaluation using only declared ecosystem semantics."""
 
 from functools import cmp_to_key
+import re
 
+from univers.nuget import InvalidNuGetVersion
 from univers.versions import DebianVersion, MavenVersion, NugetVersion, RpmVersion
 
 from .applicability import Decision, _compare_versions, known_version
@@ -25,10 +27,28 @@ def compare(left, right, kind, ecosystem):
     cls = MavenVersion if ecosystem == "Maven" else NugetVersion if ecosystem == "NuGet" else DebianVersion if ecosystem.startswith("Debian:") else RpmVersion if ecosystem.startswith(("AlmaLinux:", "Rocky Linux:", "Red Hat:")) else None
     if cls is None:
         return None
+    if any(char.isspace() for value in (left, right) for char in value):
+        return None
+    # univers.Version normalizes all ecosystems by stripping leading v's and
+    # whitespace. Compare the ecosystem values directly to preserve spelling.
+    # Maven qualifiers disagree with current ComparableVersion (e.g. release
+    # aliases and dotted qualifiers). Only numeric dotted releases are safe.
+    if cls is MavenVersion and any(not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value) for value in (left, right)):
+        return None
+    if cls is NugetVersion:
+        for value in (left, right):
+            if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,3}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", value):
+                return None
+            if any(int(part) > 2**31 - 1 for part in value.split("-")[0].split("+")[0].split(".")):
+                return None
+    if cls is RpmVersion and any(not re.fullmatch(r"(?:[0-9]+:)?[A-Za-z0-9._+~^]+(?:-[A-Za-z0-9._+~^]+)?", value) for value in (left, right)):
+        return None
     try:
-        a, b = cls(left), cls(right)
+        if not cls.is_valid(left) or not cls.is_valid(right):
+            return None
+        a, b = cls.build_value(left), cls.build_value(right)
         return (a > b) - (a < b)
-    except (ValueError, TypeError, AssertionError):
+    except (ValueError, TypeError, AssertionError, InvalidNuGetVersion):
         return None
 
 
