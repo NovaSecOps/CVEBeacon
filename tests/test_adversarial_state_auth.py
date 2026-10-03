@@ -132,7 +132,11 @@ def test_cookie_forgery_restart_parallel_sessions_and_public_errors(authenticate
     assert client.get("/").status_code == 200
     cookie = client.get_cookie("cvebeacon_session").value
     attacker = app.test_client()
-    attacker.set_cookie("cvebeacon_session", cookie[:-1] + ("a" if cookie[-1] != "a" else "b"))
+    payload, signature = cookie.rsplit(".", 1)
+    # Trailing Base64 padding bits can change spelling without changing the
+    # decoded MAC. Mutate its first character to alter actual signature bits.
+    tampered = payload + "." + ("a" if signature[0] != "a" else "b") + signature[1:]
+    attacker.set_cookie("cvebeacon_session", tampered)
     assert attacker.get("/").status_code == 303
     restarted = create_app(config).test_client()
     restarted.set_cookie("cvebeacon_session", cookie)
