@@ -1,0 +1,23 @@
+# Optional deliberate expansion. Not applied by reference deployment or CI.
+# Invoke collector CLI with --all-namespaces; reference wrapper is namespaced.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cvebeacon-pod-reader-all-namespaces
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cvebeacon-pod-reader-all-namespaces
+subjects:
+  - kind: ServiceAccount
+    name: cvebeacon-collector
+    namespace: cvebeacon-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cvebeacon-pod-reader-all-namespaces

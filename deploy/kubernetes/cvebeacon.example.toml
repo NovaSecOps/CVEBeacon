@@ -1,0 +1,15 @@
+[inventory]
+path = "/inventory/inventory.json"
+format = "json"
+
+[state]
+database = "/persistent/state.db"
+
+[output]
+directory = "/persistent/reports"
+
+[notifications.teams]
+enabled = false
+
+[notifications.email]
+enabled = false

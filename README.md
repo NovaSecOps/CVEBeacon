@@ -65,6 +65,13 @@ See the [user guide](docs/USER_GUIDE.md), [source notes](docs/SOURCES.md), [netw
 
 CVEBeacon is agentless and network-isolated from monitored assets: it reads supplied inventory and does not discover software or probe devices. Public lookups transmit component identity terms; asset IDs, system IDs, categories, and other operational metadata stay local to vulnerability lookups. Optional notifications intentionally send alert labels to the configured recipient. See the [identity guide](docs/IDENTITY.md) and [zero-credential acceptance procedure](docs/ZERO_CREDENTIAL_ACCEPTANCE.md).
 
+## Extensions
+
+Optional [inventory extensions](docs/EXTENSIONS.md) run separately and feed the
+same canonical inventory boundary. Core installation and the Quick Start remain
+independent. See the [architecture](docs/ARCHITECTURE.md) for trust and dependency
+boundaries.
+
 ## License
 
 CVEBeacon is licensed under the [Apache License 2.0](LICENSE) (`Apache-2.0`). Project attribution is preserved in [NOTICE](NOTICE).

@@ -1,0 +1,151 @@
+# Prepare the three ConfigMaps described in docs/KUBERNETES.md before resuming.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cvebeacon-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cvebeacon-collector
+  namespace: cvebeacon-demo
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cvebeacon-pod-reader
+  namespace: cvebeacon-demo
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cvebeacon-pod-reader
+  namespace: cvebeacon-demo
+subjects:
+  - kind: ServiceAccount
+    name: cvebeacon-collector
+    namespace: cvebeacon-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cvebeacon-pod-reader
+---
+# Choose a suitable CSI block-backed filesystem class before using this PVC.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cvebeacon-state
+  namespace: cvebeacon-demo
+spec:
+  accessModes: [ReadWriteOncePod]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cvebeacon
+  namespace: cvebeacon-demo
+spec:
+  schedule: "17 * * * *"
+  timeZone: Etc/UTC
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      completions: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: cvebeacon-collector
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 20
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: collect
+              image: cvebeacon-extensions:local
+              imagePullPolicy: IfNotPresent
+              command: [python, /scripts/collector.py]
+              args: [--namespace, cvebeacon-demo, --source-id, cluster-demo]
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: "1", memory: 512Mi}
+              volumeMounts:
+                - {name: api-access, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true}
+                - {name: inventory, mountPath: /inventory}
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: sboms, mountPath: /sboms/map.json, subPath: map.json, readOnly: true}
+                - {name: sboms, mountPath: /sboms/workload.json, subPath: workload.json, readOnly: true}
+                - {name: collector-tmp, mountPath: /tmp}
+          containers:
+            - name: scan
+              image: cvebeacon:local
+              imagePullPolicy: IfNotPresent
+              command: [python, /scripts/scan.py]
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: "1", memory: 512Mi}
+              volumeMounts:
+                - {name: inventory, mountPath: /inventory, readOnly: true}
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: config, mountPath: /config/cvebeacon.toml, subPath: cvebeacon.toml, readOnly: true}
+                - {name: persistent, mountPath: /persistent}
+                - {name: core-tmp, mountPath: /tmp}
+          volumes:
+            - name: inventory
+              emptyDir: {sizeLimit: 128Mi}
+            - name: collector-tmp
+              emptyDir: {medium: Memory, sizeLimit: 64Mi}
+            - name: core-tmp
+              emptyDir: {medium: Memory, sizeLimit: 64Mi}
+            - name: scripts
+              configMap: {name: cvebeacon-scripts, defaultMode: 0444}
+            - name: sboms
+              configMap: {name: cvebeacon-sboms, defaultMode: 0444}
+            - name: config
+              configMap: {name: cvebeacon-config, defaultMode: 0444}
+            - name: persistent
+              persistentVolumeClaim: {claimName: cvebeacon-state}
+            - name: api-access
+              projected:
+                defaultMode: 0444
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+                  - configMap:
+                      name: kube-root-ca.crt
+                      items:
+                        - {key: ca.crt, path: ca.crt}
+                  - downwardAPI:
+                      items:
+                        - path: namespace
+                          fieldRef: {fieldPath: metadata.namespace}
