@@ -248,6 +248,14 @@ def _structured_rows(config: InventoryConfig, kind: str) -> Iterable[tuple[str, 
         yield f"record {index}", record
 
 
+def validate_records(records: Iterable[Mapping[str, Any]]) -> list[Asset]:
+    """Validate canonical inventory records with the same rules as file input.
+
+    This public boundary performs no IO, discovery, applicability or state writes.
+    """
+    return _validate_rows(((f"record {index}", row) for index, row in enumerate(records)), {})
+
+
 def load_inventory(config: InventoryConfig) -> list[Asset]:
     kind = detect_format(config.path, config.format)
     if kind == "xlsx":

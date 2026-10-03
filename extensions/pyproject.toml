@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cvebeacon-extensions"
+version = "0.1.0"
+description = "Optional inventory collectors and import tools for CVEBeacon"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+dependencies = ["cvebeacon>=0.1.0,<0.2"]
+
+[project.scripts]
+cvebeacon-ext = "cvebeacon_extensions.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
