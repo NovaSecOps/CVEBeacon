@@ -1,0 +1,20 @@
+[inventory]
+path = "/inventory/inventory.json"
+format = "json"
+
+[state]
+database = "/state/state.db"
+
+[output]
+directory = "/reports"
+
+[dashboard]
+password_hash_env = "CVEBEACON_DASHBOARD_PASSWORD_HASH"
+# Enable when browser-facing HTTPS is configured at the reverse proxy.
+secure_cookie = false
+
+[notifications.teams]
+enabled = false
+
+[notifications.email]
+enabled = false

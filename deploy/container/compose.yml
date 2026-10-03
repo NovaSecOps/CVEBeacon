@@ -1,0 +1,40 @@
+services:
+  scan:
+    image: cvebeacon:local
+    build:
+      context: ../..
+      target: core
+    profiles: [scan]
+    command: [--config, /config/cvebeacon.toml, scan, --report, json]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
+    volumes:
+      - ./cvebeacon.toml:/config/cvebeacon.toml:ro
+      - ./inventory:/inventory:ro
+      - ./state:/state:rw
+      - ./reports:/reports:rw
+    stop_grace_period: 30s
+  dashboard:
+    image: cvebeacon:local
+    build:
+      context: ../..
+      target: core
+    profiles: [dashboard]
+    command: [--config, /config/cvebeacon.toml, serve, --host, 0.0.0.0]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
+    environment:
+      - CVEBEACON_DASHBOARD_PASSWORD_HASH
+    ports: ["127.0.0.1:8787:8787"]
+    volumes:
+      - ./cvebeacon.toml:/config/cvebeacon.toml:ro
+      - ./inventory:/inventory:ro
+      - ./state:/state:rw
+      - ./reports:/reports:rw
+    stop_grace_period: 30s

@@ -1,0 +1,27 @@
+# Deny by default: private evidence, Git, configs, databases, tests and local
+# environments never enter the build context.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!README.md
+!LICENSE
+!NOTICE
+!src/
+!src/cvebeacon/
+!src/cvebeacon/**
+!deploy/
+!deploy/container/
+!deploy/container/entrypoint.py
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+**/.private/
+**/.git/
+**/.aws/
+**/.env*
+**/*.db
+**/*.db-*
+**/*.sqlite*
+**/*.pem
+**/*.key

@@ -15,6 +15,8 @@ SQLite or decides vulnerability applicability.
 See [SBOM import](SBOM.md) and [local host collectors](HOST_COLLECTORS.md) for
 supported inputs, permissions and conservative identity rules.
 
+Core deployments can also use the separate [container reference](CONTAINERS.md).
+
 ## Inventory contract v1
 
 A snapshot is a UTF-8 JSON list, directly accepted by the existing core JSON
