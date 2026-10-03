@@ -5,7 +5,8 @@ from pathlib import Path
 from cvebeacon.identity import PURL_ECOSYSTEMS, name_key, package_name, parse_purl, purl_string
 from cvebeacon.sources.nvd import split_cpe23
 
-from .contract import ExtensionError, canonical_records, label, read_snapshot, timestamp, write_snapshot
+from .contract import (MAX_BYTES, MAX_RECORDS, ExtensionError, canonical_records, json_bytes,
+                       label, read_snapshot, timestamp, write_snapshot)
 
 
 def _slot(row):
@@ -24,6 +25,8 @@ def _slot(row):
         fields = list(split_cpe23(row["cpe"]))
         fields[3] = ""
         return (row["system_id"], "cpe", *fields)
+    if row["repository"] and row["commit"]:
+        return (row["system_id"], "repository", row["repository"])
     return None
 
 
@@ -45,6 +48,7 @@ def merge_snapshots(paths: list[Path], output: Path, *, source_id: str,
     rows = {}
     slots = {}
     observed = []
+    retained_bytes = 3
     for path in paths:
         # Explicit partial mode only tolerates missing files and
         # declared partial results. Corruption/conflicts must never be ignored.
@@ -67,6 +71,11 @@ def merge_snapshots(paths: list[Path], output: Path, *, source_id: str,
                 if rows[key] != row:
                     raise ExtensionError("conflicting asset_id across snapshots")
                 continue  # Exact duplicate content is deliberately coalesced.
+            if len(rows) >= MAX_RECORDS:
+                raise ExtensionError("merged inventory exceeds record limit")
+            retained_bytes += len(json_bytes(row)) + 2 * (len(row) + 2) + 1
+            if retained_bytes > MAX_BYTES:
+                raise ExtensionError("merged inventory exceeds size limit")
             slot = _slot(row)
             if slot is not None and slot in slots and slots[slot] != row:
                 raise ExtensionError("conflicting strong identity in the same system/component slot")

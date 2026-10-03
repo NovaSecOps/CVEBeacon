@@ -165,6 +165,22 @@ def test_registry_permission_and_enumeration_failures_are_not_success():
     with pytest.raises(PermissionError): windows_observations(registry)
 
 
+def test_registry_aggregate_metadata_budget_stops_enumeration(monkeypatch):
+    registry=Registry()
+    registry.programs={str(i):dict(DisplayName="Program "+str(i),DisplayVersion="1",Publisher="Vendor") for i in range(5)}
+    monkeypatch.setattr(hosts,"MAX_BYTES",200)
+    with pytest.raises(ExtensionError,match="metadata exceeds size"):
+        windows_observations(registry)
+    assert len(registry.queries)==6  # Reject the second item before reading the remainder.
+
+
+def test_normalized_registry_metadata_budget(monkeypatch):
+    info,programs=windows_observations(Registry())
+    monkeypatch.setattr(hosts,"MAX_BYTES",1)
+    with pytest.raises(ExtensionError,match="normalized.*size"):
+        windows_inventory(info,programs,source_id="win")
+
+
 def test_windows_incomplete_types_duplicates_and_no_environment_expansion(monkeypatch):
     registry = Registry()
     monkeypatch.setenv("SECRET_CANARY", "not-observed")

@@ -217,6 +217,7 @@ def _registry_value(registry, key, name, *, integer=False):
 
 def windows_observations(registry) -> tuple[dict, list[dict]]:
     programs = []
+    retained_bytes = 0
     for hive, scope in [(registry.HKEY_LOCAL_MACHINE, "machine"), (registry.HKEY_CURRENT_USER, "current-user")]:
         for flag, view in [(registry.KEY_WOW64_64KEY, "64"), (registry.KEY_WOW64_32KEY, "32")]:
             try:
@@ -241,6 +242,9 @@ def windows_observations(registry) -> tuple[dict, list[dict]]:
                                     vendor=_registry_value(registry, key, "Publisher"), scope=scope, view=view)
                     # Preserve both logical views: identical display fields do
                     # not prove the physical registration is shared.
+                    retained_bytes += len(json_bytes(item))
+                    if retained_bytes > MAX_BYTES:
+                        raise ExtensionError("installed-program metadata exceeds size limit")
                     programs.append(item)
     with registry.OpenKey(registry.HKEY_LOCAL_MACHINE, WINDOWS_VERSION, 0, registry.KEY_READ | registry.KEY_WOW64_64KEY) as key:
         product = _registry_value(registry, key, "ProductName")
@@ -260,6 +264,7 @@ def windows_inventory(os_info: dict, programs: list[dict], *, source_id: str):
         reviews.append(dict(name=product, version=version, reason="incomplete-os-identity"))
     if len(programs) > MAX_RECORDS:
         raise ExtensionError("too many installed programs")
+    retained_bytes = 0
     for item in programs:
         vendor, name, version = (text(item.get(key), key) for key in ("vendor", "name", "version"))
         scope, view = item.get("scope"), item.get("view")
@@ -273,6 +278,9 @@ def windows_inventory(os_info: dict, programs: list[dict], *, source_id: str):
         slot = json_bytes([scope, view, asset.vendor.casefold(), asset.product.casefold()]).decode("utf-8")
         row = asdict(asset)
         row.update(asset_id=stable_id(source_id, slot), category="installed-program", system_id=source_id)
+        retained_bytes += len(json_bytes(row))
+        if retained_bytes > MAX_BYTES:
+            raise ExtensionError("normalized installed-program metadata exceeds size limit")
         candidates.append((slot, row, scope, view))
     counts = Counter(slot for slot, row, scope, view in candidates)
     for slot, row, scope, view in candidates:

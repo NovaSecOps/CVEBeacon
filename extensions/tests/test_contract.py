@@ -185,3 +185,42 @@ def test_unpaired_surrogate_rejected_before_snapshot_write(tmp_path):
     with pytest.raises(ExtensionError):
         write_snapshot(path, [dict(asset_id="a", vendor="Example", product="\ud800", version="1")], source_id="a", collector="test")
     assert path.read_bytes() == before
+
+
+def test_repository_commit_conflict_requires_distinct_instances(tmp_path):
+    first=dict(asset_id="one",system_id="instance",repository="https://example.invalid/project",commit="a"*40)
+    second=dict(first,asset_id="two",commit="b"*40)
+    a=snapshot(tmp_path,records=[first])
+    b=snapshot(tmp_path,"b",records=[second])
+    output=tmp_path/"merged.json"
+    with pytest.raises(ExtensionError,match="strong identity"):
+        merge_snapshots([a,b],output,source_id="central")
+    assert not output.exists()
+    write_snapshot(b,[dict(second,system_id="another-instance")],source_id="b",collector="test")
+    assert merge_snapshots([a,b],output,source_id="central")["record_count"]==2
+
+
+def test_merge_record_bound_stops_before_reading_remaining_inputs(tmp_path,monkeypatch):
+    from cvebeacon_extensions import merge
+    paths=[snapshot(tmp_path,str(i),records=[row(str(i),system="host-"+str(i))]) for i in range(3)]
+    calls=[]
+    original=merge.read_snapshot
+    def read(path,**kwargs): calls.append(path); return original(path,**kwargs)
+    monkeypatch.setattr(merge,"MAX_RECORDS",1)
+    monkeypatch.setattr(merge,"read_snapshot",read)
+    with pytest.raises(ExtensionError,match="record limit"):
+        merge_snapshots(paths,tmp_path/"merged.json",source_id="central")
+    assert calls==paths[:2]
+
+
+def test_merge_byte_budget_stops_before_remaining_inputs(tmp_path,monkeypatch):
+    from cvebeacon_extensions import merge
+    paths=[snapshot(tmp_path,str(i),records=[row(str(i),system="host-"+str(i))]) for i in range(3)]
+    calls=[]
+    original=merge.read_snapshot
+    def read(path,**kwargs): calls.append(path); return original(path,**kwargs)
+    monkeypatch.setattr(merge,"MAX_BYTES",len(paths[0].read_bytes())+5)
+    monkeypatch.setattr(merge,"read_snapshot",read)
+    with pytest.raises(ExtensionError,match="size limit"):
+        merge_snapshots(paths,tmp_path/"merged.json",source_id="central")
+    assert calls==paths[:2]

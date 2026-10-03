@@ -16,6 +16,8 @@ See [SBOM import](SBOM.md) and [local host collectors](HOST_COLLECTORS.md) for
 supported inputs, permissions and conservative identity rules.
 
 Core deployments can also use the separate [container reference](CONTAINERS.md).
+For automated deployment, see [Kubernetes](KUBERNETES.md) and the
+[central home-lab workflow](HOME_LAB.md).
 
 ## Inventory contract v1
 
@@ -68,6 +70,9 @@ asset IDs, duplicate source IDs, or conflicting package slots within a system
 fail; there is no last-writer-wins policy. Strong package slots retain PURL
 qualifiers and exclude version. Ambiguous coinstalled versions in the same slot
 require explicit separate system/instance grouping before merging.
+Repository/commit identities also conflict within the same system and exact
+repository URL. The merger does not infer that different repository URLs are
+equivalent.
 
 Freshness defaults to 24 hours. Future timestamps, missing files, stale sources,
 bad hashes, invalid records and undeclared partial snapshots fail before output.
