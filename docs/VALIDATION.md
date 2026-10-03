@@ -20,3 +20,22 @@ Dependency installation requires internet access. Normal tests do not require vu
 Generalized-identity tests cover four inventory formats, type-specific PURL case and encoding, ecosystem range boundaries, malformed/partial OSV responses, withdrawals, authoritative aliases, non-CVE findings, source-specific degradation, outbound metadata minimization, transactional schema migration and alert deduplication. CLI and dashboard package/PURL queries and report formula safety run offline; native application smoke includes these query modes with external sources disabled.
 
 For the explicit anonymous live workflow and seven-ecosystem matrix, see [zero-credential acceptance](ZERO_CREDENTIAL_ACCEPTANCE.md). Run it separately from CI and retain failures alongside successful repetitions. Current public source disagreements may legitimately produce `needs_review` at a boundary that one source calls fixed.
+
+## Optional extensions and deployments
+
+Install the companion with `python -m pip install ./extensions`, then run
+`python tools/test_offline.py -q tests extensions/tests`. The separate extension
+workflow covers the same eight OS/Python combinations and repeats native local
+host collection on disposable runners. Its synthetic three-host lifecycle uses
+real normalization, merge, core state and report APIs with network and live host
+collection blocked; see [the home-lab demonstration](HOME_LAB.md).
+
+Linux container validation builds without publishing and exercises read-only,
+non-root execution, two persisted offline scans, reports, dashboard authentication,
+signal handling and image-layer hygiene. Kubernetes validation builds a separate
+companion image and uses an isolated kind cluster to exercise real in-cluster TLS,
+namespace Pod-list RBAC and denied requests, supplied digest-mapped SBOMs,
+credential/state separation, serialized persistence and actual CronJob scheduling.
+See the [container](CONTAINERS.md) and [Kubernetes](KUBERNETES.md) guides for the
+tested guarantees and storage/coverage limitations. Check each workflow on the
+exact commit being deployed; static manifest tests alone are not runtime proof.

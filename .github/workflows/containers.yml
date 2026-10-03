@@ -23,4 +23,5 @@ jobs:
       - run: python -m pip install "Werkzeug>=3.1.9,<4"
       - run: docker compose -f deploy/container/compose.yml --profile scan --profile dashboard config --quiet
       - run: docker build --target core --tag cvebeacon:ci .
+      - run: docker build --target extensions --tag cvebeacon-extensions:ci .
       - run: python tools/container_smoke.py

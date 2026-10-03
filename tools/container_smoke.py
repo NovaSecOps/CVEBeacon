@@ -22,27 +22,30 @@ def docker(*args, expected=0, env=None):
     return result.stdout.strip()
 
 
-def inspect_image():
-    metadata = json.loads(docker("image", "inspect", IMAGE))[0]
+def inspect_image(image=IMAGE, *, companion=False):
+    metadata = json.loads(docker("image", "inspect", image))[0]
     assert metadata["Config"]["User"] == "65532:65532"
     assert metadata["Config"]["StopSignal"] == "SIGTERM"
-    versions = docker("run", "--rm", "--network", "none", "--read-only", "--entrypoint", "python", IMAGE,
+    versions = docker("run", "--rm", "--network", "none", "--read-only", "--entrypoint", "python", image,
                       "-c", "import sys,json,importlib.metadata as m; assert sys.version_info[:2]==(3,13); print(json.dumps({'python':sys.version,'packages':sorted((d.metadata['Name'],d.version) for d in m.distributions())}))")
     print("Runtime versions:", versions)
     docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-           "--entrypoint", "python", IMAGE, "-c", "import os,importlib.util; assert os.geteuid()==65532; assert importlib.util.find_spec('cvebeacon_extensions') is None; assert importlib.util.find_spec('kubernetes') is None; print('non-root core only')")
+           "--entrypoint", "python", image, "-c", f"import os,importlib.util; assert os.geteuid()==65532; assert (importlib.util.find_spec('cvebeacon_extensions') is not None)=={companion!r}; assert importlib.util.find_spec('kubernetes') is None; print('non-root dependency isolation passed')")
     # The image-owned directory is writable to this UID without --read-only.
     # An EACCES failure at / alone would not prove a read-only mount.
-    docker("run", "--rm", "--network", "none", "--read-only", "--entrypoint", "python", IMAGE, "-c",
+    docker("run", "--rm", "--network", "none", "--read-only", "--entrypoint", "python", image, "-c",
            "import errno\ntry:\n open('/reports/root-probe','w').close()\nexcept OSError as e: assert e.errno==errno.EROFS,e\nelse: raise AssertionError('writable root filesystem')")
-    container = docker("create", IMAGE)
+    forbidden_parts = {".git", ".private", ".aws", ".env", "state.db"}
+    if not companion:
+        forbidden_parts.add("cvebeacon_extensions")
+    container = docker("create", image)
     try:
         process = subprocess.Popen(["docker", "export", container], stdout=subprocess.PIPE)
         forbidden = []
         with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
             for entry in archive:
                 parts = entry.name.split("/")
-                if any(part in {".git", ".private", ".aws", ".env", "state.db", "cvebeacon_extensions"} for part in parts):
+                if forbidden_parts & set(parts):
                     forbidden.append(entry.name)
                 if entry.name.startswith(("build/", "root/.cache/", "opt/venv/lib/python3.13/site-packages/cvebeacon/tests")):
                     forbidden.append(entry.name)
@@ -53,13 +56,13 @@ def inspect_image():
     # Removed files can remain in earlier image layers; inspect each layer.
     with tempfile.TemporaryDirectory(prefix="cvebeacon-image-layers-") as temporary:
         saved = Path(temporary) / "image.tar"
-        docker("image", "save", "--output", str(saved), IMAGE)
+        docker("image", "save", "--output", str(saved), image)
         with tarfile.open(saved) as image_tar:
             manifests = json.load(image_tar.extractfile("manifest.json"))
             for layer in {name for manifest in manifests for name in manifest["Layers"]}:
                 with tarfile.open(fileobj=image_tar.extractfile(layer), mode="r|*") as archive:
                     for entry in archive:
-                        assert not {".git", ".private", ".aws", ".env", "state.db", "cvebeacon_extensions"} & set(entry.name.split("/")), entry.name
+                        assert not forbidden_parts & set(entry.name.split("/")), entry.name
 
 
 CLIENT = r'''
@@ -147,5 +150,7 @@ def smoke(directory: Path):
 
 if __name__ == "__main__":
     inspect_image()
+    inspect_image("cvebeacon-extensions:ci", companion=True)
+    docker("run", "--rm", "--network", "none", "--read-only", "cvebeacon-extensions:ci", "--help")
     with tempfile.TemporaryDirectory(prefix="cvebeacon-container-") as temporary:
         smoke(Path(temporary))
