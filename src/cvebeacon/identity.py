@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 import re
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from packaging.utils import canonicalize_name
 from packageurl import PackageURL, ValidationSeverity
@@ -20,6 +20,22 @@ def parse_purl(value: str) -> PackageURL:
     decoded = unquote(value, errors="strict")
     if any(ord(char) < 32 or ord(char) == 127 for char in decoded):
         raise ValueError("invalid PURL control character")
+    # Validate components before the library drops dot segments, empty values,
+    # or duplicate qualifiers. Such repairs can change the lookup identity.
+    original = PackageURL.from_string(value, normalize_purl=False)
+    if original.namespace and any("/" in unquote(part) for part in original.namespace.split("/")):
+        raise ValueError("invalid PURL namespace segment")
+    if original.subpath:
+        segments = original.subpath.strip("/").split("/")
+        if any(unquote(part) in {"", ".", ".."} or "/" in unquote(part) for part in segments):
+            raise ValueError("invalid PURL subpath segment")
+    qualifiers = value.partition("#")[0].partition("?")[2]
+    keys = set()
+    for qualifier in qualifiers.split("&") if qualifiers else ():
+        key, separator, _ = qualifier.partition("=")
+        if not separator or not re.fullmatch(r"[a-z][a-z0-9._-]*", key) or key in keys:
+            raise ValueError("invalid or duplicate PURL qualifier")
+        keys.add(key)
     parsed = PackageURL.from_string(value)
     errors = [message for message in parsed.validate() if message.severity == ValidationSeverity.ERROR]
     if errors:
@@ -28,7 +44,6 @@ def parse_purl(value: str) -> PackageURL:
         # packageurl-python 0.17.x still lowercases npm names; the registered
         # type preserves grandfathered mixed-case names. Keep library parsing
         # and encoding, but retain the original name here.
-        original = PackageURL.from_string(value, normalize_purl=False)
         parsed = parsed._replace(name=unquote(original.name))
     elif parsed.type == "pypi":
         parsed = parsed._replace(name=canonicalize_name(parsed.name))
@@ -36,9 +51,18 @@ def parse_purl(value: str) -> PackageURL:
 
 
 def purl_string(value: PackageURL) -> str:
-    if value.type == "npm":
-        return value._replace(type="generic").to_string().replace("pkg:generic/", "pkg:npm/", 1)
-    return value.to_string()
+    # Serialize decoded components once. Library 0.17.x leaves '/' in names
+    # unescaped and normalizes npm case, changing identity on the next parse.
+    encode = lambda part: quote(part, safe=":")
+    namespace = "/".join(encode(part) for part in (value.namespace or "").split("/"))
+    result = f"pkg:{value.type}/" + (namespace + "/" if namespace else "") + encode(value.name)
+    if value.version:
+        result += "@" + encode(value.version)
+    if value.qualifiers:
+        result += "?" + "&".join(f"{key}={encode(item)}" for key, item in sorted(value.qualifiers.items()))
+    if value.subpath:
+        result += "#" + "/".join(encode(part) for part in value.subpath.split("/"))
+    return result
 
 
 def package_name(value: PackageURL) -> str:
