@@ -25,4 +25,17 @@ STOPSIGNAL SIGTERM
 ENTRYPOINT ["python", "/opt/cvebeacon-entrypoint.py"]
 CMD ["--help"]
 
+FROM build AS extension-build
+WORKDIR /extension
+COPY extensions/pyproject.toml extensions/README.md extensions/LICENSE extensions/NOTICE ./
+COPY extensions/src/ src/
+RUN python -m pip --python /opt/venv install --no-cache-dir --no-deps . \
+    && python -m pip --python /opt/venv check
+
+FROM runtime AS extensions
+COPY --from=extension-build /opt/venv /opt/venv
+ENTRYPOINT ["cvebeacon-ext"]
+CMD ["--help"]
+
+# Keep the default/final target standalone and free of the companion package.
 FROM runtime AS core

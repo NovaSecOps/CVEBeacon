@@ -40,6 +40,15 @@ def parser():
         if host == "linux":
             command.add_argument("--backend", choices=("auto", "dpkg", "rpm"), default="auto")
             command.add_argument("--package-namespace", help="explicit trusted package vendor namespace policy")
+    kube = host_commands.add_parser("kubernetes", help="observe Pods using in-cluster service-account access")
+    kube.add_argument("--source-id", required=True)
+    kube.add_argument("--output", type=Path, required=True)
+    scope = kube.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--namespace")
+    scope.add_argument("--all-namespaces", action="store_true")
+    evidence = kube.add_mutually_exclusive_group(required=True)
+    evidence.add_argument("--sbom-map", type=Path)
+    evidence.add_argument("--observations-only", action="store_true")
     return root
 
 
@@ -59,6 +68,12 @@ def main(argv=None):
             manifest = import_sbom(args.file, args.output, source_id=args.source_id, format=args.format)
             print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
         elif args.command == "collect":
+            if args.host == "kubernetes":
+                from .kubernetes import collect_kubernetes
+                manifest = collect_kubernetes(args.output, source_id=args.source_id, selected_namespace=args.namespace,
+                                              sbom_map=args.sbom_map, observations_only=args.observations_only)
+                print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
+                return 0
             from .hosts import collect_linux, collect_windows, publish_host
             rows, reviews = collect_linux(source_id=args.source_id, backend=args.backend,
                                           package_namespace=args.package_namespace) if args.host == "linux" else collect_windows(source_id=args.source_id)

@@ -17,6 +17,11 @@ Python dependency resolution: compatible ranges remain in effect. CI records
 resolved versions; review dependencies and the base digest regularly. Source and
 native executable installations remain independent of Docker.
 
+The optional `extensions` build target installs the companion and starts
+`cvebeacon-ext`. Build it separately with `docker build --target extensions --tag
+cvebeacon-extensions:local .` for the [Kubernetes reference](KUBERNETES.md).
+The default/final target remains the standalone core image.
+
 ## Runtime and mounts
 
 The default user/group is **65532:65532**, with no login shell or home. Use

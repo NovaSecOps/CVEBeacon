@@ -13,6 +13,14 @@
 !deploy/
 !deploy/container/
 !deploy/container/entrypoint.py
+!extensions/
+!extensions/pyproject.toml
+!extensions/README.md
+!extensions/LICENSE
+!extensions/NOTICE
+!extensions/src/
+!extensions/src/cvebeacon_extensions/
+!extensions/src/cvebeacon_extensions/**
 **/__pycache__/
 **/*.pyc
 **/*.egg-info/

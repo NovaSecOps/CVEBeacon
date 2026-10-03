@@ -1,0 +1,6 @@
+{
+  "contract": "cvebeacon.image-sboms.v1",
+  "images": {
+    "registry.example.invalid/team/workload@sha256:0000000000000000000000000000000000000000000000000000000000000000": "workload.json"
+  }
+}
