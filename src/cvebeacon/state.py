@@ -29,6 +29,7 @@ def material_fingerprint(finding: Finding) -> str:
 
 def _payload_fingerprint(finding: dict) -> str:
     vulnerability = finding["vulnerability"]
+    package_finding = any(item["source"] == "osv" for item in finding["evidence"])
     value = {
         "cve_id": vulnerability.get("advisory_id") or vulnerability.get("cve_id"),
         "applicability": finding["applicability"],
@@ -40,14 +41,15 @@ def _payload_fingerprint(finding: dict) -> str:
                 item["source"],
                 item["role"],
                 json.dumps(
-                    _canonical({key: item["details"][key] for key in ("state", "affected", "products", "sources", "configurations") if item["details"].get(key) is not None}),
+                    _canonical({key: item["details"][key] for key in ("state", "affected", "products", "sources", "configurations", "severity") if item["details"].get(key) is not None}),
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=False,
                 ),
             )
             for item in finding["evidence"]
-            if item["role"] != "cve_enrichment" and any(item["details"].get(key) is not None for key in ("state", "affected", "products", "sources", "configurations"))
+            if item["role"] != "cve_enrichment" and not (package_finding and item["source"] == "euvd")
+            and any(item["details"].get(key) is not None for key in ("state", "affected", "products", "sources", "configurations", "severity"))
         )),
         "conflicts": sorted(finding["conflicts"]),
     }
@@ -190,6 +192,7 @@ class StateStore:
         event_ids: list[int] = []
         try:
             with self.transaction() as db:
+                observed = set()
                 findings = [item for result in results for item in result.findings]
                 db.execute(
                     "INSERT INTO runs VALUES (?,?,?,?,?,?,?)",
@@ -223,6 +226,10 @@ class StateStore:
                             (finding.asset.asset_id, *candidates)).fetchall()
                         previous = previous_rows[0] if previous_rows else None
                         primary = previous["cve_id"] if previous else finding.vulnerability.primary_id
+                        identity = (finding.asset.asset_id, primary)
+                        if identity in observed or any((finding.asset.asset_id, candidate) in observed for candidate in candidates):
+                            raise StateError("unreconciled advisory alias collision in scan")
+                        observed.add(identity)
                         finding = replace(finding, vulnerability=replace(finding.vulnerability, advisory_id=primary))
                         payload = json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=False)
                         fingerprint = material_fingerprint(finding)
@@ -253,7 +260,7 @@ class StateStore:
                         previous_fingerprint = previous["fingerprint"] if previous else None
                         if previous:
                             old_payload = json.loads(previous["payload_json"])
-                            if any(item["role"] == "cve_enrichment" for item in old_payload["evidence"]):
+                            if any(item["role"] == "cve_enrichment" or item["source"] == "osv" for item in old_payload["evidence"]):
                                 previous_fingerprint = _payload_fingerprint(old_payload)
                         event_type = "new" if previous is None else ("changed" if previous_fingerprint != fingerprint else None)
                         first_seen = previous["first_seen"] if previous else completed

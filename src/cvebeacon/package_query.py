@@ -26,9 +26,17 @@ def fixed_versions(asset, record):
     return tuple(sorted(values))
 
 
-def alias_groups(records):
+def alias_groups(records, known_aliases=()):
     """Union only explicit authoritative aliases; never related IDs or prose."""
     groups = []
+    # Historical authoritative links remain relevant when a refreshed record
+    # omits aliases. Keep them out of the raw source record and evidence.
+    for identifiers in known_aliases:
+        identifiers = set(identifiers)
+        selected = [group for group in groups if identifiers & group[0]]
+        for group in selected:
+            identifiers.update(group[0]); groups.remove(group)
+        groups.append((identifiers, []))
     for record in records:
         identifiers = {record["id"], *record.get("aliases", [])}
         selected = [group for group in groups if identifiers & group[0]]
@@ -36,14 +44,15 @@ def alias_groups(records):
         for group in selected:
             identifiers.update(group[0]); members.extend(group[1]); groups.remove(group)
         groups.append((identifiers, members))
-    return groups
+    return [group for group in groups if group[1]]
 
 
 def query_package(engine, asset, data):
     health = [now_health("osv", H.DEGRADED if data.error and data.records else H.FAILED if data.error else H.OK,
                          data.error or f"{len(data.records)} package advisory records retrieved")]
     findings = []
-    for identifiers, records in alias_groups(data.records):
+    known_aliases = getattr(engine, "_known_package_aliases", {}).get(asset.target_key, ())
+    for identifiers, records in alias_groups(data.records, known_aliases):
         cves = sorted(identifier for identifier in identifiers if cve_id(identifier))
         primary = cves[0] if cves else min(record["id"] for record in records)
         claims, evidence, decisions = [], [], []
@@ -99,7 +108,7 @@ def query_package(engine, asset, data):
                             replace(item, role="cve_enrichment", statement="Official CVE alias metadata; package applicability is assessed separately")))
                 for vuln, item in values:
                     metadata.setdefault(identifier, []).append(vuln)
-                    extra.setdefault(identifier, []).append(item)
+                    extra.setdefault(identifier, []).append(replace(item, role="cve_enrichment"))
             except (SourceError, ValueError, TypeError):
                 failures += 1
         health.append(now_health(source, H.DEGRADED if failures else H.OK,
