@@ -75,16 +75,29 @@ print('actual TLS API allowed list and seven forbidden requests passed')
 
 OBSERVE = r'''
 from pathlib import Path
-from cvebeacon_extensions.kubernetes import collect_kubernetes
+from cvebeacon_extensions.kubernetes import collect_kubernetes, SERVICE_ACCOUNT
 path=Path('/tmp/observations.json')
 collect_kubernetes(path,source_id='synthetic-observation',selected_namespace='cvebeacon-demo',observations_only=True)
+assert (SERVICE_ACCOUNT/'token').read_text().strip() not in path.read_text()
 print(path.read_text())
 '''
 
 CORE_CHECK = r'''
-import hashlib,importlib.util,json,pathlib,runpy,sys
+import hashlib,http.client,importlib.util,json,os,pathlib,runpy,ssl,sys
 assert not pathlib.Path('/var/run/secrets/kubernetes.io/serviceaccount/token').exists()
+assert not pathlib.Path('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt').exists()
 assert importlib.util.find_spec('cvebeacon_extensions') is None
+# Negative authorization probe only: no credentials and no collector CA mount.
+# The real collector always verifies TLS; this probe only checks anonymous RBAC.
+context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+context.check_hostname=False
+context.verify_mode=ssl.CERT_NONE
+api=http.client.HTTPSConnection(os.environ['KUBERNETES_SERVICE_HOST'],443,context=context,timeout=10)
+try:
+    api.request('GET','/api/v1/namespaces/cvebeacon-demo/pods?limit=1')
+    assert api.getresponse().status in (401,403)
+finally:
+    api.close()
 raw=pathlib.Path('/inventory/inventory.json').read_bytes()
 manifest=json.loads(pathlib.Path('/inventory/inventory.json.manifest.json').read_text())
 assert manifest['status']=='partial',manifest

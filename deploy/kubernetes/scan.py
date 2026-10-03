@@ -26,7 +26,11 @@ def main():
 
     signal.signal(signal.SIGTERM, terminate)
     root = Path("/persistent")
-    descriptor = os.open(root / ".cvebeacon.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        descriptor = os.open(root / ".cvebeacon.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        print("state or lock filesystem operation failed", file=sys.stderr)
+        return 2
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise OSError("invalid lock file")

@@ -16,10 +16,10 @@ from werkzeug.security import generate_password_hash
 IMAGE = "cvebeacon:ci"
 
 
-def docker(*args, expected=0, env=None):
+def docker(*args, expected=0, env=None, capture_stderr=False):
     result = subprocess.run(["docker", *args], text=True, capture_output=True, timeout=120, env=env)
     assert result.returncode == expected, (args[:3], result.returncode, result.stdout, result.stderr)
-    return result.stdout.strip()
+    return (result.stdout + (result.stderr if capture_stderr else "")).strip()
 
 
 def inspect_image(image=IMAGE, *, companion=False):
@@ -31,6 +31,9 @@ def inspect_image(image=IMAGE, *, companion=False):
     print("Runtime versions:", versions)
     docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
            "--entrypoint", "python", image, "-c", f"import os,importlib.util; assert os.geteuid()==65532; assert (importlib.util.find_spec('cvebeacon_extensions') is not None)=={companion!r}; assert importlib.util.find_spec('kubernetes') is None; print('non-root dependency isolation passed')")
+    docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+           "--entrypoint", "python", image, "-c",
+           "import os,pathlib\nassert os.getegid()==65532\nstatus=pathlib.Path('/proc/self/status').read_text()\nassert 'CapEff:\\t0000000000000000' in status and 'NoNewPrivs:\\t1' in status\ntry:\n os.seteuid(0)\nexcept PermissionError: pass\nelse: raise AssertionError('root escalation allowed')\nprint('effective capabilities and root escalation checks passed')")
     # The image-owned directory is writable to this UID without --read-only.
     # An EACCES failure at / alone would not prove a read-only mount.
     docker("run", "--rm", "--network", "none", "--read-only", "--entrypoint", "python", image, "-c",
@@ -113,6 +116,9 @@ def smoke(directory: Path):
     for name in ("config", "inventory", "state", "reports"):
         common += ["--mount", f"type=bind,src={directory/name},dst=/{name}" + (",readonly" if name in {"config", "inventory"} else "")]
     prefix = ["--config", "/config/cvebeacon.toml"]
+    error_output = docker("run", "--rm", *common, "--env", "CVEBEACON_AUDIT_CANARY=synthetic-error-env-canary",
+                          IMAGE, "--config", "/config/nonexistent.toml", "scan", expected=2, capture_stderr=True)
+    assert "synthetic-error-env-canary" not in error_output
     docker("run", "--rm", *common, IMAGE, "--help")
     docker("run", "--rm", *common, IMAGE, *prefix, "inventory", "validate")
     for _ in range(2):

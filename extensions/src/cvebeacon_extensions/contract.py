@@ -108,6 +108,8 @@ def canonical_records(records: list[dict]) -> list[dict[str, str]]:
         if any(not isinstance(value, str) or len(value) > MAX_TEXT or any(0xD800 <= ord(c) <= 0xDFFF for c in value) for value in row.values()):
             raise ExtensionError("inventory values must be bounded text")
     assets = validate_records(records)
+    if len(assets) != len(records):
+        raise ExtensionError("inventory record was empty; no exchange records may be discarded")
     if any(identity_conflict(asset) for asset in assets):
         raise ExtensionError("conflicting strong identity systems require separate review")
     result = [asdict(asset) for asset in assets]
