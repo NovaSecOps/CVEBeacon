@@ -22,6 +22,9 @@ class AlertItem:
     cvss_score: float | None
     cisa_kev: bool
     eu_kev: bool
+    category: str = ""
+    system_id: str = ""
+    ecosystem: str = ""
 
 
 def alert_items(rows: Iterable[Mapping[str, Any]]) -> list[AlertItem]:
@@ -32,6 +35,7 @@ def alert_items(rows: Iterable[Mapping[str, Any]]) -> list[AlertItem]:
         output.append(AlertItem(
             int(row["event_id"]), str(row["asset_id"]), str(row["cve_id"]), str(row["event_type"]),
             str(payload["applicability"]), vuln.get("cvss_score"), bool(vuln.get("cisa_kev")), bool(vuln.get("eu_kev")),
+            *(str(payload.get("asset", {}).get(key, "")) for key in ("category", "system_id", "ecosystem")),
         ))
     return output
 
@@ -45,6 +49,9 @@ def render_text(items: Iterable[AlertItem], *, max_items: int = 100) -> str:
         if item.eu_kev: priority.append("EU KEV")
         score = f" CVSS {item.cvss_score:g}" if item.cvss_score is not None else ""
         suffix = f" [{', '.join(priority)}]" if priority else ""
+        labels = ", ".join(f"{key}={getattr(item, key)}" for key in ("category", "system_id", "ecosystem") if getattr(item, key))
+        if labels:
+            suffix += f" ({labels})"
         lines.append(f"- {item.asset_id}: {item.cve_id} — {item.event_type}, {item.applicability}{score}{suffix}")
     if len(values) > max_items:
         lines.append(f"- {len(values) - max_items} additional change(s) omitted from this message; use history or export for the complete set.")

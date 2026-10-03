@@ -26,6 +26,9 @@ def merge_vulnerabilities(values: Iterable[Vulnerability]) -> Vulnerability:
         epss_date=preferred("epss_date"), cisa_kev=True if any(item.cisa_kev for item in items) else (False if any(item.cisa_kev is False for item in items) else None),
         eu_kev=True if any(item.eu_kev for item in items) else (False if any(item.eu_kev is False for item in items) else None),
         references=tuple(sorted({url for item in items for url in item.references})),
+        aliases=tuple(sorted({identifier for item in items for identifier in item.aliases})),
+        source_ids=tuple(sorted({identifier for item in items for identifier in item.source_ids})),
+        fixed_versions=tuple(sorted({version for item in items for version in item.fixed_versions})),
     )
 
 
@@ -43,7 +46,7 @@ def reconcile(
     conflicts: list[str] = []
     if vulnerability.rejected:
         state = Applicability.NEEDS_REVIEW
-        reason = "the CVE record is rejected or withdrawn and this material state requires review"
+        reason = "the vulnerability record is rejected or withdrawn and this material state requires review"
     elif any(getattr(item, "conflict", False) for item in decision_list):
         state = Applicability.NEEDS_REVIEW
         reason = "authoritative evidence contains an unresolved applicability conflict"

@@ -53,6 +53,13 @@ def test_render_is_consolidated():
     assert "2 material" in text and text.count("CVE-2026-0001") == 2
 
 
+def test_non_cve_notification_preserves_group_labels():
+    from dataclasses import replace
+    item = replace(ITEM, cve_id="DSA-2099-1", category="library", system_id="example-system", ecosystem="Debian:11")
+    text = render_text([item])
+    assert all(value in text for value in ("DSA-2099-1", "category=library", "system_id=example-system", "ecosystem=Debian:11"))
+
+
 def test_transport_errors_do_not_expose_webhook_secret():
     def handler(request): raise httpx.ConnectError("connection refused", request=request)
     http = HttpClient(HttpConfig(retries=0), client=httpx.Client(transport=httpx.MockTransport(handler)))

@@ -18,12 +18,12 @@ class EUVDSource:
         self.http = http
 
     @source_payload("euvd")
-    def search(self, vendor: str, product: str) -> list[tuple[Vulnerability, Evidence]]:
+    def search(self, vendor: str, product: str, *, identifier: str | None = None) -> list[tuple[Vulnerability, Evidence]]:
         page = 0
         found: list[tuple[Vulnerability, Evidence]] = []
         while True:
             payload = self.http.get_json(
-                SEARCH_URL, source="euvd", params={"vendor": vendor, "product": product, "page": page, "size": 100}
+                SEARCH_URL, source="euvd", params={**({"text": identifier} if identifier else {"vendor": vendor, "product": product}), "page": page, "size": 100}
             )
             if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
                 raise SourceError("euvd", "source returned an invalid search envelope")
@@ -37,7 +37,7 @@ class EUVDSource:
                     if isinstance(aliases, str):
                         aliases = aliases.replace(",", " ").split()
                     identifiers = {value for alias in aliases if (value := cve_id(alias))} or {parsed[0].cve_id}
-                    found.extend((replace(parsed[0], cve_id=identifier), parsed[1]) for identifier in sorted(identifiers))
+                    found.extend((replace(parsed[0], cve_id=value), parsed[1]) for value in sorted(identifiers) if identifier is None or identifier == value)
             try:
                 total = payload["total"]
                 if type(total) is not int or total < 0:

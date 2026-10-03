@@ -48,6 +48,41 @@ def dump(store):
         return list(db.iterdump())
 
 
+@pytest.mark.parametrize("mode,fields,path", [("package", {"ecosystem": "PyPI", "product": "requests", "version": "2.31.0"}, "ecosystem"),
+    ("purl", {"purl": "pkg:pypi/requests@2.31.0"}, "purl")])
+def test_package_manual_modes_preserve_state(setup, monkeypatch, mode, fields, path):
+    _, store, client = setup
+    store.record_scan([result()])
+    before = dump(store)
+    def query(config, assets):
+        assert assets[0].identity_path == path
+        vuln = Vulnerability(advisory_id="GHSA-test-only", aliases=("PYSEC-2099-1",), fixed_versions=("2.32.0",))
+        return [QueryResult(assets[0], (Finding(assets[0], vuln, A.AFFECTED, "high", "package evidence"),), ())]
+    monkeypatch.setattr(cli, "_run_query", query)
+    response = post(client, "/query?mode=" + mode, mode=mode, **fields)
+    assert response.status_code == 200
+    assert "GHSA-test-only" in response.text and "PYSEC-2099-1" in response.text and "2.32.0" in response.text
+    assert dump(store) == before
+
+
+@pytest.mark.parametrize("query,expected", [("category=library&system_id=group&ecosystem=PyPI", True),
+    ("advisory=GHSA-test-only", True), ("cve=2099-1234", True), ("purl=requests", True), ("category=firewall", False)])
+def test_package_filters_and_aliases(setup, query, expected):
+    _, store, client = setup
+    asset = Asset("a", product="requests", version="1", ecosystem="PyPI", purl="pkg:pypi/requests@1", category="library", system_id="group")
+    vuln = Vulnerability(advisory_id="GHSA-test-only", aliases=("CVE-2099-1234",))
+    store.record_scan([QueryResult(asset, (Finding(asset, vuln, A.AFFECTED, "high", "package evidence"),), ())])
+    response = client.get("/findings?" + query)
+    assert response.status_code == 200
+    assert ('<td>GHSA-test-only</td>' in response.text) is expected
+
+
+def test_invalid_package_mode_and_purl_are_rejected(setup):
+    _, _, client = setup
+    assert client.get("/query?mode=unexpected").status_code == 400
+    assert post(client, "/query", mode="purl", purl="not-a-purl").status_code == 400
+
+
 def test_empty_database_is_unknown_and_server_is_safe(setup):
     config, store, client = setup
     response = client.get("/")
@@ -262,7 +297,7 @@ def test_server_binding_and_debug_disabled(setup, monkeypatch, capsys, host, por
         calls.append(kwargs)
         return Server()
     monkeypatch.setattr(waitress, "create_server", create)
-    dashboard.serve(setup[0], host=host, port=port)
+    dashboard.serve(setup[0], host=host, port=port, allow_unauthenticated_remote=True)
     assert calls[0]["host"] == host and calls[0]["port"] == port
     assert calls[0]["expose_tracebacks"] is False and calls[-1] == "close"
     assert str(port) in capsys.readouterr().out
@@ -278,9 +313,11 @@ def test_cli_serve_defaults_and_options(setup, monkeypatch):
     calls = []
     monkeypatch.setattr(dashboard, "serve", lambda config, **kwargs: calls.append(kwargs))
     assert cli.main(["--config", str(setup[0].config_path), "serve"]) == 0
-    assert calls[-1] == {"host": "127.0.0.1", "port": 8787}
+    assert calls[-1] == {"host": "127.0.0.1", "port": 8787, "allow_unauthenticated_remote": False}
     assert cli.main(["--config", str(setup[0].config_path), "serve", "--host", "0.0.0.0", "--port", "8989"]) == 0
-    assert calls[-1] == {"host": "0.0.0.0", "port": 8989}
+    assert calls[-1] == {"host": "0.0.0.0", "port": 8989, "allow_unauthenticated_remote": False}
+    assert cli.main(["--config", str(setup[0].config_path), "serve", "--host", "0.0.0.0", "--allow-unauthenticated-remote"]) == 0
+    assert calls[-1]["allow_unauthenticated_remote"] is True
 
 
 def test_coverage_filter_applies_to_unscanned_assets(setup):
@@ -313,5 +350,5 @@ def test_non_loopback_binding_warns_about_access_control(setup, monkeypatch, cap
         def run(self): pass
         def close(self): pass
     monkeypatch.setattr(waitress, "create_server", lambda *args, **kwargs: Server())
-    dashboard.serve(setup[0], host="0.0.0.0")
+    dashboard.serve(setup[0], host="0.0.0.0", allow_unauthenticated_remote=True)
     assert "no built-in authentication" in caplog.text

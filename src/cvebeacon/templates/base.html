@@ -2,5 +2,6 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}CVEBeacon{% endblock %}</title><link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}"></head>
 <body><header><a class="brand" href="{{ url_for('overview') }}">CVEBeacon</a><span>Vulnerability monitoring</span></header>
-<nav aria-label="Main navigation">{% for endpoint, label in [('overview','Overview'),('findings','Findings'),('assets','Assets'),('history','History'),('query','Manual query'),('reports','Reports'),('sources','Sources')] %}<a href="{{ url_for(endpoint) }}" {% if request.endpoint == endpoint %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}</nav>
+{% if not auth_enabled or authenticated %}<nav aria-label="Main navigation">{% for endpoint, label in [('overview','Overview'),('findings','Findings'),('assets','Assets'),('history','History'),('query','Manual query'),('reports','Reports'),('sources','Sources')] %}<a href="{{ url_for(endpoint) }}" {% if request.endpoint == endpoint %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}</nav>{% endif %}
+{% if authenticated %}<form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Log out</button></form>{% endif %}
 <main>{% block content %}{% endblock %}</main><footer>Stored observations retain their original timestamps. Scanning and notification delivery run separately.</footer></body></html>

@@ -1,0 +1,14 @@
+[inventory]
+path = "general-inventory.csv"
+
+[state]
+database = "../.cvebeacon/general-state.db"
+
+[output]
+directory = "../reports"
+
+[notifications.teams]
+enabled = false
+
+[notifications.email]
+enabled = false

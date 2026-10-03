@@ -90,22 +90,23 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
     workbook = Workbook()
     summary = workbook.active
     summary.title = "Summary"
-    summary.append(["Asset ID", "Vendor", "Product", "Version", "Findings", "Affected", "Needs Review", "Coverage"])
+    summary.append(["Asset ID", "Vendor", "Product", "Version", "Findings", "Affected", "Needs Review", "Coverage", "Category", "System", "Ecosystem"])
     for result in values:
         summary.append([_safe(value) for value in [
             result.asset.asset_id, result.asset.vendor, result.asset.product, result.asset.version,
             len(result.findings), sum(x.applicability == Applicability.AFFECTED for x in result.findings),
             sum(x.applicability == Applicability.NEEDS_REVIEW for x in result.findings),
             result.coverage.value if result.coverage else "evaluated",
+            result.asset.category, result.asset.system_id, result.asset.ecosystem,
         ]])
     findings = workbook.create_sheet("Findings")
-    findings.append(["Asset ID", "Vendor", "Product", "Version", "CVE", "Applicability", "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile", "EPSS Date", "CISA KEV", "EU KEV", "Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts"])
+    findings.append(["Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability", "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile", "EPSS Date", "CISA KEV", "EU KEV", "Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts"])
     for result in values:
         for item in result.findings:
             vuln = item.vulnerability
             findings.append([_safe(_one_line(value)) for value in [
                 item.asset.asset_id, item.asset.vendor, item.asset.product, item.asset.version,
-                vuln.cve_id, item.applicability.value, item.confidence, item.reason,
+                vuln.primary_id, item.applicability.value, item.confidence, item.reason,
                 vuln.cvss_score, vuln.cvss_vector, vuln.epss_score, vuln.epss_percentile,
                 vuln.epss_date.isoformat() if vuln.epss_date else None,
                 vuln.cisa_kev, vuln.eu_kev, vuln.rejected, vuln.published, vuln.modified,
@@ -113,26 +114,26 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
                 "; ".join(item.conflicts),
             ]])
     uncertainty = workbook.create_sheet("Uncertainty")
-    uncertainty.append(["Asset ID", "CVE", "State", "Reason", "Source Health"])
+    uncertainty.append(["Asset ID", "Advisory", "State", "Reason", "Source Health"])
     for result in values:
         if result.coverage:
             uncertainty.append([_safe(_one_line(value)) for value in [result.asset.asset_id, "", result.coverage.value, result.coverage_reason, "; ".join(f"{x.source}:{x.status.value}" for x in result.source_health)]])
         for item in result.findings:
             if item.applicability in {Applicability.NEEDS_REVIEW, Applicability.COVERAGE_UNKNOWN}:
-                uncertainty.append([_safe(_one_line(value)) for value in [item.asset.asset_id, item.vulnerability.cve_id, item.applicability.value, item.reason, ""]])
+                uncertainty.append([_safe(_one_line(value)) for value in [item.asset.asset_id, item.vulnerability.primary_id, item.applicability.value, item.reason, ""]])
     evidence_sheet = workbook.create_sheet("Evidence")
-    evidence_sheet.append(["Asset ID", "CVE", "Source", "Role", "Statement", "Source Timestamp", "Retrieved At", "Source URL", "Details"])
+    evidence_sheet.append(["Asset ID", "Advisory", "Source", "Role", "Statement", "Source Timestamp", "Retrieved At", "Source URL", "Details"])
     for result in values:
         for item in result.findings:
             for evidence in item.evidence:
                 evidence_sheet.append([_safe(_one_line(value)) for value in [
-                    item.asset.asset_id, item.vulnerability.cve_id, evidence.source, evidence.role,
+                    item.asset.asset_id, item.vulnerability.primary_id, evidence.source, evidence.role,
                     evidence.statement, evidence.source_timestamp, _excel_datetime(evidence.retrieved_at),
                     evidence.source_url, _detail_text(evidence.details),
                 ]])
             for reference in item.vulnerability.references:
                 evidence_sheet.append([_safe(_one_line(value)) for value in [
-                    item.asset.asset_id, item.vulnerability.cve_id, "record", "reference",
+                    item.asset.asset_id, item.vulnerability.primary_id, "record", "reference",
                     "vulnerability reference", None, None, reference, "",
                 ]])
     health_sheet = workbook.create_sheet("Source Health")
@@ -143,6 +144,18 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
                 result.asset.asset_id, health.source, health.status.value, _excel_datetime(health.checked_at),
                 _excel_datetime(health.freshness_at), health.message,
             ]])
+    identities = workbook.create_sheet("Identities")
+    identities.append(["Asset ID", "Identity Path", "Category", "System", "Ecosystem", "PURL", "CPE", "Repository", "Commit"])
+    advisory = workbook.create_sheet("Advisory Details")
+    advisory.append(["Asset ID", "Advisory", "CVE", "Aliases", "Source IDs", "Fixed Boundaries (review evidence)"])
+    for result in values:
+        asset = result.asset
+        identities.append([_safe(value) for value in (asset.asset_id, asset.identity_path, asset.category, asset.system_id,
+            asset.ecosystem, asset.purl, asset.cpe, asset.repository, asset.commit)])
+        for item in result.findings:
+            vuln = item.vulnerability
+            advisory.append([_safe(value) for value in (asset.asset_id, vuln.primary_id, vuln.cve_id,
+                ", ".join(vuln.aliases), ", ".join(vuln.source_ids), ", ".join(vuln.fixed_versions))])
     for sheet in workbook.worksheets:
         _finish_sheet(sheet)
     for row in findings.iter_rows(min_row=2, min_col=9, max_col=12):
