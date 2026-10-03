@@ -177,3 +177,11 @@ def test_published_data_always_fits_reader_limits(tmp_path):
     with pytest.raises(ExtensionError, match="normalized"):
         write_snapshot(path, [row("\ufdfa"*8192)], source_id="a", collector="test")
     assert before == (path.read_bytes(), manifest_path(path).read_bytes())
+
+
+def test_unpaired_surrogate_rejected_before_snapshot_write(tmp_path):
+    path = snapshot(tmp_path)
+    before = path.read_bytes()
+    with pytest.raises(ExtensionError):
+        write_snapshot(path, [dict(asset_id="a", vendor="Example", product="\ud800", version="1")], source_id="a", collector="test")
+    assert path.read_bytes() == before

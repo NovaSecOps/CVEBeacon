@@ -24,6 +24,13 @@ def parser():
     merge.add_argument("--expected-source", action="append", default=[])
     merge.add_argument("--max-age-seconds", type=int, default=86400)
     merge.add_argument("--allow-partial", action="store_true")
+    sbom = commands.add_parser("sbom", help="import explicitly identified SBOM components")
+    sbom_commands = sbom.add_subparsers(dest="sbom_command", required=True)
+    importer = sbom_commands.add_parser("import")
+    importer.add_argument("file", type=Path)
+    importer.add_argument("--format", choices=("auto", "cyclonedx", "spdx"), default="auto")
+    importer.add_argument("--output", type=Path, required=True)
+    importer.add_argument("--source-id", required=True)
     return root
 
 
@@ -37,6 +44,10 @@ def main(argv=None):
             manifest = merge_snapshots(args.snapshots, args.output, source_id=args.source_id,
                                        expected_sources=args.expected_source, max_age_seconds=args.max_age_seconds,
                                        allow_partial=args.allow_partial)
+            print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
+        elif args.command == "sbom":
+            from .sbom import import_sbom
+            manifest = import_sbom(args.file, args.output, source_id=args.source_id, format=args.format)
             print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
         return 0
     except (ExtensionError, CVEBeaconError, OSError) as exc:

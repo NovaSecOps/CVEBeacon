@@ -12,6 +12,8 @@ No extension is needed for supplied inventory, monitoring, reporting or the
 dashboard. The companion only produces inventory; it never writes monitoring
 SQLite or decides vulnerability applicability.
 
+See [SBOM import](SBOM.md) for supported formats and conservative identity rules.
+
 ## Inventory contract v1
 
 A snapshot is a UTF-8 JSON list, directly accepted by the existing core JSON

@@ -1,0 +1,3 @@
+# Preserve original upstream bytes and the SHA-256 values in SOURCES.md.
+*.json -text
+LICENSE-*.txt -text

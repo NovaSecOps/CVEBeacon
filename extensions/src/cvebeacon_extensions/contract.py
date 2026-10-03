@@ -36,7 +36,10 @@ def label(value: str, name: str = "source_id") -> str:
 
 
 def json_bytes(value) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    try:
+        return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    except (UnicodeError, ValueError) as exc:
+        raise ExtensionError("output contains invalid Unicode or JSON values") from exc
 
 
 def _unique_object(pairs):
@@ -102,7 +105,7 @@ def canonical_records(records: list[dict]) -> list[dict[str, str]]:
     for row in records:
         if not isinstance(row, dict) or set(row) - set(FIELDS):
             raise ExtensionError("inventory record contains unknown fields")
-        if any(not isinstance(value, str) or len(value) > MAX_TEXT for value in row.values()):
+        if any(not isinstance(value, str) or len(value) > MAX_TEXT or any(0xD800 <= ord(c) <= 0xDFFF for c in value) for value in row.values()):
             raise ExtensionError("inventory values must be bounded text")
     assets = validate_records(records)
     if any(identity_conflict(asset) for asset in assets):
