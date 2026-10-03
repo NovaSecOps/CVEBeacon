@@ -173,8 +173,9 @@ def test_windows_incomplete_types_duplicates_and_no_environment_expansion(monkey
     rows, _ = windows_inventory(info, programs, source_id="win")
     assert "not-observed" not in json.dumps(rows)
     assert any(row["product"] == "%SECRET_CANARY%" for row in rows)
-    with pytest.raises(ExtensionError, match="duplicate"):
-        windows_inventory(info, programs+programs, source_id="win")
+    duplicates, review = windows_inventory(info, programs+programs, source_id="win")
+    assert len(duplicates) == 1 and len(review) == 4
+    assert {item["reason"] for item in review} == {"ambiguous-program-instances"}
     programs[0]["version"] = ""
     rows, reviews = windows_inventory(info, programs, source_id="win")
     assert len(rows) == 2 and len(reviews) == 1

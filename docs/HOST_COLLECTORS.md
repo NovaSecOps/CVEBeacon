@@ -79,7 +79,8 @@ NuGet/winget identities or exact CPEs. Missing fields produce review. Both logic
 registry views are retained: identical strings do not prove two registrations
 are physically shared. This can show duplicates on Windows versions that share
 a view; preserving observations avoids discarding distinct installations.
-Ambiguous duplicate slots within one view fail instead of overwriting.
+All ambiguous duplicate slots within one view remain in review; no registration
+overwrites another, and other unambiguous observations can still be collected.
 
 OS observation reads ProductName, CurrentBuildNumber and UBR from the fixed
 Windows CurrentVersion key. A build is required; UBR alone never becomes a

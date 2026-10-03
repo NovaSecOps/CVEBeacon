@@ -251,7 +251,7 @@ def windows_observations(registry) -> tuple[dict, list[dict]]:
 
 def windows_inventory(os_info: dict, programs: list[dict], *, source_id: str):
     label(source_id)
-    rows, reviews, slots = [], [], set()
+    rows, reviews, candidates = [], [], []
     product, version = text(os_info.get("product"), "Windows product"), text(os_info.get("version"), "Windows build")
     if product and version:
         rows.append(dict(asset_id=stable_id(source_id, "os"), vendor="Microsoft", product=product,
@@ -271,12 +271,16 @@ def windows_inventory(os_info: dict, programs: list[dict], *, source_id: str):
         # Use core's generic normalization before deriving the stable slot.
         asset = validate_records([dict(asset_id="candidate", vendor=vendor, product=name, version=version)])[0]
         slot = json_bytes([scope, view, asset.vendor.casefold(), asset.product.casefold()]).decode("utf-8")
-        if slot in slots:
-            raise ExtensionError("ambiguous duplicate installed-program slot")
-        slots.add(slot)
         row = asdict(asset)
         row.update(asset_id=stable_id(source_id, slot), category="installed-program", system_id=source_id)
-        rows.append(row)
+        candidates.append((slot, row, scope, view))
+    counts = Counter(slot for slot, row, scope, view in candidates)
+    for slot, row, scope, view in candidates:
+        if counts[slot] > 1:
+            reviews.append(dict(name=row["product"], vendor=row["vendor"], version=row["version"],
+                                scope=scope, view=view, reason="ambiguous-program-instances"))
+        else:
+            rows.append(row)
     return (canonical_records(rows) if rows else [], reviews)
 
 
