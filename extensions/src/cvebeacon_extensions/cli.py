@@ -31,6 +31,15 @@ def parser():
     importer.add_argument("--format", choices=("auto", "cyclonedx", "spdx"), default="auto")
     importer.add_argument("--output", type=Path, required=True)
     importer.add_argument("--source-id", required=True)
+    collect = commands.add_parser("collect", help="observe this local host once")
+    host_commands = collect.add_subparsers(dest="host", required=True)
+    for host in ("linux", "windows"):
+        command = host_commands.add_parser(host)
+        command.add_argument("--source-id", required=True)
+        command.add_argument("--output", type=Path, required=True)
+        if host == "linux":
+            command.add_argument("--backend", choices=("auto", "dpkg", "rpm"), default="auto")
+            command.add_argument("--package-namespace", help="explicit trusted package vendor namespace policy")
     return root
 
 
@@ -48,6 +57,12 @@ def main(argv=None):
         elif args.command == "sbom":
             from .sbom import import_sbom
             manifest = import_sbom(args.file, args.output, source_id=args.source_id, format=args.format)
+            print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
+        elif args.command == "collect":
+            from .hosts import collect_linux, collect_windows, publish_host
+            rows, reviews = collect_linux(source_id=args.source_id, backend=args.backend,
+                                          package_namespace=args.package_namespace) if args.host == "linux" else collect_windows(source_id=args.source_id)
+            manifest = publish_host(args.output, rows, reviews, source_id=args.source_id, collector=args.host)
             print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
         return 0
     except (ExtensionError, CVEBeaconError, OSError) as exc:

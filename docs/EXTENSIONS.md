@@ -12,7 +12,8 @@ No extension is needed for supplied inventory, monitoring, reporting or the
 dashboard. The companion only produces inventory; it never writes monitoring
 SQLite or decides vulnerability applicability.
 
-See [SBOM import](SBOM.md) for supported formats and conservative identity rules.
+See [SBOM import](SBOM.md) and [local host collectors](HOST_COLLECTORS.md) for
+supported inputs, permissions and conservative identity rules.
 
 ## Inventory contract v1
 

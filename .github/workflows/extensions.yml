@@ -30,3 +30,4 @@ jobs:
       - run: python -m pip check
       - run: python tools/test_offline.py -q extensions/tests
       - run: cvebeacon-ext --help
+      - run: python tools/host_collector_smoke.py
