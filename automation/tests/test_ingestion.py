@@ -198,3 +198,23 @@ def test_reader_group_applies_before_pointer_publication_without_changing_bytes(
     assert stat.S_IMODE(staged.parent.stat().st_mode) == 0o2750
     assert staged.read_bytes() == pair.read_bytes() and manifest_path(staged).read_bytes() == manifest_path(pair).read_bytes()
     assert receiver.accept(source, body)["status"] == "idempotent"
+
+@pytest.mark.skipif(os.name != "posix", reason="Unix staging permissions; Windows uses administrator ACLs")
+@pytest.mark.parametrize("operation", ["chown", "chmod"])
+def test_reader_group_permission_failure_preserves_previous_pointer(tmp_path, monkeypatch, operation):
+    from pathlib import Path
+    receiver, source, pair, body = setup(tmp_path, monkeypatch)
+    receiver.accept(source, body)
+    pointer = receiver.config.staging_dir / source.id / "current.json"
+    before = pointer.read_bytes()
+    receiver = Receiver(replace(receiver.config, reader_gid=os.getgid()))
+    def failure(*args, **kwargs):
+        raise OSError("synthetic staging permission failure")
+    if operation == "chown":
+        monkeypatch.setattr(os, "chown", failure)
+    else:
+        monkeypatch.setattr(Path, "chmod", failure)
+    with pytest.raises(OSError):
+        receiver.accept(source, body)
+    assert pointer.read_bytes() == before
+    assert current_snapshot(receiver.config.staging_dir, source.id).read_bytes() == pair.read_bytes()

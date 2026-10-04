@@ -158,6 +158,14 @@ def run_acceptance(root, sudo):
         unknown.chmod(0o600)
         rejected_host_key(config, source, wrong, pointer)
         rejected_host_key(config, source, unknown, pointer)
+        duplicates = root / "duplicate known hosts"
+        duplicates.write_text(f"[127.0.0.1]:{port} {wrong_public}\n[127.0.0.1]:{port} {wrong_public}\n", encoding="ascii")
+        duplicates.chmod(0o600)
+        rejected_host_key(config, source, duplicates, pointer)
+        duplicates.write_text(f"[127.0.0.1]:{port} {wrong_public}\n[127.0.0.1]:{port} {host_public}\n", encoding="ascii")
+        # Multiple explicitly enrolled keys are supported; a matching pinned key is required.
+        duplicate_source = replace(source, id="native-duplicate-enrollment", options={**source.options, "known_hosts": str(duplicates)})
+        assert collect_ssh(config, duplicate_source)["status"] == "accepted"
         review_source = replace(source, id="native-review", options={key: value for key, value in source.options.items()
             if key != "package_namespace"})
         review_result = collect_ssh(config, review_source)
