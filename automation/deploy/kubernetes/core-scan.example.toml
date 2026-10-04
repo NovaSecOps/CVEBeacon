@@ -1,0 +1,15 @@
+[inventory]
+path = "/core-state/inventory.json"
+format = "json"
+
+[state]
+database = "/core-state/core.db"
+
+[output]
+directory = "/core-state/reports"
+
+[notifications.teams]
+enabled = false
+
+[notifications.email]
+enabled = false

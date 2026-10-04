@@ -116,6 +116,13 @@ All alert channels share one read-only Core snapshot for schema checks and bound
 event reads. An event key combines the Core run UUID and event ID, so a replaced
 database with the same numeric IDs is distinguished.
 
+SQLite can create transient WAL sidecars beside a live WAL-mode database even for
+`mode=ro` queries when its directory is writable; these reads do not update Core
+rows. A strictly read-only container mount needs a consistent snapshot prepared by
+the writer. The Kubernetes v2 scanner publishes a separate DELETE-mode backup for
+that purpose. Do not use SQLite's `immutable=1` against a live WAL database: it can
+miss uncheckpointed rows.
+
 A newly configured destination begins at the first stored material Core event and
 works through the retained history in batches. Prepared text is frozen before
 transmission. Keeping the channel ID and destination identity preserves that

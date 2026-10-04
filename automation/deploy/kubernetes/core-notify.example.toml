@@ -1,0 +1,15 @@
+[inventory]
+path = "/core-ro/inventory.json"
+format = "json"
+
+[state]
+database = "/core-ro/notification-core.db"
+
+[output]
+directory = "/unmounted/reports"
+
+[notifications.teams]
+enabled = false
+
+[notifications.email]
+enabled = false

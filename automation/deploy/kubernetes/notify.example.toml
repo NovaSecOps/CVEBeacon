@@ -1,0 +1,14 @@
+[automation]
+version = 1
+state_dir = "/automation-state"
+staging_dir = "/unmounted/staging"
+inventory_path = "/unmounted/inventory.json"
+core_config = "/config/core.toml"
+
+# Additional channels are opt-in. See docs/NOTIFICATION_EXTENSIONS.md.
+# [[notifications]]
+# id = "matrix-security"
+# provider = "matrix"
+# homeserver = "https://matrix.example.org"
+# room_id = "!roomid:example.org"
+# token = { env = "CVEBEACON_MATRIX_TOKEN" }

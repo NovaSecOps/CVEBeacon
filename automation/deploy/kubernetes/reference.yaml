@@ -1,0 +1,221 @@
+# Prepare the v2 ConfigMaps/optional Secrets before an initial manual Job.
+# Keep suspended until images, registry attribution and CSI storage are reviewed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cvebeacon-v2-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cvebeacon-v2-collector
+  namespace: cvebeacon-v2-demo
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cvebeacon-v2-pod-reader
+  namespace: cvebeacon-v2-demo
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cvebeacon-v2-pod-reader
+  namespace: cvebeacon-v2-demo
+subjects:
+  - kind: ServiceAccount
+    name: cvebeacon-v2-collector
+    namespace: cvebeacon-v2-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cvebeacon-v2-pod-reader
+---
+# Select an RWOP-capable CSI filesystem class for all three claims.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cvebeacon-v2-sources
+  namespace: cvebeacon-v2-demo
+spec:
+  accessModes: [ReadWriteOncePod]
+  resources:
+    requests: {storage: 1Gi}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cvebeacon-v2-core
+  namespace: cvebeacon-v2-demo
+spec:
+  accessModes: [ReadWriteOncePod]
+  resources:
+    requests: {storage: 1Gi}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cvebeacon-v2-notifications
+  namespace: cvebeacon-v2-demo
+spec:
+  accessModes: [ReadWriteOncePod]
+  resources:
+    requests: {storage: 1Gi}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cvebeacon-v2
+  namespace: cvebeacon-v2-demo
+spec:
+  schedule: "17 * * * *"
+  timeZone: Etc/UTC
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      completions: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: cvebeacon-v2-collector
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 20
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile: {type: RuntimeDefault}
+          initContainers:
+            - name: observe
+              image: cvebeacon-extensions:local
+              imagePullPolicy: IfNotPresent
+              args: [collect, kubernetes, --namespace, cvebeacon-v2-demo, --source-id, cluster-v2, --observations-only, --output, /observations/pods.json]
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: "1", memory: 512Mi}
+              volumeMounts:
+                - {name: api-access, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true}
+                - {name: observations, mountPath: /observations}
+                - {name: observe-tmp, mountPath: /tmp}
+            - name: acquire
+              image: cvebeacon-automation:local
+              imagePullPolicy: IfNotPresent
+              args: [--config, /config/acquire.toml, collect, cluster-v2]
+              env:
+                - name: CVEBEACON_REGISTRY_BEARER
+                  valueFrom:
+                    secretKeyRef: {name: cvebeacon-v2-registry, key: bearer, optional: true}
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: "1", memory: 512Mi}
+              volumeMounts:
+                - {name: observations, mountPath: /observations, readOnly: true}
+                - {name: sources, mountPath: /staging}
+                - {name: acquire-config, mountPath: /config/acquire.toml, subPath: acquire.toml, readOnly: true}
+                - {name: registry-ca, mountPath: /registry-ca/ca.crt, subPath: ca.crt, readOnly: true}
+                - {name: acquire-tmp, mountPath: /tmp}
+            - name: scan
+              image: cvebeacon-automation:local
+              imagePullPolicy: IfNotPresent
+              command: [python, /scripts/scan.py]
+              args: []
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+              resources:
+                requests: {cpu: 100m, memory: 256Mi}
+                limits: {cpu: "2", memory: 1Gi}
+              volumeMounts:
+                - {name: sources, mountPath: /staging, readOnly: true}
+                - {name: core, mountPath: /core-state}
+                - {name: scan-config, mountPath: /config/scan.toml, subPath: scan.toml, readOnly: true}
+                - {name: core-scan-config, mountPath: /config/core.toml, subPath: core.toml, readOnly: true}
+                - {name: scripts, mountPath: /scripts/scan.py, subPath: scan.py, readOnly: true}
+                - {name: scan-tmp, mountPath: /tmp}
+          containers:
+            - name: notify
+              image: cvebeacon-automation:local
+              imagePullPolicy: IfNotPresent
+              args: [--config, /config/notify.toml, notify, run]
+              env:
+                - name: CVEBEACON_MATRIX_TOKEN
+                  valueFrom:
+                    secretKeyRef: {name: cvebeacon-v2-notifier, key: matrix-token, optional: true}
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: "1", memory: 512Mi}
+              volumeMounts:
+                - {name: core, mountPath: /core-ro, readOnly: true}
+                - {name: notifications, mountPath: /automation-state}
+                - {name: notify-config, mountPath: /config/notify.toml, subPath: notify.toml, readOnly: true}
+                - {name: core-notify-config, mountPath: /config/core.toml, subPath: core.toml, readOnly: true}
+                - {name: notify-tmp, mountPath: /tmp}
+          volumes:
+            - name: observations
+              emptyDir: {sizeLimit: 128Mi}
+            - name: observe-tmp
+              emptyDir: {medium: Memory, sizeLimit: 64Mi}
+            - name: acquire-tmp
+              emptyDir: {medium: Memory, sizeLimit: 64Mi}
+            - name: scan-tmp
+              emptyDir: {medium: Memory, sizeLimit: 64Mi}
+            - name: notify-tmp
+              emptyDir: {medium: Memory, sizeLimit: 64Mi}
+            - name: sources
+              persistentVolumeClaim: {claimName: cvebeacon-v2-sources}
+            - name: core
+              persistentVolumeClaim: {claimName: cvebeacon-v2-core}
+            - name: notifications
+              persistentVolumeClaim: {claimName: cvebeacon-v2-notifications}
+            - name: acquire-config
+              configMap: {name: cvebeacon-v2-acquire, defaultMode: 0444}
+            - name: scan-config
+              configMap: {name: cvebeacon-v2-scan, defaultMode: 0444}
+            - name: core-scan-config
+              configMap: {name: cvebeacon-v2-core-scan, defaultMode: 0444}
+            - name: notify-config
+              configMap: {name: cvebeacon-v2-notify, defaultMode: 0444}
+            - name: core-notify-config
+              configMap: {name: cvebeacon-v2-core-notify, defaultMode: 0444}
+            - name: scripts
+              configMap: {name: cvebeacon-v2-scripts, defaultMode: 0444}
+            - name: registry-ca
+              configMap: {name: cvebeacon-v2-registry-ca, defaultMode: 0444}
+            - name: api-access
+              projected:
+                defaultMode: 0444
+                sources:
+                  - serviceAccountToken: {path: token, expirationSeconds: 3600}
+                  - configMap:
+                      name: kube-root-ca.crt
+                      items: [{key: ca.crt, path: ca.crt}]
+                  - downwardAPI:
+                      items:
+                        - path: namespace
+                          fieldRef: {fieldPath: metadata.namespace}

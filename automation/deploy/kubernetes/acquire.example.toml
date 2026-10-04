@@ -1,0 +1,23 @@
+[automation]
+version = 1
+state_dir = "/staging/acquisition-state"
+staging_dir = "/staging/sources"
+inventory_path = "/unmounted/inventory.json"
+core_config = "/unmounted/core.toml"
+
+[[registries]]
+id = "trusted-registry"
+url = "https://registry.example.org"
+repositories = ["team/workload"]
+bearer = { env = "CVEBEACON_REGISTRY_BEARER" }
+ca_file = "/registry-ca/ca.crt"
+timeout_seconds = 15
+budget_seconds = 60
+
+[[sources]]
+id = "cluster-v2"
+kind = "kubernetes"
+required = true
+max_age_seconds = 300
+allow_partial = false
+options = { observations = "/observations/pods.json", registries = ["trusted-registry"] }
