@@ -66,3 +66,16 @@ Use a separate OS account from Core. Accepted uploads are consumed by the next
 one-shot pipeline; request handlers never start Core scans. Back up pointers and
 generations together. Historical generations are retained until an explicit
 administrator retention operation.
+
+For separate Unix receiver and runner accounts, an explicit `reader_gid` in
+`[ingestion]` grants that local group read access to newly published source
+directories (2750), inventory/manifest files and pointer (0640). The receiver
+must already belong to that group; it cannot add itself or select arbitrary
+groups. Prepare the staging root so the runner can traverse it. Upload tokens,
+TLS keys, validation scratch, locks and other state remain private. Existing
+historical generation permissions are not rewritten, and idempotent uploads
+do not migrate them; an administrator must review existing ACLs or collect a
+new generation. Without this option files remain private to their writer.
+Windows uses explicit administrator-controlled directory ACLs instead; the
+Unix group option is rejected there. Containers may share a numeric UID while
+isolating the receiver through its limited mounts.

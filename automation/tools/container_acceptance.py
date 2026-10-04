@@ -47,12 +47,10 @@ def main():
             common.extend(["--mount", f"type=bind,source={root / name},target={destination}" + (",readonly" if name == "config" else "")])
         for _ in range(2):
             docker("run", "--rm", *common, IMAGE, "--config", "/config/automation.toml", "run", expected=4)
-        health = json.loads((root / "state" / "health.json").read_text())
-        assert health["core_exit"] == 4 and health["status"] == "coverage_warning"
-        with sqlite3.connect((root / "core" / "core.db").as_uri() + "?mode=ro", uri=True) as db:
-            assert db.execute("SELECT count(*) FROM runs").fetchone()[0] == 2
-            assert db.execute("SELECT count(*) FROM deliveries").fetchone()[0] == 0
-            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        # Files intentionally belong to image UID65532/mode600; inspect as that
+        # UID instead of weakening production state permissions for the host test.
+        docker("run", "--rm", *common, "--entrypoint", "python", IMAGE, "-c",
+               "import json,sqlite3\nh=json.load(open('/automation-state/health.json'))\nassert h['core_exit']==4 and h['status']=='coverage_warning'\nwith sqlite3.connect('file:/core-state/core.db?mode=ro',uri=True) as db:\n assert db.execute('SELECT count(*) FROM runs').fetchone()[0]==2\n assert db.execute('SELECT count(*) FROM deliveries').fetchone()[0]==0\n assert db.execute('PRAGMA integrity_check').fetchone()[0]=='ok'")
         assert not (root / "staging" / "core.db").exists()
         receiver_config = root / "receiver-config"
         receiver_secrets = root / "receiver-secrets"
@@ -60,7 +58,7 @@ def main():
         for path in (receiver_config, receiver_secrets, receiver_staging):
             path.mkdir(mode=0o755)
         cert, key = certificate(receiver_secrets)
-        (receiver_config / "ingest.toml").write_text('[ingestion]\nversion=1\nstaging_dir="/staging"\nhost="0.0.0.0"\nport=8765\ncertificate="/run/secrets/tls.crt"\nkey="/run/secrets/tls.key"\n[[sources]]\nid="host-a"\ncredential={env="INGEST_SYNTHETIC_TOKEN"}\n')
+        (receiver_config / "ingest.toml").write_text('[ingestion]\nversion=1\nstaging_dir="/staging"\nhost="0.0.0.0"\nport=8765\ncertificate="/run/secrets/tls.crt"\nkey="/run/secrets/tls.key"\nreader_gid=' + str(os.getgid()) + '\n[[sources]]\nid="host-a"\ncredential={env="INGEST_SYNTHETIC_TOKEN"}\n')
         token = "SYNTHETIC_CONTAINER_UPLOAD_ONLY_01234567890123456789"
         os.environ["INGEST_SYNTHETIC_TOKEN"] = token
         name = "cvebeacon-intake-" + uuid.uuid4().hex[:16]
@@ -88,6 +86,13 @@ def main():
                         time.sleep(0.1)
             assert result["status"] == "accepted"
             assert current_snapshot(receiver_staging, "host-a").read_bytes() == (config / "host.json").read_bytes()
+            # A different UID can read the explicitly shared staging group,
+            # without receiving the receiver's config, TLS key or upload token.
+            docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                   "--security-opt", "no-new-privileges:true", "--user", f"65532:{os.getgid()}",
+                   "--mount", f"type=bind,source={receiver_staging},target=/staging,readonly",
+                   "--entrypoint", "python", IMAGE, "-c",
+                   "from pathlib import Path\nfrom cvebeacon_automation.staging import current_snapshot\nfrom cvebeacon_extensions.contract import read_snapshot\np=current_snapshot(Path('/staging'),'host-a')\nassert read_snapshot(p).records\nassert not Path('/run/secrets/tls.key').exists()\nassert not Path('/config/ingest.toml').exists()\nassert not Path('/core-state/core.db').exists()")
             metadata = json.loads(docker("inspect", receiver))[0]
             assert {item["Destination"] for item in metadata["Mounts"]} == {"/config", "/run/secrets", "/staging"}
             docker("stop", "--time", "5", receiver)

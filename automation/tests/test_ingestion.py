@@ -2,6 +2,7 @@ import base64
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+import os
 
 import pytest
 
@@ -155,3 +156,45 @@ def test_push_strict_https_fixed_path(tmp_path, monkeypatch, url):
     receiver, source, pair, body = setup(tmp_path, monkeypatch)
     with pytest.raises(AutomationError):
         push(pair, url, source.credential)
+
+
+@pytest.mark.parametrize("group", [True, "1000", -1, 2**31])
+def test_reader_group_rejects_unbounded_or_untyped_configuration(tmp_path, monkeypatch, group):
+    receiver, source, pair, body = setup(tmp_path, monkeypatch)
+    with pytest.raises(AutomationError, match="staging_reader_group_invalid"):
+        Receiver(replace(receiver.config, reader_gid=group))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="explicit Unix group permissions; Windows uses administrator ACLs")
+def test_reader_group_applies_before_pointer_publication_without_changing_bytes(tmp_path, monkeypatch):
+    import stat
+    receiver, source, pair, body = setup(tmp_path, monkeypatch)
+    receiver = Receiver(replace(receiver.config, reader_gid=os.getgid()))
+    assert receiver.accept(source, body)["status"] == "accepted"
+    staged = current_snapshot(receiver.config.staging_dir, source.id)
+    for file in (staged, manifest_path(staged), staged.parent.parent / "current.json"):
+        assert stat.S_IMODE(file.stat().st_mode) == 0o640 and file.stat().st_gid == os.getgid()
+    assert stat.S_IMODE(staged.parent.stat().st_mode) == 0o2750
+    assert staged.read_bytes() == pair.read_bytes() and manifest_path(staged).read_bytes() == manifest_path(pair).read_bytes()
+    assert receiver.accept(source, body)["status"] == "idempotent"
+
+
+@pytest.mark.parametrize("group", [True, "1000", -1, 2**31])
+def test_reader_group_rejects_unbounded_or_untyped_configuration(tmp_path, monkeypatch, group):
+    receiver, source, pair, body = setup(tmp_path, monkeypatch)
+    with pytest.raises(AutomationError, match="staging_reader_group_invalid"):
+        Receiver(replace(receiver.config, reader_gid=group))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="explicit Unix group permissions; Windows uses administrator ACLs")
+def test_reader_group_applies_before_pointer_publication_without_changing_bytes(tmp_path, monkeypatch):
+    import stat
+    receiver, source, pair, body = setup(tmp_path, monkeypatch)
+    receiver = Receiver(replace(receiver.config, reader_gid=os.getgid()))
+    assert receiver.accept(source, body)["status"] == "accepted"
+    staged = current_snapshot(receiver.config.staging_dir, source.id)
+    for file in (staged, manifest_path(staged), staged.parent.parent / "current.json"):
+        assert stat.S_IMODE(file.stat().st_mode) == 0o640 and file.stat().st_gid == os.getgid()
+    assert stat.S_IMODE(staged.parent.stat().st_mode) == 0o2750
+    assert staged.read_bytes() == pair.read_bytes() and manifest_path(staged).read_bytes() == manifest_path(pair).read_bytes()
+    assert receiver.accept(source, body)["status"] == "idempotent"

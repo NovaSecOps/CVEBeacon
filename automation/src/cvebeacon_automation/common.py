@@ -50,7 +50,17 @@ def regular(path: Path):
         raise AutomationError("unsafe_file")
 
 
-def atomic(path: Path, data: bytes):
+def reader_group(value):
+    if value is None:
+        return None
+    if (os.name != "posix" or type(value) is not int or not 0 <= value <= 2**31 - 1
+            or value not in set(os.getgroups()) | {os.getgid()}):
+        raise AutomationError("staging_reader_group_invalid")
+    return value
+
+
+def atomic(path: Path, data: bytes, *, read_group=None):
+    read_group = reader_group(read_group)
     if len(data) > 48 * 1024 * 1024:
         raise AutomationError("output_too_large")
     directory(path.parent)
@@ -59,6 +69,9 @@ def atomic(path: Path, data: bytes):
     fd, temporary = tempfile.mkstemp(prefix=".auto-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as handle:
+            if read_group is not None:
+                os.fchown(handle.fileno(), -1, read_group)
+                os.fchmod(handle.fileno(), 0o640)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
@@ -74,8 +87,8 @@ def atomic(path: Path, data: bytes):
             os.unlink(temporary)
 
 
-def write_json(path: Path, value):
-    atomic(path, json_bytes(value))
+def write_json(path: Path, value, *, read_group=None):
+    atomic(path, json_bytes(value), **({"read_group": read_group} if read_group is not None else {}))
 
 
 def read_json(path: Path, limit=1024 * 1024):

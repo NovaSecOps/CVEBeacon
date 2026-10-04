@@ -17,7 +17,7 @@ import time
 import tomllib
 
 from cvebeacon_extensions.contract import ExtensionError, read_bytes
-from ..common import AutomationError, Secret, identifier, regular
+from ..common import AutomationError, Secret, identifier, reader_group, regular
 from ..config import boolean, keys, number, path, tables
 from ..staging import publish
 from .protocol import MAX_ENVELOPE, decode_envelope
@@ -42,6 +42,7 @@ class IngestConfig:
     max_body_bytes: int = 12 * 1024 * 1024
     timeout_seconds: int = 15
     workers: int = 2
+    reader_gid: int | None = None
 
 
 def load_ingest_config(filename):
@@ -51,7 +52,7 @@ def load_ingest_config(filename):
     except (OSError, UnicodeError, ValueError):
         raise AutomationError("ingestion_configuration_unreadable") from None
     keys(data, {"ingestion", "sources"})
-    item = keys(data.get("ingestion", {}), {"version", "staging_dir", "host", "port", "certificate", "key", "proxy_https", "max_body_bytes", "timeout_seconds", "workers"})
+    item = keys(data.get("ingestion", {}), {"version", "staging_dir", "host", "port", "certificate", "key", "proxy_https", "max_body_bytes", "timeout_seconds", "workers", "reader_gid"})
     if type(item.get("version")) is not int or item["version"] != 1:
         raise AutomationError("ingestion_configuration_version")
     host = item.get("host", "127.0.0.1")
@@ -80,12 +81,14 @@ def load_ingest_config(filename):
     return IngestConfig(path(filename.parent, item.get("staging_dir", "staging")), tuple(sources), host,
                         number(item.get("port", 8765), 1, 65535), certificate, key, proxy,
                         number(item.get("max_body_bytes", 12 * 1024 * 1024), 4096, MAX_ENVELOPE),
-                        number(item.get("timeout_seconds", 15), 1, 120), number(item.get("workers", 2), 1, 8))
+                        number(item.get("timeout_seconds", 15), 1, 120), number(item.get("workers", 2), 1, 8),
+                        reader_group(item.get("reader_gid")))
 
 
 class Receiver:
     def __init__(self, config: IngestConfig):
         self.config = config
+        reader_group(config.reader_gid)
         self.credentials = {}
         for source in config.sources:
             token = source.credential.resolve()
@@ -123,7 +126,8 @@ class Receiver:
         claimed, inventory, manifest = decode_envelope(body, self.config.max_body_bytes)
         if claimed != source.id:
             raise AutomationError("source_identity_mismatch")
-        return publish(self.config.staging_dir, source.id, inventory, manifest, max_age_seconds=source.max_age_seconds)
+        return publish(self.config.staging_dir, source.id, inventory, manifest, max_age_seconds=source.max_age_seconds,
+                       reader_gid=self.config.reader_gid)
 
 
 class Handler(BaseHTTPRequestHandler):

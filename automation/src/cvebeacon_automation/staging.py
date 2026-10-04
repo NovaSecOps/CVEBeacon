@@ -9,7 +9,7 @@ import tempfile
 
 from cvebeacon_extensions.contract import (ExtensionError, decode_json, manifest_path, read_bytes, read_snapshot,
                                             timestamp)
-from .common import AutomationError, atomic, digest, directory, identifier, lock, now, read_json, write_json
+from .common import AutomationError, atomic, digest, directory, identifier, lock, now, read_json, reader_group, write_json
 
 
 def source_directory(root: Path, source: str) -> Path:
@@ -46,7 +46,8 @@ def current_snapshot(root: Path, source: str) -> Path:
     return inventory
 
 
-def publish(root: Path, source: str, inventory: bytes, manifest: bytes, *, max_age_seconds=86400) -> dict:
+def publish(root: Path, source: str, inventory: bytes, manifest: bytes, *, max_age_seconds=86400, reader_gid=None) -> dict:
+    reader_gid = reader_group(reader_gid)
     folder = source_directory(root, source)
     # Never parse by re-serializing: the manifest binds the exact original bytes.
     with tempfile.TemporaryDirectory(prefix=".validate-", dir=folder) as temporary:
@@ -56,6 +57,11 @@ def publish(root: Path, source: str, inventory: bytes, manifest: bytes, *, max_a
         snapshot = read_snapshot(candidate, max_age_seconds=max_age_seconds, allow_partial=True)
     if snapshot.manifest["source_id"] != source:
         raise AutomationError("source_identity_mismatch")
+    if reader_gid is not None:
+        # Explicitly grant a configured local reader group access to this source,
+        # never to upload credentials or other state. Historical files untouched.
+        os.chown(folder, -1, reader_gid)
+        folder.chmod(0o2750)
     inventory_hash, manifest_hash = digest(inventory), digest(manifest)
     generation = digest(inventory + b"\x00" + manifest)
     generated = snapshot.manifest["generated_at"]
@@ -75,14 +81,20 @@ def publish(root: Path, source: str, inventory: bytes, manifest: bytes, *, max_a
             directory(final)
             if read_bytes(final / "inventory.json") != inventory or read_bytes(manifest_path(final / "inventory.json"), 65536) != manifest:
                 raise AutomationError("staging_generation_conflict")
+            if reader_gid is not None and any(item.stat().st_gid != reader_gid or item.stat().st_mode & 0o040 == 0
+                    for item in (final, final / "inventory.json", manifest_path(final / "inventory.json"))):
+                raise AutomationError("staging_reader_permissions")
         else:
             # Unreferenced interrupted generations are harmless; pointer is commit point.
             with tempfile.TemporaryDirectory(prefix=".generation-", dir=folder) as pending:
                 pending = Path(pending)
-                atomic(pending / "inventory.json", inventory)
-                atomic(manifest_path(pending / "inventory.json"), manifest)
+                if reader_gid is not None:
+                    os.chown(pending, -1, reader_gid)
+                    pending.chmod(0o2750)
+                atomic(pending / "inventory.json", inventory, read_group=reader_gid)
+                atomic(manifest_path(pending / "inventory.json"), manifest, read_group=reader_gid)
                 os.rename(pending, final)
         state = dict(version=1, generation=generation, inventory_hash=inventory_hash, manifest_hash=manifest_hash,
                      generated_at=generated, observed_at=observed, accepted_at=now())
-        write_json(pointer, state)
+        write_json(pointer, state, read_group=reader_gid)
     return {"status": "accepted", "accepted_at": state["accepted_at"], "generation": generation}

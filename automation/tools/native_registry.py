@@ -85,9 +85,10 @@ def distribution(root):
     # Pull setup precedes the product network guard; this is an immutable fixture.
     command(["docker", "pull", REGISTRY_IMAGE], timeout=180)
     identifier = command(["docker", "run", "--detach", "--name", name, "--read-only", "--cap-drop", "ALL",
+                          "--user", f"{os.getuid()}:{os.getgid()}",
                           "--security-opt", "no-new-privileges:true", "--publish", "127.0.0.1::5000",
                           "--mount", f"type=bind,source={root},target=/tls,readonly",
-                          "--tmpfs", "/var/lib/registry:rw,nosuid,size=64m", "--tmpfs", "/tmp:rw,nosuid,size=16m",
+                          "--tmpfs", "/var/lib/registry:rw,nosuid,size=64m,mode=1777", "--tmpfs", "/tmp:rw,nosuid,size=16m",
                           "--env", "REGISTRY_HTTP_TLS_CERTIFICATE=/tls/tls.crt", "--env", "REGISTRY_HTTP_TLS_KEY=/tls/tls.key",
                           "--env", "REGISTRY_HTTP_ADDR=0.0.0.0:5000", "--env", "REGISTRY_STORAGE_DELETE_ENABLED=false",
                           REGISTRY_IMAGE])

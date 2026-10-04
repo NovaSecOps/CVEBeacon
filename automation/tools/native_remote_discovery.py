@@ -73,7 +73,9 @@ def ephemeral_sshd(root, sudo, client_public, host_key):
         "AuthorizedKeysFile " + str(authorized), "AllowUsers " + user,
         "PubkeyAuthentication yes", "AuthenticationMethods publickey",
         "PasswordAuthentication no", "KbdInteractiveAuthentication no", "HostbasedAuthentication no",
-        "PermitRootLogin no", "UsePAM no", "UseDNS no", "StrictModes no",
+        # Hosted runner passwords can be locked. PAM account checks allow its
+        # existing account without changing it; all password authentication is off.
+        "PermitRootLogin no", "UsePAM yes", "UseDNS no", "StrictModes no",
         "AllowAgentForwarding no", "AllowTcpForwarding no", "X11Forwarding no",
         "PermitTunnel no", "GatewayPorts no", "PermitUserEnvironment no", "PermitUserRC no",
         "PrintMotd no", "Banner none", "LoginGraceTime 10", "MaxSessions 1", "MaxStartups 2:100:2",
