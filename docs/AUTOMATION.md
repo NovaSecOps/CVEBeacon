@@ -50,3 +50,21 @@ by an atomic pointer. Keep staging, state, Core database and reports in your
 backup plan. Do not edit generation files or reset pointers to bypass replay
 protection. Retention requires an explicit administrator policy; the service
 does not automatically delete historical evidence.
+
+The merged inventory and its v1 manifest are two files. Ordinary publication
+errors restore their previous bytes. An abrupt process or power failure between
+the two replacements can leave a hash mismatch: the frozen reader refuses that
+pair, and the next successful pipeline rebuilds it from accepted source
+generations. This boundary does not provide crash-atomic two-file rollback.
+Keep cooperating readers under the shared resource locks and retain backups.
+
+The default CLI preserves Core exit 4. `run --accept-coverage-warning` is an
+explicit deployment choice that maps that process exit to 0 so a completed scan
+can continue an init-container sequence. Stored health still records Core 4,
+`coverage_warning` and incomplete coverage; it never asserts a clean scan.
+
+Guides: [uploads](INGESTION.md), [SSH and Windows](REMOTE_COLLECTION.md),
+[notification setup](NOTIFICATION_EXTENSIONS.md), [registry SBOMs](REGISTRY_SBOM.md),
+[authorized discovery](DISCOVERY.md), [central VM and schedulers](HOME_LAB_AUTOMATION.md),
+[container isolation](AUTOMATION_CONTAINER.md), [Kubernetes stages](AUTOMATION_KUBERNETES.md),
+[deterministic lifecycle](AUTOMATION_LIFECYCLE.md) and [security boundaries](AUTOMATION_SECURITY.md).

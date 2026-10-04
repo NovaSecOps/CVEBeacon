@@ -1,0 +1,52 @@
+[automation]
+version = 1
+state_dir = "/var/lib/cvebeacon/pipeline/automation-state"
+staging_dir = "/var/lib/cvebeacon/staging"
+inventory_path = "/var/lib/cvebeacon/pipeline/merged.json"
+core_config = "/etc/cvebeacon/core.toml"
+core_timeout = 600
+
+[[sources]]
+id = "windows-a"
+kind = "upload"
+required = true
+max_age_seconds = 86400
+allow_partial = false
+
+[[sources]]
+id = "linux-a"
+kind = "ssh"
+required = true
+max_age_seconds = 86400
+allow_partial = false
+[sources.options]
+host = "linux-a.example.invalid"
+user = "cvebeacon-read"
+port = 22
+key = "/etc/cvebeacon/pipeline-secrets/linux-a-key"
+known_hosts = "/etc/cvebeacon/linux-a-known-hosts"
+timeout = 60
+backend = "dpkg"
+# Set only after reviewing the actual host distribution and package provenance.
+package_namespace = "ubuntu"
+
+# Optional Kubernetes enrichment consumes a separately refreshed v1 observation.
+# Keep disabled until exact running digests have attached eligible SBOMs.
+# [[sources]]
+# id = "cluster-a"
+# kind = "kubernetes"
+# required = true
+# max_age_seconds = 3600
+# allow_partial = false
+# [sources.options]
+# observations = "/var/lib/cvebeacon/pipeline/observations/cluster-a.json"
+# registries = ["lab-registry"]
+# [[registries]]
+# id = "lab-registry"
+# url = "https://registry.example.invalid"
+# repositories = ["team/application"]
+# bearer = {file = "/etc/cvebeacon/pipeline-secrets/registry-bearer"}
+# ca_file = "/etc/cvebeacon/registry-ca.crt"
+
+# Add reviewed provider channels from docs/NOTIFICATION_EXTENSIONS.md.
+# Core receives no integration credential environment variables by default.

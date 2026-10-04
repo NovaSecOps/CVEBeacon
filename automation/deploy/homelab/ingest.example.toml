@@ -1,0 +1,16 @@
+[ingestion]
+version = 1
+host = "127.0.0.1"
+port = 8765
+staging_dir = "/var/lib/cvebeacon/staging"
+proxy_https = true
+workers = 2
+timeout_seconds = 15
+max_body_bytes = 12582912
+# Replace with the administrator-provisioned numeric cvebeacon-stage group ID.
+reader_gid = 12345
+
+[[sources]]
+id = "windows-a"
+credential = {file = "/etc/cvebeacon/ingest-secrets/windows-a-token"}
+max_age_seconds = 86400
