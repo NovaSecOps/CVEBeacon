@@ -292,16 +292,15 @@ with sqlite3.connect((root/'core.db').as_uri()+'?mode=ro',uri=True) as db:
     assert db.execute('SELECT count(*) FROM runs').fetchone()[0]==expected
     assert db.execute('SELECT count(*) FROM events').fetchone()[0]==0
     assert db.execute('SELECT count(*) FROM deliveries').fetchone()[0]==0
+    latest,assets,unknown=db.execute('SELECT run_id,asset_count,coverage_unknown_count FROM runs ORDER BY completed_at DESC LIMIT 1').fetchone()
+    assert 0<assets<=4096 and unknown==assets
+    payloads=db.execute("SELECT CASE WHEN typeof(payload_json)='text' AND length(CAST(payload_json AS BLOB))<=65536 THEN payload_json END FROM scan_assets WHERE run_id=? LIMIT 4097",(latest,)).fetchall()
+    assert len(payloads)==assets and all(row[0] is not None and json.loads(row[0])['coverage']=='coverage_unknown' for row in payloads)
 with sqlite3.connect((root/'notification-core.db').as_uri()+'?mode=ro',uri=True) as db:
     assert db.execute('PRAGMA journal_mode').fetchone()[0]=='delete'
     assert db.execute('SELECT count(*) FROM runs').fetchone()[0]==expected
 health=json.loads((root/'runner/health.json').read_text())
 assert health['core_exit']==4 and health['status']=='coverage_warning'
-reports=list((root/'reports').glob('*.json'))
-assert reports
-for report in reports:
-    rows=json.loads(report.read_text())
-    assert rows and all(row['coverage']=='coverage_unknown' for row in rows)
 rows=json.loads((root/'inventory.json').read_text())
 assert rows and all(row['purl']=='pkg:pypi/example@1' for row in rows)
 manifest=json.loads((root/'inventory.json.manifest.json').read_text())

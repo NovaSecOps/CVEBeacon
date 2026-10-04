@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sqlite3
+import sys
 from types import SimpleNamespace
 import uuid
 
@@ -15,6 +16,8 @@ from cvebeacon_automation.common import AutomationError, Secret, lock
 from cvebeacon_automation.config import load_config
 from cvebeacon_automation.http import Response
 from cvebeacon_automation.registry.client import RegistryClient, validate_registries
+from cvebeacon.models import Applicability, Asset, QueryResult
+from cvebeacon.state import StateStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,6 +126,42 @@ def test_backup_respects_cooperating_live_database_lock(scanner, tmp_path):
         writer.close()
 
 
+def test_backup_keeps_shared_core_lock_through_atomic_publication(scanner, tmp_path, monkeypatch):
+    path, writer, _ = live_database(tmp_path)
+    replace = scanner.os.replace
+    publications = []
+    def publication(pending, destination):
+        with pytest.raises(AutomationError, match="locked"):
+            with lock(path.with_name(path.name + ".automation.lock")):
+                pytest.fail("competing publisher acquired the shared lock")
+        publications.append(destination)
+        replace(pending, destination)
+    monkeypatch.setattr(scanner.os, "replace", publication)
+    try:
+        scanner.snapshot(path, tmp_path / "notification-core.db")
+        assert publications == [tmp_path / "notification-core.db"]
+    finally:
+        writer.close()
+
+
+def test_backup_schema_lookup_obeys_the_sql_progress_deadline(scanner, tmp_path, monkeypatch):
+    path, writer, _ = live_database(tmp_path)
+    destination = tmp_path / "notification-core.db"
+    try:
+        scanner.snapshot(path, destination)
+        previous = destination.read_bytes()
+        writer.executescript("DROP TABLE schema_info; CREATE VIEW schema_info AS SELECT CASE WHEN sum(n)>0 THEN 3 END AS version "
+                             "FROM (WITH RECURSIVE x(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM x WHERE n<5000) SELECT n FROM x);")
+        ticks = iter([0.0])
+        monkeypatch.setattr(scanner, "time", SimpleNamespace(monotonic=lambda: next(ticks, 31.0)))
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            scanner.snapshot(path, destination)
+        assert destination.read_bytes() == previous
+        assert not list(tmp_path.glob(".notification-copy-*"))
+    finally:
+        writer.close()
+
+
 @pytest.mark.parametrize("same_path", [True, False])
 def test_backup_destination_is_separate_and_beside_source(scanner, tmp_path, same_path):
     path, writer, _ = live_database(tmp_path)
@@ -173,6 +212,31 @@ def test_fixture_routes_have_exact_digest_subject_and_no_credentials(acceptance)
     assert json.loads(evidence.sbom_bytes)["components"][0]["purl"] == "pkg:pypi/example@1"
     assert len(calls) == 5
     assert acceptance.REGISTRY_TOKEN not in json.dumps(routes) and acceptance.MATRIX_TOKEN not in json.dumps(routes)
+
+
+@pytest.mark.parametrize("unknown", [True, False])
+def test_native_inspector_checks_persisted_coverage_without_on_demand_reports(acceptance, scanner, tmp_path, monkeypatch, capsys, unknown):
+    # Core's supported scan API persists coverage; Automation does not request
+    # an on-demand JSON report. Native API/mount/locking proof remains in CI.
+    store = StateStore(tmp_path / "core.db")
+    coverage = Applicability.COVERAGE_UNKNOWN if unknown else None
+    store.record_scan([QueryResult(Asset("synthetic", purl="pkg:pypi/example@1"), (), (), coverage)])
+    scanner.snapshot(tmp_path / "core.db", tmp_path / "notification-core.db")
+    (tmp_path / "runner").mkdir()
+    (tmp_path / "runner/health.json").write_text(json.dumps(dict(core_exit=4, status="coverage_warning")))
+    (tmp_path / "inventory.json").write_text(json.dumps([dict(purl="pkg:pypi/example@1")]))
+    (tmp_path / "inventory.json.manifest.json").write_text(json.dumps(dict(status="partial")))
+    assert not (tmp_path / "reports").exists()
+    monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(LOCK_EX=1, LOCK_NB=2, flock=lambda *args: None))
+    monkeypatch.setattr(acceptance.subprocess, "run", lambda *args, **options: SimpleNamespace(returncode=75))
+    monkeypatch.setattr(sys, "argv", ["synthetic-inspector", "1"])
+    script = acceptance.INSPECT.replace("root=pathlib.Path('/core-state')", "root=pathlib.Path(" + repr(str(tmp_path)) + ")")
+    if unknown:
+        exec(compile(script, "synthetic-inspector", "exec"), {})
+        assert json.loads(capsys.readouterr().out)["core_exit"] == 4
+    else:
+        with pytest.raises(AssertionError):
+            exec(compile(script, "synthetic-inspector", "exec"), {})
 
 
 def test_native_helpers_do_not_use_an_owner_kubeconfig(acceptance, monkeypatch):

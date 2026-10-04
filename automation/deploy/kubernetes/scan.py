@@ -36,10 +36,11 @@ def snapshot(source: Path, destination: Path):
             reader = sqlite3.connect(source.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)
             writer = sqlite3.connect(pending, timeout=2)
             try:
+                reader.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+                writer.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
                 reader.execute("PRAGMA query_only=ON")
                 reader.execute("PRAGMA trusted_schema=OFF")
                 page_size = reader.execute("PRAGMA page_size").fetchone()[0]
-                writer.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
                 reader.execute("BEGIN")
                 version = reader.execute("SELECT version FROM schema_info LIMIT 2").fetchall()
                 if version != [(3,)]:
@@ -52,18 +53,20 @@ def snapshot(source: Path, destination: Path):
             finally:
                 writer.close()
                 reader.close()
-        regular(pending)
-        if pending.stat().st_size > MAX_DATABASE:
-            raise AutomationError("notification_snapshot_capacity")
-        with pending.open("r+b") as handle:
-            os.fsync(handle.fileno())
-        os.replace(pending, destination)
-        if os.name == "posix":
-            descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            regular(pending)
+            if pending.stat().st_size > MAX_DATABASE:
+                raise AutomationError("notification_snapshot_capacity")
+            with pending.open("r+b") as handle:
+                os.fsync(handle.fileno())
+            # Keep the same shared lock through publication: an older copy must
+            # not overtake another cooperating scanner/publisher in this gap.
+            os.replace(pending, destination)
+            if os.name == "posix":
+                descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
     finally:
         # Remove only this call's unpublished temporary copy, never prior state.
         pending.unlink(missing_ok=True)

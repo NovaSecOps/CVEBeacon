@@ -75,8 +75,12 @@ existing Automation CLI, then uses SQLite's backup API to create
 the **copy** to DELETE, checks integrity and atomically publishes it. The live Core
 rows and journal mode are unchanged. Run UUIDs, event IDs and schema 3 are preserved,
 so the notification ledger can retain its stable delivery cursor and event keys.
-The copy is published only after successful execution; copy failure fails the init
-stage and preserves the previous copy. Backup is capped at 256 MiB and 30 seconds.
+The copy is published only after successful execution. Failure before publication
+fails the init stage and preserves the previous copy; a directory-sync failure
+after publication reports failure with the verified new copy already in place.
+Backup is capped at 256 MiB and a 30-second SQLite processing budget, including
+source schema lookup; filesystem sync can exceed that budget. The shared Core
+resource lock remains held through atomic publication and directory sync.
 
 The notifier's [Core configuration](../automation/deploy/kubernetes/core-notify.example.toml)
 points at that copy on `/core-ro`, mounted read-only. Alert rendering still uses
@@ -147,6 +151,11 @@ allows the notifier to continue after it, set the scanner wrapper's `args` to
 `/core-state/runner/health.json` retains `core_exit = 4` and `coverage_warning`.
 Other failures remain nonzero. Successful container execution does not mean
 vulnerability-free inventory or complete coverage.
+
+The supported Automation scan persists results in Core SQLite. It does not request
+Core's optional on-demand JSON/XLSX export; an empty reports directory does not mean
+the scan failed. Use Core's supported export command separately when an export is
+needed.
 
 ## Persistence and scheduling
 
