@@ -14,6 +14,7 @@ from ._sqlite import BoundedConnection
 
 MAX_PAYLOAD = 65536
 EVENT_COLUMNS = {"event_id", "run_id", "occurred_at", "asset_id", "cve_id", "event_type", "fingerprint", "payload_json"}
+EVENT_TYPES = {name: "INTEGER" if name == "event_id" else "TEXT" for name in EVENT_COLUMNS}
 
 
 @contextmanager
@@ -35,7 +36,7 @@ def core_reader(filename: Path):
         if {tuple(row) for row in tables} != {("schema_info", "table"), ("events", "table"), ("runs", "table")}:
             raise AutomationError("unsupported_core_schema")
         columns = connection.execute("PRAGMA table_info(events)").fetchall()
-        if ({row[1] for row in columns} != EVENT_COLUMNS
+        if ({row[1]: row[2].upper() for row in columns} != EVENT_TYPES
                 or [(row[1], row[2].upper(), row[5]) for row in columns if row[5]] != [("event_id", "INTEGER", 1)]):
             raise AutomationError("unsupported_core_schema")
         yield connection
@@ -89,11 +90,15 @@ def event_batch(connection, cursor_id=0, cursor_run="", limit=64):
     if type(cursor_id) is not int or cursor_id < 0 or not 1 <= limit <= 256:
         raise AutomationError("invalid_notification_cursor")
     if cursor_id:
-        anchor = connection.execute("SELECT substr(run_id,1,37) FROM events WHERE event_id=?", (cursor_id,)).fetchone()
+        anchor = connection.execute("""SELECT CASE WHEN typeof(run_id)='text'
+            AND length(CAST(run_id AS BLOB))=36 THEN run_id END FROM events WHERE event_id=?""",
+            (cursor_id,)).fetchone()
         if anchor is None or anchor[0] != cursor_run:
             cursor_id = 0  # Replacement/retention: stable run UUID + event ID still deduplicate known rows.
-    rows = connection.execute("""SELECT event_id,substr(run_id,1,37) AS run_id,
-        substr(asset_id,1,161) AS asset_id,substr(cve_id,1,161) AS cve_id,substr(event_type,1,16) AS event_type,
+    rows = connection.execute("""SELECT event_id,
+        CASE WHEN typeof(run_id)='text' AND length(CAST(run_id AS BLOB))=36 THEN run_id END AS run_id,
+        substr(asset_id,1,161) AS asset_id,substr(cve_id,1,161) AS cve_id,
+        CASE WHEN typeof(event_type)='text' AND length(CAST(event_type AS BLOB))<=16 THEN event_type END AS event_type,
         CASE WHEN typeof(payload_json)='text' AND length(CAST(payload_json AS BLOB))<=?
              THEN payload_json ELSE NULL END AS payload FROM events WHERE event_id>? ORDER BY event_id LIMIT ?""",
         (MAX_PAYLOAD, cursor_id, limit)).fetchall()

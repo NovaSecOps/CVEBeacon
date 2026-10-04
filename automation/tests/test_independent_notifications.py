@@ -123,3 +123,29 @@ def test_changed_ledger_defaults_constraints_and_indexes_rejected(tmp_path, chan
         with ledger(cfg):
             pytest.fail('altered ledger schema was accepted')
     assert path.read_bytes() == before
+
+@pytest.mark.parametrize('field,declaration', [('run_id','BLOB'),('event_type','INTEGER'),('payload_json','BLOB')])
+def test_noncanonical_core_column_types_rejected_before_preparation(tmp_path,secrets,field,declaration):
+    cfg,filename,wire,clock=config(tmp_path,('slack',)),core(tmp_path),Wire(),Clock()
+    with closing(sqlite3.connect(filename)) as db:
+        sql=db.execute("SELECT sql FROM sqlite_master WHERE name='events'").fetchone()[0]
+        assert field+' TEXT' in sql
+        db.execute('ALTER TABLE events RENAME TO original_events')
+        db.execute(sql.replace(field+' TEXT',field+' '+declaration))
+        db.execute('INSERT INTO events SELECT * FROM original_events')
+        db.commit()
+    result=dispatch(cfg,filename,wire,clock)
+    assert result['errors']=={'slack':'event_preparation_failed'} and not wire.calls
+
+@pytest.mark.parametrize('field', ['run_id','event_type'])
+def test_nul_suffix_in_core_identity_not_hidden_by_sql_substring(tmp_path,secrets,field):
+    cfg,filename,wire,clock=config(tmp_path,('slack',)),core(tmp_path),Wire(),Clock()
+    with closing(sqlite3.connect(filename)) as db:
+        value=db.execute('SELECT '+field+' FROM events').fetchone()[0]
+        db.execute('UPDATE events SET '+field+'=?',(value+'\x00synthetic-suffix',))
+        db.commit()
+    result=dispatch(cfg,filename,wire,clock)
+    assert result['errors']=={'slack':'event_preparation_failed'} and not wire.calls
+    with ledger(cfg,readonly=True) as db:
+        assert db.execute('SELECT COUNT(*) FROM deliveries').fetchone()[0]==0
+        assert db.execute('SELECT cursor_id FROM destinations').fetchone()[0]==0
