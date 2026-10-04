@@ -72,9 +72,17 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install . ./extensions ./automation
+      - name: Verify pinned minimal Zot fixture
+        run: |
+          curl --fail --location --max-time 120 --max-filesize 268435456 \
+            --output "$RUNNER_TEMP/zot" \
+            https://github.com/project-zot/zot/releases/download/v2.1.21/zot-linux-amd64-minimal
+          echo 'd2422616a28dbae10a92c1df9daa23980e2f7f3deb0079968b928f23492196cb  '"$RUNNER_TEMP/zot" | sha256sum --check --strict
+          chmod 755 "$RUNNER_TEMP/zot"
       - run: python automation/tools/native_registry.py
         env:
           CVEBEACON_DISPOSABLE_CI: '1'
+          CVEBEACON_ZOT_BINARY: ${{ runner.temp }}/zot
 
   container:
     name: Automation / separate hardened OCI image

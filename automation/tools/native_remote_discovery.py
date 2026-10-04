@@ -166,7 +166,7 @@ def run_acceptance(root, sudo):
         assert partial.manifest["omissions"] == ["review-required"]
         assert not any(row.get("purl", "").startswith("pkg:deb/") for row in partial.records)
         discovered = run_jobs(config)["native-loopback"]
-        assert discovered["status"] == "success" and discovered["observations"] == 1
+        assert discovered["status"] == "success" and discovered.get("observations") == 1, discovered
         observation_file = config.state_dir / "discovery" / "native-loopback" / "current.json"
         observation = json.loads(observation_file.read_bytes())
         row = observation["observations"][0]

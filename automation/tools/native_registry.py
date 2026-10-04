@@ -1,4 +1,4 @@
-"""Pinned, ephemeral Distribution 3.1.2 with real TLS and OCI Referrers API.
+"""Pinned ephemeral Zot Referrers and Distribution unsupported API, with TLS.
 
 Docker is used only to create this synthetic registry, never exposed to the
 product or a generator. Client acquisition traffic is restricted to loopback.
@@ -9,6 +9,8 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import socket
+import subprocess
 import tempfile
 import time
 from urllib.parse import urljoin, urlsplit
@@ -25,6 +27,7 @@ from support import certificate, command, local_network_only
 
 
 REGISTRY_IMAGE = "registry:3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
+ZOT_SHA256 = "d2422616a28dbae10a92c1df9daa23980e2f7f3deb0079968b928f23492196cb"
 IMAGE_MEDIA = "application/vnd.oci.image.manifest.v1+json"
 SBOM_MEDIA = "application/vnd.cyclonedx+json"
 REPOSITORY = "synthetic/image"
@@ -80,6 +83,7 @@ class RegistryFixture:
 
 @contextmanager
 def distribution(root):
+    root.mkdir(mode=0o700)
     cert, key = certificate(root)
     name = "cvebeacon-registry-" + uuid.uuid4().hex[:16]
     # Pull setup precedes the product network guard; this is an immutable fixture.
@@ -113,12 +117,71 @@ def distribution(root):
         command(["docker", "rm", "--force", identifier])
 
 
+@contextmanager
+def zot(root):
+    """Own nonroot loopback process; no daemon install or registry extensions."""
+    root.mkdir(mode=0o700)
+    binary = Path(os.environ["CVEBEACON_ZOT_BINARY"])
+    assert binary.is_file() and not binary.is_symlink()
+    assert 0 < binary.stat().st_size <= 256 * 1024 * 1024
+    assert digest(binary.read_bytes()) == ZOT_SHA256
+    cert, key = certificate(root)
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    storage = root / "storage"
+    storage.mkdir(mode=0o700)
+    config = root / "zot.json"
+    config.write_bytes(json_bytes({
+        "distSpecVersion": "1.1.0", "storage": {"rootDirectory": str(storage), "commit": True},
+        "http": {"address": "127.0.0.1", "port": str(port), "tls": {"cert": str(cert), "key": str(key)}},
+        "log": {"level": "error"},
+    }))
+    with (root / "synthetic-zot.log").open("wb") as output:
+        child = subprocess.Popen([str(binary), "serve", str(config)], stdin=subprocess.DEVNULL,
+                                 stdout=output, stderr=output, start_new_session=True)
+        try:
+            fixture = RegistryFixture(f"https://127.0.0.1:{port}", cert)
+            deadline = time.monotonic() + 30
+            with local_network_only():
+                while True:
+                    assert child.poll() is None, "pinned synthetic Zot exited before readiness"
+                    try:
+                        assert fixture.transport.request("GET", fixture.url + "/v2/").status == 200
+                        break
+                    except AutomationError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.1)
+            yield fixture
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+
+
 def main():
-    if os.name != "posix" or os.environ.get("CVEBEACON_DISPOSABLE_CI") != "1":
+    if (os.name != "posix" or os.getuid() == 0 or os.environ.get("CVEBEACON_DISPOSABLE_CI") != "1"
+            or os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("CI") != "true"):
         raise SystemExit("native registry acceptance requires explicitly isolated Linux CI")
     with tempfile.TemporaryDirectory(prefix="cvebeacon-native-registry-") as temporary:
         root = Path(temporary)
-        with distribution(root) as fixture, local_network_only():
+        with distribution(root / "distribution") as fixture, local_network_only():
+            image_raw, image = fixture.image("distribution-unsupported-referrers")
+            fixture.sbom(image_raw)
+            registry = {"id": "local", "url": fixture.url, "repositories": [REPOSITORY], "ca_file": str(fixture.cert)}
+            definition = validate_registries((registry,), root)[0]
+            try:
+                RegistryClient(definition).acquire(image)
+            except AutomationError as error:
+                assert error.category == "registry_referrers_unavailable"
+            else:
+                raise AssertionError("Distribution3.1.2 unexpectedly implemented Referrers")
+        with zot(root / "zot") as fixture, local_network_only():
             image_raw, image = fixture.image("with-sbom")
             artifact = fixture.sbom(image_raw)
             registry = {"id": "local", "url": fixture.url, "repositories": [REPOSITORY], "ca_file": str(fixture.cert)}
@@ -158,7 +221,7 @@ def main():
                 pass
             else:
                 raise AssertionError("untrusted registry TLS accepted")
-    print("actual pinned Distribution3.1.2 TLS/referrers/digest/blob/importer, missing evidence preservation, ambiguity and explicit artifact pin passed")
+    print("actual pinned Zot2.1.21 TLS/referrers/digest/blob/importer, missing preservation, ambiguity/artifact pin and Distribution3.1.2 unsupported404 passed")
 
 
 if __name__ == "__main__":
