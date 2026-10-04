@@ -1,0 +1,31 @@
+[Unit]
+Description=CVEBeacon optional one-shot automation pipeline
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=cvebeacon-pipeline
+Group=cvebeacon-pipeline
+SupplementaryGroups=cvebeacon-stage
+WorkingDirectory=/var/lib/cvebeacon/pipeline
+UMask=0077
+ExecStart=/opt/cvebeacon/venv/bin/cvebeacon-auto --config /etc/cvebeacon/automation.toml run
+TimeoutStartSec=20min
+TimeoutStopSec=20s
+KillMode=control-group
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/cvebeacon/pipeline /var/lib/cvebeacon/staging/linux-a /var/lib/cvebeacon/staging/cluster-a
+InaccessiblePaths=/etc/cvebeacon/ingest-secrets
+StandardOutput=journal
+StandardError=journal

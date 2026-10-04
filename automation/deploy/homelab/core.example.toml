@@ -1,0 +1,14 @@
+[inventory]
+path = "/var/lib/cvebeacon/pipeline/merged.json"
+format = "json"
+
+[state]
+database = "/var/lib/cvebeacon/pipeline/core.db"
+
+[output]
+directory = "/var/lib/cvebeacon/pipeline/reports"
+
+[notifications.teams]
+enabled = false
+[notifications.email]
+enabled = false

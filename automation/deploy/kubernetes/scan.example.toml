@@ -1,0 +1,14 @@
+[automation]
+version = 1
+state_dir = "/core-state/runner"
+staging_dir = "/staging/sources"
+inventory_path = "/core-state/inventory.json"
+core_config = "/config/core.toml"
+core_timeout = 300
+
+[[sources]]
+id = "cluster-v2"
+kind = "upload"
+required = true
+max_age_seconds = 300
+allow_partial = false

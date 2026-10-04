@@ -72,6 +72,11 @@ same canonical inventory boundary. Core installation and the Quick Start remain
 independent. See the [architecture](docs/ARCHITECTURE.md) for trust and dependency
 boundaries.
 
+Optional [Automation and Integrations](docs/AUTOMATION.md) adds scheduled
+collection, authenticated uploads, digest-bound SBOM acquisition, independent
+notification channels and operational health. See the
+[central VM reference](docs/HOME_LAB_AUTOMATION.md) for deployment examples.
+
 ## License
 
 CVEBeacon is licensed under the [Apache License 2.0](LICENSE) (`Apache-2.0`). Project attribution is preserved in [NOTICE](NOTICE).

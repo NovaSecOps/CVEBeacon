@@ -1,0 +1,20 @@
+[inventory]
+path = "merged.json"
+format = "json"
+
+[state]
+database = "core-state/core.db"
+
+[output]
+directory = "reports"
+
+# Configure Core sources as documented in the existing Core guide.
+# This offline example preserves unknown coverage rather than claiming clean.
+[sources]
+osv_enabled = false
+nvd_enabled = false
+cve_enabled = false
+euvd_enabled = false
+cisa_kev_enabled = false
+eu_kev_enabled = false
+epss_enabled = false

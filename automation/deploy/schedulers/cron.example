@@ -1,0 +1,6 @@
+# Reference user crontab for the dedicated cvebeacon-pipeline account.
+# Choose cron OR systemd OR Task Scheduler. Do not install overlapping schedules.
+# Keep HOME/configuration/credential ownership under administrator control.
+SHELL=/bin/sh
+PATH=/usr/bin:/bin
+*/15 * * * * /opt/cvebeacon/venv/bin/cvebeacon-auto --config /etc/cvebeacon/automation.toml run >> /var/lib/cvebeacon/pipeline/cron.log 2>&1

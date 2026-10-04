@@ -1,0 +1,16 @@
+# Copy to an administrator-owned configuration directory; paths are relative.
+[automation]
+version = 1
+state_dir = "automation-state"
+staging_dir = "staging"
+inventory_path = "merged.json"
+core_config = "core.example.toml"
+core_timeout = 600
+
+[[sources]]
+id = "synthetic-host"
+kind = "snapshot"
+snapshot = "host.json"
+required = true
+max_age_seconds = 86400
+allow_partial = false

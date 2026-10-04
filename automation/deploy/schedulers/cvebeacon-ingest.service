@@ -1,0 +1,33 @@
+[Unit]
+Description=CVEBeacon authenticated snapshot intake
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=cvebeacon-ingest
+Group=cvebeacon-ingest
+SupplementaryGroups=cvebeacon-stage
+UMask=0077
+ExecStart=/opt/cvebeacon/venv/bin/cvebeacon-auto --config /etc/cvebeacon/ingest.toml ingest serve
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=20s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/cvebeacon/staging/windows-a
+InaccessiblePaths=/var/lib/cvebeacon/pipeline /etc/cvebeacon/pipeline-secrets /var/lib/cvebeacon/staging/linux-a /var/lib/cvebeacon/staging/cluster-a
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
