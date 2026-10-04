@@ -56,13 +56,13 @@ Each table accepts its provider fields above and these optional common fields:
 | Field | Default | Accepted range |
 | --- | --- | --- |
 | `enabled` | `true` | Boolean |
-| `timeout_seconds` | 15 | Integer 1–30 per HTTP request |
-| `max_attempts` | 5 | Integer 1–10 per part |
-| `batch_size` | 64 | Integer 1–256 events prepared and sends attempted per channel/run |
-| `max_parts` | 8 | Integer 1–16 parts per logical message |
-| `min_interval_seconds` | Telegram 3; others 1 | Integer 1–86400; Telegram requires at least 3 |
-| `retry_base_seconds` | 30 | Integer 1–3600 |
-| `retry_max_seconds` | 3600 | Integer 1–86400, at least the base |
+| `timeout_seconds` | 15 | Integer 1â€“30 per HTTP request |
+| `max_attempts` | 5 | Integer 1â€“10 per part |
+| `batch_size` | 64 | Integer 1â€“256 events prepared and sends attempted per channel/run |
+| `max_parts` | 8 | Integer 1â€“16 parts per logical message |
+| `min_interval_seconds` | Telegram 3; others 1 | Integer 1â€“86400; Telegram requires at least 3 |
+| `retry_base_seconds` | 30 | Integer 1â€“3600 |
+| `retry_max_seconds` | 3600 | Integer 1â€“86400, at least the base |
 
 Unknown keys, unknown providers, Booleans used as numeric bounds, non-finite values
 and raw credentials are rejected. Telegram accepts a nonzero numeric chat ID or an
@@ -139,8 +139,9 @@ cursors, attempts, due times and provider cooldowns. It does not store tokens,
 webhook URLs, provider response bodies or provider exception messages. A Matrix
 token-context digest is retained only to prevent unsafe replay after token changes.
 The local ledger contains the prepared alert facts; protect and back it up with the
-state directory. Do not edit, delete or reset delivery state as an automatic retry
-mechanism.
+state directory. The reader rejects changes to the known version-1 schema,
+including keys, defaults, constraints and indexes, before processing events. Do not
+edit, delete or reset delivery state as an automatic retry mechanism.
 
 Each part moves through `pending`, `sending`, `accepted`, `retryable`, `permanent`
 or `ambiguous`. The text and Matrix transaction are committed before a part enters
@@ -181,10 +182,11 @@ Malformed or missing hints use the bounded backoff policy. Retry hints are parse
 as finite bounded numbers, not unrestricted numeric expressions.
 
 At most 32 parts are attempted per service invocation. Scheduling has a 30-second
-budget and waits at most three seconds at a time for near due parts. A request
-already in progress retains its configured finite timeout; Matrix may perform two
-requests for one attempt. The service returns remaining work for later scheduler
-runs instead of starting an indefinite retry loop. The ledger refuses growth beyond
+budget and waits at most three seconds at a time for near due parts. Each attempt
+receives a bounded share of the remaining run time so a slow provider leaves time
+for other channels. Matrix encryption preflight and message PUT share that same
+attempt deadline. The service returns remaining work for later scheduler runs
+instead of starting an indefinite retry loop. The ledger refuses growth beyond
 100,000 prepared parts or a 256 MiB database; there is no automatic pruning.
 `unhealthy` is true for enabled channels with retryable, sending, permanent or
 ambiguous parts, or safe preparation/binding errors. `pending` alone describes

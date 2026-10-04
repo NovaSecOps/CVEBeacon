@@ -53,10 +53,14 @@ def _send_due(connection, targets, *, transport_factory, clock, sleeper, random_
                                        (timestamp, row["rowid"]))
                 progressed = True
                 continue
+            # Reserve time for every other configured channel before retrying this one.
+            timeout = min(bound.channel.timeout, (deadline - time.monotonic()) / len(ordered))
+            if timeout <= 0:
+                break
             claim(connection, row, timestamp)  # Commit before entering credential-bearing transport.
             try:
                 outcome = bound.send(row["text"], row["transaction_id"], transport_factory=transport_factory,
-                                     timestamp=timestamp, timeout=max(1, min(bound.channel.timeout, int(deadline - time.monotonic()))))
+                                     timestamp=timestamp, timeout=timeout)
             except Exception:
                 # No exception text/provider data may cross this boundary. Unknown send phase fails closed.
                 outcome = Outcome("retryable" if bound.channel.provider == "matrix" else "ambiguous", "adapter_failure")

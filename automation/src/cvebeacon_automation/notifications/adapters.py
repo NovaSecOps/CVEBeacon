@@ -7,6 +7,7 @@ from email.utils import parsedate_to_datetime
 import math
 from pathlib import Path
 import re
+import time
 from urllib.parse import quote, urlsplit
 
 from cvebeacon_extensions.contract import decode_json, json_bytes
@@ -166,7 +167,9 @@ class BoundChannel:
 
     def send(self, text, transaction, *, transport_factory=HTTPS, timestamp=0, timeout=None):
         provider = self.channel.provider
-        client = transport_factory(self.url, timeout=min(self.channel.timeout, timeout or self.channel.timeout),
+        budget = min(self.channel.timeout, timeout if timeout is not None else self.channel.timeout)
+        deadline = time.monotonic() + budget
+        client = transport_factory(self.url, timeout=max(1, budget),
                                    max_body=MAX_REQUEST, max_response=MAX_RESPONSE)
         headers = {"Content-Type": "application/json"}
         if provider == "matrix":
@@ -174,6 +177,10 @@ class BoundChannel:
             path = self.url + "/_matrix/client/v3/rooms/" + quote(self.channel.options["room_id"], safe="")
             # A GET outcome cannot make the later POST/PUT ambiguous: it has not been sent.
             try:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return Outcome("retryable", "send_budget_exhausted")
+                client.timeout = left
                 checked = client.request("GET", path + "/state/m.room.encryption", headers=headers)
                 data = _json(checked.body)
             except (TransportError, OSError, ValueError):
@@ -201,6 +208,11 @@ class BoundChannel:
             fallback = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             payload = {"text": fallback, "blocks": [{"type": "section", "text": {"type": "plain_text", "text": text, "emoji": False}}]}
         try:
+            # Matrix preflight and PUT share the same send deadline.
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return Outcome("retryable", "send_budget_exhausted")
+            client.timeout = left
             result = client.request(method, url, headers=headers, body=json_bytes(payload))
         except TransportError as exc:
             return Outcome("retryable" if provider == "matrix" or not exc.transmitted else "ambiguous", "transport_failure")
