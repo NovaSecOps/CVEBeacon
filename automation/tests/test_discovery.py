@@ -123,8 +123,12 @@ def test_ipv6_fixed_command_and_sanitized_environment(tmp_path, monkeypatch):
     seen = []
     def fake_run(command, **settings):
         seen.append(command)
-        assert {"--unprivileged", "-sT", "-sV", "--version-light", "--open", "-n", "-Pn", "--no-stylesheet", "--noninteractive", "--servicedb", "--versiondb"} <= set(command)
-        assert command[command.index("--servicedb") + 1].endswith("nmap-services")
+        assert {"--unprivileged", "-sT", "-sV", "--version-light", "--open", "-n", "-Pn", "--no-stylesheet", "--noninteractive", "--datadir", "--versiondb"} <= set(command)
+        # Real Nmap rejects the fastscan implied by --servicedb with explicit -p.
+        if "--servicedb" in command or "-F" in command:
+            return 1, b""
+        assert Path(command[command.index("--datadir") + 1]).as_posix() == "/trusted/nmap-data"
+        assert command[command.index("-p") + 1] == "22"
         assert command[command.index("--versiondb") + 1].endswith("nmap-service-probes")
         assert not {"-A", "-O", "-sC", "--script", "--allports", "--webxml"} & set(command)
         assert settings["limit"] == nmap.MAX_XML_BYTES and 1 <= settings["timeout"] <= 120

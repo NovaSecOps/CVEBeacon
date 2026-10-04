@@ -391,7 +391,9 @@ def run_discovery(job: dict, *, scratch: Path) -> dict:
                 raise AutomationError("process_timeout")
             command = [binary, "--unprivileged", "-n", "-Pn", "-sT", "-sV", "--version-light", "--open",
                 "--no-stylesheet", "--noninteractive", "--datadir", str(data_dir), "-oX", "-",
-                "--servicedb", str(data_dir / "nmap-services"), "--versiondb", str(data_dir / "nmap-service-probes"),
+                # --servicedb implies -F, which conflicts with explicit -p.
+                # The checked --datadir selects services; ambient fallback is refused.
+                "--versiondb", str(data_dir / "nmap-service-probes"),
                 "--host-timeout", str(min(60, job["timeout"])) + "s", "--max-retries", "1", "--max-parallelism", "8",
                 "-p", ",".join(str(port) for port in job["ports"])]
             if family == 6:
