@@ -17,6 +17,29 @@ TABLE_COLUMNS = {
     "destinations": {"channel", "destination", "provider", "cursor_id", "cursor_run", "next_send"},
     "provider_cooldowns": {"provider", "next_send"},
 }
+SCHEMA_SQL = """
+CREATE TABLE deliveries (
+    event_key TEXT NOT NULL, channel TEXT NOT NULL, destination TEXT NOT NULL,
+    provider TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('event','operational','test')),
+    part INTEGER NOT NULL, text TEXT NOT NULL,
+    transaction_id TEXT NOT NULL, replay_scope TEXT NOT NULL, state TEXT NOT NULL
+        CHECK(state IN ('pending','sending','accepted','retryable','permanent','ambiguous')),
+    attempts INTEGER NOT NULL DEFAULT 0, next_retry REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL, error TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(event_key,channel,destination,part));
+CREATE INDEX due_deliveries ON deliveries(channel,destination,state,next_retry,updated_at);
+CREATE TABLE destinations (
+    channel TEXT NOT NULL, destination TEXT NOT NULL, provider TEXT NOT NULL,
+    cursor_id INTEGER NOT NULL DEFAULT 0, cursor_run TEXT NOT NULL DEFAULT '',
+    next_send REAL NOT NULL DEFAULT 0, PRIMARY KEY(channel,destination));
+CREATE TABLE provider_cooldowns (provider TEXT PRIMARY KEY, next_send REAL NOT NULL);
+PRAGMA user_version=1;
+"""
+# Version 1 is Automation-owned; altered keys, defaults or constraints can lose alerts.
+SCHEMA_DEFINITIONS = {statement.split()[2]: " ".join(statement.split())
+                      for statement in SCHEMA_SQL.split(";") if statement.strip().startswith("CREATE ")}
+
+
 SCHEMA_OBJECTS = {(name, "table", name) for name in TABLE_COLUMNS} | {
     ("due_deliveries", "index", "deliveries"),
     ("sqlite_autoindex_deliveries_1", "index", "deliveries"),
@@ -62,28 +85,13 @@ def ledger(config, *, readonly=False, core_db=None):
             existing = connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
             if existing:
                 raise AutomationError("unsupported_notification_ledger")
-            connection.executescript("""
-                CREATE TABLE deliveries (
-                    event_key TEXT NOT NULL, channel TEXT NOT NULL, destination TEXT NOT NULL,
-                    provider TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('event','operational','test')),
-                    part INTEGER NOT NULL, text TEXT NOT NULL,
-                    transaction_id TEXT NOT NULL, replay_scope TEXT NOT NULL, state TEXT NOT NULL
-                        CHECK(state IN ('pending','sending','accepted','retryable','permanent','ambiguous')),
-                    attempts INTEGER NOT NULL DEFAULT 0, next_retry REAL NOT NULL DEFAULT 0,
-                    updated_at REAL NOT NULL, error TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY(event_key,channel,destination,part));
-                CREATE INDEX due_deliveries ON deliveries(channel,destination,state,next_retry,updated_at);
-                CREATE TABLE destinations (
-                    channel TEXT NOT NULL, destination TEXT NOT NULL, provider TEXT NOT NULL,
-                    cursor_id INTEGER NOT NULL DEFAULT 0, cursor_run TEXT NOT NULL DEFAULT '',
-                    next_send REAL NOT NULL DEFAULT 0, PRIMARY KEY(channel,destination));
-                CREATE TABLE provider_cooldowns (provider TEXT PRIMARY KEY, next_send REAL NOT NULL);
-                PRAGMA user_version=1;
-            """)
+            connection.executescript(SCHEMA_SQL)
         elif version != 1:
             raise AutomationError("unsupported_notification_ledger")
-        objects = connection.execute("SELECT name,type,tbl_name FROM sqlite_master LIMIT ?", (len(SCHEMA_OBJECTS) + 1,)).fetchall()
-        if {tuple(row) for row in objects} != SCHEMA_OBJECTS:
+        objects = connection.execute("SELECT name,type,tbl_name,sql FROM sqlite_master LIMIT ?", (len(SCHEMA_OBJECTS) + 1,)).fetchall()
+        if ({tuple(row[:3]) for row in objects} != SCHEMA_OBJECTS
+                or any((" ".join(row[3].split()) if row[3] else None) != SCHEMA_DEFINITIONS.get(row[0])
+                       for row in objects)):
             raise AutomationError("unsupported_notification_ledger")
         for name, columns in TABLE_COLUMNS.items():
             if {row[1] for row in connection.execute("PRAGMA table_info(" + name + ")")} != columns:

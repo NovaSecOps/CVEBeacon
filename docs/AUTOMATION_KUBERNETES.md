@@ -83,7 +83,9 @@ source schema lookup; filesystem sync can exceed that budget. The shared Core
 resource lock remains held through atomic publication and directory sync.
 
 The notifier's [Core configuration](../automation/deploy/kubernetes/core-notify.example.toml)
-points at that copy on `/core-ro`, mounted read-only. Alert rendering still uses
+points at `/core-ro/notification-core.db`, the only file mounted from the Core
+claim through a read-only `subPath`. The live database, WAL files, inventory and
+scanner health are absent from the notifier filesystem. Alert rendering still uses
 Automation's bounded schema-3 reader, and accepted additional deliveries are stored
 only on the separate notification claim. Core's Teams rows are not changed.
 Copy publication and notification are distinct operations; a crash can defer new
