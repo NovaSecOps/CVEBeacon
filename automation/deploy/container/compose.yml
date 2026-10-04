@@ -1,0 +1,36 @@
+# Prepare administrator-controlled config, staged inputs and secret files first.
+services:
+  pipeline:
+    image: cvebeacon-automation:local
+    profiles: [pipeline]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    volumes:
+      - ./config:/config:ro
+      - ./staging:/staging:ro
+      - ./automation-state:/automation-state
+      - ./inventory:/inventory
+      - ./core-state:/core-state
+      - ./reports:/reports
+      - ./pipeline-secrets:/run/secrets:ro
+    command: [--config, /config/automation.toml, run]
+    restart: "no"
+  ingest:
+    image: cvebeacon-automation:local
+    profiles: [ingest]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    volumes:
+      - ./ingest-config:/config:ro
+      - ./staging:/staging
+      - ./upload-secrets:/run/secrets:ro
+    # TLS is mandatory when configuration binds beyond container loopback.
+    ports: ["127.0.0.1:8765:8765"]
+    command: [--config, /config/ingest.toml, ingest, serve]
+    restart: unless-stopped

@@ -147,3 +147,69 @@ def test_sidecar_cannot_overwrite_input(tmp_path):
     config.core_config.write_text(config.core_config.read_text().replace('"merged.json"', '"overlap.json"'))
     assert run_pipeline(config, scanner=lambda c: pytest.fail("collision")) == 2
     assert "pipeline_path_collision" in status(config.state_dir)["failures"]
+
+
+@pytest.mark.parametrize("core_exit", [0, 4])
+def test_operational_delivery_failure_is_persisted_without_erasing_core_coverage(tmp_path, monkeypatch, core_exit):
+    from cvebeacon_automation.notifications import service
+    config, source = setup(tmp_path)
+    config = replace(config, notifications=({"id": "synthetic"},), operations={"enabled": True})
+    monkeypatch.setattr(service, "dispatch", lambda *args: {"unhealthy": False})
+    monkeypatch.setattr(service, "operational", lambda *args: {"version": 1, "unhealthy": True, "attempted": 1})
+    assert run_pipeline(config, scanner=lambda c: core_exit) == (5 if core_exit == 0 else 4)
+    health = status(config.state_dir)
+    assert health["core_exit"] == core_exit and health["operations"]["unhealthy"]
+    assert "operational_notification_failure" in health["failures"]
+    assert health["consecutive_failures"] == 1
+
+
+def test_disabled_discovery_does_not_degrade_pipeline(tmp_path, monkeypatch):
+    from cvebeacon_automation.discovery import nmap
+    config, source = setup(tmp_path)
+    config = replace(config, discovery=({"id": "disabled", "enabled": False},))
+    monkeypatch.setattr(nmap, "run_jobs", lambda config: {"disabled": {"status": "disabled"}})
+    assert run_pipeline(config, scanner=lambda c: 0) == 0
+    assert status(config.state_dir)["discovery"]["disabled"]["status"] == "disabled"
+
+
+@pytest.mark.parametrize("value", [[], {"version": 99, "status": "operational"},
+    {"version": 1, "status": "operational", "consecutive_failures": "1"},
+    {"version": 1, "status": "operational", "sources": []}])
+def test_corrupt_health_is_not_silently_reset(tmp_path, value):
+    directory = tmp_path / "state"
+    directory.mkdir()
+    filename = directory / "health.json"
+    raw = json.dumps(value).encode()
+    filename.write_bytes(raw)
+    with pytest.raises(AutomationError, match="invalid_automation_health"):
+        status(directory)
+    assert filename.read_bytes() == raw
+
+
+def test_kubernetes_observation_collision_preserves_input(tmp_path):
+    config, source = setup(tmp_path)
+    raw = source.read_bytes()
+    config = replace(config, sources=(Source("cluster", kind="kubernetes", options={"observations": str(config.inventory_path)}),))
+    assert run_pipeline(config, scanner=lambda c: pytest.fail("observation collision must halt")) == 2
+    assert source.read_bytes() == raw
+    assert "pipeline_path_collision" in status(config.state_dir)["failures"]
+
+
+def test_core_database_cannot_overwrite_static_source(tmp_path):
+    config, source = setup(tmp_path)
+    raw = source.read_bytes()
+    config.core_config.write_text(config.core_config.read_text().replace('database="core.db"', 'database="source.json"'))
+    assert run_pipeline(config, scanner=lambda c: pytest.fail("database collides with input")) == 2
+    assert source.read_bytes() == raw
+    assert "core_state_path_collision" in status(config.state_dir)["failures"]
+
+
+def test_explicit_container_coverage_policy_preserves_health(tmp_path, monkeypatch, capsys):
+    from cvebeacon_automation import cli, config as configuration, pipeline
+    config, source = setup(tmp_path)
+    monkeypatch.setattr(configuration, "load_config", lambda _: config)
+    monkeypatch.setattr(pipeline, "core_scan", lambda _: 4)
+    assert cli.main(["run", "--accept-coverage-warning"]) == 0
+    assert status(config.state_dir)["core_exit"] == 4
+    assert status(config.state_dir)["status"] == "coverage_warning"
+    assert "coverage warning" in capsys.readouterr().err

@@ -15,7 +15,7 @@ from cvebeacon_extensions.contract import ExtensionError, manifest_path, read_by
 from cvebeacon_extensions.merge import merge_snapshots
 
 from .common import AutomationError, atomic, directory, lock, now, publish_pair, regular
-from .config import Config
+from .config import Config, input_paths
 from .health import save, status
 from .process import run
 from .staging import current_snapshot, publish
@@ -24,10 +24,10 @@ from .staging import current_snapshot, publish
 def collect(config, source):
     if source.kind == "ssh":
         from .remote.ssh import collect_ssh
-        collect_ssh(config, source)
+        return collect_ssh(config, source)
     elif source.kind in {"registry", "kubernetes"}:
         from .registry.acquire import collect_source
-        collect_source(config, source)
+        return collect_source(config, source)
 
 
 def core_scan(config: Config) -> int:
@@ -47,10 +47,7 @@ def run_pipeline(config: Config, *, scanner=None) -> int:
         try:
             core = load_core(config.core_config)
             output_pair = {config.inventory_path, manifest_path(config.inventory_path)}
-            protected = {config.config_path, config.core_config, core.database_path}
-            for source in config.sources:
-                if source.snapshot:
-                    protected.update({source.snapshot, manifest_path(source.snapshot)})
+            protected = input_paths(config) | {core.database_path}
             if output_pair & protected:
                 raise AutomationError("pipeline_path_collision")
             # Different configs/state directories must still serialize shared outputs/DBs.
@@ -59,7 +56,8 @@ def run_pipeline(config: Config, *, scanner=None) -> int:
             # Core configuration is explicit; never patch its identity/config semantics.
             if core.inventory.path != config.inventory_path or core.inventory.format not in {"auto", "json"}:
                 raise AutomationError("core_inventory_configuration_mismatch")
-            if core.database_path in {config.inventory_path, config.config_path, config.core_config} or core.database_path.is_relative_to(config.staging_dir):
+            owned_state = {config.state_dir / name for name in ("health.json", "notification-ledger.sqlite3", "automation.lock", "notifications.lock")}
+            if core.database_path in output_pair | input_paths(config) | owned_state or core.database_path.is_relative_to(config.staging_dir):
                 raise AutomationError("core_state_path_collision")
             for destination in (config.inventory_path, manifest_path(config.inventory_path)):
                 if destination.exists() or destination.is_symlink():
@@ -73,9 +71,12 @@ def run_pipeline(config: Config, *, scanner=None) -> int:
                     entry["last_collection_success"] = prior["last_collection_success"]
                 acquisition_failed = False
                 try:
-                    collect(config, source)
+                    outcome = collect(config, source)
                     if source.kind in {"ssh", "registry", "kubernetes"}:
                         entry["last_collection_success"] = now()
+                        entry["collection"] = "success"
+                        if isinstance(outcome, dict):
+                            entry.update((key, outcome[key]) for key in ("generation", "images") if key in outcome)
                 except (AutomationError, ExtensionError, OSError):
                     acquisition_failed = True
                     entry["collection"] = "failed"
@@ -133,7 +134,7 @@ def run_pipeline(config: Config, *, scanner=None) -> int:
             if config.discovery:
                 from .discovery.nmap import run_jobs
                 state["discovery"] = run_jobs(config)
-                if any(item["status"] != "success" for item in state["discovery"].values()):
+                if any(item["status"] not in {"success", "disabled"} for item in state["discovery"].values()):
                     state["failures"].append("discovery_failure")
             if code == 0 and state["failures"]:
                 code = 5
@@ -151,7 +152,17 @@ def run_pipeline(config: Config, *, scanner=None) -> int:
             state["ended_at"] = now()
             state["consecutive_failures"] = 0 if code == 0 else state["consecutive_failures"] + 1
             save(config.state_dir, state)
-        if config.operations.get("enabled") and config.notifications:
+        if config.operations.get("enabled") and config.notifications and state["status"] in {"operational", "coverage_warning", "degraded", "failed"}:
             from .notifications.service import operational
-            operational(config, state, previous)
+            try:
+                state["operations"] = operational(config, state, previous)
+                if state["operations"].get("unhealthy", False):
+                    state["failures"].append("operational_notification_failure")
+            except (AutomationError, OSError, ValueError):
+                state["operations"] = {"version": 1, "unhealthy": True, "error": "operational_notification_failure"}
+                state["failures"].append("operational_notification_failure")
+            if code == 0 and state["operations"]["unhealthy"]:
+                code, state["status"] = 5, "degraded"
+            state["consecutive_failures"] = 0 if code == 0 else previous.get("consecutive_failures", 0) + 1
+            save(config.state_dir, state)
         return code

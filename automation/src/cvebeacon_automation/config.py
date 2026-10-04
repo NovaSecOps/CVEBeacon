@@ -68,6 +68,32 @@ class Config:
     operations: dict = field(default_factory=dict)
 
 
+def input_paths(config: Config) -> set[Path]:
+    """Explicit configured inputs, including credential files, without reading them."""
+    base = config.config_path.parent
+    result = {config.config_path, config.core_config}
+    for source in config.sources:
+        if source.snapshot:
+            result.update({source.snapshot, source.snapshot.with_name(source.snapshot.name + ".manifest.json")})
+        for key in (("observations",) if source.kind == "kubernetes" else ("key", "known_hosts") if source.kind == "ssh" else ()):
+            if key in source.options:
+                result.add(path(base, source.options[key]))
+    def files(value):
+        if isinstance(value, dict):
+            if set(value) == {"file"}:
+                result.add(path(base, value["file"]))
+            for child in value.values():
+                files(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                files(child)
+    files((config.notifications, config.registries))
+    for registry in config.registries:
+        if "ca_file" in registry:
+            result.add(path(base, registry["ca_file"]))
+    return result
+
+
 def load_config(filename: str | Path) -> Config:
     filename = Path(os.path.abspath(filename))
     base = filename.parent
@@ -146,5 +172,10 @@ def load_config(filename: str | Path) -> Config:
                 yield from secret_names(nested)
     if set(env) & set(secret_names((notifications, registries))):
         raise AutomationError("integration_credential_in_core_environment")
-    return Config(filename, state, staging, inventory, core, tuple(sources), number(settings.get("core_timeout", 600), 5, 3600),
-                  tuple(env), notifications, registries, discovery, operations)
+    result = Config(filename, state, staging, inventory, core, tuple(sources), number(settings.get("core_timeout", 600), 5, 3600),
+                    tuple(env), notifications, registries, discovery, operations)
+    owned = output_pair | {state / name for name in ("health.json", "automation.lock", "notifications.lock", "notification-ledger.sqlite3")}
+    owned.update(state / ("collection-" + source.id + ".json") for source in sources)
+    if owned & input_paths(result):
+        raise AutomationError("configuration_path_collision")
+    return result

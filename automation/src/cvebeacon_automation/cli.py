@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 from cvebeacon_extensions.contract import ExtensionError
+from cvebeacon.errors import CVEBeaconError
 from .common import AutomationError
 
 
@@ -13,7 +14,11 @@ def parser():
     result = argparse.ArgumentParser(prog="cvebeacon-auto")
     result.add_argument("--config", default="cvebeacon-automation.toml")
     commands = result.add_subparsers(dest="command", required=True)
-    commands.add_parser("run", help="one-shot collection, merge, core scan and notification pipeline")
+    pipeline = commands.add_parser("run", help="one-shot collection, merge, core scan and notification pipeline")
+    pipeline.add_argument("--accept-coverage-warning", action="store_true",
+                          help="allow a completed Core exit 4 to continue a container job; health remains coverage_warning")
+    collector = commands.add_parser("collect", help="refresh one configured source without scanning or resolving notification secrets")
+    collector.add_argument("source")
     for name in ("status", "doctor"):
         child = commands.add_parser(name, help="separate operational health JSON")
         child.add_argument("--json", action="store_true", help="JSON is also the default")
@@ -57,13 +62,29 @@ def main(argv=None):
             return 0
         from .config import load_config
         config = load_config(args.config)
-        if args.command in {"notify", "discover"}:
+        if args.command in {"notify", "discover", "collect"}:
             from .common import lock
             with lock(config.state_dir / "automation.lock"):
-                if args.command == "discover":
+                if args.command == "collect":
+                    from .pipeline import collect
+                    from .common import write_json, now
+                    source = next((item for item in config.sources if item.id == args.source), None)
+                    if source is None or source.kind not in {"ssh", "registry", "kubernetes"}:
+                        raise AutomationError("collector_source_unavailable")
+                    record = {"version": 1, "source_id": source.id, "started_at": now(), "status": "failed"}
+                    try:
+                        outcome = collect(config, source)
+                        record.update(status="success", last_collection_success=now())
+                        if isinstance(outcome, dict):
+                            record.update((key, outcome[key]) for key in ("generation", "images") if key in outcome)
+                    finally:
+                        record["ended_at"] = now()
+                        write_json(config.state_dir / ("collection-" + source.id + ".json"), record)
+                    result, code = record, 0
+                elif args.command == "discover":
                     from .discovery.nmap import run_jobs
                     result = run_jobs(config)
-                    code = 0 if all(item["status"] == "success" for item in result.values()) else 5
+                    code = 0 if all(item["status"] in {"success", "disabled"} for item in result.values()) else 5
                 else:
                     from .notifications import service
                     if args.notify_command == "status":
@@ -79,7 +100,11 @@ def main(argv=None):
                 return code
         if args.command == "run":
             from .pipeline import run_pipeline
-            return run_pipeline(config)
+            code = run_pipeline(config)
+            if code == 4 and args.accept_coverage_warning:
+                print("Core scan completed with coverage warning; review automation health and Core reports.", file=sys.stderr)
+                return 0
+            return code
         from .health import status
         value = status(config.state_dir)
         print(json.dumps(value, sort_keys=True, indent=2))
@@ -87,7 +112,7 @@ def main(argv=None):
     except AutomationError as exc:
         print("automation error: " + exc.category, file=sys.stderr)
         return 75 if exc.category == "locked" else 2
-    except (ExtensionError, OSError, ValueError):
+    except (ExtensionError, CVEBeaconError, OSError, ValueError):
         # External strings, secret values, URLs and absolute paths never cross this boundary.
         print("automation error: configuration, state or operation rejected", file=sys.stderr)
         return 2
