@@ -81,7 +81,9 @@ def validate_reference():
                                                capabilities={"drop": ["ALL"]})
         assert item["resources"]["limits"]
     assert next(mount for mount in stages[2]["volumeMounts"] if mount["name"] == "sources")["readOnly"]
-    assert next(mount for mount in stages[3]["volumeMounts"] if mount["name"] == "core")["readOnly"]
+    assert next(mount for mount in stages[3]["volumeMounts"] if mount["name"] == "core") == {
+        "name": "core", "mountPath": "/core-ro/notification-core.db",
+        "subPath": "notification-core.db", "readOnly": True}
     assert "--observations-only" in stages[0]["args"] and "--accept-coverage-warning" not in stages[2]["args"]
     assert not stages[0].get("env") and not stages[2].get("env")
     assert [item["name"] for item in stages[1]["env"]] == ["CVEBEACON_REGISTRY_BEARER"]
@@ -258,6 +260,10 @@ else:
         assert not pathlib.Path('/observations/pods.json').exists()
         if phase=='notify':
             database=pathlib.Path('/core-ro/notification-core.db')
+            assert database.is_file()
+            assert {item.name for item in database.parent.iterdir()}=={'notification-core.db'}
+            assert not pathlib.Path('/core-ro/core.db').exists()
+            assert not pathlib.Path('/core-ro/inventory.json').exists()
             try:
                 with database.open('r+b'): pass
             except OSError: pass

@@ -344,3 +344,11 @@ def test_ci_pins_match_frozen_native_versions_and_evidence_is_safe(acceptance):
     assert "persist-credentials: false" in new and "subject-manifest" not in str(workflow["permissions"])
     for script in (acceptance.SERVER, acceptance.RBAC, acceptance.STAGE, acceptance.INSPECT):
         compile(script, "synthetic-in-cluster-script", "exec")
+
+def test_notifier_mount_exposes_only_published_database_snapshot():
+    docs = list(yaml.safe_load_all((ROOT / 'automation/deploy/kubernetes/reference.yaml').read_text()))
+    cron = next(item for item in docs if item and item.get('kind') == 'CronJob')
+    notifier = cron['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]
+    mount = next(item for item in notifier['volumeMounts'] if item['name'] == 'core')
+    assert mount == {'name': 'core', 'mountPath': '/core-ro/notification-core.db',
+                     'subPath': 'notification-core.db', 'readOnly': True}

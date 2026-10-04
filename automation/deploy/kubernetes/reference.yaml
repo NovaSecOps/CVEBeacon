@@ -171,7 +171,7 @@ spec:
                 requests: {cpu: 100m, memory: 128Mi}
                 limits: {cpu: "1", memory: 512Mi}
               volumeMounts:
-                - {name: core, mountPath: /core-ro, readOnly: true}
+                - {name: core, mountPath: /core-ro/notification-core.db, subPath: notification-core.db, readOnly: true}
                 - {name: notifications, mountPath: /automation-state}
                 - {name: notify-config, mountPath: /config/notify.toml, subPath: notify.toml, readOnly: true}
                 - {name: core-notify-config, mountPath: /config/core.toml, subPath: core.toml, readOnly: true}
