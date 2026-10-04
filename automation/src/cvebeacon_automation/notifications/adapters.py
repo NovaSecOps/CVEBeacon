@@ -182,6 +182,8 @@ class BoundChannel:
                 return Outcome("permanent", "matrix_encrypted_room_unsupported")
             if checked.status == 429:
                 return Outcome("retryable", "rate_limited", retry_delay(checked.headers, data, provider, timestamp))
+            if checked.status == 408 or 500 <= checked.status < 600:
+                return Outcome("retryable", "matrix_encryption_check_failed")
             if checked.status != 404 or not data or data.get("errcode") != "M_NOT_FOUND":
                 return Outcome("permanent", "matrix_encryption_state_unknown")
             url = path + "/send/m.room.message/" + quote(transaction, safe="")
@@ -244,7 +246,11 @@ def bind(channel: Channel) -> BoundChannel:
         if not re.fullmatch(r"[1-9][0-9]{0,19}:[A-Za-z0-9_-]{16,256}", value):
             raise AutomationError("invalid_telegram_token")
         url = "https://api.telegram.org/bot" + value + "/sendMessage"
-        identity = ["telegram", value.split(":", 1)[0], channel.options]
+        identity_options = dict(channel.options)
+        chat = identity_options["chat_id"]
+        if type(chat) is int or re.fullmatch(r"-?[1-9][0-9]{0,15}", chat):
+            identity_options["chat_id"] = str(chat)
+        identity = ["telegram", value.split(":", 1)[0], identity_options]
         token = ""
     elif channel.provider in {"discord", "slack"}:
         target = endpoint(value)

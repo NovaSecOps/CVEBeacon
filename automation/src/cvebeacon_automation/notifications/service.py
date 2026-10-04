@@ -195,12 +195,20 @@ def operational(config, state, previous, *, transport_factory=HTTPS, clock=time.
         messages.append((digest(("operation:" + transition + ":" + stamp).encode("utf-8")),
                          "CVEBeacon Automation operational " + transition.upper() + "\n" + text))
     if config.operations.get("discovery", False) and isinstance(state.get("discovery"), dict):
-        changes = sum(len(item.get("changes", [])) for item in list(state["discovery"].values())[:16]
-                      if isinstance(item, dict) and isinstance(item.get("changes"), list))
-        if changes:
-            safe_count = min(changes, 10000)
-            key = digest(("operation:discovery:" + str(int(timestamp // interval)) + ":" + str(safe_count)).encode("ascii"))
-            messages.append((key, "CVEBeacon Automation DISCOVERY observations changed: " + str(safe_count)
+        changes, changed_jobs, scope_changes = 0, 0, 0
+        for item in list(state["discovery"].values())[:16]:
+            if not isinstance(item, dict) or item.get("status") != "success" or item.get("changed") is not True:
+                continue
+            count = sum(min(value, 10000) for key in ("added", "not_observed", "service_changes")
+                        if type(value := item.get(key)) is int and 0 <= value <= 10**12)
+            changes = min(10000, changes + count)
+            changed_jobs += 1
+            scope_changes += item.get("scope_changed") is True
+        if changed_jobs:
+            key = digest(("operation:discovery:" + str(int(timestamp // interval)) + ":"
+                          + str(changes) + ":" + str(changed_jobs) + ":" + str(scope_changes)).encode("ascii"))
+            messages.append((key, "CVEBeacon Automation DISCOVERY observation changes: " + str(changes)
+                             + "\nChanged jobs: " + str(changed_jobs) + "; changed scopes: " + str(scope_changes)
                              + "\nObservations require review; they are not authoritative vulnerability inventory."))
     return _deliver(config, messages=tuple(messages), transport_factory=transport_factory, clock=clock,
                     sleeper=sleeper, random_value=random_value)

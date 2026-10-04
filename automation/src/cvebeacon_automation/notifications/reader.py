@@ -4,12 +4,12 @@ from contextlib import contextmanager
 import math
 from pathlib import Path
 import sqlite3
-import time
 import unicodedata
 import uuid
 
 from cvebeacon_extensions.contract import decode_json
 from ..common import AutomationError, digest, regular
+from ._sqlite import BoundedConnection
 
 
 MAX_PAYLOAD = 65536
@@ -21,13 +21,12 @@ def core_reader(filename: Path):
     connection = None
     try:
         regular(filename)
-        connection = sqlite3.connect(filename.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)
+        connection = sqlite3.connect(filename.absolute().as_uri() + "?mode=ro", uri=True, timeout=2, factory=BoundedConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_PAYLOAD * 2)
-        deadline = time.monotonic() + 5
-        connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_PAYLOAD * 2)
         connection.execute("BEGIN")  # Schema checks and event reads share one read-only snapshot.
         version = connection.execute("SELECT version FROM schema_info LIMIT 2").fetchall()
         if len(version) != 1 or type(version[0][0]) is not int or version[0][0] != 3:
@@ -35,7 +34,9 @@ def core_reader(filename: Path):
         tables = connection.execute("SELECT name,type FROM sqlite_master WHERE name IN ('schema_info','events','runs') LIMIT 4").fetchall()
         if {tuple(row) for row in tables} != {("schema_info", "table"), ("events", "table"), ("runs", "table")}:
             raise AutomationError("unsupported_core_schema")
-        if {row[1] for row in connection.execute("PRAGMA table_info(events)")} != EVENT_COLUMNS:
+        columns = connection.execute("PRAGMA table_info(events)").fetchall()
+        if ({row[1] for row in columns} != EVENT_COLUMNS
+                or [(row[1], row[2].upper(), row[5]) for row in columns if row[5]] != [("event_id", "INTEGER", 1)]):
             raise AutomationError("unsupported_core_schema")
         yield connection
     except (sqlite3.Error, OSError, ValueError) as exc:

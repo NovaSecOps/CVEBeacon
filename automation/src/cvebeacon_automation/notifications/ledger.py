@@ -5,6 +5,7 @@ import sqlite3
 
 from ..common import AutomationError, digest, directory, regular
 from ..config import input_paths
+from ._sqlite import BoundedConnection
 
 
 STATES = ("pending", "sending", "accepted", "retryable", "permanent", "ambiguous")
@@ -15,6 +16,12 @@ TABLE_COLUMNS = {
                    "replay_scope", "state", "attempts", "next_retry", "updated_at", "error"},
     "destinations": {"channel", "destination", "provider", "cursor_id", "cursor_run", "next_send"},
     "provider_cooldowns": {"provider", "next_send"},
+}
+SCHEMA_OBJECTS = {(name, "table", name) for name in TABLE_COLUMNS} | {
+    ("due_deliveries", "index", "deliveries"),
+    ("sqlite_autoindex_deliveries_1", "index", "deliveries"),
+    ("sqlite_autoindex_destinations_1", "index", "destinations"),
+    ("sqlite_autoindex_provider_cooldowns_1", "index", "provider_cooldowns"),
 }
 
 
@@ -40,11 +47,13 @@ def ledger(config, *, readonly=False, core_db=None):
             yield None
             return
         directory(config.state_dir)
-        connection = sqlite3.connect(path.absolute().as_uri() + ("?mode=ro" if readonly else "?mode=rwc"), uri=True, timeout=2)
+        connection = sqlite3.connect(path.absolute().as_uri() + ("?mode=ro" if readonly else "?mode=rwc"),
+                                     uri=True, timeout=2, factory=BoundedConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 65536)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 65536)
         connection.execute("PRAGMA synchronous=FULL")
         if readonly:
             connection.execute("PRAGMA query_only=ON")
@@ -73,8 +82,8 @@ def ledger(config, *, readonly=False, core_db=None):
             """)
         elif version != 1:
             raise AutomationError("unsupported_notification_ledger")
-        names = connection.execute("SELECT name,type FROM sqlite_master WHERE name IN ('deliveries','destinations','provider_cooldowns') LIMIT 4").fetchall()
-        if {tuple(row) for row in names} != {(name, "table") for name in TABLE_COLUMNS}:
+        objects = connection.execute("SELECT name,type,tbl_name FROM sqlite_master LIMIT ?", (len(SCHEMA_OBJECTS) + 1,)).fetchall()
+        if {tuple(row) for row in objects} != SCHEMA_OBJECTS:
             raise AutomationError("unsupported_notification_ledger")
         for name, columns in TABLE_COLUMNS.items():
             if {row[1] for row in connection.execute("PRAGMA table_info(" + name + ")")} != columns:

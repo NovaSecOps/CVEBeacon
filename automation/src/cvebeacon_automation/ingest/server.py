@@ -118,7 +118,8 @@ class Receiver:
         valid = supplied.isascii() and hmac.compare_digest(supplied, expected) and pair is not None
         if not valid:
             with self.guard:
-                self.attempts[peer] = (window, count + 1)
+                current_window, current_count = self.attempts.get(peer, (current, 0))
+                self.attempts[peer] = (current_window, current_count + 1)
             raise AutomationError("ingestion_unauthorized")
         return pair[0]
 
@@ -161,10 +162,10 @@ class Handler(BaseHTTPRequestHandler):
             if len(self.headers) > 32 or sum(len(k) + len(v) for k, v in self.headers.items()) > 16384:
                 self.reply(431, {"status": "rejected"})
                 return
-            for header in ("Authorization", "X-CVEBeacon-Source", "Content-Length", "Content-Type", "Content-Encoding"):
+            for header in ("Authorization", "X-CVEBeacon-Source", "Content-Length", "Content-Type", "Content-Encoding", "Transfer-Encoding"):
                 if len(self.headers.get_all(header, [])) > 1:
                     raise AutomationError("upload_duplicate_header")
-            if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Encoding", "identity").lower() != "identity" or self.headers.get("Content-Type", "").lower() != "application/json":
+            if "Transfer-Encoding" in self.headers or self.headers.get("Content-Encoding", "identity").lower() != "identity" or self.headers.get("Content-Type", "").lower() != "application/json":
                 raise AutomationError("upload_encoding_rejected")
             source = self.server.receiver.authenticate(self.headers.get("X-CVEBeacon-Source"), self.headers.get("Authorization"), self.client_address[0])
             length = self.headers.get("Content-Length", "")
