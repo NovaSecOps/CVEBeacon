@@ -1,0 +1,15 @@
+# Receiver-only configuration: no Core database, reports, registry or notifier.
+[ingestion]
+version = 1
+host = "127.0.0.1"
+port = 8765
+staging_dir = "staging"
+proxy_https = true
+max_body_bytes = 12582912
+timeout_seconds = 15
+workers = 2
+
+[[sources]]
+id = "synthetic-host"
+credential = {file = "/run/secrets/synthetic-host-upload-token"}
+max_age_seconds = 86400

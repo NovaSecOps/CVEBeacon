@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cvebeacon-automation"
+version = "0.1.0"
+description = "Optional bounded orchestration and integrations for CVEBeacon"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+dependencies = ["cvebeacon>=0.1.0,<0.2", "cvebeacon-extensions>=0.1.0,<0.2"]
+
+[project.scripts]
+cvebeacon-auto = "cvebeacon_automation.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
