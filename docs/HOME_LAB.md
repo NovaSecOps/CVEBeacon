@@ -15,8 +15,11 @@ Windows ── local collection ── snapshot + manifest ──┘
 ```
 
 Choose an existing transfer mechanism such as restricted SCP/SFTP, a secured
-share, or existing orchestration. This toolkit has no upload listener or remote
-SSH/WinRM collection service. The hosts initiate or receive transfers according
+share, or existing orchestration. The Extensions v1 toolkit has no upload
+listener or remote SSH/WinRM collection service; the optional Automation package
+adds an [authenticated upload receiver](INGESTION.md) and
+[SSH collection](REMOTE_COLLECTION.md), while WinRM collection remains
+unavailable. The hosts initiate or receive transfers according
 to the administrator's policy; transfer credentials stay outside core config.
 Use source aliases such as `linux-a`, `linux-b`, and `windows-a`, with one stable,
 unique alias per host. An alias is not an authentication mechanism.

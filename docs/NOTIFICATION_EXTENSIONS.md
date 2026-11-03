@@ -56,13 +56,13 @@ Each table accepts its provider fields above and these optional common fields:
 | Field | Default | Accepted range |
 | --- | --- | --- |
 | `enabled` | `true` | Boolean |
-| `timeout_seconds` | 15 | Integer 1â€“30 per HTTP request |
-| `max_attempts` | 5 | Integer 1â€“10 per part |
-| `batch_size` | 64 | Integer 1â€“256 events prepared and sends attempted per channel/run |
-| `max_parts` | 8 | Integer 1â€“16 parts per logical message |
-| `min_interval_seconds` | Telegram 3; others 1 | Integer 1â€“86400; Telegram requires at least 3 |
-| `retry_base_seconds` | 30 | Integer 1â€“3600 |
-| `retry_max_seconds` | 3600 | Integer 1â€“86400, at least the base |
+| `timeout_seconds` | 15 | Integer 1–30 per HTTP request |
+| `max_attempts` | 5 | Integer 1–10 per part |
+| `batch_size` | 64 | Integer 1–256 events prepared and sends attempted per channel/run |
+| `max_parts` | 8 | Integer 1–16 parts per logical message |
+| `min_interval_seconds` | Telegram 3; others 1 | Integer 1–86400; Telegram requires at least 3 |
+| `retry_base_seconds` | 30 | Integer 1–3600 |
+| `retry_max_seconds` | 3600 | Integer 1–86400, at least the base |
 
 Unknown keys, unknown providers, Booleans used as numeric bounds, non-finite values
 and raw credentials are rejected. Telegram accepts a nonzero numeric chat ID or an
