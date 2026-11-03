@@ -15,8 +15,7 @@ from .store import WatchStore
 FULL_HISTORY_START = datetime(1999, 1, 1, tzinfo=timezone.utc)
 NVD_REQUEST_ESTIMATE = 400
 EUVD_REQUEST_ESTIMATE = 4200
-EPSS_MISSING_LIMIT = 1000
-PENDING_LIMIT = 25
+LOOKUP_LIMIT = 25
 LONG_GAP = timedelta(days=feeds.NVD_WINDOW_DAYS)
 
 
@@ -32,6 +31,7 @@ class SourceSummary:
     new: int = 0
     changed: int = 0
     ignored: int = 0
+    lookup_failures: int = 0
     error: str | None = None
 
 
@@ -40,6 +40,7 @@ class SyncReport:
     summaries: tuple[SourceSummary, ...] = ()
     cancelled: bool = False
     baseline: bool = False
+    touched_ids: tuple[str, ...] = ()
 
     @property
     def failures(self) -> tuple[str, ...]:
@@ -102,6 +103,7 @@ def _confirm_full_history(
         f"full history: {len(windows)} NVD window(s), roughly {NVD_REQUEST_ESTIMATE}+ NVD "
         f"requests and roughly {EUVD_REQUEST_ESTIMATE:,} EUVD requests"
     )
+    print("full history also downloads 1 EPSS file per day")
     print(
         "full history takes several hours and uses a lot of bandwidth "
         f"(about {hours:.0f} hour(s) at the current pacing)"
@@ -136,6 +138,7 @@ def sync_watch(
     stored_mode = metadata.get("initial_mode")
     mode = stored_mode or (watch.initial if first_run else "baseline")
     interval = config.sources.minimum_request_interval
+    catalogs = tuple(watch.sources)
 
     if first_run and stored_mode is None and watch.initial == "baseline":
         store.record_baseline(
@@ -207,9 +210,7 @@ def sync_watch(
             initial_window_start = FULL_HISTORY_START.date()
         else:
             initial_window_start = initial_date
-    kev_pending_since = (
-        None if mode == "full" else initial_window_start.isoformat()
-    )
+    lookup_since = None if mode == "full" else initial_window_start.isoformat()
     cursor_value = metadata.get("nvd_cursor")
     if cursor_value and now - _cursor_time(cursor_value) > LONG_GAP:
         print(
@@ -219,7 +220,8 @@ def sync_watch(
 
     api_key = config.secret(config.sources.nvd_api_key_env)
     nvd_requests = nvd_records = nvd_new = nvd_changed = 0
-    alert_ids: set[str] = set()
+    lookup_failures = 0
+    touched: set[str] = set()
     summaries: list[SourceSummary] = []
     pending_windows = list(reversed(feeds.nvd_windows(nvd_start, nvd_end)))
     first_commit = True
@@ -250,17 +252,11 @@ def sync_watch(
         first_commit = False
         if initial_run and not pending_windows:
             meta["initialized_at"] = initialized_at
-            meta["initial_complete"] = "true"
-        counts = store.upsert(
-            feed.records,
-            meta=meta,
-            cisa_kev_configured="cisa_kev" in watch.sources,
-        )
+        counts = store.upsert_nvd(feed.records, meta=meta, catalogs=catalogs)
         nvd_records += len(feed.records)
         nvd_new += counts.new
         nvd_changed += counts.changed
-        alert_ids.update(counts.new_ids)
-        alert_ids.update(counts.changed_ids)
+        touched.update(counts.touched_ids)
 
     if initial_run and first_commit:
         meta = {
@@ -268,7 +264,6 @@ def sync_watch(
             "initial_mode": mode,
             "initial_window_start": initial_window_start.isoformat(),
             "initialized_at": initialized_at,
-            "initial_complete": "true",
         }
         if "euvd" in watch.sources and "euvd_cursor" not in metadata:
             meta["euvd_cursor"] = intended_euvd_start.isoformat()
@@ -281,18 +276,20 @@ def sync_watch(
             try:
                 feed = feeds.fetch_euvd(http, start=chunk_start, end=chunk_end)
             except SourceError as exc:
+                euvd_requests += max(exc.requests, 1)
                 euvd_error = str(exc)
                 break
-            counts = store.apply_euvd(
-                feed.updates, meta={"euvd_cursor": chunk_end.isoformat()}
+            counts = store.replace_euvd_items(
+                feed.updates,
+                meta={"euvd_cursor": chunk_end.isoformat()},
+                catalogs=catalogs,
             )
             euvd_requests += feed.requests
             euvd_records += len(feed.updates)
             euvd_new += counts.new
             euvd_changed += counts.changed
             euvd_ignored += feed.ignored
-            alert_ids.update(counts.new_ids)
-            alert_ids.update(counts.changed_ids)
+            touched.update(counts.touched_ids)
         summaries.append(
             SourceSummary(
                 "euvd",
@@ -305,114 +302,117 @@ def sync_watch(
             )
         )
 
-    cisa_catalog = None
-    eu_catalog = None
+    store.prune_euvd(now=now)
+
     if "cisa_kev" in watch.sources:
         try:
             cisa = feeds.fetch_kev(http)
         except SourceError as exc:
-            summaries.append(SourceSummary("cisa_kev", error=str(exc)))
-        else:
-            cisa_catalog = cisa
-            counts = store.apply_kev(
-                cisa, {}, clear_cisa=True, pending_since=kev_pending_since
-            )
-            alert_ids.update(counts.new_ids)
-            alert_ids.update(counts.changed_ids)
             summaries.append(
-                SourceSummary("cisa_kev", 1, len(cisa), counts.new, counts.changed)
+                SourceSummary("cisa_kev", max(exc.requests, 1), error=str(exc))
+            )
+        else:
+            counts = store.replace_kev("cisa", cisa, catalogs=catalogs)
+            touched.update(counts.touched_ids)
+            summaries.append(
+                SourceSummary(
+                    "cisa_kev", 1, len(cisa), counts.new, counts.changed
+                )
             )
 
     if "eu_kev" in watch.sources:
         try:
             eu = feeds.fetch_kev(http, eu=True)
         except SourceError as exc:
-            summaries.append(SourceSummary("eu_kev", error=str(exc)))
+            summaries.append(SourceSummary("eu_kev", max(exc.requests, 1), error=str(exc)))
         else:
-            eu_catalog = eu
-            counts = store.apply_kev(
-                {}, eu, clear_eu=True, pending_since=kev_pending_since
+            counts = store.replace_kev("eu", eu, catalogs=catalogs)
+            touched.update(counts.touched_ids)
+            summaries.append(
+                SourceSummary("eu_kev", 1, len(eu), counts.new, counts.changed)
             )
-            alert_ids.update(counts.new_ids)
-            alert_ids.update(counts.changed_ids)
-            summaries.append(SourceSummary("eu_kev", 1, len(eu), counts.new, counts.changed))
 
-    store.expire_pending(now=now)
-    for row in store.pending(limit=PENDING_LIMIT):
+    store.sync_lookups(
+        [source for source in watch.sources if source in ("cisa_kev", "eu_kev")],
+        initial_window_start=lookup_since,
+        now=now,
+        include_euvd="euvd" in watch.sources,
+    )
+    for row in store.due_lookups(now=now, limit=LOOKUP_LIMIT):
         try:
             result = feeds.fetch_nvd_cve(
                 http, row.cve_id, api_key=api_key, interval=interval
             )
-        except SourceError:
-            store.pending_attempt(row.cve_id)
+        except SourceError as exc:
+            nvd_requests += max(exc.requests, 1)
+            store.lookup_failed(row.cve_id, error=str(exc), now=now)
+            lookup_failures += 1
             continue
         nvd_requests += result.requests
-        counts = store.upsert(
-            [result.record],
-            cisa_kev_configured="cisa_kev" in watch.sources,
-            cisa_catalog=cisa_catalog,
-            eu_catalog=eu_catalog,
-        )
-        store.drop_pending(row.cve_id)
+        counts = store.upsert_nvd([result.record], catalogs=catalogs)
         nvd_records += 1
         nvd_new += counts.new
         nvd_changed += counts.changed
-        alert_ids.update(counts.new_ids)
-        alert_ids.update(counts.changed_ids)
+        touched.update(counts.touched_ids)
 
-    summaries.insert(0, SourceSummary("nvd", nvd_requests, nvd_records, nvd_new, nvd_changed))
+    summaries.insert(
+        0,
+        SourceSummary(
+            "nvd",
+            nvd_requests,
+            nvd_records,
+            nvd_new,
+            nvd_changed,
+            lookup_failures=lookup_failures,
+        ),
+    )
 
     if "epss" in watch.sources:
-        try:
-            identifiers = set(alert_ids)
-            identifiers.update(store.epss_without_date(limit=EPSS_MISSING_LIMIT))
-            floor_due = metadata.get("epss_floor_date") != today.isoformat()
-            floor_scores: dict[str, tuple[float, float, date]] = {}
-            requests = 0
-            if floor_due:
-                floor_scores, floor_requests = feeds.fetch_epss_floor(
-                    http, floor=watch.epss_floor
+        epss_requests = epss_records = epss_changed = 0
+        epss_error: str | None = None
+        if metadata.get("epss_loaded_date") != today.isoformat():
+            counter = [0]
+            try:
+                result = store.replace_epss(
+                    feeds.fetch_epss_daily(http, today=today, counter=counter),
+                    meta={"epss_loaded_date": today.isoformat()},
                 )
-                requests += floor_requests
-                stale = set(store.epss_at_or_above_floor(watch.epss_floor)) - set(
-                    floor_scores
-                )
-                identifiers.update(stale)
-            scores, batch_requests = feeds.fetch_epss_scores(http, identifiers)
-            requests += batch_requests
-            merged = {**floor_scores, **scores}
-            counts = store.apply_epss(
-                merged,
-                meta={"epss_floor_date": today.isoformat()} if floor_due else None,
+            except SourceError as exc:
+                epss_requests = counter[0] or exc.requests
+                epss_error = str(exc)
+            else:
+                epss_requests = counter[0]
+                epss_records = result.rows
+                epss_changed = len(result.changed_ids)
+                touched.update(result.changed_ids)
+        summaries.append(
+            SourceSummary(
+                "epss",
+                epss_requests,
+                epss_records,
+                changed=epss_changed,
+                error=epss_error,
             )
-            summaries.append(
-                SourceSummary(
-                    "epss",
-                    requests,
-                    len(merged),
-                    counts.new,
-                    counts.changed,
-                )
-            )
-        except SourceError as exc:
-            summaries.append(SourceSummary("epss", error=str(exc)))
+        )
 
-    return SyncReport(summaries=tuple(summaries))
+    return SyncReport(summaries=tuple(summaries), touched_ids=tuple(sorted(touched)))
 
 
 def watch_status(watch: WatchConfig) -> str:
     _require_enabled(watch)
-    status = WatchStore(watch.database).status(epss_floor=watch.epss_floor)
+    status = WatchStore(watch.database).status()
     meta = status["meta"]
     lines = [
         f"database: {status['database']}",
         f"schema version: {meta.get('schema_version', 'unknown')}",
         f"nvd cursor: {meta.get('nvd_cursor', 'not set')}",
         f"euvd cursor: {meta.get('euvd_cursor', 'not set')}",
-        f"epss floor date: {meta.get('epss_floor_date', 'not set')}",
+        f"epss score date: {status['epss_date'] or 'not set'}",
         f"rows: {status['rows']}",
+        f"euvd items: {status['euvd_items']}",
         f"with KEV: {status['any_kev']} (CISA {status['cisa_kev']}, EU {status['eu_kev']})",
         f"with active SSVC: {status['active_ssvc']}",
-        f"with EPSS above {watch.epss_floor:g}: {status['epss_above']}",
+        f"with EPSS: {status['epss_rows']}",
+        f"lookups pending/backing off: {status['lookups']}",
     ]
     return "\n".join(lines)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import gzip
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -19,7 +20,6 @@ def write_config(
     enabled: bool = True,
     backfill_days: int = 7,
     overlap_minutes: int = 15,
-    epss_floor: float = 0.1,
     extra: str = "",
 ) -> AppConfig:
     names = ", ".join(f'"{name}"' for name in sources)
@@ -45,7 +45,6 @@ sources = [{names}]
 initial = "{initial}"
 backfill_days = {backfill_days}
 overlap_minutes = {overlap_minutes}
-epss_floor = {epss_floor}
 {extra}
 """,
         encoding="utf-8",
@@ -102,3 +101,23 @@ def nvd_page(
         "totalResults": len(vulnerabilities) if total is None else total,
         "vulnerabilities": [{"cve": item} for item in vulnerabilities],
     }
+
+
+def epss_gzip(
+    rows: list[tuple[str, object, object]] | list[dict],
+    *,
+    score_date: date | str = "2026-11-03",
+    model_version: str = "v2025.03.14",
+) -> bytes:
+    if isinstance(score_date, date):
+        score_date = score_date.isoformat()
+    lines = [
+        f"#model_version:{model_version},score_date:{score_date}",
+        "cve,epss,percentile",
+    ]
+    for row in rows:
+        if isinstance(row, dict):
+            lines.append(f"{row['cve']},{row['epss']},{row['percentile']}")
+        else:
+            lines.append(f"{row[0]},{row[1]},{row[2]}")
+    return gzip.compress(("\n".join(lines) + "\n").encode("utf-8"))

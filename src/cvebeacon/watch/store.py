@@ -1,12 +1,16 @@
-"""Transactional SQLite storage for recently changed CVEs."""
+"""Transactional SQLite storage for recently changed CVEs.
+
+Each source keeps its own raw table.  The alert-relevant view of a CVE is
+derived from those tables and only its fingerprint is stored in ``watch_view``.
+"""
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -16,39 +20,19 @@ from .records import (
     CVSSEntry,
     EUVDUpdate,
     KEVFields,
+    Product,
     WatchRecord,
+    build_view,
     canonical_json,
-    collapse_euvd,
+    epss_band,
 )
 
 SCHEMA_VERSION = 1
-PENDING_ATTEMPT_LIMIT = 10
-PENDING_EUVD_MAX_AGE_DAYS = 30
+EUVD_MAX_AGE_DAYS = 30
+EPSS_WRITE_BATCH = 5000
+KEV_CATALOGS = ("cisa", "eu")
 
-_CONTENT_COLUMNS = (
-    "published",
-    "last_modified",
-    "status",
-    "description",
-    "source_identifier",
-    "cvss_json",
-    "cwes_json",
-    "products_json",
-    "references_json",
-    "ssvc_exploitation",
-    "cisa_kev_added",
-    "cisa_kev_due",
-    "cisa_required_action",
-    "cisa_ransomware",
-    "eu_kev_added",
-    "euvd_id",
-    "euvd_exploited_since",
-    "epss",
-    "epss_percentile",
-    "epss_date",
-)
-
-NVD_OWNED_COLUMNS = (
+_NVD_CONTENT_COLUMNS = (
     "published",
     "last_modified",
     "status",
@@ -64,15 +48,12 @@ NVD_OWNED_COLUMNS = (
     "cisa_required_action",
     "cisa_ransomware",
 )
-EUVD_OWNED_COLUMNS = ("cvss_json", "euvd_id", "euvd_exploited_since")
-CISA_KEV_OWNED_COLUMNS = (
-    "cisa_kev_added",
-    "cisa_kev_due",
-    "cisa_required_action",
-    "cisa_ransomware",
+
+_EPSS_BAND_SQL = (
+    "CASE WHEN {column} < 0.1 THEN 0 "
+    "WHEN {column} < 0.5 THEN 1 "
+    "WHEN {column} < 0.9 THEN 2 ELSE 3 END"
 )
-EU_KEV_OWNED_COLUMNS = ("eu_kev_added",)
-EPSS_OWNED_COLUMNS = ("epss", "epss_percentile", "epss_date")
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS watch_meta (
@@ -95,78 +76,94 @@ _SCHEMA = (
         cisa_kev_due TEXT,
         cisa_required_action TEXT,
         cisa_ransomware TEXT,
-        eu_kev_added TEXT,
-        euvd_id TEXT,
-        euvd_exploited_since TEXT,
-        epss REAL,
-        epss_percentile REAL,
-        epss_date TEXT,
         first_seen TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        fingerprint TEXT NOT NULL
+        nvd_fingerprint TEXT NOT NULL
     )""",
-    "CREATE INDEX IF NOT EXISTS watch_cve_cisa_kev ON watch_cve(cisa_kev_added)",
-    "CREATE INDEX IF NOT EXISTS watch_cve_eu_kev ON watch_cve(eu_kev_added)",
     "CREATE INDEX IF NOT EXISTS watch_cve_ssvc ON watch_cve(ssvc_exploitation)",
-    "CREATE INDEX IF NOT EXISTS watch_cve_epss ON watch_cve(epss)",
-    """CREATE TABLE IF NOT EXISTS watch_pending (
-        cve_id TEXT PRIMARY KEY,
-        reason TEXT NOT NULL CHECK(reason IN ('euvd','cisa_kev','eu_kev')),
-        euvd_json TEXT,
-        first_seen TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0
+    """CREATE TABLE IF NOT EXISTS watch_euvd_item (
+        euvd_id TEXT PRIMARY KEY,
+        cve_ids_json TEXT NOT NULL,
+        date_updated TEXT,
+        score REAL,
+        version TEXT,
+        vector TEXT,
+        exploited_since TEXT,
+        vendors_json TEXT NOT NULL,
+        seen_at TEXT NOT NULL
     )""",
-    "CREATE INDEX IF NOT EXISTS watch_pending_first_seen ON watch_pending(first_seen)",
+    """CREATE TABLE IF NOT EXISTS watch_euvd_alias (
+        cve_id TEXT NOT NULL,
+        euvd_id TEXT NOT NULL,
+        PRIMARY KEY(cve_id, euvd_id),
+        FOREIGN KEY(euvd_id) REFERENCES watch_euvd_item(euvd_id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX IF NOT EXISTS watch_euvd_alias_euvd ON watch_euvd_alias(euvd_id)",
+    """CREATE TABLE IF NOT EXISTS watch_kev (
+        catalog TEXT NOT NULL CHECK(catalog IN ('cisa','eu')),
+        cve_id TEXT NOT NULL,
+        date_added TEXT,
+        due_date TEXT,
+        required_action TEXT,
+        ransomware TEXT,
+        PRIMARY KEY(catalog, cve_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS watch_kev_cve ON watch_kev(cve_id)",
+    """CREATE TABLE IF NOT EXISTS watch_epss (
+        cve_id TEXT PRIMARY KEY,
+        epss REAL NOT NULL,
+        percentile REAL NOT NULL,
+        score_date TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_view (
+        cve_id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_lookup (
+        cve_id TEXT PRIMARY KEY,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS watch_lookup_due ON watch_lookup(next_attempt_at)",
 )
 
 
 @dataclass(frozen=True, slots=True)
-class PendingCVE:
-    cve_id: str
-    reason: str
-    euvd_json: str | None
-    first_seen: str
-    attempts: int
-
-    @property
-    def euvd(self) -> EUVDUpdate | None:
-        return _euvd_from_json(self.euvd_json)
-
-    @property
-    def alert_relevant(self) -> bool:
-        if self.reason in ("cisa_kev", "eu_kev"):
-            return True
-        update = self.euvd
-        return update is not None and bool(update.exploited_since)
-
-
-@dataclass(frozen=True, slots=True)
-class UpsertCounts:
+class StepCounts:
     new: int = 0
     changed: int = 0
     unchanged: int = 0
     new_ids: tuple[str, ...] = ()
     changed_ids: tuple[str, ...] = ()
+    touched_ids: tuple[str, ...] = ()
 
     @property
     def total(self) -> int:
         return self.new + self.changed + self.unchanged
 
 
-def _counts(outcomes: Sequence[tuple[str, str]]) -> UpsertCounts:
-    priority = {"unchanged": 0, "changed": 1, "new": 2}
-    best: dict[str, str] = {}
-    for identifier, outcome in outcomes:
-        if priority[outcome] > priority.get(best.get(identifier, ""), -1):
-            best[identifier] = outcome
-    entries = list(best.items())
-    return UpsertCounts(
-        new=sum(outcome == "new" for _, outcome in entries),
-        changed=sum(outcome == "changed" for _, outcome in entries),
-        unchanged=sum(outcome == "unchanged" for _, outcome in entries),
-        new_ids=tuple(identifier for identifier, outcome in entries if outcome == "new"),
-        changed_ids=tuple(identifier for identifier, outcome in entries if outcome == "changed"),
-    )
+@dataclass(frozen=True, slots=True)
+class EpssLoadResult:
+    rows: int = 0
+    batches: int = 0
+    changed_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LookupRow:
+    cve_id: str
+    attempts: int
+    next_attempt_at: str
+    last_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ViewCounts:
+    new: int = 0
+    changed: int = 0
+    unchanged: int = 0
 
 
 def _utc_now() -> datetime:
@@ -180,7 +177,7 @@ def _timestamp(clock: Callable[[], datetime]) -> str:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def _content(record: WatchRecord) -> dict[str, Any]:
+def _nvd_content(record: WatchRecord) -> dict[str, Any]:
     return {
         "published": record.published,
         "last_modified": record.last_modified,
@@ -196,119 +193,41 @@ def _content(record: WatchRecord) -> dict[str, Any]:
         "cisa_kev_due": record.cisa_kev_due,
         "cisa_required_action": record.cisa_required_action,
         "cisa_ransomware": record.cisa_ransomware,
-        "eu_kev_added": record.eu_kev_added,
-        "euvd_id": record.euvd_id,
-        "euvd_exploited_since": record.euvd_exploited_since,
-        "epss": record.epss,
-        "epss_percentile": record.epss_percentile,
-        "epss_date": record.epss_date,
     }
 
 
-def _euvd_json(update: EUVDUpdate) -> str:
-    return canonical_json(
-        {
-            "euvd_id": update.euvd_id,
-            "exploited_since": update.exploited_since,
-            "date_updated": update.date_updated,
-            "cvss": update.cvss.as_dict() if update.cvss is not None else None,
-        }
-    )
+def _vendors_json(vendors: Iterable[Product]) -> str:
+    return canonical_json([item.as_dict() for item in vendors])
 
 
-def _euvd_from_json(value: str | None) -> EUVDUpdate | None:
-    if value is None:
-        return None
+def _euvd_from_row(row: Mapping[str, Any]) -> EUVDUpdate:
     try:
-        data = json.loads(value)
-        if not isinstance(data, dict):
-            raise ValueError("not an object")
-        raw_cvss = data.get("cvss")
-        cvss = CVSSEntry(**raw_cvss) if isinstance(raw_cvss, dict) else None
+        cve_ids = tuple(json.loads(row["cve_ids_json"]))
+        vendors = tuple(Product(**item) for item in json.loads(row["vendors_json"]))
+        version = row["version"]
+        score = row["score"]
+        cvss = None
+        if score is not None and version is not None:
+            cvss = CVSSEntry("euvd", "euvd", version, score, row["vector"])
         return EUVDUpdate(
-            (),
-            data.get("euvd_id"),
-            data.get("exploited_since"),
+            cve_ids,
+            row["euvd_id"],
+            row["exploited_since"],
             cvss,
-            data.get("date_updated"),
+            row["date_updated"],
+            vendors,
         )
     except (TypeError, ValueError, KeyError) as exc:
-        raise StateError("watch database contains invalid pending EUVD data") from exc
+        raise StateError("watch database contains an invalid EUVD item") from exc
 
 
-def _apply_euvd_fields(record: WatchRecord, update: EUVDUpdate) -> WatchRecord:
-    """Replace the EUVD-owned fields, dropping the old EUVD score first."""
-    cvss = tuple(entry for entry in record.cvss if entry.provider != "euvd")
-    if update.cvss is not None:
-        cvss += (update.cvss,)
-    return replace(
-        record,
-        euvd_id=update.euvd_id,
-        euvd_exploited_since=update.exploited_since,
-        cvss=cvss,
+def _kev_tuple(row: Mapping[str, Any]) -> tuple[str | None, ...]:
+    return (
+        row["date_added"],
+        row["due_date"],
+        row["required_action"],
+        row["ransomware"],
     )
-
-
-def _merge_nvd(
-    existing: WatchRecord | None, incoming: WatchRecord, *, cisa_owned_by_catalog: bool
-) -> WatchRecord:
-    """Replace NVD-owned fields while preserving fields owned by other sources."""
-    cisa_values: dict[str, Any] = {}
-    if cisa_owned_by_catalog:
-        for name in CISA_KEV_OWNED_COLUMNS:
-            cisa_values[name] = getattr(existing, name) if existing is not None else None
-    if existing is None:
-        return replace(incoming, **cisa_values)
-    cvss = tuple(entry for entry in incoming.cvss if entry.provider != "euvd") + tuple(
-        entry for entry in existing.cvss if entry.provider == "euvd"
-    )
-    return replace(
-        incoming,
-        cvss=cvss,
-        eu_kev_added=existing.eu_kev_added,
-        euvd_id=existing.euvd_id,
-        euvd_exploited_since=existing.euvd_exploited_since,
-        epss=existing.epss,
-        epss_percentile=existing.epss_percentile,
-        epss_date=existing.epss_date,
-        **cisa_values,
-    )
-
-
-def _apply_catalog_kev(
-    record: WatchRecord,
-    identifier: str,
-    cisa_catalog: Mapping[str, KEVFields] | None,
-    eu_catalog: Mapping[str, KEVFields] | None,
-) -> WatchRecord:
-    """Apply the current run's catalog columns to a newly inserted row."""
-    changes: dict[str, Any] = {}
-    if cisa_catalog is not None:
-        cisa_entry = cisa_catalog.get(identifier)
-        if cisa_entry is not None:
-            changes.update(
-                cisa_kev_added=cisa_entry.added,
-                cisa_kev_due=cisa_entry.due,
-                cisa_required_action=cisa_entry.required_action,
-                cisa_ransomware=cisa_entry.ransomware,
-            )
-    if eu_catalog is not None:
-        eu_entry = eu_catalog.get(identifier)
-        if eu_entry is not None:
-            changes["eu_kev_added"] = eu_entry.added
-    return replace(record, **changes) if changes else record
-
-
-def _kev_on_or_after(added: str | None, pending_since: str | None) -> bool:
-    if pending_since is None or not added:
-        return False
-    return added[:10] >= pending_since[:10]
-
-
-def _stronger_reason(current: str, incoming: str) -> str:
-    if current in ("cisa_kev", "eu_kev"):
-        return current
-    return incoming
 
 
 class WatchStore:
@@ -322,6 +241,7 @@ class WatchStore:
             connection = sqlite3.connect(self.path, timeout=30)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA foreign_keys = ON")
             return connection
         except (sqlite3.Error, OSError) as exc:
             raise StateError(f"cannot open watch database {self.path}: {exc}") from exc
@@ -389,7 +309,6 @@ class WatchStore:
             "nvd_cursor": nvd_cursor,
             "initialized_at": initialized_at,
             "initial_mode": initial_mode,
-            "initial_complete": "true",
         }
         if euvd_cursor is not None:
             values["euvd_cursor"] = euvd_cursor
@@ -404,7 +323,7 @@ class WatchStore:
             self._set_meta(db, values)
 
     @staticmethod
-    def _record(row: sqlite3.Row) -> WatchRecord:
+    def _record(row: Mapping[str, Any]) -> WatchRecord:
         try:
             return WatchRecord.from_row(row)
         except (TypeError, ValueError, KeyError) as exc:
@@ -416,365 +335,535 @@ class WatchStore:
             "SELECT * FROM watch_cve WHERE cve_id=?", (identifier,)
         ).fetchone()
 
-    def _write(
+    def _write_nvd(
         self,
         db: sqlite3.Connection,
-        identifier: str,
-        build: Callable[[WatchRecord | None], WatchRecord | None],
+        record: WatchRecord,
         now: str,
-        owned: tuple[str, ...],
-    ) -> str | None:
-        row = self._row(db, identifier)
-        existing = self._record(row) if row is not None else None
-        final = build(existing)
-        if final is None:
-            return None
-        content = _content(final)
-        fingerprint = final.fingerprint()
-        if existing is None:
-            columns = ("cve_id", *_CONTENT_COLUMNS, "first_seen", "updated_at", "fingerprint")
-            values = (identifier, *content.values(), now, now, fingerprint)
+    ) -> str:
+        row = self._row(db, record.cve_id)
+        content = _nvd_content(record)
+        fingerprint = record.nvd_fingerprint()
+        if row is None:
+            columns = (
+                "cve_id",
+                *_NVD_CONTENT_COLUMNS,
+                "first_seen",
+                "updated_at",
+                "nvd_fingerprint",
+            )
+            values = (record.cve_id, *content.values(), now, now, fingerprint)
             marks = ",".join("?" for _ in columns)
-            db.execute(f"INSERT INTO watch_cve({','.join(columns)}) VALUES ({marks})", values)
+            db.execute(
+                f"INSERT INTO watch_cve({','.join(columns)}) VALUES ({marks})", values
+            )
             return "new"
-        if all(row[column] == content[column] for column in owned):
+        if all(row[column] == content[column] for column in _NVD_CONTENT_COLUMNS):
             return "unchanged"
-        columns = (*owned, "updated_at", "fingerprint")
+        columns = (*_NVD_CONTENT_COLUMNS, "updated_at", "nvd_fingerprint")
         assignments = ", ".join(f"{column}=?" for column in columns)
-        values = (*(content[column] for column in owned), now, fingerprint, identifier)
+        values = (
+            *(content[column] for column in _NVD_CONTENT_COLUMNS),
+            now,
+            fingerprint,
+            record.cve_id,
+        )
         db.execute(f"UPDATE watch_cve SET {assignments} WHERE cve_id=?", values)
-        return "changed" if row["fingerprint"] != fingerprint else "unchanged"
+        return "changed"
 
     @staticmethod
-    def _pending_euvd(db: sqlite3.Connection) -> dict[str, EUVDUpdate]:
+    def _best_euvd(db: sqlite3.Connection, identifier: str) -> EUVDUpdate | None:
         rows = db.execute(
-            "SELECT cve_id, euvd_json FROM watch_pending WHERE euvd_json IS NOT NULL"
+            "SELECT i.* FROM watch_euvd_item i "
+            "JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id "
+            "WHERE a.cve_id=?",
+            (identifier,),
         ).fetchall()
-        output: dict[str, EUVDUpdate] = {}
-        for row in rows:
-            update = _euvd_from_json(row["euvd_json"])
-            if update is not None:
-                output[row["cve_id"]] = update
-        return output
+        if not rows:
+            return None
+        candidates = [_euvd_from_row(row) for row in rows]
+        return max(candidates, key=lambda item: item.rank())
 
     @staticmethod
-    def _put_pending(
-        db: sqlite3.Connection,
-        identifier: str,
-        reason: str,
-        euvd_json: str | None,
-        now: str,
-    ) -> None:
+    def _kev_row(
+        db: sqlite3.Connection, catalog: str, identifier: str
+    ) -> KEVFields | None:
         row = db.execute(
-            "SELECT reason, euvd_json FROM watch_pending WHERE cve_id=?", (identifier,)
+            "SELECT date_added,due_date,required_action,ransomware FROM watch_kev "
+            "WHERE catalog=? AND cve_id=?",
+            (catalog, identifier),
         ).fetchone()
         if row is None:
-            db.execute(
-                "INSERT INTO watch_pending(cve_id,reason,euvd_json,first_seen,attempts) "
-                "VALUES (?,?,?,?,0)",
-                (identifier, reason, euvd_json, now),
-            )
-            return
-        db.execute(
-            "UPDATE watch_pending SET reason=?, euvd_json=? WHERE cve_id=?",
-            (
-                _stronger_reason(row["reason"], reason),
-                euvd_json if euvd_json is not None else row["euvd_json"],
-                identifier,
-            ),
+            return None
+        return KEVFields(
+            row["date_added"],
+            row["due_date"],
+            row["required_action"],
+            row["ransomware"],
         )
 
-    def upsert(
+    @staticmethod
+    def _epss_row(
+        db: sqlite3.Connection, identifier: str
+    ) -> tuple[float, float, str] | None:
+        row = db.execute(
+            "SELECT epss,percentile,score_date FROM watch_epss WHERE cve_id=?",
+            (identifier,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["epss"], row["percentile"], row["score_date"]
+
+    def _view(
+        self, db: sqlite3.Connection, identifier: str, catalogs: Sequence[str]
+    ) -> Any | None:
+        row = self._row(db, identifier)
+        if row is None:
+            return None
+        record = self._record(row)
+        return build_view(
+            record,
+            euvd=self._best_euvd(db, identifier),
+            cisa_kev=self._kev_row(db, "cisa", identifier),
+            eu_kev=self._kev_row(db, "eu", identifier),
+            cisa_catalog="cisa_kev" in catalogs,
+            eu_catalog="eu_kev" in catalogs,
+            epss=self._epss_row(db, identifier),
+        )
+
+    def _refresh_views(
+        self,
+        db: sqlite3.Connection,
+        identifiers: Iterable[str],
+        catalogs: Sequence[str],
+        now: str,
+    ) -> _ViewCounts:
+        new = changed = unchanged = 0
+        for identifier in dict.fromkeys(identifiers):
+            view = self._view(db, identifier, catalogs)
+            if view is None:
+                db.execute("DELETE FROM watch_view WHERE cve_id=?", (identifier,))
+                continue
+            fingerprint = view.fingerprint()
+            row = db.execute(
+                "SELECT fingerprint FROM watch_view WHERE cve_id=?", (identifier,)
+            ).fetchone()
+            if row is None:
+                db.execute(
+                    "INSERT INTO watch_view(cve_id,fingerprint,updated_at) VALUES (?,?,?)",
+                    (identifier, fingerprint, now),
+                )
+                new += 1
+            elif row["fingerprint"] == fingerprint:
+                unchanged += 1
+            else:
+                db.execute(
+                    "UPDATE watch_view SET fingerprint=?,updated_at=? WHERE cve_id=?",
+                    (fingerprint, now, identifier),
+                )
+                changed += 1
+        return _ViewCounts(new, changed, unchanged)
+
+    def upsert_nvd(
         self,
         records: Sequence[WatchRecord],
         *,
         meta: Mapping[str, str] | None = None,
-        cisa_kev_configured: bool = True,
-        cisa_catalog: Mapping[str, KEVFields] | None = None,
-        eu_catalog: Mapping[str, KEVFields] | None = None,
-    ) -> UpsertCounts:
+        catalogs: Sequence[str] = (),
+    ) -> StepCounts:
         self.initialize()
         now = _timestamp(self._clock)
         outcomes: list[tuple[str, str]] = []
-        owned = NVD_OWNED_COLUMNS
-        if cisa_kev_configured:
-            cisa_columns = set(CISA_KEV_OWNED_COLUMNS)
-            owned = tuple(
-                column for column in NVD_OWNED_COLUMNS if column not in cisa_columns
-            )
-        else:
-            cisa_catalog = None
         with self.transaction() as db:
-            pending = self._pending_euvd(db)
             for record in records:
-                if record.cve_id in pending:
-                    update = pending.pop(record.cve_id)
-                    db.execute("DELETE FROM watch_pending WHERE cve_id=?", (record.cve_id,))
-                    if self._row(db, record.cve_id) is None:
-                        record = _apply_euvd_fields(record, update)
-
-                def build(
-                    existing: WatchRecord | None,
-                    record: WatchRecord = record,
-                ) -> WatchRecord:
-                    merged = _merge_nvd(
-                        existing,
-                        record,
-                        cisa_owned_by_catalog=cisa_kev_configured,
-                    )
-                    if existing is None and (
-                        cisa_catalog is not None or eu_catalog is not None
-                    ):
-                        merged = _apply_catalog_kev(
-                            merged, record.cve_id, cisa_catalog, eu_catalog
-                        )
-                    return merged
-
-                outcome = self._write(db, record.cve_id, build, now, owned)
-                if outcome is not None:
-                    outcomes.append((record.cve_id, outcome))
+                outcome = self._write_nvd(db, record, now)
+                db.execute("DELETE FROM watch_lookup WHERE cve_id=?", (record.cve_id,))
+                outcomes.append((record.cve_id, outcome))
+            written = [
+                identifier
+                for identifier, outcome in outcomes
+                if outcome in ("new", "changed")
+            ]
+            views = self._refresh_views(db, written, catalogs, now)
             if meta:
                 self._set_meta(db, meta)
-        return _counts(outcomes)
+        new_ids = tuple(identifier for identifier, outcome in outcomes if outcome == "new")
+        changed_ids = tuple(
+            identifier for identifier, outcome in outcomes if outcome == "changed"
+        )
+        return StepCounts(
+            new=len(new_ids),
+            changed=views.changed,
+            unchanged=sum(outcome == "unchanged" for _, outcome in outcomes),
+            new_ids=new_ids,
+            changed_ids=changed_ids,
+            touched_ids=tuple(identifier for identifier, _ in outcomes if outcome != "unchanged"),
+        )
 
-    def apply_euvd(
+    def replace_euvd_items(
         self,
         updates: Sequence[EUVDUpdate],
         *,
         meta: Mapping[str, str] | None = None,
-    ) -> UpsertCounts:
+        catalogs: Sequence[str] = (),
+    ) -> StepCounts:
         self.initialize()
         now = _timestamp(self._clock)
+        by_id: dict[str, EUVDUpdate] = {}
+        for update in updates:
+            if not update.euvd_id:
+                raise StateError("EUVD item has no identifier")
+            by_id[update.euvd_id] = update
         outcomes: list[tuple[str, str]] = []
-        collapsed = collapse_euvd(updates)
+        touched: set[str] = set()
         with self.transaction() as db:
-            for identifier in sorted(collapsed):
-                update = collapsed[identifier]
-                if self._row(db, identifier) is None:
-                    self._put_pending(db, identifier, "euvd", _euvd_json(update), now)
+            for euvd_id in sorted(by_id):
+                update = by_id[euvd_id]
+                cve_ids = tuple(sorted(set(update.cve_ids)))
+                cve_ids_json = canonical_json(list(cve_ids))
+                vendors_json = _vendors_json(update.vendors)
+                score = update.cvss.score if update.cvss is not None else None
+                version = update.cvss.version if update.cvss is not None else None
+                vector = update.cvss.vector if update.cvss is not None else None
+                desired = (
+                    cve_ids_json,
+                    update.date_updated,
+                    score,
+                    version,
+                    vector,
+                    update.exploited_since,
+                    vendors_json,
+                )
+                row = db.execute(
+                    "SELECT * FROM watch_euvd_item WHERE euvd_id=?", (euvd_id,)
+                ).fetchone()
+                old_aliases = {
+                    alias["cve_id"]
+                    for alias in db.execute(
+                        "SELECT cve_id FROM watch_euvd_alias WHERE euvd_id=?", (euvd_id,)
+                    )
+                }
+                current = (
+                    (
+                        row["cve_ids_json"],
+                        row["date_updated"],
+                        row["score"],
+                        row["version"],
+                        row["vector"],
+                        row["exploited_since"],
+                        row["vendors_json"],
+                    )
+                    if row is not None
+                    else None
+                )
+                if current == desired:
                     continue
-
-                def build(
-                    existing: WatchRecord | None, update: EUVDUpdate = update
-                ) -> WatchRecord | None:
-                    if existing is None:
-                        return None
-                    return _apply_euvd_fields(existing, update)
-
-                outcome = self._write(db, identifier, build, now, EUVD_OWNED_COLUMNS)
-                if outcome is not None:
-                    outcomes.append((identifier, outcome))
+                if row is None:
+                    db.execute(
+                        "INSERT INTO watch_euvd_item("
+                        "euvd_id,cve_ids_json,date_updated,score,version,vector,"
+                        "exploited_since,vendors_json,seen_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (euvd_id, *desired, now),
+                    )
+                    outcomes.append((euvd_id, "new"))
+                else:
+                    db.execute(
+                        "UPDATE watch_euvd_item SET cve_ids_json=?,date_updated=?,"
+                        "score=?,version=?,vector=?,exploited_since=?,vendors_json=?,"
+                        "seen_at=? WHERE euvd_id=?",
+                        (*desired, now, euvd_id),
+                    )
+                    outcomes.append((euvd_id, "changed"))
+                db.execute("DELETE FROM watch_euvd_alias WHERE euvd_id=?", (euvd_id,))
+                for identifier in cve_ids:
+                    db.execute(
+                        "INSERT INTO watch_euvd_alias(cve_id,euvd_id) VALUES (?,?)",
+                        (identifier, euvd_id),
+                    )
+                touched.update(old_aliases)
+                touched.update(cve_ids)
+            views = self._refresh_views(db, sorted(touched), catalogs, now)
             if meta:
                 self._set_meta(db, meta)
-        return _counts(outcomes)
+        new_items = tuple(identifier for identifier, outcome in outcomes if outcome == "new")
+        changed_items = tuple(
+            identifier for identifier, outcome in outcomes if outcome == "changed"
+        )
+        return StepCounts(
+            new=len(new_items),
+            changed=views.changed + views.new,
+            unchanged=0,
+            new_ids=new_items,
+            changed_ids=changed_items,
+            touched_ids=tuple(sorted(touched)),
+        )
 
-    def _kev_identifiers(self, db: sqlite3.Connection, *, cisa: bool) -> list[str]:
-        if cisa:
-            query = (
-                "SELECT cve_id FROM watch_cve WHERE cisa_kev_added IS NOT NULL "
-                "OR cisa_kev_due IS NOT NULL OR cisa_required_action IS NOT NULL "
-                "OR cisa_ransomware IS NOT NULL"
-            )
-        else:
-            query = "SELECT cve_id FROM watch_cve WHERE eu_kev_added IS NOT NULL"
-        return [row["cve_id"] for row in db.execute(query)]
-
-    def apply_kev(
+    def replace_kev(
         self,
-        cisa: Mapping[str, KEVFields],
-        eu: Mapping[str, KEVFields],
+        catalog: str,
+        fields: Mapping[str, KEVFields],
         *,
         meta: Mapping[str, str] | None = None,
-        clear_cisa: bool = False,
-        clear_eu: bool = False,
-        pending_since: str | None = None,
-    ) -> UpsertCounts:
+        catalogs: Sequence[str] = (),
+    ) -> StepCounts:
+        if catalog not in KEV_CATALOGS:
+            raise StateError(f"unknown KEV catalog {catalog}")
         self.initialize()
         now = _timestamp(self._clock)
-        outcomes: list[tuple[str, str]] = []
         with self.transaction() as db:
-            for identifier in sorted(set(cisa) | set(eu)):
-                cisa_entry = cisa.get(identifier)
-                eu_entry = eu.get(identifier)
-                owned: tuple[str, ...] = ()
-                if cisa_entry is not None:
-                    owned += CISA_KEV_OWNED_COLUMNS
-                if eu_entry is not None:
-                    owned += EU_KEV_OWNED_COLUMNS
-
-                if self._row(db, identifier) is None:
-                    reason = "cisa_kev" if cisa_entry is not None else "eu_kev"
-                    added = cisa_entry.added if cisa_entry is not None else eu_entry.added
-                    if _kev_on_or_after(added, pending_since):
-                        self._put_pending(db, identifier, reason, None, now)
-                    continue
-
-                def build(
-                    existing: WatchRecord | None,
-                    cisa_entry: KEVFields | None = cisa_entry,
-                    eu_entry: KEVFields | None = eu_entry,
-                ) -> WatchRecord | None:
-                    if existing is None:
-                        return None
-                    changes: dict[str, Any] = {}
-                    if cisa_entry is not None:
-                        changes.update(
-                            cisa_kev_added=cisa_entry.added,
-                            cisa_kev_due=cisa_entry.due,
-                            cisa_required_action=cisa_entry.required_action,
-                            cisa_ransomware=cisa_entry.ransomware,
-                        )
-                    if eu_entry is not None:
-                        changes["eu_kev_added"] = eu_entry.added
-                    return replace(existing, **changes)
-
-                outcome = self._write(db, identifier, build, now, owned)
-                if outcome is not None:
-                    outcomes.append((identifier, outcome))
-
-            if clear_cisa:
-                for identifier in self._kev_identifiers(db, cisa=True):
-                    if identifier in cisa:
-                        continue
-                    outcome = self._write(
-                        db,
-                        identifier,
-                        lambda existing: None
-                        if existing is None
-                        else replace(
-                            existing,
-                            cisa_kev_added=None,
-                            cisa_kev_due=None,
-                            cisa_required_action=None,
-                            cisa_ransomware=None,
-                        ),
-                        now,
-                        CISA_KEV_OWNED_COLUMNS,
-                    )
-                    if outcome is not None:
-                        outcomes.append((identifier, outcome))
-            if clear_eu:
-                for identifier in self._kev_identifiers(db, cisa=False):
-                    if identifier in eu:
-                        continue
-                    outcome = self._write(
-                        db,
-                        identifier,
-                        lambda existing: None
-                        if existing is None
-                        else replace(existing, eu_kev_added=None),
-                        now,
-                        EU_KEV_OWNED_COLUMNS,
-                    )
-                    if outcome is not None:
-                        outcomes.append((identifier, outcome))
+            old = {
+                row["cve_id"]: _kev_tuple(row)
+                for row in db.execute(
+                    "SELECT cve_id,date_added,due_date,required_action,ransomware "
+                    "FROM watch_kev WHERE catalog=?",
+                    (catalog,),
+                )
+            }
+            new = {
+                identifier: (
+                    entry.added,
+                    entry.due,
+                    entry.required_action,
+                    entry.ransomware,
+                )
+                for identifier, entry in fields.items()
+            }
+            touched = {
+                identifier
+                for identifier in set(old) | set(new)
+                if old.get(identifier) != new.get(identifier)
+            }
+            db.execute("DELETE FROM watch_kev WHERE catalog=?", (catalog,))
+            db.executemany(
+                "INSERT INTO watch_kev("
+                "catalog,cve_id,date_added,due_date,required_action,ransomware) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    (catalog, identifier, *new[identifier])
+                    for identifier in sorted(new)
+                ),
+            )
+            views = self._refresh_views(db, sorted(touched), catalogs, now)
             if meta:
                 self._set_meta(db, meta)
-        return _counts(outcomes)
+        added = set(new) - set(old)
+        common = set(old) & set(new)
+        return StepCounts(
+            new=len(added),
+            changed=views.changed + views.new,
+            unchanged=len(common - touched),
+            new_ids=tuple(sorted(added)),
+            changed_ids=tuple(sorted(touched)),
+            touched_ids=tuple(sorted(touched)),
+        )
 
-    def apply_epss(
+    def replace_epss(
         self,
-        scores: Mapping[str, tuple[float, float, date]],
+        rows: Iterable[tuple[str, float, float, date]],
         *,
         meta: Mapping[str, str] | None = None,
-    ) -> UpsertCounts:
-        self.initialize()
-        now = _timestamp(self._clock)
-        outcomes: list[tuple[str, str]] = []
-        with self.transaction() as db:
-            for identifier in sorted(scores):
-                score, percentile, score_date = scores[identifier]
-
-                def build(
-                    existing: WatchRecord | None,
-                    score: float = score,
-                    percentile: float = percentile,
-                    score_date: date = score_date,
-                ) -> WatchRecord | None:
-                    if existing is None:
-                        return None
-                    return replace(
-                        existing,
-                        epss=score,
-                        epss_percentile=percentile,
-                        epss_date=score_date.isoformat(),
-                    )
-
-                outcome = self._write(db, identifier, build, now, EPSS_OWNED_COLUMNS)
-                if outcome is not None:
-                    outcomes.append((identifier, outcome))
-            if meta:
-                self._set_meta(db, meta)
-        return _counts(outcomes)
-
-    def epss_without_date(self, *, limit: int) -> tuple[str, ...]:
-        self.initialize()
-        with closing(self._connect()) as db:
-            rows = db.execute(
-                "SELECT cve_id FROM watch_cve WHERE epss_date IS NULL "
-                "ORDER BY first_seen, cve_id LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return tuple(row["cve_id"] for row in rows)
-
-    def epss_at_or_above_floor(self, floor: float) -> tuple[str, ...]:
-        self.initialize()
-        with closing(self._connect()) as db:
-            rows = db.execute(
-                "SELECT cve_id FROM watch_cve WHERE epss IS NOT NULL AND epss >= ? "
-                "ORDER BY cve_id",
-                (floor,),
-            ).fetchall()
-        return tuple(row["cve_id"] for row in rows)
-
-    def pending(self, *, limit: int = 25) -> tuple[PendingCVE, ...]:
-        self.initialize()
-        with closing(self._connect()) as db:
-            rows = db.execute(
-                "SELECT cve_id, reason, euvd_json, first_seen, attempts FROM watch_pending "
-                "ORDER BY first_seen, cve_id"
-            ).fetchall()
-        output = [
-            PendingCVE(
-                row["cve_id"], row["reason"], row["euvd_json"], row["first_seen"], row["attempts"]
-            )
-            for row in rows
-        ]
-        alert = [item for item in output if item.alert_relevant]
-        return tuple(alert[:limit])
-
-    def expire_pending(self, *, now: datetime) -> None:
-        self.initialize()
-        cutoff = (now - timedelta(days=PENDING_EUVD_MAX_AGE_DAYS)).isoformat()
-        with self.transaction() as db:
-            rows = db.execute(
-                "SELECT cve_id, reason, euvd_json, first_seen FROM watch_pending"
-            ).fetchall()
-            for row in rows:
-                if row["reason"] != "euvd" or row["first_seen"] >= cutoff:
-                    continue
-                update = _euvd_from_json(row["euvd_json"])
-                if update is None or not update.exploited_since:
-                    db.execute("DELETE FROM watch_pending WHERE cve_id=?", (row["cve_id"],))
-
-    def pending_attempt(self, identifier: str) -> None:
+    ) -> EpssLoadResult:
         self.initialize()
         with self.transaction() as db:
             db.execute(
-                "UPDATE watch_pending SET attempts=attempts+1 WHERE cve_id=?", (identifier,)
+                "CREATE TEMP TABLE watch_epss_load ("
+                "cve_id TEXT PRIMARY KEY, epss REAL NOT NULL, "
+                "percentile REAL NOT NULL, score_date TEXT NOT NULL, "
+                "band INTEGER NOT NULL)"
             )
-            row = db.execute(
-                "SELECT attempts FROM watch_pending WHERE cve_id=?", (identifier,)
-            ).fetchone()
-            if row is not None and row["attempts"] >= PENDING_ATTEMPT_LIMIT:
-                db.execute("DELETE FROM watch_pending WHERE cve_id=?", (identifier,))
+            batch: list[tuple[str, float, float, str, int]] = []
+            total = batches = 0
+            for identifier, score, percentile, score_date in rows:
+                batch.append(
+                    (
+                        identifier,
+                        score,
+                        percentile,
+                        score_date.isoformat(),
+                        epss_band(score),
+                    )
+                )
+                if len(batch) >= EPSS_WRITE_BATCH:
+                    db.executemany(
+                        "INSERT OR REPLACE INTO watch_epss_load"
+                        "(cve_id,epss,percentile,score_date,band) VALUES (?,?,?,?,?)",
+                        batch,
+                    )
+                    total += len(batch)
+                    batches += 1
+                    batch.clear()
+            if batch:
+                db.executemany(
+                    "INSERT OR REPLACE INTO watch_epss_load"
+                    "(cve_id,epss,percentile,score_date,band) VALUES (?,?,?,?,?)",
+                    batch,
+                )
+                total += len(batch)
+                batches += 1
+            old_band = _EPSS_BAND_SQL.format(column="o.epss")
+            new_band = _EPSS_BAND_SQL.format(column="n.epss")
+            changed = {
+                row["cve_id"]
+                for row in db.execute(
+                    "SELECT n.cve_id FROM watch_epss_load n "
+                    "JOIN watch_cve c ON c.cve_id=n.cve_id "
+                    "LEFT JOIN watch_epss o ON o.cve_id=n.cve_id "
+                    f"WHERE o.cve_id IS NULL OR {old_band} <> {new_band} "
+                    "UNION "
+                    "SELECT o.cve_id FROM watch_epss o "
+                    "JOIN watch_cve c ON c.cve_id=o.cve_id "
+                    "LEFT JOIN watch_epss_load n ON n.cve_id=o.cve_id "
+                    "WHERE n.cve_id IS NULL"
+                )
+            }
+            db.execute("DELETE FROM watch_epss")
+            db.execute(
+                "INSERT INTO watch_epss(cve_id,epss,percentile,score_date) "
+                "SELECT cve_id,epss,percentile,score_date FROM watch_epss_load"
+            )
+            db.execute("DROP TABLE watch_epss_load")
+            if meta:
+                self._set_meta(db, meta)
+        return EpssLoadResult(total, batches, tuple(sorted(changed)))
 
-    def drop_pending(self, identifier: str) -> None:
+    def prune_euvd(self, *, now: datetime) -> int | None:
+        """Delete old, non-exploited items that no stored CVE refers to."""
+        self.initialize()
+        today = now.date().isoformat()
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT value FROM watch_meta WHERE key='euvd_prune_date'"
+            ).fetchone()
+            if row is not None and row["value"] == today:
+                return None
+            cutoff = (now - timedelta(days=EUVD_MAX_AGE_DAYS)).isoformat()
+            cursor = db.execute(
+                "DELETE FROM watch_euvd_item "
+                "WHERE exploited_since IS NULL AND seen_at < ? "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM watch_euvd_alias a "
+                "JOIN watch_cve c ON c.cve_id=a.cve_id "
+                "WHERE a.euvd_id=watch_euvd_item.euvd_id)",
+                (cutoff,),
+            )
+            self._set_meta(db, {"euvd_prune_date": today})
+            return cursor.rowcount
+
+    def sync_lookups(
+        self,
+        catalogs: Sequence[str],
+        *,
+        initial_window_start: str | None,
+        now: datetime,
+        include_euvd: bool = True,
+    ) -> int:
+        """Create, keep and remove lookup entries from current triggers."""
+        self.initialize()
+        stamp = _timestamp(lambda: now)
+        catalog_names = {"cisa_kev": "cisa", "eu_kev": "eu"}
+        with self.transaction() as db:
+            candidates: set[str] = set()
+            if initial_window_start is not None:
+                for source_name in catalogs:
+                    catalog = catalog_names.get(source_name, source_name)
+                    if catalog not in KEV_CATALOGS:
+                        continue
+                    candidates.update(
+                        row["cve_id"]
+                        for row in db.execute(
+                            "SELECT k.cve_id FROM watch_kev k "
+                            "WHERE k.catalog=? AND k.date_added IS NOT NULL "
+                            "AND substr(k.date_added,1,10) >= ? "
+                            "AND NOT EXISTS ("
+                            "SELECT 1 FROM watch_cve c WHERE c.cve_id=k.cve_id)",
+                            (catalog, initial_window_start[:10]),
+                        )
+                    )
+            if include_euvd:
+                candidates.update(
+                    row["cve_id"]
+                    for row in db.execute(
+                        "SELECT DISTINCT a.cve_id FROM watch_euvd_item i "
+                        "JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id "
+                        "WHERE i.exploited_since IS NOT NULL "
+                        "AND NOT EXISTS ("
+                        "SELECT 1 FROM watch_cve c WHERE c.cve_id=a.cve_id)"
+                    )
+                )
+            existing = {
+                row["cve_id"] for row in db.execute("SELECT cve_id FROM watch_lookup")
+            }
+            for identifier in sorted(candidates - existing):
+                db.execute(
+                    "INSERT INTO watch_lookup(cve_id,attempts,next_attempt_at,last_error) "
+                    "VALUES (?,0,?,NULL)",
+                    (identifier, stamp),
+                )
+            for identifier in sorted(existing - candidates):
+                db.execute("DELETE FROM watch_lookup WHERE cve_id=?", (identifier,))
+            return len(candidates)
+
+    def due_lookups(self, *, now: datetime, limit: int = 25) -> tuple[LookupRow, ...]:
+        self.initialize()
+        stamp = _timestamp(lambda: now)
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT cve_id,attempts,next_attempt_at,last_error FROM watch_lookup "
+                "WHERE next_attempt_at <= ? ORDER BY next_attempt_at, cve_id LIMIT ?",
+                (stamp, limit),
+            ).fetchall()
+        return tuple(
+            LookupRow(
+                row["cve_id"],
+                row["attempts"],
+                row["next_attempt_at"],
+                row["last_error"],
+            )
+            for row in rows
+        )
+
+    def lookup_succeeded(self, identifier: str) -> None:
         self.initialize()
         with self.transaction() as db:
-            db.execute("DELETE FROM watch_pending WHERE cve_id=?", (identifier,))
+            db.execute("DELETE FROM watch_lookup WHERE cve_id=?", (identifier,))
 
-    def status(self, *, epss_floor: float) -> dict[str, Any]:
+    def lookup_failed(self, identifier: str, *, error: str, now: datetime) -> None:
+        self.initialize()
+        stamp = _timestamp(lambda: now)
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT attempts FROM watch_lookup WHERE cve_id=?", (identifier,)
+            ).fetchone()
+            if row is None:
+                return
+            attempts = row["attempts"] + 1
+            hours = min(2 ** min(attempts - 1, 10), 168)
+            following = _timestamp(lambda: now + timedelta(hours=hours))
+            db.execute(
+                "UPDATE watch_lookup SET attempts=?,next_attempt_at=?,last_error=? "
+                "WHERE cve_id=?",
+                (attempts, following, error[:500], identifier),
+            )
+
+    def refresh_views(
+        self, identifiers: Iterable[str], *, catalogs: Sequence[str] = ()
+    ) -> StepCounts:
+        self.initialize()
+        now = _timestamp(self._clock)
+        with self.transaction() as db:
+            views = self._refresh_views(db, identifiers, catalogs, now)
+        return StepCounts(
+            new=views.new,
+            changed=views.changed,
+            unchanged=views.unchanged,
+        )
+
+    def view(self, identifier: str, *, catalogs: Sequence[str] = ()) -> Any | None:
+        self.initialize()
+        with closing(self._connect()) as db:
+            return self._view(db, identifier, catalogs)
+
+    def status(self) -> dict[str, Any]:
         self.initialize()
         with closing(self._connect()) as db:
             db.execute("BEGIN")
@@ -784,32 +873,38 @@ class WatchStore:
                     for row in db.execute("SELECT key,value FROM watch_meta")
                 }
                 row_count = db.execute("SELECT COUNT(*) FROM watch_cve").fetchone()[0]
+                euvd_items = db.execute(
+                    "SELECT COUNT(*) FROM watch_euvd_item"
+                ).fetchone()[0]
                 cisa_kev = db.execute(
-                    "SELECT COUNT(*) FROM watch_cve WHERE cisa_kev_added IS NOT NULL"
+                    "SELECT COUNT(*) FROM watch_kev WHERE catalog='cisa'"
                 ).fetchone()[0]
                 eu_kev = db.execute(
-                    "SELECT COUNT(*) FROM watch_cve WHERE eu_kev_added IS NOT NULL"
+                    "SELECT COUNT(*) FROM watch_kev WHERE catalog='eu'"
                 ).fetchone()[0]
                 any_kev = db.execute(
-                    "SELECT COUNT(*) FROM watch_cve "
-                    "WHERE cisa_kev_added IS NOT NULL OR eu_kev_added IS NOT NULL"
+                    "SELECT COUNT(DISTINCT cve_id) FROM watch_kev"
                 ).fetchone()[0]
                 active_ssvc = db.execute(
                     "SELECT COUNT(*) FROM watch_cve WHERE ssvc_exploitation='active'"
                 ).fetchone()[0]
-                epss_above = db.execute(
-                    "SELECT COUNT(*) FROM watch_cve WHERE epss IS NOT NULL AND epss >= ?",
-                    (epss_floor,),
+                epss_rows = db.execute("SELECT COUNT(*) FROM watch_epss").fetchone()[0]
+                epss_date = db.execute(
+                    "SELECT MAX(score_date) FROM watch_epss"
                 ).fetchone()[0]
+                lookups = db.execute("SELECT COUNT(*) FROM watch_lookup").fetchone()[0]
             finally:
                 db.rollback()
         return {
             "database": self.path,
             "meta": meta,
             "rows": row_count,
+            "euvd_items": euvd_items,
             "cisa_kev": cisa_kev,
             "eu_kev": eu_kev,
             "any_kev": any_kev,
             "active_ssvc": active_ssvc,
-            "epss_above": epss_above,
+            "epss_rows": epss_rows,
+            "epss_date": epss_date,
+            "lookups": lookups,
         }

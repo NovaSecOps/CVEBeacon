@@ -29,7 +29,6 @@ def test_old_config_without_watch_still_loads(tmp_path):
     assert config.watch.initial == "baseline"
     assert config.watch.backfill_days == 7
     assert config.watch.overlap_minutes == 15
-    assert config.watch.epss_floor == 0.1
 
 
 def test_watch_table_parses_and_resolves_the_database_path(tmp_path):
@@ -43,7 +42,6 @@ sources = ["nvd", "EUVD", "epss"]
 initial = "backfill"
 backfill_days = 30
 overlap_minutes = 0
-epss_floor = 0.25
 """,
     )
     assert config.watch.enabled is True
@@ -52,7 +50,6 @@ epss_floor = 0.25
     assert config.watch.initial == "backfill"
     assert config.watch.backfill_days == 30
     assert config.watch.overlap_minutes == 0
-    assert config.watch.epss_floor == 0.25
 
 
 def test_watch_sources_must_include_nvd(tmp_path):
@@ -82,13 +79,7 @@ def test_watch_unknown_key_is_rejected(tmp_path):
         ("backfill_days = 121", "integer"),
         ("overlap_minutes = -1", "integer"),
         ("overlap_minutes = 1441", "integer"),
-        ("epss_floor = '0.1'", "must be a number"),
-        ("epss_floor = true", "must be a number"),
-        ("epss_floor = -0.1", "between 0 and 1"),
-        ("epss_floor = 1.1", "between 0 and 1"),
-        ("epss_floor = nan", "between 0 and 1"),
-        ("epss_floor = inf", "between 0 and 1"),
-        ("epss_floor = " + "9" * 1000, "between 0 and 1"),
+        ("epss_floor = 0.1", "unknown watch setting"),
     ],
 )
 def test_watch_settings_are_strict(tmp_path, setting, match):

@@ -22,7 +22,7 @@ def as_float(value: Any) -> float | None:
     try:
         number = float(value) if value not in (None, "") else None
         return number if number is not None and math.isfinite(number) else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 

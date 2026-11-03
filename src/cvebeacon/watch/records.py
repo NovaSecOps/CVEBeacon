@@ -12,6 +12,7 @@ CVSS_PROVIDERS = ("nvd", "cna", "cisa-adp", "euvd", "other")
 CVSS_VERSIONS = ("2.0", "3.0", "3.1", "4.0")
 SSVC_EXPLOITATION = ("none", "poc", "active")
 STATUSES = ("published", "rejected")
+EPSS_BANDS = (0.1, 0.5, 0.9)
 
 
 def canonical_json(value: Any) -> str:
@@ -74,6 +75,10 @@ class Reference:
         return {"url": self.url, "tags": list(self.tags)}
 
 
+def _identifier_key(value: str | None) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", value or ""))
+
+
 @dataclass(frozen=True, slots=True)
 class EUVDUpdate:
     cve_ids: tuple[str, ...]
@@ -81,6 +86,7 @@ class EUVDUpdate:
     exploited_since: str | None
     cvss: CVSSEntry | None = None
     date_updated: str | None = None
+    vendors: tuple[Product, ...] = ()
 
     def rank(self) -> tuple[Any, ...]:
         """Deterministic priority when several EUVD items describe one CVE."""
@@ -91,21 +97,6 @@ class EUVDUpdate:
         )
 
 
-def _identifier_key(value: str | None) -> tuple[int, ...]:
-    return tuple(int(part) for part in re.findall(r"\d+", value or ""))
-
-
-def collapse_euvd(updates: Iterable[EUVDUpdate]) -> dict[str, EUVDUpdate]:
-    """Choose one EUVD item per CVE: exploited, newest, then highest id."""
-    best: dict[str, EUVDUpdate] = {}
-    for update in updates:
-        for identifier in update.cve_ids:
-            current = best.get(identifier)
-            if current is None or update.rank() > current.rank():
-                best[identifier] = update
-    return best
-
-
 @dataclass(frozen=True, slots=True)
 class KEVFields:
     added: str | None
@@ -114,8 +105,20 @@ class KEVFields:
     ransomware: str | None = None
 
 
+def epss_band(value: float | None) -> int:
+    """Return the EPSS band index, or -1 when no score is stored."""
+    if value is None:
+        return -1
+    for index, bound in enumerate(EPSS_BANDS):
+        if value < bound:
+            return index
+    return len(EPSS_BANDS)
+
+
 @dataclass(frozen=True, slots=True)
 class WatchRecord:
+    """The NVD-owned part of a CVE, as stored in ``watch_cve``."""
+
     cve_id: str
     status: str
     published: str | None = None
@@ -131,12 +134,6 @@ class WatchRecord:
     cisa_kev_due: str | None = None
     cisa_required_action: str | None = None
     cisa_ransomware: str | None = None
-    eu_kev_added: str | None = None
-    euvd_id: str | None = None
-    euvd_exploited_since: str | None = None
-    epss: float | None = None
-    epss_percentile: float | None = None
-    epss_date: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
@@ -174,8 +171,8 @@ class WatchRecord:
     def references_json(self) -> str:
         return canonical_json([item.as_dict() for item in self.references])
 
-    def fingerprint(self) -> str:
-        """Hash alert-relevant fields; EPSS, identifiers and timestamps are excluded."""
+    def nvd_fingerprint(self) -> str:
+        """Hash NVD-owned alert fields; other sources never contribute here."""
         value = {
             "status": self.status,
             "cvss": [entry.as_dict() for entry in self.cvss],
@@ -184,10 +181,12 @@ class WatchRecord:
             "cisa_kev_due": self.cisa_kev_due,
             "cisa_required_action": self.cisa_required_action,
             "cisa_ransomware": self.cisa_ransomware,
-            "eu_kev_added": self.eu_kev_added,
-            "euvd_exploited_since": self.euvd_exploited_since,
         }
         return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+    # Retained for callers that compare records directly.
+    def fingerprint(self) -> str:
+        return self.nvd_fingerprint()
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "WatchRecord":
@@ -210,10 +209,103 @@ class WatchRecord:
             cisa_kev_due=row["cisa_kev_due"],
             cisa_required_action=row["cisa_required_action"],
             cisa_ransomware=row["cisa_ransomware"],
-            eu_kev_added=row["eu_kev_added"],
-            euvd_id=row["euvd_id"],
-            euvd_exploited_since=row["euvd_exploited_since"],
-            epss=row["epss"],
-            epss_percentile=row["epss_percentile"],
-            epss_date=row["epss_date"],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class WatchView:
+    """The alert-relevant combination of one CVE and all source tables."""
+
+    cve_id: str
+    status: str
+    published: str | None = None
+    last_modified: str | None = None
+    description: str | None = None
+    source_identifier: str | None = None
+    cvss: tuple[CVSSEntry, ...] = ()
+    cwes: tuple[str, ...] = ()
+    products: tuple[Product, ...] = ()
+    references: tuple[Reference, ...] = ()
+    ssvc_exploitation: str | None = None
+    cisa_kev_added: str | None = None
+    cisa_kev_due: str | None = None
+    cisa_required_action: str | None = None
+    cisa_ransomware: str | None = None
+    eu_kev_added: str | None = None
+    euvd_id: str | None = None
+    euvd_exploited_since: str | None = None
+    epss: float | None = None
+    epss_percentile: float | None = None
+    epss_date: str | None = None
+
+    @property
+    def epss_band(self) -> int:
+        return epss_band(self.epss)
+
+    def fingerprint(self) -> str:
+        """Hash alert-relevant fields; EPSS, identifiers and timestamps are excluded."""
+        value = {
+            "status": self.status,
+            "cvss": [entry.as_dict() for entry in self.cvss],
+            "ssvc_exploitation": self.ssvc_exploitation,
+            "cisa_kev_added": self.cisa_kev_added,
+            "cisa_kev_due": self.cisa_kev_due,
+            "cisa_required_action": self.cisa_required_action,
+            "cisa_ransomware": self.cisa_ransomware,
+            "eu_kev_added": self.eu_kev_added,
+            "euvd_exploited_since": self.euvd_exploited_since,
+        }
+        return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def build_view(
+    record: WatchRecord,
+    *,
+    euvd: EUVDUpdate | None = None,
+    cisa_kev: KEVFields | None = None,
+    eu_kev: KEVFields | None = None,
+    cisa_catalog: bool = False,
+    eu_catalog: bool = False,
+    epss: tuple[float, float, str] | None = None,
+) -> WatchView:
+    """Combine the raw source rows into one CVE view.
+
+    The CISA catalog owns KEV fields whenever it is configured; otherwise the
+    NVD record supplies its own CISA fields.
+    """
+    cvss = record.cvss
+    if euvd is not None and euvd.cvss is not None:
+        cvss = normalized_cvss((*cvss, euvd.cvss))
+    if cisa_catalog:
+        cisa = cisa_kev or KEVFields(None)
+    else:
+        cisa = KEVFields(
+            record.cisa_kev_added,
+            record.cisa_kev_due,
+            record.cisa_required_action,
+            record.cisa_ransomware,
+        )
+    eu = eu_kev if eu_catalog else None
+    return WatchView(
+        cve_id=record.cve_id,
+        status=record.status,
+        published=record.published,
+        last_modified=record.last_modified,
+        description=record.description,
+        source_identifier=record.source_identifier,
+        cvss=cvss,
+        cwes=record.cwes,
+        products=record.products,
+        references=record.references,
+        ssvc_exploitation=record.ssvc_exploitation,
+        cisa_kev_added=cisa.added,
+        cisa_kev_due=cisa.due,
+        cisa_required_action=cisa.required_action,
+        cisa_ransomware=cisa.ransomware,
+        eu_kev_added=eu.added if eu is not None else None,
+        euvd_id=euvd.euvd_id if euvd is not None else None,
+        euvd_exploited_since=euvd.exploited_since if euvd is not None else None,
+        epss=epss[0] if epss is not None else None,
+        epss_percentile=epss[1] if epss is not None else None,
+        epss_date=epss[2] if epss is not None else None,
+    )

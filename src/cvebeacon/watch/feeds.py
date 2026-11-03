@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import csv
+import gzip
+import io
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from ..http import HttpClient
 from ..errors import SourceError
 from ..sources.common import as_float, cve_id, source_payload
-from ..sources.epss import EPSS_URL, EPSSSource, batches
 from ..sources.euvd import SEARCH_URL
 from ..sources.kev import KEVSource
 from ..sources.nvd import CVE_URL, split_cpe23
@@ -28,18 +30,20 @@ from .records import (
 
 NVD_PAGE_SIZE = 2000
 NVD_WINDOW_DAYS = 120
-NVD_WINDOW_RECORD_LIMIT = 20000
 NVD_WINDOW_ATTEMPTS = 3
+NVD_MIN_SPLIT = timedelta(hours=1)
 CISA_ADP_SOURCE = "134c704f-9b21-4f2e-91b3-4a467353bcc0"
 NVD_PROVIDER_SOURCE = "nvd@nist.gov"
 EUVD_PAGE_SIZE = 100
 EUVD_CHUNK_DAYS = 30
 EUVD_ATTEMPTS = 3
-EPSS_PAGE_SIZE = 10000
-EPSS_ATTEMPTS = 3
+EUVD_MIN_INTERVAL = 1.0
+EPSS_FILE_URL = "https://epss.empiricalsecurity.com/epss_scores-{day}.csv.gz"
+EPSS_BYTE_CAP = 20 * 1024 * 1024
+EPSS_MAX_ROWS = 1_000_000
 
 _NVD_TIMESTAMP = re.compile(
-    r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,6}))?$"
+    r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,9}))?$"
 )
 _EUVD_TIMESTAMP_FORMATS = ("%b %d, %Y, %I:%M:%S %p",)
 
@@ -80,15 +84,20 @@ def iso_timestamp(value: datetime) -> str:
 
 
 def parse_nvd_timestamp(value: Any) -> datetime | None:
-    """Parse NVD's UTC timestamp, which carries no offset, or return None."""
+    """Parse NVD's UTC timestamp, with no suffix, ``Z``, or ``+00:00``."""
     if value is None:
         return None
     if not isinstance(value, str):
         raise SourceError("nvd", "source returned an invalid response timestamp")
-    match = _NVD_TIMESTAMP.fullmatch(value.strip())
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1]
+    elif text.endswith("+00:00"):
+        text = text[:-6]
+    match = _NVD_TIMESTAMP.fullmatch(text)
     if match is None:
         raise SourceError("nvd", "source returned an invalid response timestamp")
-    fraction = (match.group("fraction") or "").ljust(6, "0")
+    fraction = (match.group("fraction") or "").ljust(6, "0")[:6]
     try:
         parsed = datetime.fromisoformat(
             f"{match.group('date')}T{match.group('time')}.{fraction}"
@@ -377,55 +386,64 @@ def _nvd_records(
     window: dict[str, str],
     api_key: str | None,
     interval: float,
-    record_limit: int,
     width: timedelta,
 ) -> NVDWindowFeed:
     requests = 0
-    for _ in range(NVD_WINDOW_ATTEMPTS):
-        records: dict[str, WatchRecord] = {}
-        offset = 0
-        pinned_total: int | None = None
-        timestamp: datetime | None = None
-        unstable = False
-        while True:
-            payload = http.get_json(
-                CVE_URL,
-                source="nvd",
-                params={**window, "startIndex": offset, "resultsPerPage": NVD_PAGE_SIZE},
-                headers=_nvd_headers(api_key),
-                minimum_interval=interval,
-            )
-            requests += 1
-            vulnerabilities, count, total = _nvd_page(payload, offset)
-            if offset == 0:
-                pinned_total = total
-                timestamp = parse_nvd_timestamp(payload.get("timestamp"))
-                if total > record_limit and width > timedelta(days=1):
-                    return NVDWindowFeed((), requests, timestamp, split=True)
-            elif total != pinned_total:
-                unstable = True
-                break
-            if offset + count > pinned_total or (count == 0 and offset < pinned_total):
-                raise SourceError("nvd", "source returned an incomplete page")
-            for wrapped in vulnerabilities:
-                raw = wrapped.get("cve") if isinstance(wrapped, dict) else None
-                if not isinstance(raw, dict):
-                    raise SourceError("nvd", "source returned an invalid vulnerability entry")
-                record = parse_nvd_cve(raw)
-                if record.cve_id in records:
+    try:
+        for _ in range(NVD_WINDOW_ATTEMPTS):
+            records: dict[str, WatchRecord] = {}
+            offset = 0
+            pinned_total: int | None = None
+            timestamp: datetime | None = None
+            unstable = False
+            while True:
+                try:
+                    payload = http.get_json(
+                        CVE_URL,
+                        source="nvd",
+                        params={**window, "startIndex": offset, "resultsPerPage": NVD_PAGE_SIZE},
+                        headers=_nvd_headers(api_key),
+                        minimum_interval=interval,
+                    )
+                except SourceError as exc:
+                    exc.requests = max(exc.requests, requests + 1)
+                    raise
+                requests += 1
+                vulnerabilities, count, total = _nvd_page(payload, offset)
+                if offset == 0:
+                    pinned_total = total
+                    timestamp = parse_nvd_timestamp(payload.get("timestamp"))
+                    if total > NVD_PAGE_SIZE and width > NVD_MIN_SPLIT:
+                        return NVDWindowFeed((), requests, timestamp, split=True)
+                elif total != pinned_total:
                     unstable = True
                     break
-                records[record.cve_id] = record
-            if unstable:
-                break
-            if offset + count >= pinned_total:
-                break
-            offset += count
-        if not unstable:
-            return NVDWindowFeed(
-                tuple(records[key] for key in sorted(records)), requests, timestamp
-            )
-    raise SourceError("nvd", "source returned unstable pagination")
+                if offset + count > (pinned_total or 0) or (
+                    count == 0 and offset < (pinned_total or 0)
+                ):
+                    raise SourceError("nvd", "source returned an incomplete page")
+                for wrapped in vulnerabilities:
+                    raw = wrapped.get("cve") if isinstance(wrapped, dict) else None
+                    if not isinstance(raw, dict):
+                        raise SourceError("nvd", "source returned an invalid vulnerability entry")
+                    record = parse_nvd_cve(raw)
+                    if record.cve_id in records:
+                        unstable = True
+                        break
+                    records[record.cve_id] = record
+                if unstable:
+                    break
+                if offset + count >= (pinned_total or 0):
+                    break
+                offset += count
+            if not unstable:
+                return NVDWindowFeed(
+                    tuple(records[key] for key in sorted(records)), requests, timestamp
+                )
+        raise SourceError("nvd", "source returned unstable pagination")
+    except SourceError as exc:
+        exc.requests = max(exc.requests, requests)
+        raise
 
 
 @source_payload("nvd")
@@ -447,7 +465,6 @@ def fetch_nvd_window(
         window=window,
         api_key=api_key,
         interval=interval,
-        record_limit=NVD_WINDOW_RECORD_LIMIT,
         width=end - start,
     )
 
@@ -457,13 +474,17 @@ def fetch_nvd_cve(
     http: HttpClient, identifier: str, *, api_key: str | None = None, interval: float = 0
 ) -> NVDCVEResult:
     """Fetch a single CVE by id, used to create rows that other feeds saw first."""
-    payload = http.get_json(
-        CVE_URL,
-        source="nvd",
-        params={"cveId": identifier},
-        headers=_nvd_headers(api_key),
-        minimum_interval=interval,
-    )
+    try:
+        payload = http.get_json(
+            CVE_URL,
+            source="nvd",
+            params={"cveId": identifier},
+            headers=_nvd_headers(api_key),
+            minimum_interval=interval,
+        )
+    except SourceError as exc:
+        exc.requests = max(exc.requests, 1)
+        raise
     vulnerabilities, _, total = _nvd_page(payload, 0)
     if total < 1 or not vulnerabilities:
         raise SourceError("nvd", "source returned no vulnerability for a requested identifier")
@@ -525,70 +546,87 @@ def _euvd_cvss(item: dict[str, Any]) -> tuple[CVSSEntry | None, bool]:
 
 @source_payload("euvd")
 def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
-    """Fetch one bounded EUVD chunk with a pinned result total."""
-    params = {"fromUpdatedDate": start.isoformat(), "toUpdatedDate": end.isoformat()}
+    """Fetch one bounded EUVD chunk with a pinned result total.
+
+    Same-day queries report a total below the items they return, so the end is
+    always widened by one day while the committed cursor stays at ``end``.
+    """
+    params = {
+        "fromUpdatedDate": start.isoformat(),
+        "toUpdatedDate": (end + timedelta(days=1)).isoformat(),
+    }
     requests = 0
-    for _ in range(EUVD_ATTEMPTS):
-        updates: list[EUVDUpdate] = []
-        ignored = 0
-        page = 0
-        pinned_total: int | None = None
-        unstable = False
-        while True:
-            payload = http.get_json(
-                SEARCH_URL,
-                source="euvd",
-                params={**params, "page": page, "size": EUVD_PAGE_SIZE},
-            )
-            requests += 1
-            if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-                raise SourceError("euvd", "source returned an invalid search envelope")
-            items = payload["items"]
-            try:
-                total = payload["total"]
-                if type(total) is not int or total < 0:
-                    raise ValueError("invalid count")
-            except (KeyError, TypeError, ValueError) as exc:
-                raise SourceError("euvd", "source returned an invalid total count") from exc
-            if page == 0:
-                pinned_total = total
-            elif total != pinned_total:
-                unstable = True
-                break
-            expected = min(EUVD_PAGE_SIZE, max(pinned_total - page * EUVD_PAGE_SIZE, 0))
-            if len(items) != expected:
-                raise SourceError("euvd", "source returned an incomplete page")
-            for item in items:
-                if not isinstance(item, dict):
-                    raise SourceError("euvd", "source returned a non-object search item")
-                identifiers = tuple(
-                    sorted(
-                        {
-                            value
-                            for alias in _alias_values(item.get("aliases"))
-                            if (value := cve_id(alias))
-                        }
+    try:
+        for _ in range(EUVD_ATTEMPTS):
+            updates: list[EUVDUpdate] = []
+            ignored = 0
+            page = 0
+            pinned_total: int | None = None
+            unstable = False
+            while True:
+                try:
+                    payload = http.get_json(
+                        SEARCH_URL,
+                        source="euvd",
+                        params={**params, "page": page, "size": EUVD_PAGE_SIZE},
+                        minimum_interval=EUVD_MIN_INTERVAL,
                     )
-                )
-                if not identifiers:
-                    continue
-                cvss, was_ignored = _euvd_cvss(item)
-                ignored += 1 if was_ignored else 0
-                updates.append(
-                    EUVDUpdate(
-                        identifiers,
-                        _text(item.get("id")),
-                        _text(item.get("exploitedSince")),
-                        cvss,
-                        _euvd_datetime(item.get("dateUpdated")),
+                except SourceError as exc:
+                    exc.requests = max(exc.requests, requests + 1)
+                    raise
+                requests += 1
+                if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+                    raise SourceError("euvd", "source returned an invalid search envelope")
+                items = payload["items"]
+                try:
+                    total = payload["total"]
+                    if type(total) is not int or total < 0:
+                        raise ValueError("invalid count")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise SourceError("euvd", "source returned an invalid total count") from exc
+                if page == 0:
+                    pinned_total = total
+                elif total != pinned_total:
+                    unstable = True
+                    break
+                expected = min(EUVD_PAGE_SIZE, max(pinned_total - page * EUVD_PAGE_SIZE, 0))
+                if len(items) != expected:
+                    raise SourceError("euvd", "source returned an incomplete page")
+                for item in items:
+                    if not isinstance(item, dict):
+                        raise SourceError("euvd", "source returned a non-object search item")
+                    euvd_id = _text(item.get("id"))
+                    if euvd_id is None:
+                        raise SourceError("euvd", "source returned an item without an identifier")
+                    identifiers = tuple(
+                        sorted(
+                            {
+                                value
+                                for alias in _alias_values(item.get("aliases"))
+                                if (value := cve_id(alias))
+                            }
+                        )
                     )
-                )
-            if (page + 1) * EUVD_PAGE_SIZE >= pinned_total:
-                break
-            page += 1
-        if not unstable:
-            return EUVDFeed(tuple(updates), requests, ignored)
-    raise SourceError("euvd", "source returned unstable pagination")
+                    cvss, was_ignored = _euvd_cvss(item)
+                    ignored += 1 if was_ignored else 0
+                    updates.append(
+                        EUVDUpdate(
+                            identifiers,
+                            euvd_id,
+                            _text(item.get("exploitedSince")),
+                            cvss,
+                            _euvd_datetime(item.get("dateUpdated")),
+                        )
+                    )
+                if (page + 1) * EUVD_PAGE_SIZE >= pinned_total:
+                    break
+                page += 1
+            if not unstable:
+                return EUVDFeed(tuple(updates), requests, ignored)
+        raise SourceError("euvd", "source returned unstable pagination")
+    except SourceError as exc:
+        exc.requests = max(exc.requests, requests)
+        raise
 
 
 def cisa_fields(items: dict[str, Any]) -> dict[str, KEVFields]:
@@ -613,75 +651,125 @@ def eu_fields(items: dict[str, Any]) -> dict[str, KEVFields]:
 
 def fetch_kev(http: HttpClient, *, eu: bool = False) -> dict[str, KEVFields]:
     source = KEVSource(http)
-    if eu:
-        return eu_fields(source.eu())
-    return cisa_fields(source.cisa())
+    try:
+        if eu:
+            return eu_fields(source.eu())
+        return cisa_fields(source.cisa())
+    except SourceError as exc:
+        exc.requests = max(exc.requests, 1)
+        raise
 
 
-def fetch_epss_scores(
-    http: HttpClient, identifiers: Iterable[str]
-) -> tuple[dict[str, tuple[float, float, date]], int]:
-    values = sorted({value for raw in identifiers if (value := cve_id(raw))})
-    if not values:
-        return {}, 0
-    return EPSSSource(http).scores(values), len(batches(values))
+def epss_file_url(day: date) -> str:
+    return EPSS_FILE_URL.format(day=day.isoformat())
 
 
-@source_payload("epss")
-def fetch_epss_floor(
-    http: HttpClient, *, floor: float
-) -> tuple[dict[str, tuple[float, float, date]], int]:
-    requests = 0
-    for _ in range(EPSS_ATTEMPTS):
-        scores: dict[str, tuple[float, float, date]] = {}
-        offset = 0
-        pinned_total: int | None = None
-        unstable = False
-        while True:
-            payload = http.get_json(
-                EPSS_URL,
-                source="epss",
-                params={"epss-gt": floor, "limit": EPSS_PAGE_SIZE, "offset": offset},
-            )
-            requests += 1
-            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-                raise SourceError("epss", "source returned an invalid response envelope")
-            total, echoed = payload.get("total"), payload.get("offset")
-            if type(total) is not int or total < 0 or type(echoed) is not int or echoed != offset:
-                raise SourceError("epss", "source returned invalid pagination metadata")
-            if offset == 0:
-                pinned_total = total
-            elif total != pinned_total:
-                unstable = True
-                break
-            data = payload["data"]
-            expected = min(EPSS_PAGE_SIZE, max(pinned_total - offset, 0))
-            if len(data) != expected:
-                raise SourceError("epss", "source returned an incomplete page")
-            for item in data:
-                if not isinstance(item, dict):
-                    raise SourceError("epss", "source returned a non-object score entry")
-                identifier = cve_id(item.get("cve"))
-                raw_score, raw_percentile = item.get("epss"), item.get("percentile")
-                if isinstance(raw_score, bool) or isinstance(raw_percentile, bool):
-                    raise SourceError("epss", "source returned an invalid probability or identifier")
-                score, percentile = as_float(raw_score), as_float(raw_percentile)
-                try:
-                    score_date = date.fromisoformat(str(item.get("date")))
-                except ValueError as exc:
-                    raise SourceError("epss", "score entry has an invalid date") from exc
-                if (
-                    identifier is None
-                    or score is None
-                    or percentile is None
-                    or not 0 <= score <= 1
-                    or not 0 <= percentile <= 1
-                ):
-                    raise SourceError("epss", "source returned an invalid probability or identifier")
-                scores[identifier] = (score, percentile, score_date)
-            if offset + len(data) >= pinned_total:
-                break
-            offset += len(data)
-        if not unstable:
-            return scores, requests
-    raise SourceError("epss", "source returned unstable pagination")
+class _ChunkReader(io.RawIOBase):
+    """Adapt an iterator of byte chunks to the file object gzip expects."""
+
+    def __init__(self, chunks: Iterable[bytes]) -> None:
+        self._chunks = iter(chunks)
+        self._buffer = bytearray()
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, target: bytearray) -> int:
+        while not self._buffer:
+            try:
+                self._buffer.extend(next(self._chunks))
+            except StopIteration:
+                return 0
+        count = min(len(target), len(self._buffer))
+        target[:count] = self._buffer[:count]
+        del self._buffer[:count]
+        return count
+
+
+def _epss_value(value: Any) -> float:
+    if isinstance(value, bool):
+        raise SourceError("epss", "source returned an invalid EPSS score file")
+    number = as_float(value)
+    if number is None or not 0 <= number <= 1:
+        raise SourceError("epss", "source returned an invalid EPSS score file")
+    return number
+
+
+def _epss_rows(chunks: Iterable[bytes], day: date) -> Iterator[tuple[str, float, float, date]]:
+    """Yield validated EPSS rows from a gzip-compressed CSV stream."""
+    gzip_file = gzip.GzipFile(fileobj=_ChunkReader(chunks), mode="rb")
+    text = io.TextIOWrapper(gzip_file, encoding="utf-8", newline="")
+    try:
+        comment_line = text.readline()
+        if not comment_line.startswith("#"):
+            raise SourceError("epss", "source returned an invalid EPSS score file")
+        fields: dict[str, str] = {}
+        for part in comment_line.strip()[1:].split(","):
+            if ":" not in part:
+                raise SourceError("epss", "source returned an invalid EPSS score file")
+            key, value = part.split(":", 1)
+            fields[key.strip()] = value.strip()
+        if not fields.get("model_version") or not fields.get("score_date"):
+            raise SourceError("epss", "source returned an invalid EPSS score file")
+        try:
+            score_date = date.fromisoformat(fields["score_date"])
+        except ValueError as exc:
+            raise SourceError(
+                "epss", "source returned an invalid EPSS score file"
+            ) from exc
+        reader = csv.reader(text)
+        header = next(reader, None)
+        if header is None or [value.strip().casefold() for value in header] != [
+            "cve",
+            "epss",
+            "percentile",
+        ]:
+            raise SourceError("epss", "source returned an invalid EPSS score file")
+        count = 0
+        for row in reader:
+            count += 1
+            if count > EPSS_MAX_ROWS:
+                raise SourceError("epss", "source returned too many EPSS scores")
+            if len(row) != 3:
+                raise SourceError("epss", "source returned an invalid EPSS score file")
+            identifier = cve_id(row[0])
+            if identifier is None:
+                raise SourceError("epss", "source returned an invalid EPSS score file")
+            yield identifier, _epss_value(row[1]), _epss_value(row[2]), score_date
+    except (OSError, EOFError, UnicodeError, csv.Error) as exc:
+        raise SourceError("epss", "source returned an invalid EPSS score file") from exc
+    finally:
+        try:
+            text.close()
+        except OSError:
+            pass
+
+
+def fetch_epss_file(
+    http: HttpClient, *, day: date, counter: list[int]
+) -> Iterator[tuple[str, float, float, date]]:
+    """Stream one dated EPSS file, keeping only a few rows in memory."""
+    chunks = http.stream_bytes(
+        epss_file_url(day),
+        source="epss",
+        byte_cap=EPSS_BYTE_CAP,
+        counter=counter,
+    )
+    yield from _epss_rows(chunks, day)
+
+
+def fetch_epss_daily(
+    http: HttpClient, *, today: date, counter: list[int]
+) -> Iterator[tuple[str, float, float, date]]:
+    """Yield today's EPSS file, or yesterday's when today is not published."""
+    for day in (today, today - timedelta(days=1)):
+        try:
+            yield from fetch_epss_file(http, day=day, counter=counter)
+            return
+        except SourceError as exc:
+            if exc.status_code == 404:
+                continue
+            raise
+    raise SourceError(
+        "epss", "EPSS score file is not published yet", requests=counter[0]
+    )

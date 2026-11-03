@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import io
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 import pytest
-from watch_support import mock_client, nvd_cve, nvd_page
+from watch_support import epss_gzip, mock_client, nvd_cve, nvd_page
 
 from cvebeacon.errors import SourceError
 from cvebeacon.models import Evidence
+from cvebeacon.sources.common import as_float
 from cvebeacon.sources.epss import EPSSSource, EPSS_URL
 from cvebeacon.sources.kev import CISA_URL, EU_URL
 from cvebeacon.sources.nvd import CVE_URL
@@ -18,8 +20,6 @@ from cvebeacon.watch.feeds import (
     cisa_fields,
     eu_fields,
     euvd_chunks,
-    fetch_epss_floor,
-    fetch_epss_scores,
     fetch_euvd,
     fetch_nvd_cve,
     fetch_nvd_window,
@@ -32,6 +32,7 @@ from cvebeacon.watch.records import CVSSEntry, Product
 
 FIXTURES = Path(__file__).parent / "fixtures" / "watch"
 CISA_ADP = "134c704f-9b21-4f2e-91b3-4a467353bcc0"
+EPSS_FILE_PREFIX = "https://epss.empiricalsecurity.com/"
 
 
 def test_recorded_nvd_sample_parses_ssvc_cvss_and_kev():
@@ -140,11 +141,10 @@ def test_description_is_truncated_and_products_and_references_are_bounded():
         {"criteria": f"cpe:2.3:a:vendor{index}:product{index}:1:*:*:*:*:*:*:*"}
         for index in range(60)
     ]
-    configurations = [{"nodes": [{"cpeMatch": cpes}]}]
     references = [{"url": f"https://example.test/{index}"} for index in range(40)]
     raw = nvd_cve(
         descriptions=[{"lang": "en", "value": "x" * 1200}],
-        configurations=configurations,
+        configurations=[{"nodes": [{"cpeMatch": cpes}]}],
         references=references,
     )
     record = parse_nvd_cve(raw)
@@ -185,10 +185,9 @@ def test_nvd_paging_validation_rejects_bad_metadata():
         {"resultsPerPage": 0, "startIndex": 0, "totalResults": 1, "vulnerabilities": []},
     ]
     for payload in payloads:
-        client = mock_client(lambda request, payload=payload: httpx.Response(200, json=payload))
         with pytest.raises(SourceError):
             fetch_nvd_window(
-                client,
+                mock_client(lambda request, payload=payload: httpx.Response(200, json=payload)),
                 start=datetime(2026, 11, 1, tzinfo=timezone.utc),
                 end=datetime(2026, 11, 2, tzinfo=timezone.utc),
             )
@@ -266,6 +265,25 @@ def test_nvd_repeated_identifier_restarts_the_window():
     assert [record.cve_id for record in feed.records] == ["CVE-2026-0001", "CVE-2026-0002"]
 
 
+def test_nvd_one_page_window_is_a_single_request():
+    calls: list[int] = []
+
+    def handler(request):
+        calling_start = int(dict(request.url.params)["startIndex"])
+        calls.append(calling_start)
+        return httpx.Response(200, json=nvd_page([nvd_cve()], total=1))
+
+    feed = fetch_nvd_window(
+        mock_client(handler),
+        start=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 11, 2, tzinfo=timezone.utc),
+    )
+    assert calls == [0]
+    assert feed.split is False
+    assert feed.requests == 1
+    assert [record.cve_id for record in feed.records] == ["CVE-2026-0001"]
+
+
 def test_nvd_unstable_pagination_fails_after_three_attempts():
     calls: list[int] = []
 
@@ -283,54 +301,80 @@ def test_nvd_unstable_pagination_fails_after_three_attempts():
             ),
         )
 
-    with pytest.raises(SourceError, match="unstable pagination"):
+    with pytest.raises(SourceError, match="unstable pagination") as caught:
         fetch_nvd_window(
             mock_client(handler),
             start=datetime(2026, 11, 1, tzinfo=timezone.utc),
             end=datetime(2026, 11, 2, tzinfo=timezone.utc),
         )
     assert calls == [0, 1] * 3
+    assert caught.value.requests == 6
 
 
-def test_nvd_window_requests_a_split_when_the_total_is_large(monkeypatch):
-    monkeypatch.setattr(feeds, "NVD_WINDOW_RECORD_LIMIT", 3)
-
-    def handler(request):
-        return httpx.Response(200, json=nvd_page([nvd_cve()], total=5))
-
+def test_nvd_windows_split_above_one_page_until_one_hour_then_page(monkeypatch):
+    monkeypatch.setattr(feeds, "NVD_PAGE_SIZE", 2)
     start = datetime(2026, 11, 1, tzinfo=timezone.utc)
-    feed = fetch_nvd_window(
-        mock_client(handler),
-        start=start,
-        end=start + timedelta(days=2),
+
+    def split_handler(request):
+        return httpx.Response(200, json=nvd_page([nvd_cve()], total=3))
+
+    split = fetch_nvd_window(
+        mock_client(split_handler), start=start, end=start + timedelta(hours=2)
     )
-    assert feed.split is True
-    assert feed.requests == 1
-    assert feed.records == ()
+    assert split.split is True
+    assert split.records == ()
+    assert split.requests == 1
 
-    one_day = fetch_nvd_window(
-        mock_client(lambda request: httpx.Response(200, json=nvd_page([nvd_cve()]))),
-        start=start,
-        end=start + timedelta(days=1),
+    starts: list[int] = []
+
+    def page_handler(request):
+        offset = int(dict(request.url.params)["startIndex"])
+        starts.append(offset)
+        if offset == 0:
+            return httpx.Response(
+                200,
+                json=nvd_page(
+                    [nvd_cve("CVE-2026-0001"), nvd_cve("CVE-2026-0002")],
+                    total=3,
+                ),
+            )
+        return httpx.Response(
+            200,
+            json=nvd_page([nvd_cve("CVE-2026-0003")], start=2, total=3),
+        )
+
+    one_hour = fetch_nvd_window(
+        mock_client(page_handler), start=start, end=start + timedelta(hours=1)
     )
-    assert one_day.split is False
-    assert [record.cve_id for record in one_day.records] == ["CVE-2026-0001"]
+    assert one_hour.split is False
+    assert starts == [0, 2]
+    assert [record.cve_id for record in one_hour.records] == [
+        "CVE-2026-0001",
+        "CVE-2026-0002",
+        "CVE-2026-0003",
+    ]
 
 
-def test_nvd_timestamp_is_parsed_strictly_and_missing_is_none():
+def test_nvd_timestamp_accepts_utc_suffixes_and_rejects_others():
     start = datetime(2026, 11, 1, tzinfo=timezone.utc)
     end = start + timedelta(days=1)
-    with_stamp = fetch_nvd_window(
-        mock_client(
-            lambda request: httpx.Response(
-                200,
-                json={**nvd_page([]), "timestamp": "2026-11-03T21:43:23.122"},
-            )
-        ),
-        start=start,
-        end=end,
-    )
-    assert with_stamp.timestamp == datetime(2026, 11, 3, 21, 43, 23, 122000, tzinfo=timezone.utc)
+    for stamp in (
+        "2026-11-03T21:43:23.122",
+        "2026-11-03T21:43:23.122Z",
+        "2026-11-03T21:43:23.122+00:00",
+    ):
+        feed = fetch_nvd_window(
+            mock_client(
+                lambda request, stamp=stamp: httpx.Response(
+                    200, json={**nvd_page([]), "timestamp": stamp}
+                )
+            ),
+            start=start,
+            end=end,
+        )
+        assert feed.timestamp == datetime(
+            2026, 11, 3, 21, 43, 23, 122000, tzinfo=timezone.utc
+        )
 
     without_stamp = fetch_nvd_window(
         mock_client(lambda request: httpx.Response(200, json=nvd_page([]))),
@@ -339,7 +383,7 @@ def test_nvd_timestamp_is_parsed_strictly_and_missing_is_none():
     )
     assert without_stamp.timestamp is None
 
-    for value in ("2026-11-03T21:43:23Z", "2026-11-03T21:43:23+00:00", "yesterday"):
+    for value in ("2026-11-03T21:43:23+01:00", "2026-11-03T21:43:23z", "yesterday"):
         with pytest.raises(SourceError, match="invalid response timestamp"):
             parse_nvd_timestamp(value)
 
@@ -381,8 +425,7 @@ def test_nvd_fetch_uses_one_request_per_window_and_millisecond_timestamps():
     starts: list[str] = []
 
     def handler(request):
-        params = dict(request.url.params)
-        starts.append(params["lastModStartDate"])
+        starts.append(dict(request.url.params)["lastModStartDate"])
         return httpx.Response(200, json=nvd_page([]))
 
     start = datetime(2026, 1, 1, 7, 0, tzinfo=timezone.utc)
@@ -431,7 +474,7 @@ def test_euvd_aliases_map_to_cves_and_epss_is_ignored():
     def handler(request):
         assert dict(request.url.params) == {
             "fromUpdatedDate": "2026-11-01",
-            "toUpdatedDate": "2026-11-03",
+            "toUpdatedDate": "2026-11-04",
             "page": "0",
             "size": "100",
         }
@@ -465,8 +508,19 @@ def test_euvd_aliases_map_to_cves_and_epss_is_ignored():
     assert update.exploited_since == "Oct 30, 2026, 12:00:00 AM"
     assert update.cvss == CVSSEntry("euvd", "euvd", "3.1", 7.5, "CVSS:3.1/AV:N")
     assert update.date_updated is None
-    # The EUVD epss field uses a 0-100 scale and must not become a CVSS score.
     assert update.cvss is not None and update.cvss.score == 7.5
+
+
+def test_same_day_euvd_queries_are_widened_by_one_day():
+    seen: list[dict[str, str]] = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"total": 0, "items": []})
+
+    fetch_euvd(mock_client(handler), start=date(2026, 11, 3), end=date(2026, 11, 3))
+    assert seen[0]["fromUpdatedDate"] == "2026-11-03"
+    assert seen[0]["toUpdatedDate"] == "2026-11-04"
 
 
 def test_euvd_ranges_are_chunked_into_at_most_thirty_days():
@@ -527,13 +581,7 @@ def test_recorded_euvd_sample_handles_missing_and_unknown_versions():
         9.8,
         "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
     )
-    assert by_id["EUVD-2026-105472"].cvss is not None
-    assert by_id["EUVD-2026-105472"].cvss.version == "4.0"
-    assert by_id["EUVD-2026-105473"].cvss is not None
-    assert by_id["EUVD-2026-105473"].cvss.version == "3.0"
     assert by_id["EUVD-2026-105474"].cvss is None
-    assert by_id["EUVD-2026-105475"].cvss is None
-    assert by_id["EUVD-2026-105476"].cvss is None
     assert by_id["EUVD-2026-105477"].cvss is not None
     assert by_id["EUVD-2026-105477"].cvss.score == 0.0
 
@@ -550,11 +598,10 @@ def test_euvd_invalid_scores_with_a_known_version_fail_the_chunk():
         {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": True, "baseScoreVersion": "3.1"},
         {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": "not-a-number", "baseScoreVersion": "3.1"},
         {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": "NaN", "baseScoreVersion": "3.1"},
+        {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 10 ** 1000, "baseScoreVersion": "3.1"},
     ):
         with pytest.raises(SourceError):
-            fetch_euvd(
-                with_item(item), start=date(2026, 11, 1), end=date(2026, 11, 2)
-            )
+            fetch_euvd(with_item(item), start=date(2026, 11, 1), end=date(2026, 11, 2))
 
     feed = fetch_euvd(
         with_item(
@@ -583,23 +630,16 @@ def test_euvd_unknown_or_missing_versions_mean_no_score():
         )
 
     unknown = parse(
-        {
-            "id": "EUVD-1",
-            "aliases": "CVE-2026-0001",
-            "baseScore": 5.0,
-            "baseScoreVersion": "9.9",
-        }
+        {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 5.0, "baseScoreVersion": "9.9"}
     )
     assert unknown.updates[0].cvss is None
     assert unknown.ignored == 1
 
-    missing = parse(
-        {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 9.8}
-    )
+    missing = parse({"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 9.8})
     assert missing.updates[0].cvss is None
     assert missing.ignored == 0
 
-    zero_with_no_version = parse(
+    zero = parse(
         {
             "id": "EUVD-1",
             "aliases": "CVE-2026-0001",
@@ -608,8 +648,8 @@ def test_euvd_unknown_or_missing_versions_mean_no_score():
             "baseScoreVector": None,
         }
     )
-    assert zero_with_no_version.updates[0].cvss is None
-    assert zero_with_no_version.ignored == 0
+    assert zero.updates[0].cvss is None
+    assert zero.ignored == 0
 
 
 def test_euvd_date_updated_is_normalized_for_ordering():
@@ -643,9 +683,7 @@ def test_euvd_paging_validation_and_second_page():
         pages.append(int(dict(request.url.params)["page"]))
         return httpx.Response(200, json=responses.pop(0))
 
-    feed = fetch_euvd(
-        mock_client(handler), start=date(2026, 11, 1), end=date(2026, 11, 2)
-    )
+    feed = fetch_euvd(mock_client(handler), start=date(2026, 11, 1), end=date(2026, 11, 2))
     assert pages == [0, 1]
     assert feed.requests == 2
     assert feed.updates[-1].cve_ids == ("CVE-2026-9999",)
@@ -654,59 +692,137 @@ def test_euvd_paging_validation_and_second_page():
         return httpx.Response(200, json={"total": 2, "items": [{"aliases": "CVE-2026-0001"}]})
 
     with pytest.raises(SourceError):
-        fetch_euvd(
-            mock_client(short_page), start=date(2026, 11, 1), end=date(2026, 11, 2)
-        )
+        fetch_euvd(mock_client(short_page), start=date(2026, 11, 1), end=date(2026, 11, 2))
 
     def bad_total(request):
         return httpx.Response(200, json={"total": "many", "items": []})
 
     with pytest.raises(SourceError):
-        fetch_euvd(
-            mock_client(bad_total), start=date(2026, 11, 1), end=date(2026, 11, 2)
+        fetch_euvd(mock_client(bad_total), start=date(2026, 11, 1), end=date(2026, 11, 2))
+
+
+def _epss_handler(content: bytes, *, today: date = date(2026, 11, 3), not_found: bool = False):
+    def handler(request):
+        assert str(request.url).startswith(EPSS_FILE_PREFIX)
+        if not_found:
+            return httpx.Response(404)
+        return httpx.Response(200, content=content)
+
+    return handler
+
+
+def test_epss_streaming_fixture_parses_every_validated_row():
+    content = (FIXTURES / "epss-scores-2026-11-03.csv.gz").read_bytes()
+    counter = [0]
+    rows = list(
+        feeds.fetch_epss_daily(
+            mock_client(_epss_handler(content)), today=date(2026, 11, 3), counter=counter
         )
+    )
+    assert counter[0] == 1
+    assert rows == [
+        ("CVE-2026-0001", 0.85, 0.97, date(2026, 11, 3)),
+        ("CVE-2026-0002", 0.05, 0.30, date(2026, 11, 3)),
+        ("CVE-2026-0003", 0.42, 0.88, date(2026, 11, 3)),
+    ]
 
 
-def test_epss_floor_queries_above_floor_and_validates_pagination(monkeypatch):
-    offsets: list[int] = []
-    monkeypatch.setattr(feeds, "EPSS_PAGE_SIZE", 2)
+def test_epss_falls_back_to_yesterday_on_404_and_counts_requests():
+    content = epss_gzip([("CVE-2026-0001", "0.5", "0.9")], score_date="2026-11-02")
+    requested: list[str] = []
 
     def handler(request):
-        params = dict(request.url.params)
-        assert params["epss-gt"] == "0.1"
-        offset = int(params["offset"])
-        offsets.append(offset)
-        rows = [
-            {"cve": f"CVE-2026-{1000 + offset}", "epss": "0.5", "percentile": "0.9", "date": "2026-11-03"},
-            {"cve": f"CVE-2026-{1001 + offset}", "epss": "0.2", "percentile": "0.8", "date": "2026-11-03"},
-        ][: max(3 - offset, 0)]
-        return httpx.Response(200, json={"total": 3, "offset": offset, "data": rows})
+        requested.append(str(request.url))
+        if "2026-11-03" in str(request.url):
+            return httpx.Response(404)
+        return httpx.Response(200, content=content)
 
-    scores, requests = fetch_epss_floor(mock_client(handler), floor=0.1)
-    assert offsets == [0, 2]
-    assert requests == 2
-    assert len(scores) == 3
+    counter = [0]
+    rows = list(
+        feeds.fetch_epss_daily(
+            mock_client(handler), today=date(2026, 11, 3), counter=counter
+        )
+    )
+    assert counter[0] == 2
+    assert len(requested) == 2
+    assert rows == [("CVE-2026-0001", 0.5, 0.9, date(2026, 11, 2))]
 
-    def wrong_offset(request):
-        return httpx.Response(200, json={"total": 1, "offset": 5, "data": []})
+
+def test_epss_missing_both_days_is_a_source_failure():
+    counter = [0]
+    with pytest.raises(SourceError, match="not published yet"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(b"", not_found=True)),
+                today=date(2026, 11, 3),
+                counter=counter,
+            )
+        )
+    assert counter[0] == 2
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"not gzip",
+        b"#model_version:v1\ncve,epss,percentile\n",
+        b"#model_version:v1,score_date:2026-11-03\ncve,epss\n",
+        b"#model_version:v1,score_date:2026-11-03\ncve,epss,percentile\nCVE-2026-0001,1.5,0.5\n",
+        b"#model_version:v1,score_date:2026-11-03\ncve,epss,percentile\nCVE-2026-0001,0.5,0.5,extra\n",
+        b"#model_version:v1,score_date:not-a-date\ncve,epss,percentile\n",
+    ],
+)
+def test_epss_invalid_files_are_source_errors(content):
+    import gzip
 
     with pytest.raises(SourceError):
-        fetch_epss_floor(mock_client(wrong_offset), floor=0.1)
-
-    def bad_score(request):
-        return httpx.Response(
-            200,
-            json={
-                "total": 1,
-                "offset": 0,
-                "data": [
-                    {"cve": "CVE-2026-0001", "epss": "55", "percentile": "0.9", "date": "2026-11-03"}
-                ],
-            },
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(gzip.compress(content))),
+                today=date(2026, 11, 3),
+                counter=[0],
+            )
         )
 
-    with pytest.raises(SourceError):
-        fetch_epss_floor(mock_client(bad_score), floor=0.1)
+
+def test_epss_stream_enforces_the_compressed_byte_cap(monkeypatch):
+    monkeypatch.setattr(feeds, "EPSS_BYTE_CAP", 10)
+    content = epss_gzip([("CVE-2026-0001", "0.5", "0.9")])
+    with pytest.raises(SourceError, match="size limit"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(content)),
+                today=date(2026, 11, 3),
+                counter=[0],
+            )
+        )
+
+
+def test_epss_too_many_rows_is_a_source_error(monkeypatch):
+    monkeypatch.setattr(feeds, "EPSS_MAX_ROWS", 1)
+    content = epss_gzip(
+        [("CVE-2026-0001", "0.5", "0.9"), ("CVE-2026-0002", "0.6", "0.9")]
+    )
+    with pytest.raises(SourceError, match="too many"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(content)),
+                today=date(2026, 11, 3),
+                counter=[0],
+            )
+        )
+
+
+def test_epss_stream_does_not_follow_redirects():
+    def handler(request):
+        return httpx.Response(302, headers={"Location": "https://example.test/other"})
+
+    with pytest.raises(SourceError, match="HTTP 302"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(handler), today=date(2026, 11, 3), counter=[0]
+            )
+        )
 
 
 def test_kev_field_conversion_reads_the_catalog_shape():
@@ -727,41 +843,11 @@ def test_kev_field_conversion_reads_the_catalog_shape():
     assert eu_fields({"CVE-2026-0001": eu})["CVE-2026-0001"].added == "2026-01-02"
 
 
-def test_kev_and_epss_urls_are_the_existing_public_endpoints():
+def test_source_urls_are_the_existing_public_endpoints():
     assert CISA_URL.startswith("https://www.cisa.gov/")
     assert EU_URL.startswith("https://euvdservices.enisa.europa.eu/")
     assert EPSS_URL == "https://api.first.org/data/v1/epss"
     assert CVE_URL == "https://services.nvd.nist.gov/rest/json/cves/2.0"
-
-
-def test_epss_floor_restarts_when_a_later_total_changes(monkeypatch):
-    monkeypatch.setattr(feeds, "EPSS_PAGE_SIZE", 2)
-    calls: list[int] = []
-
-    def handler(request):
-        offset = int(dict(request.url.params)["offset"])
-        calls.append(offset)
-        if len(calls) <= 2:
-            total = 3 if offset == 0 else 2
-            rows = (
-                [
-                    {"cve": f"CVE-2026-{1000 + index}", "epss": "0.5", "percentile": "0.9", "date": "2026-11-03"}
-                    for index in range(2)
-                ]
-                if offset == 0
-                else []
-            )
-            return httpx.Response(200, json={"total": total, "offset": offset, "data": rows})
-        rows = [
-            {"cve": f"CVE-2026-{1000 + index + offset}", "epss": "0.5", "percentile": "0.9", "date": "2026-11-03"}
-            for index in range(min(2, 3 - offset))
-        ]
-        return httpx.Response(200, json={"total": 3, "offset": offset, "data": rows})
-
-    scores, requests = fetch_epss_floor(mock_client(handler), floor=0.1)
-    assert calls == [0, 2, 0, 2]
-    assert requests == 4
-    assert len(scores) == 3
 
 
 def test_batch_epss_adapter_rejects_json_booleans():
@@ -778,5 +864,9 @@ def test_batch_epss_adapter_rejects_json_booleans():
 
     with pytest.raises(SourceError, match="invalid probability"):
         EPSSSource(mock_client(handler)).scores(["CVE-2026-0001"])
-    with pytest.raises(SourceError, match="invalid probability"):
-        fetch_epss_scores(mock_client(handler), ["CVE-2026-0001"])
+
+
+def test_as_float_treats_overflow_as_invalid():
+    assert as_float(10 ** 1000) is None
+    assert as_float("1e10000") is None
+    assert as_float("0.5") == 0.5

@@ -6,7 +6,7 @@ import email.utils
 import logging
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -125,11 +125,97 @@ class HttpClient:
                     raise SourceError(source, "source returned invalid JSON") from exc
             if response.status_code not in RETRYABLE_STATUS or attempt >= retry_count:
                 # Upstream headers/reason phrases can echo secret URLs or tokens.
-                raise SourceError(source, f"HTTP {response.status_code}")
+                raise SourceError(
+                    source,
+                    f"HTTP {response.status_code}",
+                    status_code=response.status_code,
+                    requests=attempt + 1,
+                )
             delay = self.config.backoff_seconds * (2**attempt)
             self._sleep(self._retry_after(response.headers.get("Retry-After"), delay))
         failure_type = type(last_error).__name__ if last_error else "transport failure"
-        raise SourceError(source, f"request failed after bounded retries ({failure_type})")
+        raise SourceError(
+            source,
+            f"request failed after bounded retries ({failure_type})",
+            requests=retry_count + 1,
+        )
+
+    def stream_bytes(
+        self,
+        url: str,
+        *,
+        source: str,
+        byte_cap: int,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+        minimum_interval: float = 0,
+        counter: list[int] | None = None,
+    ) -> Iterator[bytes]:
+        """Stream a bounded response body without holding it in memory.
+
+        Redirects are never followed and the compressed byte count is capped
+        while reading, so an oversized file cannot be buffered first.
+        """
+        last_error: Exception | None = None
+        retry_count = self.config.retries
+        for attempt in range(retry_count + 1):
+            self._pace(source, minimum_interval)
+            if counter is not None:
+                counter[0] += 1
+            yielded = False
+            try:
+                with self._client.stream(
+                    "GET",
+                    url,
+                    params=params,
+                    headers=headers,
+                    follow_redirects=False,
+                ) as response:
+                    if response.status_code == 200:
+                        total = 0
+                        for chunk in response.iter_bytes():
+                            total += len(chunk)
+                            if total > byte_cap:
+                                raise SourceError(
+                                    source, "source response exceeded the size limit"
+                                )
+                            yielded = True
+                            yield chunk
+                        return
+                    if (
+                        response.status_code not in RETRYABLE_STATUS
+                        or attempt >= retry_count
+                    ):
+                        raise SourceError(
+                            source,
+                            f"HTTP {response.status_code}",
+                            status_code=response.status_code,
+                            requests=counter[0] if counter is not None else 0,
+                        )
+                    retry_after = response.headers.get("Retry-After")
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_error = exc
+                if yielded:
+                    raise SourceError(
+                        source,
+                        f"request failed after a partial response ({type(exc).__name__})",
+                        requests=counter[0] if counter is not None else 0,
+                    ) from exc
+                if attempt >= retry_count:
+                    break
+                self._sleep(min(self.config.backoff_seconds * (2**attempt), 120))
+                continue
+            self._sleep(
+                self._retry_after(
+                    retry_after, self.config.backoff_seconds * (2**attempt)
+                )
+            )
+        failure_type = type(last_error).__name__ if last_error else "transport failure"
+        raise SourceError(
+            source,
+            f"request failed after bounded retries ({failure_type})",
+            requests=counter[0] if counter is not None else 0,
+        )
 
     def get_json(self, url: str, **kwargs: Any) -> Any:
         return self.request_json("GET", url, **kwargs)

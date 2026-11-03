@@ -122,6 +122,8 @@ def _run_watch(args, config: AppConfig) -> int:
         )
         if summary.ignored:
             line += f", {summary.ignored} score(s) ignored"
+        if summary.lookup_failures:
+            line += f", {summary.lookup_failures} lookup(s) failed"
         if summary.error:
             line += f"; failed: {summary.error}"
         print(line)

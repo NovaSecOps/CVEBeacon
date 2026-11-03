@@ -22,7 +22,6 @@ WATCH_SETTINGS = {
     "initial",
     "backfill_days",
     "overlap_minutes",
-    "epss_floor",
 }
 
 
@@ -107,7 +106,6 @@ class WatchConfig:
     initial: str = "baseline"
     backfill_days: int = 7
     overlap_minutes: int = 15
-    epss_floor: float = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,18 +153,6 @@ def _boolean(table: dict[str, Any], key: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise ConfigurationError(f"{key} must be true or false")
     return value
-
-
-def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigurationError(f"{name} must be a number")
-    try:
-        number = float(value)
-    except OverflowError as exc:
-        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}") from exc
-    if not math.isfinite(number) or not minimum <= number <= maximum:
-        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
-    return number
 
 
 def _bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
@@ -374,9 +360,6 @@ def load_config(path: str | Path) -> AppConfig:
             ),
             overlap_minutes=_bounded_int(
                 watch_data.get("overlap_minutes", 15), "watch.overlap_minutes", 0, 1440
-            ),
-            epss_floor=_bounded_number(
-                watch_data.get("epss_floor", 0.1), "watch.epss_floor", 0, 1
             ),
         ),
     )
