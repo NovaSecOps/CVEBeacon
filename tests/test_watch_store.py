@@ -242,3 +242,107 @@ def test_record_rejects_unknown_status_and_normalizes_limits(tmp_path):
     assert value.description is not None and len(value.description) == 1000
     assert len(value.products) == 50
     assert len(value.references) == 30
+
+
+def test_nvd_refresh_preserves_fields_owned_by_other_sources(tmp_path):
+    now = [NOW]
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: now[0])
+    nvd = record()
+    store.upsert([nvd])
+    store.apply_euvd(
+        [
+            EUVDUpdate(
+                ("CVE-2026-0001",),
+                "EUVD-2026-1",
+                "2026-11-01",
+                CVSSEntry("euvd", "euvd", "3.1", 7.5, "CVSS:3.1/X"),
+            )
+        ]
+    )
+    store.apply_kev({}, {"CVE-2026-0001": KEVFields("2026-11-04")})
+    store.apply_epss({"CVE-2026-0001": (0.5, 0.9, date(2026, 11, 3))})
+    before = dict(fetch_row(store, "CVE-2026-0001"))
+
+    now[0] += timedelta(minutes=3)
+    counts = store.upsert([nvd])
+    after = dict(fetch_row(store, "CVE-2026-0001"))
+
+    assert (counts.new, counts.changed, counts.unchanged) == (0, 0, 1)
+    assert before["fingerprint"] == after["fingerprint"]
+    assert {key: value for key, value in before.items() if key != "updated_at"} == {
+        key: value for key, value in after.items() if key != "updated_at"
+    }
+
+
+def test_nvd_change_keeps_euvd_kev_and_epss_values(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert([record()])
+    store.apply_euvd(
+        [
+            EUVDUpdate(
+                ("CVE-2026-0001",),
+                "EUVD-2026-1",
+                "2026-11-01",
+                CVSSEntry("euvd", "euvd", "3.1", 7.5, "CVSS:3.1/X"),
+            )
+        ]
+    )
+    store.apply_kev({}, {"CVE-2026-0001": KEVFields("2026-11-04")})
+    store.apply_epss({"CVE-2026-0001": (0.5, 0.9, date(2026, 11, 3))})
+
+    changed = record(
+        cvss=(
+            CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.8, "CVSS:3.1/X", "CRITICAL"),
+            CVSSEntry("cna", "security@example.com", "3.1", 8.8, "CVSS:3.1/Y", "HIGH"),
+        )
+    )
+    assert store.upsert([changed]).changed == 1
+    row = WatchRecord.from_row(fetch_row(store, "CVE-2026-0001"))
+
+    euvd = [entry for entry in row.cvss if entry.provider == "euvd"]
+    assert len(euvd) == 1 and euvd[0].score == 7.5
+    assert any(entry.provider == "cna" and entry.score == 8.8 for entry in row.cvss)
+    assert row.euvd_id == "EUVD-2026-1"
+    assert row.euvd_exploited_since == "2026-11-01"
+    assert row.eu_kev_added == "2026-11-04"
+    assert (row.epss, row.epss_percentile, row.epss_date) == (0.5, 0.9, "2026-11-03")
+
+
+def test_nvd_null_cisa_fields_do_not_clear_catalog_values(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert([record()])
+    store.apply_kev(
+        {
+            "CVE-2026-0001": KEVFields(
+                "2026-11-03", "2026-11-20", "Apply updates", "Known"
+            )
+        },
+        {},
+    )
+    changed = record(
+        cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.9, "CVSS:3.1/Z", "CRITICAL"),)
+    )
+    assert store.upsert([changed]).changed == 1
+    row = fetch_row(store, "CVE-2026-0001")
+    assert row["cisa_kev_added"] == "2026-11-03"
+    assert row["cisa_kev_due"] == "2026-11-20"
+    assert row["cisa_required_action"] == "Apply updates"
+    assert row["cisa_ransomware"] == "Known"
+
+
+def test_nvd_fills_cisa_fields_that_are_still_null(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert(
+        [
+            record(
+                "CVE-2026-0002",
+                cisa_kev_added="2026-11-01",
+                cisa_kev_due="2026-11-10",
+                cisa_required_action="Apply updates",
+            )
+        ]
+    )
+    row = fetch_row(store, "CVE-2026-0002")
+    assert row["cisa_kev_added"] == "2026-11-01"
+    assert row["cisa_kev_due"] == "2026-11-10"
+    assert row["cisa_required_action"] == "Apply updates"

@@ -467,3 +467,91 @@ def test_watch_commands_refuse_a_disabled_configuration(tmp_path, capsys, comman
     config = write_config(tmp_path, enabled=False)
     assert cli.main(["--config", str(config.config_path), *command]) == 2
     assert "watch mode is disabled" in capsys.readouterr().err
+
+
+def test_full_sync_twice_reports_no_changes(tmp_path):
+    config = write_config(
+        tmp_path,
+        sources=("nvd", "euvd", "cisa_kev", "eu_kev", "epss"),
+        initial="backfill",
+    )
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([nvd_cve()]))
+
+    def euvd_request(request):
+        return httpx.Response(
+            200,
+            json={
+                "total": 1,
+                "items": [
+                    {
+                        "id": "EUVD-2026-1",
+                        "aliases": "CVE-2026-0001",
+                        "baseScore": 7.5,
+                        "baseScoreVersion": "3.1",
+                        "baseScoreVector": "CVSS:3.1/X",
+                        "exploitedSince": "2026-11-01",
+                    }
+                ],
+            },
+        )
+
+    def cisa_request(request):
+        return httpx.Response(
+            200,
+            json={
+                "count": 1,
+                "dateReleased": "2026-11-03",
+                "vulnerabilities": [
+                    {
+                        "cveID": "CVE-2026-0001",
+                        "dateAdded": "2026-11-03",
+                        "dueDate": "2026-11-20",
+                        "requiredAction": "Apply updates",
+                        "knownRansomwareCampaignUse": "Known",
+                    }
+                ],
+            },
+        )
+
+    def eu_request(request):
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "cveId": "CVE-2026-0001",
+                    "dateAdded": "2026-11-04",
+                    "sources": ["eukev_kev"],
+                }
+            ],
+        )
+
+    def epss_request(request):
+        params = dict(request.url.params)
+        if "epss-gt" in params:
+            return httpx.Response(
+                200,
+                json={"total": 1, "offset": 0, "data": [epss_row("CVE-2026-0001")]},
+            )
+        identifiers = params["cve"].split(",")
+        return httpx.Response(
+            200,
+            json={
+                "status": "OK",
+                "total": len(identifiers),
+                "data": [epss_row(identifier) for identifier in identifiers],
+            },
+        )
+
+    handler = handler_for(
+        nvd=nvd_request,
+        euvd=euvd_request,
+        cisa=cisa_request,
+        eu=eu_request,
+        epss=epss_request,
+    )
+    run(config, handler)
+    second = run(config, handler, now=NOW + timedelta(minutes=3))
+    assert all(summary.changed == 0 for summary in second.summaries)
+    assert all(summary.new == 0 for summary in second.summaries)

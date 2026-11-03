@@ -38,6 +38,32 @@ _CONTENT_COLUMNS = (
     "epss_date",
 )
 
+NVD_OWNED_COLUMNS = (
+    "published",
+    "last_modified",
+    "status",
+    "description",
+    "source_identifier",
+    "cvss_json",
+    "cwes_json",
+    "products_json",
+    "references_json",
+    "ssvc_exploitation",
+    "cisa_kev_added",
+    "cisa_kev_due",
+    "cisa_required_action",
+    "cisa_ransomware",
+)
+EUVD_OWNED_COLUMNS = ("cvss_json", "euvd_id", "euvd_exploited_since")
+CISA_KEV_OWNED_COLUMNS = (
+    "cisa_kev_added",
+    "cisa_kev_due",
+    "cisa_required_action",
+    "cisa_ransomware",
+)
+EU_KEV_OWNED_COLUMNS = ("eu_kev_added",)
+EPSS_OWNED_COLUMNS = ("epss", "epss_percentile", "epss_date")
+
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS watch_meta (
         key TEXT PRIMARY KEY,
@@ -137,6 +163,37 @@ def _content(record: WatchRecord) -> dict[str, Any]:
     }
 
 
+def _merge_nvd(existing: WatchRecord | None, incoming: WatchRecord) -> WatchRecord:
+    """Replace NVD-owned fields while preserving fields owned by other sources."""
+    if existing is None:
+        return incoming
+    cvss = tuple(entry for entry in incoming.cvss if entry.provider != "euvd") + tuple(
+        entry for entry in existing.cvss if entry.provider == "euvd"
+    )
+    return replace(
+        incoming,
+        cvss=cvss,
+        cisa_kev_added=existing.cisa_kev_added
+        if existing.cisa_kev_added is not None
+        else incoming.cisa_kev_added,
+        cisa_kev_due=existing.cisa_kev_due
+        if existing.cisa_kev_due is not None
+        else incoming.cisa_kev_due,
+        cisa_required_action=existing.cisa_required_action
+        if existing.cisa_required_action is not None
+        else incoming.cisa_required_action,
+        cisa_ransomware=existing.cisa_ransomware
+        if existing.cisa_ransomware is not None
+        else incoming.cisa_ransomware,
+        eu_kev_added=existing.eu_kev_added,
+        euvd_id=existing.euvd_id,
+        euvd_exploited_since=existing.euvd_exploited_since,
+        epss=existing.epss,
+        epss_percentile=existing.epss_percentile,
+        epss_date=existing.epss_date,
+    )
+
+
 class WatchStore:
     def __init__(self, path: str | Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self.path = Path(path)
@@ -228,24 +285,34 @@ class WatchStore:
             "SELECT * FROM watch_cve WHERE cve_id=?", (identifier,)
         ).fetchone()
 
-    def _write(self, db: sqlite3.Connection, record: WatchRecord, now: str) -> str:
-        content = _content(record)
-        existing = self._row(db, record.cve_id)
-        fingerprint = record.fingerprint()
+    def _write(
+        self,
+        db: sqlite3.Connection,
+        identifier: str,
+        build: Callable[[WatchRecord | None], WatchRecord | None],
+        now: str,
+        owned: tuple[str, ...],
+    ) -> str | None:
+        row = self._row(db, identifier)
+        existing = self._record(row) if row is not None else None
+        final = build(existing)
+        if final is None:
+            return None
+        content = _content(final)
+        fingerprint = final.fingerprint()
         if existing is None:
             columns = ("cve_id", *_CONTENT_COLUMNS, "first_seen", "updated_at", "fingerprint")
-            values = (record.cve_id, *content.values(), now, now, fingerprint)
+            values = (identifier, *content.values(), now, now, fingerprint)
             marks = ",".join("?" for _ in columns)
             db.execute(f"INSERT INTO watch_cve({','.join(columns)}) VALUES ({marks})", values)
             return "new"
-        if all(existing[column] == value for column, value in content.items()):
+        if all(row[column] == content[column] for column in owned):
             return "unchanged"
-        assignments = ", ".join(f"{column}=?" for column in _CONTENT_COLUMNS)
-        db.execute(
-            f"UPDATE watch_cve SET {assignments}, updated_at=?, fingerprint=? WHERE cve_id=?",
-            (*content.values(), now, fingerprint, record.cve_id),
-        )
-        return "changed" if existing["fingerprint"] != fingerprint else "unchanged"
+        columns = (*owned, "updated_at", "fingerprint")
+        assignments = ", ".join(f"{column}=?" for column in columns)
+        values = (*(content[column] for column in owned), now, fingerprint, identifier)
+        db.execute(f"UPDATE watch_cve SET {assignments} WHERE cve_id=?", values)
+        return "changed" if row["fingerprint"] != fingerprint else "unchanged"
 
     def upsert(
         self,
@@ -258,7 +325,15 @@ class WatchStore:
         outcomes: list[tuple[str, str]] = []
         with self.transaction() as db:
             for record in records:
-                outcomes.append((record.cve_id, self._write(db, record, now)))
+                outcome = self._write(
+                    db,
+                    record.cve_id,
+                    lambda existing, record=record: _merge_nvd(existing, record),
+                    now,
+                    NVD_OWNED_COLUMNS,
+                )
+                if outcome is not None:
+                    outcomes.append((record.cve_id, outcome))
             if meta:
                 self._set_meta(db, meta)
         return _counts(outcomes)
@@ -275,30 +350,29 @@ class WatchStore:
         with self.transaction() as db:
             for update in updates:
                 for identifier in update.cve_ids:
-                    row = self._row(db, identifier)
-                    if row is None:
-                        continue
-                    record = self._record(row)
-                    cvss = record.cvss
-                    if update.cvss is not None:
-                        cvss = tuple(
-                            entry for entry in record.cvss if entry.provider != "euvd"
-                        ) + (update.cvss,)
-                    outcomes.append(
-                        (
-                            identifier,
-                            self._write(
-                                db,
-                                replace(
-                                    record,
-                                    euvd_id=update.euvd_id,
-                                    euvd_exploited_since=update.exploited_since,
-                                    cvss=cvss,
-                                ),
-                                now,
-                            ),
+
+                    def build(
+                        existing: WatchRecord | None, update: EUVDUpdate = update
+                    ) -> WatchRecord | None:
+                        if existing is None:
+                            return None
+                        cvss = existing.cvss
+                        if update.cvss is not None:
+                            cvss = tuple(
+                                entry for entry in existing.cvss if entry.provider != "euvd"
+                            ) + (update.cvss,)
+                        return replace(
+                            existing,
+                            euvd_id=update.euvd_id,
+                            euvd_exploited_since=update.exploited_since,
+                            cvss=cvss,
                         )
+
+                    outcome = self._write(
+                        db, identifier, build, now, EUVD_OWNED_COLUMNS
                     )
+                    if outcome is not None:
+                        outcomes.append((identifier, outcome))
             if meta:
                 self._set_meta(db, meta)
         return _counts(outcomes)
@@ -315,24 +389,36 @@ class WatchStore:
         outcomes: list[tuple[str, str]] = []
         with self.transaction() as db:
             for identifier in sorted(set(cisa) | set(eu)):
-                row = self._row(db, identifier)
-                if row is None:
-                    continue
-                record = self._record(row)
-                changes: dict[str, Any] = {}
-                if identifier in cisa:
-                    fields = cisa[identifier]
-                    changes.update(
-                        cisa_kev_added=fields.added,
-                        cisa_kev_due=fields.due,
-                        cisa_required_action=fields.required_action,
-                        cisa_ransomware=fields.ransomware,
-                    )
-                if identifier in eu:
-                    changes["eu_kev_added"] = eu[identifier].added
-                outcomes.append(
-                    (identifier, self._write(db, replace(record, **changes), now))
-                )
+                cisa_entry = cisa.get(identifier)
+                eu_entry = eu.get(identifier)
+                owned: tuple[str, ...] = ()
+                if cisa_entry is not None:
+                    owned += CISA_KEV_OWNED_COLUMNS
+                if eu_entry is not None:
+                    owned += EU_KEV_OWNED_COLUMNS
+
+                def build(
+                    existing: WatchRecord | None,
+                    cisa_entry: KEVFields | None = cisa_entry,
+                    eu_entry: KEVFields | None = eu_entry,
+                ) -> WatchRecord | None:
+                    if existing is None:
+                        return None
+                    changes: dict[str, Any] = {}
+                    if cisa_entry is not None:
+                        changes.update(
+                            cisa_kev_added=cisa_entry.added,
+                            cisa_kev_due=cisa_entry.due,
+                            cisa_required_action=cisa_entry.required_action,
+                            cisa_ransomware=cisa_entry.ransomware,
+                        )
+                    if eu_entry is not None:
+                        changes["eu_kev_added"] = eu_entry.added
+                    return replace(existing, **changes)
+
+                outcome = self._write(db, identifier, build, now, owned)
+                if outcome is not None:
+                    outcomes.append((identifier, outcome))
             if meta:
                 self._set_meta(db, meta)
         return _counts(outcomes)
@@ -348,26 +434,26 @@ class WatchStore:
         outcomes: list[tuple[str, str]] = []
         with self.transaction() as db:
             for identifier in sorted(scores):
-                row = self._row(db, identifier)
-                if row is None:
-                    continue
-                record = self._record(row)
                 score, percentile, score_date = scores[identifier]
-                outcomes.append(
-                    (
-                        identifier,
-                        self._write(
-                            db,
-                            replace(
-                                record,
-                                epss=score,
-                                epss_percentile=percentile,
-                                epss_date=score_date.isoformat(),
-                            ),
-                            now,
-                        ),
+
+                def build(
+                    existing: WatchRecord | None,
+                    score: float = score,
+                    percentile: float = percentile,
+                    score_date: date = score_date,
+                ) -> WatchRecord | None:
+                    if existing is None:
+                        return None
+                    return replace(
+                        existing,
+                        epss=score,
+                        epss_percentile=percentile,
+                        epss_date=score_date.isoformat(),
                     )
-                )
+
+                outcome = self._write(db, identifier, build, now, EPSS_OWNED_COLUMNS)
+                if outcome is not None:
+                    outcomes.append((identifier, outcome))
             if meta:
                 self._set_meta(db, meta)
         return _counts(outcomes)
