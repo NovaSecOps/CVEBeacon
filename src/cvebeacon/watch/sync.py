@@ -13,6 +13,11 @@ from . import feeds
 from .store import WatchStore
 
 FULL_HISTORY_START = datetime(1999, 1, 1, tzinfo=timezone.utc)
+NVD_REQUEST_ESTIMATE = 400
+EUVD_REQUEST_ESTIMATE = 4200
+EPSS_MISSING_LIMIT = 1000
+PENDING_LIMIT = 25
+LONG_GAP = timedelta(days=feeds.NVD_WINDOW_DAYS)
 
 
 def _utc_now() -> datetime:
@@ -79,19 +84,28 @@ def _confirm_full_history(
     *,
     assume_yes: bool,
     confirm: Callable[[str], bool],
+    interval: float,
 ) -> bool:
     windows = feeds.nvd_windows(start, now)
+    hours = (NVD_REQUEST_ESTIMATE + EUVD_REQUEST_ESTIMATE) * interval / 3600
     print(
-        f"full history: {len(windows)} NVD window(s), estimated at least {len(windows)} request(s)"
+        f"full history: {len(windows)} NVD window(s), roughly {NVD_REQUEST_ESTIMATE}+ NVD "
+        f"requests and roughly {EUVD_REQUEST_ESTIMATE:,} EUVD requests"
     )
-    print("full history takes a long time and uses a lot of bandwidth")
+    print(
+        "full history takes several hours and uses a lot of bandwidth "
+        f"(about {hours:.0f} hour(s) at the current pacing)"
+    )
     if assume_yes:
         return True
     return confirm("Synchronise the full NVD history? [y/N] ")
 
 
 def _confirm(message: str) -> bool:
-    return input(message).strip().casefold() in {"y", "yes"}
+    try:
+        return input(message).strip().casefold() in {"y", "yes"}
+    except EOFError:
+        return False
 
 
 def sync_watch(
@@ -109,9 +123,10 @@ def sync_watch(
     now = _clock_value(clock)
     today = now.date()
     first_run = "initialized_at" not in metadata
-    summaries: list[SourceSummary] = []
+    stored_mode = metadata.get("initial_mode")
+    interval = config.sources.minimum_request_interval
 
-    if first_run and watch.initial == "baseline":
+    if first_run and stored_mode is None and watch.initial == "baseline":
         store.record_baseline(
             nvd_cursor=now.isoformat(),
             initialized_at=now.isoformat(),
@@ -122,17 +137,40 @@ def sync_watch(
             baseline=True,
         )
 
-    if first_run:
-        if watch.initial == "backfill":
+    initial_run = first_run
+    if initial_run:
+        mode = stored_mode or watch.initial
+        if mode == "baseline":
+            store.record_baseline(
+                nvd_cursor=now.isoformat(),
+                initialized_at=now.isoformat(),
+                euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
+            )
+            return SyncReport(
+                summaries=tuple(SourceSummary(source) for source in watch.sources),
+                baseline=True,
+            )
+        resumed = metadata.get("nvd_cursor") is not None
+        if resumed:
+            nvd_start = _cursor_time(metadata.get("nvd_cursor"))
+        elif mode == "backfill":
             nvd_start = now - timedelta(days=watch.backfill_days)
-            euvd_start = today - timedelta(days=watch.backfill_days)
         else:
             nvd_start = FULL_HISTORY_START
-            euvd_start = FULL_HISTORY_START.date()
             if not _confirm_full_history(
-                nvd_start, now, assume_yes=assume_yes, confirm=confirm
+                nvd_start,
+                now,
+                assume_yes=assume_yes,
+                confirm=confirm,
+                interval=interval,
             ):
                 return SyncReport(cancelled=True)
+        intended_euvd_start = (
+            today - timedelta(days=watch.backfill_days)
+            if mode == "backfill"
+            else FULL_HISTORY_START.date()
+        )
+        euvd_start = _cursor_date(metadata.get("euvd_cursor")) or intended_euvd_start
         nvd_end = now
         initialized_at = now.isoformat()
     else:
@@ -140,49 +178,103 @@ def sync_watch(
             minutes=watch.overlap_minutes
         )
         nvd_end = now
-        initialized_at = metadata.get("initialized_at") or now.isoformat()
         euvd_start = _cursor_date(metadata.get("euvd_cursor")) or today
-        euvd_start = min(euvd_start, today)
+        initialized_at = metadata.get("initialized_at") or now.isoformat()
+
+    euvd_start = min(euvd_start, today)
+    baseline_at = None
+    if stored_mode == "baseline" or (stored_mode is None and not initial_run):
+        baseline_at = metadata.get("initialized_at") or initialized_at
+    cursor_value = metadata.get("nvd_cursor")
+    if cursor_value and now - _cursor_time(cursor_value) > LONG_GAP:
+        print(
+            "warning: the NVD cursor is more than 120 days old; "
+            "catching up in bounded windows"
+        )
 
     api_key = config.secret(config.sources.nvd_api_key_env)
-    nvd = feeds.fetch_nvd(
-        http,
-        start=nvd_start,
-        end=nvd_end,
-        api_key=api_key,
-        interval=config.sources.minimum_request_interval,
-    )
-    counts = store.upsert(
-        nvd.records,
-        meta={"nvd_cursor": nvd_end.isoformat(), "initialized_at": initialized_at},
-    )
-    alert_ids = set(counts.new_ids) | set(counts.changed_ids)
-    summaries.append(
-        SourceSummary(
-            "nvd", nvd.requests, len(nvd.records), counts.new, counts.changed
+    nvd_requests = nvd_records = nvd_new = nvd_changed = 0
+    alert_ids: set[str] = set()
+    summaries: list[SourceSummary] = []
+    pending_windows = list(reversed(feeds.nvd_windows(nvd_start, nvd_end)))
+    first_commit = True
+    while pending_windows:
+        window_start, window_end = pending_windows.pop()
+        feed = feeds.fetch_nvd_window(
+            http,
+            start=window_start,
+            end=window_end,
+            api_key=api_key,
+            interval=interval,
         )
-    )
+        nvd_requests += feed.requests
+        if feed.split:
+            middle = window_start + (window_end - window_start) / 2
+            pending_windows.append((middle, window_end))
+            pending_windows.append((window_start, middle))
+            continue
+        window_cursor = window_end
+        if feed.timestamp is not None:
+            window_cursor = min(window_end, feed.timestamp)
+        meta = {"nvd_cursor": window_cursor.isoformat()}
+        if first_commit and initial_run:
+            meta["initial_mode"] = mode
+            if "euvd" in watch.sources and "euvd_cursor" not in metadata:
+                meta["euvd_cursor"] = intended_euvd_start.isoformat()
+        first_commit = False
+        if initial_run and not pending_windows:
+            meta["initialized_at"] = initialized_at
+            meta["initial_complete"] = "true"
+        counts = store.upsert(
+            feed.records,
+            meta=meta,
+            cisa_kev_configured="cisa_kev" in watch.sources,
+        )
+        nvd_records += len(feed.records)
+        nvd_new += counts.new
+        nvd_changed += counts.changed
+        alert_ids.update(counts.new_ids)
+        alert_ids.update(counts.changed_ids)
+
+    if initial_run and first_commit:
+        meta = {
+            "nvd_cursor": nvd_end.isoformat(),
+            "initial_mode": mode,
+            "initialized_at": initialized_at,
+            "initial_complete": "true",
+        }
+        if "euvd" in watch.sources and "euvd_cursor" not in metadata:
+            meta["euvd_cursor"] = intended_euvd_start.isoformat()
+        store.set_metadata(meta)
 
     if "euvd" in watch.sources:
-        try:
-            euvd = feeds.fetch_euvd(http, start=euvd_start, end=today)
-        except SourceError as exc:
-            summaries.append(SourceSummary("euvd", error=str(exc)))
-        else:
+        euvd_requests = euvd_records = euvd_new = euvd_changed = 0
+        euvd_error: str | None = None
+        for chunk_start, chunk_end in feeds.euvd_chunks(euvd_start, today):
+            try:
+                feed = feeds.fetch_euvd(http, start=chunk_start, end=chunk_end)
+            except SourceError as exc:
+                euvd_error = str(exc)
+                break
             counts = store.apply_euvd(
-                euvd.updates, meta={"euvd_cursor": today.isoformat()}
+                feed.updates, meta={"euvd_cursor": chunk_end.isoformat()}
             )
+            euvd_requests += feed.requests
+            euvd_records += len(feed.updates)
+            euvd_new += counts.new
+            euvd_changed += counts.changed
             alert_ids.update(counts.new_ids)
             alert_ids.update(counts.changed_ids)
-            summaries.append(
-                SourceSummary(
-                    "euvd",
-                    euvd.requests,
-                    len(euvd.updates),
-                    counts.new,
-                    counts.changed,
-                )
+        summaries.append(
+            SourceSummary(
+                "euvd",
+                euvd_requests,
+                euvd_records,
+                euvd_new,
+                euvd_changed,
+                error=euvd_error,
             )
+        )
 
     if "cisa_kev" in watch.sources:
         try:
@@ -190,7 +282,9 @@ def sync_watch(
         except SourceError as exc:
             summaries.append(SourceSummary("cisa_kev", error=str(exc)))
         else:
-            counts = store.apply_kev(cisa, {})
+            counts = store.apply_kev(
+                cisa, {}, clear_cisa=True, baseline_at=baseline_at
+            )
             alert_ids.update(counts.new_ids)
             alert_ids.update(counts.changed_ids)
             summaries.append(
@@ -203,23 +297,53 @@ def sync_watch(
         except SourceError as exc:
             summaries.append(SourceSummary("eu_kev", error=str(exc)))
         else:
-            counts = store.apply_kev({}, eu)
+            counts = store.apply_kev(
+                {}, eu, clear_eu=True, baseline_at=baseline_at
+            )
             alert_ids.update(counts.new_ids)
             alert_ids.update(counts.changed_ids)
-            summaries.append(
-                SourceSummary("eu_kev", 1, len(eu), counts.new, counts.changed)
+            summaries.append(SourceSummary("eu_kev", 1, len(eu), counts.new, counts.changed))
+
+    store.expire_pending(now=now)
+    for row in store.pending(limit=PENDING_LIMIT):
+        try:
+            result = feeds.fetch_nvd_cve(
+                http, row.cve_id, api_key=api_key, interval=interval
             )
+        except SourceError:
+            store.pending_attempt(row.cve_id)
+            continue
+        nvd_requests += result.requests
+        counts = store.upsert(
+            [result.record], cisa_kev_configured="cisa_kev" in watch.sources
+        )
+        store.drop_pending(row.cve_id)
+        nvd_records += 1
+        nvd_new += counts.new
+        nvd_changed += counts.changed
+        alert_ids.update(counts.new_ids)
+        alert_ids.update(counts.changed_ids)
+
+    summaries.insert(0, SourceSummary("nvd", nvd_requests, nvd_records, nvd_new, nvd_changed))
 
     if "epss" in watch.sources:
         try:
-            scores, requests = feeds.fetch_epss_scores(http, alert_ids)
-            floor_scores: dict[str, tuple[float, float, date]] = {}
+            identifiers = set(alert_ids)
+            identifiers.update(store.epss_without_date(limit=EPSS_MISSING_LIMIT))
             floor_due = metadata.get("epss_floor_date") != today.isoformat()
+            floor_scores: dict[str, tuple[float, float, date]] = {}
+            requests = 0
             if floor_due:
                 floor_scores, floor_requests = feeds.fetch_epss_floor(
                     http, floor=watch.epss_floor
                 )
                 requests += floor_requests
+                stale = set(store.epss_at_or_above_floor(watch.epss_floor)) - set(
+                    floor_scores
+                )
+                identifiers.update(stale)
+            scores, batch_requests = feeds.fetch_epss_scores(http, identifiers)
+            requests += batch_requests
             merged = {**floor_scores, **scores}
             counts = store.apply_epss(
                 merged,
@@ -253,6 +377,6 @@ def watch_status(watch: WatchConfig) -> str:
         f"rows: {status['rows']}",
         f"with KEV: {status['any_kev']} (CISA {status['cisa_kev']}, EU {status['eu_kev']})",
         f"with active SSVC: {status['active_ssvc']}",
-        f"with EPSS >= {watch.epss_floor:g}: {status['epss_above']}",
+        f"with EPSS above {watch.epss_floor:g}: {status['epss_above']}",
     ]
     return "\n".join(lines)

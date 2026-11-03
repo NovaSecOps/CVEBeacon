@@ -17,6 +17,9 @@ def write_config(
     sources: tuple[str, ...] = ("nvd",),
     initial: str = "baseline",
     enabled: bool = True,
+    backfill_days: int = 7,
+    overlap_minutes: int = 15,
+    epss_floor: float = 0.1,
     extra: str = "",
 ) -> AppConfig:
     names = ", ".join(f'"{name}"' for name in sources)
@@ -40,9 +43,9 @@ enabled = {str(enabled).lower()}
 database = "watch.db"
 sources = [{names}]
 initial = "{initial}"
-backfill_days = 7
-overlap_minutes = 15
-epss_floor = 0.1
+backfill_days = {backfill_days}
+overlap_minutes = {overlap_minutes}
+epss_floor = {epss_floor}
 {extra}
 """,
         encoding="utf-8",
