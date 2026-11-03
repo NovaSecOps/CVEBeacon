@@ -213,6 +213,7 @@ server.serve_forever()
 
 
 RBAC = r'''
+import http.client,os,pathlib,ssl
 from cvebeacon_extensions.kubernetes import in_cluster_client
 from cvebeacon_extensions.contract import ExtensionError
 get=in_cluster_client()
@@ -225,7 +226,19 @@ for path in ['/api/v1/namespaces/cvebeacon-v2-demo/secrets',
     try: get(path)
     except ExtensionError as error: assert '(HTTP 403)' in str(error)
     else: raise AssertionError('unexpected API authorization')
-print('verified API TLS: list allowed, seven HTTP 403 denials')
+api=pathlib.Path('/var/run/secrets/kubernetes.io/serviceaccount')
+context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+context.load_verify_locations(cafile=str(api/'ca.crt'))
+target='/api/v1/namespaces/cvebeacon-v2-demo/pods/synthetic-workload/exec?container=main&command=true&stdout=true&stderr=true'
+for method in ('GET','POST'):
+    client=http.client.HTTPSConnection(os.environ['KUBERNETES_SERVICE_HOST'],443,timeout=10,context=context)
+    try:
+        client.request(method,target,body=b'',headers={'Authorization':'Bearer '+(api/'token').read_text().strip()})
+        response=client.getresponse()
+        assert response.status==403, 'unexpected exec API authorization'
+        assert len(response.read(16385))<=16384
+    finally: client.close()
+print('verified API TLS: list allowed, nine HTTP 403 denials including GET and POST exec')
 '''
 
 
@@ -470,7 +483,7 @@ def smoke(cluster, root, manifest):
                                                 dict(name="observe-tmp", mountPath="/tmp")])],
                  volumes=[deepcopy(item) for item in pod["volumes"] if item["name"] in {"api-access", "observe-tmp"}])
     cluster.job("rbac-probe", probe, deadline=120)
-    assert "seven HTTP 403" in cluster.wait_job("rbac-probe", seconds=130)
+    assert "nine HTTP 403" in cluster.wait_job("rbac-probe", seconds=130)
     cron["spec"]["schedule"] = "* * * * *"
     cluster.apply(cron)
     for number in (1, 2):
@@ -541,7 +554,7 @@ def smoke(cluster, root, manifest):
     assert stats["registry_ok"] >= 15 and stats["matrix_puts"] == 1
     return dict(version=1, outcome="passed", cluster=cluster.name, namespace=NAMESPACE, runtime_image_id=runtime,
                 subject_sha256=digest(manifest), synthetic_sbom=True, vendor_attestation_verified=False,
-                api_http_403_count=7, actual_scheduled_job=scheduled, scans=final["runs"], core_exit=4,
+                api_http_403_count=9, actual_scheduled_job=scheduled, scans=final["runs"], core_exit=4,
                 core_deliveries=0, missing_sbom_preserved_inventory=True, missing_credential_preserved_inventory=True,
                 credential_isolation=True, anonymous_api_denials=True, automation_lock_exclusion=True,
                 matrix_local_tls_test_accepted=1, fixture=stats, storage="kind-local-path-RWO-not-production-RWOP")

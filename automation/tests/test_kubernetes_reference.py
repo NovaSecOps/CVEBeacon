@@ -309,7 +309,7 @@ def test_complete_native_plan_constructs_positive_negative_and_scheduled_specs(a
                 count = int(self.submitted[name]["spec"]["template"]["spec"]["containers"][0]["command"][-1])
                 return json.dumps({"runs": count, "inventory_sha256": "same", "manifest_sha256": "same"})
             if name == "rbac-probe":
-                return "seven HTTP 403"
+                return "nine HTTP 403"
             if name == "missing-sbom":
                 assert failed
                 return "registry_sbom_missing"
