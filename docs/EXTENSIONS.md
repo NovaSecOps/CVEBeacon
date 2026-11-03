@@ -48,7 +48,10 @@ stable aliases, not credentials or sensitive hostnames.
 
 Writers fsync temporary files and replace inventory then manifest atomically.
 Two files cannot be replaced as one transaction: interruption between replacements
-produces a detectable hash mismatch. A failed collection leaves the previous
+produces a detectable hash mismatch. The inventory is replaced before the manifest,
+so if the manifest write fails or is interrupted the pair is left mismatched, is
+rejected by the hash check on the next read, and is recovered only by publishing
+again; it is not rolled back automatically. A failed collection leaves the previous
 snapshot unchanged and aging. Monitor exit codes as well as snapshot age.
 Concurrent cooperating writers are excluded by an exclusive output lock. After
 a crash, confirm the writer has stopped before removing its stale `.lock` file.
