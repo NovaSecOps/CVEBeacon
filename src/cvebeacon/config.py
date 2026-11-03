@@ -141,7 +141,10 @@ def _table(data: dict[str, Any], key: str) -> dict[str, Any]:
 def _positive_number(value: Any, name: str, *, minimum: float = 0) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigurationError(f"{name} must be a number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ConfigurationError(f"{name} must be greater than {minimum}") from exc
     if not math.isfinite(number) or number <= minimum:
         raise ConfigurationError(f"{name} must be greater than {minimum}")
     return number
@@ -157,7 +160,10 @@ def _boolean(table: dict[str, Any], key: str, default: bool) -> bool:
 def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigurationError(f"{name} must be a number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}") from exc
     if not math.isfinite(number) or not minimum <= number <= maximum:
         raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
     return number

@@ -88,11 +88,19 @@ def test_watch_unknown_key_is_rejected(tmp_path):
         ("epss_floor = 1.1", "between 0 and 1"),
         ("epss_floor = nan", "between 0 and 1"),
         ("epss_floor = inf", "between 0 and 1"),
+        ("epss_floor = " + "9" * 1000, "between 0 and 1"),
     ],
 )
 def test_watch_settings_are_strict(tmp_path, setting, match):
     with pytest.raises(ConfigurationError, match=match):
         write(tmp_path, f"\n[watch]\n{setting}\n")
+
+
+def test_oversized_float_settings_raise_configuration_errors(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(BASE + "\n[sources]\nminimum_request_interval = " + "9" * 1000 + "\n")
+    with pytest.raises(ConfigurationError, match="greater than 0"):
+        load_config(path)
 
 
 @pytest.mark.parametrize("value", ['"nvd"', "[1]", "[]"])
