@@ -863,7 +863,7 @@ class WatchStore:
         with closing(self._connect()) as db:
             return self._view(db, identifier, catalogs)
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, catalogs: Sequence[str] = ()) -> dict[str, Any]:
         self.initialize()
         with closing(self._connect()) as db:
             db.execute("BEGIN")
@@ -885,6 +885,37 @@ class WatchStore:
                 any_kev = db.execute(
                     "SELECT COUNT(DISTINCT cve_id) FROM watch_kev"
                 ).fetchone()[0]
+                if "cisa_kev" in catalogs:
+                    cisa_watched = {
+                        row["cve_id"]
+                        for row in db.execute(
+                            "SELECT DISTINCT k.cve_id FROM watch_kev k "
+                            "JOIN watch_cve c ON c.cve_id=k.cve_id "
+                            "WHERE k.catalog='cisa'"
+                        )
+                    }
+                else:
+                    cisa_watched = {
+                        row["cve_id"]
+                        for row in db.execute(
+                            "SELECT cve_id FROM watch_cve "
+                            "WHERE cisa_kev_added IS NOT NULL "
+                            "OR cisa_kev_due IS NOT NULL "
+                            "OR cisa_required_action IS NOT NULL "
+                            "OR cisa_ransomware IS NOT NULL"
+                        )
+                    }
+                if "eu_kev" in catalogs:
+                    eu_watched = {
+                        row["cve_id"]
+                        for row in db.execute(
+                            "SELECT DISTINCT k.cve_id FROM watch_kev k "
+                            "JOIN watch_cve c ON c.cve_id=k.cve_id "
+                            "WHERE k.catalog='eu'"
+                        )
+                    }
+                else:
+                    eu_watched = set()
                 active_ssvc = db.execute(
                     "SELECT COUNT(*) FROM watch_cve WHERE ssvc_exploitation='active'"
                 ).fetchone()[0]
@@ -903,6 +934,9 @@ class WatchStore:
             "cisa_kev": cisa_kev,
             "eu_kev": eu_kev,
             "any_kev": any_kev,
+            "cisa_watched": len(cisa_watched),
+            "eu_watched": len(eu_watched),
+            "any_watched": len(cisa_watched | eu_watched),
             "active_ssvc": active_ssvc,
             "epss_rows": epss_rows,
             "epss_date": epss_date,

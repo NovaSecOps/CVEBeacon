@@ -400,7 +400,7 @@ def sync_watch(
 
 def watch_status(watch: WatchConfig) -> str:
     _require_enabled(watch)
-    status = WatchStore(watch.database).status()
+    status = WatchStore(watch.database).status(catalogs=watch.sources)
     meta = status["meta"]
     lines = [
         f"database: {status['database']}",
@@ -410,7 +410,9 @@ def watch_status(watch: WatchConfig) -> str:
         f"epss score date: {status['epss_date'] or 'not set'}",
         f"rows: {status['rows']}",
         f"euvd items: {status['euvd_items']}",
-        f"with KEV: {status['any_kev']} (CISA {status['cisa_kev']}, EU {status['eu_kev']})",
+        f"KEV catalog entries: CISA {status['cisa_kev']}, EU {status['eu_kev']}",
+        f"watched CVEs in KEV: {status['any_watched']} "
+        f"(CISA {status['cisa_watched']}, EU {status['eu_watched']})",
         f"with active SSVC: {status['active_ssvc']}",
         f"with EPSS: {status['epss_rows']}",
         f"lookups pending/backing off: {status['lookups']}",

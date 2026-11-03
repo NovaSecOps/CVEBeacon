@@ -510,7 +510,12 @@ def test_baseline_and_status_counts(tmp_path):
         ]
     )
     store.replace_kev(
-        "cisa", {"CVE-2026-0001": KEVFields("2026-11-03")}, catalogs=("nvd", "cisa_kev")
+        "cisa",
+        {
+            "CVE-2026-0001": KEVFields("2026-11-03"),
+            "CVE-2026-9999": KEVFields("2026-11-04"),
+        },
+        catalogs=("nvd", "cisa_kev"),
     )
     store.replace_kev(
         "eu", {"CVE-2026-0002": KEVFields("2026-11-04")}, catalogs=("nvd", "eu_kev")
@@ -521,12 +526,15 @@ def test_baseline_and_status_counts(tmp_path):
             ("CVE-2026-0002", 0.05, 0.5, date(2026, 11, 3)),
         ]
     )
-    status = store.status()
+    status = store.status(catalogs=("nvd", "cisa_kev", "eu_kev"))
     assert status["rows"] == 3
     assert status["euvd_items"] == 0
-    assert status["cisa_kev"] == 1
+    assert status["cisa_kev"] == 2
     assert status["eu_kev"] == 1
-    assert status["any_kev"] == 2
+    assert status["any_kev"] == 3
+    assert status["cisa_watched"] == 1
+    assert status["eu_watched"] == 1
+    assert status["any_watched"] == 2
     assert status["active_ssvc"] == 1
     assert status["epss_rows"] == 2
     assert status["epss_date"] == "2026-11-03"

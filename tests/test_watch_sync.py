@@ -466,7 +466,7 @@ def test_full_confirmation_guard_through_the_cli(tmp_path, monkeypatch, capsys):
 
 
 def test_watch_status_reports_cursors_rows_and_signals(tmp_path, capsys):
-    config = write_config(tmp_path)
+    config = write_config(tmp_path, sources=("nvd", "cisa_kev"))
     store = WatchStore(config.watch.database)
     store.set_metadata(
         {
@@ -485,7 +485,12 @@ def test_watch_status_reports_cursors_rows_and_signals(tmp_path, capsys):
         ]
     )
     store.replace_kev(
-        "cisa", {"CVE-2026-0001": KEVFields("2026-11-03")}, catalogs=("nvd", "cisa_kev")
+        "cisa",
+        {
+            "CVE-2026-0001": KEVFields("2026-11-03"),
+            "CVE-2026-9999": KEVFields("2026-11-04"),
+        },
+        catalogs=("nvd", "cisa_kev"),
     )
     store.replace_epss([("CVE-2026-0001", 0.5, 0.9, date(2026, 11, 3))])
     assert cli.main(["--config", str(config.config_path), "watch", "status"]) == 0
@@ -497,7 +502,8 @@ def test_watch_status_reports_cursors_rows_and_signals(tmp_path, capsys):
     assert "epss score date: 2026-11-03" in output
     assert "rows: 1" in output
     assert "euvd items: 0" in output
-    assert "with KEV: 1" in output
+    assert "KEV catalog entries: CISA 2, EU 0" in output
+    assert "watched CVEs in KEV: 1 (CISA 1, EU 0)" in output
     assert "with active SSVC: 1" in output
     assert "with EPSS: 1" in output
     assert "lookups pending/backing off: 0" in output

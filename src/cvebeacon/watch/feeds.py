@@ -46,6 +46,10 @@ _NVD_TIMESTAMP = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,9}))?$"
 )
 _EUVD_TIMESTAMP_FORMATS = ("%b %d, %Y, %I:%M:%S %p",)
+_EPSS_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_EPSS_DATE_TIMESTAMP = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(?P<offset>Z|\+00:00)$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -695,6 +699,23 @@ def _epss_value(value: Any) -> float:
     return number
 
 
+def _epss_score_date(value: Any) -> date:
+    text = str(value or "").strip()
+    if _EPSS_DATE_ONLY.fullmatch(text):
+        return date.fromisoformat(text)
+    match = _EPSS_DATE_TIMESTAMP.fullmatch(text)
+    if match is None:
+        raise ValueError("invalid EPSS score date")
+    try:
+        return datetime(
+            *map(int, match.group("date").split("-")),
+            *map(int, match.group("time").split(":")),
+            tzinfo=timezone.utc,
+        ).date()
+    except ValueError as exc:
+        raise ValueError("invalid EPSS score date") from exc
+
+
 def _epss_rows(chunks: Iterable[bytes], day: date) -> Iterator[tuple[str, float, float, date]]:
     """Yield validated EPSS rows from a gzip-compressed CSV stream."""
     gzip_file = gzip.GzipFile(fileobj=_ChunkReader(chunks), mode="rb")
@@ -712,7 +733,7 @@ def _epss_rows(chunks: Iterable[bytes], day: date) -> Iterator[tuple[str, float,
         if not fields.get("model_version") or not fields.get("score_date"):
             raise SourceError("epss", "source returned an invalid EPSS score file")
         try:
-            score_date = date.fromisoformat(fields["score_date"])
+            score_date = _epss_score_date(fields["score_date"])
         except ValueError as exc:
             raise SourceError(
                 "epss", "source returned an invalid EPSS score file"

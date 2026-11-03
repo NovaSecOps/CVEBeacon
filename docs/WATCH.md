@@ -123,7 +123,9 @@ rows in one transaction. The compressed file is capped at 20 MB and 1,000,000
 rows. The leading `#model_version:...,score_date:...` line, the
 `cve,epss,percentile` header, every score, and every CVE identifier are
 validated. A validation error fails the EPSS step (exit 4) and keeps the
-previous table. When the day's file is already loaded, no EPSS request is made.
+previous table. The header's `score_date` may be a date or a UTC timestamp with
+`Z` or `+00:00`; its UTC date is stored. When the day's file is already loaded,
+no EPSS request is made.
 
 The view reads EPSS directly, so no score refresh is needed for changed CVEs.
 The daily load also computes the CVEs whose EPSS band (`<0.1`, `<0.5`, `<0.9`,
@@ -164,8 +166,9 @@ sync on the same day reads the same EUVD day again.
   sources.
 
 `watch status` prints the database path, schema version, cursors, EPSS score
-date, row counts, EUVD items, KEV counts, active SSVC exploitation, EPSS rows,
-and pending/backing-off lookups. It creates an empty database if none exists.
+date, row counts, EUVD items, KEV catalog entries, watched CVEs in KEV, active
+SSVC exploitation, EPSS rows, and pending/backing-off lookups. It creates an
+empty database if none exists.
 
 ## Cost
 

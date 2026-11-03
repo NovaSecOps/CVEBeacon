@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import io
 import json
 from datetime import date, datetime, timedelta, timezone
@@ -758,6 +759,78 @@ def test_epss_streaming_fixture_parses_every_validated_row():
         ("CVE-2026-0002", 0.05, 0.30, date(2026, 11, 3)),
         ("CVE-2026-0003", 0.42, 0.88, date(2026, 11, 3)),
     ]
+
+
+def test_epss_accepts_the_live_timestamped_header():
+    header = "#model_version:v2026.06.15,score_date:2026-11-03T12:00:27Z"
+    content = gzip.compress(
+        (
+            f"{header}\n"
+            "cve,epss,percentile\n"
+            "CVE-2026-0001,0.42,0.87\n"
+        ).encode("utf-8")
+    )
+    rows = list(
+        feeds.fetch_epss_daily(
+            mock_client(_epss_handler(content)),
+            today=date(2026, 11, 3),
+            counter=[0],
+        )
+    )
+    assert rows == [("CVE-2026-0001", 0.42, 0.87, date(2026, 11, 3))]
+
+
+@pytest.mark.parametrize(
+    "score_date",
+    [
+        "2026-11-03",
+        "2026-11-03T12:00:27Z",
+        "2026-11-03T12:00:27+00:00",
+    ],
+)
+def test_epss_accepts_date_and_utc_timestamp_score_dates(score_date):
+    content = gzip.compress(
+        (
+            f"#model_version:v2026.06.15,score_date:{score_date}\n"
+            "cve,epss,percentile\n"
+            "CVE-2026-0001,0.42,0.87\n"
+        ).encode("utf-8")
+    )
+    rows = list(
+        feeds.fetch_epss_daily(
+            mock_client(_epss_handler(content)),
+            today=date(2026, 11, 3),
+            counter=[0],
+        )
+    )
+    assert rows[0][3] == date(2026, 11, 3)
+
+
+@pytest.mark.parametrize(
+    "score_date",
+    [
+        "2026-11-03T12:00:27",
+        "2026-11-03T12:00:27+01:00",
+        "2026-11-03 12:00:27Z",
+        "2026-11-03T12:00:27.000Z",
+    ],
+)
+def test_epss_rejects_other_score_date_forms(score_date):
+    content = gzip.compress(
+        (
+            f"#model_version:v2026.06.15,score_date:{score_date}\n"
+            "cve,epss,percentile\n"
+            "CVE-2026-0001,0.42,0.87\n"
+        ).encode("utf-8")
+    )
+    with pytest.raises(SourceError, match="invalid EPSS"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(content)),
+                today=date(2026, 11, 3),
+                counter=[0],
+            )
+        )
 
 
 def test_epss_falls_back_to_yesterday_on_404_and_counts_requests():
