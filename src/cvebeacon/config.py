@@ -13,6 +13,17 @@ from .errors import ConfigurationError
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
 OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit")
+WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss")
+WATCH_INITIAL_MODES = ("baseline", "backfill", "full")
+WATCH_SETTINGS = {
+    "enabled",
+    "database",
+    "sources",
+    "initial",
+    "backfill_days",
+    "overlap_minutes",
+    "epss_floor",
+}
 
 
 def _resolve(base: Path, value: str | Path) -> Path:
@@ -89,6 +100,17 @@ class DashboardConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WatchConfig:
+    enabled: bool = False
+    database: Path = Path("cvebeacon-watch.db")
+    sources: tuple[str, ...] = WATCH_SOURCES
+    initial: str = "baseline"
+    backfill_days: int = 7
+    overlap_minutes: int = 15
+    epss_floor: float = 0.1
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     config_path: Path
     inventory: InventoryConfig
@@ -100,6 +122,7 @@ class AppConfig:
     teams: TeamsConfig = field(default_factory=TeamsConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    watch: WatchConfig = field(default_factory=WatchConfig)
 
     def secret(self, env_name: str, *, required: bool = False) -> str | None:
         value = os.environ.get(env_name)
@@ -128,6 +151,21 @@ def _boolean(table: dict[str, Any], key: str, default: bool) -> bool:
     value = table.get(key, default)
     if not isinstance(value, bool):
         raise ConfigurationError(f"{key} must be true or false")
+    return value
+
+
+def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigurationError(f"{name} must be a number")
+    number = float(value)
+    if not math.isfinite(number) or not minimum <= number <= maximum:
+        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
+    return number
+
+
+def _bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ConfigurationError(f"{name} must be an integer from {minimum} to {maximum}")
     return value
 
 
@@ -216,6 +254,28 @@ def load_config(path: str | Path) -> AppConfig:
     if any(not isinstance(value, str) or not value.strip() for value in env_values.values()):
         raise ConfigurationError("notification credential environment-variable names cannot be blank")
 
+    watch_data = _table(data, "watch")
+    unknown_watch = sorted(set(watch_data) - WATCH_SETTINGS)
+    if unknown_watch:
+        raise ConfigurationError("unknown watch setting: " + ", ".join(unknown_watch))
+    raw_watch_sources = watch_data.get("sources", list(WATCH_SOURCES))
+    if not isinstance(raw_watch_sources, list) or not all(
+        isinstance(value, str) and value.strip() for value in raw_watch_sources
+    ):
+        raise ConfigurationError("watch.sources must be a list of source names")
+    watch_sources = tuple(dict.fromkeys(value.strip().casefold() for value in raw_watch_sources))
+    unknown_sources = sorted(set(watch_sources) - set(WATCH_SOURCES))
+    if unknown_sources:
+        raise ConfigurationError("unknown watch source: " + ", ".join(unknown_sources))
+    if "nvd" not in watch_sources:
+        raise ConfigurationError("watch.sources must include nvd")
+    watch_initial = str(watch_data.get("initial", "baseline")).strip().casefold()
+    if watch_initial not in WATCH_INITIAL_MODES:
+        raise ConfigurationError("watch.initial must be baseline, backfill, or full")
+    watch_database = watch_data.get("database", "cvebeacon-watch.db")
+    if not isinstance(watch_database, str) or not watch_database.strip():
+        raise ConfigurationError("watch.database must be a nonempty path")
+
     mappings: list[ProductMapping] = []
     mapping_keys: set[tuple[str, str]] = set()
     raw_mappings = data.get("product_mappings", [])
@@ -297,5 +357,20 @@ def load_config(path: str | Path) -> AppConfig:
             ),
             sender=sender,
             recipients=tuple(value.strip() for value in raw_recipients),
+        ),
+        watch=WatchConfig(
+            enabled=_boolean(watch_data, "enabled", False),
+            database=_resolve(base, watch_database.strip()),
+            sources=watch_sources,
+            initial=watch_initial,
+            backfill_days=_bounded_int(
+                watch_data.get("backfill_days", 7), "watch.backfill_days", 1, 120
+            ),
+            overlap_minutes=_bounded_int(
+                watch_data.get("overlap_minutes", 15), "watch.overlap_minutes", 0, 1440
+            ),
+            epss_floor=_bounded_number(
+                watch_data.get("epss_floor", 0.1), "watch.epss_floor", 0, 1
+            ),
         ),
     )

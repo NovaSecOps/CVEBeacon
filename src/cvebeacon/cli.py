@@ -70,6 +70,11 @@ def _parser() -> argparse.ArgumentParser:
     add = schedule_sub.add_parser("install"); add.add_argument("--every"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
     schedule_status = schedule_sub.add_parser("status"); schedule_status.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto")
     delete = schedule_sub.add_parser("remove"); delete.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); delete.add_argument("--yes", action="store_true")
+    watch = commands.add_parser("watch", help="keep a local database of recently changed CVEs")
+    watch_sub = watch.add_subparsers(dest="watch_command", required=True)
+    watch_sync = watch_sub.add_parser("sync", help="refresh the watch database from public sources")
+    watch_sync.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
+    watch_sub.add_parser("status", help="show watch database cursors and counts")
     return parser
 
 
@@ -94,6 +99,31 @@ def _notify_pending(config: AppConfig, store: StateStore, http: HttpClient, chan
         raise
     store.mark_delivery(channel, ids, accepted=True)
     return len(items)
+
+
+def _run_watch(args, config: AppConfig) -> int:
+    from .watch.sync import sync_watch, watch_status
+
+    if args.watch_command == "status":
+        print(watch_status(config.watch))
+        return 0
+    with HttpClient(config.http) as http:
+        report = sync_watch(config, http, assume_yes=args.yes)
+    if report.cancelled:
+        print("cancelled")
+        return 1
+    if report.baseline:
+        print("baseline mode stores no history; the next sync starts from now")
+    for summary in report.summaries:
+        line = (
+            f"{summary.source}: {summary.requests} request(s), "
+            f"{summary.records} record(s), {summary.new} new, "
+            f"{summary.changed} changed"
+        )
+        if summary.error:
+            line += f"; failed: {summary.error}"
+        print(line)
+    return 4 if report.failures else 0
 
 
 def _run_query(config: AppConfig, assets: list[Asset], *, known_findings=()):
@@ -180,6 +210,8 @@ def run(args: argparse.Namespace) -> int:
         print("removed" if remove(system=args.platform) else "not installed")
         return 0
     config = load_config(args.config)
+    if args.command == "watch":
+        return _run_watch(args, config)
     store = StateStore(config.database_path)
     if args.command == "scan":
         attempt_id = store.start_scan()
