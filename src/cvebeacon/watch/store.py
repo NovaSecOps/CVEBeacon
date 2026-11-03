@@ -253,16 +253,15 @@ def _merge_nvd(
     existing: WatchRecord | None, incoming: WatchRecord, *, cisa_owned_by_catalog: bool
 ) -> WatchRecord:
     """Replace NVD-owned fields while preserving fields owned by other sources."""
+    cisa_values: dict[str, Any] = {}
+    if cisa_owned_by_catalog:
+        for name in CISA_KEV_OWNED_COLUMNS:
+            cisa_values[name] = getattr(existing, name) if existing is not None else None
     if existing is None:
-        return incoming
+        return replace(incoming, **cisa_values)
     cvss = tuple(entry for entry in incoming.cvss if entry.provider != "euvd") + tuple(
         entry for entry in existing.cvss if entry.provider == "euvd"
     )
-    cisa_values: dict[str, Any] = {}
-    for name in CISA_KEV_OWNED_COLUMNS:
-        stored = getattr(existing, name)
-        if cisa_owned_by_catalog and stored is not None:
-            cisa_values[name] = stored
     return replace(
         incoming,
         cvss=cvss,
@@ -471,6 +470,12 @@ class WatchStore:
         self.initialize()
         now = _timestamp(self._clock)
         outcomes: list[tuple[str, str]] = []
+        owned = NVD_OWNED_COLUMNS
+        if cisa_kev_configured:
+            cisa_columns = set(CISA_KEV_OWNED_COLUMNS)
+            owned = tuple(
+                column for column in NVD_OWNED_COLUMNS if column not in cisa_columns
+            )
         with self.transaction() as db:
             pending = self._pending_euvd(db)
             for record in records:
@@ -488,7 +493,7 @@ class WatchStore:
                         cisa_owned_by_catalog=cisa_kev_configured,
                     ),
                     now,
-                    NVD_OWNED_COLUMNS,
+                    owned,
                 )
                 if outcome is not None:
                     outcomes.append((record.cve_id, outcome))

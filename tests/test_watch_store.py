@@ -57,7 +57,9 @@ def test_upsert_is_idempotent_and_updates_only_on_change(tmp_path):
     assert fetch_row(store, "CVE-2026-0001")["updated_at"] == first["updated_at"]
 
     now[0] += timedelta(hours=1)
-    counts = store.upsert([record(cisa_kev_added="2026-11-03")])
+    counts = store.upsert(
+        [record(cisa_kev_added="2026-11-03")], cisa_kev_configured=False
+    )
     assert (counts.new, counts.changed, counts.unchanged) == (0, 1, 0)
     updated = fetch_row(store, "CVE-2026-0001")
     assert updated["updated_at"] != first["updated_at"]
@@ -214,7 +216,8 @@ def test_status_counts_kev_ssvc_and_epss(tmp_path):
             record("CVE-2026-0001", cisa_kev_added="2026-11-03", ssvc_exploitation="active"),
             record("CVE-2026-0002", eu_kev_added="2026-11-03"),
             record("CVE-2026-0003"),
-        ]
+        ],
+        cisa_kev_configured=False,
     )
     store.apply_epss(
         {
@@ -330,7 +333,7 @@ def test_nvd_null_cisa_fields_do_not_clear_catalog_values(tmp_path):
     assert row["cisa_ransomware"] == "Known"
 
 
-def test_nvd_fills_cisa_fields_that_are_still_null(tmp_path):
+def test_nvd_cisa_fields_do_not_appear_when_the_catalog_is_configured(tmp_path):
     store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
     store.upsert(
         [
@@ -339,13 +342,45 @@ def test_nvd_fills_cisa_fields_that_are_still_null(tmp_path):
                 cisa_kev_added="2026-11-01",
                 cisa_kev_due="2026-11-10",
                 cisa_required_action="Apply updates",
+                cisa_ransomware="Known",
             )
         ]
     )
     row = fetch_row(store, "CVE-2026-0002")
-    assert row["cisa_kev_added"] == "2026-11-01"
-    assert row["cisa_kev_due"] == "2026-11-10"
+    assert row["cisa_kev_added"] is None
+    assert row["cisa_kev_due"] is None
+    assert row["cisa_required_action"] is None
+    assert row["cisa_ransomware"] is None
+
+
+def test_nvd_cannot_overwrite_catalog_cisa_values(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert([record()])
+    store.apply_kev(
+        {
+            "CVE-2026-0001": KEVFields(
+                "2026-11-03", "2026-11-20", "Apply updates", "Known"
+            )
+        },
+        {},
+    )
+    counts = store.upsert(
+        [
+            record(
+                cisa_kev_added="2026-12-01",
+                cisa_kev_due="2026-12-20",
+                cisa_required_action="Different action",
+                cisa_ransomware="Unknown",
+            )
+        ],
+        cisa_kev_configured=True,
+    )
+    assert (counts.new, counts.changed, counts.unchanged) == (0, 0, 1)
+    row = fetch_row(store, "CVE-2026-0001")
+    assert row["cisa_kev_added"] == "2026-11-03"
+    assert row["cisa_kev_due"] == "2026-11-20"
     assert row["cisa_required_action"] == "Apply updates"
+    assert row["cisa_ransomware"] == "Known"
 
 
 def test_nvd_owns_cisa_columns_when_the_catalog_is_not_configured(tmp_path):

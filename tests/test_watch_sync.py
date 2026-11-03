@@ -264,6 +264,34 @@ def test_cisa_kev_is_downloaded_once_and_overwrites_kev_columns(tmp_path):
     assert summary.changed == 1
 
 
+def test_catalog_is_the_only_cisa_kev_writer(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "cisa_kev"), initial="backfill")
+    cve = nvd_cve(
+        cisaExploitAdd="2026-11-01",
+        cisaActionDue="2026-11-20",
+        cisaRequiredAction="Apply updates",
+    )
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([cve]))
+
+    def cisa_request(request):
+        return httpx.Response(200, json={"count": 0, "vulnerabilities": []})
+
+    handler = handler_for(nvd=nvd_request, cisa=cisa_request)
+    first = run(config, handler)
+    second = run(config, handler, now=NOW + timedelta(minutes=3))
+    assert not first.failures
+    assert all(summary.new == 0 for summary in second.summaries)
+    assert all(summary.changed == 0 for summary in second.summaries)
+    with WatchStore(config.watch.database)._connect() as db:
+        row = db.execute(
+            "SELECT cisa_kev_added, cisa_kev_due, cisa_required_action, "
+            "cisa_ransomware FROM watch_cve"
+        ).fetchone()
+    assert tuple(row) == (None, None, None, None)
+
+
 def test_epss_scores_cover_new_records_and_the_daily_floor_runs_once(tmp_path):
     config = write_config(tmp_path, sources=("nvd", "epss"), initial="backfill")
     batch_ids: list[str] = []
@@ -452,6 +480,7 @@ def test_watch_status_reports_cursors_rows_and_signals(tmp_path, capsys):
             "epss_floor_date": "2026-11-03",
             "initialized_at": NOW.isoformat(),
         },
+        cisa_kev_configured=False,
     )
     store.apply_epss({"CVE-2026-0001": (0.5, 0.9, date(2026, 11, 3))})
     assert cli.main(["--config", str(config.config_path), "watch", "status"]) == 0

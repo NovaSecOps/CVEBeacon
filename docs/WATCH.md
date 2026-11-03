@@ -87,8 +87,10 @@ After a successful KEV catalog download, rows no longer present in that catalog
 have the catalog's columns cleared. CISA columns are cleared only when
 `cisa_kev` is configured, and `eu_kev_added` only when `eu_kev` is configured.
 The same rule decides who owns the CISA columns: when `cisa_kev` is configured
-the catalog owns them and NVD only fills empty values; otherwise NVD owns them,
-including clearing values that disappear from an NVD record.
+the catalog is the only writer and NVD never writes them, even into empty
+values; otherwise NVD owns them, including clearing values that disappear from
+an NVD record. With the CISA KEV catalog enabled, KEV status comes from the
+catalog only. `eu_kev_added` is written only by the EU KEV catalog.
 
 The daily EPSS floor query reads scores above `epss_floor` in pages. After a
 complete download, stored rows at or above the floor that the response did not
