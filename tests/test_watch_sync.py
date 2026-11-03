@@ -1345,4 +1345,3 @@ def test_unknown_euvd_score_versions_are_ignored_and_counted(
     assert view2.euvd_id == "EUVD-2026-9"
     assert not any(entry.provider == "euvd" for entry in view1.cvss)
     assert not any(entry.provider == "euvd" for entry in view2.cvss)
-
