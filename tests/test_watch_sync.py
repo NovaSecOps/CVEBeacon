@@ -264,6 +264,62 @@ def test_cisa_kev_is_downloaded_once_and_overwrites_kev_columns(tmp_path):
     assert summary.changed == 1
 
 
+def test_pending_kev_status_is_applied_in_the_same_run(tmp_path):
+    config = write_config(
+        tmp_path, sources=("nvd", "cisa_kev", "eu_kev"), initial="backfill"
+    )
+    cisa_catalog = [
+        {
+            "cveID": "CVE-2026-0002",
+            "dateAdded": "2026-11-02",
+            "dueDate": "2026-11-20",
+            "requiredAction": "Apply updates",
+            "knownRansomwareCampaignUse": "Known",
+        }
+    ]
+    eu_catalog = [
+        {"cveId": "CVE-2026-0002", "dateAdded": "2026-11-03", "sources": ["eukev_kev"]}
+    ]
+    looked_up: list[str] = []
+
+    def nvd_request(request):
+        params = dict(request.url.params)
+        if params.get("cveId"):
+            looked_up.append(params["cveId"])
+            return httpx.Response(200, json=nvd_page([nvd_cve(params["cveId"])]))
+        return httpx.Response(200, json=nvd_page([]))
+
+    def cisa_request(request):
+        return httpx.Response(
+            200, json={"count": len(cisa_catalog), "vulnerabilities": cisa_catalog}
+        )
+
+    def eu_request(request):
+        return httpx.Response(200, json=eu_catalog)
+
+    handler = handler_for(nvd=nvd_request, cisa=cisa_request, eu=eu_request)
+    first = run(config, handler)
+    assert not first.failures
+    assert looked_up == ["CVE-2026-0002"]
+    with WatchStore(config.watch.database)._connect() as db:
+        row = db.execute(
+            "SELECT cisa_kev_added, cisa_kev_due, cisa_required_action, "
+            "cisa_ransomware, eu_kev_added FROM watch_cve WHERE cve_id=?",
+            ("CVE-2026-0002",),
+        ).fetchone()
+    assert tuple(row) == (
+        "2026-11-02",
+        "2026-11-20",
+        "Apply updates",
+        "Known",
+        "2026-11-03",
+    )
+
+    second = run(config, handler, now=NOW + timedelta(minutes=3))
+    assert all(summary.new == 0 for summary in second.summaries)
+    assert all(summary.changed == 0 for summary in second.summaries)
+
+
 def test_catalog_is_the_only_cisa_kev_writer(tmp_path):
     config = write_config(tmp_path, sources=("nvd", "cisa_kev"), initial="backfill")
     cve = nvd_cve(

@@ -275,6 +275,30 @@ def _merge_nvd(
     )
 
 
+def _apply_catalog_kev(
+    record: WatchRecord,
+    identifier: str,
+    cisa_catalog: Mapping[str, KEVFields] | None,
+    eu_catalog: Mapping[str, KEVFields] | None,
+) -> WatchRecord:
+    """Apply the current run's catalog columns to a newly inserted row."""
+    changes: dict[str, Any] = {}
+    if cisa_catalog is not None:
+        cisa_entry = cisa_catalog.get(identifier)
+        if cisa_entry is not None:
+            changes.update(
+                cisa_kev_added=cisa_entry.added,
+                cisa_kev_due=cisa_entry.due,
+                cisa_required_action=cisa_entry.required_action,
+                cisa_ransomware=cisa_entry.ransomware,
+            )
+    if eu_catalog is not None:
+        eu_entry = eu_catalog.get(identifier)
+        if eu_entry is not None:
+            changes["eu_kev_added"] = eu_entry.added
+    return replace(record, **changes) if changes else record
+
+
 def _kev_on_or_after(added: str | None, pending_since: str | None) -> bool:
     if pending_since is None or not added:
         return False
@@ -466,6 +490,8 @@ class WatchStore:
         *,
         meta: Mapping[str, str] | None = None,
         cisa_kev_configured: bool = True,
+        cisa_catalog: Mapping[str, KEVFields] | None = None,
+        eu_catalog: Mapping[str, KEVFields] | None = None,
     ) -> UpsertCounts:
         self.initialize()
         now = _timestamp(self._clock)
@@ -476,6 +502,8 @@ class WatchStore:
             owned = tuple(
                 column for column in NVD_OWNED_COLUMNS if column not in cisa_columns
             )
+        else:
+            cisa_catalog = None
         with self.transaction() as db:
             pending = self._pending_euvd(db)
             for record in records:
@@ -484,17 +512,25 @@ class WatchStore:
                     db.execute("DELETE FROM watch_pending WHERE cve_id=?", (record.cve_id,))
                     if self._row(db, record.cve_id) is None:
                         record = _apply_euvd_fields(record, update)
-                outcome = self._write(
-                    db,
-                    record.cve_id,
-                    lambda existing, record=record: _merge_nvd(
+
+                def build(
+                    existing: WatchRecord | None,
+                    record: WatchRecord = record,
+                ) -> WatchRecord:
+                    merged = _merge_nvd(
                         existing,
                         record,
                         cisa_owned_by_catalog=cisa_kev_configured,
-                    ),
-                    now,
-                    owned,
-                )
+                    )
+                    if existing is None and (
+                        cisa_catalog is not None or eu_catalog is not None
+                    ):
+                        merged = _apply_catalog_kev(
+                            merged, record.cve_id, cisa_catalog, eu_catalog
+                        )
+                    return merged
+
+                outcome = self._write(db, record.cve_id, build, now, owned)
                 if outcome is not None:
                     outcomes.append((record.cve_id, outcome))
             if meta:

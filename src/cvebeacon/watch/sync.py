@@ -305,12 +305,15 @@ def sync_watch(
             )
         )
 
+    cisa_catalog = None
+    eu_catalog = None
     if "cisa_kev" in watch.sources:
         try:
             cisa = feeds.fetch_kev(http)
         except SourceError as exc:
             summaries.append(SourceSummary("cisa_kev", error=str(exc)))
         else:
+            cisa_catalog = cisa
             counts = store.apply_kev(
                 cisa, {}, clear_cisa=True, pending_since=kev_pending_since
             )
@@ -326,6 +329,7 @@ def sync_watch(
         except SourceError as exc:
             summaries.append(SourceSummary("eu_kev", error=str(exc)))
         else:
+            eu_catalog = eu
             counts = store.apply_kev(
                 {}, eu, clear_eu=True, pending_since=kev_pending_since
             )
@@ -344,7 +348,10 @@ def sync_watch(
             continue
         nvd_requests += result.requests
         counts = store.upsert(
-            [result.record], cisa_kev_configured="cisa_kev" in watch.sources
+            [result.record],
+            cisa_kev_configured="cisa_kev" in watch.sources,
+            cisa_catalog=cisa_catalog,
+            eu_catalog=eu_catalog,
         )
         store.drop_pending(row.cve_id)
         nvd_records += 1
