@@ -1117,3 +1117,88 @@ def test_full_confirmation_eof_is_cancelled(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", eof)
     assert cli.main(["--config", str(config.config_path), "watch", "sync"]) == 1
     assert "cancelled" in capsys.readouterr().out
+
+
+def test_changing_nvd_totals_fail_without_advancing_the_cursor(tmp_path):
+    config = write_config(tmp_path, initial="backfill")
+    calls: list[int] = []
+
+    def nvd_request(request):
+        start = int(dict(request.url.params)["startIndex"])
+        calls.append(start)
+        if start == 0:
+            return httpx.Response(200, json=nvd_page([nvd_cve()], total=2))
+        return httpx.Response(200, json=nvd_page([], start=1, total=1))
+
+    with pytest.raises(SourceError, match="unstable pagination"):
+        run(config, handler_for(nvd=nvd_request))
+    assert calls == [0, 1] * 3
+    assert "nvd_cursor" not in metadata(config)
+
+
+def test_changing_euvd_totals_fail_without_advancing_the_cursor(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
+    pages: list[int] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        page = int(dict(request.url.params)["page"])
+        pages.append(page)
+        if page == 0:
+            return httpx.Response(
+                200,
+                json={
+                    "total": 101,
+                    "items": [
+                        {
+                            "id": f"EUVD-{index}",
+                            "aliases": f"CVE-2026-{1000 + index}",
+                        }
+                        for index in range(100)
+                    ],
+                },
+            )
+        return httpx.Response(200, json={"total": 100, "items": []})
+
+    report = run(config, handler_for(nvd=nvd_request, euvd=euvd_request))
+    assert report.failures == ("euvd",)
+    assert pages == [0, 1] * 3
+    assert metadata(config)["euvd_cursor"] == "2026-10-27"
+
+
+def test_changing_epss_floor_totals_fail_without_recording_the_day(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(feeds, "EPSS_PAGE_SIZE", 2)
+    config = write_config(tmp_path, sources=("nvd", "epss"), initial="backfill")
+    offsets: list[int] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def epss_request(request):
+        params = dict(request.url.params)
+        if "epss-gt" in params:
+            offset = int(params["offset"])
+            offsets.append(offset)
+            if offset == 0:
+                return httpx.Response(
+                    200,
+                    json={
+                        "total": 3,
+                        "offset": 0,
+                        "data": [
+                            epss_row("CVE-2026-0001"),
+                            epss_row("CVE-2026-0002"),
+                        ],
+                    },
+                )
+            return httpx.Response(200, json={"total": 2, "offset": 2, "data": []})
+        return httpx.Response(200, json={"status": "OK", "total": 0, "data": []})
+
+    report = run(config, handler_for(nvd=nvd_request, epss=epss_request))
+    assert report.failures == ("epss",)
+    assert offsets == [0, 2] * 3
+    assert "epss_floor_date" not in metadata(config)
