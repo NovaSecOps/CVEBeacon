@@ -346,3 +346,208 @@ def test_nvd_fills_cisa_fields_that_are_still_null(tmp_path):
     assert row["cisa_kev_added"] == "2026-11-01"
     assert row["cisa_kev_due"] == "2026-11-10"
     assert row["cisa_required_action"] == "Apply updates"
+
+
+def test_nvd_owns_cisa_columns_when_the_catalog_is_not_configured(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert(
+        [
+            record(
+                cisa_kev_added="2026-11-01",
+                cisa_kev_due="2026-11-20",
+                cisa_required_action="Old action",
+            )
+        ],
+        cisa_kev_configured=False,
+    )
+    counts = store.upsert(
+        [
+            record(
+                cisa_kev_added="2026-11-01",
+                cisa_kev_due="2026-11-30",
+                cisa_required_action="Corrected action",
+            )
+        ],
+        cisa_kev_configured=False,
+    )
+    assert counts.changed == 1
+    row = fetch_row(store, "CVE-2026-0001")
+    assert row["cisa_kev_due"] == "2026-11-30"
+    assert row["cisa_required_action"] == "Corrected action"
+
+    counts = store.upsert([record()], cisa_kev_configured=False)
+    assert counts.changed == 1
+    row = fetch_row(store, "CVE-2026-0001")
+    assert row["cisa_kev_added"] is None
+    assert row["cisa_kev_due"] is None
+    assert row["cisa_required_action"] is None
+    assert row["cisa_ransomware"] is None
+
+
+def test_kev_removal_clears_only_the_configured_catalog_columns(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert([record()])
+    store.apply_kev(
+        {"CVE-2026-0001": KEVFields("2026-11-03", "2026-11-20", "Apply updates", "Known")},
+        {"CVE-2026-0001": KEVFields("2026-11-04")},
+    )
+    before = fetch_row(store, "CVE-2026-0001")["fingerprint"]
+
+    counts = store.apply_kev({}, {}, clear_cisa=True, clear_eu=True)
+    assert counts.changed == 1
+    row = fetch_row(store, "CVE-2026-0001")
+    assert row["cisa_kev_added"] is None
+    assert row["cisa_kev_due"] is None
+    assert row["cisa_required_action"] is None
+    assert row["cisa_ransomware"] is None
+    assert row["eu_kev_added"] is None
+    assert row["fingerprint"] != before
+    assert store.apply_kev({}, {}, clear_cisa=True, clear_eu=True).changed == 0
+
+
+def test_euvd_score_removal_drops_the_entry(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert([record()])
+    store.apply_euvd(
+        [
+            EUVDUpdate(
+                ("CVE-2026-0001",),
+                "EUVD-2026-1",
+                "2026-11-01",
+                CVSSEntry("euvd", "euvd", "3.1", 9.8),
+            )
+        ]
+    )
+    counts = store.apply_euvd(
+        [EUVDUpdate(("CVE-2026-0001",), "EUVD-2026-1", "2026-11-01", None)]
+    )
+    assert counts.changed == 1
+    row = fetch_row(store, "CVE-2026-0001")
+    assert '"provider":"euvd"' not in row["cvss_json"]
+    assert row["euvd_id"] == "EUVD-2026-1"
+
+
+def _euvd(identifier: str, euvd_id: str, *, exploited=None, score=None, updated=None):
+    return EUVDUpdate(
+        (identifier,),
+        euvd_id,
+        exploited,
+        CVSSEntry("euvd", "euvd", "3.1", score) if score is not None else None,
+        updated,
+    )
+
+
+def test_conflicting_euvd_aliases_collapse_to_one_deterministic_update(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert([record()])
+    low = _euvd("CVE-2026-0001", "EUVD-2026-1", score=5.0, updated="2026-11-01T00:00:00")
+    high = _euvd("CVE-2026-0001", "EUVD-2026-2", score=9.8, updated="2026-11-02T00:00:00")
+    exploited = _euvd(
+        "CVE-2026-0001",
+        "EUVD-2026-0",
+        exploited="2026-10-30T00:00:00",
+        score=1.0,
+        updated="2026-10-30T00:00:00",
+    )
+    assert store.apply_euvd([low, high]).changed == 1
+    row = fetch_row(store, "CVE-2026-0001")
+    assert row["euvd_id"] == "EUVD-2026-2"
+    assert '"score":9.8' in row["cvss_json"]
+
+    assert store.apply_euvd([low, high]).changed == 0
+    assert store.apply_euvd([high, exploited]).changed == 1
+    row = fetch_row(store, "CVE-2026-0001")
+    assert row["euvd_id"] == "EUVD-2026-0"
+    assert row["euvd_exploited_since"] == "2026-10-30T00:00:00"
+
+    first = _euvd("CVE-2026-0001", "EUVD-2026-9", score=4.0)
+    second = _euvd("CVE-2026-0001", "EUVD-2026-10", score=6.0)
+    store.apply_euvd([first, second])
+    assert fetch_row(store, "CVE-2026-0001")["euvd_id"] == "EUVD-2026-10"
+
+
+def test_euvd_for_an_unknown_cve_is_pending_and_applied_on_nvd_insert(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    counts = store.apply_euvd(
+        [
+            _euvd(
+                "CVE-2026-9999",
+                "EUVD-2026-9",
+                exploited="2026-11-01T00:00:00",
+                score=8.8,
+                updated="2026-11-02T00:00:00",
+            )
+        ]
+    )
+    assert (counts.new, counts.changed) == (0, 0)
+    assert store.status(epss_floor=0.1)["rows"] == 0
+    pending = store.pending()
+    assert [item.cve_id for item in pending] == ["CVE-2026-9999"]
+    assert pending[0].reason == "euvd"
+    assert pending[0].alert_relevant is True
+
+    store.upsert([record("CVE-2026-9999")])
+    row = fetch_row(store, "CVE-2026-9999")
+    assert row["euvd_id"] == "EUVD-2026-9"
+    assert row["euvd_exploited_since"] == "2026-11-01T00:00:00"
+    assert '"score":8.8' in row["cvss_json"]
+    assert store.pending() == ()
+
+
+def test_non_exploited_euvd_pending_is_not_alert_relevant(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.apply_euvd([_euvd("CVE-2026-9999", "EUVD-1", score=5.0)])
+    assert store.pending() == ()
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM watch_pending").fetchone()[0] == 1
+
+
+def test_kev_pending_entries_respect_the_baseline_and_expire_after_attempts(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    baseline = "2026-11-03T12:00:00+00:00"
+    store.apply_kev(
+        {"CVE-2026-0001": KEVFields("2026-10-01")},
+        {},
+        baseline_at=baseline,
+    )
+    assert store.pending() == ()
+    assert store.apply_kev(
+        {"CVE-2026-0002": KEVFields("2026-11-03")},
+        {},
+        baseline_at=baseline,
+    ).changed == 0
+    assert [item.cve_id for item in store.pending()] == ["CVE-2026-0002"]
+
+    for _ in range(9):
+        store.pending_attempt("CVE-2026-0002")
+    assert [item.cve_id for item in store.pending()] == ["CVE-2026-0002"]
+    store.pending_attempt("CVE-2026-0002")
+    assert store.pending() == ()
+
+
+def test_old_non_exploited_euvd_pending_expires(tmp_path):
+    now = [NOW]
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: now[0])
+    store.apply_euvd([_euvd("CVE-2026-9999", "EUVD-1", score=5.0)])
+    store.expire_pending(now=NOW + timedelta(days=29))
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM watch_pending").fetchone()[0] == 1
+    store.expire_pending(now=NOW + timedelta(days=31))
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM watch_pending").fetchone()[0] == 0
+
+    store.apply_euvd([_euvd("CVE-2026-9999", "EUVD-2", exploited="2026-11-01")])
+    store.expire_pending(now=NOW + timedelta(days=31))
+    assert [item.cve_id for item in store.pending()] == ["CVE-2026-9999"]
+
+
+def test_epss_selectors_find_missing_dates_and_above_floor_rows(tmp_path):
+    now = [NOW]
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: now[0])
+    store.upsert([record("CVE-2026-0002")])
+    now[0] += timedelta(hours=1)
+    store.upsert([record("CVE-2026-0001")])
+    store.apply_epss({"CVE-2026-0001": (0.2, 0.9, date(2026, 11, 3))})
+    assert store.epss_without_date(limit=10) == ("CVE-2026-0002",)
+    assert store.epss_at_or_above_floor(0.1) == ("CVE-2026-0001",)
+    assert store.epss_at_or_above_floor(0.5) == ()

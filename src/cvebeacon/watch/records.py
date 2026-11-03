@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -79,6 +80,30 @@ class EUVDUpdate:
     euvd_id: str | None
     exploited_since: str | None
     cvss: CVSSEntry | None = None
+    date_updated: str | None = None
+
+    def rank(self) -> tuple[Any, ...]:
+        """Deterministic priority when several EUVD items describe one CVE."""
+        return (
+            1 if self.exploited_since else 0,
+            self.date_updated or "",
+            _identifier_key(self.euvd_id),
+        )
+
+
+def _identifier_key(value: str | None) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", value or ""))
+
+
+def collapse_euvd(updates: Iterable[EUVDUpdate]) -> dict[str, EUVDUpdate]:
+    """Choose one EUVD item per CVE: exploited, newest, then highest id."""
+    best: dict[str, EUVDUpdate] = {}
+    for update in updates:
+        for identifier in update.cve_ids:
+            current = best.get(identifier)
+            if current is None or update.rank() > current.rank():
+                best[identifier] = update
+    return best
 
 
 @dataclass(frozen=True, slots=True)
