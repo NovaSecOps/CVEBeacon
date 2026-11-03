@@ -523,6 +523,39 @@ def test_same_day_euvd_queries_are_widened_by_one_day():
     assert seen[0]["toUpdatedDate"] == "2026-11-04"
 
 
+def test_euvd_requests_are_paced_at_one_second():
+    client = mock_client(
+        lambda request: httpx.Response(200, json={"total": 0, "items": []})
+    )
+    calls: list[tuple[str, float]] = []
+    original = client._pace
+
+    def record(key: str, interval: float) -> None:
+        calls.append((key, interval))
+        original(key, interval)
+
+    client._pace = record  # type: ignore[method-assign]
+    fetch_euvd(client, start=date(2026, 11, 1), end=date(2026, 11, 2))
+    assert calls == [("euvd", 1.0)]
+
+
+def test_euvd_requests_are_paced_at_one_second():
+    client = mock_client(
+        lambda request: httpx.Response(200, json={"total": 0, "items": []})
+    )
+    intervals: list[tuple[str, float]] = []
+    original = client._pace
+
+    def pace(key, interval):
+        intervals.append((key, interval))
+        original(key, interval)
+
+    client._pace = pace
+    fetch_euvd(client, start=date(2026, 11, 1), end=date(2026, 11, 2))
+    assert intervals == [("euvd", feeds.EUVD_MIN_INTERVAL)]
+    assert feeds.EUVD_MIN_INTERVAL == 1.0
+
+
 def test_euvd_ranges_are_chunked_into_at_most_thirty_days():
     chunks = euvd_chunks(date(2026, 9, 4), date(2026, 11, 3))
     assert chunks == (
