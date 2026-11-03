@@ -49,7 +49,10 @@ class EPSSSource:
                 if not isinstance(item, dict):
                     raise SourceError("epss", "source returned a non-object score entry")
                 identifier = cve_id(item.get("cve"))
-                score, percentile = as_float(item.get("epss")), as_float(item.get("percentile"))
+                raw_score, raw_percentile = item.get("epss"), item.get("percentile")
+                if isinstance(raw_score, bool) or isinstance(raw_percentile, bool):
+                    raise SourceError("epss", "source returned an invalid probability or identifier")
+                score, percentile = as_float(raw_score), as_float(raw_percentile)
                 try:
                     score_date = date.fromisoformat(str(item.get("date")))
                 except ValueError:
