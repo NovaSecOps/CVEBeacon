@@ -42,7 +42,6 @@ sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
 initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
-epss_floor = 0.1
 
 [notifications.teams]
 enabled = false

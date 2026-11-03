@@ -24,7 +24,6 @@ sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
 initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
-epss_floor = 0.1
 ```
 
 - `enabled`: watch commands refuse to run until this is `true`.
@@ -36,74 +35,99 @@ epss_floor = 0.1
 - `backfill_days`: 1 to 120, used only when `initial = "backfill"`.
 - `overlap_minutes`: 0 to 1440. Later runs re-read this much before the stored
   NVD cursor so that late-published changes are not missed.
-- `epss_floor`: 0 to 1. Every CVE above the floor is refreshed once per UTC
-  day, in addition to newly changed CVEs. The public API's `epss-gt` filter is
-  strictly greater than, so a stored score equal to the floor is not returned
-  by that query; the daily reconciliation described below re-queries it.
 
 The NVD API key is read from the existing `sources.nvd_api_key_env` variable.
 It is optional; pacing follows `sources.minimum_request_interval`.
 
-## What sync stores
+## Storage model
 
-Each sync reads the NVD change feed (`lastModStartDate` to `lastModEndDate`,
-2000 results per page, in windows of at most 120 days) and writes one row per
-CVE to `watch_cve`. A row contains:
+Each source keeps its own raw table; a CVE's combined view is derived when it
+is needed. The schema is not migrated from earlier watch builds.
 
-- CVE identifiers, publication and modification dates, and `published` or
-  `rejected` status.
-- The first English description, truncated to 1000 characters, and the CNA.
-- Attributed CVSS metrics from NVD, CNA, CISA ADP, and EUVD, with version,
-  vector, score, and severity. Scores outside 0 to 10 are ignored.
-- CISA SSVC exploitation (`none`, `poc`, or `active`), CWE identifiers, CPE
-  vendor/product pairs, and references.
-- CISA KEV dates, required action, and ransomware indicator; the EU KEV date.
-- EUVD identifiers, exploitation date, and the EUVD-reported CVSS score.
-- EPSS score, percentile, and score date.
+- `watch_cve` holds NVD-owned data only: status, description, CNA, CVSS from
+  NVD, CNA, CISA ADP and other providers, SSVC, CPE products, references, and
+  NVD's own CISA KEV fields. `nvd_fingerprint` covers the NVD alert fields.
+- `watch_euvd_item` holds one row per EUVD item, keyed by `euvd_id`, whether or
+  not its CVE is known. `watch_euvd_alias` maps each CVE alias to its items.
+  When several items describe one CVE, the view uses the one with an
+  exploitation date, then the latest `dateUpdated`, then the highest numeric
+  EUVD id. Items are replaced in place when they change.
+- `watch_kev` holds CISA and EU catalog rows, keyed by catalog and CVE. Each
+  successful catalog download replaces that catalog's rows in one transaction,
+  including removals. When a catalog is configured it is the source for that
+  part of the view; otherwise NVD's CISA KEV fields are used.
+- `watch_epss` holds the current EPSS score, percentile, and score date for each
+  CVE. It is replaced once per UTC day from FIRST's official dated file.
+- `watch_view` stores the alert-relevant fingerprint of each CVE's derived view.
+  EPSS, identifiers, and timestamps are excluded from that fingerprint.
 
-EUVD only enriches CVEs that already exist. KEV only updates existing rows.
-Neither source creates a row on its own. NVD is authoritative for CVE creation.
-The EUVD `epss` field is ignored because it uses a 0 to 100 scale; EPSS comes
-from FIRST on a 0 to 1 scale.
+EUVD item pruning runs once per day. It deletes items that have no
+exploitation date, have not been seen for 30 days, and whose aliased CVEs are
+all absent from `watch_cve`.
 
-Each EUVD fetch is collapsed to one item per CVE before writing, preferring an
-item with an exploitation date, then the newest `dateUpdated`, then the highest
-EUVD identifier. An EUVD update always replaces the previous EUVD CVSS entry,
-including removing it when EUVD no longer reports a score. An invalid supplied
-score fails that EUVD step without committing it.
+## NVD sync
 
-When an EUVD update, CISA KEV entry, or EU KEV entry names a CVE that NVD has
-not created yet, it is kept in `watch_pending`. At the end of a run, up to 25
-alert-relevant pending CVEs (KEV entries, or EUVD entries with an exploitation
-date) are fetched from NVD by identifier, oldest first, and their pending data
-is applied. Other pending EUVD data is applied automatically when NVD first
-inserts the CVE. A pending entry is dropped after ten failed attempts, or after
-30 days if it is a non-exploited EUVD update. KEV entries for CVEs that NVD has
-not created become pending only when `dateAdded` is on or after the start of
-the database's initial window (the baseline date, the backfill start, or never
-for a full run); older catalog entries are ignored.
+NVD is read through the change feed in windows of at most 120 days. A window
+whose first page reports more than one page of results (2,000) is split in
+half by time, down to a minimum window of one hour. Only a one-hour window
+still above 2,000 results is read page by page; its total is pinned and the
+window restarts up to three times if the total or a CVE identifier repeats.
+Most windows therefore need one request, which avoids churn between pages.
 
-After a successful KEV catalog download, rows no longer present in that catalog
-have the catalog's columns cleared. CISA columns are cleared only when
-`cisa_kev` is configured, and `eu_kev_added` only when `eu_kev` is configured.
-The same rule decides who owns the CISA columns: when `cisa_kev` is configured
-the catalog is the only writer and NVD never writes them, even into empty
-values; otherwise NVD owns them, including clearing values that disappear from
-an NVD record. With the CISA KEV catalog enabled, KEV status comes from the
-catalog only. `eu_kev_added` is written only by the EU KEV catalog.
+Each finished window is written with its `nvd_cursor` in the same transaction,
+so a backfill or full run resumes from the last committed window. NVD rows are
+created only by the change feed or by a lookup for a KEV/EUVD CVE described
+below.
 
-The daily EPSS floor query reads scores above `epss_floor` in pages. After a
-complete download, stored rows at or above the floor that the response did not
-include are re-queried through the normal batch endpoint, which catches scores
-that fell below the floor. Rows that still have no EPSS date, for example after
-an earlier EPSS failure, are also retried in batches, at most 1,000 per run and
-oldest `first_seen` first.
+The stored cursor is `min(local time, NVD response timestamp)`. NVD timestamps
+are accepted without a suffix, with `Z`, or with `+00:00`; anything else is
+invalid. This keeps a device without a real-time clock from moving the cursor
+past NVD's own time. A cursor more than 120 days old prints a warning and the
+sync continues in bounded windows.
 
-The alert-relevant fingerprint covers status, CVSS, SSVC, the CISA KEV fields,
-the EU KEV date, and the EUVD exploitation date. EPSS and timestamps are
-excluded, so score churn does not change the fingerprint. Upserts are
-idempotent: unchanged data is not rewritten, and `updated_at` changes only when
-a field changes.
+## EUVD sync
+
+EUVD is read in 30-day chunks and `euvd_cursor` is committed after each chunk.
+The request end is always widened by one day while the cursor stays at the
+chunk end: same-day EUVD queries otherwise report a total below the number of
+items they return. Requests are paced at least one second apart. A failed
+chunk leaves the cursor at the previous chunk.
+
+## KEV and early lookups
+
+The CISA and EU KEV catalogs are downloaded once per run and replace their
+previous rows. For a CVE that NVD has not created yet, the sync tracks a
+bounded lookup in `watch_lookup`:
+
+- KEV entries in a configured catalog whose `dateAdded` is on or after the
+  start of the database's initial window (never for full mode);
+- EUVD items with an exploitation date whose CVE is not in `watch_cve`.
+
+Up to 25 lookups run per sync, oldest due first. A failed lookup keeps its row
+and backs off for 1 hour, doubling to a maximum of 7 days; attempts never reset
+because a catalog is downloaded again. The row is removed when the CVE appears
+in `watch_cve` or its trigger disappears.
+
+Failed lookups are reported on the NVD summary line as
+`, N lookup(s) failed`. They do not change the exit code. `watch status` shows
+`lookups pending/backing off: N`.
+
+## EPSS
+
+Once per UTC day, the sync downloads
+`https://epss.empiricalsecurity.com/epss_scores-YYYY-MM-DD.csv.gz` directly,
+without following redirects. It tries today and then yesterday; a 404 means the
+file is not published yet. The file is decompressed and parsed as a stream with
+`gzip` and `csv`, never held whole in memory, and written in batches of 5,000
+rows in one transaction. The compressed file is capped at 20 MB and 1,000,000
+rows. The leading `#model_version:...,score_date:...` line, the
+`cve,epss,percentile` header, every score, and every CVE identifier are
+validated. A validation error fails the EPSS step (exit 4) and keeps the
+previous table. When the day's file is already loaded, no EPSS request is made.
+
+The view reads EPSS directly, so no score refresh is needed for changed CVEs.
+The daily load also computes the CVEs whose EPSS band (`<0.1`, `<0.5`, `<0.9`,
+or higher) changed and exposes them with the run's touched CVEs.
 
 ## Initial modes
 
@@ -115,29 +139,13 @@ The first sync chooses what history to build:
 - `backfill`: reads NVD changes from the last `backfill_days` days and EUVD
   changes from the same date range.
 - `full`: reads NVD history from 1999-01-01 and EUVD history from 1999-01-01.
-  Before starting it prints an estimate of the NVD windows and request counts
-  plus a bandwidth warning, then requires `--yes` or an interactive
+  Before starting it prints an estimate of the NVD windows, request counts, and
+  the one EPSS file per day, then requires `--yes` or an interactive
   confirmation. When stdin is closed, the prompt counts as "no".
 
-NVD is read one bounded window at a time, at most 120 days per window. A window
-whose first page reports more than 20,000 results is split in half and retried,
-down to a one-day minimum. Each finished window is written in its own
-transaction together with `nvd_cursor` set to that window's end, so the cursor
-never passes unread data and memory is limited to one window. A large backfill
-or full run therefore resumes from the last committed window after an
-interruption instead of starting over, and the full-history confirmation is not
-asked again once work has started. `initialized_at` and `initial_complete` are
-set only when the initial run reaches its last window.
-
-The stored NVD cursor is `min(local time, NVD response timestamp)`; NVD's
-`timestamp` field is UTC without an offset and is parsed strictly. This keeps a
-Raspberry Pi without a real-time clock from moving the cursor past NVD's own
-time. A cursor more than 120 days old prints a one-line warning and the sync
-continues in bounded windows.
-
-EUVD ranges longer than 30 days are read in 30-day chunks, and `euvd_cursor` is
-committed after each chunk. A failed chunk leaves the cursor at the previous
-chunk so the next run retries it.
+`initialized_at` is set only when an initial run reaches its last window. A
+resumed initial run continues from the stored cursor and does not ask for
+confirmation again.
 
 After the first sync, `nvd_cursor` advances to the end of the window that was
 read. Later runs start `overlap_minutes` before that cursor and end at the
@@ -149,34 +157,29 @@ sync on the same day reads the same EUVD day again.
 - An NVD failure aborts the sync with exit code 2. Windows already committed
   keep their records and cursor; nothing past the cursor is committed and the
   next run resumes there.
-- Pagination that changes totals, or repeats a CVE identifier inside one NVD
-  window, restarts that window up to three times and then fails the source. The
-  same total-pinning rule applies to each EUVD chunk and to the EPSS floor
-  pager.
 - If an optional source fails, the NVD data is committed, the failing source is
   named, and the command exits 4. Its cursor does not advance past the last
-  successful chunk.
+  successful chunk. A failed EPSS download keeps the previous table.
 - A successful sync exits 0. A refused or cancelled sync does not contact the
   sources.
 
-`watch status` prints the database path, schema version, cursors, row count, and
-counts of rows with KEV data, active SSVC exploitation, and EPSS above the
-configured floor. It creates an empty database if none exists.
+`watch status` prints the database path, schema version, cursors, EPSS score
+date, row counts, EUVD items, KEV counts, active SSVC exploitation, EPSS rows,
+and pending/backing-off lookups. It creates an empty database if none exists.
 
 ## Cost
 
 A normal sync is small: one or more NVD pages for the cursor window, one EUVD
-page or a few, one KEV download, and EPSS batches for the CVEs that changed.
-NVD is paced at the configured interval. Without an API key NVD allows five
-requests per 30 seconds; with a key, fifty.
+page or a few, the KEV catalogs, and at most one EPSS file. NVD is paced at the
+configured interval; EUVD is paced at one second. Without an NVD API key, NVD
+allows five requests per 30 seconds; with a key, fifty.
 
 `initial = "full"` is the expensive path. From 1999 to the present there are
-about 85 NVD windows. A busy window can need many 2000-result pages, so expect
-roughly 400 or more NVD requests and roughly 4,200 EUVD requests. At the
-default pacing that is several hours of continuous work, a large download, and
-many small database commits. The once-daily EPSS floor query can also page
-through tens of thousands of scores. Run full history deliberately, preferably
-with an NVD API key.
+about 85 NVD windows. A busy window can need many pages, so expect roughly 400
+or more NVD requests and roughly 4,200 EUVD requests. At the default pacing
+that is several hours of continuous work, a large download, and many small
+database commits. EPSS is one current file per sync, not one per historical
+day. Run full history deliberately, preferably with an NVD API key.
 
 ## Source attribution
 
