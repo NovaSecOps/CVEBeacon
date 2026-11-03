@@ -120,6 +120,8 @@ def _run_watch(args, config: AppConfig) -> int:
             f"{summary.records} record(s), {summary.new} new, "
             f"{summary.changed} changed"
         )
+        if summary.ignored:
+            line += f", {summary.ignored} score(s) ignored"
         if summary.error:
             line += f"; failed: {summary.error}"
         print(line)

@@ -276,12 +276,10 @@ def _merge_nvd(
     )
 
 
-def _kev_on_or_after(added: str | None, baseline_at: str | None) -> bool:
-    if baseline_at is None:
-        return True
-    if not added:
+def _kev_on_or_after(added: str | None, pending_since: str | None) -> bool:
+    if pending_since is None or not added:
         return False
-    return added[:10] >= baseline_at[:10]
+    return added[:10] >= pending_since[:10]
 
 
 def _stronger_reason(current: str, incoming: str) -> str:
@@ -361,6 +359,7 @@ class WatchStore:
         initialized_at: str,
         euvd_cursor: str | None = None,
         initial_mode: str = "baseline",
+        initial_window_start: str | None = None,
     ) -> None:
         self.initialize()
         values = {
@@ -371,6 +370,8 @@ class WatchStore:
         }
         if euvd_cursor is not None:
             values["euvd_cursor"] = euvd_cursor
+        if initial_window_start is not None:
+            values["initial_window_start"] = initial_window_start
         with self.transaction() as db:
             self._set_meta(db, values)
 
@@ -545,7 +546,7 @@ class WatchStore:
         meta: Mapping[str, str] | None = None,
         clear_cisa: bool = False,
         clear_eu: bool = False,
-        baseline_at: str | None = None,
+        pending_since: str | None = None,
     ) -> UpsertCounts:
         self.initialize()
         now = _timestamp(self._clock)
@@ -563,7 +564,7 @@ class WatchStore:
                 if self._row(db, identifier) is None:
                     reason = "cisa_kev" if cisa_entry is not None else "eu_kev"
                     added = cisa_entry.added if cisa_entry is not None else eu_entry.added
-                    if _kev_on_or_after(added, baseline_at):
+                    if _kev_on_or_after(added, pending_since):
                         self._put_pending(db, identifier, reason, None, now)
                     continue
 

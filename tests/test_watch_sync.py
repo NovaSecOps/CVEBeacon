@@ -972,6 +972,7 @@ def test_kev_additions_before_the_baseline_are_not_pending(tmp_path):
         raise AssertionError("baseline must not query public sources")
 
     run(config, handler_for(nvd=no_request, cisa=no_request))
+    assert metadata(config)["initial_window_start"] == "2026-11-03"
     looked_up: list[str] = []
 
     def nvd_request(request):
@@ -1015,7 +1016,9 @@ def test_pending_fetches_at_most_twenty_five_oldest_first(tmp_path):
     for index in range(30):
         clock = lambda index=index: start + timedelta(minutes=index)
         WatchStore(config.watch.database, clock=clock).apply_kev(
-            {f"CVE-2026-{1000 + index}": KEVFields("2026-11-03")}, {}
+            {f"CVE-2026-{1000 + index}": KEVFields("2026-11-03")},
+            {},
+            pending_since="1999-01-01",
         )
 
     looked_up: list[str] = []
@@ -1202,3 +1205,117 @@ def test_changing_epss_floor_totals_fail_without_recording_the_day(
     assert report.failures == ("epss",)
     assert offsets == [0, 2] * 3
     assert "epss_floor_date" not in metadata(config)
+
+
+def test_backfill_bounds_kev_pending_to_the_initial_window(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "cisa_kev"), initial="backfill")
+    catalog = [{"cveID": "CVE-2026-0001", "dateAdded": "2026-10-01"}]
+    looked_up: list[str] = []
+
+    def nvd_request(request):
+        params = dict(request.url.params)
+        if params.get("cveId"):
+            looked_up.append(params["cveId"])
+            return httpx.Response(200, json=nvd_page([nvd_cve(params["cveId"])]))
+        return httpx.Response(200, json=nvd_page([]))
+
+    def cisa_request(request):
+        return httpx.Response(
+            200, json={"count": len(catalog), "vulnerabilities": catalog}
+        )
+
+    handler = handler_for(nvd=nvd_request, cisa=cisa_request)
+    run(config, handler)
+    assert metadata(config)["initial_window_start"] == "2026-10-27"
+    assert looked_up == []
+    assert WatchStore(config.watch.database).pending() == ()
+
+    catalog.append({"cveID": "CVE-2026-0002", "dateAdded": "2026-11-02"})
+    run(config, handler, now=NOW + timedelta(hours=1))
+    assert looked_up == ["CVE-2026-0002"]
+
+
+def test_full_mode_never_stores_kev_pending(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "cisa_kev"), initial="full")
+
+    def nvd_request(request):
+        if dict(request.url.params).get("cveId"):
+            raise AssertionError("full mode must not fetch pending KEV CVEs")
+        return httpx.Response(200, json=nvd_page([]))
+
+    def cisa_request(request):
+        return httpx.Response(
+            200,
+            json={
+                "count": 1,
+                "vulnerabilities": [
+                    {"cveID": "CVE-2026-9999", "dateAdded": "2026-11-03"}
+                ],
+            },
+        )
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, cisa=cisa_request),
+        assume_yes=True,
+    )
+    assert not report.failures
+    assert metadata(config)["initial_mode"] == "full"
+    assert metadata(config)["initial_window_start"] == "1999-01-01"
+    assert WatchStore(config.watch.database).pending() == ()
+
+
+def test_unknown_euvd_score_versions_are_ignored_and_counted(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
+
+    def nvd_request(request):
+        return httpx.Response(
+            200,
+            json=nvd_page([nvd_cve("CVE-2026-0001"), nvd_cve("CVE-2026-0002")]),
+        )
+
+    def euvd_request(request):
+        return httpx.Response(
+            200,
+            json={
+                "total": 2,
+                "items": [
+                    {
+                        "id": "EUVD-2026-8",
+                        "aliases": "CVE-2026-0001",
+                        "baseScore": 0.0,
+                        "baseScoreVersion": None,
+                        "baseScoreVector": None,
+                    },
+                    {
+                        "id": "EUVD-2026-9",
+                        "aliases": "CVE-2026-0002",
+                        "baseScore": 5.0,
+                        "baseScoreVersion": "9.9",
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        cli,
+        "HttpClient",
+        lambda http_config: mock_client(
+            handler_for(nvd=nvd_request, euvd=euvd_request)
+        ),
+    )
+    assert cli.main(["--config", str(config.config_path), "watch", "sync"]) == 0
+    output = capsys.readouterr().out
+    euvd_line = next(line for line in output.splitlines() if line.startswith("euvd:"))
+    assert euvd_line.endswith(", 1 score(s) ignored")
+    with WatchStore(config.watch.database)._connect() as db:
+        rows = {
+            row["cve_id"]: row
+            for row in db.execute("SELECT cve_id, euvd_id, cvss_json FROM watch_cve")
+        }
+    assert rows["CVE-2026-0001"]["euvd_id"] == "EUVD-2026-8"
+    assert rows["CVE-2026-0002"]["euvd_id"] == "EUVD-2026-9"
+    assert '"provider":"euvd"' not in rows["CVE-2026-0001"]["cvss_json"]
+    assert '"provider":"euvd"' not in rows["CVE-2026-0002"]["cvss_json"]

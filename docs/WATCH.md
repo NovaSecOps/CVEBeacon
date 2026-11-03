@@ -78,9 +78,10 @@ alert-relevant pending CVEs (KEV entries, or EUVD entries with an exploitation
 date) are fetched from NVD by identifier, oldest first, and their pending data
 is applied. Other pending EUVD data is applied automatically when NVD first
 inserts the CVE. A pending entry is dropped after ten failed attempts, or after
-30 days if it is a non-exploited EUVD update. On a baseline first run, only KEV
-entries added on or after the baseline date become pending; earlier catalog
-entries are ignored.
+30 days if it is a non-exploited EUVD update. KEV entries for CVEs that NVD has
+not created become pending only when `dateAdded` is on or after the start of
+the database's initial window (the baseline date, the backfill start, or never
+for a full run); older catalog entries are ignored.
 
 After a successful KEV catalog download, rows no longer present in that catalog
 have the catalog's columns cleared. CISA columns are cleared only when

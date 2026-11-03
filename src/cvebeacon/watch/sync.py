@@ -31,6 +31,7 @@ class SourceSummary:
     records: int = 0
     new: int = 0
     changed: int = 0
+    ignored: int = 0
     error: str | None = None
 
 
@@ -76,6 +77,15 @@ def _cursor_date(value: str | None) -> date | None:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise StateError("watch database has an invalid EUVD cursor") from exc
+
+
+def _stored_date(value: str | None, label: str) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise StateError(f"watch database has an invalid {label}") from exc
 
 
 def _confirm_full_history(
@@ -124,6 +134,7 @@ def sync_watch(
     today = now.date()
     first_run = "initialized_at" not in metadata
     stored_mode = metadata.get("initial_mode")
+    mode = stored_mode or (watch.initial if first_run else "baseline")
     interval = config.sources.minimum_request_interval
 
     if first_run and stored_mode is None and watch.initial == "baseline":
@@ -131,6 +142,7 @@ def sync_watch(
             nvd_cursor=now.isoformat(),
             initialized_at=now.isoformat(),
             euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
+            initial_window_start=today.isoformat(),
         )
         return SyncReport(
             summaries=tuple(SourceSummary(source) for source in watch.sources),
@@ -139,12 +151,12 @@ def sync_watch(
 
     initial_run = first_run
     if initial_run:
-        mode = stored_mode or watch.initial
         if mode == "baseline":
             store.record_baseline(
                 nvd_cursor=now.isoformat(),
                 initialized_at=now.isoformat(),
                 euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
+                initial_window_start=today.isoformat(),
             )
             return SyncReport(
                 summaries=tuple(SourceSummary(source) for source in watch.sources),
@@ -182,9 +194,22 @@ def sync_watch(
         initialized_at = metadata.get("initialized_at") or now.isoformat()
 
     euvd_start = min(euvd_start, today)
-    baseline_at = None
-    if stored_mode == "baseline" or (stored_mode is None and not initial_run):
-        baseline_at = metadata.get("initialized_at") or initialized_at
+    initial_window_start = _stored_date(
+        metadata.get("initial_window_start"), "initial window start"
+    )
+    if initial_window_start is None:
+        initial_date = _cursor_time(
+            metadata.get("initialized_at") or initialized_at
+        ).date()
+        if mode == "backfill":
+            initial_window_start = initial_date - timedelta(days=watch.backfill_days)
+        elif mode == "full":
+            initial_window_start = FULL_HISTORY_START.date()
+        else:
+            initial_window_start = initial_date
+    kev_pending_since = (
+        None if mode == "full" else initial_window_start.isoformat()
+    )
     cursor_value = metadata.get("nvd_cursor")
     if cursor_value and now - _cursor_time(cursor_value) > LONG_GAP:
         print(
@@ -219,6 +244,7 @@ def sync_watch(
         meta = {"nvd_cursor": window_cursor.isoformat()}
         if first_commit and initial_run:
             meta["initial_mode"] = mode
+            meta["initial_window_start"] = initial_window_start.isoformat()
             if "euvd" in watch.sources and "euvd_cursor" not in metadata:
                 meta["euvd_cursor"] = intended_euvd_start.isoformat()
         first_commit = False
@@ -240,6 +266,7 @@ def sync_watch(
         meta = {
             "nvd_cursor": nvd_end.isoformat(),
             "initial_mode": mode,
+            "initial_window_start": initial_window_start.isoformat(),
             "initialized_at": initialized_at,
             "initial_complete": "true",
         }
@@ -248,7 +275,7 @@ def sync_watch(
         store.set_metadata(meta)
 
     if "euvd" in watch.sources:
-        euvd_requests = euvd_records = euvd_new = euvd_changed = 0
+        euvd_requests = euvd_records = euvd_new = euvd_changed = euvd_ignored = 0
         euvd_error: str | None = None
         for chunk_start, chunk_end in feeds.euvd_chunks(euvd_start, today):
             try:
@@ -263,6 +290,7 @@ def sync_watch(
             euvd_records += len(feed.updates)
             euvd_new += counts.new
             euvd_changed += counts.changed
+            euvd_ignored += feed.ignored
             alert_ids.update(counts.new_ids)
             alert_ids.update(counts.changed_ids)
         summaries.append(
@@ -272,6 +300,7 @@ def sync_watch(
                 euvd_records,
                 euvd_new,
                 euvd_changed,
+                ignored=euvd_ignored,
                 error=euvd_error,
             )
         )
@@ -283,7 +312,7 @@ def sync_watch(
             summaries.append(SourceSummary("cisa_kev", error=str(exc)))
         else:
             counts = store.apply_kev(
-                cisa, {}, clear_cisa=True, baseline_at=baseline_at
+                cisa, {}, clear_cisa=True, pending_since=kev_pending_since
             )
             alert_ids.update(counts.new_ids)
             alert_ids.update(counts.changed_ids)
@@ -298,7 +327,7 @@ def sync_watch(
             summaries.append(SourceSummary("eu_kev", error=str(exc)))
         else:
             counts = store.apply_kev(
-                {}, eu, clear_eu=True, baseline_at=baseline_at
+                {}, eu, clear_eu=True, pending_since=kev_pending_since
             )
             alert_ids.update(counts.new_ids)
             alert_ids.update(counts.changed_ids)

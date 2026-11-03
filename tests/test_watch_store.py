@@ -502,20 +502,27 @@ def test_non_exploited_euvd_pending_is_not_alert_relevant(tmp_path):
         assert db.execute("SELECT COUNT(*) FROM watch_pending").fetchone()[0] == 1
 
 
-def test_kev_pending_entries_respect_the_baseline_and_expire_after_attempts(tmp_path):
+def test_kev_pending_entries_respect_the_window_and_expire_after_attempts(tmp_path):
     store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
-    baseline = "2026-11-03T12:00:00+00:00"
+    window_start = "2026-10-27"
     store.apply_kev(
         {"CVE-2026-0001": KEVFields("2026-10-01")},
         {},
-        baseline_at=baseline,
+        pending_since=window_start,
     )
     assert store.pending() == ()
     assert store.apply_kev(
         {"CVE-2026-0002": KEVFields("2026-11-03")},
         {},
-        baseline_at=baseline,
+        pending_since=window_start,
     ).changed == 0
+    assert [item.cve_id for item in store.pending()] == ["CVE-2026-0002"]
+
+    store.apply_kev(
+        {"CVE-2026-0003": KEVFields("2026-11-03")},
+        {},
+        pending_since=None,
+    )
     assert [item.cve_id for item in store.pending()] == ["CVE-2026-0002"]
 
     for _ in range(9):

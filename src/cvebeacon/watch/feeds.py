@@ -62,6 +62,7 @@ class NVDCVEResult:
 class EUVDFeed:
     updates: tuple[EUVDUpdate, ...]
     requests: int
+    ignored: int = 0
 
 
 def _text(value: Any) -> str | None:
@@ -504,19 +505,22 @@ def _euvd_datetime(value: Any) -> str | None:
         return None
 
 
-def _euvd_cvss(item: dict[str, Any]) -> CVSSEntry | None:
+def _euvd_cvss(item: dict[str, Any]) -> tuple[CVSSEntry | None, bool]:
+    """Return the usable score, and whether an unknown version was ignored."""
+    version = _text(item.get("baseScoreVersion"))
+    if version is None:
+        return None, False
+    if version not in CVSS_VERSIONS:
+        return None, True
     raw = item.get("baseScore")
     if raw is None:
-        return None
+        return None, False
     if isinstance(raw, bool):
         raise SourceError("euvd", "source returned an invalid CVSS score")
     score = as_float(raw)
     if score is None or not 0 <= score <= 10:
         raise SourceError("euvd", "source returned an invalid CVSS score")
-    version = _text(item.get("baseScoreVersion"))
-    if version not in CVSS_VERSIONS:
-        raise SourceError("euvd", "source returned an invalid CVSS version")
-    return CVSSEntry("euvd", "euvd", version, score, _text(item.get("baseScoreVector")))
+    return CVSSEntry("euvd", "euvd", version, score, _text(item.get("baseScoreVector"))), False
 
 
 @source_payload("euvd")
@@ -526,6 +530,7 @@ def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
     requests = 0
     for _ in range(EUVD_ATTEMPTS):
         updates: list[EUVDUpdate] = []
+        ignored = 0
         page = 0
         pinned_total: int | None = None
         unstable = False
@@ -567,12 +572,14 @@ def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
                 )
                 if not identifiers:
                     continue
+                cvss, was_ignored = _euvd_cvss(item)
+                ignored += 1 if was_ignored else 0
                 updates.append(
                     EUVDUpdate(
                         identifiers,
                         _text(item.get("id")),
                         _text(item.get("exploitedSince")),
-                        _euvd_cvss(item),
+                        cvss,
                         _euvd_datetime(item.get("dateUpdated")),
                     )
                 )
@@ -580,7 +587,7 @@ def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
                 break
             page += 1
         if not unstable:
-            return EUVDFeed(tuple(updates), requests)
+            return EUVDFeed(tuple(updates), requests, ignored)
     raise SourceError("euvd", "source returned unstable pagination")
 
 

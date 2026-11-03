@@ -509,7 +509,36 @@ def test_euvd_pagination_restarts_when_the_total_changes():
     assert feed.requests == 3
 
 
-def test_euvd_invalid_scores_and_versions_fail_the_chunk():
+def test_recorded_euvd_sample_handles_missing_and_unknown_versions():
+    payload = json.loads((FIXTURES / "euvd-no-score-page.json").read_text(encoding="utf-8"))
+    feed = fetch_euvd(
+        mock_client(lambda request: httpx.Response(200, json=payload)),
+        start=date(2026, 10, 31),
+        end=date(2026, 11, 3),
+    )
+    assert feed.requests == 1
+    assert len(feed.updates) == 7
+    assert feed.ignored == 1
+    by_id = {update.euvd_id: update for update in feed.updates}
+    assert by_id["EUVD-2026-105471"].cvss == CVSSEntry(
+        "euvd",
+        "euvd",
+        "3.1",
+        9.8,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    )
+    assert by_id["EUVD-2026-105472"].cvss is not None
+    assert by_id["EUVD-2026-105472"].cvss.version == "4.0"
+    assert by_id["EUVD-2026-105473"].cvss is not None
+    assert by_id["EUVD-2026-105473"].cvss.version == "3.0"
+    assert by_id["EUVD-2026-105474"].cvss is None
+    assert by_id["EUVD-2026-105475"].cvss is None
+    assert by_id["EUVD-2026-105476"].cvss is None
+    assert by_id["EUVD-2026-105477"].cvss is not None
+    assert by_id["EUVD-2026-105477"].cvss.score == 0.0
+
+
+def test_euvd_invalid_scores_with_a_known_version_fail_the_chunk():
     def with_item(item):
         return mock_client(
             lambda request: httpx.Response(200, json={"total": 1, "items": [item]})
@@ -519,8 +548,8 @@ def test_euvd_invalid_scores_and_versions_fail_the_chunk():
         {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 10.1, "baseScoreVersion": "3.1"},
         {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": -1, "baseScoreVersion": "3.1"},
         {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": True, "baseScoreVersion": "3.1"},
-        {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 5.0, "baseScoreVersion": "9.9"},
-        {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 5.0},
+        {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": "not-a-number", "baseScoreVersion": "3.1"},
+        {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": "NaN", "baseScoreVersion": "3.1"},
     ):
         with pytest.raises(SourceError):
             fetch_euvd(
@@ -528,11 +557,59 @@ def test_euvd_invalid_scores_and_versions_fail_the_chunk():
             )
 
     feed = fetch_euvd(
-        with_item({"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": None}),
+        with_item(
+            {
+                "id": "EUVD-1",
+                "aliases": "CVE-2026-0001",
+                "baseScore": None,
+                "baseScoreVersion": "3.1",
+            }
+        ),
         start=date(2026, 11, 1),
         end=date(2026, 11, 2),
     )
     assert feed.updates[0].cvss is None
+    assert feed.ignored == 0
+
+
+def test_euvd_unknown_or_missing_versions_mean_no_score():
+    def parse(item):
+        return fetch_euvd(
+            mock_client(
+                lambda request: httpx.Response(200, json={"total": 1, "items": [item]})
+            ),
+            start=date(2026, 11, 1),
+            end=date(2026, 11, 2),
+        )
+
+    unknown = parse(
+        {
+            "id": "EUVD-1",
+            "aliases": "CVE-2026-0001",
+            "baseScore": 5.0,
+            "baseScoreVersion": "9.9",
+        }
+    )
+    assert unknown.updates[0].cvss is None
+    assert unknown.ignored == 1
+
+    missing = parse(
+        {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 9.8}
+    )
+    assert missing.updates[0].cvss is None
+    assert missing.ignored == 0
+
+    zero_with_no_version = parse(
+        {
+            "id": "EUVD-1",
+            "aliases": "CVE-2026-0001",
+            "baseScore": 0.0,
+            "baseScoreVersion": None,
+            "baseScoreVector": None,
+        }
+    )
+    assert zero_with_no_version.updates[0].cvss is None
+    assert zero_with_no_version.ignored == 0
 
 
 def test_euvd_date_updated_is_normalized_for_ordering():
