@@ -109,12 +109,13 @@ Leaf keys:
   this value. A missing score is false.
 - `cvss_max` (0 to 10): that highest score is at most this value. A missing
   score is false, so it never selects an unscored CVE.
-- `epss_min` (0 to 1): EPSS is at least this value. A missing EPSS is false.
+- `epss_min` (0 to 1): EPSS is at least this value. A missing EPSS is false. A
+  rule that uses `epss_min` requires `epss` in `watch.sources`.
 - `kev = "cisa" | "eu" | "any"`: the CVE is in that KEV catalog. A rule that
   uses `kev = "eu"` requires `eu_kev` in `watch.sources`.
 - `exploitation = "poc" | "active"`: `active` is true when SSVC reports
   active exploitation or, with `euvd` configured, EUVD has an exploitation
-  date. `poc` keeps the SSVC poc-or-active meaning and does not use EUVD.
+  date. `poc` is true for poc or active evidence from either source.
 - `vendor`, `product`: case-insensitive exact names. They match against NVD CPE
   tokens (`palo_alto_networks`) and the selected EUVD item's display names
   (`Apache Software Foundation`). A rule must list both forms when the sources
@@ -185,12 +186,15 @@ its stored states; re-adding the same name keeps the old matches.
 `watch evaluate --all` seeds a new rule against the full stored history; it
 does not reset an existing rule's matches. A disabled rule's touches are
 consumed; on re-enable, its escalations surface at the CVE's next touch.
+After adding a rule, run `cvebeacon watch evaluate --all --yes` before the next
+`watch run`. Otherwise old CVEs alert one by one when NVD next touches them.
 
-Editing a rule's condition or `cvss_providers` changes its rule hash. The next
-evaluation of an existing match silently refreshes the stored snapshot and hash
-without emitting an event, because the CVE was matched under the old
-definition. Later evidence then escalates normally. Editing only channels or
-`events` does not reset state. A disabled rule is not evaluated until it is
+Editing a rule's condition or `cvss_providers` keeps the existing matches. The
+next evaluation compares against the stored state as usual, so an escalation
+that arrives with the edit still alerts. A change to `cvss_providers` moves the
+severity baseline to the new providers without an event, so the change alone
+does not alert. Editing only channels or `events` does not reset state. A
+disabled rule is not evaluated until it is
 enabled again.
 
 `cvebeacon watch events [--limit N] [--rule NAME] [--pending]` lists stored
@@ -226,10 +230,10 @@ rule sets `old_cves = "alert"`.
 An evaluation during the first sync of a database in `backfill` or `full` mode
 marks its `match` events `initial = 1`. `cvebeacon watch evaluate --all` marks
 only the `match` events it creates as initial; escalations keep `initial = 0`.
-`initial_evaluated_at` is set only after an initial evaluation whose sync had no
-source failures, so a later clean sync can finish an interrupted initial
-window. It requires `--yes` or a confirmation. Initial events are intended for
-one summary digest rather than individual alerts. A baseline first sync stores
+It requires `--yes` or a confirmation. `initial_evaluated_at` is set only after
+an initial evaluation whose sync had no source failures, so a later clean sync
+can finish an interrupted initial window. Initial events are intended for one
+summary digest rather than individual alerts. A baseline first sync stores
 no history, so it produces no events. Later syncs evaluate only the CVEs
 touched by that sync.
 
@@ -265,8 +269,13 @@ is needed. Watch databases created by earlier watch builds are migrated in
 place from schema version 1 to version 2. An unknown version still fails
 closed. The upgrade deletes the old `watch_touched` queue, because P1a had no
 rules and therefore no evaluation obligation, and sets `initial_evaluated_at`
-whenever `initial_mode` is already stored. Use `watch evaluate --all` to seed
-rules on an upgraded database.
+whenever `initial_mode` is already stored. It also rewinds `euvd_cursor` to
+`initial_window_start`, so the next sync re-reads that window once. P1a stored
+EUVD items without vendor names, and that re-read gives pre-upgrade items their
+names. After the upgrade, run `cvebeacon watch evaluate --all --yes` before the
+next `watch run`, as after adding a rule. Schema 2 databases written by a
+pre-release build of this branch are refused with a message to delete them and
+run `watch sync` again. They are not migrated.
 
 - `watch_cve` holds NVD-owned data only: status, description, CNA, CVSS from
   NVD, CNA, CISA ADP and other providers, SSVC, CPE products, references, and
@@ -300,7 +309,7 @@ rules on an upgraded database.
 - `watch_delivery` creates one pending row per event and channel. Delivery
   updates it in the next phase.
 - `watch_meta.view_policy` records the configured sources that affect view
-  derivation: `cisa_kev`, `eu_kev`, and `euvd`. When it changes, every stored
+  derivation: `cisa_kev`, `eu_kev`, `euvd`, and `epss`. When it changes, every stored
   view is recomputed in batches of 5,000 and every stored CVE is queued,
   including CVEs whose fingerprint did not change, because vendor and product
   names are not part of the fingerprint.
