@@ -323,7 +323,7 @@ def _cron_lines(plan: SchedulePlan) -> list[str]:
 
 def _windows_args(plan: SchedulePlan) -> list[str]:
     schedule = ["/SC", "DAILY", "/MO", "1"] if plan.every_hours == 24 else ["/SC", "HOURLY", "/MO", str(plan.every_hours)]
-    return ["schtasks", "/Create", "/F", "/TN", WINDOWS_TASK, *schedule, "/RL", "LIMITED", "/TR", subprocess.list2cmdline(plan.command)]
+    return ["schtasks", "/Create", "/F", "/TN", WINDOWS_TASK, *schedule, "/RL", "LIMITED", "/TR", subprocess.list2cmdline(plan.command), "/HRESULT"]
 
 
 def _tag(name: str) -> str:
@@ -533,9 +533,12 @@ def _without_managed_block(text: str) -> str:
 
 def _windows_access_denied(detail: str, returncode: int) -> bool:
     folded = detail.casefold()
+    code = returncode & 0xFFFFFFFF if isinstance(returncode, int) else returncode
     return (
-        returncode == 5
+        code in {5, 0x80070005}
         or "0x80070005" in folded
+        or "2147942405" in folded
+        or "-2147024891" in folded
         or "access is denied" in folded
         or "access denied" in folded
     )
@@ -548,13 +551,13 @@ def _windows_registration_hint(
     if _windows_access_denied(detail, returncode):
         if plan.run_logged_out and plan.account_explicit:
             return (
-                "access denied: run as the account named in --account from an "
-                "elevated prompt, or register from the service account's own shell"
+                "access denied: use an elevated administrator shell with --account, "
+                "or the service account's own shell"
             )
         if plan.run_logged_out:
             return (
-                "access denied: register from the service account's own shell, "
-                "or name it with --account from an elevated prompt"
+                "access denied: use the service account's own shell, or name it "
+                "with --account from an elevated administrator shell"
             )
         return "access denied: run from an elevated prompt"
     if "0x80070569" in folded:
@@ -622,7 +625,7 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
                     handle.flush()
                     os.fsync(handle.fileno())
                 result = run(
-                    ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK, "/F"],
+                    ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK, "/F", "/HRESULT"],
                     capture_output=True,
                     text=True,
                     check=False,
