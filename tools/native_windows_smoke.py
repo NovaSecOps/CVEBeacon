@@ -621,6 +621,60 @@ def probe_s4u_registration(current: str) -> None:
                     )
 
 
+def query_task_text(task_name: str) -> str:
+    result = subprocess.run(
+        ["schtasks", "/Query", "/TN", task_name, "/XML"],
+        capture_output=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        return "query failed: " + decode(result.stderr).strip()
+    return decode(result.stdout)
+
+
+def write_helper_xml(path: Path, account: str, wrapper: Path) -> None:
+    command = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"
+    path.write_text(
+        f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>CVEBeacon smoke helper</Description></RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{escape(account)}</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Enabled>true</Enabled></Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{escape(str(command))}</Command>
+      <Arguments>/c "{escape(str(wrapper))}"</Arguments>
+      <WorkingDirectory>{escape(str(wrapper.parent))}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+""",
+        encoding="utf-16",
+    )
+
+
+def dump_helper_diagnostics(
+    marker: Path, wrapper: Path, helper_xml: Path, task_name: str
+) -> None:
+    print(f"HELPER marker exists={marker.exists()}", flush=True)
+    if marker.exists():
+        print(f"HELPER marker:\n{marker.read_text(errors='replace')}", flush=True)
+    acl = command(["icacls", str(wrapper)], stdin=subprocess.DEVNULL)
+    print(f"HELPER icacls wrapper:\n{acl.stdout}{acl.stderr}", flush=True)
+    print(
+        f"HELPER task XML file:\n{helper_xml.read_text(errors='replace')}",
+        flush=True,
+    )
+    print(f"HELPER queried XML:\n{query_task_text(task_name)}", flush=True)
+
+
 def cleanup_account(batch_sid: bytes | None) -> bool:
     """Best-effort removal of the fixture's right and local account."""
     ok = True
@@ -806,6 +860,17 @@ def smoke() -> None:
                     "/T",
                 ]
             )
+        base_python = Path(sys.base_prefix)
+        if base_python.exists():
+            checked(
+                [
+                    "icacls",
+                    str(base_python),
+                    "/grant",
+                    f"{service_account}:(OI)(CI)RX",
+                    "/T",
+                ]
+            )
         batch_ready = True
         try:
             batch_sid = change_batch_logon(account=service_account, add=True)
@@ -820,44 +885,45 @@ def smoke() -> None:
             print(f"PROBE harness failed: {exc}", flush=True)
 
         installed = True
-        helper_cmd = root / "smoke-install.cmd"
+        helper_cmd = data / "smoke-install.cmd"
+        helper_xml = data / "smoke-helper.xml"
+        marker = data / "smoke-install.started"
         out_file = data / "smoke-install.out"
         err_file = data / "smoke-install.err"
         helper_cmd.write_text(
             f'@echo off\r\n'
+            f'echo started> "{marker}"\r\n'
             f'"{executable}" --config "{config}" schedule install '
             f'--times {times_arg} --command watch --run-logged-out --yes '
             f'> "{out_file}" 2> "{err_file}"\r\n'
             f"exit /b %ERRORLEVEL%\r\n",
             encoding="utf-8",
         )
+        write_helper_xml(helper_xml, service_account, helper_cmd)
         helper = command(
             [
                 "schtasks",
                 "/Create",
+                "/XML",
+                str(helper_xml),
                 "/TN",
                 HELPER_TASK,
                 "/RU",
                 service_account,
                 "/RP",
                 password,
-                "/SC",
-                "ONCE",
-                "/ST",
-                "00:00",
-                "/TR",
-                f"cmd.exe /c {helper_cmd}",
                 "/F",
             ],
             stdin=subprocess.DEVNULL,
         )
         if helper.returncode != 0:
             print(
-                "FAILED COMMAND: schtasks /Create /TN CVEBeacon Smoke Helper "
-                "... <password omitted>",
+                "FAILED COMMAND: schtasks /Create /XML ... /TN CVEBeacon Smoke "
+                "Helper ... <password omitted>",
                 flush=True,
             )
             print(f"stdout:\n{helper.stdout}\nstderr:\n{helper.stderr}", flush=True)
+            dump_helper_diagnostics(marker, helper_cmd, helper_xml, HELPER_TASK)
         assert helper.returncode == 0, helper.stderr
         helper_created = True
         _, _, helper_before = task_state(HELPER_TASK)
@@ -879,10 +945,13 @@ def smoke() -> None:
         print(f"HELPER stdout:\n{install_stdout}", flush=True)
         print(f"HELPER stderr:\n{install_stderr}", flush=True)
         print(f"HELPER LastTaskResult={helper_code}", flush=True)
+        if helper_code != "0" or not out_file.exists():
+            dump_helper_diagnostics(marker, helper_cmd, helper_xml, HELPER_TASK)
         assert helper_code == "0", (
             f"helper task failed with {helper_code}:\n"
             f"{install_stdout}\n{install_stderr}"
         )
+        assert out_file.exists(), "the helper did not write its stdout file"
         helper_delete = command(
             ["schtasks", "/Delete", "/F", "/TN", HELPER_TASK],
             stdin=subprocess.DEVNULL,
