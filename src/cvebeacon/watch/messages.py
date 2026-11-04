@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
@@ -84,7 +84,10 @@ def _date_text(value: Any) -> str:
     if not text:
         return "unknown"
     try:
-        return datetime.fromisoformat(text).date().isoformat()
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.date().isoformat()
     except ValueError:
         pass
     try:

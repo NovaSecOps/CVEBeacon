@@ -115,6 +115,18 @@ def test_missing_first_seen_date_is_shown_as_unknown():
     assert "Published 2026-10-30 · first seen unknown" in text
 
 
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    (
+        ("2026-11-04T23:30:00-05:00", "2026-11-05"),
+        ("2026-11-04T01:00:00+05:00", "2026-11-03"),
+    ),
+)
+def test_offset_timestamps_are_shown_as_utc_dates(timestamp, expected):
+    text = body_for(event(current=view(published=timestamp, first_seen=timestamp)))
+    assert f"Published {expected} · first seen {expected}" in text
+
+
 def test_initial_digest_shows_published_and_first_seen_dates():
     item = event("match", initial=True)
     message = build_messages(
