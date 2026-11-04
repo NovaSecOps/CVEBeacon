@@ -155,8 +155,11 @@ def list_tags(
             document = json.loads(response.body)
         except ValueError as error:
             raise RegistryError("tag listing response was not JSON") from error
-        page = document.get("tags") if isinstance(document, dict) else None
+        if not isinstance(document, dict) or "tags" not in document:
+            raise RegistryError("tag listing response was not an object with a tags field")
+        page = document["tags"]
         if page is None:
+            # The registry may return JSON null for an empty tag list.
             page = []
         if not isinstance(page, list) or not all(isinstance(tag, str) for tag in page):
             raise RegistryError("tag listing response had malformed tags")
@@ -218,6 +221,10 @@ def main() -> int:
     registry = registry_token(base, repository, actor, token)
     ensure_version_absent(base, repository, version, registry)
     tags = list_tags(base, repository, registry)
+    if version in tags:
+        raise RegistryError(
+            f"{image}:{version} already exists in the tag list; refusing to overwrite an immutable version tag"
+        )
     promote = promote_latest(version, tags)
     stable = stable_tags(tags)
     highest = max(stable, key=version_key) if stable else "none"

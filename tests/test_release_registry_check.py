@@ -231,3 +231,72 @@ def test_main_reads_all_pages_and_writes_the_tags_output(guard, monkeypatch, tmp
     assert "tags<<RELEASE_TAGS" in text
     assert f"{image}:1.2.0" in text
     assert f"{image}:latest" not in text
+
+
+def prepare_main(guard, monkeypatch, tmp_path, pages, version):
+    base = "https://ghcr.io"
+    owner = "owner"
+    image = f"ghcr.io/{owner}/image"
+    token_url = f"{base}/token?scope=repository:{owner}/image:pull&service=ghcr.io"
+    pages.setdefault(token_url, reply(guard, 200, b'{"token": "registry-token"}'))
+    pages.setdefault(f"{base}/v2/{owner}/image/manifests/{version}", reply(guard, 404))
+    monkeypatch.setattr(guard, "fetch", fetch_from(guard, pages))
+    output = tmp_path / "github-output"
+    monkeypatch.setenv("IMAGE_NAME", image)
+    monkeypatch.setenv("VERSION", version)
+    monkeypatch.setenv("GITHUB_ACTOR", "owner")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    return image, output
+
+
+@pytest.mark.parametrize("body", [b"[]", b"null", b"{}", b'{"tag": []}', b'"1.0.0"'])
+def test_non_object_or_missing_tags_page_stops_publishing(guard, body):
+    base = "https://ghcr.io"
+    pages = {f"{base}/v2/owner/image/tags/list": reply(guard, 200, body)}
+    with pytest.raises(guard.RegistryError, match="object with a tags field"):
+        guard.list_tags(base, "owner/image", "token", request=fetch_from(guard, pages))
+
+
+def test_null_tags_is_explicitly_an_empty_page(guard):
+    base = "https://ghcr.io"
+    pages = {f"{base}/v2/owner/image/tags/list": reply(guard, 200, b'{"tags": null}')}
+    assert guard.list_tags(base, "owner/image", "token", request=fetch_from(guard, pages)) == []
+
+
+def test_main_stops_on_a_malformed_later_page(guard, monkeypatch, tmp_path):
+    base = "https://ghcr.io"
+    first = f"{base}/v2/owner/image/tags/list"
+    second = f"{first}?last=1.0.0&n=1"
+    pages = {
+        first: reply(
+            guard,
+            200,
+            b'{"tags": ["1.0.0"]}',
+            {"Link": [f'<{second}>; rel="next"']},
+        ),
+        second: reply(guard, 200, b"[]"),
+    }
+    _, output = prepare_main(guard, monkeypatch, tmp_path, pages, "1.1.0")
+    with pytest.raises(guard.RegistryError, match="object with a tags field"):
+        guard.main()
+    assert not output.exists()
+
+
+def test_main_refuses_a_candidate_seen_on_a_later_tag_page(guard, monkeypatch, tmp_path):
+    base = "https://ghcr.io"
+    first = f"{base}/v2/owner/image/tags/list"
+    second = f"{first}?last=1.0.0&n=1"
+    pages = {
+        first: reply(
+            guard,
+            200,
+            b'{"tags": ["1.0.0"]}',
+            {"Link": [f'<{second}>; rel="next"']},
+        ),
+        second: reply(guard, 200, b'{"tags": ["1.1.0"]}'),
+    }
+    _, output = prepare_main(guard, monkeypatch, tmp_path, pages, "1.1.0")
+    with pytest.raises(guard.RegistryError, match="already exists in the tag list"):
+        guard.main()
+    assert not output.exists()
