@@ -24,11 +24,14 @@ The template type follows the file extension:
 | `.docx` | Word document | `.docx` |
 
 Any other template or output extension is refused with status `2`. An existing
-output file is not overwritten unless `--force` is passed. Output is written to
-a temporary file in the destination directory and then replaced atomically, so
-a failed render leaves the previous file untouched.
+output file is not overwritten unless `--force` is passed. Without `--force` the
+completed temporary file is published with an atomic no-replace operation, so a
+file created by another process is never silently destroyed. With `--force` the
+destination is replaced atomically.
 
-Text templates are read as UTF-8. Templates larger than 20 MiB are refused.
+Text templates are read as UTF-8. Template files must be regular files and are
+refused above 20 MiB. Rendered statements larger than 50 MiB are refused before
+the output is written.
 
 ## Placeholders
 
@@ -36,9 +39,16 @@ Placeholders follow Python [`string.Template`](https://docs.python.org/3/library
 syntax:
 
 - `${field}` inserts the value of one field.
-- `$$` inserts a literal dollar sign.
+- `$$` inserts a literal dollar sign. A bare `$` that is not followed by a name,
+  a braced name, or another `$` is an error, including in Word templates. Write
+  `$$` for currency and other literal dollar signs.
 - Every other name is rejected. The command exits with status `2` and lists
-  every unknown placeholder; it never leaves an unknown placeholder blank.
+  every unknown placeholder.
+
+Placeholders are replaced only in visible text (`w:t`) in the body, headers and
+footers. Footnotes, endnotes, comments, field instructions (`w:instrText`) and
+deleted text are copied unchanged; a placeholder in those locations is not a
+substitution point.
 
 Missing stored values render as `not available`. This text is also used when a
 field does not apply to the CVE, for example `kev_due_date` when CISA KEV has no
@@ -50,7 +60,7 @@ not stored in the watch database yet.
 | Field | Meaning and example |
 | --- | --- |
 | `cve_id` | CVE identifier, for example `CVE-2026-1234`. |
-| `title` | Record title. Current sources store no separate title, so this is normally `not available`. |
+| `title` | Record title. Current sources store no separate title, so this is always `not available`. |
 | `description` | Description from the stored record, for example `Acme Widget before 4.2.1 allows unauthenticated remote code execution.` |
 | `published` | NVD publication timestamp, for example `2026-10-28T10:00:00.000`. |
 | `first_seen` | When the CVE first entered this watch database, for example `2026-11-04T14:00:00+00:00`. |
@@ -65,7 +75,7 @@ not stored in the watch database yet.
 | `epss` | EPSS probability with five decimals, for example `0.62214`. |
 | `epss_percentile` | EPSS percentile with five decimals, for example `0.95421`. |
 | `epss_date` | EPSS score date, for example `2026-11-03`. |
-| `kev` | `yes` when CISA KEV or EU KEV lists the CVE, otherwise `no`. |
+| `kev` | `yes` when CISA KEV or EU KEV stores an entry with a date added, otherwise `no`. |
 | `kev_date_added` | CISA KEV date added, or the EU KEV date added when only EU lists it, for example `2026-11-01`. |
 | `kev_due_date` | CISA KEV remediation due date, for example `2026-11-20`. |
 | `kev_required_action` | CISA KEV required action, for example `Apply the vendor update.` |
@@ -91,28 +101,40 @@ not query NVD, EUVD, KEV, or EPSS.
 A `.docx` template is an ordinary Word document with `${field}` placeholders in
 its text. Placeholders work in:
 
-- body paragraphs, including content controls and table cells;
+- body paragraphs, including content controls, nested text boxes and table
+  cells;
 - headers and footers (`word/header*.xml` and `word/footer*.xml`);
 - text that Word has split across several formatting runs, which is common when
   a placeholder was typed with different spell-check or formatting state. The
   rendered value keeps the formatting of the first run that held placeholder
   text; consumed runs are emptied.
 
+Alternate namespace prefixes and a default WordprocessingML namespace work as
+long as the element is bound to the standard WordprocessingML namespace. Text
+inside a nested paragraph is treated as its own paragraph, so a placeholder
+cannot span two paragraphs.
+
 Multi-line values, such as `references` or `cvss_all`, become line breaks in the
-same run. Values are XML-escaped. Paragraphs without placeholders and every
-other package member are copied byte-for-byte, and `[Content_Types].xml` stays
-first in the archive.
+same run. CRLF and CR are treated as line breaks. Values are XML-escaped.
+Paragraphs without placeholders and every other package member are copied
+byte-for-byte, and `[Content_Types].xml` stays first in the archive.
 
 Limits and restrictions:
 
 - the `.docx` file must be at most 20 MiB;
 - one uncompressed member must be at most 50 MiB and the whole archive at most
-  200 MiB;
+  200 MiB; the declared sizes and the bytes actually read are both bounded;
+- rendered replacements are limited to 50 MiB, and a rendered XML part must fit
+  the 50 MiB member limit;
 - encrypted documents are refused;
-- the standard `w:` namespace prefix is expected, as Word writes it.
+- DTD and XML entity declarations are refused in every XML package member;
+- corrupt ZIP members and unsupported compression are refused;
+- placeholders in footnotes, endnotes, comments and field instructions are not
+  replaced.
 
-An empty or missing placeholder is never silently ignored: unknown names and
-malformed `$` sequences stop the command with status `2`.
+An unknown name in a supported visible-text placeholder, a malformed `$`
+sequence, or a component that cannot be parsed stops the command with status
+`2`; the previous output file, if any, is left untouched.
 
 Statements are not attached to watch notifications yet. Generate them on demand
 and deliver the file through the channel you already use.

@@ -25,7 +25,7 @@ cvebeacon --config cvebeacon.toml watch statement CVE-2026-1234 --out statement.
 delivers pending alerts. `watch sync` only syncs; the durable touch queue keeps
 the evaluation for the next `watch run`. `watch notify` delivers pending alerts
 without syncing or evaluating. `watch statement` renders one stored CVE from a
-Markdown or Word template without syncing or delivering; see
+Markdown, plain-text, or Word template without syncing or delivering; see
 [statements](STATEMENTS.md).
 
 ## Configuration
