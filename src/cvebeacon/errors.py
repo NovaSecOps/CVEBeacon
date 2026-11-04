@@ -33,9 +33,19 @@ class InventoryValidationError(CVEBeaconError):
 class SourceError(CVEBeaconError):
     """An external source failed or returned an invalid response."""
 
-    def __init__(self, source: str, message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        source: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        status_code: int | None = None,
+        requests: int = 0,
+    ):
         self.source = source
         self.retryable = retryable
+        self.status_code = status_code
+        self.requests = requests
         super().__init__(f"{source}: {message}")
 
 

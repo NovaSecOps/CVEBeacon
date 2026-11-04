@@ -113,3 +113,24 @@ def test_epss_parser_keeps_score_percentile_and_date():
             return {"data": [{"cve": "CVE-2026-0001", "epss": "0.25", "percentile": "0.75", "date": "2026-01-02"}]}
     score, percentile, score_date = EPSSSource(FakeHttp()).scores(["CVE-2026-0001"])["CVE-2026-0001"]
     assert (score, percentile, score_date.isoformat()) == (0.25, 0.75, "2026-01-02")
+
+
+@pytest.mark.parametrize(
+    "score,percentile", [(True, "0.75"), ("0.25", False), (False, True)]
+)
+def test_epss_parser_rejects_json_booleans_as_probabilities(score, percentile):
+    class FakeHttp:
+        def get_json(self, url, **kwargs):
+            return {
+                "data": [
+                    {
+                        "cve": "CVE-2026-0001",
+                        "epss": score,
+                        "percentile": percentile,
+                        "date": "2026-01-02",
+                    }
+                ]
+            }
+
+    with pytest.raises(SourceError, match="invalid probability"):
+        EPSSSource(FakeHttp()).scores(["CVE-2026-0001"])

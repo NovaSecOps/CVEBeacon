@@ -1,0 +1,61 @@
+{
+  "total": 7,
+  "items": [
+    {
+      "id": "EUVD-2026-105471",
+      "aliases": "CVE-2026-0001",
+      "dateUpdated": "Nov 3, 2026, 12:00:00 AM",
+      "baseScore": 9.8,
+      "baseScoreVersion": "3.1",
+      "baseScoreVector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    },
+    {
+      "id": "EUVD-2026-105472",
+      "aliases": "CVE-2026-0002",
+      "dateUpdated": "Nov 3, 2026, 12:01:00 AM",
+      "baseScore": 8.8,
+      "baseScoreVersion": "4.0",
+      "baseScoreVector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+    },
+    {
+      "id": "EUVD-2026-105473",
+      "aliases": "CVE-2026-0003",
+      "dateUpdated": "Nov 3, 2026, 12:02:00 AM",
+      "baseScore": 7.5,
+      "baseScoreVersion": "3.0",
+      "baseScoreVector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+    },
+    {
+      "id": "EUVD-2026-105474",
+      "aliases": "CVE-2026-0004",
+      "dateUpdated": "Nov 3, 2026, 12:03:00 AM",
+      "baseScore": 0.0,
+      "baseScoreVersion": null,
+      "baseScoreVector": null
+    },
+    {
+      "id": "EUVD-2026-105475",
+      "aliases": "CVE-2026-0005",
+      "dateUpdated": "Nov 3, 2026, 12:04:00 AM",
+      "baseScore": null,
+      "baseScoreVersion": null,
+      "baseScoreVector": null
+    },
+    {
+      "id": "EUVD-2026-105476",
+      "aliases": "CVE-2026-0006",
+      "dateUpdated": "Nov 3, 2026, 12:05:00 AM",
+      "baseScore": 5.0,
+      "baseScoreVersion": "9.9",
+      "baseScoreVector": null
+    },
+    {
+      "id": "EUVD-2026-105477",
+      "aliases": "CVE-2026-0007",
+      "dateUpdated": "Nov 3, 2026, 12:06:00 AM",
+      "baseScore": 0.0,
+      "baseScoreVersion": "3.1",
+      "baseScoreVector": null
+    }
+  ]
+}

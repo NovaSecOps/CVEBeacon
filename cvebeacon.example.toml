@@ -34,6 +34,15 @@ epss_enabled = true
 nvd_api_key_env = "NVD_API_KEY"
 minimum_request_interval = 6
 
+# Optional change history. See docs/WATCH.md.
+[watch]
+enabled = false
+database = "cvebeacon-watch.db"
+sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
+initial = "baseline"
+backfill_days = 7
+overlap_minutes = 15
+
 [notifications.teams]
 enabled = false
 webhook_env = "CVEBEACON_TEAMS_WEBHOOK_URL"
