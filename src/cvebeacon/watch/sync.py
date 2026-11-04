@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from dataclasses import dataclass
@@ -94,6 +95,72 @@ def _stored_date(value: str | None, label: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise StateError(f"watch database has an invalid {label}") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class _EUVDResume:
+    start: date
+    end: date
+    page: int
+    total: int
+    ids: tuple[str, ...] = ()
+
+
+def _euvd_resume(value: str | None) -> _EUVDResume | None:
+    """Read the page-level EUVD resume cursor, or None when there is none."""
+    if not value:
+        return None
+    try:
+        payload = json.loads(value)
+        if not isinstance(payload, dict):
+            raise ValueError("not an object")
+        start = date.fromisoformat(payload["start"])
+        end = date.fromisoformat(payload["end"])
+        page = payload["page"]
+        total = payload["total"]
+        ids = payload.get("ids", [])
+        if type(page) is not int or type(total) is not int:
+            raise ValueError("invalid offsets")
+        if not isinstance(ids, list) or not all(
+            isinstance(item, str) and item for item in ids
+        ):
+            raise ValueError("invalid identifiers")
+        if page < 1 or total < 0 or start > end or len(ids) > feeds.EUVD_PAGE_SIZE:
+            raise ValueError("invalid range")
+        if page * feeds.EUVD_PAGE_SIZE >= total:
+            raise ValueError("invalid page")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StateError("watch database has an invalid EUVD page cursor") from exc
+    return _EUVDResume(start, end, page, total, tuple(ids))
+
+
+def _euvd_resume_value(
+    start: date,
+    end: date,
+    page: int,
+    total: int,
+    ids: tuple[str, ...],
+) -> str:
+    return json.dumps(
+        {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "page": page,
+            "total": total,
+            "ids": list(ids),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _split_chunk(
+    pending: list[tuple[date, date]], start: date, end: date
+) -> None:
+    """Queue the two halves of a window, earlier half first."""
+    middle = start + timedelta(days=(end - start).days // 2)
+    pending.append((middle + timedelta(days=1), end))
+    pending.append((start, middle))
 
 
 def _confirm_full_history(
@@ -299,6 +366,40 @@ def sync_watch(
 
     throttle = Throttle(sleep=sleep)
 
+    # The EU KEV dump is a single request. Fetch it before the long EUVD
+    # backfill so that EUVD paging cannot exhaust the shared throttle budget
+    # and starve it for the rest of the run.
+    if "eu_kev" in watch.sources:
+        eu_before = http.requests
+        eu_throttled_before = throttle.count
+        eu_waited_before = throttle.waited
+        try:
+            eu = feeds.fetch_kev(http, eu=True, throttle=throttle)
+        except SourceError as exc:
+            summaries.append(
+                SourceSummary(
+                    "eu_kev",
+                    http.requests - eu_before,
+                    error=str(exc),
+                    throttled=throttle.count - eu_throttled_before,
+                    throttle_wait=throttle.waited - eu_waited_before,
+                )
+            )
+        else:
+            counts = store.replace_kev("eu", eu, catalogs=catalogs)
+            touched.update(counts.touched_ids)
+            summaries.append(
+                SourceSummary(
+                    "eu_kev",
+                    http.requests - eu_before,
+                    len(eu),
+                    counts.new,
+                    counts.changed,
+                    throttled=throttle.count - eu_throttled_before,
+                    throttle_wait=throttle.waited - eu_waited_before,
+                )
+            )
+
     if "euvd" in watch.sources:
         euvd_before = http.requests
         euvd_throttled_before = throttle.count
@@ -306,41 +407,109 @@ def sync_watch(
         euvd_records = euvd_new = euvd_changed = euvd_ignored = 0
         euvd_error: str | None = None
         euvd_cursor = _cursor_date(metadata.get("euvd_cursor"))
-        pending_chunks = list(reversed(feeds.euvd_chunks(euvd_start, today)))
+        resume = _euvd_resume(metadata.get("euvd_page_cursor"))
+        if resume is not None and euvd_cursor is not None and resume.end < euvd_cursor:
+            # The committed cursor is already past this window.
+            store.set_metadata({"euvd_page_cursor": ""})
+            resume = None
+        if resume is not None:
+            pending_chunks = list(
+                reversed(feeds.euvd_chunks(resume.end + timedelta(days=1), today))
+            )
+            pending_chunks.append((resume.start, resume.end))
+        else:
+            pending_chunks = list(reversed(feeds.euvd_chunks(euvd_start, today)))
         while pending_chunks:
             chunk_start, chunk_end = pending_chunks.pop()
-            try:
-                feed = feeds.fetch_euvd(
-                    http,
-                    start=chunk_start,
-                    end=chunk_end,
-                    throttle=throttle,
+            page = 0
+            pinned_total: int | None = None
+            if resume is not None and (resume.start, resume.end) == (
+                chunk_start,
+                chunk_end,
+            ):
+                page = resume.page
+                pinned_total = resume.total
+                seen_ids = set(resume.ids)
+                resume = None
+            else:
+                seen_ids = set()
+            restarts = 0
+            while True:
+                try:
+                    feed = feeds.fetch_euvd_page(
+                        http,
+                        start=chunk_start,
+                        end=chunk_end,
+                        page=page,
+                        throttle=throttle,
+                    )
+                except SourceError as exc:
+                    euvd_error = str(exc)
+                    break
+                if page == 0:
+                    pinned_total = feed.total
+                    if (
+                        feed.total > feeds.EUVD_SPLIT_TOTAL
+                        and chunk_end > chunk_start
+                    ):
+                        _split_chunk(pending_chunks, chunk_start, chunk_end)
+                        break
+                elif feed.total != pinned_total:
+                    restarts += 1
+                    if restarts >= feeds.EUVD_ATTEMPTS:
+                        euvd_error = "source returned unstable pagination"
+                        break
+                    page = 0
+                    pinned_total = feed.total
+                    seen_ids.clear()
+                    continue
+                page_ids = [update.euvd_id for update in feed.updates]
+                if len(set(page_ids)) != len(page_ids) or any(
+                    identifier in seen_ids for identifier in page_ids
+                ):
+                    restarts += 1
+                    if restarts >= feeds.EUVD_ATTEMPTS:
+                        euvd_error = "source returned unstable pagination"
+                        break
+                    page = 0
+                    seen_ids.clear()
+                    continue
+                seen_ids.update(page_ids)
+                complete = (page + 1) * feeds.EUVD_PAGE_SIZE >= pinned_total
+                if complete:
+                    cursor_day = (
+                        chunk_end
+                        if euvd_cursor is None
+                        else max(euvd_cursor, chunk_end)
+                    )
+                    meta = {
+                        "euvd_cursor": cursor_day.isoformat(),
+                        "euvd_page_cursor": "",
+                    }
+                else:
+                    meta = {
+                        "euvd_page_cursor": _euvd_resume_value(
+                            chunk_start,
+                            chunk_end,
+                            page + 1,
+                            pinned_total,
+                            tuple(update.euvd_id for update in feed.updates),
+                        )
+                    }
+                counts = store.replace_euvd_items(
+                    feed.updates, meta=meta, catalogs=catalogs
                 )
-            except SourceError as exc:
-                euvd_error = str(exc)
+                euvd_records += len(feed.updates)
+                euvd_new += counts.new
+                euvd_changed += counts.changed
+                euvd_ignored += feed.ignored
+                touched.update(counts.touched_ids)
+                if complete:
+                    euvd_cursor = cursor_day
+                    break
+                page += 1
+            if euvd_error:
                 break
-            if feed.split:
-                span = (chunk_end - chunk_start).days
-                middle = chunk_start + timedelta(days=span // 2)
-                pending_chunks.append((middle + timedelta(days=1), chunk_end))
-                pending_chunks.append((chunk_start, middle))
-                continue
-            cursor_day = (
-                chunk_end
-                if euvd_cursor is None
-                else max(euvd_cursor, chunk_end)
-            )
-            counts = store.replace_euvd_items(
-                feed.updates,
-                meta={"euvd_cursor": cursor_day.isoformat()},
-                catalogs=catalogs,
-            )
-            euvd_cursor = cursor_day
-            euvd_records += len(feed.updates)
-            euvd_new += counts.new
-            euvd_changed += counts.changed
-            euvd_ignored += feed.ignored
-            touched.update(counts.touched_ids)
         summaries.append(
             SourceSummary(
                 "euvd",
@@ -377,37 +546,6 @@ def sync_watch(
                     len(cisa),
                     counts.new,
                     counts.changed,
-                )
-            )
-
-    if "eu_kev" in watch.sources:
-        eu_before = http.requests
-        eu_throttled_before = throttle.count
-        eu_waited_before = throttle.waited
-        try:
-            eu = feeds.fetch_kev(http, eu=True, throttle=throttle)
-        except SourceError as exc:
-            summaries.append(
-                SourceSummary(
-                    "eu_kev",
-                    http.requests - eu_before,
-                    error=str(exc),
-                    throttled=throttle.count - eu_throttled_before,
-                    throttle_wait=throttle.waited - eu_waited_before,
-                )
-            )
-        else:
-            counts = store.replace_kev("eu", eu, catalogs=catalogs)
-            touched.update(counts.touched_ids)
-            summaries.append(
-                SourceSummary(
-                    "eu_kev",
-                    http.requests - eu_before,
-                    len(eu),
-                    counts.new,
-                    counts.changed,
-                    throttled=throttle.count - eu_throttled_before,
-                    throttle_wait=throttle.waited - eu_waited_before,
                 )
             )
 
@@ -501,11 +639,21 @@ def watch_status(watch: WatchConfig) -> str:
     store = WatchStore(watch.database)
     status = store.status(catalogs=watch.sources)
     meta = status["meta"]
+    euvd_cursor = f"euvd cursor: {meta.get('euvd_cursor', 'not set')}"
+    resume = _euvd_resume(meta.get("euvd_page_cursor"))
+    if resume is not None:
+        pages = (
+            resume.total + feeds.EUVD_PAGE_SIZE - 1
+        ) // feeds.EUVD_PAGE_SIZE
+        euvd_cursor += (
+            f" (resuming {resume.start.isoformat()}..{resume.end.isoformat()}, "
+            f"page {resume.page + 1} of {pages})"
+        )
     lines = [
         f"database: {status['database']}",
         f"schema version: {meta.get('schema_version', 'unknown')}",
         f"nvd cursor: {meta.get('nvd_cursor', 'not set')}",
-        f"euvd cursor: {meta.get('euvd_cursor', 'not set')}",
+        euvd_cursor,
         f"epss score date: {status['epss_date'] or 'not set'}",
         f"rows: {status['rows']}",
         f"euvd items: {status['euvd_items']}",

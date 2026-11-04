@@ -79,6 +79,14 @@ class EUVDFeed:
     split: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class EUVDPage:
+    updates: tuple[EUVDUpdate, ...]
+    page: int
+    total: int
+    ignored: int = 0
+
+
 def _text(value: Any) -> str | None:
     if value is None:
         return None
@@ -578,6 +586,77 @@ def _euvd_vendors(item: dict[str, Any]) -> tuple[Product, ...]:
 
 
 @source_payload("euvd")
+def fetch_euvd_page(
+    http: HttpClient,
+    *,
+    start: date,
+    end: date,
+    page: int,
+    throttle: Throttle | None = None,
+) -> EUVDPage:
+    """Fetch one page of a bounded EUVD window.
+
+    Same-day queries report a total below the items they return, so the end is
+    always widened by one day while the committed cursor stays at ``end``.
+    """
+    if page < 0:
+        raise ValueError("EUVD page must not be negative")
+    params = {
+        "fromUpdatedDate": start.isoformat(),
+        "toUpdatedDate": (end + timedelta(days=1)).isoformat(),
+    }
+    payload = http.get_json(
+        SEARCH_URL,
+        source="euvd",
+        params={**params, "page": page, "size": EUVD_PAGE_SIZE},
+        minimum_interval=EUVD_MIN_INTERVAL,
+        throttle=throttle,
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise SourceError("euvd", "source returned an invalid search envelope")
+    items = payload["items"]
+    try:
+        total = payload["total"]
+        if type(total) is not int or total < 0:
+            raise ValueError("invalid count")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SourceError("euvd", "source returned an invalid total count") from exc
+    expected = min(EUVD_PAGE_SIZE, max(total - page * EUVD_PAGE_SIZE, 0))
+    if len(items) != expected:
+        raise SourceError("euvd", "source returned an incomplete page")
+    updates: list[EUVDUpdate] = []
+    ignored = 0
+    for item in items:
+        if not isinstance(item, dict):
+            raise SourceError("euvd", "source returned a non-object search item")
+        euvd_id = _text(item.get("id"))
+        if euvd_id is None:
+            raise SourceError("euvd", "source returned an item without an identifier")
+        identifiers = tuple(
+            sorted(
+                {
+                    value
+                    for alias in _alias_values(item.get("aliases"))
+                    if (value := cve_id(alias))
+                }
+            )
+        )
+        cvss, was_ignored = _euvd_cvss(item)
+        ignored += 1 if was_ignored else 0
+        updates.append(
+            EUVDUpdate(
+                identifiers,
+                euvd_id,
+                _text(item.get("exploitedSince")),
+                cvss,
+                euvd_datetime(item.get("dateUpdated")),
+                _euvd_vendors(item),
+            )
+        )
+    return EUVDPage(tuple(updates), page, total, ignored)
+
+
+@source_payload("euvd")
 def fetch_euvd(
     http: HttpClient,
     *,
@@ -585,15 +664,11 @@ def fetch_euvd(
     end: date,
     throttle: Throttle | None = None,
 ) -> EUVDFeed:
-    """Fetch one bounded EUVD chunk with a pinned result total.
+    """Fetch one complete bounded EUVD window with a pinned result total.
 
-    Same-day queries report a total below the items they return, so the end is
-    always widened by one day while the committed cursor stays at ``end``.
+    Sync reads and commits single pages instead, so a throttled run keeps its
+    progress. This whole-window form remains for callers that want one result.
     """
-    params = {
-        "fromUpdatedDate": start.isoformat(),
-        "toUpdatedDate": (end + timedelta(days=1)).isoformat(),
-    }
     requests_before = http.requests
     for _ in range(EUVD_ATTEMPTS):
         updates: list[EUVDUpdate] = []
@@ -603,67 +678,27 @@ def fetch_euvd(
         unstable = False
         seen_ids: set[str] = set()
         while True:
-            payload = http.get_json(
-                SEARCH_URL,
-                source="euvd",
-                params={**params, "page": page, "size": EUVD_PAGE_SIZE},
-                minimum_interval=EUVD_MIN_INTERVAL,
-                throttle=throttle,
+            result = fetch_euvd_page(
+                http, start=start, end=end, page=page, throttle=throttle
             )
-            if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-                raise SourceError("euvd", "source returned an invalid search envelope")
-            items = payload["items"]
-            try:
-                total = payload["total"]
-                if type(total) is not int or total < 0:
-                    raise ValueError("invalid count")
-            except (KeyError, TypeError, ValueError) as exc:
-                raise SourceError("euvd", "source returned an invalid total count") from exc
             if page == 0:
-                pinned_total = total
-                if total > EUVD_SPLIT_TOTAL and end > start:
+                pinned_total = result.total
+                if result.total > EUVD_SPLIT_TOTAL and end > start:
                     return EUVDFeed(
                         (), http.requests - requests_before, 0, split=True
                     )
-            elif total != pinned_total:
+            elif result.total != pinned_total:
                 unstable = True
                 break
-            expected = min(EUVD_PAGE_SIZE, max(pinned_total - page * EUVD_PAGE_SIZE, 0))
-            if len(items) != expected:
-                raise SourceError("euvd", "source returned an incomplete page")
-            for item in items:
-                if not isinstance(item, dict):
-                    raise SourceError("euvd", "source returned a non-object search item")
-                euvd_id = _text(item.get("id"))
-                if euvd_id is None:
-                    raise SourceError("euvd", "source returned an item without an identifier")
-                if euvd_id in seen_ids:
-                    unstable = True
-                    break
-                seen_ids.add(euvd_id)
-                identifiers = tuple(
-                    sorted(
-                        {
-                            value
-                            for alias in _alias_values(item.get("aliases"))
-                            if (value := cve_id(alias))
-                        }
-                    )
-                )
-                cvss, was_ignored = _euvd_cvss(item)
-                ignored += 1 if was_ignored else 0
-                updates.append(
-                    EUVDUpdate(
-                        identifiers,
-                        euvd_id,
-                        _text(item.get("exploitedSince")),
-                        cvss,
-                        euvd_datetime(item.get("dateUpdated")),
-                        _euvd_vendors(item),
-                    )
-                )
-            if unstable:
+            page_ids = [update.euvd_id for update in result.updates]
+            if len(set(page_ids)) != len(page_ids) or any(
+                identifier in seen_ids for identifier in page_ids
+            ):
+                unstable = True
                 break
+            seen_ids.update(page_ids)
+            updates.extend(result.updates)
+            ignored += result.ignored
             if (page + 1) * EUVD_PAGE_SIZE >= pinned_total:
                 break
             page += 1
