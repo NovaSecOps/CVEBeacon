@@ -55,6 +55,10 @@ field does not apply to the CVE, for example `kev_due_date` when CISA KEV has no
 entry. The reported-to-clients fields render `not reported` because that mark is
 not stored in the watch database yet.
 
+Templates permit at most 100,000 placeholders or dollar escapes in total.
+Unknown-name diagnostics list every unique unknown name up to 128 names and
+16 KiB of identifier text; larger inputs stop with a resource-limit error.
+
 ## Fields
 
 | Field | Meaning and example |
@@ -128,9 +132,17 @@ Limits and restrictions:
 - rendered document, header and footer XML together must fit 50 MiB, including
   escaped text, repeated text attributes and line-break markup;
 - XML must use UTF-8 or UTF-16; its original encoding is preserved;
-- each XML member may nest at most 256 elements and contain at most 100,000
-  elements and namespace declarations combined; each paragraph may contain at
-  most 100,000 placeholders or dollar escapes;
+- XML members are limited to 8 MiB each and 32 MiB together, with nesting at
+  most 256 elements deep;
+- elements and attributes (including namespace declarations) together are
+  limited to 100,000 per XML member and 200,000 per package;
+- attributes are limited to 8,192 and 256 KiB of source bytes per element,
+  50,000 and 1 MiB per XML member, and 100,000 and 4 MiB per package; attribute
+  byte limits conservatively include surrounding whitespace and tag delimiters;
+- namespace URI spellings are limited to 256 UTF-8 bytes. A conservative upper
+  bound on expanded element/attribute names is checked before parsing: 16 MiB
+  per XML member and 32 MiB per package, including both element callbacks. This
+  charges every name against the longest namespace spelling in its member;
 - duplicate package member names are refused;
 - encrypted documents are refused;
 - DTD and XML entity declarations are refused in every XML package member;
