@@ -521,6 +521,34 @@ def test_old_cve_with_a_recent_kev_addition_alerts_normally():
         assert events[0].initial is False
 
 
+def test_old_cve_with_a_recent_euvd_exploitation_date_alerts_normally():
+    configured = rule({"name": "old"})
+    for exploited in ("Oct 27, 2026, 12:00:00 AM", "Nov 1, 2026, 3:30:00 PM"):
+        state, events = evaluate(
+            view(published="2015-01-01T00:00:00.000", euvd_exploited_since=exploited),
+            None,
+            configured,
+            now=NOW,
+            backlog_before=date(2026, 10, 27),
+        )
+        assert state is not None
+        assert events[0].initial is False
+
+
+def test_old_cve_with_an_older_or_unparseable_euvd_exploitation_date_is_backlog():
+    configured = rule({"name": "old"})
+    for exploited in ("Oct 26, 2026, 11:59:59 PM", "not a date", "2026-13-40"):
+        state, events = evaluate(
+            view(published="2015-01-01T00:00:00.000", euvd_exploited_since=exploited),
+            None,
+            configured,
+            now=NOW,
+            backlog_before=date(2026, 10, 27),
+        )
+        assert state is not None
+        assert events[0].initial is True
+
+
 def test_old_cves_modes_alert_and_ignore():
     old = view(published="2015-01-01T00:00:00.000")
     alerting = rule({"name": "old", "old_cves": "alert"})

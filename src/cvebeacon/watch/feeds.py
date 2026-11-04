@@ -25,6 +25,7 @@ from .records import (
     Reference,
     SSVC_EXPLOITATION,
     WatchRecord,
+    euvd_datetime,
     normalized_cvss,
 )
 
@@ -50,7 +51,6 @@ EPSS_MIN_ROWS = 100_000
 _NVD_TIMESTAMP = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,9}))?$"
 )
-_EUVD_TIMESTAMP_FORMATS = ("%b %d, %Y, %I:%M:%S %p",)
 _EPSS_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _EPSS_DATE_TIMESTAMP = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(?P<offset>Z|\+00:00)$"
@@ -515,21 +515,6 @@ def _alias_values(aliases: Any) -> list[str]:
     raise SourceError("euvd", "source returned invalid aliases")
 
 
-def _euvd_datetime(value: Any) -> str | None:
-    text = _text(value)
-    if text is None:
-        return None
-    for pattern in _EUVD_TIMESTAMP_FORMATS:
-        try:
-            return datetime.strptime(text, pattern).isoformat()
-        except ValueError:
-            continue
-    try:
-        return datetime.fromisoformat(text).isoformat()
-    except ValueError:
-        return None
-
-
 def _euvd_cvss(item: dict[str, Any]) -> tuple[CVSSEntry | None, bool]:
     """Return the usable score, and whether an unknown version was ignored."""
     version = _text(item.get("baseScoreVersion"))
@@ -659,7 +644,7 @@ def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
                         euvd_id,
                         _text(item.get("exploitedSince")),
                         cvss,
-                        _euvd_datetime(item.get("dateUpdated")),
+                        euvd_datetime(item.get("dateUpdated")),
                         _euvd_vendors(item),
                     )
                 )

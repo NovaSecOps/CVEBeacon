@@ -204,11 +204,15 @@ The first `match` for a CVE is treated as backlog when both of these hold:
 - the CVE's `published` date is before the database's `initial_window_start`
   date (`initialized_at` for baseline mode, or when the window start is not
   stored);
-- no CISA or EU KEV `date_added` for that CVE is on or after that date.
+- no CISA or EU KEV `date_added` for that CVE is on or after that date;
+- no EUVD exploitation date (`exploitedSince`, when `euvd` is configured) is on
+  or after that date. An unparseable EUVD date does not exempt the CVE.
 
 Backlog matches keep `initial = 1`, so the delivery phase can fold them into a
 digest. Later escalations behave normally: a new KEV addition, active
-exploitation, a higher score band, or rejection still alerts.
+exploitation, a higher score band, or rejection still alerts. A first match of
+an old CVE that an EPSS or SSVC change triggered is digested too, unless the
+rule sets `old_cves = "alert"`.
 
 `old_cves` controls this per rule:
 

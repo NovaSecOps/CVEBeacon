@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..errors import ConfigurationError
-from .records import CVSS_PROVIDERS, WatchView, canonical_json
+from .records import CVSS_PROVIDERS, WatchView, canonical_json, euvd_datetime
 
 EVENT_KINDS = (
     "match",
@@ -591,6 +591,10 @@ def _is_backlog(view: WatchView, backlog_before: date | None) -> bool:
         value = _date_prefix(added)
         if value is not None and value >= backlog_before:
             return False
+    # EUVD exploitation evidence from inside the window is new, not backlog.
+    exploited = _date_prefix(euvd_datetime(view.euvd_exploited_since))
+    if exploited is not None and exploited >= backlog_before:
+        return False
     return True
 
 

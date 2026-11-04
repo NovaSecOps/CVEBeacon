@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterable, Mapping
 
 CVSS_PROVIDERS = ("nvd", "cna", "cisa-adp", "euvd", "other")
@@ -13,10 +14,29 @@ CVSS_VERSIONS = ("2.0", "3.0", "3.1", "4.0")
 SSVC_EXPLOITATION = ("none", "poc", "active")
 STATUSES = ("published", "rejected")
 EPSS_BANDS = (0.1, 0.5, 0.9)
+EUVD_TIMESTAMP_FORMATS = ("%b %d, %Y, %I:%M:%S %p",)
 
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def euvd_datetime(value: Any) -> str | None:
+    """Normalise an EUVD timestamp to ISO 8601, or None when it is not one."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for pattern in EUVD_TIMESTAMP_FORMATS:
+        try:
+            return datetime.strptime(text, pattern).isoformat()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text).isoformat()
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
