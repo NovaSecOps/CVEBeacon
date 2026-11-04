@@ -45,8 +45,9 @@ It is Windows-only, and Linux rejects it. The task principal uses `LogonType
 Password` with an explicit `UserId` and `RunLevel` least privilege. The account
 defaults to the current OS account; use `--account DOMAIN\user` to run the task
 as another account from an elevated administrator shell. The password comes from
-a hidden prompt, or from `--password-stdin`, which reads one line from stdin for
-automation. CVEBeacon passes it to PowerShell only on stdin and never stores it;
+a hidden prompt (entered twice for confirmation), or from `--password-stdin`,
+which requires `--yes` and an explicit `--times` or `--every` and reads one
+UTF-8 line from stdin for automation. CVEBeacon passes it to PowerShell only on stdin and never stores it;
 Windows stores it in its own credential store. Changing the account password
 requires re-running `schedule install --run-logged-out`.
 

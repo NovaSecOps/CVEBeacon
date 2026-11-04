@@ -319,7 +319,9 @@ state and secrets in `C:\CVEBeacon\data`.
 As an elevated administrator, create the account and directories, and grant the
 service account "Log on as a batch job" in `secpol.msc` (Local Policies, User
 Rights Assignment; a domain GPO can override it). Replace `CVEHOST` with the
-computer or domain name, and never add the service account to Administrators.
+computer name for the local account below (or use `$env:COMPUTERNAME`). For a
+domain account, create it in Active Directory and use `DOMAIN\account` instead.
+Never add the service account to Administrators.
 
 ```powershell
 New-LocalUser svc-cvebeacon -Password (Read-Host -AsSecureString "Password") -PasswordNeverExpires
@@ -383,8 +385,8 @@ The command prompts for the service account password; Windows stores it in its
 own credential store and CVEBeacon does not. The plan must show
 `Runs as: CVEHOST\svc-cvebeacon (stored password, while logged off)` before
 `--yes`. Changing the service account password later requires re-running this
-install. For automation, `--password-stdin` reads one line from stdin instead of
-prompting.
+install. For automation, `--password-stdin` requires `--yes` and an explicit
+`--times` or `--every`, and reads one UTF-8 line from stdin instead of prompting.
 
 Check Task Scheduler: General shows `CVEHOST\svc-cvebeacon` and "Run whether
 user is logged on or not"; Triggers shows 07:00 and 19:00. The creator or an
@@ -406,24 +408,31 @@ another account), so the task uses the stored service-account password.
 
 ### Upgrade
 
-Run the first and last commands as the administrator who registered the task.
-Wait for a running job to finish. Run the backup, pull and pip commands as the
-service account that owns `C:\CVEBeacon\app`; do not run Git maintenance for
-that checkout as an administrator.
+Run the first command as the administrator who registered the task, and wait for
+a running job to finish:
 
 ```powershell
-# Task owner (administrator)
 schtasks /Change /TN "CVEBeacon Monitor" /DISABLE
-# Service account
+```
+
+Run the backup, pull and pip commands as the service account that owns
+`C:\CVEBeacon\app`; do not run Git maintenance for that checkout as an
+administrator:
+
+```powershell
 $Backup = "C:\CVEBeacon\data\backup-$(Get-Date -Format yyyyMMdd-HHmm)"
 New-Item -ItemType Directory $Backup | Out-Null; Copy-Item C:\CVEBeacon\data\cvebeacon-watch.db* $Backup
 git -C C:\CVEBeacon\app pull --ff-only
 C:\CVEBeacon\app\.venv\Scripts\python.exe -m pip install C:\CVEBeacon\app
-# Task owner (administrator)
+```
+
+Then re-enable the task as the administrator:
+
+```powershell
 schtasks /Change /TN "CVEBeacon Monitor" /ENABLE
 ```
 
-`watch status` reports the database path when it is not the default; copy `-wal` and `-shm` only while the task is disabled.
+`watch status` always reports the database path; copy `-wal` and `-shm` only while the task is disabled.
 
 ### Docker Desktop or WSL 2 on Windows
 
@@ -437,7 +446,9 @@ C:\CVEBeacon\docker\compose.yml --profile watch run -T --rm watch` from Task
 Scheduler. Windows bind mounts do not preserve Unix `0600`, so use
 `cvebeacon.env` for secrets; file secrets need the WSL filesystem. Docker
 Desktop has a free tier for smaller companies (under 250 employees and $10M
-annual revenue) and is not supported on Windows Server.
+annual revenue); government entities are not eligible, and personal,
+education and open-source use has separate terms. It is not supported on
+Windows Server.
 
 WSL 2 stops an idle distribution, and systemd in `/etc/wsl.conf` does not keep
 it alive. Follow Section A inside the distribution, then use a recurring
