@@ -25,6 +25,7 @@ from .records import (
     Reference,
     SSVC_EXPLOITATION,
     WatchRecord,
+    euvd_datetime,
     normalized_cvss,
 )
 
@@ -50,7 +51,6 @@ EPSS_MIN_ROWS = 100_000
 _NVD_TIMESTAMP = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,9}))?$"
 )
-_EUVD_TIMESTAMP_FORMATS = ("%b %d, %Y, %I:%M:%S %p",)
 _EPSS_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _EPSS_DATE_TIMESTAMP = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(?P<offset>Z|\+00:00)$"
@@ -277,6 +277,8 @@ def _products(raw: dict[str, Any]) -> tuple[Product, ...]:
             continue
         for node in nodes:
             for match in _cpe_matches(node):
+                if match.get("vulnerable") is False:
+                    continue
                 parts = split_cpe23(str(match.get("criteria") or ""))
                 if len(parts) != 11:
                     continue
@@ -513,21 +515,6 @@ def _alias_values(aliases: Any) -> list[str]:
     raise SourceError("euvd", "source returned invalid aliases")
 
 
-def _euvd_datetime(value: Any) -> str | None:
-    text = _text(value)
-    if text is None:
-        return None
-    for pattern in _EUVD_TIMESTAMP_FORMATS:
-        try:
-            return datetime.strptime(text, pattern).isoformat()
-        except ValueError:
-            continue
-    try:
-        return datetime.fromisoformat(text).isoformat()
-    except ValueError:
-        return None
-
-
 def _euvd_cvss(item: dict[str, Any]) -> tuple[CVSSEntry | None, bool]:
     """Return the usable score, and whether an unknown version was ignored."""
     version = _text(item.get("baseScoreVersion"))
@@ -544,6 +531,50 @@ def _euvd_cvss(item: dict[str, Any]) -> tuple[CVSSEntry | None, bool]:
     if score is None or not 0 <= score <= 10:
         raise SourceError("euvd", "source returned an invalid CVSS score")
     return CVSSEntry("euvd", "euvd", version, score, _text(item.get("baseScoreVector"))), False
+
+
+EUVD_PLACEHOLDER_NAMES = frozenset({"n/a", "-"})
+
+
+def _euvd_name(value: Any) -> str | None:
+    if isinstance(value, str):
+        name = _text(value)
+    elif isinstance(value, dict):
+        name = _text(value.get("name"))
+    else:
+        return None
+    if name is None or name.casefold() in EUVD_PLACEHOLDER_NAMES:
+        return None
+    return name
+
+
+def _euvd_vendors(item: dict[str, Any]) -> tuple[Product, ...]:
+    """Collect vendor and product names from the EUVD identifier fields."""
+    pairs: dict[tuple[str, str], Product] = {}
+    vendors = item.get("enisaIdVendor") or []
+    if isinstance(vendors, list):
+        for entry in vendors:
+            if not isinstance(entry, dict):
+                continue
+            name = _euvd_name(entry.get("vendor")) or _euvd_name(entry.get("name"))
+            if name:
+                pairs.setdefault((name.casefold(), ""), Product(name, ""))
+    products = item.get("enisaIdProduct") or []
+    if isinstance(products, list):
+        for entry in products:
+            if not isinstance(entry, dict):
+                continue
+            product = entry.get("product")
+            name = _euvd_name(product) or _euvd_name(entry.get("name"))
+            vendor = _euvd_name(product.get("vendor")) if isinstance(product, dict) else None
+            vendor = vendor or _euvd_name(entry.get("vendor"))
+            if not name and not vendor:
+                continue
+            pairs.setdefault(
+                ((vendor or "").casefold(), (name or "").casefold()),
+                Product(vendor or "", name or ""),
+            )
+    return tuple(pairs[key] for key in sorted(pairs)[:50])
 
 
 @source_payload("euvd")
@@ -620,7 +651,8 @@ def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
                         euvd_id,
                         _text(item.get("exploitedSince")),
                         cvss,
-                        _euvd_datetime(item.get("dateUpdated")),
+                        euvd_datetime(item.get("dateUpdated")),
+                        _euvd_vendors(item),
                     )
                 )
             if unstable:

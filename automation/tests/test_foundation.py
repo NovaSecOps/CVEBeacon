@@ -50,6 +50,15 @@ def test_optional_failure_is_degraded_and_manifest_partial(tmp_path):
     assert read_snapshot(config.inventory_path, allow_partial=True).manifest["omissions"] == ["optional"]
 
 
+def test_watch_only_core_config_is_refused_before_scanning(tmp_path):
+    config, _ = setup(tmp_path)
+    config.core_config.write_text(
+        '[watch]\nenabled = true\ndatabase = "watch.db"\nsources = ["nvd"]\n'
+    )
+    assert run_pipeline(config, scanner=lambda c: pytest.fail("a watch-only core must not scan")) == 2
+    assert status(config.state_dir)["failures"] == ["core_inventory_configuration_mismatch"]
+
+
 def test_whole_pipeline_lock(tmp_path):
     config, source = setup(tmp_path)
     with lock(config.state_dir / "automation.lock"):

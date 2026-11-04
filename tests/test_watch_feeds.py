@@ -59,6 +59,24 @@ def test_recorded_nvd_sample_parses_ssvc_cvss_and_kev():
     }
 
 
+def test_recorded_euvd_sample_extracts_vendor_and_product_names():
+    payload = json.loads(
+        (FIXTURES / "euvd-vendors-page.json").read_text(encoding="utf-8")
+    )
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    feed = fetch_euvd(
+        mock_client(handler), start=date(2026, 11, 1), end=date(2026, 11, 2)
+    )
+    assert feed.updates[0].cve_ids == ("CVE-2021-44228",)
+    assert feed.updates[0].vendors == (
+        Product("Apache Software Foundation", ""),
+        Product("Apache Software Foundation", "Apache Log4j2"),
+    )
+
+
 def test_cvss_provider_mapping_covers_nvd_cna_cisa_adp_and_other():
     raw = nvd_cve(
         sourceIdentifier="security@example.com",
@@ -156,7 +174,7 @@ def test_description_is_truncated_and_products_and_references_are_bounded():
     )
     record = parse_nvd_cve(raw)
     assert record.description is not None and len(record.description) == 1000
-    assert len(record.products) == 50
+    assert len(record.products) == 60
     assert len(record.references) == 30
 
 
@@ -181,6 +199,92 @@ def test_products_include_nested_configuration_children():
         ]
     )
     assert parse_nvd_cve(raw).products == (Product("acme", "widget"),)
+
+
+def test_products_skip_platform_only_cpe_matches():
+    raw = nvd_cve(
+        configurations=[
+            {
+                "nodes": [
+                    {
+                        "children": [
+                            {
+                                "cpeMatch": [
+                                    {
+                                        "vulnerable": True,
+                                        "criteria": "cpe:2.3:a:vmware:spring_framework:5.3:*:*:*:*:*:*:*",
+                                    }
+                                ]
+                            },
+                            {
+                                "cpeMatch": [
+                                    {
+                                        "vulnerable": False,
+                                        "criteria": "cpe:2.3:a:oracle:jdk:8.0:*:*:*:*:*:*:*",
+                                    }
+                                ]
+                            },
+                            {
+                                "cpeMatch": [
+                                    {
+                                        "criteria": "cpe:2.3:a:acme:widget:1:*:*:*:*:*:*:*"
+                                    }
+                                ]
+                            },
+                        ]
+                    }
+                ]
+            }
+        ]
+    )
+    assert parse_nvd_cve(raw).products == (
+        Product("acme", "widget"),
+        Product("vmware", "spring_framework"),
+    )
+
+
+def test_more_than_fifty_nvd_products_are_kept_for_matching():
+    cpes = [
+        {
+            "vulnerable": True,
+            "criteria": f"cpe:2.3:a:vendor{index:03d}:product{index:03d}:1:*:*:*:*:*:*:*",
+        }
+        for index in range(60)
+    ]
+    record = parse_nvd_cve(
+        nvd_cve(configurations=[{"nodes": [{"cpeMatch": cpes}]}])
+    )
+    assert len(record.products) == 60
+    assert Product("vendor059", "product059") in record.products
+
+
+def test_euvd_names_never_stringify_a_non_name_object():
+    item = {
+        "enisaIdVendor": [{"vendor": {"unexpected": "object"}}],
+        "enisaIdProduct": [
+            {"product": {"vendor": {"name": "Acme"}}},
+            {"product": {"name": "Widget", "vendor": {"name": "Acme"}}},
+        ],
+    }
+    names = feeds._euvd_vendors(item)
+    assert all("{" not in name.vendor and "{" not in name.product for name in names)
+    assert Product("Acme", "Widget") in names
+
+
+def test_euvd_placeholder_names_are_not_vendors_or_products():
+    item = {
+        "enisaIdVendor": [
+            {"vendor": {"name": "N/A"}},
+            {"vendor": {"name": " - "}},
+            {"vendor": {"name": "Acme"}},
+        ],
+        "enisaIdProduct": [
+            {"product": {"name": "n/a", "vendor": {"name": "Acme"}}},
+            {"product": {"name": "Widget"}},
+        ],
+    }
+    names = feeds._euvd_vendors(item)
+    assert [(name.vendor, name.product) for name in names] == [("", "Widget"), ("Acme", "")]
 
 
 def test_nvd_paging_validation_rejects_bad_metadata():

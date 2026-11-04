@@ -21,15 +21,16 @@ def write_config(
     backfill_days: int = 7,
     overlap_minutes: int = 15,
     extra: str = "",
+    inventory: bool = True,
 ) -> AppConfig:
     names = ", ".join(f'"{name}"' for name in sources)
     path = tmp_path / "config.toml"
+    inventory_block = (
+        '[inventory]\npath = "missing-inventory.csv"\n\n' if inventory else ""
+    )
     path.write_text(
         f"""
-[inventory]
-path = "missing-inventory.csv"
-
-[state]
+{inventory_block}[state]
 database = "state.db"
 
 [output]

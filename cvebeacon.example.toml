@@ -43,6 +43,12 @@ initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
 
+# Optional alert rules. Channel names are reserved for the delivery phase.
+# [[watch.rules]]
+# name = "critical-or-likely"
+# condition = { any = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
+# channels = ["soc-email"]
+
 [notifications.teams]
 enabled = false
 webhook_env = "CVEBEACON_TEAMS_WEBHOOK_URL"

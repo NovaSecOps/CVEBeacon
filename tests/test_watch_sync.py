@@ -413,7 +413,7 @@ def test_daily_epss_file_is_loaded_once_and_updates_the_view(tmp_path):
     first = run(config, handler)
     assert len(requested) == 1
     assert "2026-11-03" in requested[0]
-    view = WatchStore(config.watch.database).view("CVE-2026-0001")
+    view = WatchStore(config.watch.database).view("CVE-2026-0001", catalogs=config.watch.sources)
     assert (view.epss, view.epss_percentile) == (0.42, 0.88)
     assert metadata(config)["epss_file_day"] == "2026-11-03"
 
@@ -545,7 +545,7 @@ def test_watch_status_reports_cursors_rows_and_signals(tmp_path, capsys):
     assert cli.main(["--config", str(config.config_path), "watch", "status"]) == 0
     output = capsys.readouterr().out
     assert f"database: {config.watch.database}" in output
-    assert "schema version: 1" in output
+    assert "schema version: 2" in output
     assert f"nvd cursor: {NOW.isoformat()}" in output
     assert "euvd cursor: 2026-11-03" in output
     assert "epss score date: 2026-11-03" in output
@@ -1120,7 +1120,7 @@ def test_epss_downward_crossing_updates_the_view(tmp_path):
     run(config, handler)
     second = run(config, handler, now=NOW + timedelta(days=1))
     assert not second.failures
-    view = WatchStore(config.watch.database).view("CVE-2026-0001")
+    view = WatchStore(config.watch.database).view("CVE-2026-0001", catalogs=config.watch.sources)
     assert (view.epss, view.epss_date) == (0.05, "2026-11-04")
     assert "CVE-2026-0001" in second.touched_ids
 
@@ -1145,7 +1145,7 @@ def test_epss_missing_score_removes_the_previous_value(tmp_path):
     calls[0] += 1
     second = run(config, handler, now=NOW + timedelta(days=1))
     assert not second.failures
-    view = WatchStore(config.watch.database).view("CVE-2026-0001")
+    view = WatchStore(config.watch.database).view("CVE-2026-0001", catalogs=config.watch.sources)
     assert view.epss is None
     assert "CVE-2026-0001" in second.touched_ids
 
@@ -1168,7 +1168,7 @@ def test_bad_epss_file_keeps_the_previous_table_and_retries(tmp_path):
     run(config, handler)
     failing = run(config, handler, now=NOW + timedelta(days=1))
     assert failing.failures == ("epss",)
-    assert WatchStore(config.watch.database).view("CVE-2026-0001").epss == 0.8
+    assert WatchStore(config.watch.database).view("CVE-2026-0001", catalogs=config.watch.sources).epss == 0.8
     assert metadata(config)["epss_file_day"] == "2026-11-03"
 
     retried = run(config, handler, now=NOW + timedelta(days=1, hours=1))
@@ -1208,7 +1208,7 @@ def test_epss_403_falls_back_and_records_the_file_day(tmp_path):
     assert not first.failures
     assert len(requested) == 2
     assert metadata(config)["epss_file_day"] == "2026-11-02"
-    assert WatchStore(config.watch.database).view("CVE-2026-0001").epss == 0.2
+    assert WatchStore(config.watch.database).view("CVE-2026-0001", catalogs=config.watch.sources).epss == 0.2
 
     # Yesterday's file is already loaded, so only today is probed again.
     second = run(config, handler, now=NOW + timedelta(hours=1))
@@ -1221,7 +1221,7 @@ def test_epss_403_falls_back_and_records_the_file_day(tmp_path):
     assert not third.failures
     assert len(requested) == 4
     assert metadata(config)["epss_file_day"] == "2026-11-03"
-    assert WatchStore(config.watch.database).view("CVE-2026-0001").epss == 0.4
+    assert WatchStore(config.watch.database).view("CVE-2026-0001", catalogs=config.watch.sources).epss == 0.4
 
     fourth = run(config, handler, now=NOW + timedelta(hours=3))
     assert not fourth.failures
@@ -1256,7 +1256,7 @@ def test_too_few_epss_rows_keeps_the_previous_table(tmp_path, monkeypatch):
         config, handler_for(nvd=nvd_request, epss=epss_request)
     )
     assert report.failures == ("epss",)
-    assert store.view("CVE-2026-0001").epss == 0.8
+    assert store.view("CVE-2026-0001", catalogs=config.watch.sources).epss == 0.8
     assert store.status()["epss_rows"] == 1
     assert store.metadata()["epss_file_day"] == "2026-11-02"
 
@@ -1286,7 +1286,7 @@ def test_corrupt_epss_deflate_is_an_optional_cli_failure(tmp_path, monkeypatch, 
     assert "nvd:" in output
     assert "epss:" in output
     assert "failed" in output
-    assert store.view("CVE-2026-0001").epss == 0.8
+    assert store.view("CVE-2026-0001", catalogs=config.watch.sources).epss == 0.8
     assert store.metadata()["epss_file_day"] == "2026-11-02"
 
 
@@ -1737,6 +1737,71 @@ def test_full_mode_never_looks_up_kev_cves(tmp_path):
     assert WatchStore(config.watch.database).status()["lookups"] == 0
 
 
+def test_initial_evaluation_is_marked_only_once(tmp_path):
+    config = write_config(
+        tmp_path,
+        initial="backfill",
+        extra="""
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["soc-email"]
+""",
+    )
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([nvd_cve()]))
+
+    handler = handler_for(nvd=nvd_request)
+    first = run(config, handler)
+    assert first.initial_evaluation is True
+    store = WatchStore(config.watch.database)
+    store.evaluate_touched(
+        config.watch.rules,
+        catalogs=config.watch.sources,
+        initial=first.initial_evaluation,
+    )
+    second = run(config, handler, now=NOW + timedelta(hours=1))
+    assert second.initial_evaluation is False
+    assert all(event.initial for event in store.events())
+
+
+def test_rule_epss_thresholds_reach_the_sync_touched_set(tmp_path):
+    config = write_config(
+        tmp_path,
+        sources=("nvd", "epss"),
+        initial="backfill",
+        extra="""
+[[watch.rules]]
+name = "epss-watch"
+condition = { epss_min = 0.3 }
+channels = ["soc-email"]
+""",
+    )
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([nvd_cve()]))
+
+    def epss_request(request):
+        score = "0.4" if "2026-11-04" in str(request.url) else "0.2"
+        day = "2026-11-04" if score == "0.4" else "2026-11-03"
+        return httpx.Response(200, content=epss_gzip([epss_row() | {"epss": score}], score_date=day))
+
+    handler = handler_for(nvd=nvd_request, epss=epss_request)
+    first = run(config, handler)
+    assert not first.failures
+    assert "CVE-2026-0001" in first.touched_ids
+    WatchStore(config.watch.database).acknowledge(first.touched_ids)
+
+    second = run(config, handler, now=NOW + timedelta(days=1))
+    assert not second.failures
+    assert second.touched_ids == ("CVE-2026-0001",)
+    result = WatchStore(config.watch.database).evaluate_touched(
+        config.watch.rules, catalogs=config.watch.sources
+    )
+    assert result.by_kind == (("match", 1),)
+
+
 def test_unknown_euvd_score_versions_are_ignored_and_counted(
     tmp_path, monkeypatch, capsys
 ):
@@ -1789,3 +1854,52 @@ def test_unknown_euvd_score_versions_are_ignored_and_counted(
     assert view2.euvd_id == "EUVD-2026-9"
     assert not any(entry.provider == "euvd" for entry in view1.cvss)
     assert not any(entry.provider == "euvd" for entry in view2.cvss)
+
+
+def test_first_sync_with_a_failed_source_keeps_the_initial_window_open(tmp_path):
+    config = write_config(
+        tmp_path,
+        sources=("nvd", "euvd"),
+        initial="backfill",
+        extra="""
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["soc-email"]
+""",
+    )
+    euvd_failed = [False]
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([nvd_cve()]))
+
+    def euvd_request(request):
+        if not euvd_failed[0]:
+            euvd_failed[0] = True
+            return httpx.Response(500)
+        return httpx.Response(200, json={"total": 0, "items": []})
+
+    handler = handler_for(nvd=nvd_request, euvd=euvd_request)
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    first = run(config, handler)
+    assert first.failures == ("euvd",)
+    assert first.initial_evaluation is True
+    store.evaluate_touched(
+        config.watch.rules,
+        catalogs=config.watch.sources,
+        initial=first.initial_evaluation,
+        complete=not first.failures,
+    )
+    assert "initial_evaluated_at" not in store.metadata()
+    assert all(event.initial for event in store.events())
+
+    second = run(config, handler, now=NOW + timedelta(hours=1))
+    assert not second.failures
+    assert second.initial_evaluation is True
+    store.evaluate_touched(
+        config.watch.rules,
+        catalogs=config.watch.sources,
+        initial=second.initial_evaluation,
+        complete=not second.failures,
+    )
+    assert "initial_evaluated_at" in store.metadata()

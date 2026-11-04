@@ -105,3 +105,178 @@ def test_watch_must_be_a_table(tmp_path):
     path.write_text("watch = true\n" + BASE, encoding="utf-8")
     with pytest.raises(ConfigurationError, match="must be a table"):
         load_config(path)
+
+
+def test_watch_only_config_without_inventory_loads(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[watch]
+enabled = true
+database = "watch.db"
+sources = ["nvd", "epss"]
+
+[[watch.rules]]
+name = "critical-or-likely"
+condition = { any = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
+channels = ["soc-email"]
+""",
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    assert config.inventory is None
+    assert config.watch.enabled is True
+    assert len(config.watch.rules) == 1
+    rule = config.watch.rules[0]
+    assert rule.name == "critical-or-likely"
+    assert rule.channels == ("soc-email",)
+    assert rule.enabled is True
+    assert rule.events[0] == "match"
+
+
+def test_inventory_is_still_required_without_watch(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[state]\ndatabase = \"state.db\"\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="inventory.path is required"):
+        load_config(path)
+
+
+def test_watch_rules_are_validated_while_loading(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[watch]
+enabled = true
+
+[[watch.rules]]
+name = "bad"
+condition = { all = [] }
+channels = ["soc-email"]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="watch rule 'bad' condition.all"):
+        load_config(path)
+
+
+def test_rule_sources_are_checked_against_the_configured_watch_sources(tmp_path):
+    with pytest.raises(ConfigurationError, match="eu_kev is not in watch.sources"):
+        write(
+            tmp_path,
+            """
+[watch]
+sources = ["nvd"]
+
+[[watch.rules]]
+name = "eu-only"
+condition = { kev = "eu" }
+channels = ["soc-email"]
+""",
+        )
+    with pytest.raises(ConfigurationError, match="euvd is not in watch.sources"):
+        write(
+            tmp_path,
+            """
+[watch]
+sources = ["nvd"]
+
+[[watch.rules]]
+name = "euvd-only"
+condition = { cvss_min = 1 }
+channels = ["soc-email"]
+cvss_providers = ["euvd"]
+""",
+        )
+    write(
+        tmp_path,
+        """
+[watch]
+sources = ["nvd", "cisa_kev"]
+
+[[watch.rules]]
+name = "cisa-only"
+condition = { kev = "cisa" }
+channels = ["soc-email"]
+""",
+    )
+
+
+def test_rule_options_are_validated_while_loading(tmp_path):
+    with pytest.raises(ConfigurationError, match="old_cves"):
+        write(
+            tmp_path,
+            """
+[watch]
+enabled = true
+
+[[watch.rules]]
+name = "old"
+condition = { cvss_min = 1 }
+channels = ["soc-email"]
+old_cves = "loud"
+""",
+        )
+    with pytest.raises(ConfigurationError, match="at least one event kind"):
+        write(
+            tmp_path,
+            """
+[watch]
+enabled = true
+
+[[watch.rules]]
+name = "silent"
+condition = { cvss_min = 1 }
+channels = ["soc-email"]
+events = []
+""",
+        )
+
+
+def test_watch_rules_store_normalized_cwe_values(tmp_path):
+    config = write(
+        tmp_path,
+        """
+[watch]
+enabled = true
+
+[[watch.rules]]
+name = "cwe"
+condition = { cwe = ["79", "cwe-80", "CWE-81"] }
+channels = ["soc-email"]
+""",
+    )
+    assert config.watch.rules[0].condition.leaves == (
+        ("cwe", ("CWE-79", "CWE-80", "CWE-81")),
+    )
+
+
+def test_epss_min_requires_the_epss_source(tmp_path):
+    with pytest.raises(
+        ConfigurationError,
+        match="watch rule 'likely' uses epss_min but epss is not in watch.sources",
+    ):
+        write(
+            tmp_path,
+            """
+[watch]
+sources = ["nvd"]
+
+[[watch.rules]]
+name = "likely"
+condition = { any = [ { cvss_min = 9 }, { not = { epss_min = 0.5 } } ] }
+channels = ["soc-email"]
+""",
+        )
+    config = write(
+        tmp_path,
+        """
+[watch]
+sources = ["nvd", "epss"]
+
+[[watch.rules]]
+name = "likely"
+condition = { epss_min = 0.5 }
+channels = ["soc-email"]
+""",
+    )
+    assert config.watch.rules[0].name == "likely"

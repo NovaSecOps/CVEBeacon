@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterable, Mapping
 
 CVSS_PROVIDERS = ("nvd", "cna", "cisa-adp", "euvd", "other")
@@ -13,10 +14,29 @@ CVSS_VERSIONS = ("2.0", "3.0", "3.1", "4.0")
 SSVC_EXPLOITATION = ("none", "poc", "active")
 STATUSES = ("published", "rejected")
 EPSS_BANDS = (0.1, 0.5, 0.9)
+EUVD_TIMESTAMP_FORMATS = ("%b %d, %Y, %I:%M:%S %p",)
 
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def euvd_datetime(value: Any) -> str | None:
+    """Normalise an EUVD timestamp to ISO 8601, or None when it is not one."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for pattern in EUVD_TIMESTAMP_FORMATS:
+        try:
+            return datetime.strptime(text, pattern).isoformat()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text).isoformat()
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +164,7 @@ class WatchRecord:
         object.__setattr__(self, "cwes", tuple(sorted({str(value) for value in self.cwes if value})))
         products = {(item.vendor, item.product): item for item in self.products if item.vendor and item.product}
         object.__setattr__(
-            self, "products", tuple(products[key] for key in sorted(products))[:50]
+            self, "products", tuple(products[key] for key in sorted(products))[:1000]
         )
         references = {item.url: item for item in self.references if item.url}
         object.__setattr__(
@@ -207,7 +227,8 @@ class WatchView:
     source_identifier: str | None = None
     cvss: tuple[CVSSEntry, ...] = ()
     cwes: tuple[str, ...] = ()
-    products: tuple[Product, ...] = ()
+    vendors: tuple[str, ...] = ()
+    products: tuple[str, ...] = ()
     references: tuple[Reference, ...] = ()
     ssvc_exploitation: str | None = None
     cisa_kev_added: str | None = None
@@ -241,6 +262,15 @@ class WatchView:
         return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _names(values: Iterable[str], limit: int = 500) -> tuple[str, ...]:
+    unique: dict[str, str] = {}
+    for value in values:
+        text = str(value).strip()
+        if text and text.casefold() not in unique:
+            unique[text.casefold()] = text
+    return tuple(unique[key] for key in sorted(unique)[:limit])
+
+
 def build_view(
     record: WatchRecord,
     *,
@@ -254,7 +284,8 @@ def build_view(
     """Combine the raw source rows into one CVE view.
 
     The CISA catalog owns KEV fields whenever it is configured; otherwise the
-    NVD record supplies its own CISA fields.
+    NVD record supplies its own CISA fields. Vendor and product names come from
+    NVD CPE products and the selected EUVD item.
     """
     cvss = record.cvss
     if euvd is not None and euvd.cvss is not None:
@@ -269,6 +300,11 @@ def build_view(
             record.cisa_ransomware,
         )
     eu = eu_kev if eu_catalog else None
+    vendors = [item.vendor for item in record.products if item.vendor]
+    products = [item.product for item in record.products if item.product]
+    if euvd is not None:
+        vendors.extend(item.vendor for item in euvd.vendors if item.vendor)
+        products.extend(item.product for item in euvd.vendors if item.product)
     return WatchView(
         cve_id=record.cve_id,
         status=record.status,
@@ -278,7 +314,8 @@ def build_view(
         source_identifier=record.source_identifier,
         cvss=cvss,
         cwes=record.cwes,
-        products=record.products,
+        vendors=_names(vendors),
+        products=_names(products),
         references=record.references,
         ssvc_exploitation=record.ssvc_exploitation,
         cisa_kev_added=cisa.added,

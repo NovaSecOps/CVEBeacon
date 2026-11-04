@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
+from .watch.rules import Rule, parse_rules, validate_rule_sources
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
 OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit")
@@ -22,6 +23,7 @@ WATCH_SETTINGS = {
     "initial",
     "backfill_days",
     "overlap_minutes",
+    "rules",
 }
 
 
@@ -106,12 +108,13 @@ class WatchConfig:
     initial: str = "baseline"
     backfill_days: int = 7
     overlap_minutes: int = 15
+    rules: tuple[Rule, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     config_path: Path
-    inventory: InventoryConfig
+    inventory: InventoryConfig | None
     database_path: Path
     output_dir: Path
     http: HttpConfig = field(default_factory=HttpConfig)
@@ -174,30 +177,67 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigurationError(f"cannot read configuration {config_path}: {exc}") from exc
 
     base = config_path.parent
+    watch_data = _table(data, "watch")
+    unknown_watch = sorted(set(watch_data) - WATCH_SETTINGS)
+    if unknown_watch:
+        raise ConfigurationError("unknown watch setting: " + ", ".join(unknown_watch))
+    watch_enabled = _boolean(watch_data, "enabled", False)
+    raw_watch_sources = watch_data.get("sources", list(WATCH_SOURCES))
+    if not isinstance(raw_watch_sources, list) or not all(
+        isinstance(value, str) and value.strip() for value in raw_watch_sources
+    ):
+        raise ConfigurationError("watch.sources must be a list of source names")
+    watch_sources = tuple(dict.fromkeys(value.strip().casefold() for value in raw_watch_sources))
+    unknown_sources = sorted(set(watch_sources) - set(WATCH_SOURCES))
+    if unknown_sources:
+        raise ConfigurationError("unknown watch source: " + ", ".join(unknown_sources))
+    if "nvd" not in watch_sources:
+        raise ConfigurationError("watch.sources must include nvd")
+    watch_initial = str(watch_data.get("initial", "baseline")).strip().casefold()
+    if watch_initial not in WATCH_INITIAL_MODES:
+        raise ConfigurationError("watch.initial must be baseline, backfill, or full")
+    watch_database = watch_data.get("database", "cvebeacon-watch.db")
+    if not isinstance(watch_database, str) or not watch_database.strip():
+        raise ConfigurationError("watch.database must be a nonempty path")
+    watch_rules = parse_rules(watch_data.get("rules"))
+    validate_rule_sources(watch_rules, watch_sources)
+
     inv = _table(data, "inventory")
-    if not inv.get("path"):
-        raise ConfigurationError("inventory.path is required")
-    columns = inv.get("columns", {name: name for name in CANONICAL_FIELDS})
-    if not isinstance(columns, dict):
-        raise ConfigurationError("inventory.columns must be a table")
-    missing = [name for name in columns if name in CANONICAL_FIELDS + OPTIONAL_FIELDS and not columns.get(name)]
-    if not columns.get("asset_id"):
-        missing.append("asset_id")
-    if missing:
-        raise ConfigurationError(
-            "inventory.columns is missing mappings for: " + ", ".join(missing)
+    inventory_config: InventoryConfig | None = None
+    if inv.get("path"):
+        columns = inv.get("columns", {name: name for name in CANONICAL_FIELDS})
+        if not isinstance(columns, dict):
+            raise ConfigurationError("inventory.columns must be a table")
+        missing = [name for name in columns if name in CANONICAL_FIELDS + OPTIONAL_FIELDS and not columns.get(name)]
+        if not columns.get("asset_id"):
+            missing.append("asset_id")
+        if missing:
+            raise ConfigurationError(
+                "inventory.columns is missing mappings for: " + ", ".join(missing)
+            )
+        header_row = inv.get("header_row", 1)
+        if not isinstance(header_row, int) or isinstance(header_row, bool) or header_row < 1:
+            raise ConfigurationError("inventory.header_row must be an integer of at least 1")
+        delimiter = inv.get("delimiter", ",")
+        if not isinstance(delimiter, str) or len(delimiter) != 1:
+            raise ConfigurationError("inventory.delimiter must be one character")
+        inventory_format = str(inv.get("format", "auto")).casefold().lstrip(".")
+        if inventory_format == "yml":
+            inventory_format = "yaml"
+        if inventory_format not in {"auto", "xlsx", "csv", "json", "yaml"}:
+            raise ConfigurationError("inventory.format must be auto, xlsx, csv, json, or yaml")
+        inventory_config = InventoryConfig(
+            path=_resolve(base, inv["path"]),
+            format=inventory_format,
+            worksheet=inv.get("worksheet"),
+            header_row=header_row,
+            records_path=inv.get("records_path"),
+            delimiter=delimiter,
+            encoding=str(inv.get("encoding", "utf-8-sig")),
+            columns={name: str(value) for name, value in columns.items() if name in CANONICAL_FIELDS + OPTIONAL_FIELDS},
         )
-    header_row = inv.get("header_row", 1)
-    if not isinstance(header_row, int) or isinstance(header_row, bool) or header_row < 1:
-        raise ConfigurationError("inventory.header_row must be an integer of at least 1")
-    delimiter = inv.get("delimiter", ",")
-    if not isinstance(delimiter, str) or len(delimiter) != 1:
-        raise ConfigurationError("inventory.delimiter must be one character")
-    inventory_format = str(inv.get("format", "auto")).casefold().lstrip(".")
-    if inventory_format == "yml":
-        inventory_format = "yaml"
-    if inventory_format not in {"auto", "xlsx", "csv", "json", "yaml"}:
-        raise ConfigurationError("inventory.format must be auto, xlsx, csv, json, or yaml")
+    elif not watch_enabled:
+        raise ConfigurationError("inventory.path is required")
 
     state = _table(data, "state")
     output = _table(data, "output")
@@ -246,28 +286,6 @@ def load_config(path: str | Path) -> AppConfig:
     if any(not isinstance(value, str) or not value.strip() for value in env_values.values()):
         raise ConfigurationError("notification credential environment-variable names cannot be blank")
 
-    watch_data = _table(data, "watch")
-    unknown_watch = sorted(set(watch_data) - WATCH_SETTINGS)
-    if unknown_watch:
-        raise ConfigurationError("unknown watch setting: " + ", ".join(unknown_watch))
-    raw_watch_sources = watch_data.get("sources", list(WATCH_SOURCES))
-    if not isinstance(raw_watch_sources, list) or not all(
-        isinstance(value, str) and value.strip() for value in raw_watch_sources
-    ):
-        raise ConfigurationError("watch.sources must be a list of source names")
-    watch_sources = tuple(dict.fromkeys(value.strip().casefold() for value in raw_watch_sources))
-    unknown_sources = sorted(set(watch_sources) - set(WATCH_SOURCES))
-    if unknown_sources:
-        raise ConfigurationError("unknown watch source: " + ", ".join(unknown_sources))
-    if "nvd" not in watch_sources:
-        raise ConfigurationError("watch.sources must include nvd")
-    watch_initial = str(watch_data.get("initial", "baseline")).strip().casefold()
-    if watch_initial not in WATCH_INITIAL_MODES:
-        raise ConfigurationError("watch.initial must be baseline, backfill, or full")
-    watch_database = watch_data.get("database", "cvebeacon-watch.db")
-    if not isinstance(watch_database, str) or not watch_database.strip():
-        raise ConfigurationError("watch.database must be a nonempty path")
-
     mappings: list[ProductMapping] = []
     mapping_keys: set[tuple[str, str]] = set()
     raw_mappings = data.get("product_mappings", [])
@@ -289,16 +307,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     return AppConfig(
         config_path=config_path,
-        inventory=InventoryConfig(
-            path=_resolve(base, inv["path"]),
-            format=inventory_format,
-            worksheet=inv.get("worksheet"),
-            header_row=header_row,
-            records_path=inv.get("records_path"),
-            delimiter=delimiter,
-            encoding=str(inv.get("encoding", "utf-8-sig")),
-            columns={name: str(value) for name, value in columns.items() if name in CANONICAL_FIELDS + OPTIONAL_FIELDS},
-        ),
+        inventory=inventory_config,
         database_path=_resolve(base, state.get("database", ".cvebeacon/state.db")),
         output_dir=_resolve(base, output.get("directory", "reports")),
         http=HttpConfig(
@@ -351,7 +360,7 @@ def load_config(path: str | Path) -> AppConfig:
             recipients=tuple(value.strip() for value in raw_recipients),
         ),
         watch=WatchConfig(
-            enabled=_boolean(watch_data, "enabled", False),
+            enabled=watch_enabled,
             database=_resolve(base, watch_database.strip()),
             sources=watch_sources,
             initial=watch_initial,
@@ -361,5 +370,6 @@ def load_config(path: str | Path) -> AppConfig:
             overlap_minutes=_bounded_int(
                 watch_data.get("overlap_minutes", 15), "watch.overlap_minutes", 0, 1440
             ),
+            rules=watch_rules,
         ),
     )
