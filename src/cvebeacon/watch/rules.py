@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -92,6 +92,8 @@ class AlertSnapshot:
     status: str
     max_severity_band: str = "none"
     max_epss_band: str = "none"
+    epss: float | None = None
+    severity: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +106,8 @@ class AlertSnapshot:
             "status": self.status,
             "max_severity_band": self.max_severity_band,
             "max_epss_band": self.max_epss_band,
+            "epss": self.epss,
+            "severity": self.severity,
         }
 
     @classmethod
@@ -121,6 +125,8 @@ class AlertSnapshot:
                     value.get("max_severity_band", value["severity_band"])
                 ),
                 max_epss_band=str(value.get("max_epss_band", value["epss_band"])),
+                epss=value.get("epss"),
+                severity=value.get("severity"),
             )
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ValueError("invalid alert snapshot") from exc
@@ -140,6 +146,18 @@ class AlertSnapshot:
             raise ValueError("invalid alert snapshot")
         if snapshot.max_epss_band not in EPSS_BAND_LABELS:
             raise ValueError("invalid alert snapshot")
+        if snapshot.epss is not None and (
+            isinstance(snapshot.epss, bool)
+            or not isinstance(snapshot.epss, (int, float))
+            or not 0.0 <= float(snapshot.epss) <= 1.0
+        ):
+            raise ValueError("invalid alert snapshot")
+        if snapshot.severity is not None and (
+            isinstance(snapshot.severity, bool)
+            or not isinstance(snapshot.severity, (int, float))
+            or not 0.0 <= float(snapshot.severity) <= 10.0
+        ):
+            raise ValueError("invalid alert snapshot")
         return snapshot
 
 
@@ -157,6 +175,7 @@ class AlertEvent:
     reasons: tuple[str, ...]
     occurrence: str
     initial: bool = False
+    details: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _fail(path: str, message: str) -> None:
@@ -557,7 +576,8 @@ def _exploitation_sources(view: WatchView) -> tuple[str, ...]:
 
 def snapshot_for(view: WatchView, rule: Rule) -> AlertSnapshot:
     highest = highest_cvss(view, rule.cvss_providers)
-    severity_band = _severity_band(highest.score if highest is not None else None)
+    severity = highest.score if highest is not None else None
+    severity_band = _severity_band(severity)
     epss_band = _epss_band(view.epss)
     return AlertSnapshot(
         cisa_kev=view.cisa_kev_added is not None,
@@ -569,6 +589,8 @@ def snapshot_for(view: WatchView, rule: Rule) -> AlertSnapshot:
         status=view.status,
         max_severity_band=severity_band,
         max_epss_band=epss_band,
+        epss=view.epss,
+        severity=severity,
     )
 
 
@@ -766,9 +788,16 @@ def _event(
     occurrence: str,
     *,
     initial: bool = False,
+    details: Mapping[str, Any] | None = None,
 ) -> AlertEvent:
     return AlertEvent(
-        rule.name, view.cve_id, kind, tuple(reasons), occurrence, initial
+        rule.name,
+        view.cve_id,
+        kind,
+        tuple(reasons),
+        occurrence,
+        initial,
+        dict(details or {}),
     )
 
 
@@ -871,6 +900,10 @@ def evaluate(
                     f"{snapshot.severity_band}",
                 ),
                 snapshot.severity_band,
+                details={
+                    "previous_severity": old.severity,
+                    "severity": snapshot.severity,
+                },
             )
         )
     max_epss = old.max_epss_band
@@ -886,6 +919,10 @@ def evaluate(
                 "epss_increase",
                 (f"epss {old.epss_band} -> {snapshot.epss_band}",),
                 snapshot.epss_band,
+                details={
+                    "previous_epss": old.epss,
+                    "epss": snapshot.epss,
+                },
             )
         )
     if "nvd_score_added" in rule.events and not old.nvd_score and snapshot.nvd_score:

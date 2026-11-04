@@ -7,6 +7,7 @@ import logging
 import math
 import time
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +17,15 @@ from .config import HttpConfig
 from .errors import SourceError
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+@dataclass(frozen=True, slots=True)
+class HttpResult:
+    """One bounded HTTP response, with a body that is never logged."""
+
+    status_code: int
+    headers: Mapping[str, str]
+    body: bytes
 
 
 class HttpClient:
@@ -225,3 +235,53 @@ class HttpClient:
 
     def post_json(self, url: str, **kwargs: Any) -> Any:
         return self.request_json("POST", url, **kwargs)
+
+    def request_once(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        params: Mapping[str, Any] | None = None,
+        data: Mapping[str, Any] | None = None,
+        json: Any = None,
+        content: bytes | str | None = None,
+        timeout: float | None = None,
+        body_limit: int = 65536,
+    ) -> HttpResult:
+        """Send one request without retries and without following redirects.
+
+        Delivery code classifies transport failures itself: a connect failure
+        is definitely unsent, while a read failure may follow an accepted
+        request. The response body is bounded and never included in an error.
+        """
+        if body_limit < 0:
+            raise ValueError("body limit must not be negative")
+        self.requests += 1
+        request = self._client.build_request(
+            method,
+            url,
+            headers=headers,
+            params=params,
+            data=data,
+            json=json,
+            content=content,
+            timeout=timeout,
+        )
+        response = self._client.send(request, follow_redirects=False, stream=True)
+        try:
+            status_code = response.status_code
+            body = bytearray()
+            try:
+                for chunk in response.iter_bytes():
+                    remaining = body_limit - len(body)
+                    if remaining <= 0:
+                        break
+                    body.extend(chunk[:remaining])
+            except (httpx.TimeoutException, httpx.TransportError):
+                # The status line arrived, so the request was accepted even if
+                # the optional response body was not read completely.
+                pass
+            return HttpResult(status_code, dict(response.headers), bytes(body))
+        finally:
+            response.close()

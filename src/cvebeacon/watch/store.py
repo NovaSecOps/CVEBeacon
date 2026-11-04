@@ -10,7 +10,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -19,6 +19,7 @@ from ..errors import SourceError, StateError
 from .records import (
     EPSS_BANDS,
     CVSSEntry,
+    DeliveryEvent,
     EUVDUpdate,
     KEVFields,
     Product,
@@ -37,13 +38,17 @@ from .rules import (
     rule_hash,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
 VIEW_POLICY_SOURCES = ("cisa_kev", "eu_kev", "euvd", "epss")
 VIEW_POLICY_BATCH = 5000
 EVALUATION_BATCH = 5000
+DELIVERY_RETRY_BASE_SECONDS = 300
+DELIVERY_RETRY_CAP_SECONDS = 6 * 3600
+DELIVERY_MAX_ATTEMPTS = 10
+DELIVERY_SELECT_LIMIT = 1000
 
 _NVD_CONTENT_COLUMNS = (
     "published",
@@ -152,6 +157,7 @@ _SCHEMA = (
         cve_id TEXT NOT NULL,
         kind TEXT NOT NULL,
         reasons_json TEXT NOT NULL,
+        details_json TEXT NOT NULL DEFAULT '{}',
         occurrence TEXT NOT NULL,
         initial INTEGER NOT NULL,
         created_at TEXT NOT NULL,
@@ -160,7 +166,7 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS watch_delivery (
         event_id INTEGER NOT NULL,
         channel TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending','sent','failed')),
+        status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','ambiguous')),
         attempts INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
         updated_at TEXT NOT NULL,
@@ -216,6 +222,17 @@ class WatchEventRow:
     reasons: tuple[str, ...]
     initial: bool
     created_at: str
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryStatusRow:
+    channel: str
+    pending: int = 0
+    sending: int = 0
+    failed: int = 0
+    ambiguous: int = 0
+    last_success: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,9 +385,9 @@ class WatchStore:
             )
             return
         version = rows[0]["value"]
-        if version not in {"1", "2"}:
+        if version not in {"1", "2", "3"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version == "2" and not _alert_columns_current(db):
+        if version in {"2", "3"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -403,15 +420,57 @@ class WatchStore:
                 )
             # P1a stored EUVD items without vendor names and never re-read them.
             # Rewinding the cursor makes the next sync re-read the initial window.
-            if meta.get("initial_window_start"):
+            if meta.get("initial_window_start") and meta.get("euvd_cursor"):
                 db.execute(
                     "UPDATE watch_meta SET value=? WHERE key='euvd_cursor'",
                     (meta["initial_window_start"],),
                 )
+        if version in {"1", "2"}:
+            WatchStore._migrate_event_details(db)
+            WatchStore._migrate_delivery_statuses(db)
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
             )
+
+    @staticmethod
+    def _migrate_event_details(db: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(watch_event)")
+        }
+        if "details_json" not in columns:
+            db.execute(
+                "ALTER TABLE watch_event ADD COLUMN "
+                "details_json TEXT NOT NULL DEFAULT '{}'"
+            )
+
+    @staticmethod
+    def _migrate_delivery_statuses(db: sqlite3.Connection) -> None:
+        """Rebuild the delivery table with the version 3 status set."""
+        db.execute("DROP TABLE IF EXISTS watch_delivery_v3")
+        db.execute(
+            "CREATE TABLE watch_delivery_v3 ("
+            "event_id INTEGER NOT NULL,"
+            "channel TEXT NOT NULL,"
+            "status TEXT NOT NULL CHECK(status IN "
+            "('pending','sending','sent','failed','ambiguous')),"
+            "attempts INTEGER NOT NULL DEFAULT 0,"
+            "last_error TEXT,"
+            "updated_at TEXT NOT NULL,"
+            "PRIMARY KEY(event_id, channel))"
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO watch_delivery_v3"
+            "(event_id,channel,status,attempts,last_error,updated_at) "
+            "SELECT event_id,channel,status,attempts,last_error,updated_at "
+            "FROM watch_delivery"
+        )
+        db.execute("DROP TABLE watch_delivery")
+        db.execute("ALTER TABLE watch_delivery_v3 RENAME TO watch_delivery")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS watch_delivery_status "
+            "ON watch_delivery(status)"
+        )
 
     def metadata(self) -> dict[str, str]:
         self.initialize()
@@ -1071,15 +1130,18 @@ class WatchStore:
                 )
                 for event in events:
                     reasons_json = canonical_json(list(event.reasons))
+                    details_json = canonical_json(dict(event.details))
                     cursor = db.execute(
                         "INSERT OR IGNORE INTO watch_event("
-                        "rule,cve_id,kind,reasons_json,occurrence,initial,created_at) "
-                        "VALUES (?,?,?,?,?,?,?)",
+                        "rule,cve_id,kind,reasons_json,details_json,occurrence,"
+                        "initial,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
                         (
                             event.rule.casefold(),
                             event.cve_id,
                             event.kind,
                             reasons_json,
+                            details_json,
                             event.occurrence,
                             1 if event.initial or (initial and event.kind == "match") else 0,
                             stamp,
@@ -1216,7 +1278,7 @@ class WatchStore:
         with closing(self._connect()) as db:
             rows = db.execute(
                 "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,"
-                "e.initial,e.created_at FROM watch_event e"
+                "e.details_json,e.initial,e.created_at FROM watch_event e"
                 + where
                 + " ORDER BY e.created_at DESC, e.id DESC LIMIT ?",
                 parameters,
@@ -1225,8 +1287,11 @@ class WatchStore:
         for row in rows:
             try:
                 reasons = tuple(str(item) for item in json.loads(row["reasons_json"]))
+                details = json.loads(row["details_json"] or "{}")
             except (TypeError, ValueError) as exc:
                 raise StateError("watch database contains an invalid event") from exc
+            if not isinstance(details, dict):
+                raise StateError("watch database contains an invalid event")
             output.append(
                 WatchEventRow(
                     row["id"],
@@ -1236,9 +1301,191 @@ class WatchStore:
                     reasons,
                     bool(row["initial"]),
                     row["created_at"],
+                    details,
                 )
             )
         return tuple(output)
+
+    @staticmethod
+    def _parse_timestamp(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def delivery_retry_delay(attempts: int) -> timedelta:
+        exponent = max(0, attempts - 1)
+        return timedelta(
+            seconds=min(
+                DELIVERY_RETRY_BASE_SECONDS * (2**exponent),
+                DELIVERY_RETRY_CAP_SECONDS,
+            )
+        )
+
+    def recover_sending(self) -> int:
+        """Treat deliveries left in ``sending`` by a crash as ambiguous."""
+        self.initialize()
+        now = _timestamp(self._clock)
+        with self.transaction() as db:
+            cursor = db.execute(
+                "UPDATE watch_delivery SET status='ambiguous', updated_at=?, "
+                "last_error='interrupted before confirmation' "
+                "WHERE status='sending'",
+                (now,),
+            )
+            return cursor.rowcount
+
+    def delivery_events(
+        self,
+        channel: str,
+        *,
+        catalogs: Sequence[str] = (),
+        now: datetime | None = None,
+        include_ambiguous: bool = False,
+        limit: int = DELIVERY_SELECT_LIMIT,
+    ) -> tuple[DeliveryEvent, ...]:
+        """Return the deliveries one channel may send now, oldest first."""
+        if limit < 1:
+            raise StateError("delivery batch size must be positive")
+        self.initialize()
+        current = _clock_value(lambda: now) if now is not None else _clock_value(self._clock)
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,e.details_json,"
+                "e.initial,e.created_at,d.status,d.attempts,d.updated_at "
+                "FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id "
+                "WHERE d.channel=? AND ("
+                "d.status='pending' OR "
+                "(d.status='failed' AND d.attempts < ?) OR "
+                "(d.status='ambiguous' AND ?)) "
+                "ORDER BY e.created_at, e.id LIMIT ?",
+                (
+                    channel,
+                    DELIVERY_MAX_ATTEMPTS,
+                    1 if include_ambiguous else 0,
+                    limit,
+                ),
+            ).fetchall()
+            output: list[DeliveryEvent] = []
+            for row in rows:
+                if row["status"] == "failed":
+                    updated = self._parse_timestamp(row["updated_at"])
+                    delay = self.delivery_retry_delay(int(row["attempts"]))
+                    if updated is not None and updated + delay > current:
+                        continue
+                view = self._view(db, row["cve_id"], catalogs)
+                if view is None:
+                    continue
+                try:
+                    reasons = tuple(
+                        str(item) for item in json.loads(row["reasons_json"])
+                    )
+                    details = json.loads(row["details_json"] or "{}")
+                except (TypeError, ValueError) as exc:
+                    raise StateError(
+                        "watch database contains an invalid event"
+                    ) from exc
+                if not isinstance(details, dict):
+                    raise StateError("watch database contains an invalid event")
+                output.append(
+                    DeliveryEvent(
+                        row["id"],
+                        row["rule"],
+                        row["cve_id"],
+                        row["kind"],
+                        reasons,
+                        bool(row["initial"]),
+                        row["created_at"],
+                        view,
+                        details,
+                        str(row["status"]),
+                    )
+                )
+        return tuple(output)
+
+    def mark_delivery(
+        self,
+        event_ids: Iterable[int],
+        channel: str,
+        status: str,
+        *,
+        error: str | None = None,
+    ) -> int:
+        """Move delivery rows through the state machine in one transaction."""
+        if status not in {"pending", "sending", "sent", "failed", "ambiguous"}:
+            raise StateError(f"unknown delivery status {status!r}")
+        identifiers = sorted({int(value) for value in event_ids})
+        if not identifiers:
+            return 0
+        now = _timestamp(self._clock)
+        retryable = status in {"failed", "ambiguous"}
+        with self.transaction() as db:
+            for identifier in identifiers:
+                if retryable:
+                    db.execute(
+                        "UPDATE watch_delivery SET status=?, attempts=attempts+1, "
+                        "last_error=?, updated_at=? WHERE event_id=? AND channel=?",
+                        (status, (error or "")[:500], now, identifier, channel),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE watch_delivery SET status=?, last_error=NULL, "
+                        "updated_at=? WHERE event_id=? AND channel=?",
+                        (status, now, identifier, channel),
+                    )
+        return len(identifiers)
+
+    def delivery_status(
+        self, channels: Iterable[str] = ()
+    ) -> tuple[DeliveryStatusRow, ...]:
+        """Return per-channel delivery counts for status output."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT channel,status,COUNT(*) AS count,"
+                "MAX(CASE WHEN status='sent' THEN updated_at END) AS last_success "
+                "FROM watch_delivery GROUP BY channel,status"
+            ).fetchall()
+        values: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry = values.setdefault(
+                row["channel"],
+                {
+                    "pending": 0,
+                    "sending": 0,
+                    "failed": 0,
+                    "ambiguous": 0,
+                    "last_success": None,
+                },
+            )
+            if row["status"] in {"pending", "sending", "failed", "ambiguous"}:
+                entry[row["status"]] = int(row["count"])
+            if row["last_success"] and (
+                entry["last_success"] is None
+                or row["last_success"] > entry["last_success"]
+            ):
+                entry["last_success"] = row["last_success"]
+        for channel in channels:
+            values.setdefault(
+                channel,
+                {
+                    "pending": 0,
+                    "sending": 0,
+                    "failed": 0,
+                    "ambiguous": 0,
+                    "last_success": None,
+                },
+            )
+        return tuple(
+            DeliveryStatusRow(channel, **values[channel])
+            for channel in sorted(values)
+        )
 
     def prune_euvd(self, *, now: datetime) -> int | None:
         """Delete old, non-exploited items that no stored CVE refers to."""

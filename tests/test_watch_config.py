@@ -12,6 +12,11 @@ path = "inventory.csv"
 database = "state/state.db"
 [output]
 directory = "reports"
+
+[watch.channels.soc-email]
+type = "webhook"
+enabled = false
+url = "https://example.invalid/cvebeacon"
 """
 
 
@@ -102,7 +107,9 @@ def test_watch_sources_shape_is_strict(tmp_path, value):
 
 def test_watch_must_be_a_table(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text("watch = true\n" + BASE, encoding="utf-8")
+    path.write_text(
+        'watch = true\n[inventory]\npath = "inventory.csv"\n', encoding="utf-8"
+    )
     with pytest.raises(ConfigurationError, match="must be a table"):
         load_config(path)
 
@@ -115,6 +122,11 @@ def test_watch_only_config_without_inventory_loads(tmp_path):
 enabled = true
 database = "watch.db"
 sources = ["nvd", "epss"]
+
+[watch.channels.soc-email]
+type = "webhook"
+enabled = false
+url = "https://example.invalid/cvebeacon"
 
 [[watch.rules]]
 name = "critical-or-likely"

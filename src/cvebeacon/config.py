@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
+from .watch.channels import ChannelConfig, parse_channels, validate_rule_channels
 from .watch.rules import Rule, parse_rules, validate_rule_sources
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
@@ -24,6 +25,7 @@ WATCH_SETTINGS = {
     "backfill_days",
     "overlap_minutes",
     "rules",
+    "channels",
 }
 
 
@@ -109,6 +111,7 @@ class WatchConfig:
     backfill_days: int = 7
     overlap_minutes: int = 15
     rules: tuple[Rule, ...] = ()
+    channels: tuple[ChannelConfig, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +204,8 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigurationError("watch.database must be a nonempty path")
     watch_rules = parse_rules(watch_data.get("rules"))
     validate_rule_sources(watch_rules, watch_sources)
+    watch_channels = parse_channels(watch_data.get("channels"), base=base)
+    validate_rule_channels(watch_rules, watch_channels)
 
     inv = _table(data, "inventory")
     inventory_config: InventoryConfig | None = None
@@ -371,5 +376,6 @@ def load_config(path: str | Path) -> AppConfig:
                 watch_data.get("overlap_minutes", 15), "watch.overlap_minutes", 0, 1440
             ),
             rules=watch_rules,
+            channels=watch_channels,
         ),
     )
