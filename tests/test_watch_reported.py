@@ -421,6 +421,7 @@ url = "https://example.test/hook"
 
     assert cli.main(["--config", str(config.config_path), "watch", "events"]) == 0
     output = capsys.readouterr().out
+    assert "Published unknown · first seen " in output
     assert "Reported to clients by alice at " in output
 
     assert cli.main(["--config", str(config.config_path), "watch", "status"]) == 0
@@ -441,6 +442,42 @@ def test_alert_and_initial_digest_show_the_mark():
             "Reported to clients by alice at 2026-11-03 12:00 UTC"
             in message.text
         )
+
+
+def test_alert_and_webhook_keep_dates_and_report_output():
+    current = view(
+        "CVE-2026-1234",
+        published="2026-10-30T14:00:00.000",
+        first_seen="2026-11-04T09:15:00+00:00",
+    )
+    item = DeliveryEvent(
+        1,
+        "critical",
+        "CVE-2026-1234",
+        "match",
+        ("cvss 9.8 v3.1 (cna)",),
+        False,
+        "2026-11-04T12:00:00+00:00",
+        current,
+        {},
+        "pending",
+        MARK,
+    )
+    message = build_messages(
+        (item,),
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={"critical": "critical"},
+    )[0]
+    assert "Published 2026-10-30 · first seen 2026-11-04" in message.text
+    assert "Reported to clients by alice at 2026-11-03 12:00 UTC" in message.text
+
+    payload = webhook_payload((item,), {"critical": "critical"})
+    assert payload["version"] == 2
+    assert payload["events"][0]["view"]["published"] == "2026-10-30T14:00:00.000"
+    assert payload["events"][0]["view"]["first_seen"] == "2026-11-04T09:15:00+00:00"
+    assert payload["events"][0]["view"]["reported"]["by"] == "alice"
 
 
 def test_webhook_payload_includes_the_reported_state():
