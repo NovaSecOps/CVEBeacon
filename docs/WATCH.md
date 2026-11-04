@@ -480,9 +480,10 @@ The account file is `cvebeacon-users.db` beside the watch database. It is
 created owner-only (`0600`) on POSIX and is separate from the CVE history so
 credentials are not copied with a public watch database and accounts survive a
 watch database rebuild. On POSIX every ancestor of the account file up to the
-filesystem root must be owned by the CVEBeacon account (or root) and must not be
-writable by untrusted accounts; a root-owned sticky directory such as `/tmp` is
-accepted, but a shared writable directory owned by another user is not. When
+filesystem root must be owned by the CVEBeacon account or root, or be
+sticky-bit protected; a root-owned sticky directory such as `/tmp` is accepted, but any
+ancestor owned by another account is rejected even when its current mode is
+read-only, because that owner could change it. When
 CVEBeacon creates a missing data directory it uses mode `0700` regardless of
 the process umask; an existing directory that fails the check is reported with
 an actionable `chmod go-w <dir>` message. Back up both files together, and keep
