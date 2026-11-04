@@ -233,6 +233,7 @@ def test_windows_fixed_times_generate_one_task_with_one_action(tmp_path, monkeyp
         assert arguments.endswith(" run")
         principal = root.find(f".//{NS}Principal")
         assert principal.findtext(f"{NS}LogonType") == "InteractiveToken"
+        assert principal.findtext(f"{NS}UserId") is None
         assert principal.findtext(f"{NS}RunLevel") == "LeastPrivilege"
         with open(xml_path, "rb") as handle:
             assert handle.read(2) in {b"\xff\xfe", b"\xfe\xff"}
@@ -270,6 +271,178 @@ def test_windows_interval_both_uses_plain_schtasks(tmp_path, monkeypatch):
     assert args[5:9] == ["/SC", "HOURLY", "/MO", "4"]
     assert args[-1].endswith(" run")
     assert args[-1].count("--config") == 1
+
+
+def windows_plan(tmp_path, **kwargs):
+    return make_plan(
+        tmp_path / "config.toml",
+        times=kwargs.pop("times", "07:00,19:00"),
+        system="windows",
+        executable=tmp_path / "cvebeacon.exe",
+        allow_incompatible=True,
+        **kwargs,
+    )
+
+
+def windows_root(plan):
+    text = _windows_xml(plan).decode("utf-16")
+    return ET.fromstring(text.split("?>", 1)[1].lstrip())
+
+
+def test_windows_logged_out_task_uses_s4u_with_an_explicit_account(tmp_path):
+    plan = windows_plan(tmp_path, run_logged_out=True, user_id=r"CORP\svc-cvebeacon")
+    principal = windows_root(plan).find(f".//{NS}Principal")
+    assert principal.findtext(f"{NS}UserId") == r"CORP\svc-cvebeacon"
+    assert principal.findtext(f"{NS}LogonType") == "S4U"
+    assert principal.findtext(f"{NS}RunLevel") == "LeastPrivilege"
+
+
+def test_windows_logged_out_account_defaults_to_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERDOMAIN", "CORP")
+    monkeypatch.setenv("USERNAME", "svc-cvebeacon")
+    plan = windows_plan(tmp_path, run_logged_out=True)
+    assert plan.user_id == r"CORP\svc-cvebeacon"
+
+
+def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = make_plan(
+        tmp_path / "config.toml",
+        4,
+        command="watch",
+        executable=tmp_path / "cvebeacon.exe",
+        run_logged_out=True,
+        user_id=r"CORP\svc-cvebeacon",
+    )
+    calls = []
+    roots = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        roots.append(ET.parse(args[3]).getroot())
+        return Result()
+
+    install(plan, run=fake_run)
+    assert calls[0][:3] == ["schtasks", "/Create", "/XML"]
+    root = roots[0]
+    repetition = root.find(f".//{NS}TimeTrigger/{NS}Repetition")
+    assert repetition is not None
+    assert repetition.findtext(f"{NS}Interval") == "PT4H"
+    assert root.find(f".//{NS}CalendarTrigger") is None
+    principal = root.find(f".//{NS}Principal")
+    assert principal.findtext(f"{NS}LogonType") == "S4U"
+    assert principal.findtext(f"{NS}UserId") == r"CORP\svc-cvebeacon"
+
+
+def test_logged_out_schedule_is_rejected_on_linux(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
+    with pytest.raises(SchedulingError, match="only on Windows"):
+        make_plan(tmp_path / "config.toml", times="07:00", run_logged_out=True)
+    with pytest.raises(SchedulingError, match="only on Windows"):
+        make_plan(
+            tmp_path / "config.toml",
+            4,
+            system="linux",
+            allow_incompatible=True,
+            run_logged_out=True,
+        )
+
+
+def test_windows_access_denied_asks_for_an_elevated_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = make_plan(
+        tmp_path / "config.toml",
+        times="07:00",
+        executable=tmp_path / "cvebeacon.exe",
+        run_logged_out=True,
+        user_id=r"CORP\svc-cvebeacon",
+    )
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(
+            returncode=1, stdout="", stderr="ERROR: Access is denied."
+        )
+
+    with pytest.raises(SchedulingError) as error:
+        install(plan, run=fake_run)
+    message = str(error.value)
+    assert "Access is denied" in message
+    assert "run from an elevated prompt" in message
+    assert "\n" not in message
+
+
+def test_windows_status_reports_logged_off_execution(tmp_path):
+    logged_out = _describe_windows_xml(
+        _windows_xml(windows_plan(tmp_path, run_logged_out=True, user_id=r"CORP\svc")).decode(
+            "utf-16"
+        )
+    )
+    assert "Account: CORP\\svc" in logged_out
+    assert "Runs while logged off: yes" in logged_out
+    interactive = _describe_windows_xml(
+        _windows_xml(windows_plan(tmp_path)).decode("utf-16")
+    )
+    assert "Runs while logged off: no" in interactive
+    assert "Account:" not in interactive
+
+
+def test_cli_schedule_run_logged_out_is_forwarded(tmp_path, monkeypatch, capsys):
+    config = write_schedule_config(tmp_path, watch=True)
+    monkeypatch.setenv("USERDOMAIN", "CORP")
+    monkeypatch.setenv("USERNAME", "svc-cvebeacon")
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    installed = []
+    monkeypatch.setattr(cli, "install", lambda plan: installed.append(plan))
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--command",
+                "watch",
+                "--run-logged-out",
+                "--yes",
+            ]
+        )
+        == 0
+    )
+    assert installed[0].run_logged_out is True
+    assert installed[0].user_id == r"CORP\svc-cvebeacon"
+    assert "Runs while logged off: yes" in capsys.readouterr().out
+
+
+def test_cli_schedule_run_logged_out_is_rejected_on_linux(tmp_path, monkeypatch, capsys):
+    config = write_schedule_config(tmp_path, watch=True)
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--command",
+                "watch",
+                "--run-logged-out",
+                "--yes",
+            ]
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert "only on Windows" in error
+    assert "Traceback" not in error
 
 
 def write_schedule_config(tmp_path, *, inventory: bool = False, watch: bool = False):
