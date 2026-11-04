@@ -39,10 +39,11 @@ starts only when the user is logged on. It is written as UTF-16 to a temporary
 file that is deleted after `schtasks` returns. Interval mode uses the plain
 `schtasks /SC` form and needs no XML: `/SC HOURLY /MO N` for intervals below 24
 hours, or `/SC DAILY` for 24 hours. With `--run-logged-out`, CVEBeacon writes a
-temporary PowerShell script and registers the task through the Task Scheduler COM
-API (`Schedule.Service`, `RegisterTask` with the S4U logon type and the explicit
-account); no password is requested or stored. Removal and status still use
-`schtasks`.
+temporary PowerShell script and tries the Task Scheduler COM API
+(`Schedule.Service`, `RegisterTask` with the S4U logon type) for the account,
+then with the principal from the XML, and finally passwordless
+`schtasks /Create /XML ... /RU <account> /NP`; the first accepted method is used.
+No password is requested or stored. Removal and status still use `schtasks`.
 
 Add `--run-logged-out` to run the task whether the account is signed in or not.
 It is Windows-only, and Linux rejects it. The task principal becomes `LogonType

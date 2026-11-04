@@ -374,9 +374,9 @@ counts and pending deliveries, and `cb watch notify test soc-email` checks a cha
 Pick one registration flow. Both must show
 `Runs as: CVEHOST\svc-cvebeacon (S4U, while logged off)` before `--yes`. S4U
 stores no password: HTTPS works, Windows-authenticated shares do not.
-CVEBeacon registers the S4U task through the Task Scheduler COM API, so the
-command does not prompt for or store a password; removal and status still use
-`schtasks`.
+CVEBeacon registers the S4U task through the Task Scheduler COM API, retrying
+with the XML principal and then passwordless `schtasks /RU ... /NP`; it never
+prompts for or stores a password. Removal and status still use `schtasks`.
 
 **The service account registers its own task.** In the service account's shell
 (`runas /user:CVEHOST\svc-cvebeacon powershell`), define `cb` there, then:
