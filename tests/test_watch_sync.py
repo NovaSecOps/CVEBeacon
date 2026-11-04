@@ -18,7 +18,7 @@ from cvebeacon.watch import feeds
 from cvebeacon.watch.feeds import iso_timestamp, nvd_windows
 from cvebeacon.watch.records import KEVFields, WatchRecord
 from cvebeacon.watch.store import WatchStore
-from cvebeacon.watch.sync import FULL_HISTORY_START, sync_watch
+from cvebeacon.watch.sync import FULL_HISTORY_START, SourceSummary, SyncReport, sync_watch
 
 EPSS_FILE_PREFIX = "https://epss.empiricalsecurity.com/"
 
@@ -144,6 +144,7 @@ def test_full_mode_requires_confirmation_before_any_request(tmp_path, capsys):
     assert "NVD window(s)" in output
     assert "4,200 EUVD requests" in output
     assert "1 EPSS file per day" in output
+    assert "about 2 hour(s)" in output
     assert metadata(config).get("nvd_cursor") is None
 
 
@@ -794,6 +795,230 @@ def test_euvd_resumes_from_the_last_committed_chunk(tmp_path):
     assert not second.failures
     assert dates[2] == "2026-10-03"
     assert metadata(config)["euvd_cursor"] == "2026-11-03"
+
+
+def test_euvd_retries_a_throttled_page_after_a_success(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
+    sleeps: list[float] = []
+    pages: list[int] = []
+    blocked = [True]
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        page = int(dict(request.url.params)["page"])
+        pages.append(page)
+        if page == 0:
+            return httpx.Response(
+                200,
+                json={
+                    "total": 101,
+                    "items": [euvd_item(f"EUVD-{index}") for index in range(100)],
+                },
+            )
+        if blocked[0]:
+            blocked[0] = False
+            return httpx.Response(403)
+        return httpx.Response(
+            200, json={"total": 101, "items": [euvd_item("EUVD-100")]}
+        )
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=euvd_request),
+        sleep=sleeps.append,
+    )
+    assert not report.failures
+    assert pages == [0, 1, 1]
+    assert sleeps == [60.0]
+    summary = next(item for item in report.summaries if item.source == "euvd")
+    assert summary.requests == 3
+    assert summary.throttled == 1
+    assert summary.throttle_wait == 60
+    assert metadata(config)["euvd_cursor"] == "2026-11-03"
+
+
+def test_euvd_honors_retry_after_on_a_429(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
+    sleeps: list[float] = []
+    blocked = [True]
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        page = int(dict(request.url.params)["page"])
+        if page == 0:
+            return httpx.Response(
+                200,
+                json={
+                    "total": 101,
+                    "items": [euvd_item(f"EUVD-{index}") for index in range(100)],
+                },
+            )
+        if blocked[0]:
+            blocked[0] = False
+            return httpx.Response(429, headers={"Retry-After": "30"})
+        return httpx.Response(
+            200, json={"total": 101, "items": [euvd_item("EUVD-100")]}
+        )
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=euvd_request),
+        sleep=sleeps.append,
+    )
+    assert not report.failures
+    assert sleeps == [30.0]
+    summary = next(item for item in report.summaries if item.source == "euvd")
+    assert summary.throttled == 1
+    assert summary.throttle_wait == 30
+
+
+def test_euvd_gives_up_after_the_throttle_budget_and_resumes(tmp_path):
+    config = write_config(
+        tmp_path, sources=("nvd", "euvd"), initial="backfill", backfill_days=60
+    )
+    sleeps: list[float] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def throttled_euvd(request):
+        if dict(request.url.params)["fromUpdatedDate"] == "2026-09-04":
+            return httpx.Response(200, json={"total": 0, "items": []})
+        return httpx.Response(403)
+
+    first = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=throttled_euvd),
+        sleep=sleeps.append,
+    )
+    assert first.failures == ("euvd",)
+    assert sleeps == [60.0, 120.0, 240.0]
+    assert metadata(config)["euvd_cursor"] == "2026-10-03"
+    summary = next(item for item in first.summaries if item.source == "euvd")
+    assert summary.requests == 5
+    assert summary.throttled == 3
+    assert summary.throttle_wait == 420
+
+    dates: list[str] = []
+
+    def resumed_euvd(request):
+        dates.append(dict(request.url.params)["fromUpdatedDate"])
+        return httpx.Response(200, json={"total": 0, "items": []})
+
+    second = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=resumed_euvd),
+        now=NOW + timedelta(hours=1),
+    )
+    assert not second.failures
+    # The cursor day is re-read inclusively; the completed chunk is not replayed.
+    assert dates == ["2026-10-03", "2026-11-02"]
+    assert "2026-09-04" not in dates
+    assert metadata(config)["euvd_cursor"] == "2026-11-03"
+
+
+def test_first_euvd_403_fails_without_backoff(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
+    sleeps: list[float] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def denied(request):
+        return httpx.Response(403)
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=denied),
+        sleep=sleeps.append,
+    )
+    assert report.failures == ("euvd",)
+    assert sleeps == []
+    summary = next(item for item in report.summaries if item.source == "euvd")
+    assert summary.requests == 1
+    assert summary.throttled == 0
+    assert metadata(config)["euvd_cursor"] == "2026-10-27"
+
+
+def test_eu_kev_backs_off_after_euvd_success(tmp_path):
+    config = write_config(
+        tmp_path, sources=("nvd", "euvd", "eu_kev"), initial="backfill"
+    )
+    sleeps: list[float] = []
+    blocked = [True]
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        return httpx.Response(200, json={"total": 0, "items": []})
+
+    def eu_request(request):
+        if blocked[0]:
+            blocked[0] = False
+            return httpx.Response(403)
+        return httpx.Response(200, json=[])
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=euvd_request, eu=eu_request),
+        sleep=sleeps.append,
+    )
+    assert not report.failures
+    assert sleeps == [60.0]
+    summary = next(item for item in report.summaries if item.source == "eu_kev")
+    assert summary.requests == 2
+    assert summary.throttled == 1
+    assert summary.throttle_wait == 60
+
+
+def test_cancellation_during_backoff_keeps_committed_chunks(tmp_path):
+    config = write_config(
+        tmp_path, sources=("nvd", "euvd"), initial="backfill", backfill_days=60
+    )
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        if dict(request.url.params)["fromUpdatedDate"] == "2026-09-04":
+            return httpx.Response(200, json={"total": 0, "items": []})
+        return httpx.Response(403)
+
+    def cancel(_seconds):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run(
+            config,
+            handler_for(nvd=nvd_request, euvd=euvd_request),
+            sleep=cancel,
+        )
+    assert metadata(config)["euvd_cursor"] == "2026-10-03"
+
+
+def test_sync_output_reports_throttling(capsys):
+    cli._print_sync_report(
+        SyncReport(
+            summaries=(
+                SourceSummary(
+                    "euvd",
+                    requests=3,
+                    records=1,
+                    throttled=2,
+                    throttle_wait=180,
+                ),
+            )
+        )
+    )
+    assert (
+        "euvd: 3 request(s), 1 record(s), 0 new, 0 changed, "
+        "throttled 2x, waited 180s"
+    ) in capsys.readouterr().out
 
 
 def test_invalid_euvd_metric_fails_the_step_without_advancing_the_cursor(tmp_path):

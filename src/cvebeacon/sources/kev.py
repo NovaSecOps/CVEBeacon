@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..http import HttpClient
+from ..http import HttpClient, Throttle
 from ..errors import SourceError
 from ..models import Evidence
 from .common import cve_id, source_payload
@@ -39,8 +39,8 @@ class KEVSource:
         return output
 
     @source_payload("eu_kev")
-    def eu(self) -> dict[str, Evidence]:
-        payload = self.http.get_json(EU_URL, source="eu_kev")
+    def eu(self, *, throttle: Throttle | None = None) -> dict[str, Evidence]:
+        payload = self.http.get_json(EU_URL, source="eu_kev", throttle=throttle)
         if isinstance(payload, list):
             items = payload
         elif isinstance(payload, dict) and ("items" in payload or "data" in payload):

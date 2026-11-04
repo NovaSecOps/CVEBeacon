@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
 from ..config import AppConfig, WatchConfig
 from ..errors import CVEBeaconError, SourceError, StateError
-from ..http import HttpClient
+from ..http import HttpClient, Throttle
 from . import feeds
 from .records import EPSS_BANDS
 from .rules import rule_epss_thresholds
@@ -36,6 +37,8 @@ class SourceSummary:
     ignored: int = 0
     lookup_failures: int = 0
     error: str | None = None
+    throttled: int = 0
+    throttle_wait: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +105,10 @@ def _confirm_full_history(
     interval: float,
 ) -> bool:
     windows = feeds.nvd_windows(start, now)
-    hours = (NVD_REQUEST_ESTIMATE + EUVD_REQUEST_ESTIMATE) * interval / 3600
+    hours = (
+        NVD_REQUEST_ESTIMATE * interval
+        + EUVD_REQUEST_ESTIMATE * feeds.EUVD_MIN_INTERVAL
+    ) / 3600
     print(
         f"full history: {len(windows)} NVD window(s), roughly {NVD_REQUEST_ESTIMATE}+ NVD "
         f"requests and roughly {EUVD_REQUEST_ESTIMATE:,} EUVD requests"
@@ -142,6 +148,7 @@ def sync_watch(
     assume_yes: bool = False,
     clock: Callable[[], datetime] = _utc_now,
     confirm: Callable[[str], bool] = _confirm,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> SyncReport:
     watch = config.watch
     _require_enabled(watch)
@@ -290,8 +297,12 @@ def sync_watch(
 
     nvd_requests = http.requests - nvd_before
 
+    throttle = Throttle(sleep=sleep)
+
     if "euvd" in watch.sources:
         euvd_before = http.requests
+        euvd_throttled_before = throttle.count
+        euvd_waited_before = throttle.waited
         euvd_records = euvd_new = euvd_changed = euvd_ignored = 0
         euvd_error: str | None = None
         euvd_cursor = _cursor_date(metadata.get("euvd_cursor"))
@@ -300,7 +311,10 @@ def sync_watch(
             chunk_start, chunk_end = pending_chunks.pop()
             try:
                 feed = feeds.fetch_euvd(
-                    http, start=chunk_start, end=chunk_end
+                    http,
+                    start=chunk_start,
+                    end=chunk_end,
+                    throttle=throttle,
                 )
             except SourceError as exc:
                 euvd_error = str(exc)
@@ -336,6 +350,8 @@ def sync_watch(
                 euvd_changed,
                 ignored=euvd_ignored,
                 error=euvd_error,
+                throttled=throttle.count - euvd_throttled_before,
+                throttle_wait=throttle.waited - euvd_waited_before,
             )
         )
 
@@ -366,12 +382,18 @@ def sync_watch(
 
     if "eu_kev" in watch.sources:
         eu_before = http.requests
+        eu_throttled_before = throttle.count
+        eu_waited_before = throttle.waited
         try:
-            eu = feeds.fetch_kev(http, eu=True)
+            eu = feeds.fetch_kev(http, eu=True, throttle=throttle)
         except SourceError as exc:
             summaries.append(
                 SourceSummary(
-                    "eu_kev", http.requests - eu_before, error=str(exc)
+                    "eu_kev",
+                    http.requests - eu_before,
+                    error=str(exc),
+                    throttled=throttle.count - eu_throttled_before,
+                    throttle_wait=throttle.waited - eu_waited_before,
                 )
             )
         else:
@@ -384,6 +406,8 @@ def sync_watch(
                     len(eu),
                     counts.new,
                     counts.changed,
+                    throttled=throttle.count - eu_throttled_before,
+                    throttle_wait=throttle.waited - eu_waited_before,
                 )
             )
 

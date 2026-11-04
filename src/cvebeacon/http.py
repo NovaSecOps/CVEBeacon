@@ -17,6 +17,42 @@ from .config import HttpConfig
 from .errors import SourceError
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+THROTTLE_STATUS = {403, 429}
+
+
+@dataclass(slots=True)
+class Throttle:
+    """Bounded backoff shared by requests to one upstream host per run.
+
+    The first successful response marks the host as reachable. Later HTTP 403
+    or 429 responses then count as throttling instead of a permanent rejection.
+    Waits are bounded per retry and in total, and the caller's ``sleep`` keeps
+    the wait interruptible.
+    """
+
+    sleep: Callable[[float], None] = time.sleep
+    delays: tuple[float, ...] = (60.0, 120.0, 240.0)
+    maximum_delay: float = 240.0
+    budget_seconds: float = 600.0
+    maximum_retries: int = 20
+    succeeded: bool = False
+    count: int = 0
+    waited: float = 0.0
+
+    def wait(self, retry_after: float | None = None) -> bool:
+        """Wait when the budget allows another retry, and report whether to retry."""
+        if self.count >= self.maximum_retries:
+            return False
+        delay = retry_after
+        if delay is None:
+            delay = self.delays[min(self.count, len(self.delays) - 1)]
+        delay = min(max(delay, 0.0), self.maximum_delay)
+        if self.waited + delay > self.budget_seconds:
+            return False
+        self.sleep(delay)
+        self.count += 1
+        self.waited += delay
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,10 +145,12 @@ class HttpClient:
         expected: tuple[int, ...] = (200,),
         max_retries: int | None = None,
         decode_json: bool = True,
+        throttle: Throttle | None = None,
     ) -> Any:
         last_error: Exception | None = None
         retry_count = self.config.retries if max_retries is None else max_retries
-        for attempt in range(retry_count + 1):
+        attempt = 0
+        while True:
             self.requests += 1
             self._pace(source, minimum_interval)
             try:
@@ -125,8 +163,11 @@ class HttpClient:
                 if attempt >= retry_count:
                     break
                 self._sleep(min(self.config.backoff_seconds * (2**attempt), 120))
+                attempt += 1
                 continue
             if response.status_code in expected:
+                if throttle is not None:
+                    throttle.succeeded = True
                 if not decode_json:
                     return None
                 if response.status_code == 204 or not response.content:
@@ -135,6 +176,28 @@ class HttpClient:
                     return response.json()
                 except ValueError as exc:
                     raise SourceError(source, "source returned invalid JSON") from exc
+            if (
+                throttle is not None
+                and response.status_code in THROTTLE_STATUS
+                and throttle.succeeded
+            ):
+                retry_after = (
+                    self._retry_after(
+                        response.headers.get("Retry-After"),
+                        0.0,
+                        throttle.maximum_delay,
+                    )
+                    if response.headers.get("Retry-After")
+                    else None
+                )
+                if throttle.wait(retry_after):
+                    continue
+                raise SourceError(
+                    source,
+                    f"HTTP {response.status_code}",
+                    status_code=response.status_code,
+                    requests=attempt + 1,
+                )
             if response.status_code not in RETRYABLE_STATUS or attempt >= retry_count:
                 # Upstream headers/reason phrases can echo secret URLs or tokens.
                 raise SourceError(
@@ -145,6 +208,7 @@ class HttpClient:
                 )
             delay = self.config.backoff_seconds * (2**attempt)
             self._sleep(self._retry_after(response.headers.get("Retry-After"), delay))
+            attempt += 1
         failure_type = type(last_error).__name__ if last_error else "transport failure"
         raise SourceError(
             source,
