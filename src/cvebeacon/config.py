@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
+from .watch.catalog import DEFAULT_LANGUAGE, canonical_language
 from .watch.channels import ChannelConfig, parse_channels, validate_rule_channels
 from .watch.rules import Rule, parse_rules, validate_rule_sources
 
@@ -25,6 +26,7 @@ WATCH_SETTINGS = {
     "initial",
     "backfill_days",
     "overlap_minutes",
+    "language",
     "rules",
     "channels",
 }
@@ -112,6 +114,7 @@ class WatchConfig:
     initial: str = "baseline"
     backfill_days: int = 7
     overlap_minutes: int = 15
+    language: str = DEFAULT_LANGUAGE
     rules: tuple[Rule, ...] = ()
     channels: tuple[ChannelConfig, ...] = ()
 
@@ -215,6 +218,9 @@ def load_config(path: str | Path) -> AppConfig:
     watch_initial = str(watch_data.get("initial", "baseline")).strip().casefold()
     if watch_initial not in WATCH_INITIAL_MODES:
         raise ConfigurationError("watch.initial must be baseline, backfill, or full")
+    watch_language = canonical_language(
+        watch_data.get("language", DEFAULT_LANGUAGE), label="watch.language"
+    )
     raw_watch_database = watch_data.get("database")
     if raw_watch_database is None:
         watch_database = (state_database.parent / "cvebeacon-watch.db").resolve()
@@ -417,6 +423,7 @@ def load_config(path: str | Path) -> AppConfig:
             overlap_minutes=_bounded_int(
                 watch_data.get("overlap_minutes", 15), "watch.overlap_minutes", 0, 1440
             ),
+            language=watch_language,
             rules=watch_rules,
             channels=watch_channels,
         ),

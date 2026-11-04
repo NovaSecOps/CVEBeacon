@@ -43,6 +43,7 @@ sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
 initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
+# language = "en"               # en (default) or pt-PT
 
 # Optional alert rules. Every channel named here must be configured below.
 # [[watch.rules]]
@@ -60,6 +61,7 @@ overlap_minutes = 15
 # password_env = "CVEBEACON_SMTP_PASSWORD"
 # from = "alerts@example.invalid"
 # to = ["security@example.invalid"]
+# format = "html"               # text (default) or html
 
 [notifications.teams]
 enabled = false

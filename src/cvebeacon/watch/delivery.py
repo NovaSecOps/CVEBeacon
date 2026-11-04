@@ -21,10 +21,15 @@ from ..errors import ConfigurationError
 from ..http import HttpClient, HttpResult
 from .channels import ChannelConfig, channel_map, validate_webhook_url
 from .messages import (
+    EMAIL_CHANNELS,
+    MESSAGE_TOO_LARGE,
     WEBHOOK_VERSION,
+    MessageTooLarge,
     OutgoingMessage,
     build_messages,
     rule_display_names,
+    simple_html,
+    test_message,
     webhook_payload,
 )
 from .records import DeliveryEvent
@@ -38,7 +43,6 @@ DELIVERY_BUDGET_SECONDS = 60.0
 MAX_MESSAGES_PER_CHANNEL = 10
 AUTH_MAX_ATTEMPTS = 3
 INITIAL_WEBHOOK_CHUNK = 1000
-TEST_MESSAGE = "CVEBeacon test message — no action needed"
 
 
 class DeliveryFailure(Exception):
@@ -414,6 +418,11 @@ def _email_message(
     email["Message-ID"] = make_msgid(domain=domain or None)
     # A 7-bit safe body works with relays that do not offer 8BITMIME.
     email.set_content(message.body, cte="quoted-printable")
+    if message.html:
+        # The plain-text part stays first for clients that prefer it.
+        email.add_alternative(
+            message.html, subtype="html", cte="quoted-printable"
+        )
     return email
 
 
@@ -606,7 +615,11 @@ def _send_graph(
     ]
     message_body: dict[str, Any] = {
         "subject": message.subject,
-        "body": {"contentType": "Text", "content": message.body},
+        "body": (
+            {"contentType": "HTML", "content": message.html}
+            if message.html
+            else {"contentType": "Text", "content": message.body}
+        ),
         "toRecipients": recipients,
     }
     cc = channel.options.get("cc") or ()
@@ -703,6 +716,7 @@ def _channel_messages(
     *,
     names: Mapping[str, str],
     since: str | None,
+    language: str,
 ) -> tuple[OutgoingMessage, ...]:
     return build_messages(
         events,
@@ -711,6 +725,8 @@ def _channel_messages(
         max_items=channel.max_items,
         names=names,
         since=since,
+        language=language,
+        format=channel.format,
     )
 
 
@@ -779,6 +795,7 @@ def deliver_pending(
         pace_needed = False
         stop_channel = False
         interval = channel.min_interval_seconds
+        language = channel.language or config.watch.language
 
         def send_messages(
             messages: Sequence[OutgoingMessage],
@@ -922,55 +939,69 @@ def deliver_pending(
                     include_ambiguous=include_ambiguous,
                 )
                 if digest is not None:
-                    initial_messages = build_messages(
-                        (),
-                        channel_type=channel.type,
-                        grouping=channel.grouping,
-                        max_items=channel.max_items,
-                        names=names,
-                        since=since,
-                        initial=digest,
-                    )
-                    if len(initial_messages) > MAX_MESSAGES_PER_CHANNEL:
-                        store.release_initial(channel.name, now=now)
+                    try:
+                        initial_messages = build_messages(
+                            (),
+                            channel_type=channel.type,
+                            grouping=channel.grouping,
+                            max_items=channel.max_items,
+                            names=names,
+                            since=since,
+                            initial=digest,
+                            language=language,
+                            format=channel.format,
+                        )
+                    except MessageTooLarge:
+                        store.mark_initial_failed(
+                            channel.name,
+                            now=now,
+                            error=MESSAGE_TOO_LARGE,
+                        )
+                        ambiguous += digest.ambiguous
+                        failed += digest.total - digest.ambiguous
+                        error = MESSAGE_TOO_LARGE
                         stop_channel = True
                     else:
-                        (
-                            delivered,
-                            messages_sent,
-                            failure,
-                            expired,
-                            pace_needed,
-                        ) = send_messages(
-                            initial_messages,
-                            digest.events,
-                            messages_sent,
-                            pace_needed,
-                        )
-                        if expired:
+                        if len(initial_messages) > MAX_MESSAGES_PER_CHANNEL:
                             store.release_initial(channel.name, now=now)
                             stop_channel = True
-                        elif failure is not None:
-                            store.mark_initial_failed(
-                                channel.name,
-                                now=now,
-                                error=failure.category,
-                                attempts_limit=failure.attempts_limit,
-                                ambiguous=failure.ambiguous,
-                            )
-                            if failure.ambiguous:
-                                ambiguous += digest.total
-                            else:
-                                ambiguous += digest.ambiguous
-                                failed += digest.total - digest.ambiguous
-                            error = failure.category
-                            stop_channel = True
-                        elif delivered == len(initial_messages):
-                            store.mark_initial_sent(channel.name, now=now)
-                            events_sent += digest.total
                         else:
-                            store.release_initial(channel.name, now=now)
-                            stop_channel = True
+                            (
+                                delivered,
+                                messages_sent,
+                                failure,
+                                expired,
+                                pace_needed,
+                            ) = send_messages(
+                                initial_messages,
+                                digest.events,
+                                messages_sent,
+                                pace_needed,
+                            )
+                            if expired:
+                                store.release_initial(channel.name, now=now)
+                                stop_channel = True
+                            elif failure is not None:
+                                store.mark_initial_failed(
+                                    channel.name,
+                                    now=now,
+                                    error=failure.category,
+                                    attempts_limit=failure.attempts_limit,
+                                    ambiguous=failure.ambiguous,
+                                )
+                                if failure.ambiguous:
+                                    ambiguous += digest.total
+                                else:
+                                    ambiguous += digest.ambiguous
+                                    failed += digest.total - digest.ambiguous
+                                error = failure.category
+                                stop_channel = True
+                            elif delivered == len(initial_messages):
+                                store.mark_initial_sent(channel.name, now=now)
+                                events_sent += digest.total
+                            else:
+                                store.release_initial(channel.name, now=now)
+                                stop_channel = True
 
         if not stop_channel and monotonic() < deadline:
             events = store.delivery_events(
@@ -1012,9 +1043,50 @@ def deliver_pending(
                 batches.append(alerts)
             for batch in batches:
                 index = _event_index(batch)
-                for group in _group_messages(
-                    _channel_messages(channel, batch, names=names, since=since)
-                ):
+                claim_statuses = (
+                    ("ambiguous",)
+                    if batch
+                    and all(event.status == "ambiguous" for event in batch)
+                    else ("pending", "failed")
+                )
+                try:
+                    channel_messages = _channel_messages(
+                        channel,
+                        batch,
+                        names=names,
+                        since=since,
+                        language=language,
+                    )
+                except MessageTooLarge:
+                    identifiers = tuple(event.event_id for event in batch)
+                    was_ambiguous = any(
+                        event.status == "ambiguous" for event in batch
+                    )
+                    if identifiers and store.claim_delivery(
+                        identifiers,
+                        channel.name,
+                        statuses=claim_statuses,
+                    ):
+                        if was_ambiguous:
+                            store.mark_delivery(
+                                identifiers,
+                                channel.name,
+                                "ambiguous",
+                                error=MESSAGE_TOO_LARGE,
+                            )
+                            ambiguous += len(identifiers)
+                        else:
+                            store.mark_delivery(
+                                identifiers,
+                                channel.name,
+                                "failed",
+                                error=MESSAGE_TOO_LARGE,
+                            )
+                            failed += len(identifiers)
+                    error = MESSAGE_TOO_LARGE
+                    stop_channel = True
+                    break
+                for group in _group_messages(channel_messages):
                     if stop_channel or messages_sent >= MAX_MESSAGES_PER_CHANNEL:
                         stop_channel = True
                         break
@@ -1143,12 +1215,20 @@ def send_test(
         return TestOutcome(
             channel.name, channel.type, False, "channel is disabled"
         )
+    language = channel.language or config.watch.language
+    subject, body = test_message(language)
+    html = (
+        simple_html(language, subject, body)
+        if channel.format == "html" and channel.type in EMAIL_CHANNELS
+        else ""
+    )
     message = OutgoingMessage(
         (int(clock().timestamp() * 1000),) if channel.type == "matrix" else (),
-        "CVEBeacon test message",
-        TEST_MESSAGE,
-        TEST_MESSAGE,
-        content=TEST_MESSAGE,
+        subject,
+        body,
+        body,
+        html=html,
+        content=body,
     )
     try:
         if channel.type == "webhook":
@@ -1164,7 +1244,7 @@ def send_test(
                 json_body={
                     "version": WEBHOOK_VERSION,
                     "test": True,
-                    "message": TEST_MESSAGE,
+                    "message": body,
                     "events": [],
                 },
                 timeout=min(timeout_seconds, channel.timeout_seconds),
