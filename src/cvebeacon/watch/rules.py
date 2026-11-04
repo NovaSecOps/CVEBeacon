@@ -544,6 +544,13 @@ def evaluate_condition(
     raise AssertionError(f"unknown condition kind {condition.kind}")
 
 
+def _epss_increased(previous: str, current: str) -> bool:
+    """Compare EPSS bands, ignoring a first score below the lowest alert band."""
+    if previous == "none":
+        return current not in {"none", "<0.1"}
+    return EPSS_BAND_LABELS.index(current) > EPSS_BAND_LABELS.index(previous)
+
+
 def _event(
     view: WatchView, rule: Rule, kind: str, reasons: Sequence[str]
 ) -> AlertEvent:
@@ -615,7 +622,7 @@ def evaluate(
         )
     if (
         "epss_increase" in rule.events
-        and EPSS_BAND_LABELS.index(snapshot.epss_band) > EPSS_BAND_LABELS.index(old.epss_band)
+        and _epss_increased(old.epss_band, snapshot.epss_band)
     ):
         events.append(
             _event(

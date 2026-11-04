@@ -132,7 +132,8 @@ escalations, even when the condition is no longer true:
 - `kev_added`: the CVE enters the CISA or EU KEV catalog.
 - `exploitation_active`: SSVC exploitation becomes `active`.
 - `severity_increase`: the highest selected CVSS moves to a higher band.
-- `epss_increase`: EPSS moves to a higher band.
+- `epss_increase`: EPSS moves to a higher band. A first score below `0.1`
+  does not escalate.
 - `nvd_score_added`: an NVD score appears.
 - `rejected`: the CVE changes from published to rejected.
 

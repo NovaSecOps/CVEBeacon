@@ -344,6 +344,35 @@ def test_escalations_require_a_prior_match_and_only_configured_kinds():
     assert state is not None and events == ()
 
 
+def test_first_epss_score_below_the_lowest_band_does_not_escalate():
+    configured = rule({"condition": {"cvss_min": 9}})
+    state, events = evaluate(view(epss=None), None, configured, now=NOW)
+    assert state is not None and events[0].kind == "match"
+    state, events = evaluate(view(epss=0.001), state, configured, now=NOW)
+    assert state is not None and events == ()
+    assert state.snapshot.epss_band == "<0.1"
+
+
+def test_first_epss_score_in_the_first_alert_band_escalates():
+    configured = rule({"condition": {"cvss_min": 9}})
+    state, _ = evaluate(view(epss=None), None, configured, now=NOW)
+    state, events = evaluate(view(epss=0.2), state, configured, now=NOW)
+    assert state is not None
+    assert [event.kind for event in events] == ["epss_increase"]
+    assert events[0].reasons == ("epss none \u2192 <0.5",)
+    assert state.snapshot.epss_band == "<0.5"
+
+
+def test_epss_crossing_from_the_lowest_band_escalates():
+    configured = rule({"condition": {"cvss_min": 9}})
+    state, _ = evaluate(view(epss=0.001), None, configured, now=NOW)
+    state, events = evaluate(view(epss=0.2), state, configured, now=NOW)
+    assert state is not None
+    assert [event.kind for event in events] == ["epss_increase"]
+    assert events[0].reasons == ("epss <0.1 \u2192 <0.5",)
+    assert state.snapshot.epss_band == "<0.5"
+
+
 def test_decreases_and_band_steps_are_silent():
     configured = rule({"condition": {"cvss_min": 9}})
     state, _ = evaluate(
