@@ -2853,3 +2853,141 @@ channels = ["graph"]
     assert "Graph token request failed" in report.channels[0].error
     assert len(seen) == 1
     assert rows(store)[0][1] == "failed"
+
+
+def test_smtp_html_format_sends_multipart_alternative(tmp_path, monkeypatch):
+    report, store, server, _ = run_smtp_test(
+        tmp_path, monkeypatch, extra='format = "html"'
+    )
+    assert report.channels[0].ok
+    message = parsed_message(server)
+    assert message["Auto-Submitted"] == "auto-generated"
+    assert message.get_content_type() == "multipart/alternative"
+    parts = message.get_payload()
+    assert [part.get_content_type() for part in parts] == [
+        "text/plain",
+        "text/html",
+    ]
+    assert parts[0]["Content-Transfer-Encoding"] == "quoted-printable"
+    assert parts[1]["Content-Transfer-Encoding"] == "quoted-printable"
+    assert "CVE-2026-0001" in parts[0].get_content()
+    html = parts[1].get_content()
+    assert html.startswith("<!doctype html>")
+    assert "CVE-2026-0001" in html
+    assert "https://nvd.nist.gov/vuln/detail/CVE-2026-0001" in html
+    assert smtp_recipients(server) == ["soc@example.org"]
+    assert rows(store)[0][1] == "sent"
+
+
+def test_smtp_pt_pt_alert_uses_the_channel_language(tmp_path, monkeypatch):
+    report, store, server, _ = run_smtp_test(
+        tmp_path,
+        monkeypatch,
+        extra='language = "pt-PT"\nformat = "html"',
+    )
+    assert report.channels[0].ok
+    message = parsed_message(server)
+    assert "1 novo" in message["Subject"]
+    parts = message.get_payload()
+    assert "[NOVO] CVE-2026-0001" in parts[0].get_content()
+    assert "Publicado desconhecido · Visto pela primeira vez" in parts[0].get_content()
+    assert "Exploração: nenhuma" in parts[1].get_content()
+
+
+def test_graph_html_format_sends_an_html_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRAPH_SECRET", "graph-secret")
+    channels = """
+[watch.channels.graph]
+type = "graph"
+tenant_id = "tenant"
+client_id = "client"
+client_secret_env = "GRAPH_SECRET"
+sender = "beacon@example.org"
+to = ["soc@example.org"]
+format = "html"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["graph"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if "login.microsoftonline.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "graph-token"})
+        return httpx.Response(202)
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].ok
+    payload = json.loads(seen[1].content)
+    body = payload["message"]["body"]
+    assert body["contentType"] == "HTML"
+    assert body["content"].startswith("<!doctype html>")
+    assert "CVE-2026-0001" in body["content"]
+    assert payload["message"]["subject"] == "CVEBeacon: 1 new (critical)"
+
+
+def test_graph_default_format_remains_plain_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRAPH_SECRET", "graph-secret")
+    channels = """
+[watch.channels.graph]
+type = "graph"
+tenant_id = "tenant"
+client_id = "client"
+client_secret_env = "GRAPH_SECRET"
+sender = "beacon@example.org"
+to = ["soc@example.org"]
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["graph"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if "login.microsoftonline.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "graph-token"})
+        return httpx.Response(202)
+
+    deliver(config, store, handler)
+    body = json.loads(seen[1].content)["message"]["body"]
+    assert body["contentType"] == "Text"
+    assert "CVE-2026-0001" in body["content"]
+
+
+def test_pt_pt_test_message_uses_the_catalog(tmp_path):
+    channels = """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.test/hook"
+language = "pt-PT"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["hook"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={})
+
+    outcome = send_test(config, mock_client(handler), "hook")
+    assert outcome.ok
+    body = json.loads(seen[0].content)
+    assert body["message"] == (
+        "Mensagem de teste do CVEBeacon — nenhuma ação necessária"
+    )

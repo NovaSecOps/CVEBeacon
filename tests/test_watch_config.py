@@ -340,3 +340,115 @@ def test_nvd_api_key_file_must_not_be_group_accessible(tmp_path):
     os.chmod(key, 0o644)
     with pytest.raises(ConfigurationError, match="group or other accessible"):
         write(tmp_path, '\n[sources]\nnvd_api_key_file = "nvd-key"\n')
+
+
+def test_watch_language_defaults_to_english(tmp_path):
+    assert write(tmp_path, "").watch.language == "en"
+
+
+def test_watch_language_accepts_european_portuguese(tmp_path):
+    config = write(tmp_path, '\n[watch]\nlanguage = "pt-PT"\n')
+    assert config.watch.language == "pt-PT"
+    assert write(tmp_path, '\n[watch]\nlanguage = "PT-pt"\n').watch.language == (
+        "pt-PT"
+    )
+
+
+@pytest.mark.parametrize("value", ('"pt-BR"', '"fr"', "1", '["pt-PT"]'))
+def test_watch_language_rejects_unknown_values(tmp_path, value):
+    with pytest.raises(ConfigurationError, match="watch.language must be one of en, pt-PT"):
+        write(tmp_path, f"\n[watch]\nlanguage = {value}\n")
+
+
+def test_channel_language_overrides_the_watch_language(tmp_path):
+    config = write(
+        tmp_path,
+        """
+[watch]
+language = "pt-PT"
+
+[watch.channels.portuguese]
+type = "webhook"
+enabled = false
+url = "https://example.invalid/cvebeacon"
+language = "en"
+
+[watch.channels.soc-chat]
+type = "slack"
+enabled = false
+webhook_url_env = "CVEBEACON_TEST_SLACK_WEBHOOK"
+language = "PT-pt"
+""",
+    )
+    channels = {channel.name: channel for channel in config.watch.channels}
+    assert config.watch.language == "pt-PT"
+    assert channels["portuguese"].language == "en"
+    assert channels["soc-chat"].language == "pt-PT"
+
+
+def test_channel_language_rejects_unknown_values(tmp_path):
+    with pytest.raises(ConfigurationError, match="watch channel 'chat' language"):
+        write(
+            tmp_path,
+            """
+[watch.channels.chat]
+type = "slack"
+webhook_url_env = "CVEBEACON_TEST_SLACK_WEBHOOK"
+language = "pt-BR"
+""",
+        )
+
+
+def test_channel_format_defaults_to_text_and_accepts_html_for_email(tmp_path):
+    config = write(
+        tmp_path,
+        """
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.org"
+from = "alerts@example.org"
+to = ["soc@example.org"]
+format = "html"
+
+[watch.channels.graph]
+type = "graph"
+tenant_id = "tenant"
+client_id = "client"
+client_secret_env = "GRAPH_SECRET"
+sender = "alerts@example.org"
+to = ["soc@example.org"]
+format = "TEXT"
+""",
+    )
+    channels = {channel.name: channel for channel in config.watch.channels}
+    assert channels["mail"].format == "html"
+    assert channels["graph"].format == "text"
+    assert channels["soc-email"].format == "text"
+
+
+def test_channel_format_is_rejected_for_non_email_channels(tmp_path):
+    with pytest.raises(ConfigurationError, match="unknown key 'format'"):
+        write(
+            tmp_path,
+            """
+[watch.channels.chat]
+type = "slack"
+webhook_url_env = "CVEBEACON_TEST_SLACK_WEBHOOK"
+format = "html"
+""",
+        )
+
+
+def test_channel_format_rejects_unknown_values(tmp_path):
+    with pytest.raises(ConfigurationError, match="must be text or html"):
+        write(
+            tmp_path,
+            """
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.org"
+from = "alerts@example.org"
+to = ["soc@example.org"]
+format = "markdown"
+""",
+        )
