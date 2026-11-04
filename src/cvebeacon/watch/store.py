@@ -24,9 +24,19 @@ from .records import (
     InitialDigest,
     KEVFields,
     Product,
+    ReportedMark,
     WatchRecord,
     build_view,
     canonical_json,
+)
+from .reported import (
+    NOTICE_KINDS,
+    NOTICE_RULE,
+    NoticeDelivery,
+    ReportedEntry,
+    normalize_cve_id,
+    validate_identity,
+    validate_note,
 )
 from .rules import (
     EVENT_KINDS,
@@ -39,7 +49,7 @@ from .rules import (
     rule_hash,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -52,6 +62,11 @@ DELIVERY_MAX_ATTEMPTS = 10
 DELIVERY_SELECT_LIMIT = 1000
 DELIVERY_RECOVERY_SECONDS = 600
 DELIVERY_RETRY_FLOOR = "1970-01-01T00:00:00+00:00"
+_LATEST_REPORT_SQL = (
+    "SELECT r.id,r.cve_id,r.action,r.by,r.note,r.at FROM watch_report r "
+    "WHERE r.action='report' AND NOT EXISTS ("
+    "SELECT 1 FROM watch_report x WHERE x.cve_id=r.cve_id AND x.id > r.id)"
+)
 # The claim uses ``last_error`` to remember that a row was ambiguous before
 # this attempt, so a bulk failure can keep it ambiguous without an id list.
 _INITIAL_AMBIGUOUS = "__ambiguous_before_retry__"
@@ -204,8 +219,17 @@ _SCHEMA = (
         updated_at TEXT NOT NULL,
         PRIMARY KEY(event_id, channel)
     )""",
+    """CREATE TABLE IF NOT EXISTS watch_report (
+        id INTEGER PRIMARY KEY,
+        cve_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('report','unreport')),
+        by TEXT NOT NULL,
+        note TEXT,
+        at TEXT NOT NULL
+    )""",
     "CREATE INDEX IF NOT EXISTS watch_event_created ON watch_event(created_at, id)",
     "CREATE INDEX IF NOT EXISTS watch_delivery_status ON watch_delivery(status)",
+    "CREATE INDEX IF NOT EXISTS watch_report_cve ON watch_report(cve_id, id)",
 )
 
 
@@ -269,6 +293,16 @@ class DeliveryStatusRow:
     given_up: int = 0
     ambiguous: int = 0
     last_success: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReportOutcome:
+    """The result of recording or withdrawing one client-report mark."""
+
+    entry: ReportedEntry | None = None
+    changed: bool = False
+    event_id: int | None = None
+    channels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,9 +455,9 @@ class WatchStore:
             )
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4"}:
+        if version not in {"1", "2", "3", "4", "5"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -464,10 +498,6 @@ class WatchStore:
         if version in {"1", "2"}:
             WatchStore._migrate_event_details(db)
             WatchStore._migrate_delivery_statuses(db)
-            db.execute(
-                "UPDATE watch_meta SET value=? WHERE key='schema_version'",
-                (str(SCHEMA_VERSION),),
-            )
         elif version == "3":
             columns = {
                 row["name"]
@@ -477,6 +507,7 @@ class WatchStore:
                 db.execute(
                     "ALTER TABLE watch_delivery ADD COLUMN first_attempt_at TEXT"
                 )
+        if version != str(SCHEMA_VERSION):
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -1349,8 +1380,10 @@ class WatchStore:
         if limit < 1:
             raise StateError("event limit must be positive")
         self.initialize()
-        clauses = []
-        parameters: list[Any] = []
+        clauses = [
+            "e.kind NOT IN (" + ",".join("?" for _ in NOTICE_KINDS) + ")"
+        ]
+        parameters: list[Any] = list(NOTICE_KINDS)
         if rule is not None:
             clauses.append("e.rule = ?")
             parameters.append(rule.casefold())
@@ -1395,6 +1428,236 @@ class WatchStore:
                 )
             )
         return tuple(output)
+
+    @staticmethod
+    def _report_entry(row: Mapping[str, Any]) -> ReportedEntry:
+        return ReportedEntry(
+            int(row["id"]),
+            str(row["cve_id"]),
+            str(row["action"]),
+            str(row["by"]),
+            row["note"],
+            str(row["at"]),
+        )
+
+    @staticmethod
+    def _latest_report_row(
+        db: sqlite3.Connection, identifier: object
+    ) -> sqlite3.Row | None:
+        return db.execute(
+            "SELECT id,cve_id,action,by,note,at FROM watch_report "
+            "WHERE cve_id=? ORDER BY id DESC LIMIT 1",
+            (identifier,),
+        ).fetchone()
+
+    @staticmethod
+    def _latest_report(
+        db: sqlite3.Connection, identifier: str
+    ) -> ReportedEntry | None:
+        row = WatchStore._latest_report_row(db, identifier)
+        return None if row is None else WatchStore._report_entry(row)
+
+    @staticmethod
+    def _record_report_notice(
+        db: sqlite3.Connection,
+        entry: ReportedEntry,
+        channels: Sequence[str],
+        now: str,
+    ) -> int | None:
+        """Queue the optional notice through the normal delivery ledger."""
+        if not channels:
+            return None
+        if entry.action == "report":
+            kind = "reported"
+            reason = f"reported to clients by {entry.by}"
+        else:
+            kind = "unreported"
+            reason = f"report withdrawn by {entry.by}"
+        cursor = db.execute(
+            "INSERT INTO watch_event("
+            "rule,cve_id,kind,reasons_json,details_json,occurrence,initial,created_at) "
+            "VALUES (?,?,?,?,?,?,0,?)",
+            (
+                NOTICE_RULE,
+                entry.cve_id,
+                kind,
+                canonical_json([reason]),
+                canonical_json({"by": entry.by, "note": entry.note}),
+                f"{entry.action}:{entry.id}",
+                now,
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+        db.executemany(
+            "INSERT INTO watch_delivery("
+            "event_id,channel,status,attempts,last_error,updated_at) "
+            "VALUES (?,?,'pending',0,NULL,?)",
+            ((event_id, channel, now) for channel in channels),
+        )
+        return event_id
+
+    def report_cve(
+        self,
+        cve_id: object,
+        *,
+        by: object,
+        note: object | None = None,
+        force: bool = False,
+        notify_channels: Iterable[str] = (),
+    ) -> ReportOutcome:
+        """Mark a stored CVE as reported to clients.
+
+        The caller resolves the identity; this store keeps it as free text.
+        The latest ``watch_report`` row is the current state. A repeated mark
+        keeps the existing row and notification; ``force`` appends a new one.
+        """
+        identifier = normalize_cve_id(cve_id)
+        identity = validate_identity(by)
+        text = validate_note(note)
+        channels = tuple(sorted({str(name) for name in notify_channels if name}))
+        self.initialize()
+        now = _timestamp(self._clock)
+        with self.transaction() as db:
+            known = db.execute(
+                "SELECT 1 FROM watch_cve WHERE cve_id=?", (identifier,)
+            ).fetchone()
+            if known is None:
+                raise StateError(f"{identifier} is not in the watch database")
+            latest = self._latest_report(db, identifier)
+            if latest is not None and latest.action == "report" and not force:
+                return ReportOutcome(latest, False)
+            cursor = db.execute(
+                "INSERT INTO watch_report(cve_id,action,by,note,at) "
+                "VALUES (?,?,?,?,?)",
+                (identifier, "report", identity, text, now),
+            )
+            entry = ReportedEntry(
+                int(cursor.lastrowid), identifier, "report", identity, text, now
+            )
+            event_id = self._record_report_notice(db, entry, channels, now)
+        return ReportOutcome(entry, True, event_id, channels)
+
+    def unreport_cve(
+        self,
+        cve_id: object,
+        *,
+        by: object,
+        note: object | None = None,
+        notify_channels: Iterable[str] = (),
+    ) -> ReportOutcome:
+        """Withdraw the current report mark by appending an ``unreport`` row."""
+        identifier = normalize_cve_id(cve_id)
+        identity = validate_identity(by)
+        text = validate_note(note)
+        channels = tuple(sorted({str(name) for name in notify_channels if name}))
+        self.initialize()
+        now = _timestamp(self._clock)
+        with self.transaction() as db:
+            latest = self._latest_report(db, identifier)
+            if latest is None or latest.action != "report":
+                return ReportOutcome(None, False)
+            cursor = db.execute(
+                "INSERT INTO watch_report(cve_id,action,by,note,at) "
+                "VALUES (?,?,?,?,?)",
+                (identifier, "unreport", identity, text, now),
+            )
+            entry = ReportedEntry(
+                int(cursor.lastrowid), identifier, "unreport", identity, text, now
+            )
+            event_id = self._record_report_notice(db, entry, channels, now)
+        return ReportOutcome(entry, True, event_id, channels)
+
+    def reported_entries(self) -> tuple[ReportedEntry, ...]:
+        """Return the full append-only audit trail, oldest first."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT id,cve_id,action,by,note,at FROM watch_report ORDER BY id"
+            ).fetchall()
+        return tuple(self._report_entry(row) for row in rows)
+
+    def reported_cves(self) -> tuple[ReportedEntry, ...]:
+        """Return the latest ``report`` row of every currently reported CVE."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                _LATEST_REPORT_SQL + " ORDER BY r.at, r.id"
+            ).fetchall()
+        return tuple(self._report_entry(row) for row in rows)
+
+    @staticmethod
+    def _reported_marks_in(
+        db: sqlite3.Connection, identifiers: Iterable[str]
+    ) -> dict[str, ReportedMark]:
+        values = sorted({str(value) for value in identifiers if value})
+        if not values:
+            return {}
+        output: dict[str, ReportedMark] = {}
+        for start in range(0, len(values), 500):
+            chunk = values[start : start + 500]
+            marks = ",".join("?" for _ in chunk)
+            rows = db.execute(
+                "SELECT r.cve_id,r.by,r.note,r.at FROM watch_report r "
+                "JOIN (SELECT cve_id,MAX(id) AS id FROM watch_report "
+                f"WHERE cve_id IN ({marks}) GROUP BY cve_id) m ON m.id=r.id "
+                "WHERE r.action='report'",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                output[str(row["cve_id"])] = ReportedMark(
+                    str(row["cve_id"]), str(row["by"]), row["note"], str(row["at"])
+                )
+        return output
+
+    def reported_marks(
+        self, identifiers: Iterable[str]
+    ) -> dict[str, ReportedMark]:
+        """Return the current mark for each of ``identifiers`` that has one."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            return self._reported_marks_in(db, identifiers)
+
+    def notice_deliveries(
+        self,
+    ) -> dict[tuple[str, int], tuple[NoticeDelivery, ...]]:
+        """Return notice delivery states keyed by (action, report id)."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT e.kind,e.occurrence,d.channel,d.status,d.attempts,"
+                "d.last_error FROM watch_event e "
+                "JOIN watch_delivery d ON d.event_id=e.id "
+                "WHERE e.rule=? ORDER BY e.id, d.channel",
+                (NOTICE_RULE,),
+            ).fetchall()
+        output: dict[tuple[str, int], list[NoticeDelivery]] = {}
+        for row in rows:
+            action = "report" if row["kind"] == "reported" else "unreport"
+            _, _, raw_id = str(row["occurrence"]).partition(":")
+            try:
+                key = (action, int(raw_id))
+            except ValueError:
+                continue
+            output.setdefault(key, []).append(
+                NoticeDelivery(
+                    str(row["channel"]),
+                    str(row["status"]),
+                    int(row["attempts"]),
+                    row["last_error"],
+                )
+            )
+        return {key: tuple(value) for key, value in output.items()}
+
+    @staticmethod
+    def _reported_mark(
+        db: sqlite3.Connection, identifier: object
+    ) -> ReportedMark | None:
+        row = WatchStore._latest_report_row(db, identifier)
+        if row is None or row["action"] != "report":
+            return None
+        return ReportedMark(
+            str(row["cve_id"]), str(row["by"]), row["note"], str(row["at"])
+        )
 
     @staticmethod
     def _parse_timestamp(value: str | None) -> datetime | None:
@@ -1540,6 +1803,7 @@ class WatchStore:
         db: sqlite3.Connection,
         row: Mapping[str, Any],
         catalogs: Sequence[str],
+        marks: Mapping[str, ReportedMark] | None = None,
     ) -> DeliveryEvent | None:
         view = self._view(db, row["cve_id"], catalogs)
         if view is None:
@@ -1551,6 +1815,11 @@ class WatchStore:
             raise StateError("watch database contains an invalid event") from exc
         if not isinstance(details, dict):
             raise StateError("watch database contains an invalid event")
+        mark = (
+            marks.get(str(row["cve_id"]))
+            if marks is not None
+            else self._reported_mark(db, row["cve_id"])
+        )
         return DeliveryEvent(
             row["id"],
             row["rule"],
@@ -1562,6 +1831,7 @@ class WatchStore:
             view,
             details,
             str(row["status"]),
+            mark,
         )
 
     def delivery_events(
@@ -1572,14 +1842,24 @@ class WatchStore:
         now: datetime | None = None,
         include_ambiguous: bool = False,
         limit: int = DELIVERY_SELECT_LIMIT,
+        event_ids: Iterable[int] | None = None,
     ) -> tuple[DeliveryEvent, ...]:
         """Return non-initial deliveries one channel may send now, oldest first.
 
         Initial rows are handled by :meth:`claim_initial_digest` and
         :meth:`claim_initial_chunk`, which keep the backlog out of memory.
+        ``event_ids`` limits the result to those events, which the report and
+        unreport commands use to attempt only their own notice.
         """
         if limit < 1:
             raise StateError("delivery batch size must be positive")
+        selected: tuple[int, ...] | None = None
+        if event_ids is not None:
+            selected = tuple(sorted({int(value) for value in event_ids}))
+            if not selected:
+                return ()
+            if len(selected) > DELIVERY_SELECT_LIMIT:
+                raise StateError("too many delivery events selected")
         self.initialize()
         current = _clock_value(lambda: now) if now is not None else _clock_value(self._clock)
         base = (
@@ -1589,19 +1869,24 @@ class WatchStore:
             "WHERE d.channel=? AND e.initial=0 AND ("
             "d.status='pending' OR "
             "(d.status='failed' AND d.attempts < ?) OR "
-            "(d.status='ambiguous' AND ?)) "
-            "ORDER BY e.created_at, e.id"
+            "(d.status='ambiguous' AND ?))"
         )
+        parameters: list[Any] = [
+            channel,
+            DELIVERY_MAX_ATTEMPTS,
+            1 if include_ambiguous else 0,
+        ]
+        if selected is not None:
+            base += " AND e.id IN (" + ",".join("?" for _ in selected) + ")"
+            parameters.extend(selected)
         with closing(self._connect()) as db:
             found = db.execute(
-                base + " LIMIT ?",
-                (
-                    channel,
-                    DELIVERY_MAX_ATTEMPTS,
-                    1 if include_ambiguous else 0,
-                    limit,
-                ),
+                base + " ORDER BY e.created_at, e.id LIMIT ?",
+                (*parameters, limit),
             ).fetchall()
+            marks = self._reported_marks_in(
+                db, (row["cve_id"] for row in found)
+            )
             output: list[DeliveryEvent] = []
             for row in found:
                 if row["status"] == "failed":
@@ -1609,7 +1894,7 @@ class WatchStore:
                     delay = self.delivery_retry_delay(int(row["attempts"]))
                     if updated is not None and updated + delay > current:
                         continue
-                event = self._delivery_event(db, row, catalogs)
+                event = self._delivery_event(db, row, catalogs, marks)
                 if event is not None:
                     output.append(event)
         return tuple(output)
@@ -1701,10 +1986,13 @@ class WatchStore:
                 )
                 if cursor.rowcount != total:
                     raise _ClaimConflict
+                marks = self._reported_marks_in(
+                    db, (row["cve_id"] for row in sampled)
+                )
                 events = tuple(
                     event
                     for row in sampled
-                    if (event := self._delivery_event(db, row, catalogs))
+                    if (event := self._delivery_event(db, row, catalogs, marks))
                     is not None
                 )
                 return InitialDigest(
@@ -1762,10 +2050,13 @@ class WatchStore:
                 )
                 if cursor.rowcount != len(identifiers):
                     raise _ClaimConflict
+                marks = self._reported_marks_in(
+                    db, (row["cve_id"] for row in rows)
+                )
                 return tuple(
                     event
                     for row in rows
-                    if (event := self._delivery_event(db, row, catalogs))
+                    if (event := self._delivery_event(db, row, catalogs, marks))
                     is not None
                 )
         except _ClaimConflict:
@@ -1876,6 +2167,65 @@ class WatchStore:
                 )
                 changed += cursor.rowcount
         return changed
+
+    def claim_notice(
+        self,
+        event_id: int,
+        channel: str,
+        *,
+        statuses: Sequence[str] = ("pending", "failed", "ambiguous"),
+    ) -> bool:
+        """Claim one notice after earlier notices for the CVE are resolved.
+
+        A notice for a CVE and channel waits while an earlier notice for the
+        same pair is pending, sending, ambiguous, or failed below the attempt
+        cap. A notice that reached the cap no longer blocks. Ambiguous rows stay
+        blocking even during an explicit ambiguous retry; once an earlier notice
+        completes in this run, the successor can follow it in audit order.
+        """
+        allowed = tuple(
+            status
+            for status in statuses
+            if status in {"pending", "failed", "ambiguous"}
+        )
+        if not allowed:
+            raise StateError("a delivery claim needs a retryable status")
+        self.initialize()
+        now = _timestamp(self._clock)
+        allowed_placeholders = ",".join("?" for _ in allowed)
+        notice_placeholders = ",".join("?" for _ in NOTICE_KINDS)
+        with self.transaction() as db:
+            event = db.execute(
+                "SELECT kind,cve_id FROM watch_event WHERE id=?", (event_id,)
+            ).fetchone()
+            if event is None or event["kind"] not in NOTICE_KINDS:
+                raise StateError("notice claim requires a notice event")
+            blocking = db.execute(
+                "SELECT 1 FROM watch_event p "
+                "JOIN watch_delivery d ON d.event_id=p.id "
+                "WHERE p.cve_id=? AND d.channel=? "
+                f"AND p.kind IN ({notice_placeholders}) AND p.id < ? AND ("
+                "d.status IN ('pending','sending','ambiguous') OR "
+                "(d.status='failed' AND d.attempts < ?)) "
+                "LIMIT 1",
+                (
+                    event["cve_id"],
+                    channel,
+                    *NOTICE_KINDS,
+                    event_id,
+                    DELIVERY_MAX_ATTEMPTS,
+                ),
+            ).fetchone()
+            if blocking is not None:
+                return False
+            cursor = db.execute(
+                "UPDATE watch_delivery SET status='sending', "
+                "first_attempt_at=COALESCE(first_attempt_at, ?), updated_at=? "
+                "WHERE event_id=? AND channel=? "
+                f"AND status IN ({allowed_placeholders})",
+                (now, now, event_id, channel, *allowed),
+            )
+            return cursor.rowcount == 1
 
     def claim_delivery(
         self,
@@ -2244,6 +2594,9 @@ class WatchStore:
                     "SELECT MAX(score_date) FROM watch_epss"
                 ).fetchone()[0]
                 lookups = db.execute("SELECT COUNT(*) FROM watch_lookup").fetchone()[0]
+                reported = db.execute(
+                    "SELECT COUNT(*) FROM (" + _LATEST_REPORT_SQL + ")"
+                ).fetchone()[0]
             finally:
                 db.rollback()
         return {
@@ -2261,4 +2614,5 @@ class WatchStore:
             "epss_rows": epss_rows,
             "epss_date": epss_date,
             "lookups": lookups,
+            "reported": reported,
         }

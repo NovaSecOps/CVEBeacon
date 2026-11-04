@@ -264,6 +264,16 @@ class WatchView:
 
 
 @dataclass(frozen=True, slots=True)
+class ReportedMark:
+    """The current "reported to clients" mark of one CVE."""
+
+    cve_id: str
+    by: str
+    note: str | None
+    at: str
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryEvent:
     """One stored event with the derived CVE view used for a message."""
 
@@ -277,6 +287,7 @@ class DeliveryEvent:
     view: WatchView
     details: Mapping[str, Any] = field(default_factory=dict)
     status: str = ""
+    reported: ReportedMark | None = None
 
 
 @dataclass(frozen=True, slots=True)
