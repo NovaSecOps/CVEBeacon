@@ -38,6 +38,7 @@ sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
 initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
+language = "en"
 ```
 
 - `enabled`: watch commands refuse to run until this is `true`.
@@ -55,6 +56,11 @@ overlap_minutes = 15
 - `backfill_days`: 1 to 120, used only when `initial = "backfill"`.
 - `overlap_minutes`: 0 to 1440. Later runs re-read this much before the stored
   NVD cursor so that late-published changes are not missed.
+- `language`: `"en"` (default) or `"pt-PT"`. It selects the catalog used for
+  alert messages, digests, notices, email subjects, and test messages. An
+  unknown value is rejected with the supported list. Each channel can override
+  it; see [message format and language](#format-and-language). These
+  messages use the catalog even when the CLI output around them stays English.
 
 When `[watch].enabled = true`, `[inventory]` is optional. Commands that need an
 inventory (`scan`, `export`, `asset`, `inventory ...`, `doctor`, and the
@@ -92,6 +98,8 @@ Common keys:
   a plain-HTTP webhook or ntfy server.
 - `notify_reported`: `false` by default. When true, the channel receives report
   and unreport notices; see [reported to clients](#reported-to-clients).
+- `language`: optional per-channel override of `[watch] language`. A Portuguese
+  client mailbox and an English SOC channel can coexist.
 
 Secrets are never written in the configuration. A secret key comes as a pair:
 `*_env` names an environment variable, and `*_file` names a file. At least one
@@ -113,6 +121,7 @@ from = "alerts@example.com"
 to = ["soc@example.com"]
 # cc = ["manager@example.com"]
 # bcc = ["archive@example.com"]
+format = "text"                # text (default) or html
 ```
 
 `security = "none"` requires `allow_insecure = true` and logs a warning. Every
@@ -125,6 +134,9 @@ otherwise use the `graph` channel. `timeout_seconds` bounds the connection and
 every socket operation, and the delivery deadline is checked before each SMTP
 phase. Bodies are always quoted-printable, so relays do not need 8BITMIME. `bcc`
 recipients are part of the SMTP envelope and never appear as a message header.
+`format = "html"` sends `multipart/alternative`: the plain-text body first and
+the HTML body second, both quoted-printable. The default `"text"` sends the
+same message as earlier builds.
 
 ### Microsoft Graph
 
@@ -136,11 +148,15 @@ client_id = "00000000-0000-0000-0000-000000000000"
 client_secret_env = "CVEBEACON_GRAPH_CLIENT_SECRET"
 sender = "alerts@example.com"
 to = ["soc@example.com"]
+format = "text"                # text (default) or html
 ```
 
 This sends through the Microsoft Graph `sendMail` endpoint and needs an
 application permission such as `Mail.Send` for the sender mailbox. `cc` and
 `bcc` recipients are sent as Graph `ccRecipients` and `bccRecipients`.
+`format = "html"` sends the same HTML document as `contentType: "HTML"`; the
+plain-text body is still generated from the same facts and is what
+`format = "text"` sends.
 
 ### Teams
 
@@ -462,12 +478,55 @@ events each. Each document is one delivery attempt for exactly its rows.
 Provider limits are respected by splitting at line boundaries into numbered
 parts: Telegram 4,096 characters, Discord 2,000, Slack 3,800, Matrix 30,000,
 Teams about 25 KB of card text, and ntfy 4,096. The Matrix, Teams and ntfy limits
-are counted in UTF-8 bytes. Email has no practical limit but still applies
-`max_items`.
+are counted in UTF-8 bytes. Email bodies are capped at 1,000,000 characters
+(the HTML part is counted too) and still apply `max_items`.
 
 Links: the NVD detail page is always present, the CVE.org record is always
 present, the EUVD detail page appears when an EUVD id exists, and the CISA KEV
 catalog link appears when the CVE is in KEV.
+
+### Format and language
+
+`format = "html"` is available on `smtp` and `graph` channels and defaults to
+`"text"`, so existing configurations are unchanged. The key is rejected on
+other channel types. The HTML part is generated from the same message model as
+the plain-text part, not from a second content path, and both carry the same
+facts. An alert shows a header line per CVE with
+its label and CVSS, the EPSS, KEV, and exploitation fields, the publication and
+first-seen line, the reported line when present, the description, the matching
+rules, and the links. A digest shows a heading, a section per rule with its
+counts, and a compact table with the CVE, severity, EPSS, KEV, exploitation,
+published, and first-seen columns. A screenshot of an HTML alert would show one
+light card with a bold header such as
+`[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active`,
+followed by the date line, the description, the rule and link line, and a grey
+reported line when the CVE is marked. A digest screenshot would show the
+summary heading, one short section per rule, and the table below it. The layout
+is a simple table with inline styles only: there are no images, web fonts,
+scripts, tracking pixels, or remote stylesheets, and it stays readable in dark
+mode and in Outlook.
+
+Every dynamic value is HTML-escaped, and links use only the fixed NVD, CVE.org,
+EUVD, and CISA KEV URL builders with percent-quoted identifiers. A CVE
+description, rule name, reporter, or note therefore renders as inert text even
+when it contains HTML or Markdown. The email channels keep a 1,000,000-character
+limit for the plain-text body and apply it to the HTML part too, so a message is
+shortened rather than sent over the limit.
+
+`[watch] language` selects the message catalog. Supported languages are `"en"`
+and `"pt-PT"`; the default is `"en"`. Any channel can set its own `language`,
+so a Portuguese client channel and an English SOC channel can coexist. CVE
+identifiers, CVSS, EPSS, KEV, SSVC, provider names, rule names, and URLs are
+never translated, and dates stay ISO `YYYY-MM-DD` or `HH:MM UTC`. CLI output
+(`watch events`, `watch status`, and error messages) stays English in this
+phase; only delivered messages, notices, subjects, and test messages use the
+catalog.
+
+To add a language, copy the `en` dictionary in `src/cvebeacon/watch/catalog.py`,
+translate its values, and add the language name to `SUPPORTED_LANGUAGES`. Keep
+the keys and the placeholder names unchanged: a test checks that every catalog
+has the same keys and the same placeholders per key, and another renders every
+channel family in `pt-PT`.
 
 ### Webhook document
 
