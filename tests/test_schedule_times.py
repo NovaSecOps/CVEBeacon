@@ -15,6 +15,7 @@ from cvebeacon.scheduling import (
     CRON_END,
     WINDOWS_TASK,
     _cron_lines,
+    _current_windows_account,
     _describe_windows_xml,
     _windows_xml,
     _without_managed_block,
@@ -290,18 +291,74 @@ def windows_root(plan):
 
 
 def test_windows_logged_out_task_uses_s4u_with_an_explicit_account(tmp_path):
-    plan = windows_plan(tmp_path, run_logged_out=True, user_id=r"CORP\svc-cvebeacon")
+    plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
     principal = windows_root(plan).find(f".//{NS}Principal")
     assert principal.findtext(f"{NS}UserId") == r"CORP\svc-cvebeacon"
     assert principal.findtext(f"{NS}LogonType") == "S4U"
     assert principal.findtext(f"{NS}RunLevel") == "LeastPrivilege"
+    assert "Runs as: CORP\\svc-cvebeacon (S4U, while logged off)" in describe(plan)
 
 
-def test_windows_logged_out_account_defaults_to_the_environment(tmp_path, monkeypatch):
+def test_windows_account_prefers_the_native_extended_name():
+    account, note = _current_windows_account(
+        resolve_extended=lambda: r"CORP\svc-cvebeacon",
+        resolve_user=lambda: "fallback",
+    )
+    assert account == r"CORP\svc-cvebeacon"
+    assert note == ""
+
+
+def test_windows_account_falls_back_and_says_so():
+    def fail():
+        raise OSError("NameSamCompatible unavailable")
+
+    account, note = _current_windows_account(
+        resolve_extended=fail, resolve_user=lambda: "svc-cvebeacon"
+    )
+    assert account == "svc-cvebeacon"
+    assert "NameSamCompatible" in note
+
+
+def test_windows_account_notes_entra_id_accounts():
+    account, note = _current_windows_account(
+        resolve_extended=lambda: r"AzureAD\user@example.com",
+        resolve_user=lambda: "fallback",
+    )
+    assert account == r"AzureAD\user@example.com"
+    assert "Entra" in note
+
+
+def test_windows_account_fails_closed_when_both_lookups_fail():
+    def fail():
+        raise OSError("unavailable")
+
+    with pytest.raises(SchedulingError, match="--account"):
+        _current_windows_account(resolve_extended=fail, resolve_user=fail)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs a non-Windows host")
+def test_windows_account_is_not_read_from_the_environment(monkeypatch):
     monkeypatch.setenv("USERDOMAIN", "CORP")
     monkeypatch.setenv("USERNAME", "svc-cvebeacon")
-    plan = windows_plan(tmp_path, run_logged_out=True)
-    assert plan.user_id == r"CORP\svc-cvebeacon"
+    with pytest.raises(SchedulingError, match="--account"):
+        _current_windows_account()
+
+
+def test_windows_plan_shows_an_account_note(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    monkeypatch.setattr(
+        "cvebeacon.scheduling._current_windows_account",
+        lambda: (r"AzureAD\user@example.com", "verify the Entra ID account"),
+    )
+    plan = make_plan(
+        tmp_path / "config.toml",
+        times="07:00",
+        executable=tmp_path / "cvebeacon.exe",
+        run_logged_out=True,
+    )
+    text = describe(plan)
+    assert "Runs as: AzureAD\\user@example.com (S4U, while logged off)" in text
+    assert "Account note: verify the Entra ID account" in text
 
 
 def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
@@ -312,7 +369,7 @@ def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
         command="watch",
         executable=tmp_path / "cvebeacon.exe",
         run_logged_out=True,
-        user_id=r"CORP\svc-cvebeacon",
+        account=r"CORP\svc-cvebeacon",
     )
     calls = []
     roots = []
@@ -353,14 +410,37 @@ def test_logged_out_schedule_is_rejected_on_linux(tmp_path, monkeypatch):
         )
 
 
-def test_windows_access_denied_asks_for_an_elevated_prompt(tmp_path, monkeypatch):
+def test_account_requires_logged_out_and_windows(tmp_path, monkeypatch):
+    with pytest.raises(SchedulingError, match="requires --run-logged-out"):
+        make_plan(
+            tmp_path / "config.toml",
+            times="07:00",
+            system="windows",
+            executable=tmp_path / "cvebeacon.exe",
+            allow_incompatible=True,
+            account=r"CORP\svc-cvebeacon",
+        )
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
+    with pytest.raises(SchedulingError, match="only on Windows"):
+        make_plan(
+            tmp_path / "config.toml",
+            times="07:00",
+            system="linux",
+            executable="/opt/cvebeacon",
+            allow_incompatible=True,
+            run_logged_out=True,
+            account=r"CORP\svc-cvebeacon",
+        )
+
+
+def test_windows_access_denied_asks_for_the_right_account(tmp_path, monkeypatch):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     plan = make_plan(
         tmp_path / "config.toml",
         times="07:00",
         executable=tmp_path / "cvebeacon.exe",
         run_logged_out=True,
-        user_id=r"CORP\svc-cvebeacon",
+        account=r"CORP\svc-cvebeacon",
     )
 
     def fake_run(args, **kwargs):
@@ -372,13 +452,105 @@ def test_windows_access_denied_asks_for_an_elevated_prompt(tmp_path, monkeypatch
         install(plan, run=fake_run)
     message = str(error.value)
     assert "Access is denied" in message
-    assert "run from an elevated prompt" in message
+    assert "account named in --account" in message
+    assert "service account's own shell" in message
     assert "\n" not in message
+
+
+def test_windows_access_denied_accepts_the_hresult_without_english_text(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = make_plan(
+        tmp_path / "config.toml",
+        times="07:00",
+        executable=tmp_path / "cvebeacon.exe",
+        run_logged_out=True,
+        account=r"CORP\svc-cvebeacon",
+    )
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="ERROR: 0x80070005")
+
+    with pytest.raises(SchedulingError, match="account named in --account"):
+        install(plan, run=fake_run)
+
+
+def test_windows_access_denied_without_account_offers_both_flows(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    monkeypatch.setattr(
+        "cvebeacon.scheduling._current_windows_account",
+        lambda: (r"HOST\svc-cvebeacon", ""),
+    )
+    plan = make_plan(
+        tmp_path / "config.toml",
+        times="07:00",
+        executable=tmp_path / "cvebeacon.exe",
+        run_logged_out=True,
+    )
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="ERROR: Access is denied.")
+
+    with pytest.raises(SchedulingError) as error:
+        install(plan, run=fake_run)
+    message = str(error.value)
+    assert "service account's own shell" in message
+    assert "--account" in message
+    assert plan.account_explicit is False
+
+
+def test_windows_access_denied_stays_one_line_with_extra_diagnostics(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = make_plan(
+        tmp_path / "config.toml",
+        times="07:00",
+        executable=tmp_path / "cvebeacon.exe",
+        run_logged_out=True,
+        account=r"CORP\svc-cvebeacon",
+    )
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="ERROR: Access is denied.\nAnother diagnostic line.",
+        )
+
+    with pytest.raises(SchedulingError) as error:
+        install(plan, run=fake_run)
+    assert "\n" not in str(error.value)
+    assert "Another diagnostic line" in str(error.value)
+
+
+def test_linux_failure_never_gets_the_windows_access_hint(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
+    plan = make_plan(
+        tmp_path / "config.toml",
+        times="07:00",
+        system="linux",
+        executable="/opt/cvebeacon",
+        allow_incompatible=True,
+    )
+
+    def fake_run(args, **kwargs):
+        if args == ["crontab", "-l"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="access denied")
+
+    with pytest.raises(SchedulingError) as error:
+        install(plan, run=fake_run)
+    assert "elevated prompt" not in str(error.value)
+    assert "--account" not in str(error.value)
 
 
 def test_windows_status_reports_logged_off_execution(tmp_path):
     logged_out = _describe_windows_xml(
-        _windows_xml(windows_plan(tmp_path, run_logged_out=True, user_id=r"CORP\svc")).decode(
+        _windows_xml(windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc")).decode(
             "utf-16"
         )
     )
@@ -391,10 +563,19 @@ def test_windows_status_reports_logged_off_execution(tmp_path):
     assert "Account:" not in interactive
 
 
+def test_windows_status_treats_interactive_token_or_password_as_logged_off():
+    text = (
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        "<Principals><Principal><LogonType>InteractiveTokenOrPassword</LogonType>"
+        "</Principal></Principals>"
+        "<Actions><Exec><Command>cvebeacon</Command><Arguments>scan</Arguments>"
+        "</Exec></Actions></Task>"
+    )
+    assert "Runs while logged off: yes" in _describe_windows_xml(text)
+
+
 def test_cli_schedule_run_logged_out_is_forwarded(tmp_path, monkeypatch, capsys):
     config = write_schedule_config(tmp_path, watch=True)
-    monkeypatch.setenv("USERDOMAIN", "CORP")
-    monkeypatch.setenv("USERNAME", "svc-cvebeacon")
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     installed = []
     monkeypatch.setattr(cli, "install", lambda plan: installed.append(plan))
@@ -410,6 +591,8 @@ def test_cli_schedule_run_logged_out_is_forwarded(tmp_path, monkeypatch, capsys)
                 "--command",
                 "watch",
                 "--run-logged-out",
+                "--account",
+                r"CORP\svc-cvebeacon",
                 "--yes",
             ]
         )
@@ -417,7 +600,32 @@ def test_cli_schedule_run_logged_out_is_forwarded(tmp_path, monkeypatch, capsys)
     )
     assert installed[0].run_logged_out is True
     assert installed[0].user_id == r"CORP\svc-cvebeacon"
-    assert "Runs while logged off: yes" in capsys.readouterr().out
+    assert "Runs as: CORP\\svc-cvebeacon (S4U, while logged off)" in (
+        capsys.readouterr().out
+    )
+
+
+def test_cli_schedule_account_requires_logged_out(tmp_path, capsys):
+    config = write_schedule_config(tmp_path, watch=True)
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--command",
+                "watch",
+                "--account",
+                r"CORP\svc-cvebeacon",
+                "--yes",
+            ]
+        )
+        == 2
+    )
+    assert "requires --run-logged-out" in capsys.readouterr().err
 
 
 def test_cli_schedule_run_logged_out_is_rejected_on_linux(tmp_path, monkeypatch, capsys):
