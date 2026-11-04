@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import sys
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import InventoryConfig, load_config
 from .errors import CVEBeaconError, ConfigurationError, SchedulingError
@@ -29,6 +31,7 @@ from .watch.channels import (
     ENV_NAME_PATTERN,
     HEADER_PATTERN,
     TOPIC_PATTERN,
+    validate_webhook_url,
 )
 from .watch import delivery as watch_delivery
 from .watch.rules import NAME_PATTERN
@@ -70,10 +73,50 @@ CHANNEL_ENV_DEFAULTS = {
     "ntfy": "CVEBEACON_NTFY_TOKEN",
     "webhook": "CVEBEACON_HOOK_SECRET",
 }
+SOURCE_LABELS = {"cisa_kev": "CISA KEV", "eu_kev": "EU KEV"}
+SECRET_LABELS = {
+    ("smtp", "password"): "SMTP password",
+    ("graph", "client_secret"): "Microsoft Graph client secret",
+    ("teams", "webhook_url"): "Teams webhook URL",
+    ("slack", "webhook_url"): "Slack webhook URL",
+    ("discord", "webhook_url"): "Discord webhook URL",
+    ("telegram", "bot_token"): "Telegram bot token",
+    ("matrix", "access_token"): "Matrix access token",
+    ("ntfy", "token"): "ntfy access token",
+    ("gotify", "app_token"): "Gotify app token",
+    ("webhook", "header_value"): "Webhook header value",
+}
 
 
 class SetupCancelled(Exception):
     """The user interrupted the wizard."""
+
+
+class _AnswerHistory:
+    """Replays earlier answers as defaults when the user edits them."""
+
+    def __init__(self) -> None:
+        self._values: dict[tuple[str, int], str] = {}
+        self._counts: dict[str, int] = {}
+
+    def reset(self) -> None:
+        self._values = {}
+        self._counts = {}
+
+    def new_pass(self) -> None:
+        self._counts = {}
+
+    def previous(self, label: str, default: str) -> str:
+        index = self._counts.get(label, 0)
+        self._counts[label] = index + 1
+        return self._values.get((label, index), default)
+
+    def remember(self, label: str, value: str) -> None:
+        index = self._counts.get(label, 1) - 1
+        self._values[(label, index)] = value
+
+
+ANSWERS = _AnswerHistory()
 
 
 @dataclass
@@ -131,11 +174,14 @@ def _one_line(value: object) -> str:
 
 
 def _ask_line(label: str, default: str | None) -> str:
-    shown = f" [{default}]" if default is not None else " []"
+    previous = ANSWERS.previous(label, default or "")
+    shown = f" [{previous}]" if previous else ""
     try:
-        return input(f"{label}{shown}: ").strip()
+        value = input(f"{label}{shown}: ").strip()
     except (EOFError, KeyboardInterrupt):
         raise SetupCancelled from None
+    ANSWERS.remember(label, value)
+    return value
 
 
 def _ask_text(label: str, default: str = "", *, required: bool = False) -> str:
@@ -159,6 +205,9 @@ def _ask_validated(label: str, default: str, validator) -> str:
 
 
 def _ask_bool(label: str, default: bool) -> bool:
+    remembered = ANSWERS.previous(label, "")
+    if remembered.casefold() in {"y", "yes", "n", "no"}:
+        default = remembered.casefold() in {"y", "yes"}
     shown = "[Y/n]" if default else "[y/N]"
     while True:
         try:
@@ -166,10 +215,13 @@ def _ask_bool(label: str, default: bool) -> bool:
         except (EOFError, KeyboardInterrupt):
             raise SetupCancelled from None
         if not answer:
+            ANSWERS.remember(label, "y" if default else "n")
             return default
         if answer in {"y", "yes"}:
+            ANSWERS.remember(label, "y")
             return True
         if answer in {"n", "no"}:
+            ANSWERS.remember(label, "n")
             return False
         print("Please answer yes or no.")
 
@@ -265,8 +317,55 @@ def _validate_email(value: str) -> str:
 
 def _validate_https_url(value: str) -> str:
     text = value.strip()
-    if not text.startswith("https://") or len(text) <= len("https://"):
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        raise ValueError("Enter an HTTPS URL.") from None
+    if (
+        parts.scheme != "https"
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+    ):
         raise ValueError("Enter an HTTPS URL.")
+    return text
+
+
+def _validate_matrix_homeserver(value: str) -> str:
+    text = _validate_https_url(value).rstrip("/")
+    parts = urlsplit(text)
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        raise ValueError("Enter an HTTPS origin without a path, query or fragment.")
+    return text
+
+
+def _validate_telegram_chat(value: str) -> str:
+    text = value.strip()
+    if CHAT_ID_PATTERN.fullmatch(text) is None and CHAT_NAME_PATTERN.fullmatch(text) is None:
+        raise ValueError("Use a numeric chat id or a name such as @my_channel.")
+    return text
+
+
+def _validate_matrix_room(value: str) -> str:
+    text = value.strip()
+    if (
+        not text.startswith("!")
+        or ":" not in text
+        or any(ord(character) <= 32 or ord(character) >= 127 for character in text)
+        or any(character in text for character in "/?#\\")
+    ):
+        raise ValueError("Use a room id such as !room:example.org.")
+    return text
+
+
+def _validate_webhook(value: str, kind: str) -> str:
+    text = value.strip()
+    try:
+        validate_webhook_url(
+            text, kind, SECRET_LABELS.get((kind, "webhook_url"), "webhook URL")
+        )
+    except CVEBeaconError as exc:
+        raise ValueError(_one_line(exc)) from None
     return text
 
 
@@ -353,11 +452,13 @@ def _ask_inventory(base: Path) -> InventoryChoice:
 def _ask_sources() -> tuple[str, ...]:
     print("Watch sources:")
     for name, description in SOURCE_INFO:
+        label = SOURCE_LABELS.get(name, name.upper())
         suffix = " (always enabled)" if name == "nvd" else ""
-        print(f"  {name}: {description}{suffix}")
+        print(f"  {label}: {description}{suffix}")
     enabled = ["nvd"]
     for name, _description in SOURCE_INFO[1:]:
-        if _ask_bool(f"Enable {name.upper()}?", True):
+        label = SOURCE_LABELS.get(name, name.upper())
+        if _ask_bool(f"Enable {label}?", True):
             enabled.append(name)
     if "epss" not in enabled:
         print("Warning: EPSS is disabled; epss_min rules will be unavailable.")
@@ -366,6 +467,10 @@ def _ask_sources() -> tuple[str, ...]:
 
 def _ask_watch_settings() -> WatchSettings:
     sources = _ask_sources()
+    print("First run history:")
+    print("  baseline - no history; alerts start from now")
+    print("  backfill - download the last N days and evaluate them")
+    print("  full     - download all available history; this can take hours")
     initial = _ask_choice(
         "First run history", ("baseline", "backfill", "full"), "baseline"
     )
@@ -387,6 +492,10 @@ def _ask_nvd_key(base: Path) -> NvdKey:
         name = _ask_validated(
             "NVD API key environment variable", "NVD_API_KEY", _validate_env_name
         )
+        print(
+            f"Set {name} in the environment of the account that runs CVEBeacon "
+            "(including its scheduler)."
+        )
         return NvdKey("env", env=name)
     if choice == "file":
         value = _ask_secret_value("NVD API key")
@@ -395,7 +504,21 @@ def _ask_nvd_key(base: Path) -> NvdKey:
     return NvdKey()
 
 
-def _ask_rule_selection(epss_enabled: bool) -> list[int]:
+def _warn_rule_sources(index: int, sources: tuple[str, ...]) -> None:
+    enabled = set(sources)
+    if index in {3, 4} and not ({"cisa_kev", "eu_kev"} & enabled):
+        print(
+            "Warning: CISA KEV and EU KEV are disabled; KEV rules will not match."
+        )
+    if index == 5 and "euvd" not in enabled:
+        print(
+            "Warning: EUVD is disabled; actively-exploited rules will rely on "
+            "NVD SSVC only."
+        )
+
+
+def _ask_rule_selection(sources: tuple[str, ...]) -> list[int]:
+    epss_enabled = "epss" in sources
     print("Rules:")
     for index, (name, description) in enumerate(RULE_PRESETS, start=1):
         print(f"  {index}. {name}: {description}")
@@ -412,20 +535,28 @@ def _ask_rule_selection(epss_enabled: bool) -> list[int]:
         if not epss_enabled and any(value in {2, 4} for value in selected):
             print("Those rules use EPSS, which is disabled. Choose another rule or enable EPSS.")
             continue
+        for index in selected:
+            _warn_rule_sources(index, sources)
         return selected
 
 
-def _custom_condition(epss_enabled: bool) -> dict[str, Any]:
+def _custom_condition(sources: tuple[str, ...]) -> dict[str, Any]:
+    enabled = set(sources)
     while True:
         cvss = _ask_optional_number("CVSS minimum (blank for none)", 0.0, 10.0)
         epss = _ask_optional_number("EPSS minimum (blank for none)", 0.0, 1.0)
-        if epss is not None and not epss_enabled:
+        if epss is not None and "epss" not in enabled:
             print("EPSS is disabled; leave the EPSS minimum blank or enable EPSS.")
             continue
         combination = "and"
         if cvss is not None and epss is not None:
             combination = _ask_choice("Combine CVSS and EPSS", ("and", "or"), "and")
         kev = _ask_bool("Require a KEV entry?", False)
+        if kev and not ({"cisa_kev", "eu_kev"} & enabled):
+            print(
+                "Warning: CISA KEV and EU KEV are disabled; this condition will "
+                "not match."
+            )
         leaves: list[dict[str, Any]] = []
         if cvss is not None:
             leaves.append({"cvss_min": cvss})
@@ -451,7 +582,7 @@ def _custom_condition(epss_enabled: bool) -> dict[str, Any]:
         return condition
 
 
-def _preset_condition(index: int, epss_enabled: bool) -> dict[str, Any]:
+def _preset_condition(index: int, sources: tuple[str, ...]) -> dict[str, Any]:
     if index == 1:
         return {"cvss_min": _ask_number("CVSS minimum", 9.0, 0.0, 10.0)}
     if index == 2:
@@ -469,17 +600,16 @@ def _preset_condition(index: int, epss_enabled: bool) -> dict[str, Any]:
         }
     if index == 5:
         return {"exploitation": "active"}
-    return _custom_condition(epss_enabled)
+    return _custom_condition(sources)
 
 
 def _ask_rules(settings: WatchSettings) -> list[RuleDraft]:
-    epss_enabled = "epss" in settings.sources
-    selected = _ask_rule_selection(epss_enabled)
+    selected = _ask_rule_selection(settings.sources)
     rules: list[RuleDraft] = []
     used: set[str] = set()
     for index in selected:
         preset_name = RULE_PRESETS[index - 1][0]
-        condition = _preset_condition(index, epss_enabled)
+        condition = _preset_condition(index, settings.sources)
         name = _ask_validated(
             "Rule name", preset_name, lambda value: _validate_rule_name(value, used)
         )
@@ -489,6 +619,10 @@ def _ask_rules(settings: WatchSettings) -> list[RuleDraft]:
         )
         if vendors:
             condition = {"all": [condition, {"vendor": vendors}]}
+        print(
+            "Old CVEs: digest sends a summary, alert sends each one, ignore "
+            "leaves them out."
+        )
         old_cves = _ask_choice(
             "Old CVEs", ("digest", "alert", "ignore"), "digest"
         )
@@ -509,19 +643,26 @@ def _ask_channel_type() -> str:
         print("Choose a channel type from the list.")
 
 
-def _ask_secret_value(label: str) -> str:
+def _ask_secret_value(label: str, validator=None) -> str:
     while True:
         try:
-            value = getpass.getpass(f"{label} []: ").strip()
+            value = getpass.getpass(f"{label}: ").strip()
         except (EOFError, KeyboardInterrupt):
             raise SetupCancelled from None
-        if value:
-            return value
-        print(f"{label} is required.")
+        if not value:
+            print(f"{label} is required.")
+            continue
+        if validator is not None:
+            try:
+                return validator(value)
+            except (ValueError, CVEBeaconError) as exc:
+                print(_one_line(exc))
+                continue
+        return value
 
 
 def _secret_relative(base: Path, channel: str, field_name: str) -> str:
-    directory = base / "secrets" if os.name == "posix" else base
+    directory = base / "secrets"
     filename = re.sub(r"[^A-Za-z0-9_.-]", "-", f"{channel}-{field_name}")
     path = directory / filename
     try:
@@ -531,37 +672,50 @@ def _secret_relative(base: Path, channel: str, field_name: str) -> str:
     return relative.as_posix()
 
 
+def _secret_label(kind: str, field_name: str) -> str:
+    return SECRET_LABELS.get(
+        (kind, field_name), field_name.replace("_", " ").capitalize()
+    )
+
+
 def _ask_secret_choice(
     base: Path,
     channel: str,
     field_name: str,
     default_env: str,
     *,
+    kind: str,
     required: bool = True,
+    validator=None,
 ) -> SecretChoice | None:
-    if not required and not _ask_bool(f"Use a {field_name.replace('_', ' ')}?", False):
+    label = _secret_label(kind, field_name)
+    if not required and not _ask_bool(f"Use a {label}?", False):
         return None
-    method = _ask_choice(
-        f"Store the {field_name.replace('_', ' ')} in", ("env", "file"), "env"
-    )
+    method = _ask_choice(f"Store the {label} in", ("env", "file"), "env")
     if method == "env":
         name = _ask_validated(
             "Environment variable name", default_env, _validate_env_name
         )
+        print(
+            f"Set {name} in the environment of the account that runs CVEBeacon "
+            "(including its scheduler)."
+        )
         return SecretChoice(env=name)
-    value = _ask_secret_value(f"Secret value for {channel} {field_name}")
+    value = _ask_secret_value(label, validator)
     return SecretChoice(file=_secret_relative(base, channel, field_name), value=value)
 
 
 def _common_comments(kind: str, *, allow_insecure: bool = False) -> list[str]:
     interval = 3 if kind == "telegram" else 0
-    return [
+    comments = [
         '# grouping = "run"',
         "# max_items = 20",
         f"# min_interval_seconds = {interval}",
         "# timeout_seconds = 30",
-        f"# allow_insecure = {str(allow_insecure).lower()}",
     ]
+    if not allow_insecure:
+        comments.append("# allow_insecure = false")
+    return comments
 
 
 def _ask_smtp(base: Path, name: str) -> ChannelDraft:
@@ -582,11 +736,16 @@ def _ask_smtp(base: Path, name: str) -> ChannelDraft:
             "preset if it is disabled."
         )
     else:
-        host = _ask_text("SMTP host", "smtp.example.com", required=True)
-        port = _ask_int("SMTP port", 587, 1, 65535)
+        host = _ask_text("SMTP host (e.g. smtp.example.com)", "", required=True)
         security = _ask_choice("SMTP security", ("starttls", "tls", "none"), "starttls")
-    sender = _ask_validated("From address", "alerts@example.com", _validate_email)
-    recipients = _ask_list("To addresses", "security@example.com", validator=_validate_email)
+        default_port = {"starttls": 587, "tls": 465, "none": 25}[security]
+        port = _ask_int("SMTP port", default_port, 1, 65535)
+    sender = _ask_validated(
+        "From address (e.g. alerts@example.com)", "", _validate_email
+    )
+    recipients = _ask_list(
+        "To addresses (e.g. security@example.com)", "", validator=_validate_email
+    )
     username = _ask_text(
         "SMTP username (use - for no authentication)", sender, required=False
     )
@@ -605,7 +764,11 @@ def _ask_smtp(base: Path, name: str) -> ChannelDraft:
     if username:
         draft.values["username"] = username
         choice = _ask_secret_choice(
-            base, name, "password", "CVEBEACON_SMTP_PASSWORD"
+            base,
+            name,
+            "password",
+            "CVEBEACON_SMTP_PASSWORD",
+            kind="smtp",
         )
         if choice is not None:
             draft.secret_fields.append(("password", choice))
@@ -617,15 +780,21 @@ def _ask_smtp(base: Path, name: str) -> ChannelDraft:
         draft.values["allow_insecure"] = True
         print("Warning: SMTP without TLS sends credentials and alerts in clear text.")
     draft.comments.extend(['# cc = []', '# bcc = []'])
-    draft.comments.extend(_common_comments("smtp", allow_insecure=security == "none"))
+    draft.comments.extend(
+        _common_comments("smtp", allow_insecure=security == "none")
+    )
     return draft
 
 
 def _ask_graph(base: Path, name: str) -> ChannelDraft:
     tenant = _ask_text("Microsoft Graph tenant ID", "", required=True)
     client = _ask_text("Microsoft Graph client ID", "", required=True)
-    sender = _ask_validated("From address", "alerts@example.com", _validate_email)
-    recipients = _ask_list("To addresses", "security@example.com", validator=_validate_email)
+    sender = _ask_validated(
+        "From address (e.g. alerts@example.com)", "", _validate_email
+    )
+    recipients = _ask_list(
+        "To addresses (e.g. security@example.com)", "", validator=_validate_email
+    )
     draft = ChannelDraft(
         name,
         "graph",
@@ -638,7 +807,11 @@ def _ask_graph(base: Path, name: str) -> ChannelDraft:
         },
     )
     choice = _ask_secret_choice(
-        base, name, "client_secret", "CVEBEACON_GRAPH_CLIENT_SECRET"
+        base,
+        name,
+        "client_secret",
+        "CVEBEACON_GRAPH_CLIENT_SECRET",
+        kind="graph",
     )
     if choice is not None:
         draft.secret_fields.append(("client_secret", choice))
@@ -649,7 +822,12 @@ def _ask_graph(base: Path, name: str) -> ChannelDraft:
 
 def _ask_webhook_channel(base: Path, name: str, kind: str) -> ChannelDraft:
     choice = _ask_secret_choice(
-        base, name, "webhook_url", CHANNEL_ENV_DEFAULTS[kind]
+        base,
+        name,
+        "webhook_url",
+        CHANNEL_ENV_DEFAULTS[kind],
+        kind=kind,
+        validator=lambda value: _validate_webhook(value, kind),
     )
     draft = ChannelDraft(name, kind, {"type": kind})
     if choice is not None:
@@ -659,14 +837,18 @@ def _ask_webhook_channel(base: Path, name: str, kind: str) -> ChannelDraft:
 
 
 def _ask_telegram(base: Path, name: str) -> ChannelDraft:
-    while True:
-        chat_id = _ask_text("Telegram chat id or @channel", "-1001234567890", required=True)
-        if CHAT_ID_PATTERN.fullmatch(chat_id) or CHAT_NAME_PATTERN.fullmatch(chat_id):
-            break
-        print("Use a numeric chat id or a name such as @my_channel.")
+    chat_id = _ask_validated(
+        "Telegram chat id or @channel (e.g. -1001234567890)",
+        "",
+        _validate_telegram_chat,
+    )
     draft = ChannelDraft(name, "telegram", {"type": "telegram", "chat_id": chat_id})
     choice = _ask_secret_choice(
-        base, name, "bot_token", CHANNEL_ENV_DEFAULTS["telegram"]
+        base,
+        name,
+        "bot_token",
+        CHANNEL_ENV_DEFAULTS["telegram"],
+        kind="telegram",
     )
     if choice is not None:
         draft.secret_fields.append(("bot_token", choice))
@@ -676,20 +858,24 @@ def _ask_telegram(base: Path, name: str) -> ChannelDraft:
 
 def _ask_matrix(base: Path, name: str) -> ChannelDraft:
     homeserver = _ask_validated(
-        "Matrix homeserver", "https://matrix.example.org", _validate_https_url
-    ).rstrip("/")
-    while True:
-        room = _ask_text("Matrix room id", "!room:example.org", required=True)
-        if room.startswith("!") and ":" in room:
-            break
-        print("Use a room id such as !room:example.org.")
+        "Matrix homeserver (e.g. https://matrix.example.org)",
+        "",
+        _validate_matrix_homeserver,
+    )
+    room = _ask_validated(
+        "Matrix room id (e.g. !room:example.org)", "", _validate_matrix_room
+    )
     draft = ChannelDraft(
         name,
         "matrix",
         {"type": "matrix", "homeserver": homeserver, "room_id": room},
     )
     choice = _ask_secret_choice(
-        base, name, "access_token", CHANNEL_ENV_DEFAULTS["matrix"]
+        base,
+        name,
+        "access_token",
+        CHANNEL_ENV_DEFAULTS["matrix"],
+        kind="matrix",
     )
     if choice is not None:
         draft.secret_fields.append(("access_token", choice))
@@ -698,9 +884,16 @@ def _ask_matrix(base: Path, name: str) -> ChannelDraft:
 
 
 def _ask_ntfy(base: Path, name: str) -> ChannelDraft:
-    server = _ask_validated("ntfy server", "https://ntfy.sh", _validate_https_url).rstrip("/")
+    print(
+        "ntfy.sh topics are public unless protected; use a token or self-host "
+        "for private alerts."
+    )
+    server = _ask_validated(
+        "ntfy server", "https://ntfy.sh", _validate_https_url
+    ).rstrip("/")
+    suggested = "cvebeacon-" + secrets.token_urlsafe(9)
     while True:
-        topic = _ask_text("ntfy topic", "cvebeacon-alerts", required=True)
+        topic = _ask_text("ntfy topic", suggested, required=True)
         if TOPIC_PATTERN.fullmatch(topic):
             break
         print("Use only letters, digits, underscores or hyphens for the topic.")
@@ -708,7 +901,12 @@ def _ask_ntfy(base: Path, name: str) -> ChannelDraft:
         name, "ntfy", {"type": "ntfy", "server": server, "topic": topic}
     )
     token = _ask_secret_choice(
-        base, name, "token", CHANNEL_ENV_DEFAULTS["ntfy"], required=False
+        base,
+        name,
+        "token",
+        CHANNEL_ENV_DEFAULTS["ntfy"],
+        kind="ntfy",
+        required=False,
     )
     if token is not None:
         draft.secret_fields.append(("token", token))
@@ -720,11 +918,15 @@ def _ask_ntfy(base: Path, name: str) -> ChannelDraft:
 
 def _ask_gotify(base: Path, name: str) -> ChannelDraft:
     server = _ask_validated(
-        "Gotify server", "https://gotify.example.org", _validate_https_url
+        "Gotify server (e.g. https://gotify.example.org)", "", _validate_https_url
     ).rstrip("/")
     draft = ChannelDraft(name, "gotify", {"type": "gotify", "server": server})
     choice = _ask_secret_choice(
-        base, name, "app_token", CHANNEL_ENV_DEFAULTS["gotify"]
+        base,
+        name,
+        "app_token",
+        CHANNEL_ENV_DEFAULTS["gotify"],
+        kind="gotify",
     )
     if choice is not None:
         draft.secret_fields.append(("app_token", choice))
@@ -733,7 +935,11 @@ def _ask_gotify(base: Path, name: str) -> ChannelDraft:
 
 
 def _ask_webhook(base: Path, name: str) -> ChannelDraft:
-    url = _ask_validated("Webhook URL", "https://example.org/cvebeacon", _validate_https_url)
+    url = _ask_validated(
+        "Webhook URL (e.g. https://example.org/cvebeacon)",
+        "",
+        _validate_https_url,
+    )
     while True:
         header = _ask_text("Header name (blank for none)", "", required=False)
         if not header or HEADER_PATTERN.fullmatch(header) is not None:
@@ -743,7 +949,11 @@ def _ask_webhook(base: Path, name: str) -> ChannelDraft:
     if header:
         draft.values["header_name"] = header
         choice = _ask_secret_choice(
-            base, name, "header_value", CHANNEL_ENV_DEFAULTS["webhook"]
+            base,
+            name,
+            "header_value",
+            CHANNEL_ENV_DEFAULTS["webhook"],
+            kind="webhook",
         )
         if choice is not None:
             draft.secret_fields.append(("header_value", choice))
@@ -816,7 +1026,7 @@ def _assign_channels(rules: list[RuleDraft], channels: list[ChannelDraft]) -> No
 
 
 def _toml_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _toml_key(value: str) -> str:
@@ -846,14 +1056,19 @@ def _inline_table(value: dict[str, Any]) -> str:
     return "{ " + ", ".join(parts) + " }"
 
 
-def _render_channel(channel: ChannelDraft) -> str:
+def _render_channel(channel: ChannelDraft, *, secret_root: Path | None = None) -> str:
     lines = [f"[watch.channels.{_toml_key(channel.name)}]"]
     lines.extend(f"{key} = {_toml_value(value)}" for key, value in channel.values.items())
     for base_key, choice in channel.secret_fields:
         if choice.env is not None:
             lines.append(f"{base_key}_env = {_toml_string(choice.env)}")
         if choice.file is not None:
-            lines.append(f"{base_key}_file = {_toml_string(choice.file)}")
+            path = (
+                (secret_root / choice.file).as_posix()
+                if secret_root is not None
+                else choice.file
+            )
+            lines.append(f"{base_key}_file = {_toml_string(path)}")
     if channel.comments:
         lines.append("")
         lines.append("# Optional settings:")
@@ -881,6 +1096,7 @@ def _render_config(
     rules: list[RuleDraft],
     channels: list[ChannelDraft],
     nvd_key: NvdKey,
+    secret_root: Path | None = None,
 ) -> str:
     lines = [
         f"# Generated by cvebeacon setup on {now.strftime('%Y-%m-%d')}.",
@@ -921,7 +1137,12 @@ def _render_config(
     if nvd_key.kind == "env":
         lines.append(f"nvd_api_key_env = {_toml_string(nvd_key.env)}")
     elif nvd_key.kind == "file" and nvd_key.file is not None:
-        lines.append(f"nvd_api_key_file = {_toml_string(nvd_key.file)}")
+        path = (
+            (secret_root / nvd_key.file).as_posix()
+            if secret_root is not None
+            else nvd_key.file
+        )
+        lines.append(f"nvd_api_key_file = {_toml_string(path)}")
     else:
         lines.append('# nvd_api_key_env = "NVD_API_KEY"')
     lines.append("")
@@ -943,7 +1164,7 @@ def _render_config(
             lines.extend(
                 [
                     "# Alert delivery channel. See docs/WATCH.md.",
-                    _render_channel(channel),
+                    _render_channel(channel, secret_root=secret_root),
                     "",
                 ]
             )
@@ -980,18 +1201,21 @@ def _write_secret(path: Path, value: str) -> None:
         os.chmod(path.parent, 0o700)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = -1
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
     finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         if os.name == "posix":
             os.chmod(path, 0o600)
-    if os.name == "nt":
-        print("Note: restrict the secrets files with NTFS permissions.")
 
 
-def _write_config(path: Path, text: str) -> None:
+def _write_config(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -1002,7 +1226,7 @@ def _write_config(path: Path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         load_config(name)
-        os.replace(name, path)
+        return Path(name)
     except BaseException:
         try:
             os.unlink(name)
@@ -1051,6 +1275,9 @@ def _ask_schedule_command(*, inventory: bool, watch: bool) -> str:
     if inventory and watch:
         options.append("both")
     default = default_command(inventory=inventory, watch=watch)
+    if len(options) == 1:
+        print(f"Scheduled command: {options[0]}")
+        return options[0]
     return _ask_choice("Scheduled command", tuple(options), default)
 
 
@@ -1139,6 +1366,7 @@ def run_setup(
 ) -> int:
     path = Path(config_path).expanduser().resolve()
     stamp = now or datetime.now()
+    ANSWERS.reset()
     try:
         backup_pending = False
         if path.exists():
@@ -1151,55 +1379,119 @@ def run_setup(
                 print("cancelled")
                 return 1
             backup_pending = True
-        mode = _ask_mode()
-        inventory = _ask_inventory(path.parent) if mode in {"inventory", "both"} else None
-        watch = _ask_watch_settings() if mode in {"watch", "both"} else None
-        nvd_key = _ask_nvd_key(path.parent)
-        rules = _ask_rules(watch) if watch is not None else []
-        channels = _ask_channels(path.parent) if watch is not None else []
-        if watch is not None:
-            _assign_channels(rules, channels)
-        text = _render_config(
-            now=stamp,
-            inventory=inventory,
-            watch=watch,
-            rules=rules,
-            channels=channels,
-            nvd_key=nvd_key,
-        )
+        while True:
+            ANSWERS.new_pass()
+            mode = _ask_mode()
+            inventory = (
+                _ask_inventory(path.parent) if mode in {"inventory", "both"} else None
+            )
+            watch = _ask_watch_settings() if mode in {"watch", "both"} else None
+            nvd_key = _ask_nvd_key(path.parent)
+            rules = _ask_rules(watch) if watch is not None else []
+            channels = _ask_channels(path.parent) if watch is not None else []
+            if watch is not None:
+                _assign_channels(rules, channels)
+            text = _render_config(
+                now=stamp,
+                inventory=inventory,
+                watch=watch,
+                rules=rules,
+                channels=channels,
+                nvd_key=nvd_key,
+            )
+            secrets_to_write = _secret_paths(path.parent, channels, nvd_key)
+            try:
+                validation_root = Path(
+                    tempfile.mkdtemp(prefix=".cvebeacon-secrets-", dir=path.parent)
+                )
+            except OSError as exc:
+                print(f"error: cannot write secret file: {exc}", file=sys.stderr)
+                return 2
+            try:
+                for secret_path, value in secrets_to_write:
+                    relative = secret_path.relative_to(path.parent)
+                    _write_secret(validation_root / relative, value)
+                validation_text = _render_config(
+                    now=stamp,
+                    inventory=inventory,
+                    watch=watch,
+                    rules=rules,
+                    channels=channels,
+                    nvd_key=nvd_key,
+                    secret_root=validation_root,
+                )
+                try:
+                    temporary = _write_config(path, validation_text)
+                except ConfigurationError as exc:
+                    print(f"error: {_one_line(exc)}", file=sys.stderr)
+                    if _ask_bool("Edit answers again?", True):
+                        continue
+                    print("cancelled")
+                    return 2
+                except OSError as exc:
+                    print(
+                        f"error: cannot write the configuration: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
+            except OSError as exc:
+                print(f"error: cannot write secret file: {exc}", file=sys.stderr)
+                return 2
+            finally:
+                shutil.rmtree(validation_root, ignore_errors=True)
+            break
         if backup_pending:
             try:
                 backup = _backup(path, stamp)
             except OSError as exc:
-                print(f"error: cannot back up the existing configuration: {exc}", file=sys.stderr)
+                temporary.unlink(missing_ok=True)
+                print(
+                    f"error: cannot back up the existing configuration: {exc}",
+                    file=sys.stderr,
+                )
                 return 2
             print(f"Backup: {backup}")
-        for secret_path, value in _secret_paths(path.parent, channels, nvd_key):
-            try:
-                _write_secret(secret_path, value)
-            except OSError as exc:
-                print(f"error: cannot write secret file: {exc}", file=sys.stderr)
-                return 2
         try:
-            _write_config(path, text)
+            for secret_path, value in secrets_to_write:
+                if secret_path.exists():
+                    print(f"Backup: {_backup(secret_path, stamp)}")
+                _write_secret(secret_path, value)
+        except OSError as exc:
+            temporary.unlink(missing_ok=True)
+            print(f"error: cannot write secret file: {exc}", file=sys.stderr)
+            return 2
+        try:
+            final = _write_config(path, text)
         except (ConfigurationError, OSError) as exc:
+            temporary.unlink(missing_ok=True)
             print(f"error: {_one_line(exc)}", file=sys.stderr)
             return 2
+        try:
+            os.replace(final, path)
+        except OSError as exc:
+            final.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
+            print(f"error: cannot write the configuration: {exc}", file=sys.stderr)
+            return 2
+        temporary.unlink(missing_ok=True)
+        if os.name == "nt" and secrets_to_write:
+            print("Note: restrict the secrets directory with NTFS permissions.")
         print(f"Configuration written: {path}")
-        if watch is not None:
-            _offer_test_send(path)
-        _offer_schedule(
-            path,
-            inventory=inventory is not None,
-            watch=watch is not None,
-        )
-        secret_files = any(choice.file for channel in channels for _, choice in channel.secret_fields)
-        secret_files = secret_files or nvd_key.file is not None
+        try:
+            if watch is not None:
+                _offer_test_send(path)
+            _offer_schedule(
+                path,
+                inventory=inventory is not None,
+                watch=watch is not None,
+            )
+        except SetupCancelled:
+            print(f"Configuration saved: {path}")
+        secret_files = bool(secrets_to_write)
         print("")
         print(f"Configuration: {path}")
         if secret_files:
-            secret_directory = path.parent / "secrets" if os.name == "posix" else path.parent
-            print(f"Secrets: {secret_directory}")
+            print(f"Secrets: {path.parent / 'secrets'}")
         print("Next steps:")
         for command in _next_commands(
             path, inventory=inventory is not None, watch=watch

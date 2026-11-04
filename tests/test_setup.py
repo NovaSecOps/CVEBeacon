@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from datetime import datetime
 from pathlib import Path
@@ -8,16 +9,23 @@ from pathlib import Path
 import pytest
 
 from cvebeacon import cli
+from cvebeacon import setup as wizard
 from cvebeacon.config import load_config
-from cvebeacon.setup import run_setup
+from cvebeacon.errors import ConfigurationError
+from cvebeacon.setup import (
+    _secret_relative,
+    _toml_string,
+    run_setup,
+)
 from cvebeacon.watch.delivery import TestOutcome as DeliveryTestOutcome
 from cvebeacon.watch.rules import describe_condition
 
 NOW = datetime(2026, 11, 4, 12, 0)
 WATCH_START = ["", "", "", "", "", "", ""]  # mode, four sources, initial, NVD key
 CRITICAL_RULE = ["", "", "", "", ""]  # selection, CVSS, name, vendor, old_cves
-WEBHOOK_CHANNEL = ["", "10", "", "", "n"]  # name, type, URL, header, another
-SCHEDULE_NO = ["", "", "", "n"]  # type, times, command, install
+WEBHOOK_CHANNEL = ["", "10", "https://example.org/cvebeacon", "", "n"]
+SCHEDULE_NO = ["", "", "n"]  # type, times, install
+SCHEDULE_BOTH_NO = ["", "", "", "n"]  # type, times, command, install
 TAIL = ["", "n"]  # rule channels, test send
 
 
@@ -77,7 +85,7 @@ def test_watch_setup_writes_a_loadable_commented_config(tmp_path, monkeypatch, c
 
 def test_inventory_only_mode_omits_watch(tmp_path, monkeypatch):
     write_inventory(tmp_path)
-    answers = ["inventory", "", "", "", "", "", "", "n"]
+    answers = ["inventory", "", "", "", "", "", "n"]
     feed(monkeypatch, answers)
     assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
     config = load_config(tmp_path / "cvebeacon.toml")
@@ -99,7 +107,7 @@ def test_both_mode_keeps_inventory_and_watch(tmp_path, monkeypatch):
         "3", "", "", "",  # kev-any rule: select, name, vendor, old
         *WEBHOOK_CHANNEL,
         *TAIL,
-        *SCHEDULE_NO,
+        *SCHEDULE_BOTH_NO,
     ]
     feed(monkeypatch, answers)
     assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
@@ -156,16 +164,54 @@ def test_custom_rule_and_choice_with_kev(tmp_path, monkeypatch):
 
 
 CHANNEL_CASES = [
-    ("smtp", ["", "1", "custom", "", "", "", "", "", "-", "n"]),
-    ("graph", ["", "2", "tenant", "client", "", "", "", "", "n"]),
+    (
+        "smtp",
+        [
+            "",
+            "1",
+            "custom",
+            "smtp.example.com",
+            "starttls",
+            "",
+            "alerts@example.com",
+            "security@example.com",
+            "-",
+            "n",
+        ],
+    ),
+    (
+        "graph",
+        [
+            "",
+            "2",
+            "tenant",
+            "client",
+            "alerts@example.com",
+            "security@example.com",
+            "",
+            "",
+            "n",
+        ],
+    ),
     ("teams", ["", "3", "", "", "n"]),
     ("slack", ["", "4", "", "", "n"]),
     ("discord", ["", "5", "", "", "n"]),
-    ("telegram", ["", "6", "", "", "", "n"]),
-    ("matrix", ["", "7", "", "", "", "", "n"]),
+    ("telegram", ["", "6", "-1001234567890", "", "", "n"]),
+    (
+        "matrix",
+        [
+            "",
+            "7",
+            "https://matrix.example.org",
+            "!room:example.org",
+            "",
+            "",
+            "n",
+        ],
+    ),
     ("ntfy", ["", "8", "", "", "n", "n"]),
-    ("gotify", ["", "9", "", "", "", "n"]),
-    ("webhook", ["", "10", "", "", "n"]),
+    ("gotify", ["", "9", "https://gotify.example.org", "", "", "n"]),
+    ("webhook", ["", "10", "https://example.org/cvebeacon", "", "n"]),
 ]
 
 
@@ -179,16 +225,62 @@ def test_each_channel_type_is_written_and_loads(tmp_path, monkeypatch, expected_
 
 
 EMAIL_CASES = [
-    ("smtp", ["", "1", "", "", "", "-", "n"], {"host": "smtp.gmail.com", "port": 587}),
     (
         "smtp",
-        ["", "1", "m365-smtp", "", "", "-", "n"],
+        [
+            "",
+            "1",
+            "",
+            "alerts@example.com",
+            "security@example.com",
+            "-",
+            "n",
+        ],
+        {"host": "smtp.gmail.com", "port": 587},
+    ),
+    (
+        "smtp",
+        [
+            "",
+            "1",
+            "m365-smtp",
+            "alerts@example.com",
+            "security@example.com",
+            "-",
+            "n",
+        ],
         {"host": "smtp.office365.com", "port": 587},
     ),
-    ("graph", ["", "1", "m365-graph", "tenant", "client", "", "", "", "", "n"], {"tenant_id": "tenant"}),
+    (
+        "graph",
+        [
+            "",
+            "1",
+            "m365-graph",
+            "tenant",
+            "client",
+            "alerts@example.com",
+            "security@example.com",
+            "",
+            "",
+            "n",
+        ],
+        {"tenant_id": "tenant"},
+    ),
     (
         "smtp",
-        ["", "1", "custom", "", "", "", "", "", "-", "n"],
+        [
+            "",
+            "1",
+            "custom",
+            "smtp.example.com",
+            "starttls",
+            "",
+            "alerts@example.com",
+            "security@example.com",
+            "-",
+            "n",
+        ],
         {"host": "smtp.example.com", "port": 587},
     ),
 ]
@@ -209,7 +301,19 @@ def test_email_presets(tmp_path, monkeypatch, expected_type, channel, options):
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission check")
 def test_secret_file_permissions_and_no_echo(tmp_path, monkeypatch, capsys):
     write_inventory(tmp_path)
-    channel = ["", "1", "custom", "", "", "", "", "", "user", "file", "n"]
+    channel = [
+        "",
+        "1",
+        "custom",
+        "smtp.example.com",
+        "starttls",
+        "",
+        "alerts@example.com",
+        "security@example.com",
+        "user",
+        "file",
+        "n",
+    ]
     assert run_watch(tmp_path, monkeypatch, channel=channel, secrets=["canary-secret"]) == 0
     path = tmp_path / "cvebeacon.toml"
     text = path.read_text(encoding="utf-8")
@@ -226,7 +330,20 @@ def test_secret_file_permissions_and_no_echo(tmp_path, monkeypatch, capsys):
 def test_secret_environment_option_never_writes_the_value(tmp_path, monkeypatch, capsys):
     write_inventory(tmp_path)
     monkeypatch.setenv("MY_SMTP_SECRET", "env-canary")
-    channel = ["", "1", "custom", "", "", "", "", "", "user", "env", "MY_SMTP_SECRET", "n"]
+    channel = [
+        "",
+        "1",
+        "custom",
+        "smtp.example.com",
+        "starttls",
+        "",
+        "alerts@example.com",
+        "security@example.com",
+        "user",
+        "env",
+        "MY_SMTP_SECRET",
+        "n",
+    ]
     assert run_watch(tmp_path, monkeypatch, channel=channel) == 0
     text = (tmp_path / "cvebeacon.toml").read_text(encoding="utf-8")
     assert 'password_env = "MY_SMTP_SECRET"' in text
@@ -262,7 +379,7 @@ def test_invalid_answer_is_explained_and_asked_again(tmp_path, monkeypatch, caps
 
 def test_invalid_schedule_time_is_asked_again(tmp_path, monkeypatch, capsys):
     write_inventory(tmp_path)
-    schedule = ["", "24:00", "", "", "n"]
+    schedule = ["", "24:00", "", "n"]
     assert run_watch(tmp_path, monkeypatch, schedule=schedule) == 0
     output = capsys.readouterr().out
     assert "invalid schedule time" in output
@@ -333,8 +450,8 @@ def test_test_send_offer_uses_the_mocked_delivery_path(tmp_path, monkeypatch, ca
 
     monkeypatch.setattr("cvebeacon.setup.send_test", fake_send)
     answers = watch_answers()
-    # Tail layout: rule channels, test send, schedule type, times, command, install
-    answers[-5] = "y"
+    # Tail layout: rule channels, test send, schedule type, times, install
+    answers[-4] = "y"
     feed(monkeypatch, answers)
     assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
     assert calls == ["alerts"]
@@ -349,7 +466,7 @@ def test_test_send_failure_continues(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr("cvebeacon.setup.send_test", fake_send)
     answers = watch_answers()
-    answers[-5] = "y"
+    answers[-4] = "y"
     feed(monkeypatch, answers)
     assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
     output = capsys.readouterr().out
@@ -370,7 +487,7 @@ def test_schedule_offer_can_install_the_shown_plan(tmp_path, monkeypatch, capsys
     write_inventory(tmp_path)
     installed = []
     monkeypatch.setattr("cvebeacon.setup.install", lambda plan: installed.append(plan))
-    schedule = ["", "", "", "y"]
+    schedule = ["", "", "y"]
     assert run_watch(tmp_path, monkeypatch, schedule=schedule) == 0
     assert len(installed) == 1
     assert installed[0].times == ("07:00", "19:00")
@@ -381,7 +498,7 @@ def test_schedule_offer_can_install_the_shown_plan(tmp_path, monkeypatch, capsys
 
 def test_schedule_interval_offer_prints_the_later_command(tmp_path, monkeypatch, capsys):
     write_inventory(tmp_path)
-    schedule = ["interval", "4", "", "n"]
+    schedule = ["interval", "4", "n"]
     assert run_watch(tmp_path, monkeypatch, schedule=schedule) == 0
     output = capsys.readouterr().out
     assert "schedule install --every 4 --command watch" in output
@@ -389,10 +506,11 @@ def test_schedule_interval_offer_prints_the_later_command(tmp_path, monkeypatch,
 
 def test_inventory_mode_default_schedule_command_is_scan(tmp_path, monkeypatch, capsys):
     write_inventory(tmp_path)
-    answers = ["inventory", "", "", "", "", "", "", "n"]
+    answers = ["inventory", "", "", "", "", "", "n"]
     feed(monkeypatch, answers)
     assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
     output = capsys.readouterr().out
+    assert "Scheduled command: scan" in output
     assert "schedule install --times 07:00,19:00 --command scan" in output
 
 
@@ -406,7 +524,18 @@ def test_cli_setup_accepts_config_after_the_subcommand(tmp_path, monkeypatch):
 
 def test_multiple_channels_default_to_all_for_each_rule(tmp_path, monkeypatch):
     write_inventory(tmp_path)
-    channel = ["", "10", "", "", "y", "", "10", "", "", "n"]
+    channel = [
+        "",
+        "10",
+        "https://example.org/one",
+        "",
+        "y",
+        "",
+        "10",
+        "https://example.org/two",
+        "",
+        "n",
+    ]
     assert run_watch(tmp_path, monkeypatch, channel=channel) == 0
     config = load_config(tmp_path / "cvebeacon.toml")
     assert [item.name for item in config.watch.channels] == ["alerts", "alerts-2"]
@@ -424,3 +553,351 @@ def test_nvd_key_can_use_an_environment_variable(tmp_path, monkeypatch):
     assert 'nvd_api_key_env = "MY_NVD_KEY"' in text
     config = load_config(tmp_path / "cvebeacon.toml")
     assert config.sources.nvd_api_key_env == "MY_NVD_KEY"
+
+
+def test_environment_variable_choice_reminds_where_to_set_it(
+    tmp_path, monkeypatch, capsys
+):
+    write_inventory(tmp_path)
+    answers = watch_answers()
+    answers[6] = "env"
+    answers.insert(7, "MY_NVD_KEY")
+    feed(monkeypatch, answers)
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
+    assert (
+        "Set MY_NVD_KEY in the environment of the account that runs CVEBeacon"
+        in capsys.readouterr().out
+    )
+
+
+def test_slack_webhook_is_validated_at_the_prompt(tmp_path, monkeypatch, capsys):
+    write_inventory(tmp_path)
+    channel = ["", "4", "file", "n"]
+    assert (
+        run_watch(
+            tmp_path,
+            monkeypatch,
+            channel=channel,
+            secrets=[
+                "https://discord.com/api/webhooks/123/abc",
+                "https://hooks.slack.com/services/T/B/X",
+            ],
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "Slack webhook URL" in output
+    assert "must be an https://hooks.slack.com/services" in output
+    config = load_config(tmp_path / "cvebeacon.toml")
+    assert config.watch.channels[0].type == "slack"
+
+
+def test_matrix_homeserver_is_validated_at_the_prompt(tmp_path, monkeypatch, capsys):
+    write_inventory(tmp_path)
+    channel = [
+        "",
+        "7",
+        "https://matrix.example.org/synapse",
+        "https://matrix.example.org",
+        "!room:example.org",
+        "",
+        "",
+        "n",
+    ]
+    assert run_watch(tmp_path, monkeypatch, channel=channel) == 0
+    output = capsys.readouterr().out
+    assert "without a path, query or fragment" in output
+    assert load_config(tmp_path / "cvebeacon.toml").watch.channels[0].type == "matrix"
+
+
+REQUIRED_FIELD_CASES = [
+    (
+        "smtp",
+        [
+            "",
+            "1",
+            "custom",
+            "smtp.example.com",
+            "starttls",
+            "",
+            "",
+            "alerts@example.com",
+            "security@example.com",
+            "-",
+            "n",
+        ],
+    ),
+    ("telegram", ["", "6", "", "-1001234567890", "", "", "n"]),
+    (
+        "matrix",
+        [
+            "",
+            "7",
+            "",
+            "https://matrix.example.org",
+            "!room:example.org",
+            "",
+            "",
+            "n",
+        ],
+    ),
+    ("gotify", ["", "9", "", "https://gotify.example.org", "", "", "n"]),
+    ("webhook", ["", "10", "", "https://example.org/cvebeacon", "", "n"]),
+]
+
+
+@pytest.mark.parametrize("expected_type,channel", REQUIRED_FIELD_CASES)
+def test_required_fields_have_no_fake_defaults(
+    tmp_path, monkeypatch, capsys, expected_type, channel
+):
+    write_inventory(tmp_path)
+    assert run_watch(tmp_path, monkeypatch, channel=channel) == 0
+    assert "is required" in capsys.readouterr().out
+    assert load_config(tmp_path / "cvebeacon.toml").watch.channels[0].type == expected_type
+
+
+def test_ntfy_suggests_a_random_topic_and_warns(tmp_path, monkeypatch, capsys):
+    write_inventory(tmp_path)
+    channel = ["", "8", "", "", "n", "n"]
+    assert run_watch(tmp_path, monkeypatch, channel=channel) == 0
+    output = capsys.readouterr().out
+    assert "public unless protected" in output
+    config = load_config(tmp_path / "cvebeacon.toml")
+    topic = config.watch.channels[0].options["topic"]
+    assert re.fullmatch(r"cvebeacon-[A-Za-z0-9_-]{12}", topic)
+    assert topic != "cvebeacon-alerts"
+
+
+def test_disabled_kev_sources_warn_about_kev_rules(tmp_path, monkeypatch, capsys):
+    write_inventory(tmp_path)
+    start = ["", "", "n", "n", "", "", ""]  # EUVD, CISA KEV, EU KEV, EPSS, initial, NVD
+    answers = [*start, "3", "", "", "", *WEBHOOK_CHANNEL, *TAIL, *SCHEDULE_NO]
+    assert run_watch(tmp_path, monkeypatch, answers=answers) == 0
+    assert "CISA KEV and EU KEV are disabled" in capsys.readouterr().out
+
+
+def test_disabled_euvd_warns_about_exploitation_rules(tmp_path, monkeypatch, capsys):
+    write_inventory(tmp_path)
+    start = ["", "n", "", "", "", "", ""]  # EUVD, CISA KEV, EU KEV, EPSS, initial, NVD
+    answers = [*start, "5", "", "", "", *WEBHOOK_CHANNEL, *TAIL, *SCHEDULE_NO]
+    assert run_watch(tmp_path, monkeypatch, answers=answers) == 0
+    assert "EUVD is disabled" in capsys.readouterr().out
+
+
+def test_source_and_secret_prompts_use_friendly_labels(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    prompts = []
+    values = iter(watch_answers())
+
+    def fake_input(message=""):
+        prompts.append(message)
+        return next(values)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
+    assert any("Enable CISA KEV?" in prompt for prompt in prompts)
+    assert any("Enable EU KEV?" in prompt for prompt in prompts)
+    assert not any("CISA_KEV?" in prompt for prompt in prompts)
+
+
+def test_secret_prompts_have_no_empty_brackets(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    prompts = []
+
+    def fake_getpass(message=""):
+        prompts.append(message)
+        return "secret-value"
+
+    answers = watch_answers()
+    answers[6] = "file"
+    feed(monkeypatch, answers)
+    monkeypatch.setattr("getpass.getpass", fake_getpass)
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
+    assert prompts
+    assert all("[]" not in prompt for prompt in prompts)
+    assert prompts[0].startswith("NVD API key")
+
+
+def test_single_schedule_command_is_not_asked(tmp_path, monkeypatch, capsys):
+    write_inventory(tmp_path)
+    assert run_watch(tmp_path, monkeypatch) == 0
+    output = capsys.readouterr().out
+    assert "Scheduled command: watch" in output
+    assert "Scheduled command (watch)" not in output
+
+
+def test_custom_smtp_asks_security_before_port(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    channel = [
+        "",
+        "1",
+        "custom",
+        "smtp.example.com",
+        "tls",
+        "",
+        "alerts@example.com",
+        "security@example.com",
+        "-",
+        "n",
+    ]
+    assert run_watch(tmp_path, monkeypatch, channel=channel) == 0
+    config = load_config(tmp_path / "cvebeacon.toml")
+    assert config.watch.channels[0].options["port"] == 465
+
+
+def test_allow_insecure_is_written_once(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    channel = [
+        "",
+        "1",
+        "custom",
+        "smtp.example.com",
+        "none",
+        "",
+        "alerts@example.com",
+        "security@example.com",
+        "-",
+        "n",
+    ]
+    assert run_watch(tmp_path, monkeypatch, channel=channel) == 0
+    text = (tmp_path / "cvebeacon.toml").read_text(encoding="utf-8")
+    assert text.count("allow_insecure") == 1
+
+
+def test_del_character_is_escaped_in_toml():
+    assert _toml_string("a\x7fb") == '"a\\u007fb"'
+
+
+def test_secret_directory_is_always_beside_the_config(tmp_path):
+    assert _secret_relative(tmp_path, "alerts", "password") == "secrets/alerts-password"
+
+
+def test_gitignore_ignores_the_generated_secret_directory():
+    root = Path(__file__).resolve().parents[1]
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "secrets/" in lines
+
+
+def test_existing_secret_file_is_backed_up_before_replacement(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    secret = tmp_path / "secrets" / "alerts-password"
+    secret.parent.mkdir()
+    secret.write_text("old-secret", encoding="utf-8")
+    secret.chmod(0o600)
+    channel = [
+        "",
+        "1",
+        "custom",
+        "smtp.example.com",
+        "starttls",
+        "",
+        "alerts@example.com",
+        "security@example.com",
+        "user",
+        "file",
+        "n",
+    ]
+    assert run_watch(tmp_path, monkeypatch, channel=channel, secrets=["new-secret"]) == 0
+    assert secret.read_text(encoding="utf-8") == "new-secret"
+    backups = list(secret.parent.glob("alerts-password.bak-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "old-secret"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission check")
+def test_secret_mode_is_tightened_before_writing(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    secret = tmp_path / "secrets" / "alerts-password"
+    secret.parent.mkdir()
+    secret.write_text("old-secret", encoding="utf-8")
+    secret.chmod(0o644)
+    real_chmod = os.chmod
+
+    def keep_file_mode(path, mode, **kwargs):
+        if Path(path) == secret.parent:
+            real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr("cvebeacon.setup.os.chmod", keep_file_mode)
+    channel = [
+        "",
+        "1",
+        "custom",
+        "smtp.example.com",
+        "starttls",
+        "",
+        "alerts@example.com",
+        "security@example.com",
+        "user",
+        "file",
+        "n",
+    ]
+    assert run_watch(tmp_path, monkeypatch, channel=channel, secrets=["new-secret"]) == 0
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+
+
+def test_validation_failure_writes_no_secret_files(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+
+    def fail_write(path, text):
+        raise ConfigurationError("bad configuration")
+
+    monkeypatch.setattr("cvebeacon.setup._write_config", fail_write)
+    channel = [
+        "",
+        "1",
+        "custom",
+        "smtp.example.com",
+        "starttls",
+        "",
+        "alerts@example.com",
+        "security@example.com",
+        "user",
+        "file",
+        "n",
+    ]
+    answers = watch_answers(channel=channel) + ["n"]
+    feed(monkeypatch, answers, ["canary-secret"])
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 2
+    assert not (tmp_path / "secrets" / "alerts-password").exists()
+
+
+def test_final_validation_failure_offers_to_edit_answers(tmp_path, monkeypatch, capsys):
+    write_inventory(tmp_path)
+    real_write = wizard._write_config
+    calls = []
+
+    def flaky_write(path, text):
+        calls.append(path)
+        if len(calls) == 1:
+            raise ConfigurationError("simulated bad value")
+        return real_write(path, text)
+
+    monkeypatch.setattr("cvebeacon.setup._write_config", flaky_write)
+    answers = watch_answers()
+    # The first attempt stops after the answers before the test-send offer.
+    feed(monkeypatch, [*answers[:18], "y", *answers])
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
+    assert "simulated bad value" in capsys.readouterr().err
+    assert load_config(tmp_path / "cvebeacon.toml").watch.enabled is True
+
+
+def test_cancel_after_the_write_saves_and_prints_next_steps(
+    tmp_path, monkeypatch, capsys
+):
+    write_inventory(tmp_path)
+    answers = watch_answers()[:-4]  # stop before the test-send prompt
+    values = iter(answers)
+
+    def stdin(_message=""):
+        try:
+            return next(values)
+        except StopIteration:
+            raise EOFError from None
+
+    monkeypatch.setattr("builtins.input", stdin)
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
+    output = capsys.readouterr().out
+    assert "Configuration saved:" in output
+    assert "Next steps:" in output
+    assert "cancelled" not in output
+    assert (tmp_path / "cvebeacon.toml").exists()

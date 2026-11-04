@@ -11,9 +11,11 @@ cvebeacon setup --config /etc/cvebeacon/cvebeacon.toml
 cvebeacon setup --config cvebeacon.toml --force
 ```
 
-Every question shows its default in brackets; Enter accepts it. `--force` skips
-the overwrite question but still creates the backup. Ctrl-C or end of input
-cancels without writing a configuration.
+Every question that has a default shows it in brackets; Enter accepts it.
+Required fields show an example and must be answered. `--force` skips the
+overwrite question but still creates the backup. Ctrl-C or end of input before
+the configuration is written cancels without writing one. After the write it
+prints `Configuration saved: <path>`, shows the next steps, and exits 0.
 
 ## What it asks
 
@@ -25,10 +27,11 @@ cancels without writing a configuration.
    configuration directory.
 3. **Watch sources.** NVD, EUVD, CISA KEV, EU KEV and EPSS are enabled by
    default; NVD cannot be disabled. Disabling EPSS warns that `epss_min` rules
-   will be unavailable.
-4. **First run.** `baseline` (default, alerts start now), `backfill N days`
-   (1 to 120), or `full` history with a warning about time and bandwidth. The
-   first `watch sync` still asks before downloading full history.
+   will be unavailable. Disabling both KEV catalogs or EUVD warns that the
+   matching rule presets cannot fire.
+4. **First run.** `baseline` (default, no history; alerts start now), `backfill
+   N days` (1 to 120), or `full` history with a warning about time and
+   bandwidth. The first `watch sync` still asks before downloading full history.
 5. **NVD API key.** Optional. Use an environment variable or a protected secret
    file; a key raises the request limit and speeds up syncs.
 6. **Rules.** Choose one or more presets, edit their thresholds, name them, add
@@ -40,48 +43,63 @@ cancels without writing a configuration.
    fields, and assign rules to channels (default: every channel). Optional
    fields stay at their defaults and are written as comment lines. Email
    presets cover Gmail, Microsoft 365 SMTP, Microsoft 365 Graph, and a custom
-   SMTP server. After writing, the wizard offers a test message per channel.
+   SMTP server. Webhook URLs are checked for the right scheme and host while
+   you type. ntfy suggests a random topic and warns that ntfy.sh topics are
+   public unless protected. After writing, the wizard offers a test message per
+   channel.
 8. **Schedule.** Choose fixed times (default `07:00,19:00`) or an interval in
-   hours, and what the schedule runs (`scan`, `watch`, or `both`). The exact
-   command is shown before installation; the default is not to install, and
-   the `schedule install` command is printed for later.
+   hours, and what the schedule runs (`scan`, `watch`, or `both`). `both` is
+   scheduled as the single ordered `run` command. The exact command is shown
+   before installation; the default is not to install, and the `schedule
+   install` command is printed for later.
 
 ## Secrets
 
 For each channel secret, choose an environment variable or a file. File
-secrets are written next to the configuration as
-`secrets/<channel>-<field>`, with directory mode `0700` and file mode `0600` on
-POSIX. On Windows, restrict the files with NTFS permissions. The configuration
-contains only the environment variable name or the relative file path.
+secrets are written next to the configuration in `secrets/` on every OS, as
+`secrets/<channel>-<field>` (`secrets\<channel>-<field>` on Windows), with
+directory mode `0700` and file mode `0600` on POSIX. On Windows, restrict the
+directory with NTFS permissions. An existing secret file is backed up to
+`<name>.bak-<timestamp>` before it is replaced. The configuration contains only
+the environment variable name or the relative file path. When you choose an
+environment variable, set it in the environment of the account that runs
+CVEBeacon, including its scheduler.
 
 ## Example session
 
 ```text
 Mode (inventory/watch/both) [watch]:
 Enable EUVD? [Y/n]:
-Enable CISA_KEV? [Y/n]:
-Enable EU_KEV? [Y/n]:
+Enable CISA KEV? [Y/n]:
+Enable EU KEV? [Y/n]:
 Enable EPSS? [Y/n]:
+First run history:
+  baseline - no history; alerts start from now
+  backfill - download the last N days and evaluate them
+  full     - download all available history; this can take hours
 First run history (baseline/backfill/full) [baseline]:
+An NVD API key is optional; it raises the request limit and speeds up syncs.
 NVD API key (skip/env/file) [skip]:
 Rule numbers (comma-separated) [1]:
 CVSS minimum [9]:
 Rule name [critical]:
-Vendor filter (comma-separated, blank for none) []:
+Vendor filter (comma-separated, blank for none):
+Old CVEs: digest sends a summary, alert sends each one, ignore leaves them out.
 Old CVEs (digest/alert/ignore) [digest]:
 Channel name [alerts]:
 Channel type [smtp]:
 Email preset (gmail/m365-smtp/m365-graph/custom) [gmail]:
-From address [alerts@example.com]:
-To addresses [security@example.com]:
+From address (e.g. alerts@example.com):
+To addresses (e.g. security@example.com):
 SMTP username (use - for no authentication) [alerts@example.com]:
-Store the password in (env/file) [env]:
+Store the SMTP password in (env/file) [env]:
 Environment variable name [CVEBEACON_SMTP_PASSWORD]:
+Set CVEBEACON_SMTP_PASSWORD in the environment of the account that runs CVEBeacon (including its scheduler).
 Channels for rule "critical" (comma-separated or all) [alerts]:
 Send a test message to each channel now? [y/N]:
 Schedule type (times/interval) [times]:
 Times (comma-separated HH:MM) [07:00,19:00]:
-Scheduled command (scan/watch/both) [watch]:
+Scheduled command: watch
 Install this schedule now? [y/N]:
 ```
 
