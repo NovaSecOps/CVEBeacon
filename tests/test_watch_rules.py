@@ -639,6 +639,22 @@ def test_cvss_uses_the_highest_modern_score_from_one_provider():
     assert assert_match({"cvss_min": 9}, current) == ("cvss 9.0 v4.0 (nvd)",)
 
 
+def test_exploitation_poc_also_matches_euvd_active_evidence():
+    euvd_only = view(euvd_exploited_since="Oct 8, 2026, 12:00:00 AM")
+    assert assert_match({"exploitation": "poc"}, euvd_only) == (
+        "exploitation active (euvd)",
+    )
+    assert assert_match({"exploitation": "poc"}, view(ssvc_exploitation="poc")) == (
+        "exploitation poc (cisa-adp)",
+    )
+    matched, _ = evaluate_condition(
+        view(ssvc_exploitation="none"),
+        parse_condition({"exploitation": "poc"}),
+        rule({"condition": {"exploitation": "poc"}}),
+    )
+    assert matched is False
+
+
 def test_exploitation_active_uses_ssvc_or_euvd_with_source_names():
     ssvc = view(ssvc_exploitation="active")
     assert assert_match({"exploitation": "active"}, ssvc) == (
@@ -655,10 +671,10 @@ def test_exploitation_active_uses_ssvc_or_euvd_with_source_names():
         "exploitation active (cisa-adp, euvd)",
     )
     assert_match({"exploitation": "poc"}, view(ssvc_exploitation="poc"))
+    # "poc" also matches EUVD-only evidence (see the poc test below), so the
+    # negative case is a CVE with no exploitation evidence at all.
     with pytest.raises(AssertionError):
-        assert_match(
-            {"exploitation": "poc"}, view(euvd_exploited_since="2026-11-01")
-        )
+        assert_match({"exploitation": "poc"}, view())
 
 
 def test_euvd_exploitation_escalates_the_snapshot():

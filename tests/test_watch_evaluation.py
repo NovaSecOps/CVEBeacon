@@ -214,6 +214,37 @@ def test_v1_database_migrates_in_place(tmp_path):
     assert delivery_columns >= {"event_id", "channel", "status", "attempts", "last_error", "updated_at"}
 
 
+def test_v1_upgrade_rewinds_the_euvd_cursor_to_the_initial_window(tmp_path):
+    path = tmp_path / "watch.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE watch_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        db.executemany(
+            "INSERT INTO watch_meta VALUES (?,?)",
+            [
+                ("schema_version", "1"),
+                ("initial_mode", "backfill"),
+                ("initial_window_start", "2026-11-01"),
+                ("initialized_at", NOW.isoformat()),
+                ("euvd_cursor", "2026-11-04"),
+            ],
+        )
+        db.execute(
+            "CREATE TABLE watch_euvd_item ("
+            "euvd_id TEXT PRIMARY KEY, cve_ids_json TEXT NOT NULL, date_updated TEXT, "
+            "score REAL, version TEXT, vector TEXT, exploited_since TEXT, "
+            "seen_at TEXT NOT NULL)"
+        )
+    store = WatchStore(path, clock=lambda: NOW)
+    store.initialize()
+    assert store.metadata()["euvd_cursor"] == "2026-11-01"
+
+    # The rewind happens once. Later syncs own the cursor again.
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE watch_meta SET value='2026-11-03' WHERE key='euvd_cursor'")
+    store.initialize()
+    assert store.metadata()["euvd_cursor"] == "2026-11-03"
+
+
 def test_unknown_schema_version_still_fails_closed(tmp_path):
     path = tmp_path / "watch.db"
     store = WatchStore(path)

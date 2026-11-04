@@ -678,17 +678,14 @@ def _matches_leaf(view: WatchView, key: str, value: Any, rule: Rule) -> tuple[bo
         selected = [reason for catalog, reason in present if value in ("any", catalog)]
         return bool(selected), selected[0] if selected else None
     if key == "exploitation":
-        if value == "poc":
-            current = view.ssvc_exploitation
-            if current not in {"poc", "active"}:
-                return False, None
-            return True, f"exploitation {current} (cisa-adp)"
+        # "poc" means poc or active, from either source; "active" means active.
         current = _exploitation_level(view)
-        if current != "active":
+        wanted = {"poc", "active"} if value == "poc" else {"active"}
+        if current not in wanted:
             return False, None
         sources = _exploitation_sources(view)
         suffix = f" ({', '.join(sources)})" if sources else ""
-        return True, f"exploitation active{suffix}"
+        return True, f"exploitation {current}{suffix}"
     if key == "vendor":
         found = next(
             (match for name in value if (match := _first_match(view.vendors, name))),

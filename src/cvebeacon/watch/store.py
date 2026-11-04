@@ -388,6 +388,13 @@ class WatchStore:
                     "INSERT INTO watch_meta(key,value) VALUES ('initial_evaluated_at',?)",
                     (meta.get("initialized_at") or now,),
                 )
+            # P1a stored EUVD items without vendor names and never re-read them.
+            # Rewinding the cursor makes the next sync re-read the initial window.
+            if meta.get("initial_window_start"):
+                db.execute(
+                    "UPDATE watch_meta SET value=? WHERE key='euvd_cursor'",
+                    (meta["initial_window_start"],),
+                )
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
