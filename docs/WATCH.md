@@ -3,21 +3,24 @@
 Watch mode keeps a separate local history of recently changed CVEs. It is
 independent of the inventory database: `cvebeacon watch` never reads the
 inventory file, and enabling watch mode does not change `scan`, `query`, or any
-other command. Watch mode can select matching CVEs with rules and stores the
-resulting alert events. It does not deliver them yet.
+other command. Watch mode can select matching CVEs with rules, stores the
+resulting alert events, and delivers them to configured channels.
 
 ```console
 cvebeacon --config cvebeacon.toml watch sync
 cvebeacon --config cvebeacon.toml watch run
+cvebeacon --config cvebeacon.toml watch notify
+cvebeacon --config cvebeacon.toml watch notify test soc-email
 cvebeacon --config cvebeacon.toml watch status
 cvebeacon --config cvebeacon.toml watch events
 cvebeacon --config cvebeacon.toml watch rules check
 cvebeacon --config cvebeacon.toml watch evaluate --all
 ```
 
-`watch run` syncs the sources and then evaluates the CVEs touched by that sync.
-`watch sync` only syncs; the durable touch queue keeps the evaluation for the
-next `watch run`.
+`watch run` syncs the sources, evaluates the CVEs touched by that sync, and
+delivers pending alerts. `watch sync` only syncs; the durable touch queue keeps
+the evaluation for the next `watch run`. `watch notify` delivers pending alerts
+without syncing or evaluating.
 
 ## Configuration
 
@@ -55,11 +58,314 @@ run `cvebeacon --config <file> watch run` from cron or Task Scheduler instead.
 The NVD API key is read from the existing `sources.nvd_api_key_env` variable.
 It is optional; pacing follows `sources.minimum_request_interval`.
 
+## Channels
+
+Each channel is a `[watch.channels.<name>]` table. Names start with a letter or
+digit and contain at most 64 letters, digits, underscores, dots, or hyphens.
+Every rule channel must name one of these tables.
+
+Common keys:
+
+- `type` (required): `smtp`, `graph`, `teams`, `slack`, `discord`, `telegram`,
+  `matrix`, `ntfy`, `gotify`, or `webhook`.
+- `enabled`: `true` by default. A disabled channel keeps its pending deliveries.
+- `grouping`: `"run"` (default) sends one message per channel per run that lists
+  that run's events. `"event"` sends one message per event.
+- `max_items`: 1 to 100, default 20. A long message lists this many event lines
+  and then "and N more".
+- `min_interval_seconds`: 0 to 3600, default 0. Telegram defaults to 3 and
+  rejects smaller values.
+- `timeout_seconds`: 1 to 300, default 30.
+- `allow_insecure`: `false` by default. This is required for plain SMTP and for
+  a plain-HTTP webhook or ntfy server.
+
+Secrets are never written in the configuration. A secret key comes as a pair:
+`*_env` names an environment variable, and `*_file` names a file. At least one
+is required where a secret is marked. A secret file must not be group or other
+accessible on POSIX, must be at most 16 KiB, and its value is stripped of
+surrounding whitespace.
+
+### SMTP
+
+```toml
+[watch.channels.soc-email]
+type = "smtp"
+host = "smtp.gmail.com"
+port = 587
+security = "starttls"          # starttls, tls (implicit TLS), or none
+username = "alerts@example.com"
+password_env = "CVEBEACON_SMTP_PASSWORD"
+from = "alerts@example.com"
+to = ["soc@example.com"]
+# cc = ["manager@example.com"]
+# bcc = ["archive@example.com"]
+```
+
+`security = "none"` requires `allow_insecure = true` and logs a warning. Every
+TLS connection verifies certificates with the system trust store. Gmail needs an
+app password; use `smtp.gmail.com:587` with STARTTLS. Microsoft 365 uses
+`smtp.office365.com:587`, but SMTP AUTH must be enabled on the mailbox;
+otherwise use the `graph` channel. `timeout_seconds` bounds the connection and
+every socket operation.
+
+### Microsoft Graph
+
+```toml
+[watch.channels.m365]
+type = "graph"
+tenant_id = "00000000-0000-0000-0000-000000000000"
+client_id = "00000000-0000-0000-0000-000000000000"
+client_secret_env = "CVEBEACON_GRAPH_CLIENT_SECRET"
+sender = "alerts@example.com"
+to = ["soc@example.com"]
+```
+
+This sends through the Microsoft Graph `sendMail` endpoint and needs an
+application permission such as `Mail.Send` for the sender mailbox.
+
+### Teams
+
+```toml
+[watch.channels.teams]
+type = "teams"
+webhook_url_env = "CVEBEACON_TEAMS_WEBHOOK_URL"
+```
+
+Use a Teams Workflows webhook URL. Messages are Adaptive Cards.
+
+### Slack
+
+```toml
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "CVEBEACON_SLACK_WEBHOOK_URL"
+```
+
+The URL must start with `https://hooks.slack.com/services/`.
+
+### Discord
+
+```toml
+[watch.channels.discord]
+type = "discord"
+webhook_url_env = "CVEBEACON_DISCORD_WEBHOOK_URL"
+```
+
+The URL must be a `discord.com` or `discordapp.com` webhook URL. Messages set
+`allowed_mentions: {parse: []}` and escape Markdown and mentions.
+
+### Telegram
+
+```toml
+[watch.channels.telegram]
+type = "telegram"
+bot_token_env = "CVEBEACON_TELEGRAM_BOT_TOKEN"
+chat_id = "-1001234567890"
+min_interval_seconds = 3
+```
+
+`chat_id` may be a numeric id or an `@channel` name; it is normalised to a
+string.
+
+### Matrix
+
+```toml
+[watch.channels.matrix]
+type = "matrix"
+homeserver = "https://matrix.example.org"
+room_id = "!room:example.org"
+access_token_env = "CVEBEACON_MATRIX_ACCESS_TOKEN"
+```
+
+Only unencrypted rooms are supported. The channel first asks for the
+`m.room.encryption` state and requires a 404 `M_NOT_FOUND`. Sends use a
+deterministic transaction id per delivery, so a retry cannot post twice.
+
+### ntfy
+
+```toml
+[watch.channels.ntfy]
+type = "ntfy"
+server = "https://ntfy.sh"     # the default
+topic = "cvebeacon-alerts"
+# token_env = "CVEBEACON_NTFY_TOKEN"
+priority = 3                    # 1 to 5
+```
+
+The body is plain text with the message title in the `Title` header.
+
+### Gotify
+
+```toml
+[watch.channels.gotify]
+type = "gotify"
+server = "https://gotify.example.org"
+app_token_env = "CVEBEACON_GOTIFY_TOKEN"
+priority = 5                    # -2 to 10
+```
+
+### Generic webhook
+
+```toml
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.org/cvebeacon"
+# header_name = "X-Auth"
+# header_value_env = "CVEBEACON_HOOK_SECRET"
+```
+
+The URL must use HTTPS unless `allow_insecure = true`. The channel POSTs the
+stable document described below. Redirects are never followed.
+
+### HTTP behavior
+
+Every HTTP send uses the existing bounded HTTP client with redirects disabled
+and no retries inside one send. A send is accepted only on the provider's
+documented success status. Errors contain only a category and, when relevant,
+the HTTP status: never the URL, a token, or a response body. Request URLs are
+not logged.
+
+## Delivery
+
+Each event creates one delivery row per channel. A row moves through these
+states:
+
+- `pending`: queued but not attempted.
+- `sending`: committed immediately before the request or SMTP `DATA`.
+- `sent`: the provider accepted the message.
+- `failed`: a definite failure (connection, DNS, TLS, an HTTP error, or SMTP
+  rejecting the message before `DATA`). The row is retried with backoff.
+- `ambiguous`: the request or `DATA` may have reached the provider (a timeout or
+  connection drop after sending), or a `sending` row was found at startup. It is
+  never resent automatically, except for Matrix, because its transaction id
+  makes the retry idempotent.
+
+Failed rows wait 5 minutes, then double the delay up to 6 hours, and stay
+`failed` after 10 attempts. `cvebeacon watch notify` sends pending rows and due
+retries; `--retry-ambiguous` also resends ambiguous rows, and `--channel NAME`
+limits the run to one channel. `cvebeacon watch notify test <channel>` sends a
+clearly labelled test message directly, outside this state machine.
+
+A channel sends at most 10 messages per run and the whole delivery step has a
+60-second budget. Leftovers stay `pending` for the next run. One channel failing
+never blocks the others. `watch run` exits 3 when a delivery failed or became
+ambiguous in that run, before the usual source-failure exit code 4.
+
+`watch status` prints pending, failed, and ambiguous counts and the last success
+time for each channel. `watch run` prints a delivery line per channel, for
+example `soc (smtp): 1 message, 4 events sent`.
+
+## Messages
+
+All channels use the same formatter. Messages are short: one line per event, a
+description cut to 160 characters, a rule name, and links.
+
+```text
+[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active
+  Acme Widget before 4.2.1 allows unauthenticated remote code execution…
+  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234
+```
+
+Event labels:
+
+| Kind | Label |
+| --- | --- |
+| `match` | `[NEW]` |
+| `kev_added` | `[KEV ADDED: CISA]` or `[KEV ADDED: EU]` |
+| `exploitation_active` | `[ACTIVELY EXPLOITED]` |
+| `severity_increase` | `[SEVERITY UP high→critical]` |
+| `epss_increase` | `[EPSS UP 0.08→0.61]` |
+| `nvd_score_added` | `[NVD SCORED 9.1]` |
+| `rejected` | `[REJECTED]` |
+
+Every CVSS score names its provider: `CNA` (with the CNA's short name or email
+domain), `NVD`, `CISA-ADP`, `EUVD`, or `Other`. When only a CNA or ADP score
+exists, the line adds `NVD pending`. A KEV-added line also shows the CISA due
+date and required action, cut to 120 characters.
+
+Events are ordered with KEV entries and active exploitation first, then the
+highest CVSS, then EPSS. A run message has a title such as
+`CVEBeacon: 3 new, 1 KEV added (critical-or-likely)`; an event message uses
+`CVEBeacon: [KEV ADDED] CVE-2026-1234`.
+
+Initial events (`initial = 1`) are never sent one by one. They become one digest
+per channel:
+
+```text
+CVEBeacon initial summary: 12 matches across 3 rules since 2026-10-27
+
+critical-or-likely: 8 match, 1 KEV added
+kev-watch: 4 match
+
+[NEW] CVE-2026-1234 · …
+…
+
+Run `cvebeacon watch events --rule X` to list all.
+```
+
+Provider limits are respected by splitting at line boundaries into numbered
+parts: Telegram 4,096 characters, Discord 2,000, Slack 3,800, Matrix 30,000,
+Teams about 25 KB of card text, and ntfy 4,096. Email has no practical limit but
+still applies `max_items`.
+
+Links: the NVD detail page is always present, the CVE.org record is always
+present, the EUVD detail page appears when an EUVD id exists, and the CISA KEV
+catalog link appears when the CVE is in KEV.
+
+### Webhook document
+
+The generic webhook receives a stable JSON document:
+
+```json
+{
+  "version": 1,
+  "events": [
+    {
+      "rule": "critical-or-likely",
+      "cve_id": "CVE-2026-1234",
+      "kind": "match",
+      "reasons": ["cvss 9.8 v3.1 (cna)"],
+      "initial": false,
+      "created_at": "2026-11-03T12:00:00+00:00",
+      "view": {
+        "cvss": [
+          {"provider": "cna", "source": "security@acme.example", "version": "3.1", "score": 9.8, "vector": null}
+        ],
+        "kev": {
+          "cisa": {"added": "2026-11-03", "due": "2026-11-20", "required_action": "Apply the update."},
+          "eu": null
+        },
+        "epss": {"score": 0.62, "percentile": 0.97, "date": "2026-11-03"},
+        "vendors": ["Acme"],
+        "products": ["Widget"],
+        "links": {
+          "nvd": "https://nvd.nist.gov/vuln/detail/CVE-2026-1234",
+          "cve": "https://www.cve.org/CVERecord?id=CVE-2026-1234",
+          "euvd": null
+        }
+      }
+    }
+  ]
+}
+```
+
+`kev`, `epss`, and `links.euvd` are `null` when the value is absent. The order
+is the same as the text messages. A test message adds `"test": true` and
+`"message"` and has an empty `events` list.
+
+### Privacy
+
+Messages go to the providers you configure: Slack, Discord, Telegram, Teams,
+Microsoft 365, Gmail, ntfy.sh, and so on. Each provider sees the CVE identifiers,
+scores, descriptions, and rule names in the alerts. Self-host ntfy, Gotify, or
+Matrix, or use your own SMTP server, to keep alerts private.
+
 ## Rules
 
 Rules select CVEs from the watch database. Each rule has a name, a condition,
-and one or more channel names. Channel names are validated when delivery is
-added; this phase stores pending deliveries for them.
+and one or more channel names. Every channel must be configured in
+`[watch.channels.<name>]`; a rule that names an unknown channel is rejected when
+the configuration is loaded.
 
 ```toml
 [[watch.rules]]
@@ -266,19 +572,20 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place from schema version 1 to version 2. An unknown version still fails
-closed. The upgrade deletes the old `watch_touched` queue, because P1a had no
-rules and therefore no evaluation obligation, and sets `initial_evaluated_at`
-whenever `initial_mode` is already stored. It also rewinds `euvd_cursor` to
+place to schema version 3. An unknown version still fails closed. The version 1
+upgrade deletes the old `watch_touched` queue, because P1a had no rules and
+therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
+`initial_mode` is already stored. It also rewinds `euvd_cursor` to
 `initial_window_start`, but only when both values are stored, so the next sync
 re-reads that window once. P1a stored EUVD items without vendor names, and that
 re-read gives pre-upgrade items their names. In `full` mode
 `initial_window_start` is 1999-01-01, so this re-reads the whole EUVD history
-once. After the upgrade, run `cvebeacon watch evaluate --all --yes` BEFORE the
-first `watch run`, as after adding a rule. Otherwise every CVE from the initial
-window alerts one by one as NVD touches it. Schema 2 databases written by a
-pre-release build of this branch are refused with a message to delete them and
-run `watch sync` again. They are not migrated.
+once. The version 2 upgrade keeps delivery rows and adds the `sending` and
+`ambiguous` states. After the upgrade, run `cvebeacon watch evaluate --all --yes`
+BEFORE the first `watch run`, as after adding a rule. Otherwise every CVE from
+the initial window alerts one by one as NVD touches it. Schema 2 databases
+written by a pre-release build of this branch are refused with a message to
+delete them and run `watch sync` again. They are not migrated.
 
 - `watch_cve` holds NVD-owned data only: status, description, CNA, CVSS from
   NVD, CNA, CISA ADP and other providers, SSVC, CPE products, references, and
@@ -309,8 +616,9 @@ run `watch sync` again. They are not migrated.
   evaluation compares against that snapshot.
 - `watch_event` stores each event once. Its uniqueness key covers the rule,
   CVE, event kind, and occurrence; the reason text is stored separately.
-- `watch_delivery` creates one pending row per event and channel. Delivery
-  updates it in the next phase.
+- `watch_delivery` creates one row per event and channel. Its status is
+  `pending`, `sending`, `sent`, `failed`, or `ambiguous`; `attempts`,
+  `last_error`, and `updated_at` drive retries and status output.
 - `watch_meta.view_policy` records the configured sources that affect view
   derivation: `cisa_kev`, `eu_kev`, `euvd`, and `epss`. When it changes, every stored
   view is recomputed in batches of 5,000 and every stored CVE is queued,
@@ -450,8 +758,9 @@ sync on the same day reads the same EUVD day again.
 
 `watch status` prints the database path, schema version, cursors, EPSS score
 date, row counts, EUVD items, KEV catalog entries, watched CVEs in KEV, active
-SSVC exploitation, EPSS rows, and pending/backing-off lookups. It creates an
-empty database if none exists.
+SSVC exploitation, EPSS rows, and pending/backing-off lookups. It also prints
+each channel's pending, failed, and ambiguous counts and last success time. It
+creates an empty database if none exists.
 
 ## Summary lines
 
@@ -468,6 +777,10 @@ Each source prints `request(s)`, `record(s)`, `new`, and `changed`.
 - `epss`: `record(s)` counts score rows loaded and `changed` counts watched
   CVEs queued by an appearance, disappearance, or configured threshold
   crossing.
+
+After a `watch run` the delivery step prints one line per channel, for example
+`soc (smtp): 1 message, 4 events sent`, with failed or ambiguous counts when
+they are non-zero.
 
 ## Cost
 

@@ -43,11 +43,22 @@ initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
 
-# Optional alert rules. Channel names are reserved for the delivery phase.
+# Optional alert rules. Every channel named here must be configured below.
 # [[watch.rules]]
 # name = "critical-or-likely"
 # condition = { any = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
 # channels = ["soc-email"]
+
+# Optional watch alert channels. See docs/WATCH.md for every channel type.
+# [watch.channels.soc-email]
+# type = "smtp"
+# host = "smtp.example.invalid"
+# port = 587
+# security = "starttls"
+# username = "alerts@example.invalid"
+# password_env = "CVEBEACON_SMTP_PASSWORD"
+# from = "alerts@example.invalid"
+# to = ["security@example.invalid"]
 
 [notifications.teams]
 enabled = false
