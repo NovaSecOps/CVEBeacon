@@ -35,7 +35,7 @@ WINDOWS_REGISTRATION_SCRIPT = """param(
     [Parameter(Mandatory = $true)][string]$Account
 )
 $ErrorActionPreference = 'Stop'
-$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false))
+$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false), $false)
 $password = $reader.ReadLine()
 $reader.Dispose()
 if (-not $password) { throw "no password on stdin" }
@@ -715,7 +715,7 @@ def install(
                     timeout=120,
                     env=windows_powershell_environment(),
                 )
-            except (OSError, subprocess.TimeoutExpired) as exc:
+            except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
                 detail = " ".join(str(exc).split())[:600]
                 raise SchedulingError(
                     f"schedule installation failed: {detail}"
@@ -732,8 +732,11 @@ def install(
                             exc,
                         )
         elif plan.times:
-            descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
+            name = None
             try:
+                descriptor, name = tempfile.mkstemp(
+                    prefix="cvebeacon-schedule-", suffix=".xml"
+                )
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(_windows_xml(plan))
                     handle.flush()
@@ -745,11 +748,21 @@ def install(
                     check=False,
                     stdin=subprocess.DEVNULL,
                 )
+            except OSError as exc:
+                detail = " ".join(str(exc).split())[:600]
+                raise SchedulingError(
+                    f"schedule installation failed: {detail}"
+                ) from exc
             finally:
-                try:
-                    os.unlink(name)
-                except OSError:
-                    pass
+                if name is not None:
+                    try:
+                        os.unlink(name)
+                    except OSError as exc:
+                        LOG.warning(
+                            "could not remove temporary schedule file %s: %s",
+                            name,
+                            exc,
+                        )
         else:
             result = run(
                 _windows_args(plan),

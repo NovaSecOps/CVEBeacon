@@ -389,7 +389,7 @@ def test_windows_logged_out_fixed_times_uses_com_password(
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     plan = windows_plan(tmp_path, run_logged_out=True)
     calls = []
-    password = "Pässwörd-ç-€-測試"
+    password = "Pässwörd-ç-€-測試-😀"
     captured_script = {}
 
     class Result:
@@ -415,6 +415,7 @@ def test_windows_logged_out_fixed_times_uses_com_password(
     script = captured_script["text"]
     assert "OpenStandardInput" in script
     assert "UTF8Encoding" in script
+    assert "]::new($false), $false)" in script
     assert password not in script
     assert kwargs["input"] == password.encode("utf-8") + b"\n"
     assert "text" not in kwargs
@@ -603,6 +604,68 @@ def test_cli_temp_failure_is_one_error_line(tmp_path, monkeypatch, capsys):
     assert "temporary directory denied" in error
     assert "\n" in error
     assert "Traceback" not in error
+
+
+def test_windows_password_preserves_a_leading_bom(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True)
+    password = "\ufeffABC"
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(args, **kwargs):
+        seen["input"] = kwargs["input"]
+        return Result()
+
+    install(plan, run=fake_run, password=password)
+    assert seen["input"] == "\ufeffABC\n".encode("utf-8")
+
+
+def test_windows_non_bmp_password_is_utf8_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True)
+    password = "pass-😀-end"
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(args, **kwargs):
+        seen["input"] = kwargs["input"]
+        return Result()
+
+    install(plan, run=fake_run, password=password)
+    assert seen["input"] == password.encode("utf-8") + b"\n"
+
+
+def test_windows_fixed_times_temp_failure_is_controlled(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path)
+
+    def fail(**kwargs):
+        raise PermissionError("fixed temp denied")
+
+    monkeypatch.setattr("cvebeacon.scheduling.tempfile.mkstemp", fail)
+    with pytest.raises(SchedulingError, match="fixed temp denied"):
+        install(plan)
+
+
+def test_windows_fixed_times_write_failure_is_controlled(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise PermissionError("fixed write denied")
+
+    monkeypatch.setattr("cvebeacon.scheduling.os.fdopen", fail)
+    with pytest.raises(SchedulingError, match="fixed write denied"):
+        install(plan)
 
 
 def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
@@ -942,7 +1005,7 @@ def test_cli_schedule_run_logged_out_reads_password(tmp_path, monkeypatch, capsy
 def test_cli_schedule_password_stdin_and_account(tmp_path, monkeypatch, capsys):
     config = write_schedule_config(tmp_path, watch=True)
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
-    password = "Pässwörd-ç-€-測試"
+    password = "Pässwörd-ç-€-測試-😀"
     monkeypatch.setattr(
         "sys.stdin",
         TextIOWrapper(BytesIO((password + "\n").encode("utf-8")), encoding="utf-8"),
@@ -1003,6 +1066,91 @@ def test_cli_schedule_hidden_password_prompt(tmp_path, monkeypatch):
         == 0
     )
     assert installed == ["secret"]
+
+
+def test_cli_hidden_password_non_ascii_round_trip(tmp_path, monkeypatch):
+    config = write_schedule_config(tmp_path, watch=True)
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    password = "Pässwörd-ç-€-測試-😀"
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": password)
+    installed = []
+    monkeypatch.setattr(
+        cli, "install", lambda plan, password=None: installed.append(password)
+    )
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--run-logged-out",
+                "--account",
+                r"CORP\svc-cvebeacon",
+                "--yes",
+            ]
+        )
+        == 0
+    )
+    assert installed == [password]
+
+
+def test_cli_hidden_password_normalizes_surrogate_pairs(tmp_path, monkeypatch):
+    config = write_schedule_config(tmp_path, watch=True)
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "pass\ud83d\ude00")
+    installed = []
+    monkeypatch.setattr(
+        cli, "install", lambda plan, password=None: installed.append(password)
+    )
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--run-logged-out",
+                "--account",
+                r"CORP\svc-cvebeacon",
+                "--yes",
+            ]
+        )
+        == 0
+    )
+    assert installed == ["pass😀"]
+
+
+def test_cli_hidden_password_rejects_a_lone_surrogate(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_schedule_config(tmp_path, watch=True)
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "bad\ud83d")
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--run-logged-out",
+                "--account",
+                r"CORP\svc-cvebeacon",
+                "--yes",
+            ]
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert "invalid Unicode" in error
+    assert "Traceback" not in error
 
 
 def test_cli_password_stdin_requires_yes_and_an_interval(tmp_path, monkeypatch, capsys):

@@ -641,6 +641,17 @@ def run(args: argparse.Namespace) -> int:
     return _run_configured(args, config, store)
 
 
+def _normalize_password(value: str) -> str:
+    try:
+        normalized = value.encode("utf-16-le", "surrogatepass").decode("utf-16-le")
+        normalized.encode("utf-8")
+    except UnicodeError as exc:
+        raise CVEBeaconError(
+            "the account password contains an invalid Unicode sequence"
+        ) from exc
+    return normalized
+
+
 def _read_schedule_password(account: str, *, from_stdin: bool) -> str:
     if from_stdin:
         line = sys.stdin.buffer.readline()
@@ -652,6 +663,7 @@ def _read_schedule_password(account: str, *, from_stdin: bool) -> str:
             raise CVEBeaconError(
                 "the password on stdin is not valid UTF-8"
             ) from exc
+        password = _normalize_password(password)
     else:
         with warnings.catch_warnings():
             warnings.simplefilter("error", getpass.GetPassWarning)
@@ -660,7 +672,11 @@ def _read_schedule_password(account: str, *, from_stdin: bool) -> str:
                 confirmation = getpass.getpass("Confirm password: ")
             except (getpass.GetPassWarning, EOFError) as exc:
                 raise CVEBeaconError("could not read the account password") from exc
-        if not secrets.compare_digest(password, confirmation):
+        password = _normalize_password(password)
+        confirmation = _normalize_password(confirmation)
+        if not secrets.compare_digest(
+            password.encode("utf-8"), confirmation.encode("utf-8")
+        ):
             raise CVEBeaconError("the account passwords do not match")
     if not password:
         raise CVEBeaconError("the account password cannot be empty")
