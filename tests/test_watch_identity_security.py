@@ -16,7 +16,12 @@ from cvebeacon.watch.identity import ReportIdentity
 from cvebeacon.watch.records import WatchRecord
 from cvebeacon.watch.reporting import ReportService
 from cvebeacon.watch.store import WatchStore
-from cvebeacon.watch.users import AuthenticatedUser, User, UserStore
+from cvebeacon.watch.users import (
+    BOOTSTRAP,
+    AuthenticatedUser,
+    User,
+    UserStore,
+)
 
 PASSWORD = "correct horse battery staple"
 IDENTIFIER = "CVE-2026-0001"
@@ -545,6 +550,12 @@ def test_security_documentation_is_explicit():
     assert "must be owned by" in watch.casefold()
     assert "cvebeacon account (or root)" in watch.casefold()
     assert "highest legacy row id" in watch.casefold()
+    assert "total rewrite" in watch.casefold()
+    assert "not covered by either chain" in watch.casefold()
+    assert "empty actor" in watch.casefold()
+    assert "every ancestor" in watch.casefold()
+    assert "chmod go-w" in watch.casefold()
+    assert "0700" in watch.casefold()
 
 
 OLD_USER_SCHEMA = (
@@ -690,7 +701,7 @@ def test_authenticated_admin_bootstrap_and_admin_login(tmp_path, monkeypatch, ca
     assert cli.main([*base, "add", "alice", "--admin"]) == 0
     alice = users.find("alice")
     assert alice is not None and alice.is_admin
-    assert users.audit_entries()[-1].actor == "bootstrap"
+    assert users.audit_entries()[-1].actor == "(bootstrap)"
 
     assert cli.main([*base, "add", "bob"]) == 2
     assert "administrator login required" in capsys.readouterr().err
@@ -1031,3 +1042,191 @@ def test_schema6_with_no_chain_column_fails_closed(tmp_path):
         db.execute("UPDATE watch_meta SET value='6' WHERE key='schema_version'")
     with pytest.raises(StateError, match="no chain column"):
         store.verify_reports()
+
+
+def test_data_directory_created_0700_under_umask_002(tmp_path):
+    if os.name != "posix":
+        pytest.skip("POSIX directory modes")
+    old = os.umask(0o002)
+    try:
+        users_parent = tmp_path / "user-data"
+        UserStore(users_parent / "users.db", clock=lambda: NOW).initialize()
+        assert stat.S_IMODE(users_parent.stat().st_mode) == 0o700
+        watch_parent = tmp_path / "watch-data"
+        WatchStore(watch_parent / "watch.db").initialize()
+        assert stat.S_IMODE(watch_parent.stat().st_mode) == 0o700
+    finally:
+        os.umask(old)
+
+
+def test_directory_error_names_the_path_and_fix(tmp_path):
+    if os.name != "posix":
+        pytest.skip("POSIX directory modes")
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o775)
+    try:
+        with pytest.raises(StateError) as caught:
+            UserStore(parent / "users.db", clock=lambda: NOW).initialize()
+        message = str(caught.value)
+        assert str(parent) in message
+        assert "chmod go-w" in message
+    finally:
+        parent.chmod(0o700)
+
+
+def test_account_file_rejects_a_writable_ancestor(tmp_path):
+    if os.name != "posix":
+        pytest.skip("POSIX directory modes")
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir()
+    unsafe.chmod(0o770)
+    data = unsafe / "data"
+    data.mkdir(mode=0o700)
+    try:
+        with pytest.raises(StateError, match="chmod go-w"):
+            UserStore(data / "users.db", clock=lambda: NOW).initialize()
+    finally:
+        unsafe.chmod(0o700)
+
+
+def test_bootstrap_is_checked_inside_the_add_transaction(tmp_path):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.add(
+        "alice",
+        password=PASSWORD,
+        is_admin=True,
+        authorization=BOOTSTRAP,
+    )
+    with pytest.raises(ConfigurationError, match="administrator login"):
+        store.add(
+            "bob",
+            password=PASSWORD,
+            is_admin=True,
+            authorization=BOOTSTRAP,
+        )
+    assert store.find("bob") is None
+
+
+def test_admin_and_self_authorization_are_rechecked_inside_mutations(tmp_path):
+    now = [NOW]
+    store = UserStore(tmp_path / "users.db", clock=lambda: now[0])
+    store.add("alice", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
+    store.add("bob", password=PASSWORD)
+    admin = store.authenticate("alice", PASSWORD)
+    self_proof = store.authenticate("bob", PASSWORD)
+
+    store.disable("alice", authorization=admin)
+    with pytest.raises(ConfigurationError, match="disabled"):
+        store.add(
+            "carol",
+            password=PASSWORD,
+            authorization=admin,
+        )
+    with pytest.raises(ConfigurationError, match="disabled"):
+        store.disable("bob", authorization=admin)
+    assert store.find("carol") is None
+    assert store.find("bob").disabled is False
+
+    store.enable("alice", authorization=None)
+    admin = store.authenticate("alice", PASSWORD)
+    now[0] = NOW + timedelta(seconds=1)
+    reset = PASSWORD + " reset"
+    store.set_password("bob", reset, authorization=admin)
+    with pytest.raises(ConfigurationError, match="predates"):
+        store.set_password(
+            "bob", PASSWORD + " stale", authorization=self_proof
+        )
+    assert store.authenticate("bob", reset) is not None
+
+
+def test_report_identity_must_match_its_account(tmp_path):
+    config = config_with(tmp_path)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    alice = users.add(
+        "alice", display_name="Alice Smith", email="alice@example.com"
+    )
+    with pytest.raises(ConfigurationError, match="display identity"):
+        ReportIdentity("registered", "Mallory", user=alice)
+    with pytest.raises(ConfigurationError, match="email identity"):
+        ReportIdentity(
+            "registered",
+            "Alice Smith",
+            user=alice,
+            email="mallory@example.com",
+        )
+
+
+def test_listing_and_export_reject_malformed_rows(tmp_path, capsys):
+    config = config_with(tmp_path)
+    store = seed(config)
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET user_id='x' WHERE id=1")
+    assert cli.main(
+        ["--config", str(config.config_path), "watch", "reported", "--all"]
+    ) == 2
+    assert "invalid" in capsys.readouterr().err
+    assert cli.main(
+        [
+            "--config",
+            str(config.config_path),
+            "watch",
+            "reported",
+            "--all",
+            "--format",
+            "json",
+        ]
+    ) == 2
+    assert "invalid" in capsys.readouterr().err
+
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET user_id=1, note=CAST('blob' AS BLOB)")
+    assert cli.main(
+        ["--config", str(config.config_path), "watch", "reported", "--all"]
+    ) == 2
+    assert "invalid" in capsys.readouterr().err
+
+
+def test_empty_and_populated_csv_exports_share_a_header(tmp_path, capsys):
+    config = config_with(tmp_path)
+    store = seed(config)
+    base = [
+        "--config",
+        str(config.config_path),
+        "watch",
+        "reported",
+        "--all",
+        "--format",
+        "csv",
+    ]
+    assert cli.main(base) == 0
+    empty_header = capsys.readouterr().out.splitlines()[0]
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    assert cli.main(base) == 0
+    full_header = capsys.readouterr().out.splitlines()[0]
+    assert empty_header == full_header
+    assert "chain_version" in full_header and "legacy" in full_header
+
+
+def test_concurrent_bootstrap_creates_only_one_administrator(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+
+    def bootstrap(index: int) -> bool:
+        try:
+            store.add(
+                f"admin{index}",
+                password=PASSWORD,
+                is_admin=True,
+                authorization=BOOTSTRAP,
+            )
+            return True
+        except ConfigurationError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(bootstrap, (1, 2)))
+    assert sorted(results) == [False, True]
+    assert sum(user.is_admin for user in store.users()) == 1
