@@ -1286,11 +1286,19 @@ def test_throttle_give_up_reports_every_request():
 
     http = mock_client(handler)
     throttle = Throttle(sleep=lambda _: None)
+    feeds.fetch_euvd_page(
+        http,
+        start=date(2026, 11, 1),
+        end=date(2026, 11, 2),
+        page=0,
+        throttle=throttle,
+    )
     with pytest.raises(SourceError) as caught:
-        feeds.fetch_euvd(
+        feeds.fetch_euvd_page(
             http,
             start=date(2026, 11, 1),
             end=date(2026, 11, 2),
+            page=1,
             throttle=throttle,
         )
     assert caught.value.status_code == 403

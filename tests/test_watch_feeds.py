@@ -22,7 +22,7 @@ from cvebeacon.watch.feeds import (
     cisa_fields,
     eu_fields,
     euvd_chunks,
-    fetch_euvd,
+    fetch_euvd_page,
     fetch_nvd_cve,
     fetch_nvd_window,
     iso_timestamp,
@@ -67,9 +67,11 @@ def test_recorded_euvd_sample_extracts_vendor_and_product_names():
     def handler(request):
         return httpx.Response(200, json=payload)
 
-    feed = fetch_euvd(
-        mock_client(handler), start=date(2026, 11, 1), end=date(2026, 11, 2)
+    http = mock_client(handler)
+    feed = fetch_euvd_page(
+        http, start=date(2026, 11, 1), end=date(2026, 11, 2), page=0
     )
+    assert http.requests == 1
     assert feed.updates[0].cve_ids == ("CVE-2021-44228",)
     assert feed.updates[0].vendors == (
         Product("Apache Software Foundation", ""),
@@ -608,12 +610,14 @@ def test_euvd_aliases_map_to_cves_and_epss_is_ignored():
             },
         )
 
-    feed = fetch_euvd(
-        mock_client(handler),
+    http = mock_client(handler)
+    feed = fetch_euvd_page(
+        http,
         start=date(2026, 11, 1),
         end=date(2026, 11, 3),
+        page=0,
     )
-    assert feed.requests == 1
+    assert http.requests == 1
     update = feed.updates[0]
     assert update.cve_ids == ("CVE-2026-0001", "CVE-2026-0002")
     assert update.euvd_id == "EUVD-2026-1"
@@ -630,7 +634,12 @@ def test_same_day_euvd_queries_are_widened_by_one_day():
         seen.append(dict(request.url.params))
         return httpx.Response(200, json={"total": 0, "items": []})
 
-    fetch_euvd(mock_client(handler), start=date(2026, 11, 3), end=date(2026, 11, 3))
+    fetch_euvd_page(
+        mock_client(handler),
+        start=date(2026, 11, 3),
+        end=date(2026, 11, 3),
+        page=0,
+    )
     assert seen[0]["fromUpdatedDate"] == "2026-11-03"
     assert seen[0]["toUpdatedDate"] == "2026-11-04"
 
@@ -647,7 +656,9 @@ def test_euvd_requests_are_paced_at_one_second():
         original(key, interval)
 
     client._pace = pace
-    fetch_euvd(client, start=date(2026, 11, 1), end=date(2026, 11, 2))
+    fetch_euvd_page(
+        client, start=date(2026, 11, 1), end=date(2026, 11, 2), page=0
+    )
     assert intervals == [("euvd", feeds.EUVD_MIN_INTERVAL)]
     assert feeds.EUVD_MIN_INTERVAL == 1.0
 
@@ -665,100 +676,16 @@ def test_euvd_ranges_are_chunked_into_at_most_thirty_days():
     assert euvd_chunks(date(2026, 11, 3), date(2026, 11, 1)) == ()
 
 
-def test_euvd_pagination_restarts_when_the_total_changes():
-    calls: list[int] = []
-
-    def handler(request):
-        page = int(dict(request.url.params)["page"])
-        calls.append(page)
-        if len(calls) <= 2:
-            if page == 0:
-                return httpx.Response(
-                    200,
-                    json={
-                        "total": 101,
-                        "items": [{"id": f"EUVD-{index}", "aliases": f"CVE-2026-{1000 + index}"} for index in range(100)],
-                    },
-                )
-            return httpx.Response(200, json={"total": 100, "items": []})
-        return httpx.Response(
-            200,
-            json={"total": 1, "items": [{"id": "EUVD-1", "aliases": "CVE-2026-0001"}]},
-        )
-
-    feed = fetch_euvd(mock_client(handler), start=date(2026, 11, 1), end=date(2026, 11, 2))
-    assert calls == [0, 1, 0]
-    assert [update.euvd_id for update in feed.updates] == ["EUVD-1"]
-    assert feed.requests == 3
-
-
-def test_euvd_duplicate_identifier_restarts_then_fails():
-    catalog = [
-        {"id": f"EUVD-2026-{index}", "aliases": f"CVE-2026-{1000 + index}"}
-        for index in range(101)
-    ]
-    pages: list[int] = []
-
-    def handler(request):
-        page = int(dict(request.url.params)["page"])
-        pages.append(page)
-        items = catalog[:100] if page == 0 else [catalog[99]]
-        return httpx.Response(200, json={"total": 101, "items": items})
-
-    http = mock_client(handler)
-    with pytest.raises(SourceError, match="unstable pagination"):
-        fetch_euvd(http, start=date(2026, 11, 1), end=date(2026, 11, 3))
-    assert pages == [0, 1] * 3
-    assert http.requests == 6
-
-
-def test_euvd_large_chunk_reports_split_without_reading_pages():
-    pages: list[int] = []
-
-    def handler(request):
-        pages.append(int(dict(request.url.params)["page"]))
-        return httpx.Response(
-            200,
-            json={
-                "total": 10_001,
-                "items": [{"id": f"EUVD-{index}"} for index in range(100)],
-            },
-        )
-
-    feed = fetch_euvd(
-        mock_client(handler), start=date(2026, 10, 1), end=date(2026, 10, 30)
-    )
-    assert feed.split is True
-    assert feed.updates == ()
-    assert pages == [0]
-
-
-def test_euvd_one_day_chunk_is_not_split():
-    def handler(request):
-        page = int(dict(request.url.params)["page"])
-        items = (
-            [{"id": f"EUVD-{index}"} for index in range(100)]
-            if page == 0
-            else [{"id": "EUVD-last"}]
-        )
-        return httpx.Response(200, json={"total": 101, "items": items})
-
-    feed = fetch_euvd(
-        mock_client(handler), start=date(2026, 11, 3), end=date(2026, 11, 3)
-    )
-    assert feed.split is False
-    assert len(feed.updates) == 101
-    assert feed.requests == 2
-
-
-
+def test_euvd_no_score_page_parses_without_ignored_items():
     payload = json.loads((FIXTURES / "euvd-no-score-page.json").read_text(encoding="utf-8"))
-    feed = fetch_euvd(
-        mock_client(lambda request: httpx.Response(200, json=payload)),
+    http = mock_client(lambda request: httpx.Response(200, json=payload))
+    feed = fetch_euvd_page(
+        http,
         start=date(2026, 10, 31),
         end=date(2026, 11, 3),
+        page=0,
     )
-    assert feed.requests == 1
+    assert http.requests == 1
     assert len(feed.updates) == 7
     assert feed.ignored == 1
     by_id = {update.euvd_id: update for update in feed.updates}
@@ -789,9 +716,14 @@ def test_euvd_invalid_scores_with_a_known_version_fail_the_chunk():
         {"id": "EUVD-1", "aliases": "CVE-2026-0001", "baseScore": 10 ** 1000, "baseScoreVersion": "3.1"},
     ):
         with pytest.raises(SourceError):
-            fetch_euvd(with_item(item), start=date(2026, 11, 1), end=date(2026, 11, 2))
+            fetch_euvd_page(
+                with_item(item),
+                start=date(2026, 11, 1),
+                end=date(2026, 11, 2),
+                page=0,
+            )
 
-    feed = fetch_euvd(
+    feed = fetch_euvd_page(
         with_item(
             {
                 "id": "EUVD-1",
@@ -802,6 +734,7 @@ def test_euvd_invalid_scores_with_a_known_version_fail_the_chunk():
         ),
         start=date(2026, 11, 1),
         end=date(2026, 11, 2),
+        page=0,
     )
     assert feed.updates[0].cvss is None
     assert feed.ignored == 0
@@ -809,12 +742,13 @@ def test_euvd_invalid_scores_with_a_known_version_fail_the_chunk():
 
 def test_euvd_unknown_or_missing_versions_mean_no_score():
     def parse(item):
-        return fetch_euvd(
+        return fetch_euvd_page(
             mock_client(
                 lambda request: httpx.Response(200, json={"total": 1, "items": [item]})
             ),
             start=date(2026, 11, 1),
             end=date(2026, 11, 2),
+            page=0,
         )
 
     unknown = parse(
@@ -856,7 +790,12 @@ def test_euvd_date_updated_is_normalized_for_ordering():
             },
         )
 
-    feed = fetch_euvd(mock_client(handler), start=date(2026, 11, 1), end=date(2026, 11, 2))
+    feed = fetch_euvd_page(
+        mock_client(handler),
+        start=date(2026, 11, 1),
+        end=date(2026, 11, 2),
+        page=0,
+    )
     assert feed.updates[0].date_updated == "2025-10-21T23:25:23"
 
 
@@ -871,22 +810,36 @@ def test_euvd_paging_validation_and_second_page():
         pages.append(int(dict(request.url.params)["page"]))
         return httpx.Response(200, json=responses.pop(0))
 
-    feed = fetch_euvd(mock_client(handler), start=date(2026, 11, 1), end=date(2026, 11, 2))
+    http = mock_client(handler)
+    fetch_euvd_page(http, start=date(2026, 11, 1), end=date(2026, 11, 2), page=0)
+    second = fetch_euvd_page(
+        http, start=date(2026, 11, 1), end=date(2026, 11, 2), page=1
+    )
     assert pages == [0, 1]
-    assert feed.requests == 2
-    assert feed.updates[-1].cve_ids == ("CVE-2026-9999",)
+    assert http.requests == 2
+    assert second.updates[-1].cve_ids == ("CVE-2026-9999",)
 
     def short_page(request):
         return httpx.Response(200, json={"total": 2, "items": [{"aliases": "CVE-2026-0001"}]})
 
     with pytest.raises(SourceError):
-        fetch_euvd(mock_client(short_page), start=date(2026, 11, 1), end=date(2026, 11, 2))
+        fetch_euvd_page(
+            mock_client(short_page),
+            start=date(2026, 11, 1),
+            end=date(2026, 11, 2),
+            page=0,
+        )
 
     def bad_total(request):
         return httpx.Response(200, json={"total": "many", "items": []})
 
     with pytest.raises(SourceError):
-        fetch_euvd(mock_client(bad_total), start=date(2026, 11, 1), end=date(2026, 11, 2))
+        fetch_euvd_page(
+            mock_client(bad_total),
+            start=date(2026, 11, 1),
+            end=date(2026, 11, 2),
+            page=0,
+        )
 
 
 def _epss_handler(content: bytes, *, today: date = date(2026, 11, 3), not_found: bool = False):

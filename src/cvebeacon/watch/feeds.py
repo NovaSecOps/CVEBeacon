@@ -72,14 +72,6 @@ class NVDCVEResult:
 
 
 @dataclass(frozen=True, slots=True)
-class EUVDFeed:
-    updates: tuple[EUVDUpdate, ...]
-    requests: int
-    ignored: int = 0
-    split: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class EUVDPage:
     updates: tuple[EUVDUpdate, ...]
     page: int
@@ -654,59 +646,6 @@ def fetch_euvd_page(
             )
         )
     return EUVDPage(tuple(updates), page, total, ignored)
-
-
-@source_payload("euvd")
-def fetch_euvd(
-    http: HttpClient,
-    *,
-    start: date,
-    end: date,
-    throttle: Throttle | None = None,
-) -> EUVDFeed:
-    """Fetch one complete bounded EUVD window with a pinned result total.
-
-    Sync reads and commits single pages instead, so a throttled run keeps its
-    progress. This whole-window form remains for callers that want one result.
-    """
-    requests_before = http.requests
-    for _ in range(EUVD_ATTEMPTS):
-        updates: list[EUVDUpdate] = []
-        ignored = 0
-        page = 0
-        pinned_total: int | None = None
-        unstable = False
-        seen_ids: set[str] = set()
-        while True:
-            result = fetch_euvd_page(
-                http, start=start, end=end, page=page, throttle=throttle
-            )
-            if page == 0:
-                pinned_total = result.total
-                if result.total > EUVD_SPLIT_TOTAL and end > start:
-                    return EUVDFeed(
-                        (), http.requests - requests_before, 0, split=True
-                    )
-            elif result.total != pinned_total:
-                unstable = True
-                break
-            page_ids = [update.euvd_id for update in result.updates]
-            if len(set(page_ids)) != len(page_ids) or any(
-                identifier in seen_ids for identifier in page_ids
-            ):
-                unstable = True
-                break
-            seen_ids.update(page_ids)
-            updates.extend(result.updates)
-            ignored += result.ignored
-            if (page + 1) * EUVD_PAGE_SIZE >= pinned_total:
-                break
-            page += 1
-        if not unstable and len(seen_ids) == pinned_total:
-            return EUVDFeed(
-                tuple(updates), http.requests - requests_before, ignored
-            )
-    raise SourceError("euvd", "source returned unstable pagination")
 
 
 def cisa_fields(items: dict[str, Any]) -> dict[str, KEVFields]:
