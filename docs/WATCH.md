@@ -52,11 +52,13 @@ inventory (`scan`, `export`, `asset`, `inventory ...`, `doctor`, and the
 inventory dashboard pages) fail with a clear message until
 `[inventory] path` is added. A configuration with neither watch mode nor an
 inventory is rejected, so existing configurations keep their behavior.
-`schedule install`, `doctor`, and `serve` refuse in a watch-only configuration;
-run `cvebeacon --config <file> watch run` from cron or Task Scheduler instead.
+`schedule install` supports watch-only and combined configurations: it runs
+`watch run` by default when no inventory is configured, and scan plus watch run
+when both are configured. See [scheduling](SCHEDULING.md).
 
-The NVD API key is read from the existing `sources.nvd_api_key_env` variable.
-It is optional; pacing follows `sources.minimum_request_interval`.
+The NVD API key is read from the existing `sources.nvd_api_key_env` variable,
+or from `sources.nvd_api_key_file` when the variable is unset. It is optional;
+pacing follows `sources.minimum_request_interval`.
 
 ## Channels
 

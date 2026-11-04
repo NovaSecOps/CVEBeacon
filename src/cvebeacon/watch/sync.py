@@ -225,7 +225,7 @@ def sync_watch(
             "catching up in bounded windows"
         )
 
-    api_key = config.secret(config.sources.nvd_api_key_env)
+    api_key = config.nvd_api_key()
     nvd_before = http.requests
     nvd_records = nvd_new = nvd_changed = 0
     lookup_failures = 0

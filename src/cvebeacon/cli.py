@@ -65,6 +65,9 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--allow-unauthenticated-remote", action="store_true", help="acknowledge remote access without built-in authentication")
     dashboard = commands.add_parser("dashboard", help="dashboard security helpers")
     dashboard.add_subparsers(dest="dashboard_command", required=True).add_parser("hash-password", help="prompt privately and emit a password hash")
+    setup = commands.add_parser("setup", help="write a validated configuration interactively")
+    setup.add_argument("--config", dest="setup_config", help="path to write the configuration")
+    setup.add_argument("--force", action="store_true", help="overwrite an existing configuration after backing it up")
     schedule = commands.add_parser("schedule", help="manage the native recurring scan")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
     add = schedule_sub.add_parser("install"); add.add_argument("--every", "--hours", dest="every"); add.add_argument("--times", help="comma-separated local times such as 07:00,19:00"); add.add_argument("--command", dest="schedule_target", choices=("scan", "watch", "both"), help="what the schedule runs"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
@@ -372,6 +375,9 @@ def run(args: argparse.Namespace) -> int:
         from .dashboard_auth import hash_password
         print(hash_password())
         return 0
+    if args.command == "setup":
+        from .setup import run_setup
+        return run_setup(args.setup_config or args.config, force=args.force)
     if args.command == "inventory" and args.inventory_command == "inspect" and args.path:
         print(json.dumps(inspect_inventory(args.path), indent=2))
         return 0

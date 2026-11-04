@@ -230,7 +230,7 @@ cvebeacon --config /absolute/path/cvebeacon.toml schedule install --dry-run
 cvebeacon --config /absolute/path/cvebeacon.toml schedule install
 ```
 
-The interactive setup asks for an interval, defaults to four hours, shows the proposal, and requires confirmation. For automation, provide a value such as `--every 4h --yes`; Windows accepts 2 through 24 whole hours, while Linux cron accepts 2, 3, 4, 6, 8, 12, or 24. Inspect and remove with `schedule status` and `schedule remove`. See [scheduling](SCHEDULING.md) for exact ownership and safe manual native scheduling.
+The interactive setup asks for an interval or fixed times, shows the proposal, and requires confirmation. Fixed times use `--times 07:00,19:00`; `--command scan|watch|both` selects the action and defaults to the configured mode. For automation, provide a value such as `--every 4h --yes`; Windows accepts 2 through 24 whole hours, while Linux cron accepts 2, 3, 4, 6, 8, 12, or 24. Inspect and remove with `schedule status` and `schedule remove`. See [scheduling](SCHEDULING.md) for exact ownership and safe manual native scheduling.
 
 Ensure the scheduled account can read the inventory/configuration, write state/reports, reach source endpoints, and obtain notification environment variables.
 

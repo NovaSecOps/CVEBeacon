@@ -19,6 +19,9 @@ CVEBeacon is a general-purpose conservative vulnerability inventory monitor, wit
 
 ## Quick start
 
+Quick start: `cvebeacon setup` asks for the mode, sources, rules, channels and
+schedule, then writes a validated `cvebeacon.toml` with commented defaults.
+
 CVEBeacon requires Python 3.11 or newer for a source installation. CPython 3.11–3.14 are tested on Windows and Linux; see the [validation matrix](docs/VALIDATION.md). On Windows PowerShell:
 
 ```console
