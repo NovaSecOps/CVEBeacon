@@ -1427,6 +1427,51 @@ def test_new_users_database_lock_is_0600_regardless_of_umask(tmp_path, mask):
     assert stat.S_IMODE((tmp_path / "users.db.lock").stat().st_mode) == 0o600
 
 
+def test_windows_first_lock_waits_without_writing_a_locked_byte(
+    tmp_path, monkeypatch
+):
+    import sys
+    from types import SimpleNamespace
+
+    import cvebeacon.watch.users as users_module
+
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    calls = []
+    real_fstat = os.fstat
+
+    def empty_before_competing_lock(descriptor):
+        details = real_fstat(descriptor)
+        assert details.st_size == 0
+        # Another opener locks byte zero after this opener observes EOF.
+        calls.append("competitor locked")
+        return details
+
+    def mandatory_locked_write(*args):
+        raise OSError("byte zero is locked by the competing opener")
+
+    def locking(descriptor, operation, size):
+        assert os.lseek(descriptor, 0, os.SEEK_CUR) == 0
+        assert size == 1
+        calls.append(operation)
+
+    fake_os = SimpleNamespace(
+        **{name: getattr(os, name) for name in dir(os) if not name.startswith("__")}
+    )
+    fake_os.name = "nt"
+    fake_os.fstat = empty_before_competing_lock
+    fake_os.write = mandatory_locked_write
+    monkeypatch.setattr(users_module, "os", fake_os)
+    monkeypatch.setitem(
+        sys.modules, "msvcrt",
+        SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=locking),
+    )
+    with store._creation_lock(path):
+        calls.append("acquired")
+    assert calls == ["competitor locked", 1, "acquired", 0]
+    assert (tmp_path / "users.db.lock").stat().st_size == 0
+
+
 def test_foreign_read_only_ancestor_is_not_trusted(tmp_path, monkeypatch):
     if os.name != "posix":
         pytest.skip("POSIX ownership model")

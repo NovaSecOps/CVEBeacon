@@ -323,8 +323,6 @@ class UserStore:
                 else:
                     import msvcrt
 
-                    if not details.st_size:
-                        os.write(descriptor, b"0")
                     os.lseek(descriptor, 0, os.SEEK_SET)
                     msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
             except OSError as exc:
