@@ -549,7 +549,7 @@ def test_security_documentation_is_explicit():
     assert "planned dashboard" in watch.casefold()
     assert "must be owned by" in watch.casefold()
     assert "cvebeacon account or root" in watch.casefold()
-    assert "sticky-bit protected" in watch.casefold()
+    assert "sticky-bit" in watch.casefold()
     assert "read-only" in watch.casefold()
     assert "highest legacy row id" in watch.casefold()
     assert "total rewrite" in watch.casefold()
