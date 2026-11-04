@@ -42,14 +42,20 @@ hours, or `/SC DAILY` for 24 hours.
 
 Add `--run-logged-out` to run the task whether the account is signed in or not.
 It is Windows-only, and Linux rejects it. The task principal becomes `LogonType
-S4U` with the current account as an explicit `UserId` (the environment's
-`USERDOMAIN\USERNAME`), and `RunLevel` stays least privilege. S4U stores no
-password, so outbound HTTPS works but Windows-authenticated network shares do
-not. The account must already exist; the CLI does not provision credentials.
-Creating an S4U task normally requires an elevated prompt, and an access-denied
-failure prints a one-line reminder. With this flag, interval mode also uses the
-XML form. Without it the default stays `InteractiveToken` for desktops.
-`schedule status` shows the account and whether the task runs while logged off.
+S4U` with an explicit `UserId`, and `RunLevel` stays least privilege. The
+account comes from the operating system, not from environment variables; use
+`--account DOMAIN\user` with `--run-logged-out` to name the service account when
+an administrator registers it. The plan prints `Runs as: <account> (S4U, while
+logged off)`; check that line before `--yes`. S4U stores no password, so
+outbound HTTPS works but Windows-authenticated network shares do not. The
+account must already exist and, unless policy grants it, needs the "Log on as a
+batch job" right (`secpol.msc`, Local Policies, User Rights Assignment; a domain
+GPO can override it). Registration from the account's own shell or by an
+administrator with `--account` is supported; an identifiable access-denied
+failure prints a one-line hint. With this flag, interval mode also uses the XML
+form. Without it the default stays `InteractiveToken` for desktops. `schedule
+status` shows the account when the task XML has a `UserId`, and whether the task
+runs while logged off.
 
 ## What runs
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import getpass
 import os
 import platform
 import re
@@ -40,6 +39,8 @@ class SchedulePlan:
     schedule_command: str = "scan"
     run_logged_out: bool = False
     user_id: str = ""
+    account_note: str = ""
+    account_explicit: bool = False
 
     def _command(self, action: str) -> list[str]:
         prefix = (
@@ -95,19 +96,91 @@ def parse_times(value: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
     return tuple(sorted(times, key=lambda item: (int(item[:2]), int(item[3:]))))
 
 
-def _current_windows_user() -> str:
-    user = os.environ.get("USERNAME", "").strip()
-    if not user:
-        try:
-            user = getpass.getuser().strip()
-        except (KeyError, OSError):
-            user = ""
-    if not user:
+def _windows_extended_name() -> str:
+    """Return the current account as DOMAIN\\user through GetUserNameExW."""
+    import ctypes
+    from ctypes import wintypes
+
+    secur32 = ctypes.WinDLL("secur32", use_last_error=True)
+    secur32.GetUserNameExW.argtypes = [
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    secur32.GetUserNameExW.restype = wintypes.BOOLEAN
+    size = wintypes.ULONG(256)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if not secur32.GetUserNameExW(2, buffer, ctypes.byref(size)):
+        error = ctypes.get_last_error()
+        if error == 234 and size.value > 0:
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if secur32.GetUserNameExW(2, buffer, ctypes.byref(size)):
+                return buffer.value
+        raise OSError(error, "GetUserNameExW failed")
+    return buffer.value
+
+
+def _windows_user_name() -> str:
+    """Return the current user name through GetUserNameW."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.GetUserNameW.argtypes = [
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetUserNameW.restype = wintypes.BOOL
+    size = wintypes.DWORD(256)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if not advapi32.GetUserNameW(buffer, ctypes.byref(size)):
+        error = ctypes.get_last_error()
+        if error == 122 and size.value > 0:
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if advapi32.GetUserNameW(buffer, ctypes.byref(size)):
+                return buffer.value
+        raise OSError(error, "GetUserNameW failed")
+    return buffer.value
+
+
+def _current_windows_account(resolve_extended=None, resolve_user=None) -> tuple[str, str]:
+    """Return the effective account and an optional warning.
+
+    The account comes from the operating system, never from USERNAME or
+    USERDOMAIN. An injected resolver is used by the offline tests.
+    """
+    if resolve_extended is None and resolve_user is None and os.name != "nt":
         raise SchedulingError(
-            "cannot determine the current Windows account; set USERNAME in the environment"
+            "cannot determine the current Windows account on this host; "
+            "pass --account DOMAIN\\user"
         )
-    domain = os.environ.get("USERDOMAIN", "").strip()
-    return f"{domain}\\{user}" if domain else user
+    extended = resolve_extended or _windows_extended_name
+    fallback = resolve_user or _windows_user_name
+    try:
+        account = extended().strip()
+    except (AttributeError, OSError):
+        account = ""
+    if account:
+        note = ""
+        folded = account.casefold()
+        if "@" in account or folded.startswith(("azuread\\", "microsoftaccount\\")):
+            note = (
+                "this looks like an Entra ID or Microsoft account; Task Scheduler "
+                "may not accept it, so verify it or pass a local or domain account"
+            )
+        return account, note
+    try:
+        account = fallback().strip()
+    except (AttributeError, OSError):
+        account = ""
+    if account:
+        return account, (
+            "the NameSamCompatible lookup failed; the fallback returns an "
+            "unqualified name, so verify the task account"
+        )
+    raise SchedulingError(
+        "cannot determine the current Windows account; pass --account DOMAIN\\user"
+    )
 
 
 def make_plan(
@@ -120,7 +193,7 @@ def make_plan(
     executable: str | Path | None = None,
     allow_incompatible: bool = False,
     run_logged_out: bool = False,
-    user_id: str | None = None,
+    account: str | None = None,
 ) -> SchedulePlan:
     if times is not None and every_hours is not None:
         raise SchedulingError("--times and --every are mutually exclusive")
@@ -145,8 +218,12 @@ def make_plan(
         raise SchedulingError("platform must be auto, windows, or linux")
     if requested != detected and not allow_incompatible:
         raise SchedulingError(f"cannot manage a {requested} schedule on a {detected} host")
+    if account is not None and not run_logged_out:
+        raise SchedulingError("--account requires --run-logged-out")
     if run_logged_out and requested != "windows":
         raise SchedulingError("--run-logged-out is supported only on Windows")
+    if account is not None and requested != "windows":
+        raise SchedulingError("--account is supported only on Windows")
     if requested == "linux" and interval is not None and 24 % interval:
         raise SchedulingError("Linux cron intervals must divide 24: choose 2, 3, 4, 6, 8, 12, or 24 hours")
     if executable:
@@ -166,14 +243,18 @@ def make_plan(
         raise SchedulingError("schedule paths cannot contain line breaks")
     if requested == "linux" and any("%" in str(value) for value in (config_target, target)):
         raise SchedulingError("Linux cron paths cannot contain percent characters")
-    account = ""
+    account_name = ""
+    account_note = ""
     if run_logged_out:
-        account = (user_id if user_id is not None else _current_windows_user()).strip()
-        if not account:
+        if account is None:
+            account_name, account_note = _current_windows_account()
+        else:
+            account_name = account.strip()
+        if not account_name:
             raise SchedulingError(
                 "--run-logged-out needs the Windows account that runs the task"
             )
-        if any(character in account for character in "\r\n"):
+        if any(character in account_name for character in "\r\n"):
             raise SchedulingError("schedule account cannot contain line breaks")
     return SchedulePlan(
         requested,
@@ -184,7 +265,9 @@ def make_plan(
         fixed_times,
         command,
         run_logged_out=run_logged_out,
-        user_id=account,
+        user_id=account_name,
+        account_note=account_note,
+        account_explicit=account is not None,
     )
 
 
@@ -202,9 +285,9 @@ def describe(plan: SchedulePlan) -> str:
         "  " + _display_command(command, plan.system) for command in plan.commands
     )
     if plan.run_logged_out:
-        lines.append(
-            f"Runs while logged off: yes (S4U, account {plan.user_id})"
-        )
+        lines.append(f"Runs as: {plan.user_id} (S4U, while logged off)")
+        if plan.account_note:
+            lines.append(f"Account note: {plan.account_note}")
     return "\n".join(lines)
 
 
@@ -330,7 +413,12 @@ def _describe_windows_xml(text: str) -> str | None:
         logon_type = principal.findtext(_tag("LogonType")) or "InteractiveToken"
         if account:
             lines.append("Account: " + account)
-        logged_out = logon_type.casefold() in {"s4u", "password", "serviceaccount"}
+        logged_out = logon_type.casefold() in {
+            "s4u",
+            "password",
+            "serviceaccount",
+            "interactivetokenorpassword",
+        }
         lines.append("Runs while logged off: " + ("yes" if logged_out else "no"))
     if schedule:
         lines.append(schedule)
@@ -430,6 +518,16 @@ def _without_managed_block(text: str) -> str:
     return result
 
 
+def _windows_access_denied(detail: str, returncode: int) -> bool:
+    folded = detail.casefold()
+    return (
+        returncode == 5
+        or "0x80070005" in folded
+        or "access is denied" in folded
+        or "access denied" in folded
+    )
+
+
 def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
     if plan.system == "windows":
         if plan.times or plan.run_logged_out:
@@ -464,17 +562,37 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
             ["crontab", "-"], input=payload, capture_output=True, check=False
         )
     if result.returncode != 0:
-        detail = _crontab_text(result.stderr).strip() or _crontab_text(
-            getattr(result, "stdout", "")
-        ).strip()
+        detail = " ".join(
+            (
+                _crontab_text(getattr(result, "stderr", ""))
+                or _crontab_text(getattr(result, "stdout", ""))
+            ).split()
+        )
         hint = ""
-        if any(
-            value in detail.casefold()
-            for value in ("access is denied", "access denied")
+        if plan.system == "windows" and _windows_access_denied(
+            detail, result.returncode
         ):
-            detail = detail.rstrip(".")
-            hint = "; run from an elevated prompt"
-        raise SchedulingError(f"schedule installation failed: {detail}{hint}")
+            detail = detail.rstrip(".; ")
+            if plan.run_logged_out and plan.account_explicit:
+                hint = (
+                    "access denied: run as the account named in --account from an "
+                    "elevated prompt, or register from the service account's own shell"
+                )
+            elif plan.run_logged_out:
+                hint = (
+                    "access denied: register from the service account's own shell, "
+                    "or name it with --account from an elevated prompt"
+                )
+            else:
+                hint = "access denied: run from an elevated prompt"
+        message = (
+            f"schedule installation failed: {detail}"
+            if detail
+            else "schedule installation failed"
+        )
+        if hint:
+            message = f"{message}; {hint}"
+        raise SchedulingError(message)
 
 
 def _host_system(system: str) -> str:
