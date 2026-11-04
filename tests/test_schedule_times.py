@@ -364,12 +364,13 @@ def test_windows_plan_shows_an_account_note(tmp_path, monkeypatch):
     assert "Account note: verify the Entra ID account" in text
 
 
-def test_windows_logged_out_fixed_times_never_asks_for_a_password(
+def test_windows_logged_out_fixed_times_uses_the_com_api(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
     calls = []
+    captured = {}
 
     class Result:
         returncode = 0
@@ -378,15 +379,30 @@ def test_windows_logged_out_fixed_times_never_asks_for_a_password(
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
+        captured["script"] = Path(args[6]).read_text(encoding="utf-8")
+        captured["root"] = ET.parse(args[args.index("-XmlPath") + 1]).getroot()
         return Result()
 
     install(plan, run=fake_run)
     args, kwargs = calls[0]
-    assert "/RU" in args
-    assert args[args.index("/RU") + 1] == r"CORP\svc-cvebeacon"
-    assert "/NP" in args
-    assert "/RP" not in args
+    assert args[0] == "powershell.exe"
+    assert args[1:3] == ["-NoProfile", "-NonInteractive"]
+    assert args[3:5] == ["-ExecutionPolicy", "Bypass"]
+    assert args[5] == "-File"
+    script = captured["script"]
+    assert "Schedule.Service" in script
+    assert "RegisterTask" in script
+    assert ", 6, " in script
+    assert ", $null, 2, $null" in script
+    assert r"CORP\svc-cvebeacon" not in script
+    assert args[args.index("-TaskName") + 1] == WINDOWS_TASK
+    assert args[args.index("-Account") + 1] == r"CORP\svc-cvebeacon"
+    root = captured["root"]
+    principal = root.find(f".//{NS}Principal")
+    assert principal.findtext(f"{NS}LogonType") == "S4U"
+    assert principal.findtext(f"{NS}UserId") == r"CORP\svc-cvebeacon"
     assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["timeout"] == 120
 
 
 def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
@@ -409,15 +425,13 @@ def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        roots.append(ET.parse(args[3]).getroot())
+        roots.append(ET.parse(args[args.index("-XmlPath") + 1]).getroot())
         assert kwargs["stdin"] is subprocess.DEVNULL
         return Result()
 
     install(plan, run=fake_run)
-    assert calls[0][:3] == ["schtasks", "/Create", "/XML"]
-    assert calls[0][calls[0].index("/RU") + 1] == r"CORP\svc-cvebeacon"
-    assert "/NP" in calls[0]
-    assert calls[0][-1] == "/F"
+    args = calls[0]
+    assert args[0] == "powershell.exe"
     root = roots[0]
     repetition = root.find(f".//{NS}TimeTrigger/{NS}Repetition")
     assert repetition is not None
@@ -487,6 +501,45 @@ def test_windows_access_denied_asks_for_the_right_account(tmp_path, monkeypatch)
     assert "account named in --account" in message
     assert "service account's own shell" in message
     assert "\n" not in message
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ("0x80070569", "Log on as a batch job"),
+        ("0x80070534", "account or logon error"),
+        ("0x8007052e", "account or logon error"),
+    ],
+)
+def test_windows_registration_errors_map_to_one_line_hints(
+    tmp_path, monkeypatch, code, expected
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr=f'Exception calling "RegisterTask": {code}',
+        )
+
+    with pytest.raises(SchedulingError) as error:
+        install(plan, run=fake_run)
+    message = str(error.value)
+    assert expected in message
+    assert "\n" not in message
+
+
+def test_windows_registration_timeout_is_one_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
+
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    with pytest.raises(SchedulingError, match="timed out"):
+        install(plan, run=fake_run)
 
 
 def test_windows_access_denied_accepts_the_hresult_without_english_text(
