@@ -38,6 +38,12 @@ def validate_password(password: object, *, forbidden: tuple[object, ...] = ()) -
             f"password must contain {MIN_LENGTH}–{MAX_LENGTH} characters "
             "and not be all whitespace"
         )
+    try:
+        password.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ConfigurationError(
+            "password must be valid UTF-8 text"
+        ) from None
     for value in forbidden:
         if value is None or value == "":
             continue
@@ -77,6 +83,7 @@ def read_new_password(
     """Read and confirm a new password, then apply the shared rules."""
     first = read_password(prompt, getpass_module=getpass_module)
     second = read_password(CONFIRM_PROMPT, getpass_module=getpass_module)
+    validate_password(first, forbidden=forbidden)
     try:
         matched = secrets.compare_digest(
             first.encode("utf-8"), second.encode("utf-8")
@@ -85,7 +92,7 @@ def read_new_password(
         matched = False
     if not matched:
         raise ConfigurationError("password confirmation does not match")
-    return validate_password(first, forbidden=forbidden)
+    return first
 
 
 def hash_password_value(password: str) -> str:
