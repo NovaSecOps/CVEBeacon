@@ -397,7 +397,8 @@ def test_windows_logged_out_fixed_times_uses_the_com_api(
     assert "Schedule.Service" in script
     assert "RegisterTask" in script
     assert ", 6, " in script
-    assert ", $null, 2, $null" in script
+    assert "UseXmlPrincipal" in script
+    assert "RegisterTask($TaskName, $xml, 6, $userId, $null, 2, $null)" in script
     assert r"CORP\svc-cvebeacon" not in script
     assert args[args.index("-TaskName") + 1] == WINDOWS_TASK
     assert args[args.index("-Account") + 1] == r"CORP\svc-cvebeacon"
@@ -407,6 +408,55 @@ def test_windows_logged_out_fixed_times_uses_the_com_api(
     assert principal.findtext(f"{NS}UserId") == r"CORP\svc-cvebeacon"
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs["timeout"] == 120
+
+
+def test_windows_logged_out_falls_back_to_the_xml_principal(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
+    calls = []
+
+    class Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = "Access is denied." if returncode else ""
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return Result(0 if "-UseXmlPrincipal" in args else 1)
+
+    install(plan, run=fake_run)
+    assert len(calls) == 2
+    assert "-UseXmlPrincipal" in calls[1]
+
+
+def test_windows_logged_out_falls_back_to_passwordless_schtasks(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
+    calls = []
+
+    class Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = "Access is denied." if returncode else ""
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return Result(0 if args[0] == "schtasks" else 1)
+
+    install(plan, run=fake_run)
+    assert calls[0][0] == "powershell.exe"
+    assert calls[1][0] == "powershell.exe"
+    assert calls[2][0] == "schtasks"
+    args = calls[2]
+    assert "/RU" in args and args[args.index("/RU") + 1] == r"CORP\svc-cvebeacon"
+    assert "/NP" in args
+    assert "/HRESULT" in args
 
 
 def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
@@ -540,7 +590,7 @@ def test_windows_registration_timeout_is_one_error(tmp_path, monkeypatch):
     plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
 
     def fake_run(args, **kwargs):
-        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 60))
 
     with pytest.raises(SchedulingError, match="timed out") as error:
         install(plan, run=fake_run)

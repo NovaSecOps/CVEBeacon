@@ -28,14 +28,16 @@ MAX_TIMES = 12
 WINDOWS_REGISTRATION_SCRIPT = """param(
     [Parameter(Mandatory = $true)][string]$TaskName,
     [Parameter(Mandatory = $true)][string]$XmlPath,
-    [Parameter(Mandatory = $true)][string]$Account
+    [Parameter(Mandatory = $true)][string]$Account,
+    [switch]$UseXmlPrincipal
 )
 $ErrorActionPreference = 'Stop'
 $xml = [System.IO.File]::ReadAllText($XmlPath)
 $service = New-Object -ComObject Schedule.Service
 $service.Connect()
 $folder = $service.GetFolder('\\')
-$null = $folder.RegisterTask($TaskName, $xml, 6, $Account, $null, 2, $null)
+$userId = if ($UseXmlPrincipal) { $null } else { $Account }
+$null = $folder.RegisterTask($TaskName, $xml, 6, $userId, $null, 2, $null)
 """
 
 ET.register_namespace("", TASK_NAMESPACE)
@@ -588,23 +590,27 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
                 script_path.write_text(
                     WINDOWS_REGISTRATION_SCRIPT, encoding="utf-8"
                 )
-                try:
-                    result = run(
-                        [
-                            "powershell.exe",
-                            "-NoProfile",
-                            "-NonInteractive",
-                            "-ExecutionPolicy",
-                            "Bypass",
-                            "-File",
-                            str(script_path),
-                            "-TaskName",
-                            WINDOWS_TASK,
-                            "-XmlPath",
-                            str(xml_path),
-                            "-Account",
-                            plan.user_id,
-                        ],
+
+                def run_com(use_xml_principal: bool):
+                    arguments = [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_path),
+                        "-TaskName",
+                        WINDOWS_TASK,
+                        "-XmlPath",
+                        str(xml_path),
+                        "-Account",
+                        plan.user_id,
+                    ]
+                    if use_xml_principal:
+                        arguments.append("-UseXmlPrincipal")
+                    return run(
+                        arguments,
                         capture_output=True,
                         text=True,
                         errors="replace",
@@ -612,11 +618,50 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
                         stdin=subprocess.DEVNULL,
                         timeout=120,
                     )
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    detail = " ".join(str(exc).split())[:600]
+
+                result = None
+                last_error: Exception | None = None
+                for use_xml_principal in (False, True):
+                    try:
+                        result = run_com(use_xml_principal)
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        last_error = exc
+                        continue
+                    if result.returncode == 0:
+                        break
+                if result is None or result.returncode != 0:
+                    try:
+                        result = run(
+                            [
+                                "schtasks",
+                                "/Create",
+                                "/XML",
+                                str(xml_path),
+                                "/TN",
+                                WINDOWS_TASK,
+                                "/RU",
+                                plan.user_id,
+                                "/NP",
+                                "/F",
+                                "/HRESULT",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            stdin=subprocess.DEVNULL,
+                        )
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        if result is None:
+                            detail = " ".join(str(exc).split())[:600]
+                            raise SchedulingError(
+                                f"schedule installation failed: {detail}"
+                            ) from exc
+                        last_error = exc
+                if result is None:
+                    detail = " ".join(str(last_error).split())[:600]
                     raise SchedulingError(
                         f"schedule installation failed: {detail}"
-                    ) from exc
+                    ) from last_error
         elif plan.times:
             descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
             try:
