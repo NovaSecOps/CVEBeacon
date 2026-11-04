@@ -40,6 +40,8 @@ $folder = $service.GetFolder('\\')
 $null = $folder.RegisterTask($TaskName, $xml, 6, $Account, $password, 1, $null)
 """
 
+SID_PATTERN = re.compile(r"S-\d+(?:-\d+)+", re.IGNORECASE)
+
 ET.register_namespace("", TASK_NAMESPACE)
 
 
@@ -381,7 +383,72 @@ def _windows_xml(plan: SchedulePlan, *, now: datetime | None = None) -> bytes:
     return ET.tostring(root, encoding="utf-16", xml_declaration=True)
 
 
-def _describe_windows_xml(text: str) -> str | None:
+def _lookup_account_sid(sid: str) -> str | None:
+    """Resolve a SID string to DOMAIN\\name through LookupAccountSidW."""
+    if os.name != "nt" or SID_PATTERN.fullmatch(sid) is None:
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.ConvertStringSidToSidW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi32.LookupAccountSidW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPVOID,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.LookupAccountSidW.restype = wintypes.BOOL
+    advapi32.LocalFree.argtypes = [wintypes.LPVOID]
+    advapi32.LocalFree.restype = wintypes.LPVOID
+
+    sid_pointer = wintypes.LPVOID()
+    if not advapi32.ConvertStringSidToSidW(sid, ctypes.byref(sid_pointer)):
+        return None
+    try:
+        name_size = wintypes.DWORD()
+        domain_size = wintypes.DWORD()
+        use = wintypes.DWORD()
+        advapi32.LookupAccountSidW(
+            None,
+            sid_pointer,
+            None,
+            ctypes.byref(name_size),
+            None,
+            ctypes.byref(domain_size),
+            ctypes.byref(use),
+        )
+        if ctypes.get_last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
+            return None
+        name = ctypes.create_unicode_buffer(name_size.value)
+        domain = ctypes.create_unicode_buffer(domain_size.value)
+        if not advapi32.LookupAccountSidW(
+            None,
+            sid_pointer,
+            name,
+            ctypes.byref(name_size),
+            domain,
+            ctypes.byref(domain_size),
+            ctypes.byref(use),
+        ):
+            return None
+        return f"{domain.value}\\{name.value}" if domain.value else name.value
+    except (AttributeError, OSError, ValueError):
+        return None
+    finally:
+        advapi32.LocalFree(sid_pointer)
+
+
+def _describe_windows_xml(
+    text: str, *, sid_resolver=_lookup_account_sid
+) -> str | None:
     clean = re.sub(r"^\s*<\?xml[^>]*\?>", "", text)
     try:
         root = ET.fromstring(clean)
@@ -426,7 +493,15 @@ def _describe_windows_xml(text: str) -> str | None:
         account = principal.findtext(_tag("UserId"))
         logon_type = principal.findtext(_tag("LogonType")) or "InteractiveToken"
         if account:
-            lines.append("Account: " + account)
+            if SID_PATTERN.fullmatch(account) is not None:
+                resolved = sid_resolver(account)
+                lines.append(
+                    f"Account: {resolved} ({account})"
+                    if resolved
+                    else "Account: " + account
+                )
+            else:
+                lines.append("Account: " + account)
         logged_out = logon_type.casefold() in {
             "s4u",
             "password",
