@@ -1,9 +1,12 @@
 # Deployment
+
 One Linux VM, either from a source checkout or with Docker. Details are in the
 [setup guide](SETUP.md), [watch mode](WATCH.md), and [scheduling](SCHEDULING.md).
 
 ## A. Linux VM, native install
+
 ### Prerequisites
+
 - Python 3.11 or newer, `git`, `venv`, the `sqlite3` CLI, and outbound HTTPS to
   the [network requirements](NETWORK_REQUIREMENTS.md) hosts; the built-in
   schedule needs a running cron daemon (`crontab`).
@@ -20,7 +23,9 @@ sudo -u cvebeacon python3 -m venv /opt/cvebeacon/.venv
 sudo -u cvebeacon /opt/cvebeacon/.venv/bin/python -m pip install --upgrade 'pip>=26.2'
 sudo -u cvebeacon /opt/cvebeacon/.venv/bin/python -m pip install /opt/cvebeacon
 ```
+
 ### Write the configuration
+
 ```console
 sudo -u cvebeacon /opt/cvebeacon/.venv/bin/cvebeacon setup \
   --config /var/lib/cvebeacon/cvebeacon.toml
@@ -38,7 +43,9 @@ Load the command once as a function (a variable would not split in zsh):
 ```console
 cb() { sudo -u cvebeacon /opt/cvebeacon/.venv/bin/cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml "$@"; }
 ```
+
 ### First day
+
 Set `initial` and, for `backfill`, `backfill_days` (the wizard offers both).
 Then run:
 
@@ -60,7 +67,9 @@ Check a channel:
 ```console
 cb watch notify test soc-email
 ```
+
 ### Schedule it
+
 The built-in command writes one managed block to the service account's crontab:
 
 ```console
@@ -107,7 +116,9 @@ owned by `root`. Enable the timer; `Persistent=true` catches up one missed run:
 sudo systemctl daemon-reload
 sudo systemctl enable --now cvebeacon.timer
 ```
+
 ### Check the result
+
 ```console
 cb watch status
 cb schedule status
@@ -115,7 +126,9 @@ sudo systemctl list-timers cvebeacon.timer
 ```
 
 Use the line for the scheduler you installed; see [exit codes](DEVELOPMENT.md#exit-codes).
+
 ### Upgrade
+
 Stop the scheduler you actually use and wait for a running job to finish; run
 one line:
 
@@ -142,7 +155,9 @@ cb schedule install --times 07:00,19:00 --command watch --yes
 ```
 
 ## B. Docker
+
 ### Prerequisites
+
 Requires Docker Engine with Compose 2.24 or newer (`docker compose version`);
 `cvebeacon.env` uses the long `env_file` form. Use `/opt/cvebeacon` from A, or
 clone one as root on a Docker-only host:
@@ -156,7 +171,9 @@ The image is built locally; no image is published. Build only from the
 checkout. The copied file below keeps `build.context: ../..`, which points at
 `/` after the copy; it only runs the prebuilt `cvebeacon:local` image. Rebuild
 from the checkout after every upgrade.
+
 ### Prepare the runtime directory
+
 ```console
 sudo install -d -m 0700 -o 65532 -g 65532 /srv/cvebeacon/state /srv/cvebeacon/reports /srv/cvebeacon/secrets
 sudo install -d -m 0755 /srv/cvebeacon/inventory
@@ -171,7 +188,9 @@ The example writes state and the watch database to `/state`, and keeps
 `[watch]` and its sample channel disabled: enable both and replace the webhook
 URL. Leave `[watch] database` unset. Do not reuse a native wizard
 configuration, which sets that path beside the read-only `/config`.
+
 ### Secrets
+
 Prefer an untracked `/srv/cvebeacon/cvebeacon.env`, mode `0600`, with the
 `*_env` names the configuration uses (for example `NVD_API_KEY` and
 `CVEBEACON_HOOK_SECRET`). The `watch` and `run` services load it when present;
@@ -192,7 +211,9 @@ Load the command once in your shell, again as a function:
 ```console
 dc() { sudo docker compose -f /srv/cvebeacon/compose.yml "$@"; }
 ```
+
 ### First day
+
 Set `initial` and, for `backfill`, `backfill_days` in
 `/srv/cvebeacon/cvebeacon.toml`, then:
 
@@ -209,7 +230,9 @@ Test one channel:
 ```console
 dc --profile watch run --rm watch --config /config/cvebeacon.toml watch notify test soc-webhook
 ```
+
 ### Schedule it
+
 The image contains no scheduler. Use host cron or a systemd timer, with one lock
 and `-T` (no TTY). Put the watch-only line in root's crontab
 (`sudo crontab -e`), or in an account with Docker access that owns the lock path:
@@ -253,7 +276,9 @@ sudo systemctl enable --now cvebeacon-container.timer
 ```
 
 Docker access is root-equivalent; restrict the account that runs the schedule.
+
 ### Upgrade
+
 Stop the scheduler and wait for a running container to finish, then back up
 state and rebuild from the checkout:
 
@@ -269,7 +294,9 @@ sudo systemctl start cvebeacon-container.timer
 
 Use the cron line instead of the timer commands when cron runs the schedule.
 The next run uses the rebuilt image; never build from `/srv/cvebeacon/compose.yml`.
+
 ### Check the result
+
 ```console
 dc --profile watch run --rm watch --config /config/cvebeacon.toml watch status
 sudo systemctl list-timers cvebeacon-container.timer
@@ -278,4 +305,5 @@ sudo systemctl list-timers cvebeacon-container.timer
 `watch status` should report `/state/cvebeacon-watch.db`; exit codes match the native install.
 
 ## C. Resource notes
+
 System requirements are still being measured; see [validation](VALIDATION.md) and the [README](../README.md).
