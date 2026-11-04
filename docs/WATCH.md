@@ -15,6 +15,8 @@ cvebeacon --config cvebeacon.toml watch status
 cvebeacon --config cvebeacon.toml watch events
 cvebeacon --config cvebeacon.toml watch rules check
 cvebeacon --config cvebeacon.toml watch evaluate --all
+cvebeacon --config cvebeacon.toml watch report CVE-2026-1234
+cvebeacon --config cvebeacon.toml watch reported
 ```
 
 `watch run` syncs the sources, evaluates the CVEs touched by that sync, and
@@ -87,6 +89,8 @@ Common keys:
 - `timeout_seconds`: 1 to 300, default 30.
 - `allow_insecure`: `false` by default. This is required for plain SMTP and for
   a plain-HTTP webhook or ntfy server.
+- `notify_reported`: `false` by default. When true, the channel receives report
+  and unreport notices; see [reported to clients](#reported-to-clients).
 
 Secrets are never written in the configuration. A secret key comes as a pair:
 `*_env` names an environment variable, and `*_file` names a file. At least one
@@ -300,6 +304,66 @@ cap), ambiguous, stuck `sending`, and the last success time for each channel.
 failed rows have reached the attempt cap, the line adds
 `; N given up (run cvebeacon watch notify --retry-failed)`.
 
+## Reported to clients
+
+A per-CVE mark records that clients have been informed, so the same CVE is not
+reported twice. The mark is append-only: every report or withdrawal is kept,
+and the latest row is the current state. The watch store exposes the same
+operations for other front ends.
+
+```console
+cvebeacon --config cvebeacon.toml watch report CVE-2026-1234
+cvebeacon --config cvebeacon.toml watch report CVE-2026-1234 --by alice --note "Sent in ticket OPS-42"
+cvebeacon --config cvebeacon.toml watch unreport CVE-2026-1234 --by alice --note "Sent in error"
+cvebeacon --config cvebeacon.toml watch reported
+cvebeacon --config cvebeacon.toml watch reported --all
+```
+
+- `watch report` requires the CVE to exist in the watch database; otherwise it
+  prints a clear error and exits 2.
+- `--by` is free text of at most 100 characters and must not contain control
+  characters. When it is omitted, the OS login name is used, or `unknown` when
+  it cannot be read.
+- `--note` is optional, at most 500 characters, and single-line.
+- Reporting a CVE that is already reported prints the existing mark and exits 0
+  without a new row. `--force` appends another report row and notification.
+- `watch unreport` appends a withdrawal row. When the CVE is not currently
+  reported, it says so and exits 0.
+- `watch reported` lists the currently reported CVEs with the reporter, UTC
+  time, and note. `--all` prints the full audit trail.
+
+A reported CVE is displayed as
+`Reported to clients by X at YYYY-MM-DD HH:MM UTC`. The mark appears in
+`watch events` lines, in alert messages and the initial digest when the CVE is
+already reported at send time, and in the generic webhook document as
+`view.reported` (`null` or an object with `by`, `at`, and `note`). `watch status`
+prints the number of currently reported CVEs.
+
+### Reported notification
+
+Set `notify_reported = true` on a channel to send a short notice when a CVE is
+reported or its report is withdrawn:
+
+```toml
+[watch.channels.soc-chat]
+type = "slack"
+webhook_url_env = "CVEBEACON_SLACK_WEBHOOK_URL"
+notify_reported = true
+```
+
+The message is `[REPORTED] CVE-2026-1234 reported to clients by alice`, with the
+optional note as a second line, or
+`[UNREPORTED] CVE-2026-1234 report withdrawn by alice`. Channels without the
+setting receive nothing.
+
+Notices use the same delivery ledger as alerts. `watch report` and
+`watch unreport` attempt them immediately and print the delivery line. A failed
+notice is retried by `watch notify` or `watch run` with the usual backoff, and a
+successful one is final, so the delivery phase never sends it twice. The generic
+webhook receives a notice as a normal version 2 document with an extra `notice`
+object (`action`, `by`, and `note`). Notice events are delivery records rather
+than alert events, so `watch events` does not list them.
+
 ## Messages
 
 All channels use the same formatter. Messages are short: one header line per
@@ -408,6 +472,7 @@ The generic webhook receives a stable JSON document:
           "eu": null
         },
         "epss": {"score": 0.62, "percentile": 0.97, "date": "2026-11-03"},
+        "reported": null,
         "vendors": ["Acme"],
         "products": ["Widget"],
         "links": {
@@ -426,8 +491,11 @@ The generic webhook receives a stable JSON document:
 is `null` when the CVE record has none. Version 2 adds these two `view` fields.
 Every version 1 field keeps its meaning. `view.kev.cisa` and `view.kev.eu` are
 `null` when the CVE is not in that catalog. `epss` and `links.euvd` are `null`
-when the value is absent. The order is the same as the text messages. A test
-message adds `"test": true` and `"message"` and has an empty `events` list.
+when the value is absent. `view.reported` is `null` or an object with `by`,
+`at`, and `note`. The order is the same as the text messages. A test message
+adds `"test": true` and `"message"` and has an empty `events` list. A report or
+unreport notice event adds a `notice` object with `action` (`report` or
+`unreport`), `by`, and `note`.
 
 ### Privacy
 
@@ -650,7 +718,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 4. An unknown version still fails closed. The version 1
+place to schema version 5. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to
@@ -660,7 +728,8 @@ re-read gives pre-upgrade items their names. In `full` mode
 `initial_window_start` is 1999-01-01, so this re-reads the whole EUVD history
 once. The version 2 upgrade keeps delivery rows and adds the `sending` and
 `ambiguous` states. The version 3 upgrade adds `first_attempt_at`, which records
-when a row was first claimed. After the upgrade, run
+when a row was first claimed. The version 4 upgrade creates `watch_report`; it
+changes no other data. After the upgrade, run
 `cvebeacon watch evaluate --all --yes`
 BEFORE the first `watch run`, as after adding a rule. Otherwise every CVE from
 the initial window alerts one by one as NVD touches it. Schema 2 databases
@@ -699,6 +768,9 @@ delete them and run `watch sync` again. They are not migrated.
 - `watch_delivery` creates one row per event and channel. Its status is
   `pending`, `sending`, `sent`, `failed`, or `ambiguous`; `attempts`,
   `last_error`, and `updated_at` drive retries and status output.
+- `watch_report` is the append-only report trail. Each row records the CVE,
+  `report` or `unreport`, the free-text identity, an optional note, and a UTC
+  time. The latest row for a CVE is its current state.
 - `watch_meta.view_policy` records the configured sources that affect view
   derivation: `cisa_kev`, `eu_kev`, `euvd`, and `epss`. When it changes, every stored
   view is recomputed in batches of 5,000 and every stored CVE is queued,
@@ -840,7 +912,8 @@ sync on the same day reads the same EUVD day again.
 
 `watch status` prints the database path, schema version, cursors, EPSS score
 date, row counts, EUVD items, KEV catalog entries, watched CVEs in KEV, active
-SSVC exploitation, EPSS rows, and pending/backing-off lookups. It also prints
+SSVC exploitation, EPSS rows, pending/backing-off lookups, and the number of
+CVEs marked as reported to clients. It also prints
 each channel's pending, failed (with the given-up count), ambiguous, sending,
 and last success counts. It creates an empty database if none exists.
 
