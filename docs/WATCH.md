@@ -825,11 +825,11 @@ The first sync chooses what history to build:
 - `backfill`: reads NVD changes from the last `backfill_days` days and EUVD
   changes from the same date range.
 - `full`: reads NVD history from 1999-01-01 and EUVD history from 1999-01-01.
-  Before starting it prints an estimate of the NVD windows, request counts, and
-  the one EPSS file per day, then requires `--yes` or an interactive
-  confirmation. When stdin is not a terminal, it prints a one-line instruction
-  and cancels instead of waiting; run `watch sync --yes` once before the first
-  scheduled run.
+  Before starting it prints the NVD window count, the request floors, a
+  pacing-based minimum time, and the one EPSS file per day, then requires
+  `--yes` or an interactive confirmation. When stdin is not a terminal, it
+  prints a one-line instruction and cancels instead of waiting; run
+  `watch sync --yes` once before the first scheduled run.
 
 `initialized_at` is set only when an initial run reaches its last NVD window,
 so it records NVD progress and resume state, not completion of the whole initial
@@ -909,13 +909,14 @@ per 30 seconds; with a key, fifty.
 
 `initial = "full"` is the expensive path. From 1999 to the present there are
 about 85 NVD windows. A busy window can need many pages, so expect roughly 400
-or more NVD requests and roughly 4,200 EUVD requests. The estimate charges NVD
-requests at `sources.minimum_request_interval` and EUVD requests at the fixed
-one-second EUVD pace: about 2 hours at the default NVD interval before extra NVD
-pages, retries, and throttling. Budget several hours of continuous work, a
-large download, and many small database commits. EPSS is one current file per
-sync, not one per historical day. Run full history deliberately, preferably
-with an NVD API key.
+or more NVD requests and roughly 4,200 EUVD requests; both counts are planning
+floors, not measurements. The pacing-based minimum charges NVD requests at
+`sources.minimum_request_interval` and EUVD requests at the fixed one-second
+EUVD pace: at least 2 hours at the default NVD interval before extra NVD pages,
+retries, and throttling. Budget several hours of continuous work, a large
+download, and many small database commits. EPSS is one current file per sync,
+not one per historical day. Run full history deliberately, preferably with an
+NVD API key.
 
 ## Source attribution
 

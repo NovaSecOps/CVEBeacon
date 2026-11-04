@@ -116,7 +116,7 @@ def _confirm_full_history(
     print("full history also downloads 1 EPSS file per day")
     print(
         "full history takes several hours and uses a lot of bandwidth "
-        f"(about {hours:.0f} hour(s) at the current pacing)"
+        f"(at least {hours:.0f} hour(s) of pacing at the current NVD interval)"
     )
     if assume_yes:
         return True

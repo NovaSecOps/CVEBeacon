@@ -144,7 +144,7 @@ def test_full_mode_requires_confirmation_before_any_request(tmp_path, capsys):
     assert "NVD window(s)" in output
     assert "4,200 EUVD requests" in output
     assert "1 EPSS file per day" in output
-    assert "about 2 hour(s)" in output
+    assert "at least 2 hour(s) of pacing" in output
     assert metadata(config).get("nvd_cursor") is None
 
 
