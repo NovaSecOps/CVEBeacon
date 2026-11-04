@@ -123,12 +123,18 @@ Limits and restrictions:
 
 - the `.docx` file must be at most 20 MiB;
 - one uncompressed member must be at most 50 MiB and the whole archive at most
-  200 MiB; the declared sizes and the bytes actually read are both bounded;
-- rendered replacements are limited to 50 MiB, and a rendered XML part must fit
-  the 50 MiB member limit;
+  200 MiB; complete compressed streams are checked against the declared sizes
+  and checksums, and inconsistent members are refused;
+- rendered document, header and footer XML together must fit 50 MiB, including
+  escaped text, repeated text attributes and line-break markup;
+- XML must use UTF-8 or UTF-16; its original encoding is preserved;
+- each XML member may nest at most 256 elements and contain at most 100,000
+  elements and namespace declarations combined; each paragraph may contain at
+  most 100,000 placeholders or dollar escapes;
+- duplicate package member names are refused;
 - encrypted documents are refused;
 - DTD and XML entity declarations are refused in every XML package member;
-- corrupt ZIP members and unsupported compression are refused;
+- only stored and DEFLATE ZIP members are supported; corrupt streams are refused;
 - placeholders in footnotes, endnotes, comments and field instructions are not
   replaced.
 
