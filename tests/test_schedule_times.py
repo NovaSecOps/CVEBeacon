@@ -4,6 +4,7 @@ import os
 import shlex
 import subprocess
 import xml.etree.ElementTree as ET
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -304,13 +305,16 @@ def windows_root(plan):
     return ET.fromstring(text.split("?>", 1)[1].lstrip())
 
 
-def test_windows_logged_out_task_uses_s4u_with_the_current_account(tmp_path):
+def test_windows_logged_out_task_uses_stored_password(tmp_path):
     plan = windows_plan(tmp_path, run_logged_out=True)
     principal = windows_root(plan).find(f".//{NS}Principal")
     assert principal.findtext(f"{NS}UserId") == r"CORP\svc-cvebeacon"
-    assert principal.findtext(f"{NS}LogonType") == "S4U"
+    assert principal.findtext(f"{NS}LogonType") == "Password"
     assert principal.findtext(f"{NS}RunLevel") == "LeastPrivilege"
-    assert "Runs as: CORP\\svc-cvebeacon (S4U, while logged off)" in describe(plan)
+    assert (
+        "Runs as: CORP\\svc-cvebeacon (stored password, while logged off)"
+        in describe(plan)
+    )
 
 
 def test_windows_account_prefers_the_native_extended_name():
@@ -371,16 +375,21 @@ def test_windows_plan_shows_an_account_note(tmp_path, monkeypatch):
         run_logged_out=True,
     )
     text = describe(plan)
-    assert "Runs as: AzureAD\\user@example.com (S4U, while logged off)" in text
+    assert (
+        "Runs as: AzureAD\\user@example.com (stored password, while logged off)"
+        in text
+    )
     assert "Account note: verify the Entra ID account" in text
 
 
-def test_windows_logged_out_fixed_times_uses_passwordless_schtasks(
+def test_windows_logged_out_fixed_times_uses_com_password(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     plan = windows_plan(tmp_path, run_logged_out=True)
     calls = []
+    password = "S3cret-test-password"
+    captured_script = {}
 
     class Result:
         returncode = 0
@@ -389,22 +398,39 @@ def test_windows_logged_out_fixed_times_uses_passwordless_schtasks(
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
-        root = ET.parse(args[3]).getroot()
+        captured_script["text"] = Path(args[6]).read_text(encoding="utf-8")
+        xml_path = args[args.index("-XmlPath") + 1]
+        root = ET.parse(xml_path).getroot()
         principal = root.find(f".//{NS}Principal")
-        assert principal.findtext(f"{NS}LogonType") == "S4U"
+        assert principal.findtext(f"{NS}LogonType") == "Password"
         assert principal.findtext(f"{NS}UserId") == r"CORP\svc-cvebeacon"
         return Result()
 
-    install(plan, run=fake_run)
+    install(plan, run=fake_run, password=password)
     args, kwargs = calls[0]
-    assert args[:3] == ["schtasks", "/Create", "/XML"]
-    assert args[4:6] == ["/TN", WINDOWS_TASK]
-    assert args[6:10] == ["/RU", r"CORP\svc-cvebeacon", "/NP", "/F"]
-    assert args[-1] == "/HRESULT"
-    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert args[0] == "powershell.exe"
+    assert args[5] == "-File"
+    assert password not in args
+    script = captured_script["text"]
+    assert "[Console]::In.ReadLine()" in script
+    assert password not in script
+    assert kwargs["input"] == password + "\n"
+    assert "stdin" not in kwargs
+    assert kwargs["timeout"] == 120
+    assert (
+        "Runs as: CORP\\svc-cvebeacon (stored password, while logged off)"
+        in describe(plan)
+    )
 
 
-def test_windows_success_uses_return_code_not_absence_of_prompt_text(
+def test_windows_registration_requires_a_password(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True)
+    with pytest.raises(SchedulingError, match="password"):
+        install(plan, run=lambda *a, **k: None)
+
+
+def test_windows_success_uses_return_code_not_prompt_text(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
@@ -412,16 +438,13 @@ def test_windows_success_uses_return_code_not_absence_of_prompt_text(
 
     class Result:
         returncode = 0
-        stdout = (
-            "Please enter the run as password for svc: \n"
-            "SUCCESS: The scheduled task has successfully been created."
-        )
+        stdout = "Please enter the run as password: SUCCESS"
         stderr = ""
 
     def fake_run(args, **kwargs):
         return Result()
 
-    install(plan, run=fake_run)
+    install(plan, run=fake_run, password="secret")
 
 
 def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
@@ -439,6 +462,7 @@ def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
     )
     calls = []
     roots = []
+    password = "S3cret-test-password"
 
     class Result:
         returncode = 0
@@ -447,22 +471,34 @@ def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        roots.append(ET.parse(args[3]).getroot())
-        assert kwargs["stdin"] is subprocess.DEVNULL
+        roots.append(ET.parse(args[args.index("-XmlPath") + 1]).getroot())
+        assert kwargs["input"] == password + "\n"
+        assert password not in args
         return Result()
 
-    install(plan, run=fake_run)
+    install(plan, run=fake_run, password=password)
     args = calls[0]
-    assert args[:3] == ["schtasks", "/Create", "/XML"]
-    assert args[6:10] == ["/RU", r"CORP\svc-cvebeacon", "/NP", "/F"]
+    assert args[0] == "powershell.exe"
     root = roots[0]
     repetition = root.find(f".//{NS}TimeTrigger/{NS}Repetition")
     assert repetition is not None
     assert repetition.findtext(f"{NS}Interval") == "PT4H"
     assert root.find(f".//{NS}CalendarTrigger") is None
     principal = root.find(f".//{NS}Principal")
-    assert principal.findtext(f"{NS}LogonType") == "S4U"
+    assert principal.findtext(f"{NS}LogonType") == "Password"
     assert principal.findtext(f"{NS}UserId") == r"CORP\svc-cvebeacon"
+
+
+def test_account_requires_run_logged_out(tmp_path, monkeypatch):
+    with pytest.raises(SchedulingError, match="requires --run-logged-out"):
+        make_plan(
+            tmp_path / "config.toml",
+            times="07:00",
+            system="windows",
+            executable=tmp_path / "cvebeacon.exe",
+            allow_incompatible=True,
+            account=r"CORP\svc-cvebeacon",
+        )
 
 
 def test_logged_out_schedule_is_rejected_on_linux(tmp_path, monkeypatch):
@@ -476,6 +512,16 @@ def test_logged_out_schedule_is_rejected_on_linux(tmp_path, monkeypatch):
             system="linux",
             allow_incompatible=True,
             run_logged_out=True,
+        )
+    with pytest.raises(SchedulingError, match="only on Windows"):
+        make_plan(
+            tmp_path / "config.toml",
+            times="07:00",
+            system="linux",
+            executable="/opt/cvebeacon",
+            allow_incompatible=True,
+            run_logged_out=True,
+            account=r"CORP\svc-cvebeacon",
         )
 
 
@@ -491,10 +537,11 @@ def test_windows_access_denied_asks_for_the_service_account_shell(
         )
 
     with pytest.raises(SchedulingError) as error:
-        install(plan, run=fake_run)
+        install(plan, run=fake_run, password="secret")
     message = str(error.value)
     assert "Access is denied" in message
-    assert "account that will run it" in message
+    assert "elevated administrator shell" in message
+    assert "account name" in message
     assert "\n" not in message
 
 
@@ -502,8 +549,8 @@ def test_windows_access_denied_asks_for_the_service_account_shell(
     "code,expected",
     [
         ("0x80070569", "Log on as a batch job"),
-        ("0x80070534", "account or logon error"),
-        ("0x8007052e", "account or logon error"),
+        ("0x80070534", "account was not found"),
+        ("0x8007052e", "password was rejected"),
     ],
 )
 def test_windows_registration_errors_map_to_one_line_hints(
@@ -516,11 +563,11 @@ def test_windows_registration_errors_map_to_one_line_hints(
         return SimpleNamespace(
             returncode=1,
             stdout="",
-            stderr=f"schtasks: {code}",
+            stderr=f"PowerShell: {code}",
         )
 
     with pytest.raises(SchedulingError) as error:
-        install(plan, run=fake_run)
+        install(plan, run=fake_run, password="secret")
     message = str(error.value)
     assert expected in message
     assert "\n" not in message
@@ -537,8 +584,8 @@ def test_windows_access_denied_uses_numeric_code_with_localized_text(
         return SimpleNamespace(returncode=code, stdout="", stderr="ERRO: Acesso negado.")
 
     with pytest.raises(SchedulingError) as error:
-        install(plan, run=fake_run)
-    assert "account that will run it" in str(error.value)
+        install(plan, run=fake_run, password="secret")
+    assert "elevated administrator shell" in str(error.value)
 
 
 def test_windows_access_denied_accepts_the_hresult_without_english_text(
@@ -550,8 +597,8 @@ def test_windows_access_denied_accepts_the_hresult_without_english_text(
     def fake_run(args, **kwargs):
         return SimpleNamespace(returncode=1, stdout="", stderr="ERROR: 0x80070005")
 
-    with pytest.raises(SchedulingError, match="account that will run it"):
-        install(plan, run=fake_run)
+    with pytest.raises(SchedulingError, match="elevated administrator shell"):
+        install(plan, run=fake_run, password="secret")
 
 
 def test_windows_access_denied_stays_one_line_with_extra_diagnostics(
@@ -568,7 +615,7 @@ def test_windows_access_denied_stays_one_line_with_extra_diagnostics(
         )
 
     with pytest.raises(SchedulingError) as error:
-        install(plan, run=fake_run)
+        install(plan, run=fake_run, password="secret")
     assert "\n" not in str(error.value)
     assert "Another diagnostic line" in str(error.value)
 
@@ -632,15 +679,18 @@ def test_windows_status_treats_interactive_token_or_password_as_logged_off():
     assert "Runs while logged off: yes" in _describe_windows_xml(text)
 
 
-def test_cli_schedule_run_logged_out_is_forwarded(tmp_path, monkeypatch, capsys):
+def test_cli_schedule_run_logged_out_reads_password(tmp_path, monkeypatch, capsys):
     config = write_schedule_config(tmp_path, watch=True)
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     monkeypatch.setattr(
         "cvebeacon.scheduling._current_windows_account",
         lambda: (r"CORP\svc-cvebeacon", ""),
     )
+    monkeypatch.setattr(cli, "_read_schedule_password", lambda account, *, from_stdin: "secret")
     installed = []
-    monkeypatch.setattr(cli, "install", lambda plan: installed.append(plan))
+    monkeypatch.setattr(
+        cli, "install", lambda plan, password=None: installed.append((plan, password))
+    )
     assert (
         cli.main(
             [
@@ -658,11 +708,94 @@ def test_cli_schedule_run_logged_out_is_forwarded(tmp_path, monkeypatch, capsys)
         )
         == 0
     )
-    assert installed[0].run_logged_out is True
-    assert installed[0].user_id == r"CORP\svc-cvebeacon"
-    assert "Runs as: CORP\\svc-cvebeacon (S4U, while logged off)" in (
-        capsys.readouterr().out
+    assert installed[0][0].run_logged_out is True
+    assert installed[0][0].user_id == r"CORP\svc-cvebeacon"
+    assert installed[0][1] == "secret"
+    assert (
+        "Runs as: CORP\\svc-cvebeacon (stored password, while logged off)"
+        in capsys.readouterr().out
     )
+
+
+def test_cli_schedule_password_stdin_and_account(tmp_path, monkeypatch, capsys):
+    config = write_schedule_config(tmp_path, watch=True)
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    monkeypatch.setattr("sys.stdin", StringIO("secret\n"))
+    installed = []
+    monkeypatch.setattr(
+        cli, "install", lambda plan, password=None: installed.append((plan, password))
+    )
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--command",
+                "watch",
+                "--run-logged-out",
+                "--account",
+                r"CORP\svc-cvebeacon",
+                "--password-stdin",
+                "--yes",
+            ]
+        )
+        == 0
+    )
+    assert installed[0][0].user_id == r"CORP\svc-cvebeacon"
+    assert installed[0][1] == "secret"
+
+
+def test_cli_schedule_hidden_password_prompt(tmp_path, monkeypatch):
+    config = write_schedule_config(tmp_path, watch=True)
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "secret")
+    installed = []
+    monkeypatch.setattr(
+        cli, "install", lambda plan, password=None: installed.append(password)
+    )
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--command",
+                "watch",
+                "--run-logged-out",
+                "--account",
+                r"CORP\svc-cvebeacon",
+                "--yes",
+            ]
+        )
+        == 0
+    )
+    assert installed == ["secret"]
+
+
+def test_cli_password_stdin_requires_logged_out(tmp_path, capsys):
+    config = write_schedule_config(tmp_path, watch=True)
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "schedule",
+                "install",
+                "--times",
+                "07:00",
+                "--password-stdin",
+            ]
+        )
+        == 2
+    )
+    assert "--password-stdin requires --run-logged-out" in capsys.readouterr().err
 
 
 def test_cli_schedule_run_logged_out_is_rejected_on_linux(tmp_path, monkeypatch, capsys):
