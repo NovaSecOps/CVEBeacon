@@ -303,9 +303,15 @@ rules match the same CVE under the same label, they share one block and a
 
 ```text
 [NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active
+  Published 2026-10-30 · first seen 2026-11-04
   Acme Widget before 4.2.1 allows unauthenticated remote code execution…
   Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234
 ```
+
+Each CVE block also shows its publication and first-seen dates as UTC dates.
+`Published` is the official NVD/CVE publication date and is shown as
+`Published unknown` when the record has none. `first seen` is when this
+CVEBeacon instance first stored the CVE.
 
 Event labels:
 
@@ -342,8 +348,9 @@ CVEBeacon initial summary: 12 CVEs across 3 rules since 2026-10-27
 critical-or-likely: 8 matches, 1 KEV added
 kev-watch: 4 matches
 
-[NEW] CVE-2026-1234 · …
-…
+[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA – EU – · Exploitation: none
+  Published 2026-10-30 · first seen 2026-11-04
+  Acme Widget before 4.2.1 allows unauthenticated remote code execution…
 and 8 more. Run `cvebeacon watch events` to list all.
 ```
 
@@ -375,7 +382,7 @@ The generic webhook receives a stable JSON document:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "events": [
     {
       "rule": "critical-or-likely",
@@ -385,6 +392,8 @@ The generic webhook receives a stable JSON document:
       "initial": false,
       "created_at": "2026-11-03T12:00:00+00:00",
       "view": {
+        "published": "2026-10-30T14:00:00.000",
+        "first_seen": "2026-11-04T09:15:00+00:00",
         "cvss": [
           {"provider": "cna", "source": "security@acme.example", "version": "3.1", "score": 9.8, "vector": null}
         ],
@@ -407,10 +416,12 @@ The generic webhook receives a stable JSON document:
 }
 ```
 
-`view.kev.cisa` and `view.kev.eu` are `null` when the CVE is not in that
-catalog. `epss` and `links.euvd` are `null` when the value is absent. The order
-is the same as the text messages. A test message adds `"test": true` and
-`"message"` and has an empty `events` list.
+`published` and `first_seen` are the full ISO timestamps as stored; `published`
+is `null` when the CVE record has none. Version 2 adds these two `view` fields.
+Every version 1 field keeps its meaning. `view.kev.cisa` and `view.kev.eu` are
+`null` when the CVE is not in that catalog. `epss` and `links.euvd` are `null`
+when the value is absent. The order is the same as the text messages. A test
+message adds `"test": true` and `"message"` and has an empty `events` list.
 
 ### Privacy
 
@@ -564,7 +575,9 @@ enabled again.
 
 `cvebeacon watch events [--limit N] [--rule NAME] [--pending]` lists stored
 events, newest first. `--rule` is case-insensitive. `--pending` keeps events
-that still have a pending delivery.
+that still have a pending delivery. Each line ends with the CVE's
+`Published YYYY-MM-DD · first seen YYYY-MM-DD` dates, with `Published unknown`
+when the record has no publication date.
 
 ### Old CVEs
 

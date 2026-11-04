@@ -161,6 +161,8 @@ def _print_evaluation(result) -> None:
 
 
 def _event_line(row, rule_name: str | None = None) -> str:
+    from .watch.messages import date_phrase
+
     try:
         stamp = datetime.fromisoformat(row.created_at).astimezone(timezone.utc).strftime(
             "%Y-%m-%d %H:%MZ"
@@ -171,6 +173,7 @@ def _event_line(row, rule_name: str | None = None) -> str:
     line = f"{stamp}  {rule_name or row.rule}  {row.cve_id}  {row.kind}"
     if reasons:
         line += f"  {reasons}"
+    line += f"  {date_phrase(row.published, row.first_seen)}"
     return line
 
 

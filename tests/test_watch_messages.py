@@ -17,6 +17,8 @@ def view(cve_id: str = "CVE-2026-1234", **overrides: Any) -> WatchView:
     values: dict[str, Any] = {
         "cve_id": cve_id,
         "status": "published",
+        "published": "2026-10-30T14:00:00.000",
+        "first_seen": "2026-11-04T09:15:00+00:00",
         "description": "Acme Widget before 4.2.1 allows unauthenticated remote code execution.",
         "source_identifier": "security@acme.example",
         "cvss": (CVSSEntry("cna", "security@acme.example", "3.1", 9.8),),
@@ -69,10 +71,61 @@ def test_match_line_follows_the_template():
     assert "EPSS 0.62" in text
     assert "KEV: CISA – EU –" in text
     assert "Exploitation: none" in text
+    assert "Published 2026-10-30 · first seen 2026-11-04" in text
     assert "Acme Widget before 4.2.1" in text
     assert "Rule: critical-or-likely" in text
     assert "https://nvd.nist.gov/vuln/detail/CVE-2026-1234" in text
     assert "https://www.cve.org/CVERecord?id=CVE-2026-1234" in text
+
+
+@pytest.mark.parametrize(
+    "channel",
+    (
+        "smtp",
+        "graph",
+        "teams",
+        "slack",
+        "discord",
+        "telegram",
+        "matrix",
+        "ntfy",
+        "gotify",
+    ),
+)
+def test_every_channel_shows_published_and_first_seen_dates(channel):
+    item = event()
+    message = build_messages(
+        (item,),
+        channel_type=channel,
+        grouping="run",
+        max_items=20,
+        names={item.rule: item.rule},
+    )[0]
+    text = message.body if channel in {"smtp", "graph"} else message.text
+    assert "Published 2026-10-30 · first seen 2026-11-04" in text
+
+
+def test_missing_published_date_is_shown_as_unknown():
+    text = body_for(event(current=view(published=None)))
+    assert "Published unknown · first seen 2026-11-04" in text
+
+
+def test_missing_first_seen_date_is_shown_as_unknown():
+    text = body_for(event(current=view(first_seen=None)))
+    assert "Published 2026-10-30 · first seen unknown" in text
+
+
+def test_initial_digest_shows_published_and_first_seen_dates():
+    item = event("match", initial=True)
+    message = build_messages(
+        (item,),
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={item.rule: item.rule},
+        since="2026-10-27",
+    )[0]
+    assert "Published 2026-10-30 · first seen 2026-11-04" in message.text
 
 
 def test_kev_added_label_and_detail():
@@ -348,7 +401,7 @@ def test_webhook_payload_is_stable_and_descriptive():
         )
     )
     payload = webhook_payload((item,), {item.rule: "critical-or-likely"})
-    assert payload["version"] == 1
+    assert payload["version"] == 2
     entry = payload["events"][0]
     assert entry["rule"] == "critical-or-likely"
     assert entry["cve_id"] == "CVE-2026-1234"
@@ -357,6 +410,8 @@ def test_webhook_payload_is_stable_and_descriptive():
     assert entry["initial"] is False
     assert entry["created_at"].startswith("2026-11-03")
     view_payload = entry["view"]
+    assert view_payload["published"] == "2026-10-30T14:00:00.000"
+    assert view_payload["first_seen"] == "2026-11-04T09:15:00+00:00"
     assert view_payload["cvss"][0]["provider"] == "cna"
     assert view_payload["kev"]["cisa"]["due"] == "2026-11-20"
     assert view_payload["epss"]["percentile"] == 0.91
@@ -530,6 +585,14 @@ def test_webhook_document_links_the_kev_catalog():
         payload["events"][0]["view"]["links"]["kev"]
         == "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
     )
+
+
+def test_webhook_document_keeps_a_missing_published_date_null():
+    item = event(current=view(published=None))
+    payload = webhook_payload((item,), {item.rule: item.rule})
+    view_payload = payload["events"][0]["view"]
+    assert view_payload["published"] is None
+    assert view_payload["first_seen"] == "2026-11-04T09:15:00+00:00"
 
 
 def test_epss_label_uses_the_event_time_score():

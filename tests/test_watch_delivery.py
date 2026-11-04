@@ -122,7 +122,7 @@ def test_success_marks_the_delivery_sent(tmp_path):
     assert (summary.channel, summary.messages, summary.events) == ("hook", 1, 1)
     assert rows(store) == [("hook", "sent", 0, None)]
     payload = json.loads(requests[0].content)
-    assert payload["version"] == 1
+    assert payload["version"] == 2
     assert payload["events"][0]["cve_id"] == "CVE-2026-0001"
 
 

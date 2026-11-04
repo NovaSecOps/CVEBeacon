@@ -44,6 +44,7 @@ def record(identifier: str = "CVE-2026-0001", **overrides) -> WatchRecord:
     values = {
         "cve_id": identifier,
         "status": "published",
+        "published": "2026-10-30T00:00:00.000",
         "description": "Example vulnerability",
         "cvss": (CVSSEntry("cna", "security@example.com", "3.1", 9.8),),
     }
@@ -80,6 +81,7 @@ def test_watch_events_lists_concise_lines_and_filters(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "2026-11-03 12:00Z  critical-or-likely  CVE-2026-0001  match  cvss 9.8 v3.1 (cna)" in output
     assert "2026-11-03 12:00Z  kev-watch  CVE-2026-0002  match" in output
+    assert "Published 2026-10-30 · first seen 2026-11-03" in output
     assert cli.main(
         ["--config", str(config.config_path), "watch", "events", "--rule", "kev-watch"]
     ) == 0
