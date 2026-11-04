@@ -34,6 +34,7 @@ class HttpClient:
         self._sleep = sleep
         self._monotonic = monotonic
         self._last_request: dict[str, float] = {}
+        self.requests = 0
         self._owned = client is None
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(
@@ -102,6 +103,7 @@ class HttpClient:
         last_error: Exception | None = None
         retry_count = self.config.retries if max_retries is None else max_retries
         for attempt in range(retry_count + 1):
+            self.requests += 1
             self._pace(source, minimum_interval)
             try:
                 response = self._client.request(
@@ -159,6 +161,7 @@ class HttpClient:
         last_error: Exception | None = None
         retry_count = self.config.retries
         for attempt in range(retry_count + 1):
+            self.requests += 1
             self._pace(source, minimum_interval)
             if counter is not None:
                 counter[0] += 1

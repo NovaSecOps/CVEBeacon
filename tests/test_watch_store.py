@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from cvebeacon.errors import StateError
+from cvebeacon.errors import SourceError, StateError
 from cvebeacon.watch.records import (
     CVSSEntry,
     EUVDUpdate,
@@ -82,7 +82,6 @@ def test_upsert_is_idempotent_and_updates_only_on_change(tmp_path):
     updated = fetch_row(store, "CVE-2026-0001")
     assert updated["updated_at"] != first["updated_at"]
     assert updated["first_seen"] == first["first_seen"]
-    assert updated["nvd_fingerprint"] == first["nvd_fingerprint"]
 
 
 @pytest.mark.parametrize("changed_index", [0, 1])
@@ -122,40 +121,6 @@ def test_pending_evaluations_only_include_known_cves_and_can_be_acknowledged(tmp
     assert store.pending_evaluations(10) == ("CVE-2026-9999",)
     store.acknowledge(["CVE-2026-9999"])
     assert store.pending_evaluations(10) == ()
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("status", "rejected"),
-        ("cvss", (CVSSEntry("cna", "security@example.com", "3.1", 8.0),)),
-        ("ssvc_exploitation", "active"),
-        ("cisa_kev_added", "2026-11-03"),
-        ("cisa_kev_due", "2026-11-20"),
-        ("cisa_required_action", "Apply updates"),
-        ("cisa_ransomware", "Known"),
-    ],
-)
-def test_nvd_fingerprint_tracks_nvd_alert_fields(field, value):
-    original = record()
-    assert replace(original, **{field: value}).nvd_fingerprint() != original.nvd_fingerprint()
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("published", "2020-01-01T00:00:00.000"),
-        ("last_modified", "2026-10-01T00:00:00.000"),
-        ("description", "A different description"),
-        ("source_identifier", "other@example.com"),
-        ("cwes", ("CWE-20",)),
-        ("products", (Product("other", "thing"),)),
-        ("references", (Reference("https://example.test/b"),)),
-    ],
-)
-def test_nvd_fingerprint_ignores_non_alert_fields(field, value):
-    original = record()
-    assert replace(original, **{field: value}).nvd_fingerprint() == original.nvd_fingerprint()
 
 
 def test_view_combines_euvd_kev_and_epss(tmp_path):
@@ -307,6 +272,23 @@ def test_view_uses_nvd_cisa_fields_only_when_no_catalog_is_configured(tmp_path):
     assert catalog_view.cisa_kev_added is None
 
 
+def test_view_policy_change_recomputes_in_batches(tmp_path, monkeypatch):
+    import cvebeacon.watch.store as store_module
+
+    monkeypatch.setattr(store_module, "VIEW_POLICY_BATCH", 2)
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    identifiers = [f"CVE-2026-{index:04d}" for index in range(5)]
+    store.upsert_nvd(
+        [record(identifier, cisa_kev_added="2026-11-01") for identifier in identifiers]
+    )
+    store.acknowledge(store.pending_evaluations(10))
+
+    changed = store.apply_view_policy(("cisa_kev",))
+    assert changed == tuple(identifiers)
+    assert sorted(store.pending_evaluations(10)) == identifiers
+    assert store.apply_view_policy(("cisa_kev",)) == ()
+
+
 def test_epss_load_is_idempotent_and_reports_band_changes(tmp_path):
     store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
     store.upsert_nvd([record("CVE-2026-0001"), record("CVE-2026-0002")])
@@ -339,21 +321,81 @@ def test_epss_load_is_idempotent_and_reports_band_changes(tmp_path):
     assert store.view("CVE-2026-0002").epss is None
 
 
-def test_epss_write_batches_do_not_materialise_the_iterator(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "thresholds,expected",
+    [
+        ((0.1, 0.5, 0.9), ()),
+        ((0.3,), ("CVE-2026-0001",)),
+    ],
+)
+def test_epss_threshold_crossing_uses_the_configured_thresholds(
+    tmp_path, thresholds, expected
+):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert_nvd([record()])
+    store.acknowledge(store.pending_evaluations(10))
+    store.replace_epss(
+        [("CVE-2026-0001", 0.20, 0.8, date(2026, 11, 2))],
+        thresholds=thresholds,
+    )
+    store.acknowledge(store.pending_evaluations(10))
+    result = store.replace_epss(
+        [("CVE-2026-0001", 0.40, 0.9, date(2026, 11, 3))],
+        thresholds=thresholds,
+    )
+    assert result.changed_ids == expected
+
+
+def test_epss_rejects_a_file_below_half_the_current_table(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert_nvd([record()])
+    store.replace_epss(
+        [
+            ("CVE-2026-0001", 0.8, 0.99, date(2026, 11, 2)),
+            ("CVE-2026-0002", 0.7, 0.9, date(2026, 11, 2)),
+            ("CVE-2026-0003", 0.6, 0.8, date(2026, 11, 2)),
+            ("CVE-2026-0004", 0.5, 0.7, date(2026, 11, 2)),
+        ]
+    )
+    with pytest.raises(SourceError, match="too few EPSS scores"):
+        store.replace_epss(
+            [("CVE-2026-0001", 0.1, 0.2, date(2026, 11, 3))]
+        )
+    assert store.status()["epss_rows"] == 4
+    assert store.view("CVE-2026-0001").epss == 0.8
+
+
+def test_epss_write_batches_interleave_with_reading(tmp_path, monkeypatch):
     import cvebeacon.watch.store as store_module
 
-    monkeypatch.setattr(store_module, "EPSS_WRITE_BATCH", 2)
-    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
-    consumed: list[int] = []
+    produced = [0]
+    writes: list[tuple[int, int]] = []
+    original = sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        def executemany(self, sql, parameters):
+            if sql.startswith("INSERT OR REPLACE INTO watch_epss_load"):
+                writes.append((produced[0], len(parameters)))
+            return super().executemany(sql, parameters)
+
+    def connect(*args, **kwargs):
+        return original(*args, **kwargs, factory=Connection)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
 
     def rows():
-        for index in range(5):
-            consumed.append(index)
+        for index in range(store_module.EPSS_WRITE_BATCH + 1):
+            if index == store_module.EPSS_WRITE_BATCH:
+                assert writes == [(store_module.EPSS_WRITE_BATCH, store_module.EPSS_WRITE_BATCH)]
+            produced[0] += 1
             yield f"CVE-2026-{1000 + index}", 0.5, 0.9, date(2026, 11, 3)
 
-    result = store.replace_epss(rows())
-    assert (result.rows, result.batches) == (5, 3)
-    assert consumed == [0, 1, 2, 3, 4]
+    result = WatchStore(tmp_path / "watch.db").replace_epss(rows())
+    assert (result.rows, result.batches) == (store_module.EPSS_WRITE_BATCH + 1, 2)
+    assert writes == [
+        (store_module.EPSS_WRITE_BATCH, store_module.EPSS_WRITE_BATCH),
+        (store_module.EPSS_WRITE_BATCH + 1, 1),
+    ]
 
 
 def test_lookup_backoff_never_resets_or_deletes_while_the_trigger_exists(tmp_path):
@@ -428,6 +470,24 @@ def test_lookups_cover_kev_window_and_exploited_euvd_and_delete_on_insert(tmp_pa
     assert store.sync_lookups(
         ["cisa_kev"], initial_window_start=None, now=NOW
     ) == 0
+
+
+def test_identical_euvd_reobservation_refreshes_seen_at_without_a_change(tmp_path):
+    now = [NOW - timedelta(days=31)]
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: now[0])
+    item = euvd("EUVD-2026-1", ("CVE-2026-9999",), score=9.8)
+    store.replace_euvd_items([item])
+    store.acknowledge(store.pending_evaluations(10))
+    now[0] = NOW
+    counts = store.replace_euvd_items([item])
+    assert (counts.new, counts.changed, counts.unchanged) == (0, 0, 1)
+    assert counts.touched_ids == ()
+    assert store.prune_euvd(now=NOW) == 0
+    with sqlite3.connect(store.path) as db:
+        seen_at = db.execute(
+            "SELECT seen_at FROM watch_euvd_item WHERE euvd_id='EUVD-2026-1'"
+        ).fetchone()[0]
+    assert seen_at == NOW.isoformat()
 
 
 def test_prune_euvd_removes_only_old_unexploited_unreferenced_items(tmp_path):

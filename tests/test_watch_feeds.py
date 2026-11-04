@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import tracemalloc
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -34,6 +35,11 @@ from cvebeacon.watch.records import CVSSEntry, Product
 FIXTURES = Path(__file__).parent / "fixtures" / "watch"
 CISA_ADP = "134c704f-9b21-4f2e-91b3-4a467353bcc0"
 EPSS_FILE_PREFIX = "https://epss.empiricalsecurity.com/"
+
+
+@pytest.fixture(autouse=True)
+def _small_epss_files(monkeypatch):
+    monkeypatch.setattr(feeds, "EPSS_MIN_ROWS", 1, raising=False)
 
 
 def test_recorded_nvd_sample_parses_ssvc_cvss_and_kev():
@@ -302,14 +308,15 @@ def test_nvd_unstable_pagination_fails_after_three_attempts():
             ),
         )
 
-    with pytest.raises(SourceError, match="unstable pagination") as caught:
+    http = mock_client(handler)
+    with pytest.raises(SourceError, match="unstable pagination"):
         fetch_nvd_window(
-            mock_client(handler),
+            http,
             start=datetime(2026, 11, 1, tzinfo=timezone.utc),
             end=datetime(2026, 11, 2, tzinfo=timezone.utc),
         )
     assert calls == [0, 1] * 3
-    assert caught.value.requests == 6
+    assert http.requests == 6
 
 
 def test_nvd_windows_split_above_one_page_until_one_hour_then_page(monkeypatch):
@@ -528,22 +535,6 @@ def test_euvd_requests_are_paced_at_one_second():
     client = mock_client(
         lambda request: httpx.Response(200, json={"total": 0, "items": []})
     )
-    calls: list[tuple[str, float]] = []
-    original = client._pace
-
-    def record(key: str, interval: float) -> None:
-        calls.append((key, interval))
-        original(key, interval)
-
-    client._pace = record  # type: ignore[method-assign]
-    fetch_euvd(client, start=date(2026, 11, 1), end=date(2026, 11, 2))
-    assert calls == [("euvd", 1.0)]
-
-
-def test_euvd_requests_are_paced_at_one_second():
-    client = mock_client(
-        lambda request: httpx.Response(200, json={"total": 0, "items": []})
-    )
     intervals: list[tuple[str, float]] = []
     original = client._pace
 
@@ -597,7 +588,66 @@ def test_euvd_pagination_restarts_when_the_total_changes():
     assert feed.requests == 3
 
 
-def test_recorded_euvd_sample_handles_missing_and_unknown_versions():
+def test_euvd_duplicate_identifier_restarts_then_fails():
+    catalog = [
+        {"id": f"EUVD-2026-{index}", "aliases": f"CVE-2026-{1000 + index}"}
+        for index in range(101)
+    ]
+    pages: list[int] = []
+
+    def handler(request):
+        page = int(dict(request.url.params)["page"])
+        pages.append(page)
+        items = catalog[:100] if page == 0 else [catalog[99]]
+        return httpx.Response(200, json={"total": 101, "items": items})
+
+    http = mock_client(handler)
+    with pytest.raises(SourceError, match="unstable pagination"):
+        fetch_euvd(http, start=date(2026, 11, 1), end=date(2026, 11, 3))
+    assert pages == [0, 1] * 3
+    assert http.requests == 6
+
+
+def test_euvd_large_chunk_reports_split_without_reading_pages():
+    pages: list[int] = []
+
+    def handler(request):
+        pages.append(int(dict(request.url.params)["page"]))
+        return httpx.Response(
+            200,
+            json={
+                "total": 10_001,
+                "items": [{"id": f"EUVD-{index}"} for index in range(100)],
+            },
+        )
+
+    feed = fetch_euvd(
+        mock_client(handler), start=date(2026, 10, 1), end=date(2026, 10, 30)
+    )
+    assert feed.split is True
+    assert feed.updates == ()
+    assert pages == [0]
+
+
+def test_euvd_one_day_chunk_is_not_split():
+    def handler(request):
+        page = int(dict(request.url.params)["page"])
+        items = (
+            [{"id": f"EUVD-{index}"} for index in range(100)]
+            if page == 0
+            else [{"id": "EUVD-last"}]
+        )
+        return httpx.Response(200, json={"total": 101, "items": items})
+
+    feed = fetch_euvd(
+        mock_client(handler), start=date(2026, 11, 3), end=date(2026, 11, 3)
+    )
+    assert feed.split is False
+    assert len(feed.updates) == 101
+    assert feed.requests == 2
+
+
+
     payload = json.loads((FIXTURES / "euvd-no-score-page.json").read_text(encoding="utf-8"))
     feed = fetch_euvd(
         mock_client(lambda request: httpx.Response(200, json=payload)),
@@ -931,7 +981,156 @@ def test_epss_stream_does_not_follow_redirects():
         )
 
 
-def test_kev_field_conversion_reads_the_catalog_shape():
+def _gzip_from_writes(writer) -> bytes:
+    buffer = io.BytesIO()
+    with gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=6) as output:
+        writer(output)
+    return buffer.getvalue()
+
+
+def test_epss_falls_back_to_yesterday_on_403():
+    content = epss_gzip(
+        [("CVE-2026-0001", "0.5", "0.9")], score_date="2026-11-02"
+    )
+    requested: list[str] = []
+
+    def handler(request):
+        requested.append(str(request.url))
+        if "2026-11-03" in str(request.url):
+            return httpx.Response(403)
+        return httpx.Response(200, content=content)
+
+    rows = list(
+        feeds.fetch_epss_daily(
+            mock_client(handler), today=date(2026, 11, 3), counter=[0]
+        )
+    )
+    assert len(requested) == 2
+    assert rows == [("CVE-2026-0001", 0.5, 0.9, date(2026, 11, 2))]
+
+
+def test_epss_corrupt_deflate_is_a_source_error():
+    content = bytearray(epss_gzip([("CVE-2026-0001", "0.5", "0.9")]))
+    content[10] = 0x07
+    with pytest.raises(SourceError, match="invalid EPSS"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(bytes(content))),
+                today=date(2026, 11, 3),
+                counter=[0],
+            )
+        )
+
+
+def test_epss_rejects_a_huge_data_line_with_bounded_memory():
+    content = _gzip_from_writes(
+        lambda output: (
+            output.write(
+                b"#model_version:v1,score_date:2026-11-03\ncve,epss,percentile\n"
+            ),
+            output.write(b"CVE-2026-0001,"),
+            [output.write(b"9" * (64 * 1024)) for _ in range(6000)],
+        )
+    )
+    assert 300_000 < len(content) < 500_000
+    tracemalloc.start()
+    try:
+        with pytest.raises(SourceError, match="invalid EPSS"):
+            list(feeds._epss_rows([content], date(2026, 11, 3)))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 50 * 1024 * 1024
+
+
+def test_epss_rejects_a_huge_comment_line_with_bounded_memory():
+    content = _gzip_from_writes(
+        lambda output: (
+            output.write(b"#model_version:v"),
+            [output.write(b"a" * (64 * 1024)) for _ in range(1024)],
+            output.write(b",score_date:2026-11-03\ncve,epss,percentile\n"),
+        )
+    )
+    tracemalloc.start()
+    try:
+        with pytest.raises(SourceError, match="invalid EPSS"):
+            list(feeds._epss_rows([content], date(2026, 11, 3)))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 50 * 1024 * 1024
+
+
+def test_epss_rejects_too_few_rows(monkeypatch):
+    monkeypatch.setattr(feeds, "EPSS_MIN_ROWS", 5)
+    content = epss_gzip(
+        [
+            ("CVE-2026-0001", "0.5", "0.9"),
+            ("CVE-2026-0002", "0.4", "0.8"),
+            ("CVE-2026-0003", "0.3", "0.7"),
+            ("CVE-2026-0004", "0.2", "0.6"),
+        ]
+    )
+    with pytest.raises(SourceError, match="too few"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(content)),
+                today=date(2026, 11, 3),
+                counter=[0],
+            )
+        )
+
+
+def test_epss_rejects_a_score_date_outside_the_requested_days():
+    content = epss_gzip(
+        [("CVE-2026-0001", "0.5", "0.9")], score_date="2026-10-01"
+    )
+    with pytest.raises(SourceError, match="invalid EPSS score date"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(content)),
+                today=date(2026, 11, 3),
+                counter=[0],
+            )
+        )
+
+
+def test_epss_allows_a_complete_final_line_without_a_newline():
+    content = gzip.compress(
+        b"#model_version:v1,score_date:2026-11-03\n"
+        b"cve,epss,percentile\nCVE-2026-0001,0.5,0.9"
+    )
+    rows = list(feeds._epss_rows([content], date(2026, 11, 3)))
+    assert rows == [("CVE-2026-0001", 0.5, 0.9, date(2026, 11, 3))]
+
+
+def test_epss_rejects_unterminated_comment_and_header_lines():
+    for body in (
+        b"#model_version:v1,score_date:2026-11-03",
+        b"#model_version:v1,score_date:2026-11-03\ncve,epss,percentile",
+    ):
+        with pytest.raises(SourceError, match="invalid EPSS"):
+            list(
+                feeds._epss_rows(
+                    [gzip.compress(body)], date(2026, 11, 3)
+                )
+            )
+
+
+def test_epss_enforces_the_decompressed_byte_cap(monkeypatch):
+    monkeypatch.setattr(feeds, "EPSS_DECOMPRESSED_CAP", 40)
+    content = epss_gzip([("CVE-2026-0001", "0.5", "0.9")])
+    with pytest.raises(SourceError, match="oversized"):
+        list(
+            feeds.fetch_epss_daily(
+                mock_client(_epss_handler(content)),
+                today=date(2026, 11, 3),
+                counter=[0],
+            )
+        )
+
+
+
     cisa = Evidence(
         "cisa_kev",
         "known_exploitation",

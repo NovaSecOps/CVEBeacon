@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 import pytest
 from watch_support import NOW, epss_gzip, mock_client, nvd_cve, nvd_page, write_config
 
 from cvebeacon import cli
+from cvebeacon.config import HttpConfig
 from cvebeacon.errors import SourceError
+from cvebeacon.http import HttpClient
 from cvebeacon.sources.euvd import SEARCH_URL
 from cvebeacon.sources.kev import CISA_URL, EU_URL
 from cvebeacon.sources.nvd import CVE_URL
@@ -18,6 +21,11 @@ from cvebeacon.watch.store import WatchStore
 from cvebeacon.watch.sync import FULL_HISTORY_START, sync_watch
 
 EPSS_FILE_PREFIX = "https://epss.empiricalsecurity.com/"
+
+
+@pytest.fixture(autouse=True)
+def _small_epss_files(monkeypatch):
+    monkeypatch.setattr(feeds, "EPSS_MIN_ROWS", 1, raising=False)
 
 
 def handler_for(*, nvd=None, euvd=None, cisa=None, eu=None, epss=None):
@@ -91,7 +99,7 @@ def test_baseline_stores_cursors_and_no_history(tmp_path):
     assert stored["nvd_cursor"] == NOW.isoformat()
     assert stored["euvd_cursor"] == "2026-11-03"
     assert stored["initialized_at"] == NOW.isoformat()
-    assert "epss_loaded_date" not in stored
+    assert "epss_file_day" not in stored
     assert WatchStore(config.watch.database).status()["rows"] == 0
 
 
@@ -407,7 +415,7 @@ def test_daily_epss_file_is_loaded_once_and_updates_the_view(tmp_path):
     assert "2026-11-03" in requested[0]
     view = WatchStore(config.watch.database).view("CVE-2026-0001")
     assert (view.epss, view.epss_percentile) == (0.42, 0.88)
-    assert metadata(config)["epss_loaded_date"] == "2026-11-03"
+    assert metadata(config)["epss_file_day"] == "2026-11-03"
 
     second = run(config, handler, now=NOW + timedelta(hours=1))
     assert len(requested) == 1
@@ -1161,14 +1169,370 @@ def test_bad_epss_file_keeps_the_previous_table_and_retries(tmp_path):
     failing = run(config, handler, now=NOW + timedelta(days=1))
     assert failing.failures == ("epss",)
     assert WatchStore(config.watch.database).view("CVE-2026-0001").epss == 0.8
-    assert metadata(config)["epss_loaded_date"] == "2026-11-03"
+    assert metadata(config)["epss_file_day"] == "2026-11-03"
 
     retried = run(config, handler, now=NOW + timedelta(days=1, hours=1))
     assert not retried.failures
     assert requested[0] == 3
 
 
-def test_failed_euvd_page_counts_requests_already_made(tmp_path):
+def test_epss_403_falls_back_and_records_the_file_day(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "epss"), initial="backfill")
+    requested: list[str] = []
+    nvd_calls = [0]
+    published = [False]
+    yesterday = epss_gzip(
+        [("CVE-2026-0001", "0.2", "0.5")], score_date="2026-11-02"
+    )
+    today = epss_gzip(
+        [("CVE-2026-0001", "0.4", "0.7")], score_date="2026-11-03"
+    )
+
+    def nvd_request(request):
+        nvd_calls[0] += 1
+        return httpx.Response(
+            200, json=nvd_page([nvd_cve()] if nvd_calls[0] == 1 else [])
+        )
+
+    def epss_request(request):
+        url = str(request.url)
+        requested.append(url)
+        if "2026-11-03" in url:
+            if published[0]:
+                return httpx.Response(200, content=today)
+            return httpx.Response(403)
+        return httpx.Response(200, content=yesterday)
+
+    handler = handler_for(nvd=nvd_request, epss=epss_request)
+    first = run(config, handler)
+    assert not first.failures
+    assert len(requested) == 2
+    assert metadata(config)["epss_file_day"] == "2026-11-02"
+    assert WatchStore(config.watch.database).view("CVE-2026-0001").epss == 0.2
+
+    # The file day is still yesterday, so the next run asks again.
+    second = run(config, handler, now=NOW + timedelta(hours=1))
+    assert not second.failures
+    assert len(requested) == 4
+    assert metadata(config)["epss_file_day"] == "2026-11-02"
+
+    published[0] = True
+    third = run(config, handler, now=NOW + timedelta(hours=2))
+    assert not third.failures
+    assert len(requested) == 5
+    assert metadata(config)["epss_file_day"] == "2026-11-03"
+    assert WatchStore(config.watch.database).view("CVE-2026-0001").epss == 0.4
+
+    fourth = run(config, handler, now=NOW + timedelta(hours=3))
+    assert not fourth.failures
+    assert len(requested) == 5
+
+
+def test_corrupt_epss_deflate_is_an_optional_cli_failure(tmp_path, monkeypatch, capsys):
+    config = write_config(tmp_path, sources=("nvd", "epss"), initial="backfill")
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    store.record_baseline(
+        nvd_cursor=(NOW - timedelta(minutes=5)).isoformat(),
+        initialized_at=NOW.isoformat(),
+    )
+    store.upsert_nvd([WatchRecord("CVE-2026-0001", "published")])
+    store.replace_epss(
+        [("CVE-2026-0001", 0.8, 0.9, date(2026, 11, 2))]
+    )
+    corrupt = bytearray(epss_gzip([("CVE-2026-0001", 0.4, 0.8)]))
+    corrupt[10] = 0x07
+
+    def handler(request):
+        if str(request.url).startswith(CVE_URL):
+            return httpx.Response(200, json=nvd_page([]))
+        return httpx.Response(200, content=bytes(corrupt))
+
+    monkeypatch.setattr(cli, "HttpClient", lambda http_config: mock_client(handler))
+    assert cli.main(["--config", str(config.config_path), "watch", "sync"]) == 4
+    output = capsys.readouterr().out
+    assert "nvd:" in output
+    assert "epss:" in output
+    assert "failed" in output
+    assert store.view("CVE-2026-0001").epss == 0.8
+    assert store.metadata()["epss_file_day"] == "2026-11-02"
+
+
+def test_a_backward_clock_does_not_regress_cursors_or_reload_epss(tmp_path):
+    config = write_config(
+        tmp_path, sources=("nvd", "euvd", "epss"), initial="backfill"
+    )
+    euvd_dates: list[dict[str, str]] = []
+    epss_urls: list[str] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([nvd_cve()]))
+
+    def euvd_request(request):
+        euvd_dates.append(dict(request.url.params))
+        return httpx.Response(200, json={"total": 0, "items": []})
+
+    def epss_request(request):
+        epss_urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            content=epss_gzip(
+                [("CVE-2026-0001", "0.5", "0.9")], score_date="2026-11-03"
+            ),
+        )
+
+    handler = handler_for(
+        nvd=nvd_request, euvd=euvd_request, epss=epss_request
+    )
+    first = run(config, handler)
+    assert not first.failures
+    assert metadata(config)["euvd_cursor"] == "2026-11-03"
+    assert metadata(config)["epss_file_day"] == "2026-11-03"
+
+    euvd_dates.clear()
+    epss_urls.clear()
+    backward = run(config, handler, now=NOW - timedelta(days=3))
+    assert not backward.failures
+    assert euvd_dates == []
+    assert epss_urls == []
+    assert metadata(config)["euvd_cursor"] == "2026-11-03"
+    assert metadata(config)["epss_file_day"] == "2026-11-03"
+
+    forward = run(config, handler, now=NOW + timedelta(hours=1))
+    assert not forward.failures
+    assert len(euvd_dates) == 1
+    assert epss_urls == []
+
+
+def test_euvd_duplicate_page_does_not_commit_the_cursor(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
+    catalog = [
+        {
+            "id": f"EUVD-2026-{index}",
+            "aliases": f"CVE-2026-{1000 + index}",
+            "dateUpdated": "Nov 1, 2026, 12:00:00 PM",
+        }
+        for index in range(101)
+    ]
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        page = int(dict(request.url.params)["page"])
+        items = catalog[:100] if page == 0 else [catalog[99]]
+        return httpx.Response(200, json={"total": 101, "items": items})
+
+    report = run(
+        config, handler_for(nvd=nvd_request, euvd=euvd_request)
+    )
+    assert report.failures == ("euvd",)
+    assert metadata(config)["euvd_cursor"] == "2026-10-27"
+    with WatchStore(config.watch.database)._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM watch_euvd_item").fetchone()[0] == 0
+
+
+def test_euvd_large_chunks_split_and_commit_each_subchunk(tmp_path):
+    config = write_config(
+        tmp_path,
+        sources=("nvd", "euvd"),
+        initial="backfill",
+        backfill_days=60,
+    )
+    requested: list[tuple[str, str]] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        params = dict(request.url.params)
+        requested.append(
+            (params["fromUpdatedDate"], params["toUpdatedDate"])
+        )
+        if params["fromUpdatedDate"] == "2026-09-04":
+            if params["toUpdatedDate"] == "2026-10-04":
+                return httpx.Response(
+                    200,
+                    json={
+                        "total": 10_001,
+                        "items": [
+                            {"id": f"EUVD-parent-{index}"}
+                            for index in range(100)
+                        ],
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "total": 1,
+                    "items": [
+                        {
+                            "id": "EUVD-left",
+                            "aliases": "CVE-2026-0001",
+                            "dateUpdated": "Nov 1, 2026, 12:00:00 PM",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(500)
+
+    report = run(
+        config, handler_for(nvd=nvd_request, euvd=euvd_request)
+    )
+    assert report.failures == ("euvd",)
+    assert requested == [
+        ("2026-09-04", "2026-10-04"),
+        ("2026-09-04", "2026-09-19"),
+        ("2026-09-19", "2026-10-04"),
+    ]
+    assert metadata(config)["euvd_cursor"] == "2026-09-18"
+    with WatchStore(config.watch.database)._connect() as db:
+        identifiers = {
+            row[0] for row in db.execute("SELECT euvd_id FROM watch_euvd_item")
+        }
+    assert identifiers == {"EUVD-left"}
+
+
+def test_successful_retry_counts_every_attempt():
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        if len(calls) == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json=nvd_page([]))
+
+    http = HttpClient(
+        HttpConfig(retries=2, backoff_seconds=0),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+    )
+    feed = feeds.fetch_nvd_window(
+        http,
+        start=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 11, 2, tzinfo=timezone.utc),
+    )
+    assert len(calls) == 2
+    assert feed.requests == 2
+    assert http.requests == 2
+
+
+def test_later_page_exhaustion_counts_every_get_in_the_summary(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
+    pages: list[int] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        page = int(dict(request.url.params)["page"])
+        pages.append(page)
+        if page == 0:
+            return httpx.Response(
+                200,
+                json={
+                    "total": 101,
+                    "items": [
+                        {"id": f"EUVD-{index}"} for index in range(100)
+                    ],
+                },
+            )
+        return httpx.Response(503)
+
+    http = HttpClient(
+        HttpConfig(retries=2, backoff_seconds=0),
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                handler_for(nvd=nvd_request, euvd=euvd_request)
+            )
+        ),
+        sleep=lambda _: None,
+    )
+    report = sync_watch(config, http, clock=lambda: NOW)
+    assert report.failures == ("euvd",)
+    assert pages == [0, 1, 1, 1]
+    summary = next(item for item in report.summaries if item.source == "euvd")
+    assert summary.requests == 4
+
+
+def test_enabling_cisa_catalog_refreshes_a_stale_view(tmp_path):
+    base = write_config(tmp_path, sources=("nvd",), initial="backfill")
+    raw = nvd_cve(
+        cisaExploitAdd="2026-11-01",
+        cisaActionDue="2026-11-20",
+        cisaRequiredAction="Apply",
+    )
+
+    def only_nvd(request):
+        return httpx.Response(200, json=nvd_page([raw]))
+
+    run(base, handler_for(nvd=only_nvd))
+    store = WatchStore(base.watch.database)
+    old = store.view("CVE-2026-0001")
+    assert old.cisa_kev_added == "2026-11-01"
+
+    config = replace(
+        base, watch=replace(base.watch, sources=("nvd", "cisa_kev"))
+    )
+
+    def with_empty_catalog(request):
+        if str(request.url).startswith(CISA_URL):
+            return httpx.Response(
+                200, json={"count": 0, "vulnerabilities": []}
+            )
+        return httpx.Response(200, json=nvd_page([raw]))
+
+    report = run(config, handler_for(nvd=with_empty_catalog, cisa=with_empty_catalog), now=NOW + timedelta(hours=1))
+    assert not report.failures
+    assert "CVE-2026-0001" in report.touched_ids
+    new = store.view("CVE-2026-0001", catalogs=config.watch.sources)
+    assert old.cisa_kev_added == "2026-11-01" and new.cisa_kev_added is None
+    assert old.fingerprint() != new.fingerprint()
+    with store._connect() as db:
+        persisted = db.execute(
+            "SELECT fingerprint FROM watch_view WHERE cve_id='CVE-2026-0001'"
+        ).fetchone()[0]
+    assert persisted == new.fingerprint()
+
+
+def test_disabling_cisa_catalog_restores_nvd_fields_and_touches(tmp_path):
+    config = write_config(
+        tmp_path, sources=("nvd", "cisa_kev"), initial="backfill"
+    )
+    raw = nvd_cve(
+        cisaExploitAdd="2026-11-01",
+        cisaActionDue="2026-11-20",
+        cisaRequiredAction="Apply",
+    )
+
+    def handler(request):
+        if str(request.url).startswith(CISA_URL):
+            return httpx.Response(
+                200, json={"count": 0, "vulnerabilities": []}
+            )
+        return httpx.Response(200, json=nvd_page([raw]))
+
+    run(
+        config,
+        handler_for(nvd=handler, cisa=handler),
+    )
+    store = WatchStore(config.watch.database)
+    assert store.view("CVE-2026-0001", catalogs=config.watch.sources).cisa_kev_added is None
+
+    disabled = replace(
+        config, watch=replace(config.watch, sources=("nvd",))
+    )
+    report = run(
+        disabled,
+        handler_for(nvd=handler),
+        now=NOW + timedelta(hours=1),
+    )
+    assert not report.failures
+    assert "CVE-2026-0001" in report.touched_ids
+    view = store.view("CVE-2026-0001")
+    assert view.cisa_kev_added == "2026-11-01"
+
+
+
     config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
     pages: list[int] = []
 

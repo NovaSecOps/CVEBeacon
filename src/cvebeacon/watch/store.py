@@ -73,8 +73,7 @@ _SCHEMA = (
         cisa_required_action TEXT,
         cisa_ransomware TEXT,
         first_seen TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        nvd_fingerprint TEXT NOT NULL
+        updated_at TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS watch_cve_ssvc ON watch_cve(ssvc_exploitation)",
     """CREATE TABLE IF NOT EXISTS watch_euvd_item (
@@ -398,16 +397,14 @@ class WatchStore:
     ) -> str:
         row = self._row(db, record.cve_id)
         content = _nvd_content(record)
-        fingerprint = record.nvd_fingerprint()
         if row is None:
             columns = (
                 "cve_id",
                 *_NVD_CONTENT_COLUMNS,
                 "first_seen",
                 "updated_at",
-                "nvd_fingerprint",
             )
-            values = (record.cve_id, *content.values(), now, now, fingerprint)
+            values = (record.cve_id, *content.values(), now, now)
             marks = ",".join("?" for _ in columns)
             db.execute(
                 f"INSERT INTO watch_cve({','.join(columns)}) VALUES ({marks})", values
@@ -415,12 +412,11 @@ class WatchStore:
             return "new"
         if all(row[column] == content[column] for column in _NVD_CONTENT_COLUMNS):
             return "unchanged"
-        columns = (*_NVD_CONTENT_COLUMNS, "updated_at", "nvd_fingerprint")
+        columns = (*_NVD_CONTENT_COLUMNS, "updated_at")
         assignments = ", ".join(f"{column}=?" for column in columns)
         values = (
             *(content[column] for column in _NVD_CONTENT_COLUMNS),
             now,
-            fingerprint,
             record.cve_id,
         )
         db.execute(f"UPDATE watch_cve SET {assignments} WHERE cve_id=?", values)
@@ -768,6 +764,7 @@ class WatchStore:
         thresholds: Iterable[float] = EPSS_BANDS,
     ) -> EpssLoadResult:
         self.initialize()
+        now = _timestamp(self._clock)
         with self.transaction() as db:
             old_rows = db.execute("SELECT COUNT(*) FROM watch_epss").fetchone()[0]
             db.execute(
@@ -838,7 +835,7 @@ class WatchStore:
             values.update(meta or {})
             if values:
                 self._set_meta(db, values)
-            self._mark_touched(db, changed, _timestamp(self._clock))
+            self._mark_touched(db, changed, now)
         return EpssLoadResult(total, batches, tuple(sorted(changed)))
 
     def prune_euvd(self, *, now: datetime) -> int | None:
@@ -937,11 +934,6 @@ class WatchStore:
             for row in rows
         )
 
-    def lookup_succeeded(self, identifier: str) -> None:
-        self.initialize()
-        with self.transaction() as db:
-            db.execute("DELETE FROM watch_lookup WHERE cve_id=?", (identifier,))
-
     def lookup_failed(self, identifier: str, *, error: str, now: datetime) -> None:
         self.initialize()
         stamp = _timestamp(lambda: now)
@@ -959,19 +951,6 @@ class WatchStore:
                 "WHERE cve_id=?",
                 (attempts, following, error[:500], identifier),
             )
-
-    def refresh_views(
-        self, identifiers: Iterable[str], *, catalogs: Sequence[str] = ()
-    ) -> StepCounts:
-        self.initialize()
-        now = _timestamp(self._clock)
-        with self.transaction() as db:
-            views = self._refresh_views(db, identifiers, catalogs, now)
-        return StepCounts(
-            new=views.new,
-            changed=views.changed,
-            unchanged=views.unchanged,
-        )
 
     def view(self, identifier: str, *, catalogs: Sequence[str] = ()) -> Any | None:
         self.initialize()

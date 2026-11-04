@@ -171,23 +171,6 @@ class WatchRecord:
     def references_json(self) -> str:
         return canonical_json([item.as_dict() for item in self.references])
 
-    def nvd_fingerprint(self) -> str:
-        """Hash NVD-owned alert fields; other sources never contribute here."""
-        value = {
-            "status": self.status,
-            "cvss": [entry.as_dict() for entry in self.cvss],
-            "ssvc_exploitation": self.ssvc_exploitation,
-            "cisa_kev_added": self.cisa_kev_added,
-            "cisa_kev_due": self.cisa_kev_due,
-            "cisa_required_action": self.cisa_required_action,
-            "cisa_ransomware": self.cisa_ransomware,
-        }
-        return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
-
-    # Retained for callers that compare records directly.
-    def fingerprint(self) -> str:
-        return self.nvd_fingerprint()
-
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "WatchRecord":
         return cls(
