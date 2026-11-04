@@ -25,6 +25,19 @@ TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 MAX_TIMES = 12
 
+WINDOWS_REGISTRATION_SCRIPT = """param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][string]$XmlPath,
+    [Parameter(Mandatory = $true)][string]$Account
+)
+$ErrorActionPreference = 'Stop'
+$xml = [System.IO.File]::ReadAllText($XmlPath)
+$service = New-Object -ComObject Schedule.Service
+$service.Connect()
+$folder = $service.GetFolder('\\')
+$null = $folder.RegisterTask($TaskName, $xml, 6, $Account, $null, 2, $null)
+"""
+
 ET.register_namespace("", TASK_NAMESPACE)
 
 
@@ -528,21 +541,86 @@ def _windows_access_denied(detail: str, returncode: int) -> bool:
     )
 
 
+def _windows_registration_hint(
+    detail: str, returncode: int, plan: SchedulePlan
+) -> str:
+    folded = detail.casefold()
+    if _windows_access_denied(detail, returncode):
+        if plan.run_logged_out and plan.account_explicit:
+            return (
+                "access denied: run as the account named in --account from an "
+                "elevated prompt, or register from the service account's own shell"
+            )
+        if plan.run_logged_out:
+            return (
+                "access denied: register from the service account's own shell, "
+                "or name it with --account from an elevated prompt"
+            )
+        return "access denied: run from an elevated prompt"
+    if "0x80070569" in folded:
+        return (
+            "the account needs the 'Log on as a batch job' right: grant it in "
+            "secpol.msc; a domain GPO can override it"
+        )
+    if any(
+        code in folded
+        for code in ("0x80070534", "0x8007052e", "0x80070533", "0x800704ec")
+    ):
+        return (
+            "account or logon error: verify the account and grant it the "
+            "'Log on as a batch job' right in secpol.msc"
+        )
+    return ""
+
+
 def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
     if plan.system == "windows":
-        if plan.times or plan.run_logged_out:
+        if plan.run_logged_out:
+            with tempfile.TemporaryDirectory(
+                prefix="cvebeacon-schedule-", ignore_cleanup_errors=True
+            ) as directory:
+                xml_path = Path(directory) / "task.xml"
+                script_path = Path(directory) / "register.ps1"
+                xml_path.write_bytes(_windows_xml(plan))
+                script_path.write_text(
+                    WINDOWS_REGISTRATION_SCRIPT, encoding="utf-8"
+                )
+                try:
+                    result = run(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                            str(script_path),
+                            "-TaskName",
+                            WINDOWS_TASK,
+                            "-XmlPath",
+                            str(xml_path),
+                            "-Account",
+                            plan.user_id,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        stdin=subprocess.DEVNULL,
+                        timeout=120,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise SchedulingError(
+                        f"schedule installation failed: {exc}"
+                    ) from exc
+        elif plan.times:
             descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
             try:
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(_windows_xml(plan))
                     handle.flush()
                     os.fsync(handle.fileno())
-                arguments = ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK]
-                if plan.run_logged_out:
-                    arguments.extend(["/RU", plan.user_id, "/NP"])
-                arguments.append("/F")
                 result = run(
-                    arguments,
+                    ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK, "/F"],
                     capture_output=True,
                     text=True,
                     check=False,
@@ -580,22 +658,11 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
             ).split()
         )
         hint = ""
-        if plan.system == "windows" and _windows_access_denied(
-            detail, result.returncode
-        ):
+        if plan.system == "windows":
+            hint = _windows_registration_hint(detail, result.returncode, plan)
+        if hint:
             detail = detail.rstrip(".; ")
-            if plan.run_logged_out and plan.account_explicit:
-                hint = (
-                    "access denied: run as the account named in --account from an "
-                    "elevated prompt, or register from the service account's own shell"
-                )
-            elif plan.run_logged_out:
-                hint = (
-                    "access denied: register from the service account's own shell, "
-                    "or name it with --account from an elevated prompt"
-                )
-            else:
-                hint = "access denied: run from an elevated prompt"
+        detail = detail[:600]
         message = (
             f"schedule installation failed: {detail}"
             if detail
