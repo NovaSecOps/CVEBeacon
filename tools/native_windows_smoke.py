@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -15,6 +16,7 @@ from contextlib import closing
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = "CVEBeacon Monitor"
@@ -35,6 +37,41 @@ STEPS = (
 )
 
 _step = 0
+
+PROBE_COM_SCRIPT = """param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][string]$XmlPath,
+    [Parameter(Mandatory = $true)][string]$Account,
+    [switch]$UseXmlPrincipal
+)
+$ErrorActionPreference = 'Stop'
+$xml = [System.IO.File]::ReadAllText($XmlPath)
+$service = New-Object -ComObject Schedule.Service
+$service.Connect()
+$folder = $service.GetFolder('\\')
+$userId = if ($UseXmlPrincipal) { $null } else { $Account }
+$null = $folder.RegisterTask($TaskName, $xml, 6, $userId, $null, 2, $null)
+"""
+
+PROBE_CMDLET_SCRIPT = """param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][string]$XmlPath,
+    [Parameter(Mandatory = $true)][string]$Account,
+    [Parameter(Mandatory = $true)][string]$Method
+)
+$ErrorActionPreference = 'Stop'
+if ($Method -eq 'd') {
+    $xml = [System.IO.File]::ReadAllText($XmlPath)
+    Register-ScheduledTask -Xml $xml -TaskName $TaskName -User $Account | Out-Null
+} elseif ($Method -eq 'e') {
+    $principal = New-ScheduledTaskPrincipal -UserId $Account -LogonType S4U -RunLevel Limited
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0'
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(2)
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal | Out-Null
+} else {
+    throw "unknown probe method"
+}
+"""
 
 
 def step(description: str) -> None:
@@ -419,6 +456,170 @@ def database_owner(database: Path) -> str:
     ).stdout.strip()
 
 
+def write_probe_xml(path: Path, account: str) -> None:
+    boundary = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    path.write_text(
+        f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>CVEBeacon S4U probe</Description></RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>{boundary}</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{escape(account)}</UserId>
+      <LogonType>S4U</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Enabled>true</Enabled></Settings>
+  <Actions Context="Author">
+    <Exec><Command>cmd.exe</Command><Arguments>/c exit 0</Arguments></Exec>
+  </Actions>
+</Task>
+""",
+        encoding="utf-16",
+    )
+
+
+def probe_principal(task_name: str) -> str:
+    result = subprocess.run(
+        ["schtasks", "/Query", "/TN", task_name, "/XML"],
+        capture_output=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        return f"query failed: {decode(result.stderr).strip()}"
+    text = decode(result.stdout)
+    logon = re.search(r"<LogonType>(.*?)</LogonType>", text)
+    user = re.search(r"<UserId>(.*?)</UserId>", text)
+    return "LogonType={} UserId={}".format(
+        logon.group(1) if logon else "?",
+        user.group(1) if user else "?",
+    )
+
+
+def probe_registration(
+    label: str, account: str, task_name: str, args: list[str]
+) -> None:
+    print(f"PROBE {label}: account={account} task={task_name}", flush=True)
+    try:
+        result = command(args, timeout=120)
+    except Exception as exc:
+        print(f"PROBE {label}: EXCEPTION {exc}", flush=True)
+        command(
+            ["schtasks", "/Delete", "/F", "/TN", task_name],
+            stdin=subprocess.DEVNULL,
+        )
+        return
+    print(f"PROBE {label}: returncode={result.returncode}", flush=True)
+    if result.stdout.strip():
+        print(f"PROBE {label} stdout:\n{result.stdout}", flush=True)
+    if result.stderr.strip():
+        print(f"PROBE {label} stderr:\n{result.stderr}", flush=True)
+    if result.returncode == 0:
+        print(f"PROBE {label}: {probe_principal(task_name)}", flush=True)
+    cleanup = command(
+        ["schtasks", "/Delete", "/F", "/TN", task_name],
+        stdin=subprocess.DEVNULL,
+    )
+    if cleanup.returncode != 0:
+        print(
+            f"PROBE {label} cleanup stderr:\n{cleanup.stderr}", flush=True
+        )
+
+
+def probe_s4u_registration(current: str, service: str) -> None:
+    print("PROBE whoami /user:", flush=True)
+    for name, args in (
+        ("user", ["whoami", "/user"]),
+        ("groups", ["whoami", "/groups"]),
+        ("priv", ["whoami", "/priv"]),
+    ):
+        result = command(args, stdin=subprocess.DEVNULL)
+        print(f"PROBE whoami /{name}:\n{result.stdout}{result.stderr}", flush=True)
+    token = secrets.token_hex(3)
+    with tempfile.TemporaryDirectory(
+        prefix="cvebeacon-probe-", ignore_cleanup_errors=True
+    ) as directory:
+        directory = Path(directory)
+        com_script = directory / "probe-com.ps1"
+        cmdlet_script = directory / "probe-cmdlet.ps1"
+        com_script.write_text(PROBE_COM_SCRIPT, encoding="utf-8")
+        cmdlet_script.write_text(PROBE_CMDLET_SCRIPT, encoding="utf-8")
+        for kind, account in (("current", current), ("service", service)):
+            xml_path = directory / f"probe-{kind}.xml"
+            write_probe_xml(xml_path, account)
+            for method in ("a", "b", "c", "d", "e"):
+                task_name = f"CVEBeacon Probe {token} {kind} {method}"
+                if method == "a":
+                    args = [
+                        "schtasks",
+                        "/Create",
+                        "/XML",
+                        str(xml_path),
+                        "/TN",
+                        task_name,
+                        "/RU",
+                        account,
+                        "/NP",
+                        "/F",
+                        "/HRESULT",
+                    ]
+                elif method in {"b", "c"}:
+                    args = [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(com_script),
+                        "-TaskName",
+                        task_name,
+                        "-XmlPath",
+                        str(xml_path),
+                        "-Account",
+                        account,
+                    ]
+                    if method == "c":
+                        args.append("-UseXmlPrincipal")
+                else:
+                    args = [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(cmdlet_script),
+                        "-TaskName",
+                        task_name,
+                        "-XmlPath",
+                        str(xml_path),
+                        "-Account",
+                        account,
+                        "-Method",
+                        method,
+                    ]
+                try:
+                    probe_registration(f"{kind}-{method}", account, task_name, args)
+                except Exception as exc:
+                    print(
+                        f"PROBE {kind}-{method}: harness exception {exc}",
+                        flush=True,
+                    )
+                    command(
+                        ["schtasks", "/Delete", "/F", "/TN", task_name],
+                        stdin=subprocess.DEVNULL,
+                    )
+
+
 def cleanup_account(batch_sid: bytes | None) -> bool:
     """Best-effort removal of the fixture's right and local account."""
     ok = True
@@ -610,6 +811,11 @@ def smoke() -> None:
             batch_ready = False
             print(f"WARN: could not grant SeBatchLogonRight: {exc}", flush=True)
         step("local service account and ACLs")
+
+        try:
+            probe_s4u_registration(current, service_account)
+        except Exception as exc:
+            print(f"PROBE harness failed: {exc}", flush=True)
 
         installed = True
         install = checked(
