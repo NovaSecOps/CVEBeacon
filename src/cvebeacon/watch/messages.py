@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
@@ -20,6 +21,7 @@ STYLE_SLACK = "slack"
 STYLE_MARKDOWN = "markdown"
 STYLE_DISCORD = "discord"
 MAX_PARTS = 10
+WEBHOOK_VERSION = 2
 DESCRIPTION_LIMIT = 160
 KEV_ACTION_LIMIT = 120
 PROVIDER_ORDER = ("cna", "nvd", "cisa-adp", "euvd", "other")
@@ -74,6 +76,32 @@ def _clean(value: Any, limit: int | None = None) -> str:
     if limit is not None and len(text) > limit:
         text = text[: max(0, limit - 1)].rstrip() + "…"
     return text
+
+
+def _date_text(value: Any) -> str:
+    """Return a UTC date as ``YYYY-MM-DD``, or ``unknown`` when it is absent."""
+    text = _clean(value)
+    if not text:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.date().isoformat()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return "unknown"
+
+
+def date_phrase(published: Any, first_seen: Any) -> str:
+    """Return the short publication and first-seen phrase for one CVE."""
+    return (
+        f"Published {_date_text(published)} · "
+        f"first seen {_date_text(first_seen)}"
+    )
 
 
 def _escape_slack(value: str) -> str:
@@ -276,7 +304,10 @@ def _event_lines(
         f"EPSS {_epss_field(event.view)} · KEV: {_kev_field(event.view)} · "
         f"Exploitation: {_exploitation_field(event.view)}"
     )
-    lines = [line]
+    lines = [
+        line,
+        f"  {date_phrase(event.view.published, event.view.first_seen)}",
+    ]
     description = _dynamic(event.view.description, style, DESCRIPTION_LIMIT)
     if description:
         lines.append(f"  {description}")
@@ -673,7 +704,7 @@ def build_messages(
 def webhook_payload(
     events: Sequence[DeliveryEvent], names: Mapping[str, str]
 ) -> dict[str, Any]:
-    """Return the stable version 1 webhook document."""
+    """Return the stable version 2 webhook document."""
     output = []
     for event in sort_events(events):
         view = event.view
@@ -686,6 +717,8 @@ def webhook_payload(
                 "initial": bool(event.initial),
                 "created_at": event.created_at,
                 "view": {
+                    "published": view.published,
+                    "first_seen": view.first_seen,
                     "cvss": [
                         {
                             "provider": entry.provider,
@@ -742,7 +775,7 @@ def webhook_payload(
                 },
             }
         )
-    return {"version": 1, "events": output}
+    return {"version": WEBHOOK_VERSION, "events": output}
 
 
 def rule_display_names(rules: Iterable[Rule]) -> dict[str, str]:

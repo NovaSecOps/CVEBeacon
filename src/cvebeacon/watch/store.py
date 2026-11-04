@@ -255,6 +255,8 @@ class WatchEventRow:
     initial: bool
     created_at: str
     details: Mapping[str, Any] = field(default_factory=dict)
+    published: str | None = None
+    first_seen: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,6 +721,7 @@ class WatchStore:
             cisa_catalog="cisa_kev" in catalogs,
             eu_catalog="eu_kev" in catalogs,
             epss=self._epss_row(db, identifier) if "epss" in catalogs else None,
+            first_seen=row["first_seen"],
         )
 
     def _refresh_views(
@@ -1325,7 +1328,9 @@ class WatchStore:
         with closing(self._connect()) as db:
             rows = db.execute(
                 "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,"
-                "e.details_json,e.initial,e.created_at FROM watch_event e"
+                "e.details_json,e.initial,e.created_at,"
+                "c.published AS published,c.first_seen AS first_seen "
+                "FROM watch_event e LEFT JOIN watch_cve c ON c.cve_id=e.cve_id"
                 + where
                 + " ORDER BY e.created_at DESC, e.id DESC LIMIT ?",
                 parameters,
@@ -1349,6 +1354,8 @@ class WatchStore:
                     bool(row["initial"]),
                     row["created_at"],
                     details,
+                    row["published"],
+                    row["first_seen"],
                 )
             )
         return tuple(output)

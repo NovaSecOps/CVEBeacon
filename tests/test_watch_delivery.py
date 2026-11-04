@@ -122,7 +122,7 @@ def test_success_marks_the_delivery_sent(tmp_path):
     assert (summary.channel, summary.messages, summary.events) == ("hook", 1, 1)
     assert rows(store) == [("hook", "sent", 0, None)]
     payload = json.loads(requests[0].content)
-    assert payload["version"] == 1
+    assert payload["version"] == 2
     assert payload["events"][0]["cve_id"] == "CVE-2026-0001"
 
 
@@ -708,6 +708,7 @@ def test_notify_test_sends_a_labelled_message(tmp_path):
     outcome = send_test(config, http, "hook")
     assert outcome.ok
     body = json.loads(seen[0].content)
+    assert body["version"] == 2
     assert body["test"] is True
     assert "no action needed" in body["message"]
     assert store.delivery_status() == ()

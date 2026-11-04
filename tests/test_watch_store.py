@@ -139,6 +139,8 @@ def test_view_combines_euvd_kev_and_epss(tmp_path):
     store.replace_epss([("CVE-2026-0001", 0.5, 0.9, date(2026, 11, 3))])
     view = store.view("CVE-2026-0001", catalogs=("nvd", "euvd", "cisa_kev", "epss"))
     assert view is not None
+    assert view.published == "2026-11-01T00:00:00.000"
+    assert view.first_seen == NOW.isoformat()
     assert {entry.provider for entry in view.cvss} == {"nvd", "euvd"}
     assert view.euvd_id == "EUVD-2026-1"
     assert view.euvd_exploited_since == "2026-11-01"

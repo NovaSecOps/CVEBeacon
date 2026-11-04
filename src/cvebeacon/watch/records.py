@@ -222,6 +222,7 @@ class WatchView:
     cve_id: str
     status: str
     published: str | None = None
+    first_seen: str | None = None
     last_modified: str | None = None
     description: str | None = None
     source_identifier: str | None = None
@@ -311,6 +312,7 @@ def build_view(
     cisa_catalog: bool = False,
     eu_catalog: bool = False,
     epss: tuple[float, float, str] | None = None,
+    first_seen: str | None = None,
 ) -> WatchView:
     """Combine the raw source rows into one CVE view.
 
@@ -340,6 +342,7 @@ def build_view(
         cve_id=record.cve_id,
         status=record.status,
         published=record.published,
+        first_seen=first_seen,
         last_modified=record.last_modified,
         description=record.description,
         source_identifier=record.source_identifier,

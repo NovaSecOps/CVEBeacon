@@ -21,6 +21,7 @@ from ..errors import ConfigurationError
 from ..http import HttpClient, HttpResult
 from .channels import ChannelConfig, channel_map, validate_webhook_url
 from .messages import (
+    WEBHOOK_VERSION,
     OutgoingMessage,
     build_messages,
     rule_display_names,
@@ -1120,7 +1121,7 @@ def send_test(
                 str(channel.options["url"]),
                 headers=headers,
                 json_body={
-                    "version": 1,
+                    "version": WEBHOOK_VERSION,
                     "test": True,
                     "message": TEST_MESSAGE,
                     "events": [],
