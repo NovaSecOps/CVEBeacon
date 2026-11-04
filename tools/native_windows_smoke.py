@@ -44,6 +44,7 @@ def step(description: str) -> None:
 
 
 def command(args, **kwargs):
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.run(
         args, capture_output=True, text=True, errors="replace", check=False, **kwargs
     )
@@ -222,8 +223,8 @@ header_value_file = "secrets/hook-header"
     return config
 
 
-def grant_batch_logon(account: str) -> None:
-    """Add SeBatchLogonRight for account through the local LSA policy."""
+def change_batch_logon(*, account=None, sid=None, add=True) -> bytes:
+    """Add or remove SeBatchLogonRight and return the account SID bytes."""
     import ctypes
     from ctypes import wintypes
 
@@ -269,44 +270,61 @@ def grant_batch_logon(account: str) -> None:
         wintypes.ULONG,
     ]
     advapi32.LsaAddAccountRights.restype = wintypes.LONG
+    advapi32.LsaRemoveAccountRights.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.BOOLEAN,
+        ctypes.POINTER(LsaUnicodeString),
+        wintypes.ULONG,
+    ]
+    advapi32.LsaRemoveAccountRights.restype = wintypes.LONG
     advapi32.LsaClose.argtypes = [wintypes.HANDLE]
     advapi32.LsaClose.restype = wintypes.LONG
     advapi32.LsaNtStatusToWinError.argtypes = [wintypes.LONG]
     advapi32.LsaNtStatusToWinError.restype = wintypes.ULONG
 
-    sid_size = wintypes.DWORD()
-    domain_size = wintypes.DWORD()
-    use = wintypes.DWORD()
-    advapi32.LookupAccountNameW(
-        None,
-        account,
-        None,
-        ctypes.byref(sid_size),
-        None,
-        ctypes.byref(domain_size),
-        ctypes.byref(use),
-    )
-    error = ctypes.get_last_error()
-    if error != 122:  # ERROR_INSUFFICIENT_BUFFER
-        raise OSError(error, f"cannot resolve account {account}")
-    sid = ctypes.create_string_buffer(sid_size.value)
-    domain = ctypes.create_unicode_buffer(domain_size.value)
-    if not advapi32.LookupAccountNameW(
-        None,
-        account,
-        ctypes.cast(sid, wintypes.LPVOID),
-        ctypes.byref(sid_size),
-        domain,
-        ctypes.byref(domain_size),
-        ctypes.byref(use),
-    ):
-        raise OSError(ctypes.get_last_error(), f"cannot resolve account {account}")
+    if sid is None:
+        if not account:
+            raise ValueError("account or sid is required")
+        sid_size = wintypes.DWORD()
+        domain_size = wintypes.DWORD()
+        use = wintypes.DWORD()
+        advapi32.LookupAccountNameW(
+            None,
+            account,
+            None,
+            ctypes.byref(sid_size),
+            None,
+            ctypes.byref(domain_size),
+            ctypes.byref(use),
+        )
+        error = ctypes.get_last_error()
+        if error != 122:  # ERROR_INSUFFICIENT_BUFFER
+            raise OSError(error, f"cannot resolve account {account}")
+        sid_buffer = ctypes.create_string_buffer(sid_size.value)
+        domain = ctypes.create_unicode_buffer(domain_size.value)
+        if not advapi32.LookupAccountNameW(
+            None,
+            account,
+            ctypes.cast(sid_buffer, wintypes.LPVOID),
+            ctypes.byref(sid_size),
+            domain,
+            ctypes.byref(domain_size),
+            ctypes.byref(use),
+        ):
+            raise OSError(
+                ctypes.get_last_error(), f"cannot resolve account {account}"
+            )
+        sid_bytes = sid_buffer.raw
+    else:
+        sid_bytes = bytes(sid)
+        sid_buffer = ctypes.create_string_buffer(sid_bytes)
 
     attributes = LsaObjectAttributes()
     attributes.Length = ctypes.sizeof(attributes)
     policy = wintypes.HANDLE()
     status = advapi32.LsaOpenPolicy(
-        None, ctypes.byref(attributes), 0x00F0FFF, ctypes.byref(policy)
+        None, ctypes.byref(attributes), 0x00000810, ctypes.byref(policy)
     )
     if status:
         raise OSError(advapi32.LsaNtStatusToWinError(status), "LsaOpenPolicy failed")
@@ -318,19 +336,24 @@ def grant_batch_logon(account: str) -> None:
             (len(name) + 1) * ctypes.sizeof(ctypes.c_wchar),
             ctypes.cast(text, wintypes.LPWSTR),
         )
-        status = advapi32.LsaAddAccountRights(
-            policy,
-            ctypes.cast(sid, wintypes.LPVOID),
-            ctypes.byref(right),
-            1,
-        )
+        sid_pointer = ctypes.cast(sid_buffer, wintypes.LPVOID)
+        if add:
+            status = advapi32.LsaAddAccountRights(
+                policy, sid_pointer, ctypes.byref(right), 1
+            )
+            action = "LsaAddAccountRights"
+        else:
+            status = advapi32.LsaRemoveAccountRights(
+                policy, sid_pointer, False, ctypes.byref(right), 1
+            )
+            action = "LsaRemoveAccountRights"
         if status:
             raise OSError(
-                advapi32.LsaNtStatusToWinError(status),
-                "LsaAddAccountRights failed",
+                advapi32.LsaNtStatusToWinError(status), f"{action} failed"
             )
     finally:
         advapi32.LsaClose(policy)
+    return sid_bytes
 
 
 def stop_registered_task() -> None:
@@ -396,6 +419,33 @@ def database_owner(database: Path) -> str:
     ).stdout.strip()
 
 
+def cleanup_account(batch_sid: bytes | None) -> bool:
+    """Best-effort removal of the fixture's right and local account."""
+    ok = True
+    if batch_sid is not None:
+        try:
+            change_batch_logon(sid=batch_sid, add=False)
+        except Exception as exc:
+            ok = False
+            print(f"WARN: could not remove SeBatchLogonRight: {exc}", flush=True)
+    deleted = command(
+        ["net", "user", SERVICE_ACCOUNT, "/delete"], stdin=subprocess.DEVNULL
+    )
+    if deleted.returncode != 0:
+        print(
+            f"WARN: could not delete {SERVICE_ACCOUNT}: {deleted.stderr.strip()}",
+            flush=True,
+        )
+        return False
+    remaining = command(
+        ["net", "user", SERVICE_ACCOUNT], stdin=subprocess.DEVNULL
+    )
+    if remaining.returncode == 0:
+        print(f"WARN: account {SERVICE_ACCOUNT} still exists after deletion", flush=True)
+        ok = False
+    return ok
+
+
 def smoke() -> None:
     drive = os.environ.get("SystemDrive", "C:")
     root = Path(
@@ -412,6 +462,7 @@ def smoke() -> None:
     )
     installed = False
     user_created = False
+    batch_sid: bytes | None = None
     sink = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
     thread = threading.Thread(target=sink.serve_forever, daemon=True)
     thread.start()
@@ -521,19 +572,21 @@ def smoke() -> None:
         installed = False
         step("fixed-time interactive task install, run, result and removal")
 
-        subprocess.run(
-            ["net", "user", SERVICE_ACCOUNT, "/delete"],
-            capture_output=True,
-            check=False,
+        existing_account = command(
+            ["net", "user", SERVICE_ACCOUNT], stdin=subprocess.DEVNULL
+        )
+        assert existing_account.returncode != 0, (
+            f"refusing to reuse an existing account named {SERVICE_ACCOUNT!r}"
         )
         password = "Cvb-" + secrets.token_urlsafe(18) + "!9aA"
         created = command(
-            ["net", "user", SERVICE_ACCOUNT, password, "/add", "/expires:never"]
+            ["net", "user", SERVICE_ACCOUNT, password, "/add", "/expires:never", "/Y"],
+            stdin=subprocess.DEVNULL,
         )
         if created.returncode != 0:
             print(
                 f"FAILED COMMAND: net user {SERVICE_ACCOUNT} <password omitted> "
-                "/add /expires:never",
+                "/add /expires:never /Y",
                 flush=True,
             )
             print(f"stdout:\n{created.stdout}", flush=True)
@@ -552,7 +605,7 @@ def smoke() -> None:
             )
         batch_ready = True
         try:
-            grant_batch_logon(service_account)
+            batch_sid = change_batch_logon(account=service_account, add=True)
         except Exception as exc:  # policy APIs vary; registration still proves XML
             batch_ready = False
             print(f"WARN: could not grant SeBatchLogonRight: {exc}", flush=True)
@@ -655,18 +708,14 @@ def smoke() -> None:
         installed = False
         step("interval S4U XML registration and removal")
 
-        checked(["net", "user", SERVICE_ACCOUNT, "/delete"])
+        assert cleanup_account(batch_sid), "service account cleanup failed"
         user_created = False
         step("service account removal")
     finally:
         if installed:
             delete_task()
         if user_created:
-            subprocess.run(
-                ["net", "user", SERVICE_ACCOUNT, "/delete"],
-                capture_output=True,
-                check=False,
-            )
+            cleanup_account(batch_sid)
         sink.shutdown()
         sink.server_close()
         thread.join(timeout=5)
