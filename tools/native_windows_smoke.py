@@ -73,23 +73,7 @@ if ($Method -eq 'd') {
 }
 """
 
-RUN_AS_SCRIPT = """param(
-    [Parameter(Mandatory = $true)][string]$User,
-    [Parameter(Mandatory = $true)][string]$Exe,
-    [Parameter(Mandatory = $true)][string]$Config,
-    [Parameter(Mandatory = $true)][string]$Times,
-    [Parameter(Mandatory = $true)][string]$Out,
-    [Parameter(Mandatory = $true)][string]$Err
-)
-$ErrorActionPreference = 'Stop'
-$secure = ConvertTo-SecureString $env:CVB_SMOKE_PASSWORD -AsPlainText -Force
-$env:CVB_SMOKE_PASSWORD = $null
-$cred = New-Object System.Management.Automation.PSCredential($User, $secure)
-$arguments = @('--config', $Config, 'schedule', 'install', '--times', $Times, '--command', 'watch', '--run-logged-out', '--yes')
-$process = Start-Process -FilePath $Exe -ArgumentList $arguments -Credential $cred -Wait -NoNewWindow -PassThru -RedirectStandardOutput $Out -RedirectStandardError $Err
-exit $process.ExitCode
-"""
-
+HELPER_TASK = "CVEBeacon Smoke Helper"
 
 def step(description: str) -> None:
     global _step
@@ -168,10 +152,10 @@ def delete_task() -> None:
         print(f"WARN: task {TASK!r} is still registered after cleanup", flush=True)
 
 
-def task_state() -> tuple[str, str, str]:
+def task_state(name: str = TASK) -> tuple[str, str, str]:
     script = (
-        f"$i = Get-ScheduledTaskInfo -TaskName '{TASK}'; "
-        f"$s = (Get-ScheduledTask -TaskName '{TASK}').State; "
+        f"$i = Get-ScheduledTaskInfo -TaskName '{name}'; "
+        f"$s = (Get-ScheduledTask -TaskName '{name}').State; "
         "$s.ToString() + '|' + $i.LastTaskResult + '|' + "
         "$i.LastRunTime.ToString('o')"
     )
@@ -189,10 +173,10 @@ def task_state() -> tuple[str, str, str]:
     return state, code, last_run
 
 
-def wait_for_task(before: str, timeout: float = 120) -> str:
+def wait_for_task(before: str, timeout: float = 120, name: str = TASK) -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        state, code, last_run = task_state()
+        state, code, last_run = task_state(name)
         if (
             state.casefold() != "running"
             and last_run != before
@@ -200,7 +184,7 @@ def wait_for_task(before: str, timeout: float = 120) -> str:
         ):
             return code
         time.sleep(1)
-    state, code, last_run = task_state()
+    state, code, last_run = task_state(name)
     raise AssertionError(
         f"task did not finish in {timeout:.0f}s: state={state} code={code} last={last_run}"
     )
@@ -680,6 +664,7 @@ def smoke() -> None:
     )
     installed = False
     user_created = False
+    helper_created = False
     batch_sid: bytes | None = None
     sink = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
     thread = threading.Thread(target=sink.serve_forever, daemon=True)
@@ -835,37 +820,52 @@ def smoke() -> None:
             print(f"PROBE harness failed: {exc}", flush=True)
 
         installed = True
-        run_script = root / "run-as-service.ps1"
-        run_script.write_text(RUN_AS_SCRIPT, encoding="utf-8")
-        out_file = root / "run-as-service.out"
-        err_file = root / "run-as-service.err"
-        run_env = dict(env)
-        run_env["CVB_SMOKE_PASSWORD"] = password
-        install = command(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(run_script),
-                "-User",
-                service_account,
-                "-Exe",
-                str(executable),
-                "-Config",
-                str(config),
-                "-Times",
-                times_arg,
-                "-Out",
-                str(out_file),
-                "-Err",
-                str(err_file),
-            ],
-            timeout=180,
-            env=run_env,
+        helper_cmd = root / "smoke-install.cmd"
+        out_file = data / "smoke-install.out"
+        err_file = data / "smoke-install.err"
+        helper_cmd.write_text(
+            f'@echo off\r\n'
+            f'"{executable}" --config "{config}" schedule install '
+            f'--times {times_arg} --command watch --run-logged-out --yes '
+            f'> "{out_file}" 2> "{err_file}"\r\n'
+            f"exit /b %ERRORLEVEL%\r\n",
+            encoding="utf-8",
         )
+        helper = command(
+            [
+                "schtasks",
+                "/Create",
+                "/TN",
+                HELPER_TASK,
+                "/RU",
+                service_account,
+                "/RP",
+                password,
+                "/SC",
+                "ONCE",
+                "/ST",
+                "00:00",
+                "/TR",
+                f"cmd.exe /c {helper_cmd}",
+                "/F",
+            ],
+            stdin=subprocess.DEVNULL,
+        )
+        if helper.returncode != 0:
+            print(
+                "FAILED COMMAND: schtasks /Create /TN CVEBeacon Smoke Helper "
+                "... <password omitted>",
+                flush=True,
+            )
+            print(f"stdout:\n{helper.stdout}\nstderr:\n{helper.stderr}", flush=True)
+        assert helper.returncode == 0, helper.stderr
+        helper_created = True
+        _, _, helper_before = task_state(HELPER_TASK)
+        helper_run = command(
+            ["schtasks", "/Run", "/TN", HELPER_TASK], stdin=subprocess.DEVNULL
+        )
+        assert helper_run.returncode == 0, helper_run.stderr
+        helper_code = wait_for_task(helper_before, name=HELPER_TASK)
         install_stdout = (
             out_file.read_text(encoding="utf-8", errors="replace")
             if out_file.exists()
@@ -876,12 +876,23 @@ def smoke() -> None:
             if err_file.exists()
             else ""
         )
-        print(f"RUN AS SERVICE stdout:\n{install_stdout}", flush=True)
-        print(f"RUN AS SERVICE stderr:\n{install_stderr}", flush=True)
-        assert install.returncode == 0, (
-            f"schedule install as service failed ({install.returncode}):\n"
-            f"{install.stdout}\n{install.stderr}"
+        print(f"HELPER stdout:\n{install_stdout}", flush=True)
+        print(f"HELPER stderr:\n{install_stderr}", flush=True)
+        print(f"HELPER LastTaskResult={helper_code}", flush=True)
+        assert helper_code == "0", (
+            f"helper task failed with {helper_code}:\n"
+            f"{install_stdout}\n{install_stderr}"
         )
+        helper_delete = command(
+            ["schtasks", "/Delete", "/F", "/TN", HELPER_TASK],
+            stdin=subprocess.DEVNULL,
+        )
+        if helper_delete.returncode != 0:
+            print(
+                f"WARN: could not delete {HELPER_TASK}: {helper_delete.stderr}",
+                flush=True,
+            )
+        helper_created = False
         assert (
             f"Runs as: {service_account} (S4U, while logged off)".casefold()
             in install_stdout.casefold()
@@ -966,6 +977,11 @@ def smoke() -> None:
     finally:
         if installed:
             delete_task()
+        if helper_created:
+            command(
+                ["schtasks", "/Delete", "/F", "/TN", HELPER_TASK],
+                stdin=subprocess.DEVNULL,
+            )
         if user_created:
             cleanup_account(batch_sid)
         sink.shutdown()
