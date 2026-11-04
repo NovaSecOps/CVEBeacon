@@ -54,7 +54,11 @@ def run_pipeline(config: Config, *, scanner=None) -> int:
             for resource in sorted({config.inventory_path.resolve(), core.database_path.resolve()}, key=str):
                 resources.enter_context(lock(resource.with_name(resource.name + ".automation.lock")))
             # Core configuration is explicit; never patch its identity/config semantics.
-            if core.inventory.path != config.inventory_path or core.inventory.format not in {"auto", "json"}:
+            if (
+                core.inventory is None
+                or core.inventory.path != config.inventory_path
+                or core.inventory.format not in {"auto", "json"}
+            ):
                 raise AutomationError("core_inventory_configuration_mismatch")
             owned_state = {config.state_dir / name for name in ("health.json", "notification-ledger.sqlite3", "automation.lock", "notifications.lock")}
             if core.database_path in output_pair | input_paths(config) | owned_state or core.database_path.is_relative_to(config.staging_dir):
