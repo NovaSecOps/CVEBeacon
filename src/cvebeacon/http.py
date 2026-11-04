@@ -260,10 +260,13 @@ class HttpClient:
             raise ValueError("body limit must not be negative")
         self.requests += 1
         started = self._monotonic()
+        request_headers = dict(headers or {})
+        # Count wire bytes rather than an expanded compressed body.
+        request_headers["Accept-Encoding"] = "identity"
         request = self._client.build_request(
             method,
             url,
-            headers=headers,
+            headers=request_headers,
             params=params,
             data=data,
             json=json,
@@ -275,7 +278,15 @@ class HttpClient:
             status_code = response.status_code
             body = bytearray()
             try:
-                for chunk in response.iter_bytes():
+                # A test transport may hand back an already-read response;
+                # real sends stay on the raw stream so ``body_limit`` counts
+                # wire bytes rather than decoded content.
+                chunks = (
+                    response.iter_bytes()
+                    if response.is_stream_consumed
+                    else response.iter_raw()
+                )
+                for chunk in chunks:
                     if timeout is not None and self._monotonic() - started > timeout:
                         break
                     remaining = body_limit - len(body)

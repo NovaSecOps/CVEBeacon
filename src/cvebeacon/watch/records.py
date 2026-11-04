@@ -278,6 +278,21 @@ class DeliveryEvent:
     status: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class InitialDigest:
+    """The SQL counts and rendered sample for one initial digest.
+
+    ``counts`` holds ``(rule, kind, event count)`` over every selected initial
+    row, while ``events`` holds only the sampled rows with a full view.
+    """
+
+    events: tuple[DeliveryEvent, ...] = ()
+    counts: tuple[tuple[str, str, int], ...] = ()
+    cves: int = 0
+    total: int = 0
+    ambiguous: int = 0
+
+
 def _names(values: Iterable[str], limit: int = 500) -> tuple[str, ...]:
     unique: dict[str, str] = {}
     for value in values:

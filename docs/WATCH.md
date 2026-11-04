@@ -103,13 +103,14 @@ to = ["soc@example.com"]
 
 `security = "none"` requires `allow_insecure = true` and logs a warning. Every
 TLS connection verifies certificates with the system trust store; a certificate
-failure is reported as "certificate verification failed". Gmail needs an app
-password; use `smtp.gmail.com:587` with STARTTLS. Microsoft 365 uses
+failure is reported as "certificate verification failed". A `starttls` channel
+refuses a server that does not offer STARTTLS. Gmail needs an app password; use
+`smtp.gmail.com:587` with STARTTLS. Microsoft 365 uses
 `smtp.office365.com:587`, but SMTP AUTH must be enabled on the mailbox;
 otherwise use the `graph` channel. `timeout_seconds` bounds the connection and
-every socket operation. Bodies are always quoted-printable, so relays do not
-need 8BITMIME. `bcc` recipients are part of the SMTP envelope and never appear
-as a message header.
+every socket operation, and the delivery deadline is checked before each SMTP
+phase. Bodies are always quoted-printable, so relays do not need 8BITMIME. `bcc`
+recipients are part of the SMTP envelope and never appear as a message header.
 
 ### Microsoft Graph
 
@@ -184,9 +185,10 @@ access_token_env = "CVEBEACON_MATRIX_ACCESS_TOKEN"
 
 Only unencrypted rooms are supported. The channel first asks for the
 `m.room.encryption` state and requires a 404 `M_NOT_FOUND`. Messages use the
-plain-text form. Sends use a deterministic transaction id per message part, so a
-retry cannot post twice. An ambiguous row is retried automatically for one hour
-after its first attempt; after that, use `--retry-ambiguous`.
+plain-text form. Sends use a deterministic transaction id per message part, so
+an explicit retry after an ambiguous send usually does not post the same part
+twice. Ambiguous rows are never retried automatically; use
+`--retry-ambiguous` to send them again.
 
 ### ntfy
 
@@ -250,8 +252,9 @@ are not resent automatically. A row moves through these states:
 - `ambiguous`: the request or `DATA` may have reached the provider (a timeout or
   connection drop after sending), a success status arrived without a readable
   confirmation, or a stale `sending` row was found. It is never downgraded to
-  `failed`, and never resent automatically, except for Matrix within one hour
-  of the first attempt, because its transaction id makes the retry idempotent.
+  `failed`, and never resent automatically. A Matrix retry reuses a transaction
+  id per part, so an explicit retry after an ambiguous send is usually
+  idempotent.
 
 Failed rows wait 5 minutes, then double the delay up to 6 hours, and stay
 `failed` after 10 attempts. Authentication failures (SMTP 535 and Graph
@@ -267,16 +270,21 @@ Newer `sending` rows belong to a live run and are left alone.
 
 A channel sends at most 10 messages per run and the whole delivery step has a
 60-second budget. Leftovers stay `pending` for the next run; a group whose
-budget ran out before its first message stays pending. The budget also bounds
-each HTTP response body read, so a slow provider cannot hold the run open. One
-channel failing never blocks the others. `watch run` exits 3 when a delivery
+budget ran out before its first message stays pending and does not count an
+attempt. The budget also bounds each HTTP response body read, and the SMTP
+connection is checked between phases. A provider that keeps sending headers one
+byte at a time, or keeps an SMTP phase alive below the socket timeout, can still
+hold the run open longer than the budget; each operation has its own timeout.
+One channel failing never blocks the others. `watch run` exits 3 when a delivery
 failed or became ambiguous in that run, before the usual source-failure exit
 code 4. A source failure still delivers rows that were already pending.
 
 `watch status` prints pending, failed (with the number that reached the attempt
 cap), ambiguous, stuck `sending`, and the last success time for each channel.
 `watch run` prints a delivery line per channel, for example
-`soc (smtp): 1 message, 4 events sent`, using that channel's own counts.
+`soc (smtp): 1 message, 4 events sent`, using that channel's own counts. When
+failed rows have reached the attempt cap, the line adds
+`; N given up (run cvebeacon watch notify --retry-failed)`.
 
 ## Messages
 
@@ -316,23 +324,32 @@ highest CVSS, then EPSS. A run message has a title such as
 `CVEBeacon: [KEV ADDED] CVE-2026-1234`.
 
 Initial events (`initial = 1`) are never sent one by one. They become one digest
-per channel:
+per channel per run. The digest covers every selected initial row, whatever its
+prior status: pending rows, due failed rows, and ambiguous rows when
+`--retry-ambiguous` is used.
 
 ```text
-CVEBeacon initial summary: 12 matches across 3 rules since 2026-10-27
+CVEBeacon initial summary: 12 CVEs across 3 rules since 2026-10-27
 
-critical-or-likely: 8 match, 1 KEV added
-kev-watch: 4 match
+critical-or-likely: 8 matches, 1 KEV added
+kev-watch: 4 matches
 
 [NEW] CVE-2026-1234 · …
 …
-
-Run `cvebeacon watch events --rule critical-or-likely` to list all.
+and 8 more. Run `cvebeacon watch events` to list all.
 ```
 
-The digest counts every initial pending row, even beyond 1,000. It lists the
-top `max_items` CVEs and reports the rest as "and N more". A one-item digest
-uses "1 match across 1 rule".
+The subject counts distinct CVEs. The per-rule lines and the overall digest
+total count events, so one CVE matched by two rules appears in both rules. The
+digest counts every selected initial row, even beyond 1,000, without loading the
+backlog: counts come from SQL and only the top `max_items` rows are rendered. It
+lists those rows and reports the rest as "and N more" (distinct CVEs). A one-item
+digest uses "1 CVE across 1 rule". The list-all hint quotes a rule name that
+contains spaces. The SQL sample uses the same KEV, exploitation, CVSS and EPSS
+order as the messages; the selected rows are sorted exactly before rendering.
+
+A generic webhook receives initial events as JSON documents of at most 1,000
+events each. Each document is one delivery attempt for exactly its rows.
 
 Provider limits are respected by splitting at line boundaries into numbered
 parts: Telegram 4,096 characters, Discord 2,000, Slack 3,800, Matrix 30,000,
@@ -382,7 +399,8 @@ The generic webhook receives a stable JSON document:
 }
 ```
 
-`kev`, `epss`, and `links.euvd` are `null` when the value is absent. The order
+`view.kev.cisa` and `view.kev.eu` are `null` when the CVE is not in that
+catalog. `epss` and `links.euvd` are `null` when the value is absent. The order
 is the same as the text messages. A test message adds `"test": true` and
 `"message"` and has an empty `events` list.
 
@@ -614,8 +632,8 @@ re-reads that window once. P1a stored EUVD items without vendor names, and that
 re-read gives pre-upgrade items their names. In `full` mode
 `initial_window_start` is 1999-01-01, so this re-reads the whole EUVD history
 once. The version 2 upgrade keeps delivery rows and adds the `sending` and
-`ambiguous` states. The version 3 upgrade adds `first_attempt_at`, which bounds
-the Matrix automatic retry. After the upgrade, run
+`ambiguous` states. The version 3 upgrade adds `first_attempt_at`, which records
+when a row was first claimed. After the upgrade, run
 `cvebeacon watch evaluate --all --yes`
 BEFORE the first `watch run`, as after adding a rule. Otherwise every CVE from
 the initial window alerts one by one as NVD touches it. Schema 2 databases

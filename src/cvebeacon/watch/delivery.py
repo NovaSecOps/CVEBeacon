@@ -8,7 +8,7 @@ import smtplib
 import ssl
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -28,7 +28,6 @@ from .messages import (
 )
 from .records import DeliveryEvent
 from .store import (
-    DELIVERY_AMBIGUOUS_RETRY_SECONDS,
     DeliveryStatusRow,
     WatchStore,
 )
@@ -36,6 +35,7 @@ from .store import (
 DELIVERY_BUDGET_SECONDS = 60.0
 MAX_MESSAGES_PER_CHANNEL = 10
 AUTH_MAX_ATTEMPTS = 3
+INITIAL_WEBHOOK_CHUNK = 1000
 TEST_MESSAGE = "CVEBeacon test message — no action needed"
 
 
@@ -69,6 +69,7 @@ class ChannelSummary:
     failed: int = 0
     ambiguous: int = 0
     ambiguous_total: int = 0
+    given_up: int = 0
     error: str | None = None
     skipped: bool = False
 
@@ -108,6 +109,11 @@ def format_channel_line(summary: ChannelSummary) -> str:
     ambiguous = summary.ambiguous_total or summary.ambiguous
     if ambiguous:
         line += f"; {ambiguous} ambiguous"
+    if summary.given_up:
+        line += (
+            f"; {summary.given_up} given up "
+            "(run cvebeacon watch notify --retry-failed)"
+        )
     if summary.error:
         line += f"; {summary.error}"
     return line
@@ -141,6 +147,9 @@ def _http_call(
         httpx.UnsupportedProtocol,
     ):
         raise DeliveryFailure("connection failed") from None
+    except (httpx.LocalProtocolError, httpx.InvalidURL):
+        # Raised while building the request, before anything leaves the host.
+        raise DeliveryFailure("invalid request") from None
     except (httpx.TimeoutException, httpx.TransportError):
         raise DeliveryFailure("connection interrupted", ambiguous=True) from None
     except ValueError:
@@ -406,36 +415,95 @@ def _email_message(
     return email
 
 
+class _SmtpDeadline(Exception):
+    """The delivery deadline expired between SMTP phases."""
+
+
+class _TrackedSMTP(smtplib.SMTP):
+    data_sent = False
+
+    def data(self, msg):
+        self.data_sent = True
+        return super().data(msg)
+
+
+class _TrackedSMTP_SSL(smtplib.SMTP_SSL):
+    data_sent = False
+
+    def data(self, msg):
+        self.data_sent = True
+        return super().data(msg)
+
+
 def _smtp_client(channel: ChannelConfig, timeout: float):
     security = str(channel.options["security"])
     context = ssl.create_default_context()
     host = str(channel.options["host"])
     port = int(channel.options["port"])
     if security == "tls":
-        return smtplib.SMTP_SSL(host, port, timeout=timeout, context=context)
-    return smtplib.SMTP(host, port, timeout=timeout)
+        return _TrackedSMTP_SSL(host, port, timeout=timeout, context=context)
+    return _TrackedSMTP(host, port, timeout=timeout)
 
 
 def _send_smtp(
-    channel: ChannelConfig, message: OutgoingMessage, timeout: float
+    channel: ChannelConfig,
+    message: OutgoingMessage,
+    timeout: float,
+    *,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] | None = None,
 ) -> None:
+    if monotonic is None:
+        monotonic = time.monotonic
+
+    def remaining() -> float:
+        if deadline is None:
+            return timeout
+        return deadline - monotonic()
+
+    def phase_timeout() -> float:
+        left = remaining()
+        if deadline is not None and left <= 0:
+            raise _SmtpDeadline
+        return max(0.01, min(timeout, left))
+
+    def set_phase_timeout() -> None:
+        sock = getattr(client, "sock", None)
+        if sock is not None:
+            sock.settimeout(phase_timeout())
+
     security = str(channel.options["security"])
     try:
-        client = _smtp_client(channel, timeout)
+        client = _smtp_client(channel, phase_timeout())
+    except _SmtpDeadline:
+        raise DeliveryFailure("delivery budget exhausted") from None
     except ssl.SSLCertVerificationError:
         raise DeliveryFailure("SMTP certificate verification failed") from None
     except (OSError, ssl.SSLError, smtplib.SMTPException):
         raise DeliveryFailure("SMTP connection failed") from None
     try:
         try:
+            set_phase_timeout()
             client.ehlo()
             if security == "starttls":
-                client.starttls(context=ssl.create_default_context())
+                try:
+                    set_phase_timeout()
+                    client.starttls(context=ssl.create_default_context())
+                except smtplib.SMTPNotSupportedError:
+                    raise DeliveryFailure(
+                        "server does not offer STARTTLS"
+                    ) from None
+                set_phase_timeout()
                 client.ehlo()
             username = channel.options.get("username")
             if username:
                 password = _secret(channel, "password")
+                set_phase_timeout()
                 client.login(str(username), password)
+        except _SmtpDeadline:
+            raise DeliveryFailure("delivery budget exhausted") from None
+        except DeliveryFailure:
+            raise
         except smtplib.SMTPAuthenticationError:
             raise DeliveryFailure(
                 "SMTP authentication failed", attempts_limit=AUTH_MAX_ATTEMPTS
@@ -450,29 +518,33 @@ def _send_smtp(
             *(channel.options.get("bcc") or ()),
         ]
         try:
+            set_phase_timeout()
             refused = client.send_message(
                 _email_message(channel, message), to_addrs=recipients
             )
+        except _SmtpDeadline:
+            raise DeliveryFailure("delivery budget exhausted") from None
         except ssl.SSLCertVerificationError:
             raise DeliveryFailure("SMTP certificate verification failed") from None
         except (
             smtplib.SMTPRecipientsRefused,
             smtplib.SMTPSenderRefused,
-            smtplib.SMTPDataError,
-            smtplib.SMTPNotSupportedError,
             smtplib.SMTPHeloError,
         ):
             raise DeliveryFailure("SMTP rejected the message") from None
         except (OSError, ssl.SSLError, smtplib.SMTPException, TimeoutError):
-            raise DeliveryFailure("SMTP outcome unknown", ambiguous=True) from None
+            if client.data_sent:
+                raise DeliveryFailure("SMTP outcome unknown", ambiguous=True) from None
+            raise DeliveryFailure("SMTP session failed") from None
         if refused:
             raise DeliveryFailure(
                 "SMTP refused some recipients", ambiguous=True
             )
     finally:
         try:
+            set_phase_timeout()
             client.quit()
-        except (OSError, smtplib.SMTPException):
+        except (_SmtpDeadline, OSError, smtplib.SMTPException):
             try:
                 client.close()
             except OSError:
@@ -561,6 +633,9 @@ def _send(
     http: HttpClient,
     timeout: float,
     names: Mapping[str, str],
+    *,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] | None = None,
 ) -> None:
     if channel.type in {"teams", "slack", "discord"}:
         _send_webhook_channel(channel, message, http, timeout)
@@ -577,7 +652,13 @@ def _send(
     elif channel.type == "graph":
         _send_graph(channel, message, http, timeout)
     elif channel.type == "smtp":
-        _send_smtp(channel, message, timeout)
+        _send_smtp(
+            channel,
+            message,
+            timeout,
+            deadline=deadline,
+            monotonic=monotonic,
+        )
     else:
         raise DeliveryFailure("unsupported channel type")
 
@@ -673,45 +754,7 @@ def deliver_pending(
         if retry_failed:
             store.reset_failed(channel.name)
         now = clock()
-        include_ambiguous = retry_ambiguous or channel.type == "matrix"
-        ambiguous_after = None
-        if channel.type == "matrix" and not retry_ambiguous:
-            # The homeserver remembers a transaction id for a limited time, so
-            # an automatic retry is safe only for a recent attempt.
-            ambiguous_after = now - timedelta(
-                seconds=DELIVERY_AMBIGUOUS_RETRY_SECONDS
-            )
-        events = store.delivery_events(
-            channel.name,
-            catalogs=config.watch.sources,
-            now=now,
-            include_ambiguous=include_ambiguous,
-            ambiguous_after=ambiguous_after,
-        )
-        current_status = _channel_status(store, channel.name)
-        if not events:
-            summaries.append(
-                ChannelSummary(
-                    channel.name,
-                    channel.type,
-                    ambiguous_total=current_status.ambiguous,
-                )
-            )
-            continue
-        batches: list[tuple[DeliveryEvent, ...]] = []
-        if include_ambiguous:
-            ambiguous_events = tuple(
-                event for event in events if event.status == "ambiguous"
-            )
-            other_events = tuple(
-                event for event in events if event.status != "ambiguous"
-            )
-            if ambiguous_events:
-                batches.append(ambiguous_events)
-            if other_events:
-                batches.append(other_events)
-        else:
-            batches.append(tuple(events))
+        include_ambiguous = retry_ambiguous
         messages_sent = 0
         events_sent = 0
         failed = 0
@@ -720,110 +763,304 @@ def deliver_pending(
         pace_needed = False
         stop_channel = False
         interval = channel.min_interval_seconds
-        for batch in batches:
-            index = _event_index(batch)
-            claim_statuses = (
-                ("ambiguous",) if batch and batch[0].status == "ambiguous"
-                else ("pending", "failed")
-            )
-            for group in _group_messages(
-                _channel_messages(channel, batch, names=names, since=since)
-            ):
-                if stop_channel or messages_sent >= MAX_MESSAGES_PER_CHANNEL:
-                    stop_channel = True
+
+        def send_messages(
+            messages: Sequence[OutgoingMessage],
+            covered: Sequence[DeliveryEvent],
+            sent: int,
+            pace: bool,
+        ) -> tuple[int, int, DeliveryFailure | None, bool, bool]:
+            delivered = 0
+            failure: DeliveryFailure | None = None
+            expired = False
+            for message in messages:
+                if sent >= MAX_MESSAGES_PER_CHANNEL:
                     break
-                if messages_sent + len(group) > MAX_MESSAGES_PER_CHANNEL:
-                    break
-                if monotonic() >= deadline:
-                    break
-                if pace_needed and interval > 0:
+                if delivered and pace and interval > 0:
                     remaining = deadline - monotonic()
                     if interval > remaining:
-                        stop_channel = True
+                        failure = DeliveryFailure(
+                            "delivery budget exhausted", ambiguous=True
+                        )
                         break
                     sleep(interval)
                     if monotonic() >= deadline:
-                        stop_channel = True
+                        failure = DeliveryFailure(
+                            "delivery budget exhausted", ambiguous=True
+                        )
                         break
-                event_ids = group[0].event_ids
-                covered = [index[value] for value in event_ids if value in index]
-                if not covered:
-                    continue
-                if not store.claim_delivery(
-                    event_ids, channel.name, statuses=claim_statuses
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    if delivered == 0:
+                        expired = True
+                    else:
+                        failure = DeliveryFailure(
+                            "delivery budget exhausted", ambiguous=True
+                        )
+                    break
+                timeout = max(0.5, min(channel.timeout_seconds, remaining))
+                try:
+                    _send(
+                        channel,
+                        message,
+                        covered,
+                        http,
+                        timeout,
+                        names,
+                        deadline=deadline,
+                        monotonic=monotonic,
+                    )
+                except DeliveryFailure as exc:
+                    failure = exc
+                    if delivered:
+                        failure = DeliveryFailure(
+                            exc.category,
+                            ambiguous=True,
+                            attempts_limit=exc.attempts_limit,
+                        )
+                    break
+                except ConfigurationError as exc:
+                    failure = DeliveryFailure(str(exc))
+                    break
+                except Exception:
+                    failure = DeliveryFailure(
+                        "unexpected delivery failure",
+                        ambiguous=delivered > 0,
+                    )
+                    break
+                delivered += 1
+                sent += 1
+                pace = True
+            return delivered, sent, failure, expired, pace
+
+        if monotonic() < deadline:
+            if channel.type == "webhook":
+                # Initial events are JSON documents of at most 1,000 rows.
+                while (
+                    not stop_channel
+                    and messages_sent < MAX_MESSAGES_PER_CHANNEL
                 ):
-                    # Another run owns these rows.
-                    continue
-                delivered = 0
-                failure: DeliveryFailure | None = None
-                for message in group:
-                    if delivered and pace_needed and interval > 0:
+                    if messages_sent and pace_needed and interval > 0:
                         remaining = deadline - monotonic()
                         if interval > remaining:
-                            failure = DeliveryFailure(
-                                "delivery budget exhausted", ambiguous=delivered > 0
-                            )
+                            stop_channel = True
                             break
                         sleep(interval)
+                        if monotonic() >= deadline:
+                            stop_channel = True
+                            break
+                    if monotonic() >= deadline:
+                        stop_channel = True
+                        break
+                    chunk = store.claim_initial_chunk(
+                        channel.name,
+                        catalogs=config.watch.sources,
+                        now=now,
+                        include_ambiguous=include_ambiguous,
+                        limit=INITIAL_WEBHOOK_CHUNK,
+                    )
+                    if not chunk:
+                        break
                     remaining = deadline - monotonic()
                     if remaining <= 0:
-                        failure = DeliveryFailure(
-                            "delivery budget exhausted", ambiguous=delivered > 0
-                        )
+                        store.release_initial(channel.name)
+                        stop_channel = True
                         break
                     timeout = max(0.5, min(channel.timeout_seconds, remaining))
+                    failure: DeliveryFailure | None = None
                     try:
-                        _send(channel, message, covered, http, timeout, names)
+                        _send_webhook(channel, chunk, http, timeout, names)
                     except DeliveryFailure as exc:
                         failure = exc
-                        if delivered:
-                            failure = DeliveryFailure(
-                                exc.category,
-                                ambiguous=True,
-                                attempts_limit=exc.attempts_limit,
-                            )
-                        break
                     except ConfigurationError as exc:
                         failure = DeliveryFailure(str(exc))
-                        break
                     except Exception:
-                        failure = DeliveryFailure(
-                            "unexpected delivery failure",
-                            ambiguous=delivered > 0,
+                        failure = DeliveryFailure("unexpected delivery failure")
+                    if failure is not None:
+                        store.mark_initial_failed(
+                            channel.name,
+                            error=failure.category,
+                            attempts_limit=failure.attempts_limit,
+                            ambiguous=failure.ambiguous,
                         )
+                        prior_ambiguous = sum(
+                            event.status == "ambiguous" for event in chunk
+                        )
+                        if failure.ambiguous:
+                            ambiguous += len(chunk)
+                        else:
+                            ambiguous += prior_ambiguous
+                            failed += len(chunk) - prior_ambiguous
+                        error = failure.category
+                        stop_channel = True
                         break
-                    delivered += 1
+                    store.mark_initial_sent(channel.name)
                     messages_sent += 1
+                    events_sent += len(chunk)
                     pace_needed = True
-                if failure is not None:
-                    # A row that was ambiguous before this attempt may already
-                    # have been delivered; a later failure cannot clear that.
-                    was_ambiguous = any(
-                        event.status == "ambiguous" for event in covered
+            else:
+                digest = store.claim_initial_digest(
+                    channel.name,
+                    catalogs=config.watch.sources,
+                    now=now,
+                    max_items=channel.max_items,
+                    include_ambiguous=include_ambiguous,
+                )
+                if digest is not None:
+                    initial_messages = build_messages(
+                        (),
+                        channel_type=channel.type,
+                        grouping=channel.grouping,
+                        max_items=channel.max_items,
+                        names=names,
+                        since=since,
+                        initial=digest,
                     )
-                    if failure.ambiguous or delivered or was_ambiguous:
-                        store.mark_delivery(
-                            event_ids,
-                            channel.name,
-                            "ambiguous",
-                            error=failure.category,
-                            attempts_limit=failure.attempts_limit,
-                        )
-                        ambiguous += len(event_ids)
+                    if len(initial_messages) > MAX_MESSAGES_PER_CHANNEL:
+                        store.release_initial(channel.name)
+                        stop_channel = True
                     else:
-                        store.mark_delivery(
+                        (
+                            delivered,
+                            messages_sent,
+                            failure,
+                            expired,
+                            pace_needed,
+                        ) = send_messages(
+                            initial_messages,
+                            digest.events,
+                            messages_sent,
+                            pace_needed,
+                        )
+                        if expired:
+                            store.release_initial(channel.name)
+                            stop_channel = True
+                        elif failure is not None:
+                            store.mark_initial_failed(
+                                channel.name,
+                                error=failure.category,
+                                attempts_limit=failure.attempts_limit,
+                                ambiguous=failure.ambiguous,
+                            )
+                            if failure.ambiguous:
+                                ambiguous += digest.total
+                            else:
+                                ambiguous += digest.ambiguous
+                                failed += digest.total - digest.ambiguous
+                            error = failure.category
+                            stop_channel = True
+                        elif delivered == len(initial_messages):
+                            store.mark_initial_sent(channel.name)
+                            events_sent += digest.total
+                        else:
+                            store.release_initial(channel.name)
+                            stop_channel = True
+
+        if not stop_channel and monotonic() < deadline:
+            events = store.delivery_events(
+                channel.name,
+                catalogs=config.watch.sources,
+                now=now,
+                include_ambiguous=include_ambiguous,
+            )
+            batches: list[tuple[DeliveryEvent, ...]] = []
+            if include_ambiguous:
+                ambiguous_events = tuple(
+                    event for event in events if event.status == "ambiguous"
+                )
+                other_events = tuple(
+                    event for event in events if event.status != "ambiguous"
+                )
+                if ambiguous_events:
+                    batches.append(ambiguous_events)
+                if other_events:
+                    batches.append(other_events)
+            else:
+                batches.append(tuple(events))
+            for batch in batches:
+                index = _event_index(batch)
+                claim_statuses = (
+                    ("ambiguous",)
+                    if batch and batch[0].status == "ambiguous"
+                    else ("pending", "failed")
+                )
+                for group in _group_messages(
+                    _channel_messages(channel, batch, names=names, since=since)
+                ):
+                    if stop_channel or messages_sent >= MAX_MESSAGES_PER_CHANNEL:
+                        stop_channel = True
+                        break
+                    if messages_sent + len(group) > MAX_MESSAGES_PER_CHANNEL:
+                        break
+                    if monotonic() >= deadline:
+                        break
+                    if pace_needed and interval > 0:
+                        remaining = deadline - monotonic()
+                        if interval > remaining:
+                            stop_channel = True
+                            break
+                        sleep(interval)
+                        if monotonic() >= deadline:
+                            stop_channel = True
+                            break
+                    event_ids = group[0].event_ids
+                    covered = [index[value] for value in event_ids if value in index]
+                    if not covered:
+                        continue
+                    if not store.claim_delivery(
+                        event_ids, channel.name, statuses=claim_statuses
+                    ):
+                        # Another run owns these rows.
+                        continue
+                    (
+                        delivered,
+                        messages_sent,
+                        failure,
+                        expired,
+                        pace_needed,
+                    ) = send_messages(
+                        group, covered, messages_sent, pace_needed
+                    )
+                    if expired:
+                        # Nothing left this run: undo the claim without an
+                        # attempt or a failure.
+                        store.release_delivery(
                             event_ids,
                             channel.name,
-                            "failed",
-                            error=failure.category,
-                            attempts_limit=failure.attempts_limit,
+                            status=claim_statuses[0],
                         )
-                        failed += len(event_ids)
-                    error = failure.category
-                    stop_channel = True
-                    break
-                store.mark_delivery(event_ids, channel.name, "sent")
-                events_sent += len(event_ids)
+                        stop_channel = True
+                        break
+                    if failure is not None:
+                        # A row that was ambiguous before this attempt may
+                        # already have been delivered; a later failure cannot
+                        # clear that.
+                        was_ambiguous = any(
+                            event.status == "ambiguous" for event in covered
+                        )
+                        if failure.ambiguous or delivered or was_ambiguous:
+                            store.mark_delivery(
+                                event_ids,
+                                channel.name,
+                                "ambiguous",
+                                error=failure.category,
+                                attempts_limit=failure.attempts_limit,
+                            )
+                            ambiguous += len(event_ids)
+                        else:
+                            store.mark_delivery(
+                                event_ids,
+                                channel.name,
+                                "failed",
+                                error=failure.category,
+                                attempts_limit=failure.attempts_limit,
+                            )
+                            failed += len(event_ids)
+                        error = failure.category
+                        stop_channel = True
+                        break
+                    store.mark_delivery(event_ids, channel.name, "sent")
+                    events_sent += len(event_ids)
         final_status = _channel_status(store, channel.name)
         summaries.append(
             ChannelSummary(
@@ -834,6 +1071,7 @@ def deliver_pending(
                 failed=failed,
                 ambiguous=ambiguous,
                 ambiguous_total=final_status.ambiguous,
+                given_up=final_status.given_up,
                 error=error,
             )
         )

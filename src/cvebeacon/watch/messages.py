@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
-from .records import CVSSEntry, DeliveryEvent, WatchView
+from .records import CVSSEntry, DeliveryEvent, InitialDigest, WatchView
 from .rules import EVENT_KINDS, Rule
 
 NVD_URL = "https://nvd.nist.gov/vuln/detail/{cve_id}"
@@ -221,8 +221,11 @@ def _kind_label(event: DeliveryEvent, style: str) -> str:
         return "[SEVERITY UP]"
     if kind == "epss_increase":
         previous = event.details.get("previous_epss")
-        if isinstance(previous, (int, float)) and event.view.epss is not None:
-            return f"[EPSS UP {float(previous):.2f}->{event.view.epss:.2f}]"
+        current = event.details.get("epss")
+        if not isinstance(current, (int, float)):
+            current = event.view.epss
+        if isinstance(previous, (int, float)) and isinstance(current, (int, float)):
+            return f"[EPSS UP {float(previous):.2f}->{float(current):.2f}]"
         transition = _reason_transition(event.reasons, "epss")
         if transition is not None:
             return f"[EPSS UP {transition[0]}->{transition[1]}]"
@@ -280,7 +283,7 @@ def _event_lines(
     if event.kind == "kev_added" and event.view.cisa_kev_added is not None:
         extras: list[str] = []
         if event.view.cisa_kev_due:
-            extras.append(f"Due {_clean(event.view.cisa_kev_due, 40)}")
+            extras.append(f"Due {_dynamic(event.view.cisa_kev_due, style, 40)}")
         if event.view.cisa_required_action:
             extras.append(
                 _dynamic(event.view.cisa_required_action, style, KEV_ACTION_LIMIT)
@@ -463,6 +466,12 @@ def _event_body(
             max_items = max(0, min(max_items, len(shown)) - 1)
 
 
+def _kind_count_name(kind: str, count: int) -> str:
+    if kind == "match":
+        return "match" if count == 1 else "matches"
+    return KIND_NAMES[kind]
+
+
 def _initial_body(
     events: Sequence[DeliveryEvent],
     *,
@@ -472,40 +481,54 @@ def _initial_body(
     max_items: int,
     since: str | None,
     byte_limit: bool = False,
+    counts: Sequence[tuple[str, str, int]] | None = None,
+    total_cves: int | None = None,
 ) -> str:
     ordered = sort_events(events)
     groups = _group_events(ordered, style)
+    totals: dict[str, Counter[str]] = {}
+    if counts is None:
+        for event in ordered:
+            totals.setdefault(event.rule, Counter())[event.kind] += 1
+    else:
+        for rule, kind, count in counts:
+            totals.setdefault(rule, Counter())[kind] += count
+    cves = total_cves if total_cves is not None else len({event.cve_id for event in ordered})
     while True:
         shown = groups[:max_items]
-        counts: dict[str, Counter[str]] = {}
-        for event in ordered:
-            counts.setdefault(event.rule, Counter())[event.kind] += 1
         lines: list[str] = []
-        for rule in sorted(counts):
+        for rule in sorted(totals):
             parts = [
-                f"{count} {KIND_NAMES[kind]}"
+                f"{count} {_kind_count_name(kind, count)}"
                 for kind in EVENT_KINDS
-                if (count := counts[rule].get(kind, 0))
+                if (count := totals[rule].get(kind, 0))
             ]
             lines.append(f"{_display_name_for(rule, names)}: " + ", ".join(parts))
         lines.append("")
         for group in shown:
             lines.extend(_event_lines(group, style, names))
-        omitted = len(groups) - len(shown)
+        shown_cves = len({event.cve_id for group in shown for event in group})
+        omitted = max(0, cves - shown_cves)
         if omitted:
             lines.append(
                 f"and {omitted} more. "
                 "Run `cvebeacon watch events` to list all."
             )
-        rule_names = sorted({_display_name(event, names) for event in ordered})
-        lines.append("")
-        if rule_names:
-            example = _dynamic(rule_names[0], style, 80)
-            lines.append(
-                f"Run `cvebeacon watch events --rule {example}` to list all."
-            )
         else:
-            lines.append("Run `cvebeacon watch events` to list all.")
+            rule_names = sorted(
+                {_display_name_for(rule, names) for rule in totals}
+            )
+            lines.append("")
+            if rule_names:
+                example = rule_names[0]
+                if any(character.isspace() for character in example):
+                    example = f'"{example}"'
+                lines.append(
+                    "Run `cvebeacon watch events --rule "
+                    f"{_dynamic(example, style, 80)}` to list all."
+                )
+            else:
+                lines.append("Run `cvebeacon watch events` to list all.")
         body = "\n".join(lines)
         if (
             len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS
@@ -519,16 +542,12 @@ def _display_name_for(folded: str, names: Mapping[str, str]) -> str:
     return names.get(folded, folded)
 
 
-def _initial_subject(
-    events: Sequence[DeliveryEvent], names: Mapping[str, str], since: str | None
-) -> str:
-    matches = sum(event.kind == "match" for event in events)
-    rules = len({event.rule for event in events})
+def _initial_subject(cves: int, rules: int, since: str | None) -> str:
     suffix = f" since {since}" if since else ""
-    match_word = "match" if matches == 1 else "matches"
+    cve_word = "CVE" if cves == 1 else "CVEs"
     rule_word = "rule" if rules == 1 else "rules"
     return (
-        f"CVEBeacon initial summary: {matches} {match_word} across {rules} "
+        f"CVEBeacon initial summary: {cves} {cve_word} across {rules} "
         f"{rule_word}{suffix}"
     )
 
@@ -541,6 +560,7 @@ def build_messages(
     max_items: int,
     names: Mapping[str, str],
     since: str | None = None,
+    initial: InitialDigest | None = None,
 ) -> tuple[OutgoingMessage, ...]:
     """Build the messages one channel should send for the selected events."""
     style = style_for(channel_type)
@@ -550,19 +570,39 @@ def build_messages(
     title_in_body = chat and channel_type not in {"ntfy", "gotify"}
     body_limit = limit - 300 if chat else limit
     ordered = sort_events(events)
-    initial = tuple(event for event in ordered if event.initial)
     normal = tuple(event for event in ordered if not event.initial)
+    if initial is None:
+        selected = tuple(event for event in ordered if event.initial)
+        if selected:
+            counter: dict[str, Counter[str]] = {}
+            for event in selected:
+                counter.setdefault(event.rule, Counter())[event.kind] += 1
+            initial = InitialDigest(
+                selected,
+                tuple(
+                    sorted(
+                        (rule, kind, count)
+                        for rule, counts in counter.items()
+                        for kind, count in counts.items()
+                    )
+                ),
+                len({event.cve_id for event in selected}),
+                len(selected),
+            )
     output: list[OutgoingMessage] = []
-    if initial:
-        subject = _initial_subject(initial, names, since)
+    if initial is not None and initial.total:
+        rules = len({rule for rule, _, _ in initial.counts})
+        subject = _initial_subject(initial.cves, rules, since)
         body = _initial_body(
-            initial,
+            initial.events,
             style=style,
             names=names,
             limit=body_limit,
             max_items=max_items,
             since=since,
             byte_limit=byte_limit,
+            counts=initial.counts,
+            total_cves=initial.cves,
         )
         parts = _partials(
             subject,
@@ -576,7 +616,7 @@ def build_messages(
         for index, part in enumerate(parts[:MAX_PARTS]):
             output.append(
                 OutgoingMessage(
-                    tuple(event.event_id for event in initial),
+                    tuple(event.event_id for event in initial.events),
                     subject,
                     part,
                     body,

@@ -232,7 +232,7 @@ def test_initial_events_become_one_digest():
     assert len(messages) == 1
     message = messages[0]
     assert message.initial is True
-    assert message.subject == "CVEBeacon initial summary: 2 matches across 2 rules since 2026-10-27"
+    assert message.subject == "CVEBeacon initial summary: 3 CVEs across 2 rules since 2026-10-27"
     assert "first: 1 match" in message.text
     assert "second: 1 match, 1 KEV added" in message.text
     assert "Run `cvebeacon watch events --rule first` to list all." in message.text
@@ -485,7 +485,7 @@ def test_byte_limits_are_counted_in_utf8_bytes():
     assert all(len(part.encode("utf-8")) <= 300 for part in parts)
 
 
-def test_initial_subject_pluralises_matches_and_rules():
+def test_initial_subject_counts_cves_and_pluralises_rules():
     item = event("match", initial=True, rule="only")
     message = build_messages(
         (item,),
@@ -496,7 +496,7 @@ def test_initial_subject_pluralises_matches_and_rules():
         since="2026-10-27",
     )[0]
     assert message.subject == (
-        "CVEBeacon initial summary: 1 match across 1 rule since 2026-10-27"
+        "CVEBeacon initial summary: 1 CVE across 1 rule since 2026-10-27"
     )
 
 
@@ -530,3 +530,82 @@ def test_webhook_document_links_the_kev_catalog():
         payload["events"][0]["view"]["links"]["kev"]
         == "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
     )
+
+
+def test_epss_label_uses_the_event_time_score():
+    item = event(
+        "epss_increase",
+        details={"previous_epss": 0.08, "epss": 0.61},
+        reasons=("epss <0.5 -> <1.0",),
+        current=view(epss=0.70),
+    )
+    text = body_for(item)
+    assert "[EPSS UP 0.08->0.61]" in text
+
+
+def test_initial_per_rule_counts_pluralise_matches():
+    events = tuple(
+        event(
+            "match",
+            cve_id=f"CVE-2026-{index:04d}",
+            event_id=index,
+            initial=True,
+            rule="alpha",
+        )
+        for index in range(1, 5)
+    )
+    text = build_messages(
+        events,
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={"alpha": "alpha"},
+    )[0].text
+    assert "alpha: 4 matches" in text
+
+
+def test_initial_hint_quotes_a_rule_name_with_spaces():
+    item = event("match", initial=True, rule="kev watch")
+    text = build_messages(
+        (item,),
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={"kev watch": "KEV Watch"},
+    )[0].text
+    assert (
+        'Run `cvebeacon watch events --rule "KEV Watch"` to list all.'
+        in text
+    )
+
+
+def test_initial_and_more_does_not_repeat_the_list_all_hint():
+    events = tuple(
+        event(
+            "match",
+            cve_id=f"CVE-2026-{index:04d}",
+            event_id=index,
+            initial=True,
+        )
+        for index in range(1, 6)
+    )
+    text = build_messages(
+        events,
+        channel_type="slack",
+        grouping="run",
+        max_items=2,
+        names={"critical-or-likely": "critical-or-likely"},
+    )[0].text
+    assert "and 3 more" in text
+    assert text.count("to list all") == 1
+    assert "--rule" not in text
+
+
+def test_kev_due_is_escaped_like_other_dynamic_text():
+    item = event(
+        "kev_added",
+        reasons=("kev cisa false -> true",),
+        current=view(cisa_kev_added="2026-11-03", cisa_kev_due="2026-[11]-20"),
+    )
+    text = body_for(item, "teams")
+    assert "Due 2026-\\[11\\]-20" in text

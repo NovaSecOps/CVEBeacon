@@ -21,6 +21,7 @@ from .records import (
     CVSSEntry,
     DeliveryEvent,
     EUVDUpdate,
+    InitialDigest,
     KEVFields,
     Product,
     WatchRecord,
@@ -50,8 +51,20 @@ DELIVERY_RETRY_CAP_SECONDS = 6 * 3600
 DELIVERY_MAX_ATTEMPTS = 10
 DELIVERY_SELECT_LIMIT = 1000
 DELIVERY_RECOVERY_SECONDS = 600
-DELIVERY_AMBIGUOUS_RETRY_SECONDS = 3600
 DELIVERY_RETRY_FLOOR = "1970-01-01T00:00:00+00:00"
+# The claim uses ``last_error`` to remember that a row was ambiguous before
+# this attempt, so a bulk failure can keep it ambiguous without an id list.
+_INITIAL_AMBIGUOUS = "__ambiguous_before_retry__"
+_RETRY_SECONDS_SQL = (
+    "CASE WHEN d.attempts <= 1 THEN 300 "
+    "WHEN d.attempts = 2 THEN 600 "
+    "WHEN d.attempts = 3 THEN 1200 "
+    "WHEN d.attempts = 4 THEN 2400 "
+    "WHEN d.attempts = 5 THEN 4800 "
+    "WHEN d.attempts = 6 THEN 9600 "
+    "WHEN d.attempts = 7 THEN 19200 "
+    "ELSE 21600 END"
+)
 
 # Previous statuses from which each target is allowed. ``sent`` is final and an
 # ``ambiguous`` row may only become ``sent`` or stay ``ambiguous``. A claim goes
@@ -1384,6 +1397,108 @@ class WatchStore:
             )
             return cursor.rowcount
 
+    @staticmethod
+    def _initial_condition(
+        channel: str, include_ambiguous: bool, now: str
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Rows one initial digest may cover, including the retry backoff."""
+        return (
+            "d.channel=? AND e.initial=1 AND ("
+            "d.status='pending' OR "
+            "(d.status='failed' AND d.attempts < ? AND "
+            "julianday(d.updated_at) + (" + _RETRY_SECONDS_SQL + ")/86400.0 "
+            "<= julianday(?)) OR "
+            "(d.status='ambiguous' AND ?))",
+            (channel, DELIVERY_MAX_ATTEMPTS, now, 1 if include_ambiguous else 0),
+        )
+
+    @staticmethod
+    def _initial_order(catalogs: Sequence[str]) -> tuple[str, str]:
+        """Order initial rows in SQL without building a view for each one.
+
+        This is a close approximation of ``messages.sort_events``. KEV entries
+        and active exploitation come first, then the highest CVSS score and
+        EPSS. The sampled rows are sorted exactly before rendering.
+        """
+        kev = []
+        if "cisa_kev" in catalogs:
+            kev.append(
+                "EXISTS (SELECT 1 FROM watch_kev k "
+                "WHERE k.catalog='cisa' AND k.cve_id=e.cve_id)"
+            )
+        else:
+            kev.append("c.cisa_kev_added IS NOT NULL")
+        if "eu_kev" in catalogs:
+            kev.append(
+                "EXISTS (SELECT 1 FROM watch_kev k "
+                "WHERE k.catalog='eu' AND k.cve_id=e.cve_id)"
+            )
+        exploitation = ["c.ssvc_exploitation='active'"]
+        if "euvd" in catalogs:
+            exploitation.append(
+                "EXISTS (SELECT 1 FROM watch_euvd_alias a "
+                "JOIN watch_euvd_item i ON i.euvd_id=a.euvd_id "
+                "WHERE a.cve_id=e.cve_id AND i.exploited_since IS NOT NULL)"
+            )
+        modern = (
+            "(SELECT MAX(CAST(json_extract(value,'$.score') AS REAL)) "
+            "FROM json_each(c.cvss_json) "
+            "WHERE json_extract(value,'$.version') <> '2.0')"
+        )
+        any_score = (
+            "(SELECT MAX(CAST(json_extract(value,'$.score') AS REAL)) "
+            "FROM json_each(c.cvss_json))"
+        )
+        cvss = f"COALESCE({modern}, {any_score}, -1)"
+        if "euvd" in catalogs:
+            euvd_score = (
+                "(SELECT MAX(i.score) FROM watch_euvd_alias a "
+                "JOIN watch_euvd_item i ON i.euvd_id=a.euvd_id "
+                "WHERE a.cve_id=e.cve_id)"
+            )
+            cvss = f"MAX({cvss}, COALESCE({euvd_score}, -1))"
+        join = ""
+        if "epss" in catalogs:
+            join = "LEFT JOIN watch_epss p ON p.cve_id=e.cve_id"
+            epss = "COALESCE(p.epss, -1)"
+        else:
+            epss = "(-1.0)"
+        order = (
+            f"CASE WHEN ({' OR '.join(kev)}) THEN 0 ELSE 1 END, "
+            f"CASE WHEN ({' OR '.join(exploitation)}) THEN 0 ELSE 1 END, "
+            f"{cvss} DESC, {epss} DESC, e.created_at, e.id"
+        )
+        return order, join
+
+    def _delivery_event(
+        self,
+        db: sqlite3.Connection,
+        row: Mapping[str, Any],
+        catalogs: Sequence[str],
+    ) -> DeliveryEvent | None:
+        view = self._view(db, row["cve_id"], catalogs)
+        if view is None:
+            return None
+        try:
+            reasons = tuple(str(item) for item in json.loads(row["reasons_json"]))
+            details = json.loads(row["details_json"] or "{}")
+        except (TypeError, ValueError) as exc:
+            raise StateError("watch database contains an invalid event") from exc
+        if not isinstance(details, dict):
+            raise StateError("watch database contains an invalid event")
+        return DeliveryEvent(
+            row["id"],
+            row["rule"],
+            row["cve_id"],
+            row["kind"],
+            reasons,
+            bool(row["initial"]),
+            row["created_at"],
+            view,
+            details,
+            str(row["status"]),
+        )
+
     def delivery_events(
         self,
         channel: str,
@@ -1391,50 +1506,37 @@ class WatchStore:
         catalogs: Sequence[str] = (),
         now: datetime | None = None,
         include_ambiguous: bool = False,
-        ambiguous_after: datetime | None = None,
         limit: int = DELIVERY_SELECT_LIMIT,
     ) -> tuple[DeliveryEvent, ...]:
-        """Return the deliveries one channel may send now, oldest first.
+        """Return non-initial deliveries one channel may send now, oldest first.
 
-        Initial rows are never capped: the counts of the initial digest must
-        cover the whole backlog. Non-initial rows keep the ``limit``.
+        Initial rows are handled by :meth:`claim_initial_digest` and
+        :meth:`claim_initial_chunk`, which keep the backlog out of memory.
         """
         if limit < 1:
             raise StateError("delivery batch size must be positive")
         self.initialize()
         current = _clock_value(lambda: now) if now is not None else _clock_value(self._clock)
-        after = ambiguous_after.isoformat() if ambiguous_after is not None else None
         base = (
             "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,e.details_json,"
             "e.initial,e.created_at,d.status,d.attempts,d.updated_at,d.first_attempt_at "
             "FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id "
-            "WHERE d.channel=? AND e.initial=? AND ("
+            "WHERE d.channel=? AND e.initial=0 AND ("
             "d.status='pending' OR "
             "(d.status='failed' AND d.attempts < ?) OR "
-            "(d.status='ambiguous' AND ? AND (? IS NULL OR d.first_attempt_at >= ?))) "
+            "(d.status='ambiguous' AND ?)) "
             "ORDER BY e.created_at, e.id"
         )
         with closing(self._connect()) as db:
-            found = list(
-                db.execute(
-                    base, (channel, 1, DELIVERY_MAX_ATTEMPTS, 1 if include_ambiguous else 0, after, after)
-                ).fetchall()
-            )
-            found.extend(
-                db.execute(
-                    base + " LIMIT ?",
-                    (
-                        channel,
-                        0,
-                        DELIVERY_MAX_ATTEMPTS,
-                        1 if include_ambiguous else 0,
-                        after,
-                        after,
-                        limit,
-                    ),
-                ).fetchall()
-            )
-            found.sort(key=lambda row: (row["created_at"], row["id"]))
+            found = db.execute(
+                base + " LIMIT ?",
+                (
+                    channel,
+                    DELIVERY_MAX_ATTEMPTS,
+                    1 if include_ambiguous else 0,
+                    limit,
+                ),
+            ).fetchall()
             output: list[DeliveryEvent] = []
             for row in found:
                 if row["status"] == "failed":
@@ -1442,35 +1544,247 @@ class WatchStore:
                     delay = self.delivery_retry_delay(int(row["attempts"]))
                     if updated is not None and updated + delay > current:
                         continue
-                view = self._view(db, row["cve_id"], catalogs)
-                if view is None:
-                    continue
-                try:
-                    reasons = tuple(
-                        str(item) for item in json.loads(row["reasons_json"])
-                    )
-                    details = json.loads(row["details_json"] or "{}")
-                except (TypeError, ValueError) as exc:
-                    raise StateError(
-                        "watch database contains an invalid event"
-                    ) from exc
-                if not isinstance(details, dict):
-                    raise StateError("watch database contains an invalid event")
-                output.append(
-                    DeliveryEvent(
-                        row["id"],
-                        row["rule"],
-                        row["cve_id"],
-                        row["kind"],
-                        reasons,
-                        bool(row["initial"]),
-                        row["created_at"],
-                        view,
-                        details,
-                        str(row["status"]),
-                    )
-                )
+                event = self._delivery_event(db, row, catalogs)
+                if event is not None:
+                    output.append(event)
         return tuple(output)
+
+    def claim_initial_digest(
+        self,
+        channel: str,
+        *,
+        catalogs: Sequence[str] = (),
+        now: datetime | None = None,
+        max_items: int,
+        include_ambiguous: bool = False,
+    ) -> InitialDigest | None:
+        """Count and claim every selected initial row, sampling only the top ones.
+
+        Counts come from SQL, and only ``max_items`` rows get a full view. The
+        whole selected set moves to ``sending`` in the same transaction, so no
+        event id list for the backlog is kept in Python.
+        """
+        if max_items < 1:
+            raise StateError("initial digest sample size must be positive")
+        self.initialize()
+        current = _clock_value(lambda: now) if now is not None else _clock_value(self._clock)
+        stamp = current.isoformat()
+        try:
+            with self.transaction() as db:
+                condition, parameters = self._initial_condition(
+                    channel, include_ambiguous, stamp
+                )
+                counts = db.execute(
+                    "SELECT e.rule,e.kind,COUNT(*) AS count,"
+                    "SUM(CASE WHEN d.status='ambiguous' THEN 1 ELSE 0 END) "
+                    "AS ambiguous FROM watch_event e "
+                    "JOIN watch_delivery d ON d.event_id=e.id "
+                    "WHERE " + condition + " GROUP BY e.rule,e.kind "
+                    "ORDER BY e.rule,e.kind",
+                    parameters,
+                ).fetchall()
+                total = sum(int(row["count"]) for row in counts)
+                if total == 0:
+                    return None
+                prior_ambiguous = sum(
+                    int(row["ambiguous"] or 0) for row in counts
+                )
+                cves = int(
+                    db.execute(
+                        "SELECT COUNT(DISTINCT e.cve_id) FROM watch_event e "
+                        "JOIN watch_delivery d ON d.event_id=e.id "
+                        "WHERE " + condition,
+                        parameters,
+                    ).fetchone()[0]
+                )
+                order, join = self._initial_order(catalogs)
+                sampled = db.execute(
+                    "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,"
+                    "e.details_json,e.initial,e.created_at,d.status,d.attempts "
+                    "FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id "
+                    "JOIN watch_cve c ON c.cve_id=e.cve_id " + join +
+                    " WHERE " + condition + " ORDER BY " + order + " LIMIT ?",
+                    (*parameters, max_items),
+                ).fetchall()
+                cursor = db.execute(
+                    "UPDATE watch_delivery SET status='sending', "
+                    "first_attempt_at=COALESCE(first_attempt_at, ?), updated_at=?, "
+                    "last_error=CASE WHEN status='ambiguous' THEN ? ELSE NULL END "
+                    "WHERE channel=? AND status IN ('pending','failed','ambiguous') "
+                    "AND event_id IN ("
+                    "SELECT e.id FROM watch_event e "
+                    "JOIN watch_delivery d ON d.event_id=e.id "
+                    "WHERE " + condition + ")",
+                    (stamp, stamp, _INITIAL_AMBIGUOUS, channel, *parameters),
+                )
+                if cursor.rowcount != total:
+                    raise _ClaimConflict
+                events = tuple(
+                    event
+                    for row in sampled
+                    if (event := self._delivery_event(db, row, catalogs))
+                    is not None
+                )
+                return InitialDigest(
+                    events,
+                    tuple(
+                        (row["rule"], row["kind"], int(row["count"]))
+                        for row in counts
+                    ),
+                    cves,
+                    total,
+                    prior_ambiguous,
+                )
+        except _ClaimConflict:
+            return None
+
+    def claim_initial_chunk(
+        self,
+        channel: str,
+        *,
+        catalogs: Sequence[str] = (),
+        now: datetime | None = None,
+        include_ambiguous: bool = False,
+        limit: int = DELIVERY_SELECT_LIMIT,
+    ) -> tuple[DeliveryEvent, ...]:
+        """Claim and return one bounded chunk of initial rows for a webhook."""
+        if limit < 1:
+            raise StateError("initial delivery chunk size must be positive")
+        self.initialize()
+        current = _clock_value(lambda: now) if now is not None else _clock_value(self._clock)
+        stamp = current.isoformat()
+        try:
+            with self.transaction() as db:
+                condition, parameters = self._initial_condition(
+                    channel, include_ambiguous, stamp
+                )
+                rows = db.execute(
+                    "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,"
+                    "e.details_json,e.initial,e.created_at,d.status,d.attempts "
+                    "FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id "
+                    "JOIN watch_cve c ON c.cve_id=e.cve_id "
+                    "WHERE " + condition + " ORDER BY e.created_at, e.id LIMIT ?",
+                    (*parameters, limit),
+                ).fetchall()
+                if not rows:
+                    return ()
+                identifiers = [int(row["id"]) for row in rows]
+                placeholders = ",".join("?" for _ in identifiers)
+                cursor = db.execute(
+                    "UPDATE watch_delivery SET status='sending', "
+                    "first_attempt_at=COALESCE(first_attempt_at, ?), updated_at=?, "
+                    "last_error=CASE WHEN status='ambiguous' THEN ? ELSE NULL END "
+                    "WHERE channel=? AND status IN ('pending','failed','ambiguous') "
+                    f"AND event_id IN ({placeholders})",
+                    (stamp, stamp, _INITIAL_AMBIGUOUS, channel, *identifiers),
+                )
+                if cursor.rowcount != len(identifiers):
+                    raise _ClaimConflict
+                return tuple(
+                    event
+                    for row in rows
+                    if (event := self._delivery_event(db, row, catalogs))
+                    is not None
+                )
+        except _ClaimConflict:
+            return ()
+
+    def mark_initial_sent(self, channel: str) -> int:
+        """Mark every initial row this run claimed for ``channel`` as sent."""
+        self.initialize()
+        now = _timestamp(self._clock)
+        with self.transaction() as db:
+            cursor = db.execute(
+                "UPDATE watch_delivery SET status='sent', last_error=NULL, "
+                "updated_at=? WHERE channel=? AND status='sending' "
+                "AND event_id IN (SELECT id FROM watch_event WHERE initial=1)",
+                (now, channel),
+            )
+            return cursor.rowcount
+
+    def mark_initial_failed(
+        self,
+        channel: str,
+        *,
+        error: str,
+        attempts_limit: int | None = None,
+        ambiguous: bool = False,
+    ) -> int:
+        """Mark the claimed initial rows failed, keeping prior ambiguity."""
+        self.initialize()
+        now = _timestamp(self._clock)
+        if attempts_limit is None:
+            attempts_sql = "attempts=attempts+1"
+            attempts_parameters: tuple[Any, ...] = ()
+        else:
+            attempts_sql = (
+                "attempts=CASE WHEN attempts + 1 >= ? THEN ? "
+                "ELSE attempts + 1 END"
+            )
+            attempts_parameters = (attempts_limit, DELIVERY_MAX_ATTEMPTS)
+        with self.transaction() as db:
+            cursor = db.execute(
+                "UPDATE watch_delivery SET "
+                "status=CASE WHEN ? OR last_error=? THEN 'ambiguous' "
+                "ELSE 'failed' END, "
+                + attempts_sql
+                + ", last_error=?, updated_at=?, "
+                "first_attempt_at=COALESCE(first_attempt_at, ?) "
+                "WHERE channel=? AND status='sending' "
+                "AND event_id IN (SELECT id FROM watch_event WHERE initial=1)",
+                (
+                    1 if ambiguous else 0,
+                    _INITIAL_AMBIGUOUS,
+                    *attempts_parameters,
+                    (error or "")[:500],
+                    now,
+                    now,
+                    channel,
+                ),
+            )
+            return cursor.rowcount
+
+    def release_initial(self, channel: str) -> int:
+        """Return claimed initial rows to pending (or their prior ambiguity)."""
+        self.initialize()
+        now = _timestamp(self._clock)
+        with self.transaction() as db:
+            cursor = db.execute(
+                "UPDATE watch_delivery SET "
+                "status=CASE WHEN last_error=? THEN 'ambiguous' ELSE 'pending' END, "
+                "last_error=NULL, updated_at=? WHERE channel=? AND status='sending' "
+                "AND event_id IN (SELECT id FROM watch_event WHERE initial=1)",
+                (_INITIAL_AMBIGUOUS, now, channel),
+            )
+            return cursor.rowcount
+
+    def release_delivery(
+        self,
+        event_ids: Iterable[int],
+        channel: str,
+        *,
+        status: str = "pending",
+    ) -> int:
+        """Undo a claim before its first message, without counting an attempt."""
+        if status not in {"pending", "ambiguous"}:
+            raise StateError(f"cannot release a delivery to {status!r}")
+        identifiers = sorted({int(value) for value in event_ids})
+        if not identifiers:
+            return 0
+        now = _timestamp(self._clock)
+        changed = 0
+        with self.transaction() as db:
+            for start in range(0, len(identifiers), 500):
+                chunk = identifiers[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                cursor = db.execute(
+                    "UPDATE watch_delivery SET status=?, last_error=NULL, "
+                    f"updated_at=? WHERE event_id IN ({placeholders}) "
+                    "AND channel=? AND status='sending'",
+                    (status, now, *chunk, channel),
+                )
+                changed += cursor.rowcount
+        return changed
 
     def claim_delivery(
         self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import email
 import email.policy
+import gzip
 import json
 import shutil
 import socket
@@ -12,6 +13,7 @@ import ssl
 import subprocess
 import threading
 import time
+import tracemalloc
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -22,8 +24,17 @@ from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
 
 from cvebeacon import cli
 from cvebeacon.errors import ConfigurationError
-from cvebeacon.watch.delivery import deliver_pending, send_test
-from cvebeacon.watch.records import CVSSEntry, WatchRecord
+from cvebeacon.watch.channels import channel_map
+from cvebeacon.watch.delivery import (
+    DeliveryFailure,
+    _http_call,
+    _send_smtp,
+    deliver_pending,
+    format_channel_line,
+    send_test,
+)
+from cvebeacon.watch.messages import OutgoingMessage
+from cvebeacon.watch.records import CVSSEntry, KEVFields, WatchRecord
 from cvebeacon.watch.store import WatchStore
 
 REAL_CONNECT = socket.socket.__mro__[1].connect
@@ -288,7 +299,7 @@ channels = ["matrix"]
     assert first.channels[0].ambiguous == 1
     assert rows(store) == [("matrix", "ambiguous", 1, "connection interrupted")]
 
-    second = deliver(config, store, handler)
+    second = deliver(config, store, handler, retry_ambiguous=True)
     assert second.channels[0].messages == 1
     assert len(puts) == 2
     assert puts[0] == puts[1]
@@ -891,6 +902,8 @@ class FakeSMTPHandler(socketserver.StreamRequestHandler):
                 self.envelope["from"] = command.decode("utf-8", "replace")
                 self.wfile.write(b"250 OK\r\n")
             elif upper.startswith(b"RCPT TO"):
+                if server.mode == "drop-rcpt":
+                    return
                 if server.mode == "rcpt-refused" and self.envelope["rcpt"]:
                     self.wfile.write(b"550 5.1.1 no such user\r\n")
                 else:
@@ -1187,18 +1200,87 @@ def test_smtp_authentication_gives_up_after_three_attempts(tmp_path, monkeypatch
     )
 
 
-def test_smtp_data_rejection_is_a_definite_failure(tmp_path, monkeypatch):
+def test_smtp_data_rejection_after_data_is_ambiguous(tmp_path, monkeypatch):
     report, store, server, _ = run_smtp_test(tmp_path, monkeypatch, "data-error")
-    assert report.channels[0].failed == 1
-    assert report.channels[0].ambiguous == 0
-    assert "SMTP rejected" in report.channels[0].error
-    assert rows(store)[0][1] == "failed"
+    assert report.channels[0].failed == 0
+    assert report.channels[0].ambiguous == 1
+    assert "SMTP outcome unknown" in report.channels[0].error
+    assert rows(store)[0][1] == "ambiguous"
 
 
 def test_smtp_drop_after_data_is_ambiguous(tmp_path, monkeypatch):
     report, store, server, _ = run_smtp_test(tmp_path, monkeypatch, "drop")
     assert report.channels[0].ambiguous == 1
     assert rows(store)[0][1] == "ambiguous"
+
+
+def test_smtp_drop_before_data_is_a_definite_failure(tmp_path, monkeypatch):
+    report, store, server, _ = run_smtp_test(tmp_path, monkeypatch, "drop-rcpt")
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+    assert rows(store)[0][1] == "failed"
+
+
+def test_smtp_without_starttls_is_refused(tmp_path, monkeypatch):
+    report, store, server, _ = run_smtp_test(
+        tmp_path, monkeypatch, security="starttls"
+    )
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+    assert report.channels[0].error == "server does not offer STARTTLS"
+    assert server.messages == []
+    assert rows(store)[0][1] == "failed"
+
+
+def test_smtp_deadline_stops_between_phases(tmp_path, monkeypatch):
+    config = make_config(
+        tmp_path, channels=smtp_channel(2525), rules=smtp_rule()
+    )
+    channel = channel_map(config.watch.channels)["mail"]
+    state = {"now": 0.0}
+
+    class FakeSocket:
+        def settimeout(self, value):
+            pass
+
+    class FakeClient:
+        data_sent = False
+
+        def __init__(self):
+            self.sock = FakeSocket()
+            self.send_called = False
+            self.closed = False
+
+        def ehlo(self):
+            state["now"] = 2.0
+
+        def send_message(self, *args, **kwargs):
+            self.send_called = True
+            return {}
+
+        def quit(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    client = FakeClient()
+    monkeypatch.setattr(
+        "cvebeacon.watch.delivery._smtp_client",
+        lambda channel, timeout: client,
+    )
+    message = OutgoingMessage((), "subject", "text", "body")
+    with pytest.raises(DeliveryFailure) as error:
+        _send_smtp(
+            channel,
+            message,
+            5.0,
+            deadline=1.0,
+            monotonic=lambda: state["now"],
+        )
+    assert error.value.category == "delivery budget exhausted"
+    assert error.value.ambiguous is False
+    assert client.send_called is False
 
 
 @pytest.mark.parametrize(
@@ -1577,7 +1659,7 @@ def test_mark_delivery_never_leaves_sent_or_ambiguous(tmp_path):
     assert rows(store) == [("hook", "sent", 1, None)]
 
 
-def test_matrix_auto_retry_stops_after_one_hour(tmp_path, monkeypatch):
+def test_matrix_ambiguous_rows_are_not_retried_automatically(tmp_path, monkeypatch):
     monkeypatch.setenv("MATRIX_TOKEN", "matrix-token")
     channels = """
 [watch.channels.matrix]
@@ -1606,51 +1688,16 @@ channels = ["matrix"]
         db.execute(
             "UPDATE watch_delivery SET status='ambiguous', attempts=1, "
             "first_attempt_at=?",
-            ((NOW - timedelta(hours=2)).isoformat(),),
+            ((NOW - timedelta(minutes=1)).isoformat(),),
         )
     report = deliver(config, store, handler, clock=lambda: NOW)
     assert report.channels[0].messages == 0
     assert puts == []
     assert rows(store)[0][1] == "ambiguous"
 
-    report = deliver(config, store, handler, clock=lambda: NOW, retry_ambiguous=True)
-    assert report.channels[0].messages == 1
-    assert len(puts) == 1
-    assert rows(store)[0][1] == "sent"
-
-
-def test_matrix_auto_retry_uses_a_recent_ambiguous_row(tmp_path, monkeypatch):
-    monkeypatch.setenv("MATRIX_TOKEN", "matrix-token")
-    channels = """
-[watch.channels.matrix]
-type = "matrix"
-homeserver = "https://matrix.example.org"
-room_id = "!room:example.org"
-access_token_env = "MATRIX_TOKEN"
-"""
-    rules = """
-[[watch.rules]]
-name = "critical"
-condition = { cvss_min = 9 }
-channels = ["matrix"]
-"""
-    config = make_config(tmp_path, channels=channels, rules=rules)
-    store = seed(config)
-    puts = []
-
-    def handler(request):
-        if request.method == "GET":
-            return httpx.Response(404, json={"errcode": "M_NOT_FOUND"})
-        puts.append(str(request.url))
-        return httpx.Response(200, json={"event_id": "$event"})
-
-    with sqlite3.connect(store.path) as db:
-        db.execute(
-            "UPDATE watch_delivery SET status='ambiguous', attempts=1, "
-            "first_attempt_at=?",
-            ((NOW - timedelta(minutes=30)).isoformat(),),
-        )
-    report = deliver(config, store, handler, clock=lambda: NOW)
+    report = deliver(
+        config, store, handler, clock=lambda: NOW, retry_ambiguous=True
+    )
     assert report.channels[0].messages == 1
     assert len(puts) == 1
     assert rows(store)[0][1] == "sent"
@@ -1827,6 +1874,17 @@ channels = ["graph"]
         )
         == ()
     )
+    final = deliver(
+        config,
+        store,
+        handler,
+        clock=lambda: NOW + timedelta(days=30),
+    )
+    assert final.channels[0].given_up == 1
+    assert (
+        "; 1 given up (run cvebeacon watch notify --retry-failed)"
+        in format_channel_line(final.channels[0])
+    )
 
 
 def test_retry_failed_resets_attempts_and_backoff(tmp_path, monkeypatch):
@@ -1960,6 +2018,100 @@ channels = ["hook"]
     assert store.delivery_status()[0].pending == 1
 
 
+def test_budget_expiry_after_a_claim_keeps_non_initial_rows_pending(
+    tmp_path, monkeypatch
+):
+    channels = """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.test/hook"
+grouping = "event"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["hook"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    state = {"now": 0.0}
+    original = store.claim_delivery
+
+    def claim_then_expire(*args, **kwargs):
+        result = original(*args, **kwargs)
+        state["now"] = 100.0
+        return result
+
+    monkeypatch.setattr(store, "claim_delivery", claim_then_expire)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={})
+
+    report = deliver(
+        config,
+        store,
+        handler,
+        monotonic=lambda: state["now"],
+        budget_seconds=60,
+    )
+    assert report.channels[0].messages == 0
+    assert report.channels[0].failed == 0
+    assert report.channels[0].ambiguous == 0
+    assert seen == []
+    assert rows(store) == [("hook", "pending", 0, None)]
+
+
+def test_budget_expiry_after_an_initial_claim_keeps_rows_pending(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
+    )
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["slack"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config, initial=True)
+    state = {"now": 0.0}
+    original = store.claim_initial_digest
+
+    def claim_then_expire(*args, **kwargs):
+        result = original(*args, **kwargs)
+        state["now"] = 100.0
+        return result
+
+    monkeypatch.setattr(store, "claim_initial_digest", claim_then_expire)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, content=b"ok")
+
+    report = deliver(
+        config,
+        store,
+        handler,
+        monotonic=lambda: state["now"],
+        budget_seconds=60,
+    )
+    assert report.channels[0].messages == 0
+    assert report.channels[0].failed == 0
+    assert report.channels[0].ambiguous == 0
+    assert seen == []
+    assert rows(store) == [("slack", "pending", 0, None)]
+
+
 class SlowDripServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -2009,6 +2161,65 @@ def test_request_once_stops_a_slow_drip_body(tmp_path, monkeypatch):
         thread.join(timeout=5)
     assert result.status_code == 200
     assert elapsed < 4
+
+
+def test_request_once_counts_wire_bytes_and_requests_identity(tmp_path):
+    from cvebeacon.config import HttpConfig
+    from cvebeacon.http import HttpClient
+
+    class GzipStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield compressed
+
+    compressed = gzip.compress(b"x" * (2 * 1024 * 1024))
+    seen = {}
+
+    def handler(request):
+        seen["encoding"] = request.headers.get("accept-encoding")
+        return httpx.Response(
+            200,
+            stream=GzipStream(),
+            headers={"Content-Encoding": "gzip"},
+        )
+
+    client = HttpClient(
+        HttpConfig(retries=0),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    result = client.request_once(
+        "GET",
+        "https://example.test/compressed",
+        timeout=5,
+        body_limit=1024 * 1024,
+    )
+    client.close()
+    assert seen["encoding"] == "identity"
+    assert result.body == compressed
+
+
+def test_invalid_url_is_a_definite_failure():
+    http = mock_client(lambda request: httpx.Response(200, json={}))
+    with pytest.raises(DeliveryFailure) as error:
+        _http_call(http, "GET", "https://example.test/\x7f", timeout=1)
+    assert error.value.category == "invalid request"
+    assert error.value.ambiguous is False
+
+
+def test_local_protocol_error_is_a_definite_failure(tmp_path):
+    config = make_config(tmp_path)
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        raise httpx.LocalProtocolError("illegal header value")
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+    assert report.channels[0].error == "invalid request"
+    assert len(seen) == 1
+    assert rows(store) == [("hook", "failed", 1, "invalid request")]
 
 
 def test_ntfy_and_gotify_do_not_repeat_the_title_in_the_body(tmp_path, monkeypatch):
@@ -2145,7 +2356,8 @@ channels = ["slack"]
     report = deliver(config, store, handler)
     assert len(seen) == 1
     text = json.loads(seen[0].content)["text"]
-    assert "1500 matches across 1 rule" in text
+    assert "1500 CVEs across 1 rule" in text
+    assert "critical: 1500 matches" in text
     assert "and 1495 more" in text
     assert report.channels[0].messages == 1
     assert report.channels[0].events == 1500
@@ -2156,6 +2368,270 @@ channels = ["slack"]
             ).fetchone()[0]
             == 1500
         )
+
+
+def test_initial_digest_does_not_build_a_view_for_the_backlog(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
+    )
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+max_items = 20
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["slack"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 5001))
+    store = seed(config, identifiers=identifiers, initial=True)
+    views = {"count": 0}
+    original = store._view
+
+    def counting(*args, **kwargs):
+        views["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_view", counting)
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["text"])
+        return httpx.Response(200, content=b"ok")
+
+    tracemalloc.start()
+    report = deliver(config, store, handler)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert views["count"] <= 22
+    assert sum(text.count("CVEBeacon initial summary") for text in seen) == 1
+    assert "CVEBeacon initial summary: 5000 CVEs across 1 rule" in seen[0]
+    assert "critical: 5000 matches" in seen[0]
+    assert any("and 4980 more" in text for text in seen)
+    assert report.channels[0].events == 5000
+    assert report.channels[0].messages == len(seen)
+    assert peak < 8 * 1024 * 1024
+    with sqlite3.connect(store.path) as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM watch_delivery WHERE status='sent'"
+            ).fetchone()[0]
+            == 5000
+        )
+
+
+def test_initial_digest_samples_kev_rows_first(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
+    )
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+max_items = 1
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 0 }
+channels = ["slack"]
+"""
+    config = make_config(
+        tmp_path, sources=("nvd", "cisa_kev"), channels=channels, rules=rules
+    )
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    records = [
+        WatchRecord(
+            cve_id=f"CVE-2026-{index:04d}",
+            status="published",
+            description="A high score without exploitation.",
+            cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.8),),
+        )
+        for index in range(1, 21)
+    ]
+    records.append(
+        WatchRecord(
+            cve_id="CVE-2026-9999",
+            status="published",
+            description="A lower score that is in KEV.",
+            cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 1.0),),
+        )
+    )
+    store.upsert_nvd(records, catalogs=config.watch.sources)
+    store.replace_kev(
+        "cisa", {"CVE-2026-9999": KEVFields("2026-11-01")},
+        catalogs=config.watch.sources,
+    )
+    store.evaluate_touched(
+        config.watch.rules, catalogs=config.watch.sources, initial=True
+    )
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["text"])
+        return httpx.Response(200, content=b"ok")
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].ok
+    assert "CVE-2026-9999" in seen[0]
+    assert "and 20 more" in seen[0]
+
+
+def test_initial_digest_combines_pending_and_ambiguous_rows(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
+    )
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["slack"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(
+        config,
+        identifiers=("CVE-2026-0001", "CVE-2026-0002"),
+        initial=True,
+    )
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_delivery SET status='ambiguous', attempts=1, "
+            "first_attempt_at=? WHERE event_id=("
+            "SELECT id FROM watch_event WHERE cve_id='CVE-2026-0002')",
+            ((NOW - timedelta(minutes=30)).isoformat(),),
+        )
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["text"])
+        return httpx.Response(200, content=b"ok")
+
+    report = deliver(config, store, handler, retry_ambiguous=True)
+    assert len(seen) == 1
+    assert "CVEBeacon initial summary: 2 CVEs across 1 rule" in seen[0]
+    assert "critical: 2 matches" in seen[0]
+    assert report.channels[0].events == 2
+    with sqlite3.connect(store.path) as db:
+        assert db.execute(
+            "SELECT DISTINCT status FROM watch_delivery"
+        ).fetchall() == [("sent",)]
+
+
+def test_initial_failure_keeps_ambiguous_rows_ambiguous(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
+    )
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["slack"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(
+        config,
+        identifiers=("CVE-2026-0001", "CVE-2026-0002"),
+        initial=True,
+    )
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_delivery SET status='ambiguous', attempts=1, "
+            "first_attempt_at=? WHERE event_id=("
+            "SELECT id FROM watch_event WHERE cve_id='CVE-2026-0002')",
+            ((NOW - timedelta(minutes=30)).isoformat(),),
+        )
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(500)
+
+    report = deliver(config, store, handler, retry_ambiguous=True)
+    assert len(seen) == 1
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 1
+    with sqlite3.connect(store.path) as db:
+        statuses = {
+            cve_id: (status, attempts)
+            for cve_id, status, attempts in db.execute(
+                "SELECT e.cve_id,d.status,d.attempts FROM watch_delivery d "
+                "JOIN watch_event e ON e.id=d.event_id"
+            ).fetchall()
+        }
+    assert statuses["CVE-2026-0001"] == ("failed", 1)
+    assert statuses["CVE-2026-0002"] == ("ambiguous", 2)
+
+
+def test_initial_webhook_is_sent_in_chunks_of_one_thousand(tmp_path):
+    config = make_config(tmp_path)
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 5001))
+    store = seed(config, identifiers=identifiers, initial=True)
+    payloads = []
+
+    def handler(request):
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={})
+
+    report = deliver(config, store, handler)
+    assert [len(payload["events"]) for payload in payloads] == [1000] * 5
+    assert all(
+        event["initial"]
+        for payload in payloads
+        for event in payload["events"]
+    )
+    assert report.channels[0].messages == 5
+    assert report.channels[0].events == 5000
+    with sqlite3.connect(store.path) as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM watch_delivery WHERE status='sent'"
+            ).fetchone()[0]
+            == 5000
+        )
+
+
+def test_initial_failed_rows_wait_for_their_backoff(tmp_path):
+    config = make_config(tmp_path)
+    store = seed(config, initial=True)
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_delivery SET status='failed', attempts=1, updated_at=?",
+            (NOW.isoformat(),),
+        )
+    assert (
+        store.claim_initial_digest(
+            "hook",
+            catalogs=config.watch.sources,
+            now=NOW + timedelta(minutes=4),
+            max_items=20,
+        )
+        is None
+    )
+    digest = store.claim_initial_digest(
+        "hook",
+        catalogs=config.watch.sources,
+        now=NOW + timedelta(minutes=5),
+        max_items=20,
+    )
+    assert digest is not None
+    assert digest.total == 1
 
 
 def test_fake_smtp_server_unstuffs_leading_dots(tmp_path, monkeypatch):
