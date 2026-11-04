@@ -18,6 +18,7 @@ from cvebeacon.scheduling import (
     _cron_lines,
     _current_windows_account,
     _describe_windows_xml,
+    _windows_access_denied,
     _windows_xml,
     _without_managed_block,
     default_command,
@@ -223,6 +224,7 @@ def test_windows_fixed_times_generate_one_task_with_one_action(tmp_path, monkeyp
         assert args[:3] == ["schtasks", "/Create", "/XML"]
         assert args[4:6] == ["/TN", WINDOWS_TASK]
         assert args[6] == "/F"
+        assert "/HRESULT" in args
         assert "/RU" not in args and "/NP" not in args
         xml_path = args[3]
         root = ET.parse(xml_path).getroot()
@@ -273,8 +275,10 @@ def test_windows_interval_both_uses_plain_schtasks(tmp_path, monkeypatch):
     args = calls[0]
     assert "/XML" not in args
     assert args[5:9] == ["/SC", "HOURLY", "/MO", "4"]
-    assert args[-1].endswith(" run")
-    assert args[-1].count("--config") == 1
+    assert args[-1] == "/HRESULT"
+    command_line = args[args.index("/TR") + 1]
+    assert command_line.endswith(" run")
+    assert command_line.count("--config") == 1
 
 
 def windows_plan(tmp_path, **kwargs):
@@ -498,7 +502,7 @@ def test_windows_access_denied_asks_for_the_right_account(tmp_path, monkeypatch)
         install(plan, run=fake_run)
     message = str(error.value)
     assert "Access is denied" in message
-    assert "account named in --account" in message
+    assert "elevated administrator shell with --account" in message
     assert "service account's own shell" in message
     assert "\n" not in message
 
@@ -543,6 +547,21 @@ def test_windows_registration_timeout_is_one_error(tmp_path, monkeypatch):
     assert "\n" not in str(error.value)
 
 
+@pytest.mark.parametrize("code", [0x80070005, -2147024891, 2147942405])
+def test_windows_access_denied_uses_numeric_code_with_localized_text(
+    tmp_path, monkeypatch, code
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=code, stdout="", stderr="ERRO: Acesso negado.")
+
+    with pytest.raises(SchedulingError) as error:
+        install(plan, run=fake_run)
+    assert "elevated administrator shell with --account" in str(error.value)
+
+
 def test_windows_access_denied_accepts_the_hresult_without_english_text(
     tmp_path, monkeypatch
 ):
@@ -558,7 +577,7 @@ def test_windows_access_denied_accepts_the_hresult_without_english_text(
     def fake_run(args, **kwargs):
         return SimpleNamespace(returncode=1, stdout="", stderr="ERROR: 0x80070005")
 
-    with pytest.raises(SchedulingError, match="account named in --account"):
+    with pytest.raises(SchedulingError, match="elevated administrator shell with --account"):
         install(plan, run=fake_run)
 
 
@@ -647,6 +666,19 @@ def test_windows_status_reports_logged_off_execution(tmp_path):
     )
     assert "Runs while logged off: no" in interactive
     assert "Account:" not in interactive
+
+
+@pytest.mark.parametrize(
+    "code", [5, 0x80070005, -2147024891, 2147942405]
+)
+def test_windows_access_denied_normalises_signed_and_unsigned_codes(code):
+    assert _windows_access_denied("ERRO: Acesso negado.", code)
+
+
+def test_windows_access_denied_detects_signed_and_unsigned_text():
+    assert _windows_access_denied("-2147024891", 1)
+    assert _windows_access_denied("2147942405", 1)
+    assert _windows_access_denied("0X80070005", 1)
 
 
 def test_windows_status_treats_interactive_token_or_password_as_logged_off():
