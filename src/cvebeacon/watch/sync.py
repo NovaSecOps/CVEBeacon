@@ -897,17 +897,22 @@ def watch_status(watch: WatchConfig) -> str:
             cursor_value is None or resume.end.isoformat() >= cursor_value
         ):
             if resume.phase == "verify":
-                action, pages = "verifying", resume.verify
+                action = "verifying"
+                progress = f"page {resume.page + 1} of {resume.verify}"
             else:
                 action = "scanning"
-                pages = max(
-                    (resume.total + feeds.EUVD_PAGE_SIZE - 1)
-                    // feeds.EUVD_PAGE_SIZE,
-                    1,
-                )
+                if resume.total:
+                    pages = (
+                        resume.total + feeds.EUVD_PAGE_SIZE - 1
+                    ) // feeds.EUVD_PAGE_SIZE
+                    progress = f"page {resume.page + 1} of {pages}"
+                else:
+                    # A restarted scan has no pinned total until its first page
+                    # succeeds; do not present a wide window as one page.
+                    progress = f"page {resume.page + 1} (total not yet known)"
             euvd_cursor += (
                 f" ({action} {resume.start.isoformat()}..{resume.end.isoformat()}, "
-                f"page {resume.page + 1} of {pages})"
+                f"{progress})"
             )
         else:
             pending = _euvd_window(meta.get("euvd_next_window"))
