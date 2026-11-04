@@ -424,6 +424,31 @@ def test_windows_logged_out_fixed_times_uses_com_password(
     )
 
 
+def test_windows_registration_drops_powershell7_module_path(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+    monkeypatch.setenv("CVEBEACON_KEEP_ME", "1")
+    plan = windows_plan(tmp_path, run_logged_out=True)
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        seen["env"] = kwargs.get("env")
+        return Result()
+
+    install(plan, run=fake_run, password="S3cret-test-password")
+    env = seen["env"]
+    assert env is not None
+    assert not any(name.upper() == "PSMODULEPATH" for name in env)
+    assert env["CVEBEACON_KEEP_ME"] == "1"
+
+
 def test_windows_registration_requires_a_password(tmp_path, monkeypatch):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     plan = windows_plan(tmp_path, run_logged_out=True)
