@@ -1,0 +1,363 @@
+name: Release
+
+# Builds every release artifact on pull requests and manual runs. Publishing
+# happens only for a v* tag push, only after the `release` environment approves
+# the run, and only when that environment sets RELEASE_PUBLISH_ENABLED=true.
+# See docs/RELEASE_CHECKLIST.md for the owner setup.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/release-notes.md'
+      - '.dockerignore'
+      - 'Dockerfile'
+      - 'pyproject.toml'
+      - 'deploy/container/entrypoint.py'
+      - 'requirements/release-build.txt'
+      - 'scripts/build-windows.ps1'
+      - 'scripts/release_registry_check.py'
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/novasecops/cvebeacon
+
+jobs:
+  verify:
+    name: Version and offline tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Check tag matches the project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = f"v{version}"
+          if tag != expected:
+              raise SystemExit(f"tag {tag!r} does not match pyproject version {version!r}; expected {expected!r}")
+          print(f"tag {tag} matches pyproject version {version}")
+          PY
+      - name: Install all distributions
+        run: |
+          python -m pip install --upgrade 'pip>=26.2'
+          python -m pip install '.[dev]' ./extensions ./automation
+      - run: python -m pip check
+      - name: Offline test suite
+        run: python tools/test_offline.py -q tests extensions/tests automation/tests
+
+  python-dist:
+    name: Python distributions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Build core sdist and wheel
+        run: |
+          python -m pip install --require-hashes --only-binary :all: -r requirements/release-build.txt
+          python -m pip show pip build setuptools wheel packaging pyproject_hooks | grep -E '^(Name|Version):'
+          python -m build --no-isolation --sdist --wheel --outdir dist
+      - name: Install and smoke-test the wheel
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install --upgrade 'pip>=26.2'
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip check
+          "$RUNNER_TEMP/wheel-venv/bin/cvebeacon" --help
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: python-dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-exe:
+    name: Windows executable
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv/Scripts/python -m pip install --upgrade "pip>=26.2"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv/Scripts/python -m pip install ".[dev]"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv/Scripts/python -m pip check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build and smoke-test the standalone executable
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - name: Verify both packaged formats
+        shell: pwsh
+        run: |
+          .venv/Scripts/python tools/smoke.py --executable dist/cvebeacon/cvebeacon.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv/Scripts/python tools/smoke.py --executable dist/cvebeacon.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv/Scripts/python tools/inspect_package.py dist/cvebeacon/cvebeacon.exe dist/cvebeacon.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Archive the Windows bundle
+        shell: pwsh
+        run: Compress-Archive -Path dist/cvebeacon,dist/cvebeacon.exe,dist/LICENSE,dist/NOTICE -DestinationPath dist/cvebeacon-windows-x64.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cvebeacon-windows-x64
+          path: dist/cvebeacon-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  container:
+    name: Container image build
+    # Tag pushes use the gated publish job below instead. Pull requests and
+    # manual runs build both architectures into the cache only.
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Resolve the project version
+        id: version
+        run: |
+          version=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 # pinned 2026-11-04
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          version: v0.38.2 # pinned 2026-11-04
+          # BuildKit image pinned 2026-11-04; the comment stays outside the value.
+          driver-opts: |
+            image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+      - name: Build the multi-arch core image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: core
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.title=CVEBeacon
+            org.opencontainers.image.description=Conservative vulnerability monitoring and lookup for product inventories
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha,scope=release-core
+          cache-to: type=gha,mode=max,scope=release-core
+
+  container-publish:
+    name: Container image publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, python-dist, windows-exe]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    # One shared group across every release tag, with cancellation disabled:
+    # the registry check and push for different tags cannot overlap.
+    concurrency:
+      group: release-container-publish
+      cancel-in-progress: false
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      # The workflow can only read the merged vars context. Reviewer approval,
+      # the v* tag rule and the admin-bypass setting are enforced by the
+      # environment configuration, not by this step. See the checklist.
+      - name: Require release publishing opt-in
+        env:
+          RELEASE_PUBLISH_ENABLED: ${{ vars.RELEASE_PUBLISH_ENABLED }}
+        run: |
+          if [ "${RELEASE_PUBLISH_ENABLED:-}" != "true" ]; then
+            echo "::error::RELEASE_PUBLISH_ENABLED is not exactly 'true' in the merged vars context. Publishing is disabled; the protected 'release' environment must exist and set this variable (docs/RELEASE_CHECKLIST.md)."
+            exit 1
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Resolve the project version
+        id: version
+        run: |
+          version=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 # pinned 2026-11-04
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          version: v0.38.2 # pinned 2026-11-04
+          # BuildKit image pinned 2026-11-04; the comment stays outside the value.
+          driver-opts: |
+            image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite the version and decide latest
+        id: registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python3 scripts/release_registry_check.py
+      - name: Build and push the multi-arch core image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: core
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.registry.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=CVEBeacon
+            org.opencontainers.image.description=Conservative vulnerability monitoring and lookup for product inventories
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha,scope=release-core
+          cache-to: type=gha,mode=max,scope=release-core
+
+  release:
+    name: Draft GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, python-dist, windows-exe, container-publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Require release publishing opt-in
+        env:
+          RELEASE_PUBLISH_ENABLED: ${{ vars.RELEASE_PUBLISH_ENABLED }}
+        run: |
+          if [ "${RELEASE_PUBLISH_ENABLED:-}" != "true" ]; then
+            echo "::error::RELEASE_PUBLISH_ENABLED is not true in the 'release' environment. Release creation is disabled; configure the protected environment first (docs/RELEASE_CHECKLIST.md)."
+            exit 1
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: python-dist
+          path: release-assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: cvebeacon-windows-x64
+          path: release-assets
+      - name: Write checksums and release notes
+        env:
+          VERSION: ${{ needs.container-publish.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.container-publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | sort > "$RUNNER_TEMP/release-assets.txt"
+          xargs sha256sum < "$RUNNER_TEMP/release-assets.txt" > SHA256SUMS
+          cd ..
+          python3 - <<'PY'
+          import datetime
+          import os
+          import pathlib
+
+          version = os.environ["VERSION"]
+          digest = os.environ.get("IMAGE_DIGEST") or "not available"
+          replacements = {
+              "{{VERSION}}": version,
+              "{{DATE}}": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
+              "{{IMAGE_DIGEST}}": digest,
+          }
+          notes = pathlib.Path(".github/release-notes.md").read_text()
+          for placeholder, value in replacements.items():
+              notes = notes.replace(placeholder, value)
+          pathlib.Path("release-notes.md").write_text(notes)
+          print(notes)
+          PY
+      - name: Verify the tag still points at the built commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          built=$(git rev-parse HEAD)
+          reference=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha + " " + .object.type')
+          target=${reference%% *}
+          kind=${reference##* }
+          depth=0
+          while [ "$kind" = "tag" ]; do
+            depth=$((depth + 1))
+            if [ "$depth" -gt 3 ]; then
+              echo "::error::tag ${TAG} has an unsupported tag chain; refusing to create the release."
+              exit 1
+            fi
+            reference=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${target}" --jq '.object.sha + " " + .object.type')
+            target=${reference%% *}
+            kind=${reference##* }
+          done
+          if [ "$kind" != "commit" ] || [ "$target" != "$built" ]; then
+            echo "::error::tag ${TAG} no longer points at the built commit ${built}; refusing to create the release."
+            exit 1
+          fi
+          echo "Tag ${TAG} still points at ${built}."
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.container-publish.outputs.version }}
+        run: |
+          gh release create "v${VERSION}" \
+            --draft \
+            --verify-tag \
+            --title "CVEBeacon ${VERSION}" \
+            --notes-file release-notes.md \
+            release-assets/*
