@@ -44,7 +44,7 @@ def linux_plan(tmp_path, **kwargs):
 def test_cron_groups_times_by_minute(tmp_path):
     plan = linux_plan(tmp_path, times="19:00,07:00,07:30")
     lines = _cron_lines(plan)
-    prefix = shlex.join(["/opt/cvebeacon", "--config", str(plan.config_path), "scan"])
+    prefix = shlex.join([str(plan.executable), "--config", str(plan.config_path), "scan"])
     assert lines == [f"0 7,19 * * * {prefix}", f"30 7 * * * {prefix}"]
 
 

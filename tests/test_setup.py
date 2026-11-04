@@ -359,7 +359,7 @@ def test_nvd_key_can_be_stored_in_a_secret_file(tmp_path, monkeypatch):
     feed(monkeypatch, answers, ["nvd-canary"])
     assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
     text = (tmp_path / "cvebeacon.toml").read_text(encoding="utf-8")
-    expected_file = "secrets/nvd-api-key" if os.name == "posix" else "nvd-api-key"
+    expected_file = "secrets/nvd-api-key"  # the same location on every OS
     assert f'nvd_api_key_file = "{expected_file}"' in text
     assert "nvd-canary" not in text
     secret_path = tmp_path / expected_file
