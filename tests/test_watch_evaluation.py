@@ -255,6 +255,35 @@ def test_unknown_schema_version_still_fails_closed(tmp_path):
         store.initialize()
 
 
+def test_pre_release_alert_tables_fail_with_a_clear_message(tmp_path):
+    path = tmp_path / "watch.db"
+    WatchStore(path, clock=lambda: NOW).initialize()
+    with sqlite3.connect(path) as db:
+        # Schema version 2 as an earlier build wrote it, without the newer columns.
+        db.execute("DROP TABLE watch_alert_state")
+        db.execute(
+            "CREATE TABLE watch_alert_state(rule TEXT NOT NULL, cve_id TEXT NOT NULL, "
+            "first_matched_at TEXT NOT NULL, snapshot_json TEXT NOT NULL, "
+            "PRIMARY KEY(rule, cve_id))"
+        )
+        db.execute("DROP TABLE watch_event")
+        db.execute(
+            "CREATE TABLE watch_event(id INTEGER PRIMARY KEY, rule TEXT NOT NULL, "
+            "cve_id TEXT NOT NULL, kind TEXT NOT NULL, reasons_json TEXT NOT NULL, "
+            "initial INTEGER NOT NULL, created_at TEXT NOT NULL)"
+        )
+    with pytest.raises(
+        Exception,
+        match=r"^watch database was created by a pre-release build; "
+        r"delete it and run `watch sync` again$",
+    ):
+        WatchStore(path, clock=lambda: NOW).initialize()
+    # Refused, not migrated: the old table shape is still there.
+    with sqlite3.connect(path) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(watch_alert_state)")}
+    assert "providers_hash" not in columns
+
+
 def test_rejected_escalation_is_recorded(tmp_path):
     store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
     store.upsert_nvd([record()])

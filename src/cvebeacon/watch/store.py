@@ -308,6 +308,12 @@ def _kev_tuple(row: Mapping[str, Any]) -> tuple[str | None, ...]:
     )
 
 
+def _alert_columns_current(db: sqlite3.Connection) -> bool:
+    alert = {row["name"] for row in db.execute("PRAGMA table_info(watch_alert_state)")}
+    event = {row["name"] for row in db.execute("PRAGMA table_info(watch_event)")}
+    return {"rule_hash", "providers_hash"} <= alert and "occurrence" in event
+
+
 class WatchStore:
     def __init__(self, path: str | Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self.path = Path(path)
@@ -364,6 +370,13 @@ class WatchStore:
         version = rows[0]["value"]
         if version not in {"1", "2"}:
             raise StateError(f"unsupported watch schema version {version}")
+        if version == "2" and not _alert_columns_current(db):
+            # Pre-release builds wrote schema 2 without these columns. They are
+            # not migrated; the operator deletes the file and resyncs.
+            raise StateError(
+                "watch database was created by a pre-release build; "
+                "delete it and run `watch sync` again"
+            )
         for statement in _SCHEMA:
             db.execute(statement)
         if version == "1":
