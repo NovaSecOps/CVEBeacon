@@ -508,6 +508,8 @@ def _send_smtp(
             raise DeliveryFailure(
                 "SMTP authentication failed", attempts_limit=AUTH_MAX_ATTEMPTS
             ) from None
+        except smtplib.SMTPResponseException:
+            raise DeliveryFailure("SMTP rejected the message") from None
         except ssl.SSLCertVerificationError:
             raise DeliveryFailure("SMTP certificate verification failed") from None
         except (OSError, ssl.SSLError, smtplib.SMTPException):
@@ -526,11 +528,17 @@ def _send_smtp(
             raise DeliveryFailure("delivery budget exhausted") from None
         except ssl.SSLCertVerificationError:
             raise DeliveryFailure("SMTP certificate verification failed") from None
+        except smtplib.SMTPAuthenticationError:
+            raise DeliveryFailure(
+                "SMTP authentication failed", attempts_limit=AUTH_MAX_ATTEMPTS
+            ) from None
         except (
             smtplib.SMTPRecipientsRefused,
             smtplib.SMTPSenderRefused,
             smtplib.SMTPHeloError,
         ):
+            raise DeliveryFailure("SMTP rejected the message") from None
+        except smtplib.SMTPResponseException:
             raise DeliveryFailure("SMTP rejected the message") from None
         except (OSError, ssl.SSLError, smtplib.SMTPException, TimeoutError):
             if client.data_sent:

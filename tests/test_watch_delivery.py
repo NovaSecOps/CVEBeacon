@@ -854,6 +854,9 @@ class FakeSMTPHandler(socketserver.StreamRequestHandler):
                     mode = server.mode
                     if mode == "data-error":
                         self.wfile.write(b"451 4.3.0 rejected\r\n")
+                    elif mode == "timeout":
+                        time.sleep(2)
+                        return
                     elif mode == "drop":
                         return
                     else:
@@ -1200,11 +1203,23 @@ def test_smtp_authentication_gives_up_after_three_attempts(tmp_path, monkeypatch
     )
 
 
-def test_smtp_data_rejection_after_data_is_ambiguous(tmp_path, monkeypatch):
+def test_smtp_data_rejection_is_a_definite_failure(tmp_path, monkeypatch):
     report, store, server, _ = run_smtp_test(tmp_path, monkeypatch, "data-error")
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+    assert "SMTP rejected" in report.channels[0].error
+    assert rows(store)[0][1] == "failed"
+
+
+def test_smtp_timeout_after_data_is_ambiguous(tmp_path, monkeypatch):
+    report, store, server, _ = run_smtp_test(
+        tmp_path,
+        monkeypatch,
+        "timeout",
+        extra="timeout_seconds = 1",
+    )
     assert report.channels[0].failed == 0
     assert report.channels[0].ambiguous == 1
-    assert "SMTP outcome unknown" in report.channels[0].error
     assert rows(store)[0][1] == "ambiguous"
 
 

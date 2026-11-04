@@ -247,11 +247,12 @@ are not resent automatically. A row moves through these states:
   `DATA`. Rows are claimed with a conditional update, so two runs cannot send
   the same delivery.
 - `sent`: the provider accepted the message. This state is final.
-- `failed`: a definite failure (connection, DNS, TLS, an HTTP error, or SMTP
-  rejecting the message before `DATA`). The row is retried with backoff.
-- `ambiguous`: the request or `DATA` may have reached the provider (a timeout or
-  connection drop after sending), a success status arrived without a readable
-  confirmation, or a stale `sending` row was found. It is never downgraded to
+- `failed`: a definite failure (connection, DNS, TLS, an HTTP error, or any
+  SMTP error reply, including one after `DATA`). A connection drop or timeout
+  before `DATA` is also definite. The row is retried with backoff.
+- `ambiguous`: the request or `DATA` may have reached the provider (a connection
+  drop, EOF or timeout after `DATA`, or a success status without a readable
+  confirmation), or a stale `sending` row was found. It is never downgraded to
   `failed`, and never resent automatically. A Matrix retry reuses a transaction
   id per part, so an explicit retry after an ambiguous send is usually
   idempotent.
