@@ -133,7 +133,8 @@ def fields_for(store: WatchStore, identifier: str = "CVE-2026-0001") -> dict[str
     view = store.view(identifier, catalogs=SOURCES)
     assert view is not None
     return build_fields(
-        view, first_seen=store.first_seen(identifier), generated_at=NOW
+        view, first_seen=view.first_seen, generated_at=NOW,
+        reported_mark=store.reported_marks((identifier,)).get(identifier),
     )
 
 
@@ -1660,3 +1661,40 @@ def test_member_count_accepts_exact_limit_and_rejects_one_more(monkeypatch):
     monkeypatch.setattr(statements, 'MAX_ZIP_MEMBERS', count - 1)
     with pytest.raises(CVEBeaconError, match='member count limit'):
         render_docx(template, all_fields())
+
+
+def test_statement_uses_current_report_mark_after_rebase(tmp_path, capsys):
+    config = write_config(tmp_path, sources=("nvd",))
+    store = populate(WatchStore(config.watch.database, clock=lambda: NOW))
+    out = tmp_path / 'statement.md'
+    arguments = ['--config', str(config.config_path), 'watch', 'statement', 'CVE-2026-0001', '--out', str(out), '--force']
+    assert cli.main(arguments) == 0
+    assert 'Reported to clients: not reported' in out.read_text()
+    mark = store.report_cve('CVE-2026-0001', by='operator@example.invalid').entry
+    assert cli.main(arguments) == 0
+    text = out.read_text()
+    assert 'Reported to clients: yes' in text
+    assert 'Reported by: operator@example.invalid' in text
+    assert f'Reported at: {mark.at}' in text
+    store.unreport_cve('CVE-2026-0001', by='operator@example.invalid')
+    assert cli.main(arguments) == 0
+    text = out.read_text()
+    assert 'Reported to clients: not reported' in text
+    assert 'Reported by: not reported' in text
+    assert 'Reported at: not reported' in text
+    capsys.readouterr()
+
+
+def test_statement_reads_first_seen_from_the_stored_view(tmp_path, monkeypatch):
+    from dataclasses import replace
+    store = full_store(tmp_path)
+    view = replace(store.view('CVE-2026-0001', catalogs=SOURCES), first_seen='2026-11-04T00:30:00+02:00')
+    monkeypatch.setattr(store, 'view', lambda *args, **kwargs: view)
+    def forbidden(*args, **kwargs):
+        pytest.fail('statement queried a second first-seen snapshot')
+    monkeypatch.setattr(store, 'first_seen', forbidden, raising=False)
+    template = tmp_path / 'template.md'
+    template.write_text('${first_seen}|${first_seen_date}')
+    out = tmp_path / 'statement.md'
+    statements.write_statement(store, view.cve_id, catalogs=SOURCES, template=template, out=out, now=NOW)
+    assert out.read_text() == '2026-11-04T00:30:00+02:00|2026-11-03'

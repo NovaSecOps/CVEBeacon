@@ -2533,15 +2533,6 @@ class WatchStore:
         with closing(self._connect()) as db:
             return self._view(db, identifier, catalogs)
 
-    def first_seen(self, identifier: str) -> str | None:
-        """Return when a stored CVE was first seen, or None when it is absent."""
-        self.initialize()
-        with closing(self._connect()) as db:
-            row = db.execute(
-                "SELECT first_seen FROM watch_cve WHERE cve_id=?", (identifier,)
-            ).fetchone()
-        return None if row is None else str(row["first_seen"])
-
     def status(self, *, catalogs: Sequence[str] = ()) -> dict[str, Any]:
         self.initialize()
         with closing(self._connect()) as db:

@@ -28,7 +28,7 @@ from xml.sax.saxutils import escape
 
 from ..errors import CVEBeaconError
 from .messages import CVE_URL, EUVD_URL, NVD_URL, PROVIDER_ORDER
-from .records import CVSS_PROVIDERS, CVSSEntry, WatchView
+from .records import CVSS_PROVIDERS, CVSSEntry, ReportedMark, WatchView
 from .rules import highest_cvss
 from .store import WatchStore
 
@@ -175,18 +175,16 @@ def _products(view: WatchView) -> str:
     return "\n".join(view.vendors)
 
 
-def _reported_marks(view: WatchView) -> tuple[str, str, str]:
-    """Return the reported-to-clients mark for one CVE.
-
-    The watch database does not store this mark yet, so every statement renders
-    ``not reported``.  Keep this lookup as the single wiring point for when the
-    mark is stored.
-    """
-    return NOT_REPORTED, NOT_REPORTED, NOT_REPORTED
+def _reported_marks(mark: ReportedMark | None) -> tuple[str, str, str]:
+    """Render the current stored reported-to-clients mark."""
+    if mark is None:
+        return NOT_REPORTED, NOT_REPORTED, NOT_REPORTED
+    return "yes", mark.by, mark.at
 
 
 def build_fields(
-    view: WatchView, *, first_seen: str | None, generated_at: datetime
+    view: WatchView, *, first_seen: str | None, generated_at: datetime,
+    reported_mark: ReportedMark | None = None,
 ) -> dict[str, str]:
     """Derive every statement field from one stored watch view."""
     highest = highest_cvss(view, CVSS_PROVIDERS)
@@ -199,7 +197,7 @@ def build_fields(
         if (entry := highest_cvss(view, (name,))) is not None
     ]
     kev_added = view.cisa_kev_added or view.eu_kev_added
-    reported, reported_by, reported_at = _reported_marks(view)
+    reported, reported_by, reported_at = _reported_marks(reported_mark)
     cve_id = quote(str(view.cve_id), safe="-_.")
     euvd_id = quote(str(view.euvd_id), safe="-_.") if view.euvd_id else None
     values = {
@@ -1017,7 +1015,8 @@ def write_statement(
         )
     fields = build_fields(
         view,
-        first_seen=store.first_seen(cve_id),
+        first_seen=view.first_seen,
+        reported_mark=store.reported_marks((view.cve_id,)).get(view.cve_id),
         generated_at=now or datetime.now(timezone.utc),
     )
     if template_path is None:

@@ -52,8 +52,8 @@ substitution point.
 
 Missing stored values render as `not available`. This text is also used when a
 field does not apply to the CVE, for example `kev_due_date` when CISA KEV has no
-entry. The reported-to-clients fields render `not reported` because that mark is
-not stored in the watch database yet.
+entry. The reported-to-clients fields use the current stored mark from `watch report`.
+After `watch unreport`, or without a mark, all three render `not reported`.
 
 The default statement shows publication, first-seen and last-modified dates as
 `YYYY-MM-DD` in UTC. Custom templates can use either the date-only fields or the
@@ -100,12 +100,12 @@ Unknown-name diagnostics list every unique unknown name up to 128 names and
 | `euvd_id` | EUVD identifier when the CVE has an EUVD item, for example `EUVD-2026-0001`. |
 | `euvd_url` | `https://euvd.enisa.europa.eu/vulnerability/<euvd_id>` when available. |
 | `generated_at` | Generation time in UTC, for example `2026-11-04T14:00:00+00:00`. |
-| `reported` | Whether the CVE was reported to clients. Currently always `not reported`. |
-| `reported_by` | Who reported the CVE to clients. Currently always `not reported`. |
-| `reported_at` | When the CVE was reported to clients. Currently always `not reported`. |
+| `reported` | `yes` when currently marked as reported to clients, otherwise `not reported`. |
+| `reported_by` | Who made the current report mark, for example `operator@example.invalid`; `not reported` without a mark. |
+| `reported_at` | Full timestamp of the current report mark, for example `2026-11-04T14:00:00+00:00`; `not reported` without a mark. |
 
-Values come from the same stored view used by alert messages. The command does
-not query NVD, EUVD, KEV, or EPSS.
+Values come from the same stored view used by alert messages and the current
+local report mark. The command does not query NVD, EUVD, KEV, or EPSS.
 
 ## Word templates
 
