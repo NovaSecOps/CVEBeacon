@@ -758,6 +758,8 @@ def main(argv: list[str] | None = None) -> int:
     try: return run(args)
     except CVEBeaconError as exc:
         print(f"error: {exc}", file=sys.stderr); return 2
+    except MemoryError:
+        print("error: not enough memory to complete the command", file=sys.stderr); return 2
     except KeyboardInterrupt:
         print("cancelled", file=sys.stderr); return 130
 

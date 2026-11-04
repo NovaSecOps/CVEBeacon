@@ -133,6 +133,7 @@ byte-for-byte, and `[Content_Types].xml` stays first in the archive.
 Limits and restrictions:
 
 - the `.docx` file must be at most 20 MiB;
+- packages may contain at most 10,000 members, including directory entries;
 - one uncompressed member must be at most 50 MiB and the whole archive at most
   200 MiB; complete compressed streams are checked against the declared sizes
   and checksums, and inconsistent members are refused;
@@ -145,7 +146,8 @@ Limits and restrictions:
   limited to 100,000 per XML member and 200,000 per package;
 - attributes are limited to 8,192 and 256 KiB of source bytes per element,
   50,000 and 1 MiB per XML member, and 100,000 and 4 MiB per package; attribute
-  byte limits conservatively include surrounding whitespace and tag delimiters;
+  byte limits conservatively include surrounding whitespace and a self-closing
+  slash, but exclude the final `>`;
 - namespace URI spellings are limited to 256 UTF-8 bytes. A conservative upper
   bound on expanded element/attribute names is checked before parsing: 16 MiB
   per XML member and 32 MiB per package, including both element callbacks. This

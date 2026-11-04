@@ -1261,12 +1261,13 @@ def test_docx_sanitizes_corrupt_container_errors(kind):
 
 @pytest.mark.parametrize("failure", [ValueError, NotImplementedError, UnicodeDecodeError, struct.error, zlib.error, RuntimeError, EOFError, zipfile.LargeZipFile])
 def test_docx_sanitizes_all_container_open_errors(monkeypatch, failure):
+    template = docx_bytes("<w:p/>")
     error = failure("utf-8", b"\xff", 0, 1, "invalid") if failure is UnicodeDecodeError else failure("private details")
     def broken(*args, **kwargs):
         raise error
     monkeypatch.setattr(zipfile, "ZipFile", broken)
     with pytest.raises(CVEBeaconError, match="not a readable .docx") as caught:
-        render_docx(b"broken", all_fields())
+        render_docx(template, all_fields())
     assert "private details" not in str(caught.value)
 
 
@@ -1470,3 +1471,192 @@ def test_preflight_applies_name_budget_inside_opening_tag(monkeypatch):
         statements._parse_xml(b'<s a="' + b'x' * 100_000 + b'"/>', "styles.xml")
 
 
+def zip64_directory(template: bytes) -> bytes:
+    end = template.rindex(b"PK\x05\x06")
+    count = struct.unpack_from("<H", template, end + 10)[0]
+    size, offset = struct.unpack_from("<II", template, end + 12)
+    record = struct.pack("<4sQ2H2I4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, count, count, size, offset)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, end, 1)
+    footer = bytearray(template[end:])
+    struct.pack_into("<HHII", footer, 8, 0xffff, 0xffff, 0xffffffff, 0xffffffff)
+    return template[:end] + record + locator + footer
+
+
+@pytest.mark.parametrize("zip64", [False, True])
+@pytest.mark.parametrize("lie", [False, True])
+def test_docx_bounds_member_count_before_directory_allocation(zip64, lie):
+    template = docx_zip(f'<w:document xmlns:w="{W}"/>', extra={
+        f"media/{i}.bin": b"" for i in range(10_001)
+    })
+    if zip64:
+        template = zip64_directory(template)
+    if lie:
+        data = bytearray(template)
+        if zip64:
+            end = data.rindex(b"PK\x06\x06")
+            struct.pack_into("<QQ", data, end + 24, 1, 1)
+        else:
+            end = data.rindex(b"PK\x05\x06")
+            struct.pack_into("<HH", data, end + 8, 1, 1)
+        template = bytes(data)
+    result = bounded_render(template)
+    assert "member count limit" in result["error"]
+    assert result["seconds"] < 1.0
+
+
+def test_member_count_limit_precedes_zipfile_constructor(monkeypatch):
+    template = docx_zip(f'<w:document xmlns:w="{W}"/>', extra={f"{i}.bin": b"" for i in range(20)})
+    monkeypatch.setattr(statements, "MAX_ZIP_MEMBERS", 10, raising=False)
+    def forbidden(*args, **kwargs):
+        pytest.fail("ZipFile constructed directory metadata before the count check")
+    monkeypatch.setattr(zipfile, "ZipFile", forbidden)
+    with pytest.raises(CVEBeaconError, match="member count limit"):
+        render_docx(template, all_fields())
+
+
+@pytest.mark.parametrize("zip64", [False, True])
+@pytest.mark.parametrize("prefix", [b"", b"prefix-data"])
+def test_zip_directory_preflight_accepts_comments_and_prefixes(zip64, prefix):
+    template = docx_bytes('<w:p><w:r><w:t>${cve_id}</w:t></w:r></w:p>')
+    if zip64:
+        template = zip64_directory(template)
+    data = bytearray(template)
+    end = data.rindex(b"PK\x05\x06")
+    comment = b"package comment"
+    struct.pack_into("<H", data, end + 20, len(comment))
+    result = render_docx(prefix + bytes(data) + comment, all_fields())
+    assert paragraph_texts(part(result, "word/document.xml")) == ["CVE-2026-0001"]
+    with zipfile.ZipFile(io.BytesIO(result)) as archive:
+        assert archive.comment == comment
+
+
+@pytest.mark.parametrize("failure", [ValueError, OSError, struct.error, zlib.error])
+def test_output_zip_close_errors_are_labeled_and_bounded(monkeypatch, failure):
+    import tracemalloc
+    real_zip = zipfile.ZipFile
+    template = docx_bytes('<w:p/>')
+    class BrokenClose(real_zip):
+        def close(self):
+            fail = self.mode == "w" and self.fp is not None
+            super().close()
+            if fail:
+                raise failure("private output failure")
+    monkeypatch.setattr(zipfile, "ZipFile", BrokenClose)
+    tracemalloc.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(CVEBeaconError, match="could not write statement") as caught:
+            render_docx(template, all_fields())
+        assert "private output failure" not in str(caught.value)
+        assert tracemalloc.get_traced_memory()[1] < 8 * 1024**2
+        assert time.monotonic() - started < 1.0
+    finally:
+        tracemalloc.stop()
+
+
+def test_cli_memory_backstop_has_a_clean_exit_under_a_hard_limit():
+    script = '''
+import json, sys
+from pathlib import Path
+try:
+    import resource
+except ImportError:
+    resource = None
+from cvebeacon import cli
+if resource:
+    resource.setrlimit(resource.RLIMIT_AS, (96 * 1024**2, 96 * 1024**2))
+def exhaust(args):
+    if resource:
+        bytearray(128 * 1024**2)
+    raise MemoryError("private allocation details")
+cli.run = exhaust
+code = cli.main(["watch", "statement", "CVE-2026-0001", "--out", "unused.md"])
+peak = None
+if sys.platform == "linux":
+    peak = int(next(line.split()[1] for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("VmHWM:")))
+print(json.dumps({"code": code, "peak": peak}))
+'''
+    completed = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=5)
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["code"] == 2
+    assert "not enough memory" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "private allocation details" not in completed.stderr
+    if result["peak"] is not None:
+        assert result["peak"] < 64 * 1024
+
+
+@pytest.mark.parametrize("kind", ["matches", "unknowns"])
+def test_text_template_limits_are_bounded_and_have_neutral_errors(kind):
+    import tracemalloc
+    text = '${description}' * 100_001 if kind == 'matches' else ''.join(f'${{unknown{i}}}' for i in range(300_000))
+    tracemalloc.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(CVEBeaconError, match="limit") as caught:
+            render_text(text, all_fields())
+        assert "XML" not in str(caught.value)
+        assert tracemalloc.get_traced_memory()[1] < 8 * 1024**2
+        assert time.monotonic() - started < 3
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.parametrize("failure", [ValueError, MemoryError])
+def test_statement_output_close_failure_keeps_existing_file(tmp_path, capsys, monkeypatch, failure):
+    import tracemalloc
+    config = write_config(tmp_path, sources=("nvd",))
+    populate(WatchStore(config.watch.database, clock=lambda: NOW))
+    template = tmp_path / "template.docx"
+    template.write_bytes(docx_bytes('<w:p/>'))
+    out = tmp_path / "statement.docx"
+    out.write_bytes(b"old")
+    real_zip = zipfile.ZipFile
+    class BrokenClose(real_zip):
+        def close(self):
+            fail = self.mode == 'w' and self.fp is not None
+            super().close()
+            if fail:
+                raise failure('private close details')
+    monkeypatch.setattr(zipfile, 'ZipFile', BrokenClose)
+    started = time.monotonic()
+    tracemalloc.start()
+    try:
+        assert cli.main([
+            '--config', str(config.config_path), 'watch', 'statement', 'CVE-2026-0001',
+            '--template', str(template), '--out', str(out), '--force',
+        ]) == 2
+        # Include the bounded 20 MiB template-reader buffer.
+        assert tracemalloc.get_traced_memory()[1] < 32 * 1024**2
+        assert time.monotonic() - started < 1.0
+    finally:
+        tracemalloc.stop()
+    error = capsys.readouterr().err
+    assert ('not enough memory' if failure is MemoryError else 'could not write statement') in error
+    assert 'private close details' not in error
+    assert 'Traceback' not in error
+    assert out.read_bytes() == b'old'
+
+
+@pytest.mark.parametrize('prefix', [b'', b'prefix'])
+def test_member_count_guard_handles_legacy_zip64_end_location(monkeypatch, prefix):
+    template = prefix + zip64_directory(docx_bytes('<w:p/>'))
+    original = zipfile._EndRecData
+    def legacy(handle):
+        end = original(handle)
+        end[zipfile._ECD_LOCATION] = template.rindex(b'PK\x05\x06')
+        return end
+    monkeypatch.setattr(zipfile, '_EndRecData', legacy)
+    statements._check_zip_directory(template)
+
+
+def test_member_count_accepts_exact_limit_and_rejects_one_more(monkeypatch):
+    template = docx_bytes('<w:p/>')
+    with zipfile.ZipFile(io.BytesIO(template)) as archive:
+        count = len(archive.infolist())
+    monkeypatch.setattr(statements, 'MAX_ZIP_MEMBERS', count)
+    render_docx(template, all_fields())
+    monkeypatch.setattr(statements, 'MAX_ZIP_MEMBERS', count - 1)
+    with pytest.raises(CVEBeaconError, match='member count limit'):
+        render_docx(template, all_fields())

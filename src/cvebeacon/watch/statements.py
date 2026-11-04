@@ -15,6 +15,7 @@ import tempfile
 import zipfile
 import zlib
 from bisect import bisect_right
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
@@ -37,6 +38,7 @@ MAX_TEMPLATE_BYTES = 20 * 1024 * 1024
 MAX_MEMBER_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_BYTES = 200 * 1024 * 1024
 MAX_RENDERED_BYTES = 50 * 1024 * 1024
+MAX_ZIP_MEMBERS = 10_000
 MAX_XML_DEPTH = 256
 MAX_XML_SPANS = 100_000
 MAX_XML_BYTES = 8 * 1024 * 1024
@@ -787,6 +789,45 @@ def _process_xml_part(
     return data if unknown else _render_part(data, scan, values, remaining)
 
 
+def _check_zip_directory(template: bytes) -> None:
+    """Bound directory records before ZipFile allocates its member tables."""
+    # Reuse the stdlib's classic/ZIP64 end-record decoder, which allocates no
+    # ZipInfo objects. Walk fixed headers too: declared entry counts can lie.
+    end = zipfile._EndRecData(io.BytesIO(template))
+    if end is None:
+        raise zipfile.BadZipFile("missing end record")
+    if end[zipfile._ECD_ENTRIES_TOTAL] > MAX_ZIP_MEMBERS:
+        raise _xml_limit("member count")
+    directory_end = end[zipfile._ECD_LOCATION]
+    if (end[zipfile._ECD_SIGNATURE] == zipfile.stringEndArchive64
+        and template[directory_end:directory_end + 4] != zipfile.stringEndArchive64):
+        # Older supported Python versions leave LOCATION at the classic EOCD.
+        directory_end -= zipfile.sizeEndCentDir64 + zipfile.sizeEndCentDir64Locator
+    position = directory_end - end[zipfile._ECD_SIZE]
+    if position < 0 or directory_end > len(template):
+        raise zipfile.BadZipFile("invalid directory bounds")
+    count = 0
+    while position < directory_end:
+        if position + 46 > directory_end or template[position:position + 4] != b"PK\x01\x02":
+            raise zipfile.BadZipFile("invalid directory record")
+        count += 1
+        if count > MAX_ZIP_MEMBERS:
+            raise _xml_limit("member count")
+        name, extra, comment = struct.unpack_from("<HHH", template, position + 28)
+        position += 46 + name + extra + comment
+    if position != directory_end or count != end[zipfile._ECD_ENTRIES_TOTAL]:
+        raise zipfile.BadZipFile("inconsistent directory records")
+
+
+@contextmanager
+def _output_archive(output: io.BytesIO):
+    try:
+        with zipfile.ZipFile(output, "w") as target:
+            yield target
+    except _ZIP_ERRORS as exc:
+        raise CVEBeaconError("could not write statement document") from exc
+
+
 def render_docx(template: bytes, fields: Mapping[str, str]) -> bytes:
     """Fill placeholders in a .docx template and return the new document bytes."""
     try:
@@ -799,6 +840,7 @@ def _render_docx(template: bytes, fields: Mapping[str, str]) -> bytes:
     if len(template) > MAX_TEMPLATE_BYTES:
         raise CVEBeaconError(f"statement template is larger than {MAX_TEMPLATE_BYTES} bytes")
     values = _values(fields)
+    _check_zip_directory(template)
     with zipfile.ZipFile(io.BytesIO(template)) as source:
         infos = source.infolist()
         names = {info.filename for info in infos}
@@ -811,7 +853,7 @@ def _render_docx(template: bytes, fields: Mapping[str, str]) -> bytes:
         unknown: set[str] = set()
         output = io.BytesIO()
         written = rendered = 0
-        with zipfile.ZipFile(output, "w") as target:
+        with _output_archive(output) as target:
             target.comment = source.comment
             for info in sorted(infos, key=lambda info: info.filename != "[Content_Types].xml"):
                 if written + info.file_size > MAX_TOTAL_BYTES:
