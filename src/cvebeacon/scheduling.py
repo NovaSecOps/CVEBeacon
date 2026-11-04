@@ -25,6 +25,21 @@ TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 MAX_TIMES = 12
 
+WINDOWS_REGISTRATION_SCRIPT = """param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][string]$XmlPath,
+    [Parameter(Mandatory = $true)][string]$Account
+)
+$ErrorActionPreference = 'Stop'
+$password = [Console]::In.ReadLine()
+if (-not $password) { throw "no password on stdin" }
+$xml = [System.IO.File]::ReadAllText($XmlPath)
+$service = New-Object -ComObject Schedule.Service
+$service.Connect()
+$folder = $service.GetFolder('\\')
+$null = $folder.RegisterTask($TaskName, $xml, 6, $Account, $password, 1, $null)
+"""
+
 ET.register_namespace("", TASK_NAMESPACE)
 
 
@@ -193,6 +208,7 @@ def make_plan(
     executable: str | Path | None = None,
     allow_incompatible: bool = False,
     run_logged_out: bool = False,
+    account: str | None = None,
 ) -> SchedulePlan:
     if times is not None and every_hours is not None:
         raise SchedulingError("--times and --every are mutually exclusive")
@@ -217,8 +233,12 @@ def make_plan(
         raise SchedulingError("platform must be auto, windows, or linux")
     if requested != detected and not allow_incompatible:
         raise SchedulingError(f"cannot manage a {requested} schedule on a {detected} host")
+    if account is not None and not run_logged_out:
+        raise SchedulingError("--account requires --run-logged-out")
     if run_logged_out and requested != "windows":
         raise SchedulingError("--run-logged-out is supported only on Windows")
+    if account is not None and requested != "windows":
+        raise SchedulingError("--account is supported only on Windows")
     if requested == "linux" and interval is not None and 24 % interval:
         raise SchedulingError("Linux cron intervals must divide 24: choose 2, 3, 4, 6, 8, 12, or 24 hours")
     if executable:
@@ -241,10 +261,13 @@ def make_plan(
     account_name = ""
     account_note = ""
     if run_logged_out:
-        account_name, account_note = _current_windows_account()
+        if account is None:
+            account_name, account_note = _current_windows_account()
+        else:
+            account_name = account.strip()
         if not account_name:
             raise SchedulingError(
-                "--run-logged-out needs the current Windows account"
+                "--run-logged-out needs the Windows account that runs the task"
             )
         if any(character in account_name for character in "\r\n"):
             raise SchedulingError("schedule account cannot contain line breaks")
@@ -276,7 +299,7 @@ def describe(plan: SchedulePlan) -> str:
         "  " + _display_command(command, plan.system) for command in plan.commands
     )
     if plan.run_logged_out:
-        lines.append(f"Runs as: {plan.user_id} (S4U, while logged off)")
+        lines.append(f"Runs as: {plan.user_id} (stored password, while logged off)")
         if plan.account_note:
             lines.append(f"Account note: {plan.account_note}")
     return "\n".join(lines)
@@ -340,7 +363,7 @@ def _windows_xml(plan: SchedulePlan, *, now: datetime | None = None) -> bytes:
     principal.set("id", "Author")
     if plan.run_logged_out:
         _add(principal, "UserId", plan.user_id)
-    _add(principal, "LogonType", "S4U" if plan.run_logged_out else "InteractiveToken")
+    _add(principal, "LogonType", "Password" if plan.run_logged_out else "InteractiveToken")
     _add(principal, "RunLevel", "LeastPrivilege")
     settings = _add(root, "Settings")
     _add(settings, "MultipleInstancesPolicy", "IgnoreNew")
@@ -529,18 +552,22 @@ def _windows_registration_hint(
     if _windows_access_denied(detail, returncode):
         if plan.run_logged_out:
             return (
-                "access denied: register the task from the account that will run it"
+                "access denied: use an elevated administrator shell and verify "
+                "the account name"
             )
         return "access denied: run from an elevated prompt"
+    if "0x8007052e" in folded:
+        return (
+            "the account password was rejected: verify it and run the command again"
+        )
     if "0x80070569" in folded:
         return (
             "the account needs the 'Log on as a batch job' right: grant it in "
             "secpol.msc; a domain GPO can override it"
         )
-    if any(
-        code in folded
-        for code in ("0x80070534", "0x8007052e", "0x80070533", "0x800704ec")
-    ):
+    if "0x80070534" in folded:
+        return "the account was not found: verify the --account name"
+    if any(code in folded for code in ("0x80070533", "0x800704ec")):
         return (
             "account or logon error: verify the account and grant it the "
             "'Log on as a batch job' right in secpol.msc"
@@ -548,21 +575,64 @@ def _windows_registration_hint(
     return ""
 
 
-def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
+def install(
+    plan: SchedulePlan, *, password: str | None = None, run=subprocess.run
+) -> None:
     if plan.system == "windows":
-        if plan.times or plan.run_logged_out:
+        if plan.run_logged_out:
+            if not password:
+                raise SchedulingError(
+                    "--run-logged-out requires the account password"
+                )
+            with tempfile.TemporaryDirectory(
+                prefix="cvebeacon-schedule-", ignore_cleanup_errors=True
+            ) as directory:
+                xml_path = Path(directory) / "task.xml"
+                script_path = Path(directory) / "register.ps1"
+                xml_path.write_bytes(_windows_xml(plan))
+                script_path.write_text(
+                    WINDOWS_REGISTRATION_SCRIPT, encoding="utf-8"
+                )
+                try:
+                    result = run(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                            str(script_path),
+                            "-TaskName",
+                            WINDOWS_TASK,
+                            "-XmlPath",
+                            str(xml_path),
+                            "-Account",
+                            plan.user_id,
+                        ],
+                        input=password + "\n",
+                        capture_output=True,
+                        text=True,
+                        errors="replace",
+                        check=False,
+                        timeout=120,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    detail = " ".join(str(exc).split())[:600]
+                    raise SchedulingError(
+                        f"schedule installation failed: {detail}"
+                    ) from exc
+                finally:
+                    password = None
+        elif plan.times:
             descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
             try:
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(_windows_xml(plan))
                     handle.flush()
                     os.fsync(handle.fileno())
-                arguments = ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK]
-                if plan.run_logged_out:
-                    arguments.extend(["/RU", plan.user_id, "/NP"])
-                arguments.extend(["/F", "/HRESULT"])
                 result = run(
-                    arguments,
+                    ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK, "/F", "/HRESULT"],
                     capture_output=True,
                     text=True,
                     check=False,
