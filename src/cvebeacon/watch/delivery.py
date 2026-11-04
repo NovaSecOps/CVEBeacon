@@ -782,8 +782,6 @@ def deliver_pending(
             failure: DeliveryFailure | None = None
             expired = False
             for message in messages:
-                if sent >= MAX_MESSAGES_PER_CHANNEL:
-                    break
                 if delivered and pace and interval > 0:
                     remaining = deadline - monotonic()
                     if interval > remaining:
