@@ -610,8 +610,9 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
                         timeout=120,
                     )
                 except (OSError, subprocess.TimeoutExpired) as exc:
+                    detail = " ".join(str(exc).split())[:600]
                     raise SchedulingError(
-                        f"schedule installation failed: {exc}"
+                        f"schedule installation failed: {detail}"
                     ) from exc
         elif plan.times:
             descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
