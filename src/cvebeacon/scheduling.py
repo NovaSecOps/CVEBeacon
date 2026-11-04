@@ -604,6 +604,7 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
                         ],
                         capture_output=True,
                         text=True,
+                        errors="replace",
                         check=False,
                         stdin=subprocess.DEVNULL,
                         timeout=120,
