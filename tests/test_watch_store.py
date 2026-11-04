@@ -137,7 +137,7 @@ def test_view_combines_euvd_kev_and_epss(tmp_path):
         catalogs=("nvd", "cisa_kev"),
     )
     store.replace_epss([("CVE-2026-0001", 0.5, 0.9, date(2026, 11, 3))])
-    view = store.view("CVE-2026-0001", catalogs=("nvd", "euvd", "cisa_kev"))
+    view = store.view("CVE-2026-0001", catalogs=("nvd", "euvd", "cisa_kev", "epss"))
     assert view is not None
     assert {entry.provider for entry in view.cvss} == {"nvd", "euvd"}
     assert view.euvd_id == "EUVD-2026-1"
@@ -363,7 +363,7 @@ def test_epss_rejects_a_file_below_half_the_current_table(tmp_path):
             [("CVE-2026-0001", 0.1, 0.2, date(2026, 11, 3))]
         )
     assert store.status()["epss_rows"] == 4
-    assert store.view("CVE-2026-0001").epss == 0.8
+    assert store.view("CVE-2026-0001", catalogs=("epss",)).epss == 0.8
 
 
 def test_epss_write_batches_interleave_with_reading(tmp_path, monkeypatch):
@@ -752,3 +752,21 @@ def test_products_and_names_are_capped_at_the_new_limits(tmp_path):
     assert len(view.products) == 500
     assert view.vendors[-1] == "v0499"
     assert view.products[-1] == "p0499"
+
+
+def test_epss_is_ignored_when_the_source_is_not_configured(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert_nvd([record()], catalogs=("nvd",))
+    store.replace_epss([("CVE-2026-0001", 0.5, 0.9, date(2026, 11, 3))])
+    assert store.view("CVE-2026-0001", catalogs=("nvd",)).epss is None
+    assert store.view("CVE-2026-0001", catalogs=("nvd", "epss")).epss == 0.5
+
+
+def test_adding_or_removing_the_epss_source_recomputes_views(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert_nvd([record()])
+    assert store.apply_view_policy(("nvd",)) == ("CVE-2026-0001",)
+    store.acknowledge(store.pending_evaluations(10))
+    assert store.apply_view_policy(("nvd", "epss")) == ("CVE-2026-0001",)
+    store.acknowledge(store.pending_evaluations(10))
+    assert store.apply_view_policy(("nvd",)) == ("CVE-2026-0001",)

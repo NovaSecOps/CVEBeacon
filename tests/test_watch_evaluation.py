@@ -151,7 +151,7 @@ def test_epss_only_touch_is_evaluated(tmp_path):
     )
     assert changed.changed_ids == ("CVE-2026-0001",)
     configured = rule(condition={"epss_min": 0.3})
-    result = store.evaluate_touched((configured,), catalogs=("nvd",))
+    result = store.evaluate_touched((configured,), catalogs=("nvd", "epss"))
     assert result.by_kind == (("match", 1),)
     assert store.events()[0].reasons == ("epss 0.4",)
 
@@ -559,12 +559,12 @@ def test_epss_oscillation_stores_one_event_per_new_maximum(tmp_path):
     store.upsert_nvd([record()])
     store.replace_epss([("CVE-2026-0001", 0.6, 0.5, date(2026, 11, 3))])
     configured = rule(condition={"cvss_min": 1})
-    store.evaluate_touched((configured,), catalogs=("nvd",))
+    store.evaluate_touched((configured,), catalogs=("nvd", "epss"))
     for score in (0.2, 0.95, 0.2, 0.95):
         store.replace_epss(
             [("CVE-2026-0001", score, 0.5, date(2026, 11, 3))]
         )
-        store.evaluate_touched((configured,), catalogs=("nvd",))
+        store.evaluate_touched((configured,), catalogs=("nvd", "epss"))
     with sqlite3.connect(store.path) as db:
         assert db.execute(
             "SELECT COUNT(*) FROM watch_event WHERE kind='epss_increase'"

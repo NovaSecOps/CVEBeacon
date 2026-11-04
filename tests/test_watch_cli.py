@@ -24,6 +24,21 @@ channels = ["teams"]
 events = ["match", "kev_added"]
 """
 
+# CVSS-only variant for tests that run `watch run` or `watch sync`: their mock
+# server answers every URL with NVD JSON, so no EPSS feed is available there.
+RULES_CVSS_ONLY = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9.0 }
+channels = ["soc-email"]
+
+[[watch.rules]]
+name = "kev-watch"
+condition = { kev = "any" }
+channels = ["teams"]
+events = ["match", "kev_added"]
+"""
+
 
 def record(identifier: str = "CVE-2026-0001", **overrides) -> WatchRecord:
     values = {
@@ -37,7 +52,7 @@ def record(identifier: str = "CVE-2026-0001", **overrides) -> WatchRecord:
 
 
 def test_watch_rules_check_prints_readable_conditions(tmp_path, capsys):
-    config = write_config(tmp_path, extra=RULES)
+    config = write_config(tmp_path, sources=("nvd", "epss"), extra=RULES)
     assert cli.main(["--config", str(config.config_path), "watch", "rules", "check"]) == 0
     output = capsys.readouterr().out
     assert "critical-or-likely: (cvss >= 9.0 OR epss >= 0.5)" in output
@@ -45,14 +60,14 @@ def test_watch_rules_check_prints_readable_conditions(tmp_path, capsys):
 
 
 def test_watch_rules_check_works_for_a_watch_only_config(tmp_path, capsys):
-    config = write_config(tmp_path, inventory=False, extra=RULES)
+    config = write_config(tmp_path, inventory=False, sources=("nvd", "epss"), extra=RULES)
     assert config.inventory is None
     assert cli.main(["--config", str(config.config_path), "watch", "rules", "check"]) == 0
     assert "critical-or-likely" in capsys.readouterr().out
 
 
 def test_watch_events_lists_concise_lines_and_filters(tmp_path, capsys):
-    config = write_config(tmp_path, extra=RULES)
+    config = write_config(tmp_path, sources=("nvd", "epss"), extra=RULES)
     store = WatchStore(config.watch.database, clock=lambda: NOW)
     store.upsert_nvd(
         [
@@ -74,7 +89,7 @@ def test_watch_events_lists_concise_lines_and_filters(tmp_path, capsys):
 
 
 def test_watch_events_pending_filter(tmp_path, capsys):
-    config = write_config(tmp_path, extra=RULES)
+    config = write_config(tmp_path, sources=("nvd", "epss"), extra=RULES)
     store = WatchStore(config.watch.database, clock=lambda: NOW)
     store.upsert_nvd([record(cisa_kev_added="2026-11-03")])
     store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources)
@@ -90,7 +105,7 @@ def test_watch_events_pending_filter(tmp_path, capsys):
 
 
 def test_watch_evaluate_all_requires_confirmation_and_marks_initial(tmp_path, monkeypatch, capsys):
-    config = write_config(tmp_path, extra=RULES)
+    config = write_config(tmp_path, sources=("nvd", "epss"), extra=RULES)
     store = WatchStore(config.watch.database, clock=lambda: NOW)
     store.upsert_nvd([record(cisa_kev_added="2026-11-03")])
     store.acknowledge(store.pending_evaluations(100))
@@ -109,7 +124,7 @@ def test_watch_evaluate_all_requires_confirmation_and_marks_initial(tmp_path, mo
 
 
 def test_watch_run_syncs_and_evaluates_with_initial_events(tmp_path, monkeypatch, capsys):
-    config = write_config(tmp_path, initial="backfill", extra=RULES)
+    config = write_config(tmp_path, initial="backfill", extra=RULES_CVSS_ONLY)
 
     def handler(request):
         return httpx.Response(200, json=nvd_page([nvd_cve(cisaExploitAdd="2026-11-03")]))
@@ -124,7 +139,7 @@ def test_watch_run_syncs_and_evaluates_with_initial_events(tmp_path, monkeypatch
 
 
 def test_watch_sync_leaves_evaluation_for_watch_run(tmp_path, monkeypatch, capsys):
-    config = write_config(tmp_path, initial="backfill", extra=RULES)
+    config = write_config(tmp_path, initial="backfill", extra=RULES_CVSS_ONLY)
 
     def handler(request):
         return httpx.Response(200, json=nvd_page([nvd_cve(cisaExploitAdd="2026-11-03")]))
@@ -140,7 +155,7 @@ def test_watch_sync_leaves_evaluation_for_watch_run(tmp_path, monkeypatch, capsy
 
 
 def test_watch_evaluate_all_eof_is_cancelled(tmp_path, monkeypatch, capsys):
-    config = write_config(tmp_path, extra=RULES)
+    config = write_config(tmp_path, sources=("nvd", "epss"), extra=RULES)
 
     def eof(message):
         raise EOFError
@@ -151,7 +166,7 @@ def test_watch_evaluate_all_eof_is_cancelled(tmp_path, monkeypatch, capsys):
 
 
 def test_watch_run_works_without_an_inventory(tmp_path, monkeypatch, capsys):
-    config = write_config(tmp_path, inventory=False, initial="backfill", extra=RULES)
+    config = write_config(tmp_path, inventory=False, initial="backfill", extra=RULES_CVSS_ONLY)
 
     def handler(request):
         return httpx.Response(
@@ -164,7 +179,7 @@ def test_watch_run_works_without_an_inventory(tmp_path, monkeypatch, capsys):
 
 
 def test_inventory_commands_fail_clearly_without_inventory(tmp_path, capsys):
-    config = write_config(tmp_path, inventory=False, extra=RULES)
+    config = write_config(tmp_path, inventory=False, sources=("nvd", "epss"), extra=RULES)
     for command in (
         ["scan"],
         ["asset", "example"],
@@ -235,7 +250,7 @@ def test_watch_output_is_ascii_under_cp1252(tmp_path, monkeypatch):
     import io
     import sys
 
-    config = write_config(tmp_path, extra=RULES)
+    config = write_config(tmp_path, sources=("nvd", "epss"), extra=RULES)
     store = WatchStore(config.watch.database, clock=lambda: NOW)
     store.upsert_nvd([record()])
     store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources)

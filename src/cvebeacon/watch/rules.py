@@ -454,6 +454,11 @@ def validate_rule_sources(rules: Iterable[Rule], sources: Iterable[str]) -> None
                 f"watch rule {rule.name!r} uses kev = \"eu\" but eu_kev "
                 "is not in watch.sources"
             )
+        if rule.condition.contains_leaf("epss_min") and "epss" not in configured:
+            raise ConfigurationError(
+                f"watch rule {rule.name!r} uses epss_min but epss "
+                "is not in watch.sources"
+            )
         if set(rule.cvss_providers) == {"euvd"} and "euvd" not in configured:
             raise ConfigurationError(
                 f"watch rule {rule.name!r} selects only the euvd CVSS provider "

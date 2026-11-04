@@ -114,7 +114,7 @@ def test_watch_only_config_without_inventory_loads(tmp_path):
 [watch]
 enabled = true
 database = "watch.db"
-sources = ["nvd"]
+sources = ["nvd", "epss"]
 
 [[watch.rules]]
 name = "critical-or-likely"
@@ -248,3 +248,35 @@ channels = ["soc-email"]
     assert config.watch.rules[0].condition.leaves == (
         ("cwe", ("CWE-79", "CWE-80", "CWE-81")),
     )
+
+
+def test_epss_min_requires_the_epss_source(tmp_path):
+    with pytest.raises(
+        ConfigurationError,
+        match="watch rule 'likely' uses epss_min but epss is not in watch.sources",
+    ):
+        write(
+            tmp_path,
+            """
+[watch]
+sources = ["nvd"]
+
+[[watch.rules]]
+name = "likely"
+condition = { any = [ { cvss_min = 9 }, { not = { epss_min = 0.5 } } ] }
+channels = ["soc-email"]
+""",
+        )
+    config = write(
+        tmp_path,
+        """
+[watch]
+sources = ["nvd", "epss"]
+
+[[watch.rules]]
+name = "likely"
+condition = { epss_min = 0.5 }
+channels = ["soc-email"]
+""",
+    )
+    assert config.watch.rules[0].name == "likely"

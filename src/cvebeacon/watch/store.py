@@ -41,7 +41,7 @@ SCHEMA_VERSION = 2
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
-VIEW_POLICY_SOURCES = ("cisa_kev", "eu_kev", "euvd")
+VIEW_POLICY_SOURCES = ("cisa_kev", "eu_kev", "euvd", "epss")
 VIEW_POLICY_BATCH = 5000
 EVALUATION_BATCH = 5000
 
@@ -592,7 +592,7 @@ class WatchStore:
             eu_kev=self._kev_row(db, "eu", identifier),
             cisa_catalog="cisa_kev" in catalogs,
             eu_catalog="eu_kev" in catalogs,
-            epss=self._epss_row(db, identifier),
+            epss=self._epss_row(db, identifier) if "epss" in catalogs else None,
         )
 
     def _refresh_views(
