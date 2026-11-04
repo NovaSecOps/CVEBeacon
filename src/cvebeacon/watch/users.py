@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import sqlite3
 import stat
 import unicodedata
@@ -62,6 +63,10 @@ _SCHEMA = (
         failed_logins INTEGER NOT NULL DEFAULT 0,
         locked_until TEXT,
         credential_version INTEGER NOT NULL DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS cb_user_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS cb_user_audit (
         id INTEGER PRIMARY KEY,
@@ -222,6 +227,7 @@ class UserStore:
     ) -> None:
         self.path = Path(path)
         self._clock = clock
+        self._store_id: str | None = None
 
     @staticmethod
     def _trusted_directory_chain(directory: Path) -> tuple[tuple[int, int], ...]:
@@ -304,7 +310,12 @@ class UserStore:
                             "CVEBeacon user database must not be group or "
                             "other accessible"
                         )
-                    expected = (details.st_dev, details.st_ino)
+                    expected = (
+                        details.st_dev,
+                        details.st_ino,
+                        details.st_size,
+                        details.st_mtime_ns,
+                    )
                 finally:
                     os.close(descriptor)
                 connection = sqlite3.connect(
@@ -321,7 +332,13 @@ class UserStore:
                     ) from exc
                 if (
                     not stat.S_ISREG(current.st_mode)
-                    or (current.st_dev, current.st_ino) != expected
+                    or (
+                        current.st_dev,
+                        current.st_ino,
+                        current.st_size,
+                        getattr(current, "st_mtime_ns", 0),
+                    )
+                    != expected
                     or self._trusted_directory_chain(resolved_parent)
                     != directory_chain
                 ):
@@ -330,11 +347,19 @@ class UserStore:
                         "CVEBeacon user database was replaced while opening"
                     )
             else:
+                created = create and not path.exists()
                 if not create and not path.exists():
                     raise StateError("CVEBeacon user database not found")
                 connection = sqlite3.connect(
                     str(path), timeout=30
                 )
+            try:
+                self._verify_store_content(
+                    connection, created=created, allow_empty=create
+                )
+            except Exception:
+                connection.close()
+                raise
             connection.row_factory = sqlite3.Row
             return connection
         except StateError:
@@ -343,6 +368,65 @@ class UserStore:
             raise StateError(
                 f"cannot open CVEBeacon user database {self.path}: {exc}"
             ) from exc
+
+    def _verify_store_content(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        created: bool,
+        allow_empty: bool = False,
+    ) -> None:
+        """Read-only identity check for the file SQLite actually opened."""
+        connection.execute("BEGIN")
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "cb_user" not in tables:
+                if (
+                    self._store_id is None
+                    and not tables
+                    and (created or allow_empty)
+                ):
+                    return
+                raise StateError(
+                    "CVEBeacon user database was replaced while opening"
+                )
+            if "cb_user_meta" not in tables:
+                if self._store_id is not None:
+                    raise StateError(
+                        "CVEBeacon user database was replaced while opening"
+                    )
+                return
+            row = connection.execute(
+                "SELECT value FROM cb_user_meta WHERE key='store_id'"
+            ).fetchone()
+            if row is None or not str(row[0]):
+                if self._store_id is not None:
+                    raise StateError(
+                        "CVEBeacon user database was replaced while opening"
+                    )
+                return
+            store_id = str(row[0])
+            if self._store_id is not None and store_id != self._store_id:
+                raise StateError(
+                    "CVEBeacon user database was replaced while opening"
+                )
+            self._store_id = store_id
+        except StateError:
+            raise
+        except sqlite3.Error as exc:
+            raise StateError(
+                "CVEBeacon user database was replaced while opening"
+            ) from exc
+        finally:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -367,6 +451,7 @@ class UserStore:
             self._migrate_email_keys(db)
             self._migrate_audit_actor(db)
             self._migrate_credential_version(db)
+            self._ensure_store_id(db)
             db.commit()
 
     @staticmethod
@@ -418,6 +503,24 @@ class UserStore:
                 "CVEBeacon account emails collide under Unicode case "
                 "folding; correct the account file"
             ) from exc
+
+    def _ensure_store_id(self, db: sqlite3.Connection) -> None:
+        row = db.execute(
+            "SELECT value FROM cb_user_meta WHERE key='store_id'"
+        ).fetchone()
+        if row is not None and str(row[0]):
+            self._store_id = str(row[0])
+            return
+        store_id = secrets.token_hex(32)
+        db.execute(
+            "INSERT OR IGNORE INTO cb_user_meta(key,value) "
+            "VALUES ('store_id',?)",
+            (store_id,),
+        )
+        row = db.execute(
+            "SELECT value FROM cb_user_meta WHERE key='store_id'"
+        ).fetchone()
+        self._store_id = str(row[0])
 
     @staticmethod
     def _migrate_credential_version(db: sqlite3.Connection) -> None:
