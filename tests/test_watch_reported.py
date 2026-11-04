@@ -990,13 +990,13 @@ def set_delivery_state(
 def test_combined_retry_flags_keep_notice_audit_order(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    first = record_report(store, 
+    first = record_report(store,
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
-    second = record_unreport(store, 
+    second = record_unreport(store,
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
-    third = record_report(store, 
+    third = record_report(store,
         "CVE-2026-0001", by="third", notify_channels=("hook",)
     )
     assert first.event_id is not None
@@ -1037,13 +1037,13 @@ def test_cli_combined_retry_flags_keep_notice_order(
 ):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    first = record_report(store, 
+    first = record_report(store,
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
-    second = record_unreport(store, 
+    second = record_unreport(store,
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
-    third = record_report(store, 
+    third = record_report(store,
         "CVE-2026-0001", by="third", notify_channels=("hook",)
     )
     assert first.event_id is not None
@@ -1079,10 +1079,10 @@ def test_cli_combined_retry_flags_keep_notice_order(
 def test_selected_successor_waits_for_an_ambiguous_predecessor(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    first = record_report(store, 
+    first = record_report(store,
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
-    second = record_unreport(store, 
+    second = record_unreport(store,
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
     assert first.event_id is not None
