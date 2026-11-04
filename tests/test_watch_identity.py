@@ -798,12 +798,30 @@ def test_notice_text_uses_display_name_username_and_email(tmp_path):
         "pending",
     )
     message = build_messages(
-        (event,), channel_type="slack", grouping="run", max_items=20, names={}
+        (event,), channel_type="smtp", grouping="run", max_items=20, names={}
     )[0]
     assert (
         "[REPORTED] CVE-2026-0001 reported to clients by "
-        "Alice Smith (alice) <alice@example.com> at " in message.text
+        "Alice Smith (alice) <alice@example.com> at " in message.body
     )
+    escaped = build_messages(
+        (event,), channel_type="slack", grouping="run", max_items=20, names={}
+    )[0]
+    assert "&lt;alice@example.com&gt;" in escaped.text
+    assert "<alice@example.com>" not in escaped.text
+    localized = build_messages(
+        (event,),
+        channel_type="smtp",
+        grouping="run",
+        max_items=20,
+        names={},
+        language="pt-PT",
+        format="html",
+    )[0]
+    assert "comunicado aos clientes por" in localized.html
+    assert "Alice Smith (alice)" in localized.html
+    assert "&lt;alice@example.com&gt;" in localized.html
+    assert "<alice@example.com>" not in localized.html
 
 
 def test_report_mark_display_includes_the_username():

@@ -474,7 +474,11 @@ class WatchStore:
             connection.close()
 
     def initialize(self, *, create: bool = True) -> None:
-        with self.transaction(create=create) as db:
+        if create:
+            with self.transaction() as db:
+                self._ensure_schema(db, _timestamp(self._clock))
+            return
+        with self.transaction(create=False) as db:
             self._ensure_schema(db, _timestamp(self._clock))
 
     @staticmethod
