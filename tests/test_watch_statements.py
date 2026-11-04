@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import base64
 import io
+import json
 import os
+import random
 import re
 import struct
+import subprocess
+import sys
 import time
 import zipfile
 import zlib
 from datetime import date
 from pathlib import Path
+from string import Template
+from xml.sax.saxutils import escape
 from xml.etree import ElementTree
 
 import pytest
@@ -238,7 +245,10 @@ def corrupt_deflate(zip_data: bytes, name: str) -> bytes:
     return bytes(data)
 
 
-def patch_central_size(zip_data: bytes, name: str, size: int) -> bytes:
+def patch_central_size(
+    zip_data: bytes, name: str, size: int | None = None,
+    *, compressed_size: int | None = None,
+) -> bytes:
     data = bytearray(zip_data)
     position = 0
     while True:
@@ -247,48 +257,13 @@ def patch_central_size(zip_data: bytes, name: str, size: int) -> bytes:
         name_length = struct.unpack_from("<H", data, position + 28)[0]
         filename = data[position + 46 : position + 46 + name_length]
         if filename == name.encode():
-            struct.pack_into("<I", data, position + 24, size)
-            struct.pack_into("<I", data, position + 16, zlib.crc32(b"\0" * size))
+            if size is not None:
+                struct.pack_into("<I", data, position + 24, size)
+                struct.pack_into("<I", data, position + 16, zlib.crc32(b"\0" * size))
+            if compressed_size is not None:
+                struct.pack_into("<I", data, position + 20, compressed_size)
             return bytes(data)
         position += 4
-
-
-def member_data_offset(zip_data: bytes, name: str) -> int:
-    position = 0
-    while True:
-        position = zip_data.find(b"PK\x03\x04", position)
-        if position < 0:
-            raise AssertionError(f"local header not found for {name}")
-        name_length = struct.unpack_from("<H", zip_data, position + 26)[0]
-        extra_length = struct.unpack_from("<H", zip_data, position + 28)[0]
-        filename = zip_data[position + 30 : position + 30 + name_length]
-        if filename == name.encode():
-            return position + 30 + name_length + extra_length
-        position += 4
-
-
-def corrupt_deflate(zip_data: bytes, name: str) -> bytes:
-    data = bytearray(zip_data)
-    data[member_data_offset(bytes(data), name)] = 0x07
-    return bytes(data)
-
-
-def lie_about_member_size(zip_data: bytes, name: str) -> bytes:
-    data = bytearray(zip_data)
-    position = data.find(b"PK\x01\x02")
-    while position >= 0:
-        name_length = struct.unpack_from("<H", data, position + 28)[0]
-        extra_length = struct.unpack_from("<H", data, position + 30)[0]
-        comment_length = struct.unpack_from("<H", data, position + 32)[0]
-        filename = data[position + 46 : position + 46 + name_length]
-        if filename == name.encode():
-            struct.pack_into("<I", data, position + 16, zlib.crc32(b"\0"))
-            struct.pack_into("<I", data, position + 24, 1)
-            return bytes(data)
-        position = data.find(
-            b"PK\x01\x02", position + 46 + name_length + extra_length + comment_length
-        )
-    raise AssertionError(f"central directory entry not found for {name}")
 
 
 def test_fields_cover_the_documented_names(tmp_path):
@@ -711,7 +686,7 @@ def test_docx_rejects_malformed_input():
         render_docx(
             docx_bytes("<w:p><w:r><w:t>${cve_id}</w:t>"), all_fields()
         )
-    with pytest.raises(CVEBeaconError, match="unclosed comment"):
+    with pytest.raises(CVEBeaconError, match="malformed"):
         render_docx(docx_bytes("<!-- ${cve_id}"), all_fields())
 
 
@@ -744,7 +719,7 @@ def test_docx_rejects_a_lying_member_size():
     )
     with pytest.raises(CVEBeaconError, match="invalid member size"):
         render_docx(
-            lie_about_member_size(template, "word/styles.xml"), all_fields()
+            patch_central_size(template, "word/styles.xml", 1), all_fields()
         )
 
 
@@ -966,3 +941,235 @@ def test_docx_bare_dollar_error_mentions_doubling():
             all_fields(),
         )
     assert "write '$$'" in str(caught.value)
+
+
+def bounded_render(template: bytes, fields=None, *, expect_error=True) -> dict:
+    """Keep adversarial regressions inside a time and address-space bound."""
+    script = '''
+import base64, json, sys, time
+try:
+    import resource
+except ImportError:
+    resource = None
+if resource:
+    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024**2, 256 * 1024**2))
+from cvebeacon.errors import CVEBeaconError
+from cvebeacon.watch.statements import render_docx
+request = json.load(sys.stdin)
+started = time.monotonic()
+try:
+    render_docx(base64.b64decode(request["template"]), request["fields"])
+except CVEBeaconError as exc:
+    error = str(exc)
+else:
+    error = None
+print(json.dumps({"error": error, "seconds": time.monotonic() - started,
+    "peak_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss if resource else None}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        input=json.dumps({
+            "template": base64.b64encode(template).decode("ascii"),
+            "fields": fields or all_fields(),
+        }),
+        capture_output=True, text=True, timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert (result["error"] is not None) == expect_error
+    assert result["seconds"] < 1.5
+    if sys.platform == "linux":
+        assert result["peak_kib"] < 128 * 1024
+    return result
+
+
+@pytest.mark.parametrize("suffix", ["></other>", '="unterminated'])
+def test_docx_bounds_malformed_attribute_work(suffix):
+    result = bounded_render(docx_bytes("<other " + "a" * 16_000 + suffix))
+    assert "malformed" in result["error"]
+
+
+def test_docx_bounds_unique_namespace_depth():
+    body = "".join(f'<n xmlns:p{i}="urn:{i}">' for i in range(5000))
+    result = bounded_render(docx_bytes(body + "</n>" * 5000))
+    assert "limit" in result["error"]
+
+
+@pytest.mark.parametrize("value", ["X" + "\n" * 999, "&" * 1000])
+def test_docx_bounds_serialized_replacements(value):
+    fields = all_fields()
+    fields["description"] = value
+    count = 2000 if "\n" in value else 11_000
+    result = bounded_render(docx_bytes(
+        "<w:p><w:r><w:t>" + "${description}" * count + "</w:t></w:r></w:p>"
+    ), fields)
+    assert "rendered statement is larger" in result["error"]
+
+
+@pytest.mark.parametrize("text_tag", [
+    f'<x:t xmlns:x="{W}">',
+    f'<t xmlns="{W}">',
+])
+@pytest.mark.parametrize("outer_binding", ["", ' xmlns:x="urn:other"'])
+def test_docx_break_namespace_survives_local_text_binding(text_tag, outer_binding):
+    close = "</x:t>" if text_tag.startswith("<x:") else "</t>"
+    document = (f'<w:document xmlns:w="{W}"{outer_binding}><w:body><w:p><w:r>'
+                + text_tag + "${references}" + close
+                + "</w:r></w:p></w:body></w:document>")
+    fields = all_fields()
+    fields["references"] = "one\ntwo"
+    root = ElementTree.fromstring(part(render_docx(docx_zip(document), fields), "word/document.xml"))
+    run = root.find(f".//{{{W}}}r")
+    assert [node.tag for node in run] == [f"{{{W}}}t", f"{{{W}}}br", f"{{{W}}}t"]
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"])
+def test_docx_preserves_supported_encoding_and_untouched_bytes(encoding):
+    declaration = "UTF-8" if encoding.startswith("utf-8") else "UTF-16"
+    untouched = '<w:p odd="&gt;"><w:r><w:t><![CDATA[café & <]]></w:t></w:r></w:p>'
+    document = (f'<?xml version="1.0" encoding="{declaration}"?>'
+                f'<w:document xmlns:w="{W}"><w:body>{untouched}'
+                '<w:p><w:r><w:t>${description}</w:t></w:r></w:p></w:body></w:document>')
+    raw = document.encode(encoding)
+    fields = all_fields()
+    fields["description"] = "café ☃"
+    output = part(render_docx(docx_zip(raw), fields), "word/document.xml")
+    assert paragraph_texts(output) == ["café & <", "café ☃"]
+    assert untouched in output.decode(encoding)
+    codec = "utf-8" if encoding == "utf-8-sig" else "utf-16-le" if encoding == "utf-16" else encoding
+    assert untouched.encode(codec) in output
+    assert output.startswith(raw[:raw.index("<w:document".encode(codec))])
+
+
+@pytest.mark.parametrize("encoding", ["ISO-8859-1", "not-a-real-encoding", "UTF-32", "UTF-7"])
+def test_docx_rejects_unsupported_encoding_clearly(encoding):
+    document = (f'<?xml version="1.0" encoding="{encoding}"?>'
+                f'<w:document xmlns:w="{W}"><w:p><w:r><w:t>${{description}}</w:t>'
+                '</w:r></w:p></w:document>')
+    fields = all_fields()
+    fields["description"] = "café"
+    result = bounded_render(docx_zip(document), fields)
+    assert "encoding" in result["error"]
+
+
+@pytest.mark.parametrize("content", [
+    "<![CDATA[${cve_id}]]>",
+    "${cve<!-- split -->_id}",
+    "${cve<?test value?>_id}",
+    "&#36;{cve_id}",
+])
+def test_docx_logical_text_includes_cdata_and_ignores_comments_and_pis(content):
+    result = render_docx(docx_bytes(f"<w:p><w:r><w:t>{content}</w:t></w:r></w:p>"), all_fields())
+    assert paragraph_texts(part(result, "word/document.xml")) == ["CVE-2026-0001"]
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
+def test_docx_rejects_adjusted_size_lie_without_truncating(method):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=method) as archive:
+        archive.writestr("[Content_Types].xml", CONTENT_TYPES)
+        archive.writestr("word/document.xml", f'<w:document xmlns:w="{W}"/>')
+        with archive.open("word/media/image.png", "w") as member:
+            for _ in range(64 if method == zipfile.ZIP_DEFLATED else 2):
+                member.write(b"\0" * 1024**2)
+    template = output.getvalue()
+    with zipfile.ZipFile(io.BytesIO(template)) as archive:
+        declared = archive.getinfo("word/media/image.png").compress_size // 2
+    result = bounded_render(patch_central_size(template, "word/media/image.png", declared))
+    assert "member" in result["error"]
+
+
+@pytest.mark.parametrize("invalid", ["&#0;", "&#xD800;", "\x01", "&unknown;"])
+@pytest.mark.parametrize("prefix", ["", "${cve_id} "])
+def test_docx_rejects_invalid_original_xml_even_when_replacing(invalid, prefix):
+    with pytest.raises(CVEBeaconError, match="malformed"):
+        render_docx(docx_bytes(f"<w:p><w:r><w:t>{prefix}{invalid}</w:t></w:r></w:p>"), all_fields())
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16", "utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("member", ["word/styles.xml", "_rels/custom.rels"])
+def test_docx_rejects_encoded_dtd_in_untouched_xml(encoding, member):
+    declaration = "UTF-8" if encoding == "utf-8" else "UTF-16"
+    raw = (f'<?xml version="1.0" encoding="{declaration}"?>'
+           '<!DOCTYPE x [<!ENTITY e SYSTEM "file:///nonexistent">]><x>&e;</x>').encode(encoding)
+    with pytest.raises(CVEBeaconError, match="DTD or XML entities"):
+        template = docx_zip(f'<w:document xmlns:w="{W}"/>', styles=raw) if member == "word/styles.xml" else docx_zip(f'<w:document xmlns:w="{W}"/>', extra={member: raw})
+        render_docx(template, all_fields())
+
+
+def test_docx_randomized_split_runs_match_string_template():
+    rng = random.Random(20261104)
+    fields = all_fields()
+    fields["description"] = "A & B < C\nnext café"
+    tokens = ["${cve_id}", "$severity", "${description}", "$$", "$${unknown}", "café & < >", " tail "]
+    for _ in range(500):
+        text = " ".join(rng.choices(tokens, k=rng.randint(1, 15)))
+        splits = sorted({0, len(text), *(rng.randrange(len(text) + 1) for _ in range(20))})
+        runs = "".join('<w:r><w:rPr><w:b/></w:rPr><w:t>' + escape(text[a:b]) + '</w:t></w:r>'
+                       for a, b in zip(splits, splits[1:]))
+        root = ElementTree.fromstring(part(render_docx(docx_bytes(f"<w:p>{runs}</w:p>"), fields), "word/document.xml"))
+        actual = "".join("\n" if node.tag == f"{{{W}}}br" else node.text or ""
+                         for node in root.iter() if node.tag in (f"{{{W}}}t", f"{{{W}}}br"))
+        assert actual == Template(text).substitute(fields)
+        assert all(run.find(f"{{{W}}}rPr/{{{W}}}b") is not None for run in root.iter(f"{{{W}}}r"))
+
+
+def test_docx_bounds_namespace_work_for_flat_siblings():
+    declarations = " ".join(f'xmlns:p{i}="urn:{i}"' for i in range(5000))
+    siblings = '<n xmlns:local="urn:local"/>' * 30_000
+    document = f'<w:document xmlns:w="{W}" {declarations}>{siblings}</w:document>'
+    bounded_render(docx_zip(document), expect_error=False)
+
+
+def test_docx_bounds_element_count():
+    bounded_render(docx_bytes("<n/>" * 100_001))
+
+
+@pytest.mark.parametrize("location", ["document", "styles"])
+def test_docx_resource_limits_also_cover_empty_elements_and_namespaces(monkeypatch, location):
+    monkeypatch.setattr(statements, "MAX_XML_SPANS", 32)
+    body = "<n/>" * 33
+    template = docx_bytes(body) if location == "document" else docx_bytes("", styles=f"<s>{body}</s>".encode())
+    with pytest.raises(CVEBeaconError, match="span limit"):
+        render_docx(template, all_fields())
+    namespaces = " ".join(f'xmlns:p{i}="urn:{i}"' for i in range(33))
+    with pytest.raises(CVEBeaconError, match="span limit"):
+        render_docx(docx_bytes(f"<n {namespaces}/>"), all_fields())
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16-be"])
+def test_docx_counts_literal_escaping_and_repeated_attributes_before_allocation(monkeypatch, encoding):
+    # The short replacement is harmless; literal newlines repeat large t attributes.
+    document = (f'<?xml version="1.0" encoding="{"UTF-8" if encoding == "utf-8" else "UTF-16"}"?>'
+                f'<w:document xmlns:w="{W}"><w:p><w:r>'
+                f'<w:t odd="{"x" * 1000}">${{cve_id}}' + "\n" * 100
+                + '</w:t></w:r></w:p></w:document>').encode(encoding)
+    monkeypatch.setattr(statements, "MAX_RENDERED_BYTES", 16_000)
+    with pytest.raises(CVEBeaconError, match="rendered statement is larger"):
+        render_docx(docx_zip(document), all_fields())
+
+
+def test_docx_rejects_incomplete_deflate_stream():
+    # Keep the declared CRC/size unchanged; only stream completion is inconsistent.
+    template = docx_bytes("<w:p/>", compression=zipfile.ZIP_DEFLATED)
+    with zipfile.ZipFile(io.BytesIO(template)) as archive:
+        info = archive.getinfo("word/document.xml")
+    truncated = patch_central_size(
+        template, info.filename, compressed_size=info.compress_size - 1,
+    )
+    with pytest.raises(CVEBeaconError, match="unreadable member"):
+        render_docx(truncated, all_fields())
+
+
+def test_docx_bounds_substitution_fragment_count():
+    bounded_render(docx_bytes("<w:p><w:r><w:t>" + "$$" * 100_001 + "</w:t></w:r></w:p>"))
+
+
+def test_docx_refuses_duplicate_package_members():
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        template = docx_zip(
+            f'<w:document xmlns:w="{W}"/>',
+            extra={"word/document.xml": f'<w:document xmlns:w="{W}"/>'},
+        )
+    with pytest.raises(CVEBeaconError, match="duplicate"):
+        render_docx(template, all_fields())
