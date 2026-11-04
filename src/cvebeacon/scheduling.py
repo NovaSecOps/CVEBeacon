@@ -655,6 +655,20 @@ def _windows_registration_hint(
     return ""
 
 
+def windows_powershell_environment() -> dict[str, str]:
+    """Return the environment for Windows PowerShell 5.1 child processes.
+
+    PowerShell 7 exports its own PSModulePath. Windows PowerShell inherits it
+    and then cannot load its built-in modules, so drop it and let Windows
+    PowerShell use its default module path.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() != "PSMODULEPATH"
+    }
+
+
 def install(
     plan: SchedulePlan, *, password: str | None = None, run=subprocess.run
 ) -> None:
@@ -696,6 +710,7 @@ def install(
                         errors="replace",
                         check=False,
                         timeout=120,
+                        env=windows_powershell_environment(),
                     )
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     detail = " ".join(str(exc).split())[:600]
