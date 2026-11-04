@@ -7,7 +7,13 @@ from typing import Any
 import pytest
 
 from cvebeacon.watch.messages import build_messages, test_message as localized_test_message
-from cvebeacon.watch.records import CVSSEntry, ReportedMark, WatchView
+from cvebeacon.watch.records import (
+    CVSSEntry,
+    DeliveryEvent,
+    InitialDigest,
+    ReportedMark,
+    WatchView,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "watch_text_identity.json"
 CHANNELS = (
@@ -166,6 +172,47 @@ def rendered(case: str, channel: str, **kwargs: Any) -> list[dict[str, Any]]:
     ]
 
 
+def large_slack_messages() -> list[dict[str, Any]]:
+    names = [f"rule-{index:04d}-" + "x" * 50 for index in range(1, 501)]
+    item = DeliveryEvent(
+        1,
+        names[0],
+        "CVE-2026-1234",
+        "match",
+        ("cvss 9.8 v3.1 (cna)",),
+        True,
+        "2026-11-03T12:00:00+00:00",
+        view(),
+    )
+    digest = InitialDigest(
+        (item,),
+        tuple((name, "match", 1) for name in names),
+        1,
+        500,
+    )
+    messages = build_messages(
+        (),
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={name: name for name in names},
+        since="2026-10-27",
+        initial=digest,
+    )
+    return [
+        {
+            "subject": message.subject,
+            "text": message.text,
+            "body": message.body,
+            "content": message.content,
+            "initial": message.initial,
+            "part_index": message.part_index,
+            "part_count": message.part_count,
+        }
+        for message in messages
+    ]
+
+
 @pytest.fixture(scope="module")
 def frozen() -> dict[str, Any]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -177,6 +224,14 @@ def test_default_english_text_is_frozen(frozen, case, channel):
     expected = frozen["cases"][case][channel]
     assert rendered(case, channel) == expected
     assert rendered(case, channel, format="text", language="en") == expected
+
+
+def test_large_fixed_text_summary_is_frozen(frozen):
+    expected = frozen["cases"]["large_slack"]["slack"]
+    actual = large_slack_messages()
+    assert actual == expected
+    assert actual[0]["part_count"] == 10
+    assert len(actual[0]["body"]) == 35_054
 
 
 def test_test_message_is_frozen(frozen):

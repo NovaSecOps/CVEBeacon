@@ -913,7 +913,9 @@ def _event_body_and_html(
         if fits:
             return body, markup
         if not shown:
-            raise MessageTooLarge(MESSAGE_TOO_LARGE)
+            if with_html:
+                raise MessageTooLarge(MESSAGE_TOO_LARGE)
+            return body, markup
         if current is None:
             current = len(shown) - 1
         else:
@@ -1047,7 +1049,9 @@ def _initial_body_and_html(
         if fits:
             return body, markup
         if not shown:
-            raise MessageTooLarge(MESSAGE_TOO_LARGE)
+            if with_html:
+                raise MessageTooLarge(MESSAGE_TOO_LARGE)
+            return body, markup
         current = max(0, len(shown) - 1)
 
 
