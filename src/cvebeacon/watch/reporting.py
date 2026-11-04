@@ -28,15 +28,19 @@ class ReportService:
         mode: str,
     ) -> None:
         self.store = store
-        self.mode = validate_identity_mode(mode)
+        self._mode = validate_identity_mode(mode)
         self._users_database = (
             None if users_database is None else Path(users_database)
         )
-        if self.mode != "open" and self._users_database is None:
+        if self._mode != "open" and self._users_database is None:
             raise ConfigurationError(
                 "the configured identity mode requires a CVEBeacon user database"
             )
         self._users: UserStore | None = None
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     @property
     def users(self) -> UserStore:
@@ -57,7 +61,7 @@ class ReportService:
         password: object | None,
         password_prompt: Callable[[str], str] | None,
     ) -> ReportIdentity:
-        mode = self.mode
+        mode = self._mode
         if mode == "open":
             if user is not None or password is not None:
                 raise ConfigurationError(

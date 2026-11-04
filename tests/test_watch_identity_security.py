@@ -96,6 +96,8 @@ def test_service_has_no_caller_selected_mode_and_no_downgrade(tmp_path):
 
     with pytest.raises(TypeError):
         ReportService(store, config.watch.users_database)
+    with pytest.raises(AttributeError):
+        actor.mode = "open"
     for call in (
         lambda: actor.report_cve(IDENTIFIER, by="alice"),
         lambda: actor.report_cve(IDENTIFIER),
