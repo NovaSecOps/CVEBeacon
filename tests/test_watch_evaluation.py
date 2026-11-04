@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from cvebeacon.errors import StateError
 from cvebeacon.watch.records import CVSSEntry, EUVDUpdate, KEVFields, Product, WatchRecord
 from cvebeacon.watch.rules import parse_rules
 from cvebeacon.watch.store import WatchStore
@@ -273,7 +274,7 @@ def test_pre_release_alert_tables_fail_with_a_clear_message(tmp_path):
             "initial INTEGER NOT NULL, created_at TEXT NOT NULL)"
         )
     with pytest.raises(
-        Exception,
+        StateError,
         match=r"^watch database was created by a pre-release build; "
         r"delete it and run `watch sync` again$",
     ):
@@ -394,7 +395,7 @@ def touch(store: WatchStore, *identifiers: str) -> None:
         )
 
 
-def test_rule_definition_change_refreshes_state_without_events(tmp_path):
+def test_rule_definition_change_updates_state_without_events(tmp_path):
     store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
     store.upsert_nvd([record()])
     original = rule(condition={"cvss_min": 9})
@@ -416,7 +417,7 @@ def test_rule_definition_change_refreshes_state_without_events(tmp_path):
     assert second_hash != first_hash
     assert '"severity_band":"critical"' in snapshot_json
 
-    # After the silent refresh, later evidence escalates normally.
+    # After the silent state update, later evidence escalates normally.
     store.upsert_nvd([record(cisa_kev_added="2026-11-03")], catalogs=("nvd",))
     result = store.evaluate_touched((edited,), catalogs=("nvd",))
     assert result.by_kind == (("kev_added", 1),)

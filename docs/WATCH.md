@@ -203,7 +203,7 @@ that still have a pending delivery.
 
 ### Old CVEs
 
-The first `match` for a CVE is treated as backlog when both of these hold:
+The first `match` for a CVE is treated as backlog when all of these hold:
 
 - the CVE's `published` date is before the database's `initial_window_start`
   date (`initialized_at` for baseline mode, or when the window start is not
@@ -270,10 +270,13 @@ place from schema version 1 to version 2. An unknown version still fails
 closed. The upgrade deletes the old `watch_touched` queue, because P1a had no
 rules and therefore no evaluation obligation, and sets `initial_evaluated_at`
 whenever `initial_mode` is already stored. It also rewinds `euvd_cursor` to
-`initial_window_start`, so the next sync re-reads that window once. P1a stored
-EUVD items without vendor names, and that re-read gives pre-upgrade items their
-names. After the upgrade, run `cvebeacon watch evaluate --all --yes` before the
-next `watch run`, as after adding a rule. Schema 2 databases written by a
+`initial_window_start`, but only when both values are stored, so the next sync
+re-reads that window once. P1a stored EUVD items without vendor names, and that
+re-read gives pre-upgrade items their names. In `full` mode
+`initial_window_start` is 1999-01-01, so this re-reads the whole EUVD history
+once. After the upgrade, run `cvebeacon watch evaluate --all --yes` BEFORE the
+first `watch run`, as after adding a rule. Otherwise every CVE from the initial
+window alerts one by one as NVD touches it. Schema 2 databases written by a
 pre-release build of this branch are refused with a message to delete them and
 run `watch sync` again. They are not migrated.
 
@@ -301,9 +304,9 @@ run `watch sync` again. They are not migrated.
   the obligation. Only ids with a `watch_cve` row are queued; an id first seen
   from EUVD or KEV is queued when NVD inserts its row. `pending_evaluations`
   reads the queue and `acknowledge` removes completed entries.
-- `watch_alert_state` keeps the first match time, the alert snapshot, and a rule
-  hash for each casefolded rule name and CVE. A later evaluation compares
-  against that snapshot.
+- `watch_alert_state` keeps the first match time, the alert snapshot, and the
+  rule and CVSS-provider hashes for each casefolded rule name and CVE. A later
+  evaluation compares against that snapshot.
 - `watch_event` stores each event once. Its uniqueness key covers the rule,
   CVE, event kind, and occurrence; the reason text is stored separately.
 - `watch_delivery` creates one pending row per event and channel. Delivery
