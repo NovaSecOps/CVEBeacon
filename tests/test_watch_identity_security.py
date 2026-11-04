@@ -560,6 +560,8 @@ def test_security_documentation_is_explicit():
     assert "every ancestor" in watch.casefold()
     assert "chmod go-w" in watch.casefold()
     assert "0700" in watch.casefold()
+    assert "store id" in watch.casefold()
+    assert "inode number" in watch.casefold()
 
 
 OLD_USER_SCHEMA = (
@@ -1290,3 +1292,50 @@ def test_credential_version_revokes_proofs_without_clock_order(tmp_path):
         store.set_password(
             "bob", PASSWORD + " stale2", authorization=self_proof
         )
+
+
+def test_replacement_with_identical_inode_and_timestamps_is_detected(
+    tmp_path, monkeypatch
+):
+    import shutil
+
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
+    other = tmp_path / "other-users.db"
+    UserStore(other, clock=lambda: NOW).initialize()
+    original = path.stat()
+    import sqlite3 as sqlite_module
+
+    real_connect = sqlite_module.connect
+
+    def swapping_connect(database, *args, **kwargs):
+        path.unlink()
+        shutil.copyfile(other, path)
+        os.chmod(path, 0o600)
+        return real_connect(database, *args, **kwargs)
+
+    real_stat = os.stat
+
+    def fake_stat(candidate, *args, **kwargs):
+        if Path(candidate) == path:
+            return original
+        return real_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr("cvebeacon.watch.users.sqlite3.connect", swapping_connect)
+    monkeypatch.setattr("cvebeacon.watch.users.os.stat", fake_stat)
+    with pytest.raises(StateError, match="replaced"):
+        store.users()
+
+
+def test_existing_database_without_meta_gains_one_store_id(tmp_path):
+    path = tmp_path / "users.db"
+    old_user_database(path, "alice@example.com")
+    store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
+    with sqlite3.connect(path) as db:
+        row = db.execute(
+            "SELECT value FROM cb_user_meta WHERE key='store_id'"
+        ).fetchone()
+    assert row is not None and len(row[0]) == 64
+    assert UserStore(path, clock=lambda: NOW).users()[0].username == "alice"
