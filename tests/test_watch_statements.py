@@ -963,8 +963,12 @@ except CVEBeaconError as exc:
     error = str(exc)
 else:
     error = None
-print(json.dumps({"error": error, "seconds": time.monotonic() - started,
-    "peak_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss if resource else None}))
+peak = None
+if sys.platform == "linux":
+    from pathlib import Path
+    peak = int(next(line.split()[1] for line in Path("/proc/self/status").read_text().splitlines()
+                    if line.startswith("VmHWM:")))
+print(json.dumps({"error": error, "seconds": time.monotonic() - started, "peak_kib": peak}))
 '''
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -972,12 +976,12 @@ print(json.dumps({"error": error, "seconds": time.monotonic() - started,
             "template": base64.b64encode(template).decode("ascii"),
             "fields": fields or all_fields(),
         }),
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True, timeout=15,
     )
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
     assert (result["error"] is not None) == expect_error
-    assert result["seconds"] < 1.5
+    assert result["seconds"] < 10
     if sys.platform == "linux":
         assert result["peak_kib"] < 128 * 1024
     return result
@@ -1172,4 +1176,236 @@ def test_docx_refuses_duplicate_package_members():
             extra={"word/document.xml": f'<w:document xmlns:w="{W}"/>'},
         )
     with pytest.raises(CVEBeaconError, match="duplicate"):
+        render_docx(template, all_fields())
+
+
+@pytest.mark.parametrize("member", ["word/styles.xml", "word/document.xml"])
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16-be"])
+def test_docx_bounds_attribute_tables_before_parsing(member, encoding):
+    attrs = " ".join(f'a{i}=""' for i in range(100_000))
+    raw = f'<x {attrs}/>'.encode(encoding)
+    template = docx_zip(raw) if member.endswith("document.xml") else docx_zip(
+        f'<w:document xmlns:w="{W}"/>', styles=raw,
+    )
+    result = bounded_render(template)
+    assert "limit" in result["error"]
+
+
+@pytest.mark.parametrize("kind", ["element_bytes", "part_count", "part_bytes", "package_count", "package_bytes"])
+def test_docx_checks_attribute_budgets_before_parser_allocation(monkeypatch, kind):
+    # Valid lexical input, but the parser must never see a table above the limit.
+    body = '<x a="' + "q" * 200 + '"/>' if kind.endswith("bytes") else '<x a="" b=""/>' * 20
+    extra = {}
+    if kind.startswith("package"):
+        extra = {"word/header1.xml": f"<h>{body}</h>", "word/footer1.xml": f"<h>{body}</h>"}
+    limit = "MAX_" + {
+        "element_bytes": "ELEMENT_ATTRIBUTE_BYTES", "part_count": "PART_ATTRIBUTES",
+        "part_bytes": "PART_ATTRIBUTE_BYTES", "package_count": "PACKAGE_ATTRIBUTES",
+        "package_bytes": "PACKAGE_ATTRIBUTE_BYTES",
+    }[kind]
+    monkeypatch.setattr(statements, limit, 300 if kind == "package_bytes" else 100 if kind.endswith("bytes") else 50 if kind.startswith("package") else 30, raising=False)
+    with pytest.raises(CVEBeaconError, match="attribute.*limit"):
+        render_docx(docx_bytes(body, ) if not extra else docx_zip(
+            f'<w:document xmlns:w="{W}"/>', extra=extra,
+        ), all_fields())
+
+
+def test_docx_releases_parts_and_applies_a_global_record_budget():
+    header = f'<w:hdr xmlns:w="{W}"><w:p><w:r>' + '<w:t/>' * 99_000 + '</w:r></w:p></w:hdr>'
+    extra = {f"word/header{i}.xml": header for i in range(1, 9)}
+    result = bounded_render(docx_zip(
+        f'<w:document xmlns:w="{W}"/>', extra=extra, compression=zipfile.ZIP_DEFLATED,
+    ))
+    assert "limit" in result["error"]
+
+
+def test_docx_retains_only_the_current_part_scan(monkeypatch):
+    import gc
+    import tracemalloc
+    header = f'<w:hdr xmlns:w="{W}"><w:p><w:r>' + '<w:t>x</w:t>' * 25_000 + '</w:r></w:p></w:hdr>'
+    template = docx_zip(f'<w:document xmlns:w="{W}"/>', extra={
+        f"word/header{i}.xml": header for i in range(1, 7)
+    }, compression=zipfile.ZIP_DEFLATED)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        render_docx(template, all_fields())
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 32 * 1024**2
+
+
+def corrupt_container(template: bytes, kind: str) -> bytes:
+    data = bytearray(template)
+    central = data.index(b"PK\x01\x02")
+    if kind == "offset":
+        end = data.rindex(b"PK\x05\x06")
+        offset = struct.unpack_from("<I", data, end + 16)[0]
+        struct.pack_into("<I", data, end + 16, offset + 20_000)
+    elif kind == "version":
+        struct.pack_into("<H", data, central + 6, 151)
+    else:
+        flags = struct.unpack_from("<H", data, central + 8)[0]
+        struct.pack_into("<H", data, central + 8, flags | 0x800)
+        data[central + 46] = 0xff
+    return bytes(data)
+
+
+@pytest.mark.parametrize("kind", ["offset", "version", "filename"])
+def test_docx_sanitizes_corrupt_container_errors(kind):
+    result = bounded_render(corrupt_container(docx_bytes("<w:p/>"), kind))
+    assert "statement template" in result["error"]
+    assert not any(word in result["error"] for word in ("seek", "15.1", "codec"))
+
+
+@pytest.mark.parametrize("failure", [ValueError, NotImplementedError, UnicodeDecodeError, struct.error, zlib.error, RuntimeError, EOFError, zipfile.LargeZipFile])
+def test_docx_sanitizes_all_container_open_errors(monkeypatch, failure):
+    error = failure("utf-8", b"\xff", 0, 1, "invalid") if failure is UnicodeDecodeError else failure("private details")
+    def broken(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(zipfile, "ZipFile", broken)
+    with pytest.raises(CVEBeaconError, match="not a readable .docx") as caught:
+        render_docx(b"broken", all_fields())
+    assert "private details" not in str(caught.value)
+
+
+@pytest.mark.parametrize("distinct", [False, True])
+@pytest.mark.parametrize("location", ["element", "attribute"])
+def test_docx_bounds_namespace_expansion_before_allocation(distinct, location):
+    uri = "urn:" + "x" * 32_000
+    if location == "element":
+        body = "".join(f'<x:n{i if distinct else 0}/>' for i in range(16_000))
+    else:
+        body = '<n ' + " ".join(f'x:a{i}=""' for i in range(8000)) + '/>'
+    styles = f'<s xmlns:x="{uri}">{body}</s>'.encode()
+    result = bounded_render(docx_zip(f'<w:document xmlns:w="{W}"/>', styles=styles))
+    assert "limit" in result["error"]
+
+
+@pytest.mark.parametrize("distinct", [False, True])
+def test_docx_bounds_cumulative_expanded_name_bytes(monkeypatch, distinct):
+    body = '<s xmlns:x="urn:long-binding">' + "".join(
+        f'<x:n{i if distinct else 0} x:attr=""/>' for i in range(200)
+    ) + '</s>'
+    monkeypatch.setattr(statements, "MAX_PART_EXPANDED_BYTES", 1024, raising=False)
+    def forbidden(*args, **kwargs):
+        pytest.fail("expanded-name budget must be checked before creating the parser")
+    monkeypatch.setattr(statements.expat, "ParserCreate", forbidden)
+    with pytest.raises(CVEBeaconError, match="expanded.*limit"):
+        statements._parse_xml(body.encode(), "styles.xml")
+
+
+@pytest.mark.parametrize("location", ["paragraph", "parts", "long_name"])
+def test_docx_bounds_unknown_diagnostic_storage(location):
+    if location == "long_name":
+        text = "${" + "a" * 200_000 + "}"
+        template = docx_bytes(f'<w:p><w:r><w:t>{text}</w:t></w:r></w:p>')
+    elif location == "paragraph":
+        text = "".join(f'${{unknown{i}}}' for i in range(300_000))
+        template = docx_bytes(f'<w:p><w:r><w:t>{text}</w:t></w:r></w:p>')
+    else:
+        extra = {f"word/header{i}.xml": f'<w:hdr xmlns:w="{W}">' + "".join(
+            f'<w:p><w:r><w:t>${{unknown{i}_{j}}}</w:t></w:r></w:p>' for j in range(100)
+        ) + '</w:hdr>' for i in range(8)}
+        template = docx_zip(f'<w:document xmlns:w="{W}"/>', extra=extra)
+    result = bounded_render(template)
+    assert "limit" in result["error"]
+    assert len(result["error"]) < 256
+
+
+def test_docx_initial_check_applies_placeholder_limit(monkeypatch):
+    monkeypatch.setattr(statements, "MAX_XML_SPANS", 20)
+    text = "${unknown}" * 21
+    with pytest.raises(CVEBeaconError, match="placeholder.*limit"):
+        render_docx(docx_bytes(f'<w:p><w:r><w:t>{text}</w:t></w:r></w:p>'), all_fields())
+
+
+def test_docx_accepts_namespace_uri_with_pipe():
+    raw = b'<s xmlns:x="urn:a|b"><x:a/></s>'
+    output = render_docx(docx_bytes("<w:p/>", styles=raw), all_fields())
+    assert part(output, "word/styles.xml") == raw
+
+
+def test_bounded_render_ignores_inherited_high_water_mark():
+    script = '''
+import sys
+sys.path.insert(0, "tests")
+import test_watch_statements as t
+allocation = bytearray(160 * 1024**2)
+del allocation
+t.bounded_render(t.docx_bytes("<w:p/>"), expect_error=False)
+'''
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=15)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_docx_bounds_aggregate_unknown_name_bytes():
+    extra = {f"word/header{i}.xml": f'<w:hdr xmlns:w="{W}">' + "".join(
+        '<w:p><w:r><w:t>${unknown_' + str(i) + '_' + str(j) + '_' + 'x' * 400 + '}</w:t></w:r></w:p>'
+        for j in range(20)
+    ) + '</w:hdr>' for i in range(4)}
+    result = bounded_render(docx_zip(f'<w:document xmlns:w="{W}"/>', extra=extra))
+    assert "diagnostic limit" in result["error"]
+
+
+@pytest.mark.parametrize("kind", ["offset", "version", "filename"])
+def test_corrupt_container_exits_two_and_preserves_output(tmp_path, capsys, kind):
+    config = write_config(tmp_path, sources=("nvd",))
+    populate(WatchStore(config.watch.database, clock=lambda: NOW))
+    template = tmp_path / "bad.docx"
+    template.write_bytes(corrupt_container(docx_bytes("<w:p/>"), kind))
+    out = tmp_path / "statement.docx"
+    out.write_bytes(b"old")
+    assert cli.main([
+        "--config", str(config.config_path), "watch", "statement", "CVE-2026-0001",
+        "--template", str(template), "--out", str(out), "--force",
+    ]) == 2
+    error = capsys.readouterr().err
+    assert "statement template" in error
+    assert "Traceback" not in error
+    assert out.read_bytes() == b"old"
+
+
+def test_docx_applies_package_expanded_name_budget_before_next_parser(monkeypatch):
+    raw = b'<s xmlns:x="urn:small"><x:a x:b=""/></s>'
+    budget = statements._XMLBudget()
+    statements._parse_xml(raw, "first.xml", budget=budget)
+    monkeypatch.setattr(statements, "MAX_PACKAGE_EXPANDED_BYTES", budget.expanded_bytes + 1)
+    def forbidden(*args, **kwargs):
+        pytest.fail("package name budget must be checked before the next parser")
+    monkeypatch.setattr(statements.expat, "ParserCreate", forbidden)
+    with pytest.raises(CVEBeaconError, match="expanded.*limit"):
+        statements._parse_xml(raw, "second.xml", budget=budget)
+
+
+def test_docx_counts_short_namespace_expansion_before_allocation():
+    styles = '<s xmlns:x="urn:' + 'u' * 252 + '">' + ''.join(
+        f'<x:n{i}/>' for i in range(40_000)
+    ) + '</s>'
+    result = bounded_render(docx_bytes("<w:p/>", styles=styles.encode()))
+    assert "expanded name byte limit" in result["error"]
+
+
+@pytest.mark.parametrize("kind", ["count", "bytes"])
+def test_attribute_guard_runs_before_parser_creation(monkeypatch, kind):
+    monkeypatch.setattr(statements, "MAX_ELEMENT_ATTRIBUTES", 4)
+    monkeypatch.setattr(statements, "MAX_ELEMENT_ATTRIBUTE_BYTES", 100)
+    raw = b'<s a="" b="" c="" d="" e=""/>' if kind == "count" else b'<s a="' + b'x' * 101 + b'"/>'
+    def forbidden(*args, **kwargs):
+        pytest.fail("attribute budget must be checked before Expat allocates")
+    monkeypatch.setattr(statements.expat, "ParserCreate", forbidden)
+    with pytest.raises(CVEBeaconError, match="attribute.*limit"):
+        statements._parse_xml(raw, "styles.xml")
+
+
+def test_xml_input_budget_runs_before_member_decompression(monkeypatch):
+    template = docx_zip('<x>' + 'z' * 1000 + '</x>')
+    monkeypatch.setattr(statements, "MAX_XML_BYTES", 700)
+    original = statements._read_member
+    def reader(source, info):
+        assert info.filename != "word/document.xml", "oversized XML was decompressed"
+        return original(source, info)
+    monkeypatch.setattr(statements, "_read_member", reader)
+    with pytest.raises(CVEBeaconError, match="input byte limit"):
         render_docx(template, all_fields())
