@@ -43,6 +43,9 @@ overlap_minutes = 15
   `cvebeacon-watch.db` in the directory of the resolved `[state] database`, so
   it stays beside the monitoring state. With no `[state] database`, that is
   `.cvebeacon/cvebeacon-watch.db` under the configuration directory.
+  Configurations from earlier builds that omitted this setting should pin
+  `database = "cvebeacon-watch.db"` before upgrading, or the old file is
+  ignored and a new baseline starts.
 - `sources`: any subset of `nvd`, `euvd`, `cisa_kev`, `eu_kev`, and `epss`.
   `nvd` is required. Unknown names are rejected.
 - `initial`: what the first sync does; see [initial modes](#initial-modes).

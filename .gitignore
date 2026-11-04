@@ -53,4 +53,5 @@ deploy/container/cvebeacon.env
 deploy/container/secrets/
 deploy/container/state/
 deploy/container/reports/
+deploy/container/inventory/
 deploy/container/cvebeacon.toml
