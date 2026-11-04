@@ -2138,15 +2138,14 @@ class WatchStore:
         channel: str,
         *,
         statuses: Sequence[str] = ("pending", "failed", "ambiguous"),
-        include_ambiguous: bool = False,
     ) -> bool:
         """Claim one notice after earlier notices for the CVE are resolved.
 
         A notice for a CVE and channel waits while an earlier notice for the
         same pair is pending, sending, ambiguous, or failed below the attempt
-        cap. A notice that reached the cap no longer blocks. Retrying ambiguous
-        or failed rows explicitly makes the predecessor eligible first; the
-        successor then follows it in the same ordered run.
+        cap. A notice that reached the cap no longer blocks. Ambiguous rows stay
+        blocking even during an explicit ambiguous retry; once an earlier notice
+        completes in this run, the successor can follow it in audit order.
         """
         allowed = tuple(
             status
@@ -2170,8 +2169,7 @@ class WatchStore:
                 "JOIN watch_delivery d ON d.event_id=p.id "
                 "WHERE p.cve_id=? AND d.channel=? "
                 f"AND p.kind IN ({notice_placeholders}) AND p.id < ? AND ("
-                "d.status IN ('pending','sending') OR "
-                "(d.status='ambiguous' AND ? = 0) OR "
+                "d.status IN ('pending','sending','ambiguous') OR "
                 "(d.status='failed' AND d.attempts < ?)) "
                 "LIMIT 1",
                 (
@@ -2179,7 +2177,6 @@ class WatchStore:
                     channel,
                     *NOTICE_KINDS,
                     event_id,
-                    1 if include_ambiguous else 0,
                     DELIVERY_MAX_ATTEMPTS,
                 ),
             ).fetchone()

@@ -980,27 +980,38 @@ def deliver_pending(
                 include_ambiguous=include_ambiguous,
                 event_ids=selected_events,
             )
+            notices = tuple(
+                sorted(
+                    (
+                        event
+                        for event in events
+                        if event.kind in NOTICE_KINDS
+                    ),
+                    key=lambda event: event.event_id,
+                )
+            )
+            alerts = tuple(
+                event for event in events if event.kind not in NOTICE_KINDS
+            )
             batches: list[tuple[DeliveryEvent, ...]] = []
+            if notices:
+                # Notices are one message each and follow the audit order.
+                batches.append(notices)
             if include_ambiguous:
                 ambiguous_events = tuple(
-                    event for event in events if event.status == "ambiguous"
+                    event for event in alerts if event.status == "ambiguous"
                 )
                 other_events = tuple(
-                    event for event in events if event.status != "ambiguous"
+                    event for event in alerts if event.status != "ambiguous"
                 )
                 if ambiguous_events:
                     batches.append(ambiguous_events)
                 if other_events:
                     batches.append(other_events)
-            else:
-                batches.append(tuple(events))
+            elif alerts:
+                batches.append(alerts)
             for batch in batches:
                 index = _event_index(batch)
-                claim_statuses = (
-                    ("ambiguous",)
-                    if batch and batch[0].status == "ambiguous"
-                    else ("pending", "failed")
-                )
                 for group in _group_messages(
                     _channel_messages(channel, batch, names=names, since=since)
                 ):
@@ -1028,13 +1039,22 @@ def deliver_pending(
                         len(event_ids) == 1
                         and covered[0].kind in NOTICE_KINDS
                     ):
+                        claim_statuses = (
+                            ("ambiguous",)
+                            if covered[0].status == "ambiguous"
+                            else ("pending", "failed")
+                        )
                         claimed = store.claim_notice(
                             event_ids[0],
                             channel.name,
                             statuses=claim_statuses,
-                            include_ambiguous=include_ambiguous,
                         )
                     else:
+                        claim_statuses = (
+                            ("ambiguous",)
+                            if batch and batch[0].status == "ambiguous"
+                            else ("pending", "failed")
+                        )
                         claimed = store.claim_delivery(
                             event_ids, channel.name, statuses=claim_statuses
                         )
