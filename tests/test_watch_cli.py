@@ -74,14 +74,31 @@ def test_watch_events_lists_concise_lines_and_filters(tmp_path, capsys):
         [
             record(),
             record("CVE-2026-0002", cisa_kev_added="2026-11-03"),
+            record("CVE-2026-0003", published=None),
         ]
     )
     store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources)
     assert cli.main(["--config", str(config.config_path), "watch", "events"]) == 0
     output = capsys.readouterr().out
-    assert "2026-11-03 12:00Z  critical-or-likely  CVE-2026-0001  match  cvss 9.8 v3.1 (cna)" in output
-    assert "2026-11-03 12:00Z  kev-watch  CVE-2026-0002  match" in output
-    assert "Published 2026-10-30 · first seen 2026-11-03" in output
+    assert (
+        "2026-11-03 12:00Z  critical-or-likely  CVE-2026-0001  match  "
+        "cvss 9.8 v3.1 (cna)  "
+        "Published 2026-10-30 · first seen 2026-11-03"
+    ) in output
+    assert (
+        "2026-11-03 12:00Z  kev-watch  CVE-2026-0002  match  kev cisa  "
+        "Published 2026-10-30 · first seen 2026-11-03"
+    ) in output
+    assert (
+        "2026-11-03 12:00Z  critical-or-likely  CVE-2026-0002  match  "
+        "cvss 9.8 v3.1 (cna)  "
+        "Published 2026-10-30 · first seen 2026-11-03"
+    ) in output
+    assert (
+        "2026-11-03 12:00Z  critical-or-likely  CVE-2026-0003  match  "
+        "cvss 9.8 v3.1 (cna)  "
+        "Published unknown · first seen 2026-11-03"
+    ) in output
     assert cli.main(
         ["--config", str(config.config_path), "watch", "events", "--rule", "kev-watch"]
     ) == 0
