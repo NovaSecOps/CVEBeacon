@@ -410,6 +410,41 @@ def database_owner(database: Path) -> str:
     ).stdout.strip()
 
 
+def create_local_user(account: str, password: str) -> None:
+    """Create a local account without putting the password in argv."""
+    import ctypes
+    from ctypes import wintypes
+
+    class UserInfo1(ctypes.Structure):
+        _fields_ = [
+            ("name", wintypes.LPWSTR),
+            ("password", wintypes.LPWSTR),
+            ("password_age", wintypes.DWORD),
+            ("privilege", wintypes.DWORD),
+            ("home_dir", wintypes.LPWSTR),
+            ("comment", wintypes.LPWSTR),
+            ("flags", wintypes.DWORD),
+            ("script_path", wintypes.LPWSTR),
+        ]
+
+    netapi32 = ctypes.WinDLL("netapi32", use_last_error=True)
+    netapi32.NetUserAdd.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(UserInfo1),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    netapi32.NetUserAdd.restype = wintypes.DWORD
+    # USER_PRIV_USER, UF_SCRIPT | UF_DONT_EXPIRE_PASSWD
+    info = UserInfo1(account, password, 0, 1, None, None, 0x00010001, None)
+    parameter = wintypes.DWORD()
+    status = netapi32.NetUserAdd(
+        None, 1, ctypes.byref(info), ctypes.byref(parameter)
+    )
+    if status != 0:
+        raise OSError(status, f"NetUserAdd failed with status {status}")
+
+
 def sid_to_string(sid: bytes) -> str | None:
     """Return the string form of a binary SID."""
     import ctypes
@@ -595,20 +630,15 @@ def smoke() -> None:
         assert existing_account.returncode != 0, (
             f"refusing to reuse an existing account named {SERVICE_ACCOUNT!r}"
         )
-        password = "Cvb-" + secrets.token_urlsafe(18) + "!9aA"
-        created = command(
-            ["net", "user", SERVICE_ACCOUNT, password, "/add", "/expires:never", "/Y"],
-            stdin=subprocess.DEVNULL,
-        )
-        if created.returncode != 0:
+        password = "Cvb-" + secrets.token_urlsafe(18) + "!9aA-é"
+        try:
+            create_local_user(SERVICE_ACCOUNT, password)
+        except OSError as exc:
             print(
-                f"FAILED COMMAND: net user {SERVICE_ACCOUNT} <password omitted> "
-                "/add /expires:never /Y",
+                f"FAILED: cannot create local account {SERVICE_ACCOUNT}: {exc}",
                 flush=True,
             )
-            print(f"stdout:\n{created.stdout}", flush=True)
-            print(f"stderr:\n{created.stderr}", flush=True)
-        assert created.returncode == 0, created.stderr
+            raise
         user_created = True
         for path, rights in ((root, "RX"), (app, "RX"), (data, "F")):
             checked(
@@ -662,6 +692,8 @@ def smoke() -> None:
             f"Runs as: {service_account} (stored password, while logged off)".casefold()
             in install.stdout.casefold()
         ), install.stdout
+        assert password not in install.stdout, "password appeared in stdout"
+        assert password not in install.stderr, "password appeared in stderr"
         status = checked([*base, "schedule", "status"], timeout=120, env=env)
         status_text = status.stdout.casefold()
         name_match = f"Account: {service_account}".casefold() in status_text
