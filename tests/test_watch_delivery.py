@@ -658,6 +658,7 @@ channels = ["hook"]
 
 def test_notify_test_sends_a_labelled_message(tmp_path):
     config = make_config(tmp_path)
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
     seen = []
 
     def handler(request):
@@ -670,8 +671,36 @@ def test_notify_test_sends_a_labelled_message(tmp_path):
     body = json.loads(seen[0].content)
     assert body["test"] is True
     assert "no action needed" in body["message"]
+    assert store.delivery_status() == ()
     with pytest.raises(ConfigurationError, match="unknown watch channel"):
         send_test(config, http, "missing")
+
+
+def test_cli_output_never_contains_a_secret(tmp_path, monkeypatch, capsys):
+    canary = "CANARY-CLI-OUTPUT-4b72"
+    monkeypatch.setenv("HOOK_SECRET", canary)
+    channels = """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.test/hook"
+header_name = "X-Auth"
+header_value_env = "HOOK_SECRET"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["hook"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    seed(config)
+    monkeypatch.setattr(
+        cli, "HttpClient", lambda http_config: mock_client(lambda request: httpx.Response(500))
+    )
+    assert cli.main(["--config", str(config.config_path), "watch", "notify"]) == 3
+    captured = capsys.readouterr()
+    assert canary not in captured.out
+    assert canary not in captured.err
 
 
 class FakeSMTPServer(socketserver.ThreadingTCPServer):
@@ -946,6 +975,32 @@ channels = ["bad", "good"]
     monkeypatch.setattr(cli, "HttpClient", lambda http_config: mock_client(handler))
     assert cli.main(["--config", str(config.config_path), "watch", "notify", "--channel", "good"]) == 0
     assert seen == ["https://example.test/good"]
+
+
+def test_cli_notify_retry_ambiguous(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    store = seed(config)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_delivery SET status='ambiguous'")
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(cli, "HttpClient", lambda http_config: mock_client(handler))
+    assert cli.main(["--config", str(config.config_path), "watch", "notify"]) == 0
+    assert seen == []
+    assert cli.main(
+        [
+            "--config",
+            str(config.config_path),
+            "watch",
+            "notify",
+            "--retry-ambiguous",
+        ]
+    ) == 0
+    assert len(seen) == 1
 
 
 def test_cli_watch_run_exits_three_on_delivery_failure(tmp_path, monkeypatch, capsys):
