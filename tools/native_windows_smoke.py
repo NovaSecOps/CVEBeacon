@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -323,13 +324,47 @@ def grant_batch_logon(account: str) -> None:
         advapi32.LsaClose(policy)
 
 
+def stop_registered_task() -> None:
+    """Stop the exact owned task and wait for it before touching its database."""
+    query = subprocess.run(
+        ["schtasks", "/Query", "/TN", TASK], capture_output=True, check=False
+    )
+    if query.returncode != 0:
+        return
+    subprocess.run(
+        ["schtasks", "/End", "/TN", TASK], capture_output=True, check=False
+    )
+    for _ in range(10):
+        try:
+            state, _, _ = task_state()
+        except AssertionError:
+            return
+        if state.casefold() != "running":
+            return
+        time.sleep(1)
+    print(f"WARN: task {TASK!r} is still running after schtasks /End", flush=True)
+
+
 def reset_database(data: Path) -> None:
+    stop_registered_task()
     for path in data.glob("cvebeacon-watch.db*"):
-        path.unlink()
+        if os.name != "nt":
+            path.unlink(missing_ok=True)
+            continue
+        for attempt in range(5):
+            try:
+                path.unlink()
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.5)
 
 
 def assert_baseline(database: Path) -> None:
-    with sqlite3.connect(database) as db:
+    with closing(sqlite3.connect(database)) as db:
         mode = db.execute(
             "SELECT value FROM watch_meta WHERE key = 'initial_mode'"
         ).fetchone()
