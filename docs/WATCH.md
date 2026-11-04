@@ -1072,6 +1072,9 @@ delete them and run `watch sync` again. They are not migrated.
   view is recomputed in batches of 5,000 and every stored CVE is queued,
   including CVEs whose fingerprint did not change, because vendor and product
   names are not part of the fingerprint.
+- `watch_meta.euvd_page_cursor` holds the in-progress EUVD window, its pinned
+  total, the next page, and the previous page's identifiers while a large
+  window is incomplete. It is cleared when the window commits.
 
 `watch_touched` is the evaluation set; the view fingerprint only detects
 escalations. NVD-only content changes such as products, CWEs, or description
@@ -1103,13 +1106,29 @@ sync continues in bounded windows.
 
 ## EUVD sync
 
-EUVD is read in 30-day chunks and `euvd_cursor` is committed after each chunk.
-A chunk whose first page reports more than 10,000 items is split in half by
-days, down to a one-day chunk, and every sub-chunk commits on its own. The
-cursor only moves forward, so a device without a real-time clock cannot
-rewind it. The request end is always widened by one day while the cursor stays
-at the chunk end: same-day EUVD queries otherwise report a total below the
-number of items they return. Requests are paced at least one second apart.
+EUVD is read in 30-day chunks and `euvd_cursor` records the last fully
+committed day. A chunk whose first page reports more than 10,000 items is split
+in half by days, down to a one-day chunk. Every accepted page is committed in
+its own transaction, and a page cursor in `watch_meta` records the current
+window and the next page while that window is incomplete. A throttled or
+interrupted run therefore keeps every completed page, and the next run resumes
+at that page instead of replaying the window from its first page. A single very
+busy day with more items than one run can fetch still makes progress across
+runs; it does not need a smaller date range, which the source cannot provide.
+
+When a window completes, `euvd_cursor` moves to its end and the page cursor is
+cleared in the same transaction. The cursor only moves forward, so a device
+without a real-time clock cannot rewind it. The request end is always widened
+by one day while the cursor stays at the chunk end: same-day EUVD queries
+otherwise report a total below the number of items they return. Requests are
+paced at least one second apart.
+
+Each page must contain the expected number of items. When the reported total
+changes between pages, or a page repeats an item that was already read (the
+previous page's identifiers are kept in the page cursor), the run restarts the
+window from its first page. A repeated page therefore never advances the
+cursor. If the window still cannot be scanned, the source fails and the next
+run tries the same window again.
 
 When a request returns HTTP 403 or 429 after at least one successful request in
 the run, watch mode treats it as throttling. It honours a usable `Retry-After`
@@ -1118,27 +1137,19 @@ wait to the remaining budget, then retries the same request; an unusable header
 uses those scheduled waits. Each wait is capped at 240 seconds and all waits
 share a 10-minute budget per run, including the EU KEV dump on the same host. A
 `Retry-After` longer than the remaining budget ends the retries. When the budget
-is exhausted the source fails as usual and every completed chunk stays
+is exhausted the source fails as usual and every completed page stays
 committed. A 403 on a run's first EUVD request still fails immediately, because
 a rejected query is a more likely cause than throttling.
 
-The EU KEV dump shares this state: it is retried only after a successful EUVD
-request in the same run. A sync with only `eu_kev`, or one where EUVD never
-succeeds, still fails the dump's first 403 immediately.
-
-Pages are accumulated until the chunk's pinned total is complete. A 403 that
-recurs at the same page therefore blocks that sub-chunk on every run: the
-current run and the next both restart it from its first page, and the budget
-only helps a temporary throttle. Progress inside an incomplete chunk is not
-retained. A page cursor or per-page commits would be a separate change.
+The EU KEV dump is a single request and is fetched before the EUVD backfill, so
+a long EUVD catch-up cannot exhaust the shared budget before the dump is read.
+It still uses the shared throttle state when an earlier request to the host
+succeeded. A run whose first EU request is a 403 fails the dump immediately and
+does not retry it.
 
 This backoff belongs to watch sync. Scan and package-query EUVD lookups use a
 separate, unpaced search adapter; they do not use this budget and report a
 failed EUVD source for that asset instead.
-
-A page that repeats an EUVD id restarts the chunk through the same bounded
-retry path, and the distinct item count must equal the pinned total before the
-chunk commits. A failed chunk leaves the cursor at the previous chunk.
 
 ## KEV and early lookups
 
@@ -1223,7 +1234,9 @@ baseline, backfill, and full mode.
 After the first sync, `nvd_cursor` advances to the end of the window that was
 read. Later runs start `overlap_minutes` before that cursor and end at the
 current time. `euvd_cursor` is a date and is re-read inclusively, so a second
-sync on the same day reads the same EUVD day again.
+sync on the same day reads the same EUVD day again. While a large EUVD window
+is incomplete, its page cursor resumes at the next unread page, so a full
+history that needs several scheduled runs continues where the last one stopped.
 
 ## Failure behavior
 
@@ -1232,11 +1245,11 @@ sync on the same day reads the same EUVD day again.
   next run resumes there.
 - If an optional source fails, the NVD data is committed, the failing source is
   named, and the command exits 4. Its cursor does not advance past the last
-  successful chunk. A failed EPSS download keeps the previous table.
-- EUVD throttling, and the EU KEV dump after a successful EUVD request in the
-  same run, is retried within the run, for up to 10 minutes of waits. A run
-  that exhausts that budget fails the source, keeps the last committed EUVD
-  chunk and the previous KEV rows, and exits 4.
+  completed window. A failed EPSS download keeps the previous table.
+- EUVD throttling is retried within the run, for up to 10 minutes of waits. The
+  EU KEV dump is fetched before the EUVD backfill and shares that budget when
+  it is retried. A run that exhausts the budget fails the source, keeps every
+  completed EUVD page and the previous KEV rows, and exits 4.
 - Committed source changes also remain in `watch_touched`, so a later failure or
   interruption does not lose an evaluation obligation. The initial window stays
   open until every enabled source has finished a sync without a failure and an
@@ -1248,7 +1261,9 @@ sync on the same day reads the same EUVD day again.
 `watch status` prints the database path, schema version, cursors, EPSS score
 date, row counts, EUVD items, KEV catalog entries, watched CVEs in KEV, active
 SSVC exploitation, EPSS rows, pending/backing-off lookups, and the number of
-CVEs marked as reported to clients. It also prints
+CVEs marked as reported to clients. When a large EUVD window is still being
+read, the EUVD cursor line also names the window and the next page, so a
+throttled full-history catch-up shows its progress. It also prints
 each channel's pending, failed (with the given-up count), ambiguous, sending,
 and last success counts. It creates an empty database if none exists.
 
@@ -1288,9 +1303,12 @@ or more NVD requests and roughly 4,200 EUVD requests; both counts are planning
 floors, not measurements. The pacing-based minimum uses the configured NVD
 interval for NVD requests and the fixed one-second EUVD pace for EUVD requests:
 at least 2 hours at the default NVD interval before extra NVD pages, retries,
-and throttling. Budget several hours of continuous work, a large download, and
-many small database commits. EPSS is one current file per sync, not one per
-historical day. Run full history deliberately, preferably with an NVD API key.
+and throttling. Under throttling, EUVD full history needs several scheduled
+runs: each run reads and commits the pages the budget allows, `watch status`
+shows the window and page, and the next run continues there. Budget several
+hours of continuous work, a large download, and many small database commits.
+EPSS is one current file per sync, not one per historical day. Run full history
+deliberately, preferably with an NVD API key.
 
 ## Source attribution
 
