@@ -592,6 +592,12 @@ def test_cli_users_add_passwd_and_list_never_print_secrets(
     assert "alice@example.com" in output.out
     assert "scrypt" not in output.out + output.err
     assert PASSWORD not in output.out + output.err
+    with sqlite3.connect(users.path) as db:
+        audit = " ".join(
+            str(row) for row in db.execute("SELECT * FROM cb_user_audit")
+        )
+    assert PASSWORD not in audit
+    assert PASSWORD + " two" not in audit
 
 
 def test_cli_users_add_no_password_skips_the_prompt(tmp_path, monkeypatch, capsys):
