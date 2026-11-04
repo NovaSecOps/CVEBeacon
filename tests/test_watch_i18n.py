@@ -156,8 +156,8 @@ def test_pt_pt_renders_every_message_channel_family():
             else message.text
         )
         assert "[NOVO]" in body, channel
-        assert "Publicado 2026-10-30" in body, channel
-        assert "visto pela primeira vez 2026-11-04" in body, channel
+        assert "Publicado: 2026-10-30" in body, channel
+        assert "visto pela primeira vez: 2026-11-04" in body, channel
         assert "Exploração: nenhuma" in body, channel
         assert "Regra: critical-or-likely" in body, channel
         assert "https://nvd.nist.gov/vuln/detail/CVE-2026-1234" in body, channel
@@ -182,7 +182,7 @@ def test_pt_pt_alert_header_and_reported_line():
     assert "[NOVO] CVE-2026-1234" in message.body
     assert "CVSS 9.8 (CNA: acme.example), NVD pendente" in message.body
     assert "EPSS 0.62" in message.body
-    assert "KEV: CISA – EU –" in message.body
+    assert "KEV: CISA – UE –" in message.body
     assert (
         "Comunicado aos clientes por alice em 2026-11-04 12:00 UTC"
         in message.body
@@ -219,7 +219,7 @@ def test_pt_pt_digest_uses_a_summary_and_per_rule_sections():
     assert "alpha: 2 correspondências" in message.body
     assert "beta: 1 adicionado ao KEV" in message.body
     assert "[NOVO] CVE-2026-0001" in message.body
-    assert "Publicado 2026-10-30" in message.body
+    assert "Publicado: 2026-10-30" in message.body
     assert "Execute `cvebeacon watch events --rule alpha`" in message.body
     assert "<h2" in message.html
     assert "Gravidade" in message.html
@@ -560,7 +560,7 @@ def test_pt_pt_missing_date_uses_agreement_for_a_date():
     message = message_for(
         event(current=view(published=None)), "smtp", format="text"
     )
-    assert "Publicado data desconhecida" in message.body
+    assert "Publicado: data desconhecida" in message.body
     assert "Publicado desconhecido" not in message.body
 
 
@@ -575,7 +575,7 @@ def test_pt_pt_typography_for_dates_and_due_dates():
         ),
     )
     message = message_for(item, "smtp", format="text")
-    assert "Publicado 2026-10-30 · visto pela primeira vez" in message.body
+    assert "Publicado: 2026-10-30 · visto pela primeira vez:" in message.body
     assert "Prazo: 2026-11-20" in message.body
     assert "Prazo 2026-11-20" not in message.body
 
@@ -604,6 +604,44 @@ def test_pt_pt_unscored_cvss_wording():
     )
     assert "Sem pontuação CVSS" in message.body
     assert "não classificada" not in message.body
+
+
+def test_pt_pt_uses_ue_for_the_european_kev_catalog():
+    item = event(
+        "kev_added",
+        reasons=("kev eu false -> true",),
+        current=view(eu_kev_added="2026-11-01"),
+    )
+    message = message_for(item, "smtp", format="text")
+    assert "[ADICIONADO AO KEV: UE]" in message.body
+    assert "KEV: CISA – UE ✓" in message.body
+
+
+def test_pt_pt_uses_plural_rule_label_for_several_rules():
+    events = (
+        event("match", cve_id="CVE-2026-0001", event_id=1, rule="alpha"),
+        event("match", cve_id="CVE-2026-0001", event_id=2, rule="beta"),
+    )
+    message = build_messages(
+        events,
+        channel_type="smtp",
+        grouping="run",
+        max_items=20,
+        names={"alpha": "alpha", "beta": "beta"},
+        language="pt-PT",
+        format="text",
+    )[0]
+    assert "Regras: alpha, beta" in message.body
+    assert "Regra: alpha, beta" not in message.body
+
+
+def test_pt_pt_missing_identity_reads_as_unknown_author():
+    notice = event("reported", details={})
+    message = message_for(notice, "smtp", format="text")
+    assert (
+        "comunicado aos clientes por autor desconhecido em"
+        in message.body
+    )
 
 
 def test_html_escapes_rule_due_action_and_cna_source():

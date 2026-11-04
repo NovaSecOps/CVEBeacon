@@ -281,6 +281,8 @@ def _kind_label(
                 catalog_name = "EU"
             elif "kev cisa" in reason:
                 catalog_name = "CISA"
+        if catalog_name == "EU":
+            catalog_name = catalog["kev_catalog_eu"]
         return translate(
             catalog, "label_kev_added", catalog=catalog_name
         )
@@ -422,6 +424,7 @@ def _event_facts(
             catalog,
             "kev_value",
             cisa="✓" if view.cisa_kev_added is not None else "–",
+            eu_name=catalog["kev_catalog_eu"],
             eu="✓" if view.eu_kev_added is not None else "–",
         ),
         exploitation=_exploitation_value(view, catalog),
@@ -477,7 +480,12 @@ def _event_lines(
     )
     lines.append(
         "  "
-        + translate(catalog, "rule_line", rules=rules, links=links)
+        + translate(
+            catalog,
+            "rule_line_plural" if len(facts.rules) > 1 else "rule_line",
+            rules=rules,
+            links=links,
+        )
     )
     return lines
 
@@ -729,9 +737,12 @@ def _html_event_block(facts: _EventFacts, catalog: Mapping[str, str]) -> str:
             f'<tr><td style="{_HTML_TD}">{_h(facts.reported)}</td></tr>'
         )
     rules = _h(", ".join(facts.rules))
+    rule_label = catalog[
+        "rule_label_plural" if len(facts.rules) > 1 else "rule_label"
+    ]
     rows.append(
         f'<tr><td style="{_HTML_TD}">'
-        f'<span style="{_HTML_MUTED}">{_h(catalog["rule_label"])}:</span> '
+        f'<span style="{_HTML_MUTED}">{_h(rule_label)}:</span> '
         f"{rules} · {_html_links(facts)}</td></tr>"
     )
     return (
@@ -804,7 +815,8 @@ def _html_digest_fragment(
                 f'<span style="{_HTML_MUTED}">{_h(item.reported)}</span>'
             )
         cell.append(
-            f'<span style="{_HTML_MUTED}">{_h(catalog["rule_label"])}: '
+            f'<span style="{_HTML_MUTED}">'
+            f'{_h(catalog["rule_label_plural"] if len(item.rules) > 1 else catalog["rule_label"])}: '
             f'{_h(", ".join(item.rules))}</span>'
         )
         cell.append(

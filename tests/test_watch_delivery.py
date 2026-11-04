@@ -2895,7 +2895,7 @@ def test_smtp_pt_pt_alert_uses_the_channel_language(tmp_path, monkeypatch):
     assert "1 novo" in message["Subject"]
     parts = message.get_payload()
     assert "[NOVO] CVE-2026-0001" in parts[0].get_content()
-    assert "Publicado data desconhecida · visto pela primeira vez" in parts[0].get_content()
+    assert "Publicado: data desconhecida · visto pela primeira vez:" in parts[0].get_content()
     assert "Exploração: nenhuma" in parts[1].get_content()
 
 
