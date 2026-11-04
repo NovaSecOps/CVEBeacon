@@ -68,6 +68,80 @@ See the [deployment guide](docs/DEPLOY.md), [user guide](docs/USER_GUIDE.md), [s
 
 CVEBeacon is agentless and network-isolated from monitored assets: it reads supplied inventory and does not discover software or probe devices. Public lookups transmit component identity terms; asset IDs, system IDs, categories, and other operational metadata stay local to vulnerability lookups. Optional notifications intentionally send alert labels to the configured recipient. See the [identity guide](docs/IDENTITY.md) and [zero-credential acceptance procedure](docs/ZERO_CREDENTIAL_ACCEPTANCE.md).
 
+## System requirements
+
+CVEBeacon runs on Linux and Windows with Python 3.11 or newer; see the
+[validation matrix](docs/VALIDATION.md). The figures below were measured on one
+x86_64 host (Ryzen 9 5900X, Python 3.13, no NVD API key, default pacing) with a
+five-asset inventory. RAM is the process peak; database size is the watch
+database after the run. ARM devices are expected to take longer in wall time
+and to need about the same RAM (estimate; not measured on ARM). Figures are
+rounded.
+
+| Mode | Peak RAM | Disk after first run | First run | Scheduled run | Requests, first run (NVD, EUVD, KEV, EPSS) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| inventory scan only | 87 MiB | 9.5 MiB state DB + about 8 MiB JSON report per scan | 3.5 min cold, 2.5 min warm | 2.5 min | not reported by `scan`; see [network requirements](docs/NETWORK_REQUIREMENTS.md) |
+| watch baseline | 55 MiB | 30 MiB database | 0.3 s empty baseline, then 9 s first real sync | 9 s | NVD 2, EUVD 6, KEV 2, EPSS 2 |
+| backfill 1 day | 108 MiB | 35 MiB database | 2.5 min | 7 s | NVD 5, EUVD 27, KEV 2, EPSS 2 |
+| backfill 7 days | 171 MiB | 54 MiB database | 7.5 min | 7 s | NVD 29, EUVD 129, KEV 2, EPSS 2 |
+| backfill 30 days | 226 MiB | 144 MiB database (EUVD incomplete) | 45 min | 30 s | NVD 157, EUVD 216, KEV 2, EPSS 1 |
+| **backfill 120 days** (heavy) | 234 MiB | 231 MiB database | 64 min, plus a 4 min resumed sync | 4 min | NVD 220, EUVD 650 + 139 on resume, KEV 2, EPSS 1 |
+| **full history** (heavy) | 372 MiB | 718 MiB database (EUVD incomplete) | 98 min, then further syncs to finish EUVD | about 20 min per resumed sync while EUVD catch-up lasts | NVD 508 (419,060 CVEs), EUVD 851 (incomplete), KEV 2 (CISA 1, EU 1), EPSS 1 |
+
+The 30-day database has incomplete EUVD data after an HTTP 403 that survived
+retries; NVD, CISA KEV and EPSS completed in the first run, and the EU KEV dump
+completed in the follow-up sync. The 120-day run hit the same limit, kept its
+progress, and the next sync completed EUVD.
+
+The full-history first run finished NVD (419,060 CVEs in 508 requests) in 98
+minutes, but EUVD was throttled and incomplete. It stopped after 851 requests
+with the cursor at 2024-08-02; two EUVD days in August 2024 alone hold about
+55,000 items each. The EU KEV dump failed with HTTP 403 in that run and its
+resumed syncs, so the measured database has no EU KEV entries. Each resumed sync
+took about 20 minutes, made about 600 EUVD requests, and spent the 10-minute
+throttle budget. EUVD resume commits every page, so the load finishes across
+several scheduled runs and each one advances it; a run rejected on its first
+EUVD request makes no EUVD progress. Pages read in earlier runs are verified
+once, and that pass is also resumable.
+
+Scheduled syncs after a backfill of up to 120 days stayed between about
+7 seconds and 4 minutes and peaked at 78 MiB. A scheduled `watch run` also
+evaluates new records and delivers notifications, which adds time to the sync
+measured here.
+
+**Disk growth** (estimate from database deltas): about 3–5 MiB per day of
+recent history in a complete backfill (5.0 MiB/day over 1 day, 3.4 over 7 days).
+The 30- and 120-day figures (3.8 and 1.7 MiB/day) are understated because EUVD
+was incomplete. Incremental syncs after a backfill added 0–8 MiB each. Keep room
+for one JSON report per scan (about 8 MiB with five assets) and for backups.
+
+**Minimum recommendations** (with headroom over the measured peak):
+
+- **2 GB RAM and 1 GB free disk**: enough for inventory scans, a baseline, and a
+  backfill of up to 30 days on a Raspberry Pi 4 or 5. The largest of these peaks
+  is 226 MiB; the largest database is 144 MiB.
+- **120-day backfill and full history are heavy first loads.** The 120-day load
+  takes about an hour and leaves a 0.23 GB database. Full history took 98
+  minutes for the first sync and leaves a database of about 0.7 GB while EUVD
+  is still incomplete, with further syncs needed before EUVD finishes. Both
+  write continuously. They are not suited to a Raspberry Pi or another SD-card
+  device for the first load. Use an x86_64 machine or a larger ARM board with at
+  least 2 GB RAM and 2 GB free disk; full history can exceed the measured 0.7 GB
+  as EUVD completes (estimate). Scheduled runs afterwards are light and fit the
+  2 GB class once the initial load, including the EUVD catch-up, is complete.
+- If the small device will be the long-term host, run the first load on the
+  larger machine and copy the finished watch database with SQLite's online
+  backup while no CVEBeacon process is running (the
+  [deployment guide](docs/DEPLOY.md#upgrade) has the command), using the same
+  CVEBeacon version on both.
+
+An NVD API key is optional. It raises the NVD pacing limit from 5 to 50 requests
+per 30 seconds and shortens NVD-heavy first loads. EUVD is paced at one request
+per second and can throttle or reject bursts. Watch mode backs off on HTTP 403
+or 429 after a successful request, retries within a 10-minute budget per run,
+keeps every completed page, and the next sync resumes at the next unread page.
+A large first load can therefore require more than one run.
+
 ## Extensions
 
 Optional [inventory extensions](docs/EXTENSIONS.md) run separately and feed the
