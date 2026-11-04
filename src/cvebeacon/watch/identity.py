@@ -12,7 +12,12 @@ from dataclasses import dataclass
 
 from ..errors import ConfigurationError
 from .reported import IDENTITY_MODES, validate_identity
-from .users import AuthenticatedUser, User, validate_email
+from .users import (
+    AuthenticatedUser,
+    User,
+    email_lookup_key,
+    validate_email,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +55,21 @@ class ReportIdentity:
                 raise ConfigurationError(
                     "authenticated identity proof does not match the user"
                 )
+        if self.mode != "open":
+            assert self.user is not None
+            if self.display != self.user.identity:
+                raise ConfigurationError(
+                    "the display identity does not match the resolved account"
+                )
+            if self.email is not None:
+                if (
+                    self.user.email is None
+                    or email_lookup_key(self.email)
+                    != email_lookup_key(self.user.email)
+                ):
+                    raise ConfigurationError(
+                        "the email identity does not match the resolved account"
+                    )
         if self.email is not None:
             validate_email(self.email)
 

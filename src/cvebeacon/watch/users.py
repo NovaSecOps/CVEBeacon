@@ -27,6 +27,7 @@ from ..passwords import (
     verify_password,
 )
 from .chain import chain_hash, decode_text, verify_chain
+from .directories import ensure_private_directory
 from .reported import checked_text, host_name, os_account
 
 if TYPE_CHECKING:
@@ -113,6 +114,14 @@ class AuthenticatedUser:
     @property
     def identity(self) -> str:
         return self.user.identity
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapAuthorization:
+    """The first administrator creation, checked inside the add transaction."""
+
+
+BOOTSTRAP = BootstrapAuthorization()
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,28 +220,50 @@ class UserStore:
         self.path = Path(path)
         self._clock = clock
 
+    @staticmethod
+    def _trusted_directory_chain(directory: Path) -> tuple[tuple[int, int], ...]:
+        """Validate every ancestor and return its device/inode identity."""
+        euid = os.geteuid()
+        identities: list[tuple[int, int]] = []
+        current = directory
+        while True:
+            details = current.stat()
+            if not stat.S_ISDIR(details.st_mode):
+                raise StateError(
+                    f"CVEBeacon user database path is not a directory: {current}"
+                )
+            mode = stat.S_IMODE(details.st_mode)
+            if details.st_uid in {euid, 0}:
+                if mode & 0o022 and not mode & stat.S_ISVTX:
+                    raise StateError(
+                        "CVEBeacon user database directory must not be group "
+                        f"or other writable: {current}; chmod go-w {current}"
+                    )
+            elif mode & 0o222:
+                raise StateError(
+                    "CVEBeacon user database directory must be owned by this "
+                    f"account or root: {current}"
+                )
+            identities.append((details.st_dev, details.st_ino))
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        return tuple(identities)
+
     def _connect(self, *, create: bool = True) -> sqlite3.Connection:
         try:
             parent = self.path.parent
             if create:
-                parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_directory(parent)
             resolved_parent = parent.resolve()
             path = resolved_parent / self.path.name
             connection = None
             if os.name == "posix":
-                directory = resolved_parent.stat()
-                directory_mode = stat.S_IMODE(directory.st_mode)
-                if directory.st_uid not in {os.geteuid(), 0}:
-                    raise StateError(
-                        "CVEBeacon user database directory must be owned by "
-                        "this account or root"
-                    )
-                if directory_mode & 0o022:
-                    raise StateError(
-                        "CVEBeacon user database directory must not be group "
-                        "or other writable"
-                    )
-                parent_identity = (directory.st_dev, directory.st_ino)
+                directory_chain = self._trusted_directory_chain(
+                    resolved_parent
+                )
+                parent_identity = directory_chain[0]
                 flags = (
                     os.O_RDWR if create else os.O_RDONLY
                 ) | getattr(os, "O_NOFOLLOW", 0)
@@ -285,12 +316,11 @@ class UserStore:
                     raise StateError(
                         "CVEBeacon user database was replaced while opening"
                     ) from exc
-                current_parent = resolved_parent.stat()
                 if (
                     not stat.S_ISREG(current.st_mode)
                     or (current.st_dev, current.st_ino) != expected
-                    or (current_parent.st_dev, current_parent.st_ino)
-                    != parent_identity
+                    or self._trusted_directory_chain(resolved_parent)
+                    != directory_chain
                 ):
                     connection.close()
                     raise StateError(
@@ -482,7 +512,7 @@ class UserStore:
         display_name: object | None = None,
         email: object | None = None,
         is_admin: bool = False,
-        actor: str | None = None,
+        authorization: AuthenticatedUser | BootstrapAuthorization | None = None,
     ) -> User:
         name = validate_username(username)
         shown = validate_display_name(display_name)
@@ -500,6 +530,20 @@ class UserStore:
         if address is not None:
             checks.append((address, email_lookup_key(address)))
         with self.transaction() as db:
+            if isinstance(authorization, BootstrapAuthorization):
+                existing_admin = db.execute(
+                    "SELECT 1 FROM cb_user WHERE is_admin=1 LIMIT 1"
+                ).fetchone()
+                if existing_admin is not None:
+                    raise ConfigurationError(
+                        "administrator login required; use --admin-user"
+                    )
+                actor = "(bootstrap)"
+            elif authorization is not None:
+                current = self.require_admin_in(db, authorization)
+                actor = current.username
+            else:
+                actor = None
             existing_usernames = {
                 email_lookup_key(str(row["username"]))
                 for row in db.execute("SELECT username FROM cb_user")
@@ -548,7 +592,11 @@ class UserStore:
         return self._user(row)
 
     def set_password(
-        self, username: object, password: object, *, actor: str | None = None
+        self,
+        username: object,
+        password: object,
+        *,
+        authorization: AuthenticatedUser | BootstrapAuthorization | None = None,
     ) -> User:
         self.initialize()
         with self.transaction() as db:
@@ -559,6 +607,17 @@ class UserStore:
             if row is None:
                 raise ConfigurationError("user not found")
             user = self._user(row)
+            if isinstance(authorization, BootstrapAuthorization):
+                raise ConfigurationError(
+                    "bootstrap is only valid for the first administrator"
+                )
+            if authorization is not None:
+                current = self._validate_proof_in(db, authorization)
+                if current.id != user.id and not current.is_admin:
+                    raise ConfigurationError("administrator login required")
+                actor = current.username
+            else:
+                actor = None
             password = validate_password(
                 password, forbidden=(user.username, user.email)
             )
@@ -574,11 +633,25 @@ class UserStore:
             ).fetchone()
         return self._user(updated)
 
-    def disable(self, username: object, *, actor: str | None = None) -> User:
-        return self._set_disabled(username, True, "disable", actor=actor)
+    def disable(
+        self,
+        username: object,
+        *,
+        authorization: AuthenticatedUser | BootstrapAuthorization | None = None,
+    ) -> User:
+        return self._set_disabled(
+            username, True, "disable", authorization=authorization
+        )
 
-    def enable(self, username: object, *, actor: str | None = None) -> User:
-        return self._set_disabled(username, False, "enable", actor=actor)
+    def enable(
+        self,
+        username: object,
+        *,
+        authorization: AuthenticatedUser | BootstrapAuthorization | None = None,
+    ) -> User:
+        return self._set_disabled(
+            username, False, "enable", authorization=authorization
+        )
 
     def _set_disabled(
         self,
@@ -586,7 +659,7 @@ class UserStore:
         value: bool,
         action: str,
         *,
-        actor: str | None = None,
+        authorization: AuthenticatedUser | BootstrapAuthorization | None = None,
     ) -> User:
         self.initialize()
         with self.transaction() as db:
@@ -597,6 +670,15 @@ class UserStore:
             if row is None:
                 raise ConfigurationError("user not found")
             user = self._user(row)
+            if isinstance(authorization, BootstrapAuthorization):
+                raise ConfigurationError(
+                    "bootstrap is only valid for the first administrator"
+                )
+            if authorization is not None:
+                current = self.require_admin_in(db, authorization)
+                actor = current.username
+            else:
+                actor = None
             now = _timestamp(self._clock())
             db.execute(
                 "UPDATE cb_user SET disabled=?,updated_at=? WHERE id=?",
@@ -608,7 +690,12 @@ class UserStore:
             ).fetchone()
         return self._user(updated)
 
-    def unlock(self, username: object, *, actor: str | None = None) -> User:
+    def unlock(
+        self,
+        username: object,
+        *,
+        authorization: AuthenticatedUser | BootstrapAuthorization | None = None,
+    ) -> User:
         self.initialize()
         with self.transaction() as db:
             row = db.execute(
@@ -618,6 +705,15 @@ class UserStore:
             if row is None:
                 raise ConfigurationError("user not found")
             user = self._user(row)
+            if isinstance(authorization, BootstrapAuthorization):
+                raise ConfigurationError(
+                    "bootstrap is only valid for the first administrator"
+                )
+            if authorization is not None:
+                current = self.require_admin_in(db, authorization)
+                actor = current.username
+            else:
+                actor = None
             now = _timestamp(self._clock())
             db.execute(
                 "UPDATE cb_user SET failed_logins=0,locked_until=NULL,"
@@ -726,43 +822,31 @@ class UserStore:
         with closing(self._connect(create=False)) as db:
             self.require_current_in(db, identity)
 
-    def require_current_in(
-        self, db: sqlite3.Connection, identity: "ReportIdentity"
-    ) -> None:
-        """Reject a deleted, renamed, disabled or unproven account.
-
-        The caller may hold the user-database lock; ``ReportService`` keeps a
-        ``transaction()`` open from this check through the report write so a
-        concurrent disable cannot slip between them.
-        """
-        if identity.mode == "open":
-            return
-        if identity.user is None:
-            raise ConfigurationError("the resolved CVEBeacon user is missing")
+    def _current_account(
+        self, db: sqlite3.Connection, user_id: int, username: str
+    ) -> User:
         row = db.execute(
-            f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?",
-            (identity.user.id,),
+            f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?", (user_id,)
         ).fetchone()
         if row is None:
             raise ConfigurationError("the CVEBeacon user no longer exists")
         current = self._user(row)
-        if current.username != identity.user.username:
+        if current.username != username:
             raise ConfigurationError(
                 "the CVEBeacon user no longer matches the resolved identity"
             )
         if current.disabled:
             raise ConfigurationError("the CVEBeacon user is disabled")
-        if identity.mode != "authenticated":
-            return
-        proof = identity.authenticated
-        if (
-            proof is None
-            or proof.user.id != current.id
-            or proof.user.username != current.username
-        ):
-            raise ConfigurationError(
-                "authenticated identity proof does not match the user"
-            )
+        return current
+
+    def _validate_proof_in(
+        self, db: sqlite3.Connection, proof: AuthenticatedUser
+    ) -> User:
+        if not isinstance(proof, AuthenticatedUser):
+            raise ConfigurationError("a successful login is required")
+        current = self._current_account(
+            db, proof.user.id, proof.user.username
+        )
         login = db.execute(
             "SELECT action,username,at FROM cb_user_audit WHERE id=?",
             (proof.login_id,),
@@ -787,6 +871,45 @@ class UserStore:
                 raise ConfigurationError(
                     "authenticated identity proof predates the password change"
                 )
+        return current
+
+    def require_current_in(
+        self, db: sqlite3.Connection, identity: "ReportIdentity"
+    ) -> None:
+        """Reject a deleted, renamed, disabled or unproven account.
+
+        The caller may hold the user-database lock; ``ReportService`` keeps a
+        ``transaction()`` open from this check through the report write so a
+        concurrent disable cannot slip between them.
+        """
+        if identity.mode == "open":
+            return
+        if identity.user is None:
+            raise ConfigurationError("the resolved CVEBeacon user is missing")
+        if identity.mode == "authenticated":
+            self._validate_proof_in(db, identity.authenticated)
+            return
+        self._current_account(
+            db, identity.user.id, identity.user.username
+        )
+
+    def require_admin_in(
+        self, db: sqlite3.Connection, proof: AuthenticatedUser
+    ) -> User:
+        current = self._validate_proof_in(db, proof)
+        if not current.is_admin:
+            raise ConfigurationError("administrator login required")
+        return current
+
+    def require_self_in(
+        self, db: sqlite3.Connection, proof: AuthenticatedUser, username: object
+    ) -> User:
+        current = self._validate_proof_in(db, proof)
+        if current.username.casefold() != str(username).casefold():
+            raise ConfigurationError(
+                "the current password does not match the target account"
+            )
+        return current
 
     @staticmethod
     def _parse_time(value: object) -> datetime | None:

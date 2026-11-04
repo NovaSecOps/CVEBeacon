@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..errors import SourceError, StateError
+from .directories import ensure_private_directory
 from .chain import (
     chain_hash,
     chain_matches,
@@ -430,7 +431,7 @@ class WatchStore:
     def _connect(self, *, create: bool = True) -> sqlite3.Connection:
         try:
             if create:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_directory(self.path.parent)
             connection = sqlite3.connect(
                 f"{self.path.resolve().as_uri()}?mode={'rwc' if create else 'rw'}",
                 uri=True,
@@ -1556,23 +1557,34 @@ class WatchStore:
 
     @staticmethod
     def _report_entry(row: Mapping[str, Any]) -> ReportedEntry:
-        user_id = row["user_id"]
-        chain_version = row["chain_version"]
-        return ReportedEntry(
-            int(row["id"]),
-            str(row["cve_id"]),
-            str(row["action"]),
-            str(row["by"]),
-            row["note"],
-            str(row["at"]),
-            None if user_id is None else int(user_id),
-            row["username"],
-            row["identity_mode"],
-            row["os_account"],
-            row["host"],
-            row["chain"],
-            1 if chain_version is None else int(chain_version),
-        )
+        decoded = decoded_row(row)
+        if decoded is None:
+            raise StateError(
+                f"watch_report row {row_id(row)} is invalid"
+            )
+        row = decoded
+        try:
+            user_id = row["user_id"]
+            chain_version = row["chain_version"]
+            return ReportedEntry(
+                int(row["id"]),
+                str(row["cve_id"]),
+                str(row["action"]),
+                str(row["by"]),
+                row["note"],
+                str(row["at"]),
+                None if user_id is None else int(user_id),
+                row["username"],
+                row["identity_mode"],
+                row["os_account"],
+                row["host"],
+                row["chain"],
+                1 if chain_version is None else int(chain_version),
+            )
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise StateError(
+                f"watch_report row {row_id(row)} is invalid"
+            ) from exc
 
     @staticmethod
     def _latest_report_row(

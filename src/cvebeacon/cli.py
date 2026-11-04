@@ -228,6 +228,7 @@ def _print_evaluation(result) -> None:
 def _run_users(args, config: AppConfig) -> int:
     from .passwords import read_new_password, read_password
     from .watch.users import (
+        BOOTSTRAP,
         UserStore,
         audit_name,
         validate_display_name,
@@ -238,14 +239,14 @@ def _run_users(args, config: AppConfig) -> int:
     store = UserStore(config.watch.users_database)
     authenticated = config.watch.reporting_identity == "authenticated"
 
-    def admin_login(name: str) -> str:
+    def admin_login(name: str):
         password = read_password(f"Admin password for {audit_name(name)}: ")
         proof = store.authenticate(name, password)
         if proof is None or not proof.user.is_admin:
             raise CVEBeaconError("administrator login required")
-        return proof.user.username
+        return proof
 
-    def require_admin() -> str | None:
+    def require_admin():
         admin_user = getattr(args, "admin_user", None)
         if not authenticated:
             if admin_user is not None:
@@ -313,12 +314,12 @@ def _run_users(args, config: AppConfig) -> int:
                 "--no-password is not available when "
                 "watch.reporting.identity = authenticated"
             )
-        actor = None
+        authorization = None
         if authenticated:
             if args.admin_user is not None:
-                actor = admin_login(args.admin_user)
-            elif args.admin and not store.has_admin():
-                actor = "bootstrap"
+                authorization = admin_login(args.admin_user)
+            elif args.admin:
+                authorization = BOOTSTRAP
             else:
                 raise CVEBeaconError(
                     "administrator login required; use --admin-user"
@@ -344,13 +345,14 @@ def _run_users(args, config: AppConfig) -> int:
             display_name=display,
             email=email,
             is_admin=args.admin,
-            actor=actor,
+            authorization=authorization,
         )
         print(f"added {user.username}")
         return 0
     if command == "passwd":
+        authorization = None
         if authenticated and args.admin_user is not None:
-            actor = admin_login(args.admin_user)
+            authorization = admin_login(args.admin_user)
         elif authenticated:
             user = store.find(args.username)
             if user is None:
@@ -361,14 +363,13 @@ def _run_users(args, config: AppConfig) -> int:
             proof = store.authenticate(user.username, current)
             if proof is None:
                 raise CVEBeaconError("invalid username or password")
-            actor = proof.user.username
+            authorization = proof
         else:
             if getattr(args, "admin_user", None) is not None:
                 raise CVEBeaconError(
                     "--admin-user is only available when "
                     "watch.reporting.identity = authenticated"
                 )
-            actor = None
         user = store.find(args.username)
         if user is None:
             raise CVEBeaconError("user not found")
@@ -376,22 +377,24 @@ def _run_users(args, config: AppConfig) -> int:
             f"New password for {user.username} (12–1024 characters): ",
             forbidden=(user.username, user.email),
         )
-        store.set_password(user.username, password, actor=actor)
+        store.set_password(
+            user.username, password, authorization=authorization
+        )
         print(f"password changed for {user.username}")
         return 0
     if command == "disable":
-        actor = require_admin()
-        user = store.disable(args.username, actor=actor)
+        authorization = require_admin()
+        user = store.disable(args.username, authorization=authorization)
         print(f"disabled {user.username}")
         return 0
     if command == "enable":
-        actor = require_admin()
-        user = store.enable(args.username, actor=actor)
+        authorization = require_admin()
+        user = store.enable(args.username, authorization=authorization)
         print(f"enabled {user.username}")
         return 0
     if command == "unlock":
-        actor = require_admin()
-        user = store.unlock(args.username, actor=actor)
+        authorization = require_admin()
+        user = store.unlock(args.username, authorization=authorization)
         print(f"unlocked {user.username}")
         return 0
     raise CVEBeaconError("unsupported users command")
@@ -428,6 +431,24 @@ def _password_prompt(username: str) -> str:
     from .watch.users import audit_name
 
     return read_password(f"Password for {audit_name(username)}: ")
+
+
+_REPORT_EXPORT_FIELDS = (
+    "id",
+    "cve_id",
+    "action",
+    "by",
+    "user_id",
+    "username",
+    "identity_mode",
+    "os_account",
+    "host",
+    "at",
+    "note",
+    "chain",
+    "chain_version",
+    "legacy",
+)
 
 
 def _report_export_record(entry) -> dict[str, object]:
@@ -578,12 +599,14 @@ def _run_watch(args, config: AppConfig) -> int:
                 print(json.dumps(records, indent=2, ensure_ascii=False))
             else:
                 writer = csv.writer(sys.stdout, lineterminator="\n")
-                writer.writerow(list(records[0]) if records else [
-                    "id", "cve_id", "action", "by", "user_id", "username",
-                    "identity_mode", "os_account", "host", "at", "note", "chain",
-                ])
+                writer.writerow(_REPORT_EXPORT_FIELDS)
                 for record in records:
-                    writer.writerow([_csv_cell(value) for value in record.values()])
+                    writer.writerow(
+                        [
+                            _csv_cell(record[field])
+                            for field in _REPORT_EXPORT_FIELDS
+                        ]
+                    )
             return 0
         if not entries:
             print("no CVEs are marked as reported to clients")
