@@ -227,8 +227,10 @@ not logged.
 
 ## Delivery
 
-Each event creates one delivery row per channel. A row moves through these
-states:
+Each event creates one delivery row per channel. Delivery aims to be at least
+once: every event has a durable row, and definite failures are retried. Because
+a message may already have arrived when the outcome is unknown, ambiguous rows
+are not resent automatically. A row moves through these states:
 
 - `pending`: queued but not attempted.
 - `sending`: committed immediately before the request or SMTP `DATA`.
@@ -244,7 +246,9 @@ Failed rows wait 5 minutes, then double the delay up to 6 hours, and stay
 `failed` after 10 attempts. `cvebeacon watch notify` sends pending rows and due
 retries; `--retry-ambiguous` also resends ambiguous rows, and `--channel NAME`
 limits the run to one channel. `cvebeacon watch notify test <channel>` sends a
-clearly labelled test message directly, outside this state machine.
+clearly labelled test message directly, outside this state machine. If a
+previous run stopped after committing `sending`, the next delivery prints a
+recovery line and marks those rows ambiguous before it continues.
 
 A channel sends at most 10 messages per run and the whole delivery step has a
 60-second budget. Leftovers stay `pending` for the next run. One channel failing

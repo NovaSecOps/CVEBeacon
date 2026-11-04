@@ -294,6 +294,35 @@ channels = ["matrix"]
     assert "encrypted" in report.channels[0].error
 
 
+def test_matrix_preflight_failure_does_not_send(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATRIX_TOKEN", "matrix-token")
+    channels = """
+[watch.channels.matrix]
+type = "matrix"
+homeserver = "https://matrix.example.org"
+room_id = "!room:example.org"
+access_token_env = "MATRIX_TOKEN"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["matrix"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        seen.append(request.method)
+        return httpx.Response(500)
+
+    report = deliver(config, store, handler)
+    assert seen == ["GET"]
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+
+
 def test_per_run_message_cap_leaves_the_rest_pending(tmp_path):
     channels = """
 [watch.channels.hook]
@@ -755,6 +784,112 @@ def test_smtp_drop_after_data_is_ambiguous(tmp_path, monkeypatch):
     report, store, server = run_smtp_test(tmp_path, monkeypatch, "drop")
     assert report.channels[0].ambiguous == 1
     assert rows(store)[0][1] == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    "channel_block,env",
+    [
+        (
+            '[watch.channels.c]\ntype = "webhook"\nurl = "https://example.test/hook"\n',
+            {},
+        ),
+        (
+            '[watch.channels.c]\ntype = "teams"\nwebhook_url_env = "TEAMS_URL"\n',
+            {"TEAMS_URL": "https://example.webhook.office.com/webhookb2/abc"},
+        ),
+        (
+            '[watch.channels.c]\ntype = "slack"\nwebhook_url_env = "SLACK_URL"\n',
+            {"SLACK_URL": "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"},
+        ),
+        (
+            '[watch.channels.c]\ntype = "discord"\nwebhook_url_env = "DISCORD_URL"\n',
+            {
+                "DISCORD_URL": "https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz"
+            },
+        ),
+        (
+            '[watch.channels.c]\ntype = "telegram"\nbot_token_env = "TELEGRAM_TOKEN"\nchat_id = 1\n',
+            {"TELEGRAM_TOKEN": "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"},
+        ),
+        (
+            '[watch.channels.c]\ntype = "ntfy"\ntopic = "cvebeacon"\n',
+            {},
+        ),
+        (
+            '[watch.channels.c]\ntype = "gotify"\nserver = "https://gotify.example.org"\napp_token_env = "GOTIFY_TOKEN"\n',
+            {"GOTIFY_TOKEN": "gotify-token"},
+        ),
+    ],
+)
+def test_http_error_status_is_a_retryable_failure(tmp_path, monkeypatch, channel_block, env):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["c"]
+"""
+    config = make_config(tmp_path, channels=channel_block, rules=rules)
+    store = seed(config)
+    report = deliver(config, store, lambda request: httpx.Response(500, json={}))
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+
+
+def test_graph_failure_status_is_retryable(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRAPH_SECRET", "graph-secret")
+    channels = """
+[watch.channels.c]
+type = "graph"
+tenant_id = "tenant"
+client_id = "client"
+client_secret_env = "GRAPH_SECRET"
+sender = "beacon@example.org"
+to = ["soc@example.org"]
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["c"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+
+    def handler(request):
+        if "login.microsoftonline.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "graph-token"})
+        return httpx.Response(500)
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+
+
+def test_no_secret_in_logs(tmp_path, monkeypatch, caplog):
+    import logging
+
+    canary = "CANARY-LOG-ONLY-8a1f"
+    monkeypatch.setenv("HOOK_SECRET", canary)
+    channels = """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.test/hook"
+header_name = "X-Auth"
+header_value_env = "HOOK_SECRET"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["hook"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    with caplog.at_level(logging.DEBUG):
+        deliver(config, store, lambda request: httpx.Response(500))
+    assert canary not in caplog.text
 
 
 def test_watch_status_shows_delivery_counts(tmp_path):
