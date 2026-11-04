@@ -38,9 +38,11 @@ one daily `CalendarTrigger` per time, runs at the least-privilege level, and
 starts only when the user is logged on. It is written as UTF-16 to a temporary
 file that is deleted after `schtasks` returns. Interval mode uses the plain
 `schtasks /SC` form and needs no XML: `/SC HOURLY /MO N` for intervals below 24
-hours, or `/SC DAILY` for 24 hours. With `--run-logged-out`, the XML command also
-passes `/RU <account> /NP`, so `schtasks` stores no password and does not prompt;
-stdin is closed so an unexpected prompt fails instead of hanging.
+hours, or `/SC DAILY` for 24 hours. With `--run-logged-out`, CVEBeacon writes a
+temporary PowerShell script and registers the task through the Task Scheduler COM
+API (`Schedule.Service`, `RegisterTask` with the S4U logon type and the explicit
+account); no password is requested or stored. Removal and status still use
+`schtasks`.
 
 Add `--run-logged-out` to run the task whether the account is signed in or not.
 It is Windows-only, and Linux rejects it. The task principal becomes `LogonType
