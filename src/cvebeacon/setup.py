@@ -97,23 +97,23 @@ class _AnswerHistory:
 
     def __init__(self) -> None:
         self._values: dict[tuple[str, int], str] = {}
-        self._counts: dict[str, int] = {}
+        self._positions: dict[str, int] = {}
 
     def reset(self) -> None:
         self._values = {}
-        self._counts = {}
+        self._positions = {}
 
     def new_pass(self) -> None:
-        self._counts = {}
+        self._positions = {}
 
     def previous(self, label: str, default: str) -> str:
-        index = self._counts.get(label, 0)
-        self._counts[label] = index + 1
+        index = self._positions.get(label, 0)
         return self._values.get((label, index), default)
 
     def remember(self, label: str, value: str) -> None:
-        index = self._counts.get(label, 1) - 1
+        index = self._positions.get(label, 0)
         self._values[(label, index)] = value
+        self._positions[label] = index + 1
 
 
 ANSWERS = _AnswerHistory()
@@ -180,11 +180,16 @@ def _ask_line(label: str, default: str | None) -> str:
         value = input(f"{label}{shown}: ").strip()
     except (EOFError, KeyboardInterrupt):
         raise SetupCancelled from None
-    ANSWERS.remember(label, value)
-    return value
+    return value or previous
 
 
-def _ask_text(label: str, default: str = "", *, required: bool = False) -> str:
+def _ask_text(
+    label: str,
+    default: str = "",
+    *,
+    required: bool = False,
+    validator=None,
+) -> str:
     while True:
         value = _ask_line(label, default)
         if not value:
@@ -192,16 +197,18 @@ def _ask_text(label: str, default: str = "", *, required: bool = False) -> str:
         if required and not value:
             print(f"{label} is required.")
             continue
+        if validator is not None:
+            try:
+                value = validator(value)
+            except (ValueError, CVEBeaconError) as exc:
+                print(_one_line(exc))
+                continue
+        ANSWERS.remember(label, value)
         return value
 
 
 def _ask_validated(label: str, default: str, validator) -> str:
-    while True:
-        value = _ask_text(label, default, required=True)
-        try:
-            return validator(value)
-        except (ValueError, CVEBeaconError) as exc:
-            print(_one_line(exc))
+    return _ask_text(label, default, required=True, validator=validator)
 
 
 def _ask_bool(label: str, default: bool) -> bool:
@@ -228,55 +235,77 @@ def _ask_bool(label: str, default: bool) -> bool:
 
 def _ask_choice(label: str, options: tuple[str, ...], default: str) -> str:
     shown = "/".join(options)
-    while True:
-        value = _ask_text(f"{label} ({shown})", default, required=True).casefold()
-        if value in options:
-            return value
-        print(f"Choose one of: {shown}.")
+
+    def validate(value: str) -> str:
+        folded = value.casefold()
+        if folded not in options:
+            raise ValueError(f"Choose one of: {shown}.")
+        return folded
+
+    return _ask_text(
+        f"{label} ({shown})", default, required=True, validator=validate
+    )
 
 
 def _ask_number(label: str, default: float, minimum: float, maximum: float) -> float:
-    while True:
-        value = _ask_text(label, f"{default:g}", required=True)
+    message = f"Enter a number from {minimum:g} to {maximum:g}."
+
+    def validate(value: str) -> str:
         try:
             number = float(value)
         except ValueError:
-            print(f"Enter a number from {minimum:g} to {maximum:g}.")
-            continue
+            raise ValueError(message) from None
         if not minimum <= number <= maximum:
-            print(f"Enter a number from {minimum:g} to {maximum:g}.")
-            continue
-        return number
+            raise ValueError(message)
+        return f"{number:g}"
+
+    return float(_ask_text(label, f"{default:g}", required=True, validator=validate))
 
 
-def _ask_optional_number(label: str, minimum: float, maximum: float) -> float | None:
-    while True:
-        value = _ask_text(label, "", required=False)
+def _ask_optional_number(
+    label: str, minimum: float, maximum: float, *, validator=None
+) -> float | None:
+    message = f"Enter a number from {minimum:g} to {maximum:g}, or leave it blank."
+
+    def validate(value: str) -> str:
         if not value:
-            return None
+            return ""
         try:
             number = float(value)
         except ValueError:
-            print(f"Enter a number from {minimum:g} to {maximum:g}, or leave it blank.")
-            continue
+            raise ValueError(message) from None
         if not minimum <= number <= maximum:
-            print(f"Enter a number from {minimum:g} to {maximum:g}, or leave it blank.")
-            continue
-        return number
+            raise ValueError(message)
+        if validator is not None:
+            validator(number)
+        return f"{number:g}"
+
+    value = _ask_text(label, "", required=False, validator=validate)
+    return float(value) if value else None
 
 
-def _ask_int(label: str, default: int, minimum: int, maximum: int) -> int:
-    while True:
-        value = _ask_text(label, str(default), required=True)
+def _ask_int(
+    label: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+    *,
+    validator=None,
+) -> int:
+    message = f"Enter a whole number from {minimum} to {maximum}."
+
+    def validate(value: str) -> str:
         try:
             number = int(value)
         except ValueError:
-            print(f"Enter a whole number from {minimum} to {maximum}.")
-            continue
+            raise ValueError(message) from None
         if not minimum <= number <= maximum:
-            print(f"Enter a whole number from {minimum} to {maximum}.")
-            continue
-        return number
+            raise ValueError(message)
+        if validator is not None:
+            validator(number)
+        return str(number)
+
+    return int(_ask_text(label, str(default), required=True, validator=validate))
 
 
 def _ask_list(
@@ -286,26 +315,24 @@ def _ask_list(
     validator=None,
     required: bool = True,
 ) -> list[str]:
-    while True:
-        value = _ask_text(label, default, required=required)
+    def validate(value: str) -> str:
         items = [item.strip() for item in value.split(",") if item.strip()]
         if required and not items:
-            print(f"{label} is required.")
-            continue
-        if not items:
-            return []
-        try:
+            raise ValueError(f"{label} is required.")
+        if validator is not None:
             for item in items:
-                if validator is not None:
-                    validator(item)
-        except ValueError as exc:
-            print(_one_line(exc))
-            continue
-        output: list[str] = []
-        for item in items:
-            if item not in output:
-                output.append(item)
-        return output
+                validator(item)
+        return value
+
+    value = _ask_text(
+        label, default, required=required, validator=validate
+    )
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    output: list[str] = []
+    for item in items:
+        if item not in output:
+            output.append(item)
+    return output
 
 
 def _validate_email(value: str) -> str:
@@ -504,17 +531,25 @@ def _ask_nvd_key(base: Path) -> NvdKey:
     return NvdKey()
 
 
-def _warn_rule_sources(index: int, sources: tuple[str, ...]) -> None:
+def _warn_rule_sources(
+    index: int, sources: tuple[str, ...], warned: set[str]
+) -> None:
     enabled = set(sources)
-    if index in {3, 4} and not ({"cisa_kev", "eu_kev"} & enabled):
+    if (
+        index in {3, 4}
+        and "kev" not in warned
+        and not ({"cisa_kev", "eu_kev"} & enabled)
+    ):
         print(
             "Warning: CISA KEV and EU KEV are disabled; KEV rules will not match."
         )
-    if index == 5 and "euvd" not in enabled:
+        warned.add("kev")
+    if index == 5 and "euvd" not in warned and "euvd" not in enabled:
         print(
             "Warning: EUVD is disabled; actively-exploited rules will rely on "
             "NVD SSVC only."
         )
+        warned.add("euvd")
 
 
 def _ask_rule_selection(sources: tuple[str, ...]) -> list[int]:
@@ -522,32 +557,51 @@ def _ask_rule_selection(sources: tuple[str, ...]) -> list[int]:
     print("Rules:")
     for index, (name, description) in enumerate(RULE_PRESETS, start=1):
         print(f"  {index}. {name}: {description}")
-    while True:
-        raw = _ask_text("Rule numbers (comma-separated)", "1", required=True)
+
+    def validate(value: str) -> str:
         try:
-            selected = sorted({int(part.strip()) for part in raw.split(",") if part.strip()})
+            selected = {
+                int(part.strip()) for part in value.split(",") if part.strip()
+            }
         except ValueError:
-            print("Choose numbers from 1 to 6.")
-            continue
-        if not selected or any(not 1 <= value <= len(RULE_PRESETS) for value in selected):
-            print("Choose numbers from 1 to 6.")
-            continue
-        if not epss_enabled and any(value in {2, 4} for value in selected):
-            print("Those rules use EPSS, which is disabled. Choose another rule or enable EPSS.")
-            continue
-        for index in selected:
-            _warn_rule_sources(index, sources)
-        return selected
+            raise ValueError("Choose numbers from 1 to 6.") from None
+        if not selected or any(
+            not 1 <= number <= len(RULE_PRESETS) for number in selected
+        ):
+            raise ValueError("Choose numbers from 1 to 6.")
+        if not epss_enabled and any(number in {2, 4} for number in selected):
+            raise ValueError(
+                "Those rules use EPSS, which is disabled. Choose another rule "
+                "or enable EPSS."
+            )
+        return value
+
+    raw = _ask_text(
+        "Rule numbers (comma-separated)", "1", required=True, validator=validate
+    )
+    selected = sorted(
+        {int(part.strip()) for part in raw.split(",") if part.strip()}
+    )
+    warned: set[str] = set()
+    for index in selected:
+        _warn_rule_sources(index, sources, warned)
+    return selected
 
 
 def _custom_condition(sources: tuple[str, ...]) -> dict[str, Any]:
     enabled = set(sources)
+
+    def validate_epss(number: float) -> None:
+        if "epss" not in enabled:
+            raise ValueError(
+                "EPSS is disabled; leave the EPSS minimum blank or enable EPSS."
+            )
+
     while True:
         cvss = _ask_optional_number("CVSS minimum (blank for none)", 0.0, 10.0)
-        epss = _ask_optional_number("EPSS minimum (blank for none)", 0.0, 1.0)
-        if epss is not None and "epss" not in enabled:
-            print("EPSS is disabled; leave the EPSS minimum blank or enable EPSS.")
-            continue
+        epss = _ask_optional_number(
+            "EPSS minimum (blank for none)", 0.0, 1.0, validator=validate_epss
+        )
         combination = "and"
         if cvss is not None and epss is not None:
             combination = _ask_choice("Combine CVSS and EPSS", ("and", "or"), "and")
@@ -634,13 +688,16 @@ def _ask_channel_type() -> str:
     print("Channel types:")
     for index, (name, description) in enumerate(CHANNEL_INFO, start=1):
         print(f"  {index}. {name}: {description}")
-    while True:
-        value = _ask_text("Channel type", "smtp", required=True).casefold()
-        if value.isdigit() and 1 <= int(value) <= len(CHANNEL_INFO):
-            return CHANNEL_INFO[int(value) - 1][0]
-        if value in CHANNEL_TYPES:
-            return value
-        print("Choose a channel type from the list.")
+
+    def validate(value: str) -> str:
+        folded = value.casefold()
+        if folded.isdigit() and 1 <= int(folded) <= len(CHANNEL_INFO):
+            return CHANNEL_INFO[int(folded) - 1][0]
+        if folded in CHANNEL_TYPES:
+            return folded
+        raise ValueError("Choose a channel type from the list.")
+
+    return _ask_text("Channel type", "smtp", required=True, validator=validate)
 
 
 def _ask_secret_value(label: str, validator=None) -> str:
@@ -689,7 +746,8 @@ def _ask_secret_choice(
     validator=None,
 ) -> SecretChoice | None:
     label = _secret_label(kind, field_name)
-    if not required and not _ask_bool(f"Use a {label}?", False):
+    article = "an" if label.casefold().startswith("ntfy") else "a"
+    if not required and not _ask_bool(f"Use {article} {label}?", False):
         return None
     method = _ask_choice(f"Store the {label} in", ("env", "file"), "env")
     if method == "env":
@@ -892,11 +950,15 @@ def _ask_ntfy(base: Path, name: str) -> ChannelDraft:
         "ntfy server", "https://ntfy.sh", _validate_https_url
     ).rstrip("/")
     suggested = "cvebeacon-" + secrets.token_urlsafe(9)
-    while True:
-        topic = _ask_text("ntfy topic", suggested, required=True)
-        if TOPIC_PATTERN.fullmatch(topic):
-            break
-        print("Use only letters, digits, underscores or hyphens for the topic.")
+
+    def validate(value: str) -> str:
+        if TOPIC_PATTERN.fullmatch(value) is None:
+            raise ValueError(
+                "Use only letters, digits, underscores or hyphens for the topic."
+            )
+        return value
+
+    topic = _ask_text("ntfy topic", suggested, required=True, validator=validate)
     draft = ChannelDraft(
         name, "ntfy", {"type": "ntfy", "server": server, "topic": topic}
     )
@@ -940,11 +1002,14 @@ def _ask_webhook(base: Path, name: str) -> ChannelDraft:
         "",
         _validate_https_url,
     )
-    while True:
-        header = _ask_text("Header name (blank for none)", "", required=False)
-        if not header or HEADER_PATTERN.fullmatch(header) is not None:
-            break
-        print("Enter a valid HTTP header name.")
+    def validate_header(value: str) -> str:
+        if value and HEADER_PATTERN.fullmatch(value) is None:
+            raise ValueError("Enter a valid HTTP header name.")
+        return value
+
+    header = _ask_text(
+        "Header name (blank for none)", "", required=False, validator=validate_header
+    )
     draft = ChannelDraft(name, "webhook", {"type": "webhook", "url": url})
     if header:
         draft.values["header_name"] = header
@@ -1002,27 +1067,30 @@ def _assign_channels(rules: list[RuleDraft], channels: list[ChannelDraft]) -> No
     names = [channel.name for channel in channels]
     default = names[0] if len(names) == 1 else "all"
     for index, rule in enumerate(rules):
-        while True:
-            value = _ask_text(
-                f'Channels for rule "{rule.name}" (comma-separated or all)',
-                default,
-                required=True,
-            )
+        def validate(value: str) -> str:
             if value.casefold() == "all":
-                selected = names
-            else:
-                selected = [item.strip() for item in value.split(",") if item.strip()]
-                missing = [item for item in selected if item not in names]
-                if missing:
-                    print("Unknown channel: " + ", ".join(missing))
-                    continue
-                if not selected:
-                    print("Choose at least one channel.")
-                    continue
-            rules[index] = RuleDraft(
-                rule.name, rule.condition, rule.old_cves, tuple(dict.fromkeys(selected))
-            )
-            break
+                return value
+            selected = [item.strip() for item in value.split(",") if item.strip()]
+            missing = [item for item in selected if item not in names]
+            if missing:
+                raise ValueError("Unknown channel: " + ", ".join(missing))
+            if not selected:
+                raise ValueError("Choose at least one channel.")
+            return value
+
+        value = _ask_text(
+            f'Channels for rule "{rule.name}" (comma-separated or all)',
+            default,
+            required=True,
+            validator=validate,
+        )
+        if value.casefold() == "all":
+            selected = names
+        else:
+            selected = [item.strip() for item in value.split(",") if item.strip()]
+        rules[index] = RuleDraft(
+            rule.name, rule.condition, rule.old_cves, tuple(dict.fromkeys(selected))
+        )
 
 
 def _toml_string(value: str) -> str:
@@ -1235,14 +1303,25 @@ def _write_config(path: Path, text: str) -> Path:
         raise
 
 
-def _backup(path: Path, now: datetime) -> Path:
+def _backup_path(path: Path, now: datetime) -> Path:
     stamp = now.strftime("%Y%m%dT%H%M%S")
     candidate = path.with_name(f"{path.name}.bak-{stamp}")
     counter = 1
     while candidate.exists():
         candidate = path.with_name(f"{path.name}.bak-{stamp}-{counter}")
         counter += 1
+    return candidate
+
+
+def _backup(path: Path, now: datetime) -> Path:
+    candidate = _backup_path(path, now)
     shutil.copy2(path, candidate)
+    return candidate
+
+
+def _backup_secret(path: Path, now: datetime) -> Path:
+    candidate = _backup_path(path, now)
+    _write_secret(candidate, path.read_bytes().decode("utf-8"))
     return candidate
 
 
@@ -1289,22 +1368,27 @@ def _offer_schedule(
 ) -> None:
     kind = _ask_choice("Schedule type", ("times", "interval"), "times")
     if kind == "times":
-        while True:
-            value = _ask_text("Times (comma-separated HH:MM)", "07:00,19:00", required=True)
-            try:
-                times = parse_times(value)
-                break
-            except SchedulingError as exc:
-                print(_one_line(exc))
+        def validate_times(value: str) -> str:
+            parse_times(value)
+            return value
+
+        value = _ask_text(
+            "Times (comma-separated HH:MM)",
+            "07:00,19:00",
+            required=True,
+            validator=validate_times,
+        )
+        times = parse_times(value)
         every: int | None = None
         later = ["--times", ",".join(times)]
     else:
-        while True:
-            every = _ask_int("Interval in hours", 4, 2, 24)
-            if platform.system().casefold() == "linux" and 24 % every:
-                print("Linux intervals must divide 24: choose 2, 3, 4, 6, 8, 12 or 24.")
-                continue
-            break
+        def validate_interval(value: int) -> None:
+            if platform.system().casefold() == "linux" and 24 % value:
+                raise ValueError(
+                    "Linux intervals must divide 24: choose 2, 3, 4, 6, 8, 12 or 24."
+                )
+
+        every = _ask_int("Interval in hours", 4, 2, 24, validator=validate_interval)
         times = ()
         later = ["--every", str(every)]
     command = _ask_schedule_command(inventory=inventory, watch=watch)
@@ -1454,7 +1538,7 @@ def run_setup(
         try:
             for secret_path, value in secrets_to_write:
                 if secret_path.exists():
-                    print(f"Backup: {_backup(secret_path, stamp)}")
+                    print(f"Backup: {_backup_secret(secret_path, stamp)}")
                 _write_secret(secret_path, value)
         except OSError as exc:
             temporary.unlink(missing_ok=True)
@@ -1485,7 +1569,7 @@ def run_setup(
                 inventory=inventory is not None,
                 watch=watch is not None,
             )
-        except SetupCancelled:
+        except (SetupCancelled, KeyboardInterrupt):
             print(f"Configuration saved: {path}")
         secret_files = bool(secrets_to_write)
         print("")

@@ -901,3 +901,198 @@ def test_cancel_after_the_write_saves_and_prints_next_steps(
     assert "Next steps:" in output
     assert "cancelled" not in output
     assert (tmp_path / "cvebeacon.toml").exists()
+
+
+def test_ask_text_remembers_the_effective_default(monkeypatch):
+    wizard.ANSWERS.reset()
+    try:
+        feed(monkeypatch, [""])
+        assert (
+            wizard._ask_text("From address", "alerts@example.org")
+            == "alerts@example.org"
+        )
+        wizard.ANSWERS.new_pass()
+        feed(monkeypatch, [""])
+        assert wizard._ask_line("From address", "") == "alerts@example.org"
+    finally:
+        wizard.ANSWERS.reset()
+
+
+def test_rejected_answer_is_not_replayed(monkeypatch):
+    wizard.ANSWERS.reset()
+    try:
+        feed(monkeypatch, ["BAD", "alerts@example.org"])
+        assert (
+            wizard._ask_validated(
+                "From address", "a@b.org", wizard._validate_email
+            )
+            == "alerts@example.org"
+        )
+        wizard.ANSWERS.new_pass()
+        feed(monkeypatch, [""])
+        assert (
+            wizard._ask_validated(
+                "From address", "a@b.org", wizard._validate_email
+            )
+            == "alerts@example.org"
+        )
+    finally:
+        wizard.ANSWERS.reset()
+
+
+def test_ntfy_topic_replay_does_not_generate_a_new_topic(tmp_path, monkeypatch):
+    wizard.ANSWERS.reset()
+    try:
+        feed(monkeypatch, ["", "my-topic", "n"])
+        first = wizard._ask_ntfy(tmp_path, "alerts")
+        assert first.values["topic"] == "my-topic"
+        wizard.ANSWERS.new_pass()
+        feed(monkeypatch, ["", "", ""])
+        second = wizard._ask_ntfy(tmp_path, "alerts")
+        assert second.values["topic"] == first.values["topic"]
+    finally:
+        wizard.ANSWERS.reset()
+
+
+def test_editing_answers_replays_accepted_values(tmp_path, monkeypatch):
+    first = tmp_path / "first"
+    first.mkdir()
+    write_inventory(first)
+    answers = [
+        "both",
+        "",
+        "csv",
+        "",
+        "",
+        "",
+        "",
+        "backfill",
+        "30",
+        "env",
+        "CVEBEACON_TEST_NVD_KEY",
+        "1",
+        "9.5",
+        "critical-plus",
+        "Acme, Beta",
+        "alert",
+        "ops",
+        "10",
+        "https://example.org/hooks/ops",
+        "",
+        "n",
+        "ops",
+        "n",
+        "interval",
+        "6",
+        "both",
+        "n",
+    ]
+    feed(monkeypatch, answers)
+    assert run_setup(first / "cvebeacon.toml", now=NOW) == 0
+    expected = (first / "cvebeacon.toml").read_text(encoding="utf-8")
+
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    write_inventory(replay)
+    real_write = wizard._write_config
+    calls = []
+
+    def flaky_write(path, text):
+        calls.append(path)
+        if len(calls) == 1:
+            raise ConfigurationError("simulated bad value")
+        return real_write(path, text)
+
+    monkeypatch.setattr("cvebeacon.setup._write_config", flaky_write)
+    # The first pass stops before the test-send and schedule prompts, so replay
+    # starts after the 22 answers that reach validation.
+    feed(monkeypatch, [*answers[:22], "y", *([""] * len(answers))])
+    assert run_setup(replay / "cvebeacon.toml", now=NOW) == 0
+    assert (replay / "cvebeacon.toml").read_text(encoding="utf-8") == expected
+
+
+def test_kev_warning_is_printed_once_for_several_rules(tmp_path, monkeypatch, capsys):
+    write_inventory(tmp_path)
+    start = ["", "", "n", "n", "", "", ""]
+    answers = [
+        *start,
+        "3,4",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        *WEBHOOK_CHANNEL,
+        "",
+        "",
+        "n",
+        *SCHEDULE_NO,
+    ]
+    assert run_watch(tmp_path, monkeypatch, answers=answers) == 0
+    output = capsys.readouterr().out
+    assert output.count("CISA KEV and EU KEV are disabled") == 1
+
+
+def test_ntfy_token_prompt_uses_an_article(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    prompts = []
+    values = iter(watch_answers(channel=["", "8", "", "", "n", "n"]))
+
+    def fake_input(message=""):
+        prompts.append(message)
+        return next(values)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
+    assert any("Use an ntfy access token?" in prompt for prompt in prompts)
+    assert not any("Use a ntfy" in prompt for prompt in prompts)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission check")
+def test_secret_backup_is_owner_only(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    secret = tmp_path / "secrets" / "alerts-password"
+    secret.parent.mkdir()
+    secret.write_text("old-secret", encoding="utf-8")
+    secret.chmod(0o644)
+    channel = [
+        "",
+        "1",
+        "custom",
+        "smtp.example.com",
+        "starttls",
+        "",
+        "alerts@example.com",
+        "security@example.com",
+        "user",
+        "file",
+        "n",
+    ]
+    assert run_watch(tmp_path, monkeypatch, channel=channel, secrets=["new-secret"]) == 0
+    backups = list(secret.parent.glob("alerts-password.bak-*"))
+    assert len(backups) == 1
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+    assert backups[0].read_text(encoding="utf-8") == "old-secret"
+
+
+def test_ctrl_c_during_the_test_send_saves_the_configuration(
+    tmp_path, monkeypatch, capsys
+):
+    write_inventory(tmp_path)
+    answers = watch_answers()[:-3]
+    answers[-1] = "y"
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("cvebeacon.setup.send_test", interrupt)
+    feed(monkeypatch, answers)
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
+    output = capsys.readouterr().out
+    assert "Configuration saved:" in output
+    assert "Next steps:" in output
+    assert "cancelled" not in output
+    assert (tmp_path / "cvebeacon.toml").exists()
