@@ -253,11 +253,13 @@ class HttpClient:
 
         Delivery code classifies transport failures itself: a connect failure
         is definitely unsent, while a read failure may follow an accepted
-        request. The response body is bounded and never included in an error.
+        request. The response body is bounded, is never included in an error,
+        and is read only until the per-send wall-clock deadline.
         """
         if body_limit < 0:
             raise ValueError("body limit must not be negative")
         self.requests += 1
+        started = self._monotonic()
         request = self._client.build_request(
             method,
             url,
@@ -274,6 +276,8 @@ class HttpClient:
             body = bytearray()
             try:
                 for chunk in response.iter_bytes():
+                    if timeout is not None and self._monotonic() - started > timeout:
+                        break
                     remaining = body_limit - len(body)
                     if remaining <= 0:
                         break

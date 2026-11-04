@@ -31,6 +31,7 @@ CHANNEL_TYPES = (
 )
 GROUPING_MODES = ("run", "event")
 CHANNEL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 TOPIC_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 CHAT_ID_PATTERN = re.compile(r"-?[1-9][0-9]{0,15}")
 CHAT_NAME_PATTERN = re.compile(r"@[A-Za-z][A-Za-z0-9_]{3,63}")
@@ -117,15 +118,27 @@ class SecretRef:
         value = self.peek()
         if value:
             return value
-        if self.env and self.file is not None:
+        named_env = (
+            self.env
+            if self.env is not None and ENV_NAME_PATTERN.fullmatch(self.env)
+            else None
+        )
+        if named_env is not None and self.file is not None:
             raise ConfigurationError(
-                f"{self.label} is not set (environment variable {self.env} "
+                f"{self.label} is not set (environment variable {named_env} "
                 f"and its file are empty or unreadable)"
             )
-        if self.env:
+        if named_env is not None:
             raise ConfigurationError(
-                f"{self.label} is not set (environment variable {self.env})"
+                f"{self.label} is not set (environment variable {named_env})"
             )
+        if self.env is not None and self.file is not None:
+            raise ConfigurationError(
+                f"{self.label} is not set (its environment variable and file "
+                "are empty or unreadable)"
+            )
+        if self.env is not None:
+            raise ConfigurationError(f"{self.label} is not set")
         raise ConfigurationError(f"{self.label} is empty or unreadable")
 
 
@@ -147,10 +160,6 @@ class ChannelConfig:
     def secret(self, key: str) -> SecretRef | None:
         value = self.options.get(key)
         return value if isinstance(value, SecretRef) else None
-
-    @property
-    def retry_limit(self) -> int:
-        return 10
 
 
 def _table(value: Any, label: str) -> dict[str, Any]:
@@ -293,6 +302,9 @@ def _secret(
     required: bool,
 ) -> SecretRef | None:
     env_name = _string(table, env_key, label, maximum=200)
+    if env_name is not None and ENV_NAME_PATTERN.fullmatch(env_name) is None:
+        # Never repeat the value: a pasted secret must not reach logs or errors.
+        _fail(f"{label} {env_key}", "must be an environment variable name")
     file_value = _string(table, file_key, label, maximum=4096)
     if env_name is None and file_value is None:
         if required:
@@ -647,3 +659,8 @@ def validate_rule_channels(rules: Iterable[Rule], channels: Iterable[ChannelConf
 
 def channel_map(channels: Iterable[ChannelConfig]) -> dict[str, ChannelConfig]:
     return {channel.name: channel for channel in channels}
+
+
+def validate_webhook_url(value: str, channel_type: str, label: str) -> None:
+    """Re-check a webhook URL after its secret was resolved at send time."""
+    _validate_webhook_host(value, channel_type, label)
