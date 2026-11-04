@@ -308,15 +308,18 @@ sudo systemctl list-timers cvebeacon-container.timer
 ## C. Windows (native)
 
 Windows 11 or Windows Server 2019 or newer, with Python 3.11 or newer from
-python.org or `winget install Python.Python.3.12` (check `py -3.12 --version`),
-Git for Windows, and outbound HTTPS to the [network requirements](NETWORK_REQUIREMENTS.md)
+python.org or `winget install Python.Python.3.12` on Windows 11 (Server:
+python.org), Git for Windows, and outbound HTTPS to the [network requirements](NETWORK_REQUIREMENTS.md)
 hosts. Use a dedicated local or domain account such as `svc-cvebeacon`; keep the
 checkout and virtual environment in `C:\CVEBeacon\app`, and configuration,
 state and secrets in `C:\CVEBeacon\data`.
 
 ### Prepare the account and directories
 
-In an elevated PowerShell, create the account if needed and both directories; replace `CVEHOST` with the computer or domain name:
+As an elevated administrator, create the account and directories, and grant the
+service account "Log on as a batch job" in `secpol.msc` (Local Policies, User
+Rights Assignment; a domain GPO can override it). Replace `CVEHOST` with the
+computer or domain name, and never add the service account to Administrators.
 
 ```powershell
 New-LocalUser svc-cvebeacon -Password (Read-Host -AsSecureString "Password") -PasswordNeverExpires
@@ -325,9 +328,10 @@ icacls C:\CVEBeacon\app /grant "CVEHOST\svc-cvebeacon:(OI)(CI)M"
 icacls C:\CVEBeacon\data /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F" "CVEHOST\svc-cvebeacon:(OI)(CI)F"
 ```
 
-`/inheritance:r` drops inherited permissions, and `(OI)(CI)` applies the grants
-to new files and subdirectories, including `data\secrets`. On non-English
-Windows, use the localized names or equivalent SIDs.
+`/inheritance:r` drops inherited permissions and `(OI)(CI)` applies the grants
+to new files and subdirectories, including `data\secrets`. Run it before the
+first secret is created; add `/T` on an existing directory. On non-English
+Windows, use localized names or equivalent SIDs.
 
 ### Install
 
@@ -343,16 +347,16 @@ C:\CVEBeacon\app\.venv\Scripts\cvebeacon.exe setup --config C:\CVEBeacon\data\cv
 
 The wizard writes `data\cvebeacon.toml` and secret files under `data\secrets`,
 and prints an NTFS reminder; the POSIX mode check does not apply. Leave the
-schedule question for later. Load the command as a function:
+schedule question for later. Load `cb` in this shell; a new shell needs it again:
 
 ```powershell
 function cb { & C:\CVEBeacon\app\.venv\Scripts\cvebeacon.exe --config C:\CVEBeacon\data\cvebeacon.toml @args }
 ```
 
-Secrets can instead be environment variables named by the configuration: run
-`[Environment]::SetEnvironmentVariable('NVD_API_KEY', '<value>', 'User')` as the
-service account, or use `setx`. A scheduled task reads that account's persisted
-environment when it starts.
+For scheduled runs, use secret files in the ACL-restricted `data\secrets`; the
+wizard writes them there. Use environment variables only for interactive runs
+(`[Environment]::SetEnvironmentVariable('NVD_API_KEY', '<value>', 'User')` as
+that account); a logged-out task's environment is not reliable for credentials.
 
 ### First day
 
@@ -362,31 +366,45 @@ counts and pending deliveries, and `cb watch notify test soc-email` checks a cha
 
 ### Schedule it
 
-From an elevated PowerShell running as the service account (or via `runas`):
+Pick one registration flow. Both must show
+`Runs as: CVEHOST\svc-cvebeacon (S4U, while logged off)` before `--yes`. S4U
+stores no password: HTTPS works, Windows-authenticated shares do not.
+
+**The service account registers its own task.** In the service account's shell
+(`runas /user:CVEHOST\svc-cvebeacon powershell`), define `cb` there, then:
 
 ```powershell
-cb schedule install --times 07:00,19:00 --command watch --run-logged-out --yes
+cb schedule install --times '07:00,19:00' --command watch --run-logged-out --yes
 cb schedule status
 ```
 
-`--run-logged-out` uses S4U: the task runs whether the account is signed in or
-not without a stored password, and keeps least privilege. HTTPS works;
-Windows-authenticated shares do not. Creation normally needs elevation; a denied
-`schtasks` prints a one-line hint. Check Task Scheduler, then run it now:
+**An administrator registers for the service account.** From an elevated
+administrator shell (define `cb` there too), name the account explicitly:
+
+```powershell
+cb schedule install --times '07:00,19:00' --command watch --run-logged-out --account CVEHOST\svc-cvebeacon --yes
+cb schedule status
+```
+
+The creator or an administrator can later change or remove the task; if an
+administrator created it, rerun `schedule remove` from that same context. Check
+Task Scheduler: General shows `CVEHOST\svc-cvebeacon` and "Run whether user is
+logged on or not"; Triggers shows 07:00 and 19:00. Then test it immediately:
 
 ```powershell
 schtasks /Run /TN "CVEBeacon Monitor"
 schtasks /Query /TN "CVEBeacon Monitor" /V /FO LIST
 ```
 
-Read `Last Result` with the [exit codes](DEVELOPMENT.md#exit-codes). A scheduled
-`watch run` needs an unattended first run: use `baseline` or `backfill`, or run
-`cb watch sync --yes` once first.
+Read `Last Result` with the [exit codes](DEVELOPMENT.md#exit-codes). If the task
+does not run, check "Log on as a batch job" in `secpol.msc` and any domain GPO.
+A scheduled `watch run` needs an unattended first run: use `baseline` or
+`backfill`, or run `cb watch sync --yes` once first.
 
 ### Upgrade
 
-As the service account, disable the task, wait for a running job, back up the
-watch database, upgrade, and re-enable:
+In the same account context that owns the task, disable it, wait for a running
+job, back up the watch database, upgrade, and re-enable:
 
 ```powershell
 schtasks /Change /TN "CVEBeacon Monitor" /DISABLE
@@ -401,19 +419,26 @@ schtasks /Change /TN "CVEBeacon Monitor" /ENABLE
 
 ### Docker Desktop or WSL 2 on Windows
 
-Docker Desktop with the WSL 2 backend runs the Linux image and Section B's
-compose file as-is: use `C:\CVEBeacon\docker` in place of `/srv/cvebeacon`,
-build `cvebeacon:local` from the checkout as in B, and let Task Scheduler call
-`docker compose -f C:\CVEBeacon\docker\compose.yml --profile watch run -T --rm
-watch` instead of cron or systemd. Docker Desktop has licensing terms for larger
-companies and is not supported on Windows Server; a server needs WSL 2 with
-nested virtualization or a Linux VM.
+Docker Desktop's Linux engine runs in the signed-in user's session, so a
+logged-out or S4U task cannot use it; schedule it with an interactive task that
+runs only while that user is signed in, and use native Windows or a Linux VM for
+unattended service. The WSL 2 backend runs Section B's compose file as-is: use
+`C:\CVEBeacon\docker` in place of `/srv/cvebeacon`, build `cvebeacon:local` from
+the checkout as in B, and call `docker compose -f
+C:\CVEBeacon\docker\compose.yml --profile watch run -T --rm watch` from Task
+Scheduler. Windows bind mounts do not preserve Unix `0600`, so use
+`cvebeacon.env` for secrets; file secrets need the WSL filesystem. Docker
+Desktop has a free tier for smaller companies (under 250 employees and $10M
+annual revenue) and is not supported on Windows Server.
 
-On WSL 2, follow Section A inside the distribution; scheduling inside WSL needs
-systemd in `/etc/wsl.conf`. A Windows task can instead call `wsl.exe -d <distro>
--u cvebeacon -- /opt/cvebeacon/.venv/bin/cvebeacon --config
-/var/lib/cvebeacon/cvebeacon.toml run`, and that account must be able to start
-the distribution. On Windows Server, native Windows is the simplest path.
+WSL 2 stops an idle distribution, and systemd in `/etc/wsl.conf` does not keep
+it alive. Follow Section A inside the distribution, then use a recurring
+Windows task calling `wsl.exe -d <distro> -u cvebeacon --
+/opt/cvebeacon/.venv/bin/cvebeacon --config
+/var/lib/cvebeacon/cvebeacon.toml run`; the task must run as the Windows account
+that owns the distribution, because `-u` selects only the Linux user. WSL 2 is
+supported on Server 2022/2025, not 2019, and needs nested virtualization when
+Windows is itself a VM. On Windows Server, native Windows is simplest.
 
 ## D. Resource notes
 
