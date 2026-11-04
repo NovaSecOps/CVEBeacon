@@ -36,8 +36,9 @@ On Windows, fixed times create one task, `CVEBeacon Monitor`, through
 `schtasks /Create /XML <file> /TN "CVEBeacon Monitor" /F`. The generated XML has
 one daily `CalendarTrigger` per time, runs at the least-privilege level, and
 starts only when the user is logged on. It is written as UTF-16 to a temporary
-file that is deleted after `schtasks` returns. Interval mode keeps the existing
-`schtasks /SC` behaviour.
+file that is deleted after `schtasks` returns. Interval mode uses the plain
+`schtasks /SC` form and needs no XML: `/SC HOURLY /MO N` for intervals below 24
+hours, or `/SC DAILY` for 24 hours.
 
 ## What runs
 
@@ -49,10 +50,17 @@ follows the configuration:
 - `both` when both are configured.
 
 `watch` runs `<executable> --config <path> watch run`. `scan` runs
-`<executable> --config <path> scan`. `both` runs scan and then watch run as two
-cron lines or two task actions, never through shell chaining. On Linux both
-lines stay in the same managed block. On Windows both actions live in the one
-`CVEBeacon Monitor` task.
+`<executable> --config <path> scan`. `both` runs the single command
+`<executable> --config <path> run`: `scan` when `[inventory]` is configured,
+then `watch run` when `[watch].enabled` is true, in that order in one process.
+It is one cron line or one Windows task action, never shell chaining.
+
+`run` reports the most severe result of its parts:
+
+- `2` when either part failed;
+- otherwise `3` when any notification or delivery failed;
+- otherwise `4` for coverage warnings or degraded sources;
+- otherwise `0`.
 
 Inspect or remove the owned schedule:
 
@@ -61,8 +69,13 @@ cvebeacon schedule status
 cvebeacon schedule remove
 ```
 
-`schedule status` shows the installed times or interval and the commands.
-Removal requires confirmation unless `--yes` is used. It never performs wildcard deletion. On Linux, only text between `# BEGIN CVEBEACON MANAGED` and `# END CVEBEACON MANAGED` is replaced or removed; unrelated crontab entries are preserved.
+`schedule status` shows the installed times or interval and the commands, each
+listed once. Removal requires confirmation unless `--yes` is used. It never
+performs wildcard deletion. On Linux, only text between
+`# BEGIN CVEBEACON MANAGED` and `# END CVEBEACON MANAGED` is replaced or
+removed; unrelated crontab entries are preserved byte for byte, including
+trailing whitespace and carriage returns inside an entry. A separating newline
+is added when the entry before the managed block has none.
 
 `--platform auto` is the default. An explicit `windows` or `linux` override is rejected for live changes on an incompatible host, but can be used with `--dry-run` to inspect the generated proposal.
 

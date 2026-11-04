@@ -93,7 +93,7 @@ The run queries each identical component identity/version target once, then asso
 
 The first scan may be slow without an NVD API key because the default respects NVD’s public-client pacing guidance. Set the configured API-key environment variable to use a key; never put the key in TOML.
 
-Exit codes are `0` for a successful operation, `2` for validation/operational failure, `3` for notification failure, and `4` for a scan with uncertain coverage or degraded sources. A completed scan can contain useful findings and still exit `4`; review its report and `source-status`. Notification failure takes precedence if both occur.
+Exit codes are `0` for a successful operation, `2` for validation/operational failure, `3` for notification failure, and `4` for a scan with uncertain coverage or degraded sources. A completed scan can contain useful findings and still exit `4`; review its report and `source-status`. Notification failure takes precedence if both occur. `cvebeacon run` uses the same codes across its parts: any part failing gives `2`, otherwise a notification or delivery failure gives `3`, otherwise coverage warnings or degraded sources give `4`.
 
 Package/PURL identities, category and system grouping work in all four input formats; `examples/general.toml` demonstrates a mixed inventory. No accounts or credentials are needed for core scans.
 

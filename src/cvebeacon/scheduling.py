@@ -43,13 +43,15 @@ class SchedulePlan:
             if self.module_mode
             else [str(self.executable)]
         )
-        tail = ["scan"] if action == "scan" else ["watch", "run"]
-        return [*prefix, "--config", str(self.config_path), *tail]
+        tails = {
+            "scan": ["scan"],
+            "watch": ["watch", "run"],
+            "both": ["run"],
+        }
+        return [*prefix, "--config", str(self.config_path), *tails[action]]
 
     @property
     def commands(self) -> tuple[list[str], ...]:
-        if self.schedule_command == "both":
-            return (self._command("scan"), self._command("watch"))
         return (self._command(self.schedule_command),)
 
     @property
@@ -135,7 +137,7 @@ def make_plan(
         if launcher.suffix.casefold() in {".exe", ""} and launcher.stem.casefold() == "cvebeacon":
             target, module_mode = launcher, False
         else:
-            target, module_mode = Path(sys.executable).resolve(), True
+            target, module_mode = Path(sys.executable), True
     config_target = Path(config_path).expanduser().resolve()
     if any(character in str(value) for value in (config_target, target) for character in "\r\n"):
         raise SchedulingError("schedule paths cannot contain line breaks")
@@ -202,32 +204,19 @@ def _add(parent: ET.Element, name: str, text: str | None = None) -> ET.Element:
 
 
 def _windows_xml(plan: SchedulePlan, *, now: datetime | None = None) -> bytes:
+    if not plan.times:
+        raise SchedulingError("the Windows task XML is used only for fixed times")
     stamp = (now or datetime.now()).strftime("%Y-%m-%d")
     root = ET.Element(_tag("Task"), {"version": "1.2"})
     registration = _add(root, "RegistrationInfo")
     _add(registration, "Description", "CVEBeacon scan and watch schedule")
     triggers = _add(root, "Triggers")
-    if plan.times:
-        for value in plan.times:
-            trigger = _add(triggers, "CalendarTrigger")
-            _add(trigger, "StartBoundary", f"{stamp}T{value}:00")
-            _add(trigger, "Enabled", "true")
-            daily = _add(trigger, "ScheduleByDay")
-            _add(daily, "DaysInterval", "1")
-    elif plan.every_hours == 24:
+    for value in plan.times:
         trigger = _add(triggers, "CalendarTrigger")
-        _add(trigger, "StartBoundary", f"{stamp}T00:00:00")
+        _add(trigger, "StartBoundary", f"{stamp}T{value}:00")
         _add(trigger, "Enabled", "true")
         daily = _add(trigger, "ScheduleByDay")
         _add(daily, "DaysInterval", "1")
-    else:
-        trigger = _add(triggers, "TimeTrigger")
-        _add(trigger, "StartBoundary", f"{stamp}T00:00:00")
-        _add(trigger, "Enabled", "true")
-        repetition = _add(trigger, "Repetition")
-        _add(repetition, "Interval", f"PT{plan.every_hours}H")
-        _add(repetition, "Duration", "P1D")
-        _add(repetition, "StopAtDurationEnd", "false")
     principals = _add(root, "Principals")
     principal = _add(principals, "Principal", None)
     principal.set("id", "Author")
@@ -277,7 +266,9 @@ def _describe_windows_xml(text: str) -> str | None:
     for action in root.iter(_tag("Exec")):
         command = action.findtext(_tag("Command")) or ""
         arguments = action.findtext(_tag("Arguments")) or ""
-        commands.append((command + " " + arguments).strip())
+        line = (command + " " + arguments).strip()
+        if line not in commands:
+            commands.append(line)
     if not commands:
         return None
     if times:
@@ -318,7 +309,8 @@ def _describe_cron_block(block: str) -> str | None:
                 return None
             for value in hours:
                 times.add(f"{value:02d}:{int(minute):02d}")
-        commands.append(command)
+        if command not in commands:
+            commands.append(command)
     if not commands:
         return None
     if interval is not None:
@@ -340,25 +332,31 @@ def _read_crontab(run=subprocess.run) -> str:
 
 
 def _without_managed_block(text: str) -> str:
-    lines = text.splitlines()
-    output, in_block, found = [], False, False
+    lines = text.split("\n")
+    output: list[str] = []
+    in_block, found = False, False
     for line in lines:
-        if line == CRON_BEGIN:
-            if in_block or found: raise SchedulingError("malformed duplicate managed cron marker")
+        marker = line[:-1] if line.endswith("\r") else line
+        if marker == CRON_BEGIN:
+            if in_block or found:
+                raise SchedulingError("malformed duplicate managed cron marker")
             in_block, found = True, True
             continue
-        if line == CRON_END:
-            if not in_block: raise SchedulingError("managed cron end marker has no beginning")
+        if marker == CRON_END:
+            if not in_block:
+                raise SchedulingError("managed cron end marker has no beginning")
             in_block = False
             continue
-        if not in_block: output.append(line)
-    if in_block: raise SchedulingError("managed cron block is missing its end marker")
-    return "\n".join(output).rstrip() + ("\n" if output else "")
+        if not in_block:
+            output.append(line)
+    if in_block:
+        raise SchedulingError("managed cron block is missing its end marker")
+    return "\n".join(output)
 
 
 def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
     if plan.system == "windows":
-        if plan.times or plan.schedule_command == "both":
+        if plan.times:
             descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
             try:
                 with os.fdopen(descriptor, "wb") as handle:
@@ -381,8 +379,9 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
     else:
         existing = _read_crontab(run)
         clean = _without_managed_block(existing)
+        separator = "\n" if clean and not clean.endswith("\n") else ""
         lines = "\n".join(_cron_lines(plan))
-        value = f"{clean}{CRON_BEGIN}\n{lines}\n{CRON_END}\n"
+        value = f"{clean}{separator}{CRON_BEGIN}\n{lines}\n{CRON_END}\n"
         result = run(["crontab", "-"], input=value, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise SchedulingError(f"schedule installation failed: {result.stderr.strip()}")

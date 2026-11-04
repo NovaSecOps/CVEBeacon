@@ -16,6 +16,7 @@ from cvebeacon.scheduling import (
     _cron_lines,
     _describe_windows_xml,
     _windows_xml,
+    _without_managed_block,
     default_command,
     describe,
     install,
@@ -45,16 +46,15 @@ def test_cron_groups_times_by_minute(tmp_path):
     assert lines == [f"0 7,19 * * * {prefix}", f"30 7 * * * {prefix}"]
 
 
-def test_cron_both_runs_scan_then_watch_in_one_block(tmp_path):
+def test_cron_both_runs_one_ordered_command(tmp_path):
     plan = linux_plan(tmp_path, times="07:00", command="both")
     lines = _cron_lines(plan)
-    assert len(lines) == 2
-    assert lines[0].endswith(" scan")
-    assert lines[1].endswith(" watch run")
+    assert len(lines) == 1
     assert lines[0].startswith("0 7 * * * ")
+    assert lines[0].endswith(" run")
 
 
-def test_interval_both_uses_two_cron_lines(tmp_path):
+def test_interval_both_uses_one_cron_line(tmp_path):
     plan = make_plan(
         tmp_path / "config.toml",
         every_hours=4,
@@ -64,10 +64,9 @@ def test_interval_both_uses_two_cron_lines(tmp_path):
         allow_incompatible=True,
     )
     lines = _cron_lines(plan)
-    assert len(lines) == 2
-    assert all(line.startswith("0 */4 * * * ") for line in lines)
-    assert lines[0].endswith(" scan")
-    assert lines[1].endswith(" watch run")
+    assert len(lines) == 1
+    assert lines[0].startswith("0 */4 * * * ")
+    assert lines[0].endswith(" run")
 
 
 def test_linux_install_keeps_unrelated_entries_and_one_owned_block(tmp_path):
@@ -90,8 +89,9 @@ def test_linux_install_keeps_unrelated_entries_and_one_owned_block(tmp_path):
     assert value.count(CRON_BEGIN) == 1
     assert value.count(CRON_END) == 1
     assert "0 7,19 * * * " in value
-    assert value.count(" watch run") == 1
-    assert value.count(" scan") == 1
+    assert value.count(" run") == 1
+    assert " scan" not in value
+    assert " watch run" not in value
 
 
 def test_cron_read_failure_never_writes_with_times(tmp_path):
@@ -169,13 +169,13 @@ def test_default_command_follows_config_shape(inventory, watch, expected):
     assert default_command(inventory=inventory, watch=watch) == expected
 
 
-def test_describe_shows_times_and_commands(tmp_path):
+def test_describe_shows_times_and_one_command(tmp_path):
     plan = linux_plan(tmp_path, command="both")
     text = describe(plan)
     assert "Schedule: daily at 07:00, 19:00" in text
     assert "Commands:" in text
-    assert text.count("--config") == 2
-    assert " scan" in text and " watch run" in text
+    assert text.count("--config") == 1
+    assert text.rstrip().endswith(" run")
 
 
 def test_status_shows_times_and_commands(tmp_path, monkeypatch):
@@ -195,7 +195,7 @@ def test_status_shows_times_and_commands(tmp_path, monkeypatch):
     assert "/opt/cvebeacon --config /srv/cvebeacon.toml scan" in text
 
 
-def test_windows_fixed_times_generate_one_task_with_two_actions(tmp_path, monkeypatch):
+def test_windows_fixed_times_generate_one_task_with_one_action(tmp_path, monkeypatch):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     executable = tmp_path / "cvebeacon.exe"
     plan = make_plan(
@@ -224,11 +224,11 @@ def test_windows_fixed_times_generate_one_task_with_two_actions(tmp_path, monkey
         assert len(triggers) == 2
         boundaries = {item.findtext(f"{NS}StartBoundary")[11:16] for item in triggers}
         assert boundaries == {"07:00", "19:00"}
+        assert root.find(f".//{NS}Repetition") is None
         actions = root.findall(f".//{NS}Exec")
-        assert len(actions) == 2
-        arguments = [item.findtext(f"{NS}Arguments") or "" for item in actions]
-        assert arguments[0].endswith(" scan")
-        assert arguments[1].endswith(" watch run")
+        assert len(actions) == 1
+        arguments = actions[0].findtext(f"{NS}Arguments") or ""
+        assert arguments.endswith(" run")
         principal = root.find(f".//{NS}Principal")
         assert principal.findtext(f"{NS}LogonType") == "InteractiveToken"
         assert principal.findtext(f"{NS}RunLevel") == "LeastPrivilege"
@@ -242,7 +242,7 @@ def test_windows_fixed_times_generate_one_task_with_two_actions(tmp_path, monkey
     assert not Path(xml_path).exists()
 
 
-def test_windows_interval_both_uses_xml_with_two_actions(tmp_path, monkeypatch):
+def test_windows_interval_both_uses_plain_schtasks(tmp_path, monkeypatch):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     plan = make_plan(
         tmp_path / "config.toml",
@@ -250,12 +250,24 @@ def test_windows_interval_both_uses_xml_with_two_actions(tmp_path, monkeypatch):
         command="both",
         executable=tmp_path / "cvebeacon.exe",
     )
-    xml = _windows_xml(plan)
-    root = ET.fromstring(xml.decode("utf-16"))
-    assert len(root.findall(f".//{NS}TimeTrigger")) == 1
-    repetition = root.find(f".//{NS}Repetition")
-    assert repetition.findtext(f"{NS}Interval") == "PT4H"
-    assert len(root.findall(f".//{NS}Exec")) == 2
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return Result()
+
+    install(plan, run=fake_run)
+    assert len(calls) == 1
+    args = calls[0]
+    assert "/XML" not in args
+    assert args[5:9] == ["/SC", "HOURLY", "/MO", "4"]
+    assert args[-1].endswith(" run")
+    assert args[-1].count("--config") == 1
 
 
 def write_schedule_config(tmp_path, *, inventory: bool = False, watch: bool = False):
@@ -330,7 +342,8 @@ def test_cli_schedule_both_config_defaults_to_both(tmp_path, monkeypatch):
         == 0
     )
     assert installed[0].schedule_command == "both"
-    assert len(installed[0].commands) == 2
+    assert len(installed[0].commands) == 1
+    assert installed[0].command[-1] == "run"
 
 
 def test_cli_schedule_rejects_times_with_interval(tmp_path, capsys):
@@ -375,15 +388,112 @@ def test_cli_schedule_rejects_watch_without_watch_mode(tmp_path, capsys):
     assert "watch mode is disabled" in capsys.readouterr().err
 
 
-def test_windows_interval_status_shows_the_repetition(tmp_path):
+@pytest.mark.parametrize(
+    "scan_code,watch_code,expected",
+    [(0, 0, 0), (4, 0, 4), (0, 3, 3), (2, 0, 2), (3, 2, 2), (3, 4, 3)],
+)
+def test_cli_run_combines_exit_codes(
+    tmp_path, monkeypatch, scan_code, watch_code, expected
+):
+    config = write_schedule_config(tmp_path, inventory=True, watch=True)
+    calls = []
+    monkeypatch.setattr(
+        cli, "_run_scan", lambda config: calls.append("scan") or scan_code
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_watch",
+        lambda args, config: calls.append("watch") or watch_code,
+    )
+    assert cli.main(["--config", str(config), "run"]) == expected
+    assert calls == ["scan", "watch"]
+
+
+def test_cli_run_skips_unconfigured_parts(tmp_path, monkeypatch):
+    config = write_schedule_config(tmp_path, watch=True)
+    calls = []
+    monkeypatch.setattr(
+        cli, "_run_scan", lambda config: calls.append("scan") or 0
+    )
+    monkeypatch.setattr(
+        cli, "_run_watch", lambda args, config: calls.append("watch") or 0
+    )
+    assert cli.main(["--config", str(config), "run"]) == 0
+    assert calls == ["watch"]
+
+
+def test_windows_fixed_time_status_shows_the_times(tmp_path):
     plan = make_plan(
         tmp_path / "config.toml",
-        4,
+        times="07:00,19:00",
         command="both",
         system="windows",
         executable=tmp_path / "cvebeacon.exe",
         allow_incompatible=True,
     )
     text = _describe_windows_xml(_windows_xml(plan).decode("utf-16"))
-    assert "Interval: every 4 hours" in text
-    assert text.count("--config") == 2
+    assert "Schedule: daily at 07:00, 19:00" in text
+    assert text.count("--config") == 1
+
+
+def test_cron_status_lists_each_command_once(tmp_path, monkeypatch):
+    scan = "/opt/cvebeacon --config /srv/cvebeacon.toml scan"
+    watch = "/opt/cvebeacon --config /srv/cvebeacon.toml watch run"
+    block = (
+        f"{CRON_BEGIN}\n"
+        f"0 7,19 * * * {scan}\n"
+        f"0 7,19 * * * {watch}\n"
+        f"30 7 * * * {scan}\n"
+        f"30 7 * * * {watch}\n"
+        f"{CRON_END}"
+    )
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=block + "\n", stderr="")
+
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
+    text = status(run=fake_run)
+    commands = [line.strip() for line in text.splitlines() if line.startswith("  /opt")]
+    assert commands == [scan, watch]
+
+
+def test_module_mode_keeps_the_virtualenv_interpreter(tmp_path, monkeypatch):
+    real = tmp_path / "python-real"
+    real.write_text("", encoding="utf-8")
+    venv_python = tmp_path / "venv-python"
+    venv_python.symlink_to(real)
+    monkeypatch.setattr("cvebeacon.scheduling.sys.executable", str(venv_python))
+    monkeypatch.setattr("cvebeacon.scheduling.sys.argv", ["/tmp/pytest"])
+    plan = make_plan(
+        tmp_path / "config.toml",
+        times="07:00",
+        system="linux",
+        allow_incompatible=True,
+    )
+    assert plan.module_mode is True
+    assert plan.executable == venv_python
+
+
+def test_without_managed_block_preserves_unrelated_bytes():
+    text = "0 5 * * * /bin/foo   \n15 2 * * * backup\r\nMAILTO=\"x\"\r\n"
+    assert _without_managed_block(text) == text
+    assert _without_managed_block("0 5 * * * /bin/foo   ") == "0 5 * * * /bin/foo   "
+    mixed = f"0 5 * * * /bin/foo   \n{CRON_BEGIN}\n0 7 * * * scan\n{CRON_END}\n15 2 * * * backup\r"
+    assert _without_managed_block(mixed) == "0 5 * * * /bin/foo   \n15 2 * * * backup\r"
+
+
+def test_install_keeps_an_entry_without_a_final_newline(tmp_path):
+    writes = []
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def fake_run(args, **kwargs):
+        if args == ["crontab", "-l"]:
+            return Result(stdout="15 2 * * * backup   ")
+        writes.append(kwargs["input"])
+        return Result()
+
+    install(linux_plan(tmp_path), run=fake_run)
+    assert writes[0].startswith("15 2 * * * backup   \n" + CRON_BEGIN)
