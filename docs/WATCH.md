@@ -345,8 +345,8 @@ digest counts every selected initial row, even beyond 1,000, without loading the
 backlog: counts come from SQL and only the top `max_items` rows are rendered. It
 lists those rows and reports the rest as "and N more" (distinct CVEs). A one-item
 digest uses "1 CVE across 1 rule". The list-all hint quotes a rule name that
-contains spaces. The SQL sample uses the same KEV, exploitation, CVSS and EPSS
-order as the messages; the selected rows are sorted exactly before rendering.
+contains spaces. The SQL sample orders KEV, active exploitation, CVSS and EPSS;
+the selected rows are sorted exactly before rendering.
 
 A generic webhook receives initial events as JSON documents of at most 1,000
 events each. Each document is one delivery attempt for exactly its rows.
