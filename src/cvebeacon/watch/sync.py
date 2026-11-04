@@ -479,8 +479,9 @@ def watch_status(watch: WatchConfig) -> str:
     ]
     for row in store.delivery_status(channel.name for channel in watch.channels):
         lines.append(
-            f"channel {row.channel}: pending {row.pending}, failed {row.failed}, "
-            f"ambiguous {row.ambiguous}, last success "
+            f"channel {row.channel}: pending {row.pending}, "
+            f"failed {row.failed} ({row.given_up} given up), "
+            f"ambiguous {row.ambiguous}, sending {row.sending}, last success "
             f"{row.last_success or 'never'}"
         )
     return "\n".join(lines)

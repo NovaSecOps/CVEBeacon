@@ -83,6 +83,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also resend deliveries whose outcome is unknown",
     )
+    watch_notify.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="also retry failed deliveries and reset their attempt count",
+    )
     notify_sub = watch_notify.add_subparsers(dest="notify_command")
     notify_test = notify_sub.add_parser("test", help="send one labelled test message")
     notify_test.add_argument("channel")
@@ -204,6 +209,7 @@ def _run_watch(args, config: AppConfig) -> int:
                 http,
                 channel_names=[args.channel] if args.channel else None,
                 retry_ambiguous=args.retry_ambiguous,
+                retry_failed=args.retry_failed,
             )
         _print_delivery(delivery, only_selected=bool(args.channel))
         return 3 if delivery.failed else 0
@@ -230,20 +236,32 @@ def _run_watch(args, config: AppConfig) -> int:
         _print_evaluation(result)
         return 0
     with HttpClient(config.http) as http:
-        report = sync_watch(config, http, assume_yes=args.yes)
-        if report.cancelled:
-            print("cancelled")
-            return 1
-        _print_sync_report(report)
         if args.watch_command == "sync":
+            report = sync_watch(config, http, assume_yes=args.yes)
+            if report.cancelled:
+                print("cancelled")
+                return 1
+            _print_sync_report(report)
             return 4 if report.failures else 0
-        result = store.evaluate_touched(
-            config.watch.rules,
-            catalogs=config.watch.sources,
-            initial=report.initial_evaluation,
-            complete=not report.failures,
-        )
-        _print_evaluation(result)
+        try:
+            report = sync_watch(config, http, assume_yes=args.yes)
+            if report.cancelled:
+                print("cancelled")
+                return 1
+            _print_sync_report(report)
+            result = store.evaluate_touched(
+                config.watch.rules,
+                catalogs=config.watch.sources,
+                initial=report.initial_evaluation,
+                complete=not report.failures,
+            )
+            _print_evaluation(result)
+        except SourceError as exc:
+            # A failed source must not hold back alerts that are already queued.
+            print(f"error: {exc}", file=sys.stderr)
+            delivery = deliver_pending(config, store, http)
+            _print_delivery(delivery)
+            return 3 if delivery.failed else 2
         delivery = deliver_pending(config, store, http)
     _print_delivery(delivery)
     if delivery.failed:
