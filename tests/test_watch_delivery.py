@@ -33,7 +33,12 @@ from cvebeacon.watch.delivery import (
     format_channel_line,
     send_test,
 )
-from cvebeacon.watch.messages import MESSAGE_TOO_LARGE, MessageTooLarge, OutgoingMessage
+from cvebeacon.watch.messages import (
+    CHANNEL_LIMITS,
+    MESSAGE_TOO_LARGE,
+    MessageTooLarge,
+    OutgoingMessage,
+)
 from cvebeacon.watch.records import CVSSEntry, KEVFields, WatchRecord
 from cvebeacon.watch.store import WatchStore
 
@@ -3016,3 +3021,32 @@ def test_oversized_initial_digest_is_a_controlled_failure(tmp_path, monkeypatch)
     assert summary.ambiguous == 0
     assert summary.error == MESSAGE_TOO_LARGE
     assert rows(store) == [("mail", "failed", 1, MESSAGE_TOO_LARGE)]
+
+
+def test_oversized_ambiguous_retry_keeps_prior_ambiguity(
+    tmp_path, monkeypatch
+):
+    config = make_config(
+        tmp_path,
+        channels=smtp_channel(1, extra='format = "html"'),
+        rules=smtp_rule(),
+    )
+    store = seed(config)
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_delivery SET status='ambiguous', attempts=1, "
+            "last_error='connection interrupted'"
+        )
+    monkeypatch.setitem(CHANNEL_LIMITS, "smtp", 100)
+    report = deliver(
+        config,
+        store,
+        lambda request: httpx.Response(500),
+        retry_ambiguous=True,
+    )
+    summary = report.channels[0]
+    assert summary.failed == 0
+    assert summary.ambiguous == 1
+    assert summary.ambiguous_total == 1
+    assert summary.error == MESSAGE_TOO_LARGE
+    assert rows(store) == [("mail", "ambiguous", 2, MESSAGE_TOO_LARGE)]

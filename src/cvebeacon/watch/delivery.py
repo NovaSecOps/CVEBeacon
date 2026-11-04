@@ -1059,18 +1059,30 @@ def deliver_pending(
                     )
                 except MessageTooLarge:
                     identifiers = tuple(event.event_id for event in batch)
+                    was_ambiguous = any(
+                        event.status == "ambiguous" for event in batch
+                    )
                     if identifiers and store.claim_delivery(
                         identifiers,
                         channel.name,
                         statuses=claim_statuses,
                     ):
-                        store.mark_delivery(
-                            identifiers,
-                            channel.name,
-                            "failed",
-                            error=MESSAGE_TOO_LARGE,
-                        )
-                        failed += len(identifiers)
+                        if was_ambiguous:
+                            store.mark_delivery(
+                                identifiers,
+                                channel.name,
+                                "ambiguous",
+                                error=MESSAGE_TOO_LARGE,
+                            )
+                            ambiguous += len(identifiers)
+                        else:
+                            store.mark_delivery(
+                                identifiers,
+                                channel.name,
+                                "failed",
+                                error=MESSAGE_TOO_LARGE,
+                            )
+                            failed += len(identifiers)
                     error = MESSAGE_TOO_LARGE
                     stop_channel = True
                     break
