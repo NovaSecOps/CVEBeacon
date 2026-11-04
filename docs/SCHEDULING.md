@@ -38,29 +38,25 @@ one daily `CalendarTrigger` per time, runs at the least-privilege level, and
 starts only when the user is logged on. It is written as UTF-16 to a temporary
 file that is deleted after `schtasks` returns. Interval mode uses the plain
 `schtasks /SC` form and needs no XML: `/SC HOURLY /MO N` for intervals below 24
-hours, or `/SC DAILY` for 24 hours. With `--run-logged-out`, CVEBeacon writes a
-temporary PowerShell script and tries the Task Scheduler COM API
-(`Schedule.Service`, `RegisterTask` with the S4U logon type) for the account,
-then with the principal from the XML, and finally passwordless
-`schtasks /Create /XML ... /RU <account> /NP`; the first accepted method is used.
-No password is requested or stored. Removal and status still use `schtasks`.
+hours, or `/SC DAILY` for 24 hours.
 
 Add `--run-logged-out` to run the task whether the account is signed in or not.
 It is Windows-only, and Linux rejects it. The task principal becomes `LogonType
-S4U` with an explicit `UserId`, and `RunLevel` stays least privilege. The
-account comes from the operating system, not from environment variables; use
-`--account DOMAIN\user` with `--run-logged-out` to name the service account when
-an administrator registers it. The plan prints `Runs as: <account> (S4U, while
-logged off)`; check that line before `--yes`. S4U stores no password, so
-outbound HTTPS works but Windows-authenticated network shares do not. The
-account must already exist and, unless policy grants it, needs the "Log on as a
-batch job" right (`secpol.msc`, Local Policies, User Rights Assignment; a domain
-GPO can override it). Registration from the account's own shell or by an
-administrator with `--account` is supported; an identifiable access-denied
-failure prints a one-line hint. With this flag, interval mode also uses the XML
-form. Without it the default stays `InteractiveToken` for desktops. `schedule
-status` shows the account when the task XML has a `UserId`, and whether the task
-runs while logged off.
+S4U` with an explicit `UserId` for the current OS account, and `RunLevel` stays
+least privilege. The task is registered with `schtasks /Create /XML ... /RU
+<current account> /NP /F`, so no password is requested or stored. The plan
+prints `Runs as: <account> (S4U, while logged off)`; check that line before
+`--yes`. S4U stores no password, so outbound HTTPS works but
+Windows-authenticated network shares do not. The account must already exist and,
+unless policy grants it, needs the "Log on as a batch job" right (`secpol.msc`,
+Local Policies, User Rights Assignment; a domain GPO can override it). Run the
+command from that account's own shell: Windows does not allow an administrator
+to register a passwordless S4U task for another account, so registering on a
+service account's behalf would require storing its password. An identifiable
+access-denied failure prints a one-line hint. With this flag, interval mode also
+uses the XML form. Without it the default stays `InteractiveToken` for desktops.
+`schedule status` shows the account when the task XML has a `UserId`, and whether
+the task runs while logged off.
 
 ## What runs
 
