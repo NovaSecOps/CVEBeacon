@@ -412,13 +412,22 @@ def sync_watch(
         stored_day = _stored_date(metadata.get("epss_file_day"), "EPSS file day")
         if stored_day is None or stored_day < today:
             counter = [0]
+            fallback = stored_day is None or stored_day < today - timedelta(days=1)
             try:
                 result = store.replace_epss(
-                    feeds.fetch_epss_daily(http, today=today, counter=counter),
+                    feeds.fetch_epss_daily(
+                        http,
+                        today=today,
+                        counter=counter,
+                        fallback=fallback,
+                    ),
                     thresholds=EPSS_BANDS,
                 )
             except SourceError as exc:
-                epss_error = str(exc)
+                if not fallback and exc.status_code in (403, 404):
+                    pass
+                else:
+                    epss_error = str(exc)
             else:
                 epss_records = result.rows
                 epss_changed = len(result.changed_ids)

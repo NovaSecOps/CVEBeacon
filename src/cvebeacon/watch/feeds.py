@@ -831,10 +831,11 @@ def fetch_epss_file(
 
 
 def fetch_epss_daily(
-    http: HttpClient, *, today: date, counter: list[int]
+    http: HttpClient, *, today: date, counter: list[int], fallback: bool = True
 ) -> Iterator[tuple[str, float, float, date]]:
     """Yield today's EPSS file, or yesterday's when today is not published."""
-    for day in (today, today - timedelta(days=1)):
+    days = (today, today - timedelta(days=1)) if fallback else (today,)
+    for day in days:
         try:
             yield from fetch_epss_file(http, day=day, counter=counter)
             return
@@ -843,5 +844,8 @@ def fetch_epss_daily(
                 continue
             raise
     raise SourceError(
-        "epss", "EPSS score file is not published yet", requests=counter[0]
+        "epss",
+        "EPSS score file is not published yet",
+        status_code=404,
+        requests=counter[0],
     )

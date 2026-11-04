@@ -1210,22 +1210,22 @@ def test_epss_403_falls_back_and_records_the_file_day(tmp_path):
     assert metadata(config)["epss_file_day"] == "2026-11-02"
     assert WatchStore(config.watch.database).view("CVE-2026-0001").epss == 0.2
 
-    # The file day is still yesterday, so the next run asks again.
+    # Yesterday's file is already loaded, so only today is probed again.
     second = run(config, handler, now=NOW + timedelta(hours=1))
     assert not second.failures
-    assert len(requested) == 4
+    assert len(requested) == 3
     assert metadata(config)["epss_file_day"] == "2026-11-02"
 
     published[0] = True
     third = run(config, handler, now=NOW + timedelta(hours=2))
     assert not third.failures
-    assert len(requested) == 5
+    assert len(requested) == 4
     assert metadata(config)["epss_file_day"] == "2026-11-03"
     assert WatchStore(config.watch.database).view("CVE-2026-0001").epss == 0.4
 
     fourth = run(config, handler, now=NOW + timedelta(hours=3))
     assert not fourth.failures
-    assert len(requested) == 5
+    assert len(requested) == 4
 
 
 def test_corrupt_epss_deflate_is_an_optional_cli_failure(tmp_path, monkeypatch, capsys):

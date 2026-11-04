@@ -138,7 +138,9 @@ While `epss_file_day` is earlier than today, the sync downloads
 without following redirects. It tries today and then yesterday; HTTP 403 and
 404 both mean the dated file is not published yet. `epss_file_day` records the
 day of the file that was loaded, so a later run asks again until today's file
-appears, and a clock that moves backwards never reloads an older file.
+appears. When yesterday's file is already loaded, only a small request for
+today is made until it is published. A clock that moves backwards never
+reloads an older file.
 
 The file is decompressed and parsed as a stream, never held whole in memory,
 and written in batches of 5,000 rows in one transaction. The compressed file
