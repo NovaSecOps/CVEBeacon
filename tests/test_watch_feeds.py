@@ -59,6 +59,24 @@ def test_recorded_nvd_sample_parses_ssvc_cvss_and_kev():
     }
 
 
+def test_recorded_euvd_sample_extracts_vendor_and_product_names():
+    payload = json.loads(
+        (FIXTURES / "euvd-vendors-page.json").read_text(encoding="utf-8")
+    )
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    feed = fetch_euvd(
+        mock_client(handler), start=date(2026, 11, 1), end=date(2026, 11, 2)
+    )
+    assert feed.updates[0].cve_ids == ("CVE-2021-44228",)
+    assert feed.updates[0].vendors == (
+        Product("Apache Software Foundation", ""),
+        Product("Apache Software Foundation", "Apache Log4j2"),
+    )
+
+
 def test_cvss_provider_mapping_covers_nvd_cna_cisa_adp_and_other():
     raw = nvd_cve(
         sourceIdentifier="security@example.com",

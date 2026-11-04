@@ -207,7 +207,8 @@ class WatchView:
     source_identifier: str | None = None
     cvss: tuple[CVSSEntry, ...] = ()
     cwes: tuple[str, ...] = ()
-    products: tuple[Product, ...] = ()
+    vendors: tuple[str, ...] = ()
+    products: tuple[str, ...] = ()
     references: tuple[Reference, ...] = ()
     ssvc_exploitation: str | None = None
     cisa_kev_added: str | None = None
@@ -241,6 +242,15 @@ class WatchView:
         return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _names(values: Iterable[str], limit: int = 50) -> tuple[str, ...]:
+    unique: dict[str, str] = {}
+    for value in values:
+        text = str(value).strip()
+        if text and text.casefold() not in unique:
+            unique[text.casefold()] = text
+    return tuple(unique[key] for key in sorted(unique)[:limit])
+
+
 def build_view(
     record: WatchRecord,
     *,
@@ -254,7 +264,8 @@ def build_view(
     """Combine the raw source rows into one CVE view.
 
     The CISA catalog owns KEV fields whenever it is configured; otherwise the
-    NVD record supplies its own CISA fields.
+    NVD record supplies its own CISA fields. Vendor and product names come from
+    NVD CPE products and the selected EUVD item.
     """
     cvss = record.cvss
     if euvd is not None and euvd.cvss is not None:
@@ -269,6 +280,11 @@ def build_view(
             record.cisa_ransomware,
         )
     eu = eu_kev if eu_catalog else None
+    vendors = [item.vendor for item in record.products if item.vendor]
+    products = [item.product for item in record.products if item.product]
+    if euvd is not None:
+        vendors.extend(item.vendor for item in euvd.vendors if item.vendor)
+        products.extend(item.product for item in euvd.vendors if item.product)
     return WatchView(
         cve_id=record.cve_id,
         status=record.status,
@@ -278,7 +294,8 @@ def build_view(
         source_identifier=record.source_identifier,
         cvss=cvss,
         cwes=record.cwes,
-        products=record.products,
+        vendors=_names(vendors),
+        products=_names(products),
         references=record.references,
         ssvc_exploitation=record.ssvc_exploitation,
         cisa_kev_added=cisa.added,

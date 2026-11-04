@@ -546,6 +546,43 @@ def _euvd_cvss(item: dict[str, Any]) -> tuple[CVSSEntry | None, bool]:
     return CVSSEntry("euvd", "euvd", version, score, _text(item.get("baseScoreVector"))), False
 
 
+def _euvd_name(value: Any) -> str | None:
+    if isinstance(value, str):
+        return _text(value)
+    if isinstance(value, dict):
+        return _text(value.get("name")) or _text(value.get("vendor"))
+    return None
+
+
+def _euvd_vendors(item: dict[str, Any]) -> tuple[Product, ...]:
+    """Collect vendor and product names from the EUVD identifier fields."""
+    pairs: dict[tuple[str, str], Product] = {}
+    vendors = item.get("enisaIdVendor") or []
+    if isinstance(vendors, list):
+        for entry in vendors:
+            if not isinstance(entry, dict):
+                continue
+            name = _euvd_name(entry.get("vendor")) or _euvd_name(entry.get("name"))
+            if name:
+                pairs.setdefault((name.casefold(), ""), Product(name, ""))
+    products = item.get("enisaIdProduct") or []
+    if isinstance(products, list):
+        for entry in products:
+            if not isinstance(entry, dict):
+                continue
+            product = entry.get("product")
+            name = _euvd_name(product) or _euvd_name(entry.get("name"))
+            vendor = _euvd_name(product.get("vendor")) if isinstance(product, dict) else None
+            vendor = vendor or _euvd_name(entry.get("vendor"))
+            if not name and not vendor:
+                continue
+            pairs.setdefault(
+                ((vendor or "").casefold(), (name or "").casefold()),
+                Product(vendor or "", name or ""),
+            )
+    return tuple(pairs[key] for key in sorted(pairs)[:50])
+
+
 @source_payload("euvd")
 def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
     """Fetch one bounded EUVD chunk with a pinned result total.
@@ -621,6 +658,7 @@ def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
                         _text(item.get("exploitedSince")),
                         cvss,
                         _euvd_datetime(item.get("dateUpdated")),
+                        _euvd_vendors(item),
                     )
                 )
             if unstable:
