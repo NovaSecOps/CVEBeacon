@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import subprocess
 
 import pytest
 from openpyxl import load_workbook
@@ -91,7 +92,10 @@ def test_windows_schedule_commands_use_exact_owned_name(tmp_path, monkeypatch):
     calls = []
     class Result:
         returncode = 0; stdout = "TaskName: CVEBeacon Monitor"; stderr = ""
-    def fake_run(args, **kwargs): calls.append(args); return Result()
+    def fake_run(args, **kwargs):
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        calls.append(args)
+        return Result()
     plan = make_plan(tmp_path / "config.toml", 4, executable="C:/Tools/cvebeacon.exe")
     install(plan, run=fake_run)
     assert calls[0][calls[0].index("/TN") + 1] == "CVEBeacon Monitor"

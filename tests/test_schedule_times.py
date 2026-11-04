@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
@@ -218,9 +219,11 @@ def test_windows_fixed_times_generate_one_task_with_one_action(tmp_path, monkeyp
     def fake_run(args, **kwargs):
         nonlocal xml_path
         calls.append(args)
+        assert kwargs["stdin"] is subprocess.DEVNULL
         assert args[:3] == ["schtasks", "/Create", "/XML"]
         assert args[4:6] == ["/TN", WINDOWS_TASK]
         assert args[6] == "/F"
+        assert "/RU" not in args and "/NP" not in args
         xml_path = args[3]
         root = ET.parse(xml_path).getroot()
         triggers = root.findall(f".//{NS}CalendarTrigger")
@@ -361,6 +364,31 @@ def test_windows_plan_shows_an_account_note(tmp_path, monkeypatch):
     assert "Account note: verify the Entra ID account" in text
 
 
+def test_windows_logged_out_fixed_times_never_asks_for_a_password(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True, account=r"CORP\svc-cvebeacon")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return Result()
+
+    install(plan, run=fake_run)
+    args, kwargs = calls[0]
+    assert "/RU" in args
+    assert args[args.index("/RU") + 1] == r"CORP\svc-cvebeacon"
+    assert "/NP" in args
+    assert "/RP" not in args
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
 def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     plan = make_plan(
@@ -382,10 +410,14 @@ def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
     def fake_run(args, **kwargs):
         calls.append(args)
         roots.append(ET.parse(args[3]).getroot())
+        assert kwargs["stdin"] is subprocess.DEVNULL
         return Result()
 
     install(plan, run=fake_run)
     assert calls[0][:3] == ["schtasks", "/Create", "/XML"]
+    assert calls[0][calls[0].index("/RU") + 1] == r"CORP\svc-cvebeacon"
+    assert "/NP" in calls[0]
+    assert calls[0][-1] == "/F"
     root = roots[0]
     repetition = root.find(f".//{NS}TimeTrigger/{NS}Repetition")
     assert repetition is not None
