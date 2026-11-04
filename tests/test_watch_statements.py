@@ -818,7 +818,10 @@ def test_template_reader_rejects_special_files(tmp_path):
     with pytest.raises(CVEBeaconError, match="regular file"):
         statements._read_template(zero)
     fifo = tmp_path / "fifo.md"
-    os.mkfifo(fifo)
+    try:
+        os.mkfifo(fifo)
+    except OSError:
+        pytest.skip("named pipes are not available")
     with pytest.raises(CVEBeaconError, match="regular file"):
         statements._read_template(fifo)
 
