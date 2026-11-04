@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import io
+import os
 import re
+import struct
+import time
 import zipfile
+import zlib
 from datetime import date
 from pathlib import Path
 from xml.etree import ElementTree
@@ -20,6 +24,7 @@ from cvebeacon.watch.records import (
     Product,
     Reference,
     WatchRecord,
+    WatchView,
 )
 from cvebeacon.watch.statements import (
     FIELD_NAMES,
@@ -140,6 +145,43 @@ def all_fields() -> dict[str, str]:
     return values
 
 
+def docx_zip(
+    document: str,
+    *,
+    header: str | None = None,
+    footer: str | None = None,
+    styles: bytes = STYLES,
+    core: bytes = b"<core/>",
+    content_types_last: bool = False,
+    compression: int = zipfile.ZIP_STORED,
+    extra: dict[str, bytes] | None = None,
+) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=compression) as archive:
+        members = [
+            ("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>'),
+            ("word/document.xml", document),
+        ]
+        if header is not None:
+            members.append(("word/header1.xml", header))
+        if footer is not None:
+            members.append(("word/footer1.xml", footer))
+        members.extend(
+            [
+                ("word/styles.xml", styles),
+                ("docProps/core.xml", core),
+            ]
+        )
+        members.extend((extra or {}).items())
+        if content_types_last:
+            members.append(("[Content_Types].xml", CONTENT_TYPES))
+        else:
+            members.insert(0, ("[Content_Types].xml", CONTENT_TYPES))
+        for name, value in members:
+            archive.writestr(name, value)
+    return output.getvalue()
+
+
 def docx_bytes(
     document: str,
     *,
@@ -147,26 +189,22 @@ def docx_bytes(
     footer: str | None = None,
     styles: bytes = STYLES,
     core: bytes = b"<core/>",
+    content_types_last: bool = False,
+    compression: int = zipfile.ZIP_STORED,
 ) -> bytes:
     body = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         f'<w:document xmlns:w="{W}"><w:body>{document}</w:body></w:document>'
     )
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w") as archive:
-        archive.writestr("[Content_Types].xml", CONTENT_TYPES)
-        archive.writestr(
-            "_rels/.rels",
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
-        )
-        archive.writestr("word/document.xml", body)
-        if header is not None:
-            archive.writestr("word/header1.xml", header)
-        if footer is not None:
-            archive.writestr("word/footer1.xml", footer)
-        archive.writestr("word/styles.xml", styles)
-        archive.writestr("docProps/core.xml", core)
-    return output.getvalue()
+    return docx_zip(
+        body,
+        header=header,
+        footer=footer,
+        styles=styles,
+        core=core,
+        content_types_last=content_types_last,
+        compression=compression,
+    )
 
 
 def paragraph_texts(xml: bytes) -> list[str]:
@@ -180,6 +218,77 @@ def paragraph_texts(xml: bytes) -> list[str]:
 def part(zip_data: bytes, name: str) -> bytes:
     with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
         return archive.read(name)
+
+
+def local_data_offset(zip_data: bytes, name: str) -> int:
+    position = 0
+    while True:
+        position = zip_data.find(b"PK\x03\x04", position)
+        assert position >= 0
+        name_length, extra_length = struct.unpack_from("<HH", zip_data, position + 26)
+        filename = zip_data[position + 30 : position + 30 + name_length]
+        if filename == name.encode():
+            return position + 30 + name_length + extra_length
+        position += 4
+
+
+def corrupt_deflate(zip_data: bytes, name: str) -> bytes:
+    data = bytearray(zip_data)
+    data[local_data_offset(data, name)] = 0x07
+    return bytes(data)
+
+
+def patch_central_size(zip_data: bytes, name: str, size: int) -> bytes:
+    data = bytearray(zip_data)
+    position = 0
+    while True:
+        position = data.find(b"PK\x01\x02", position)
+        assert position >= 0
+        name_length = struct.unpack_from("<H", data, position + 28)[0]
+        filename = data[position + 46 : position + 46 + name_length]
+        if filename == name.encode():
+            struct.pack_into("<I", data, position + 24, size)
+            struct.pack_into("<I", data, position + 16, zlib.crc32(b"\0" * size))
+            return bytes(data)
+        position += 4
+
+
+def member_data_offset(zip_data: bytes, name: str) -> int:
+    position = 0
+    while True:
+        position = zip_data.find(b"PK\x03\x04", position)
+        if position < 0:
+            raise AssertionError(f"local header not found for {name}")
+        name_length = struct.unpack_from("<H", zip_data, position + 26)[0]
+        extra_length = struct.unpack_from("<H", zip_data, position + 28)[0]
+        filename = zip_data[position + 30 : position + 30 + name_length]
+        if filename == name.encode():
+            return position + 30 + name_length + extra_length
+        position += 4
+
+
+def corrupt_deflate(zip_data: bytes, name: str) -> bytes:
+    data = bytearray(zip_data)
+    data[member_data_offset(bytes(data), name)] = 0x07
+    return bytes(data)
+
+
+def lie_about_member_size(zip_data: bytes, name: str) -> bytes:
+    data = bytearray(zip_data)
+    position = data.find(b"PK\x01\x02")
+    while position >= 0:
+        name_length = struct.unpack_from("<H", data, position + 28)[0]
+        extra_length = struct.unpack_from("<H", data, position + 30)[0]
+        comment_length = struct.unpack_from("<H", data, position + 32)[0]
+        filename = data[position + 46 : position + 46 + name_length]
+        if filename == name.encode():
+            struct.pack_into("<I", data, position + 16, zlib.crc32(b"\0"))
+            struct.pack_into("<I", data, position + 24, 1)
+            return bytes(data)
+        position = data.find(
+            b"PK\x01\x02", position + 46 + name_length + extra_length + comment_length
+        )
+    raise AssertionError(f"central directory entry not found for {name}")
 
 
 def test_fields_cover_the_documented_names(tmp_path):
@@ -282,8 +391,11 @@ def test_unknown_placeholders_are_listed(tmp_path):
 
 
 def test_malformed_placeholder_is_rejected():
-    with pytest.raises(CVEBeaconError, match="invalid statement placeholder"):
+    with pytest.raises(CVEBeaconError) as caught:
         render_text("bad $ placeholder", all_fields())
+    message = str(caught.value)
+    assert "invalid statement placeholder" in message
+    assert "write '$$'" in message
 
 
 def test_default_markdown_statement_renders_from_the_cli(tmp_path, capsys):
@@ -479,8 +591,15 @@ def test_docx_escapes_xml_special_characters():
 
 
 def test_docx_keeps_other_members_and_content_types_first():
+    untouched = (
+        '<w:p w:rsidR="00A1"><w:pPr><w:jc w:val="center"/></w:pPr>'
+        '<w:r><w:t xml:space="preserve">A &#38; B</w:t></w:r></w:p>'
+    )
     result = render_docx(
-        docx_bytes("<w:p><w:r><w:t>${cve_id}</w:t></w:r></w:p>"),
+        docx_bytes(
+            "<w:p><w:r><w:t>${cve_id}</w:t></w:r></w:p>" + untouched,
+            content_types_last=True,
+        ),
         all_fields(),
     )
     with zipfile.ZipFile(io.BytesIO(result)) as archive:
@@ -488,6 +607,7 @@ def test_docx_keeps_other_members_and_content_types_first():
         assert names[0] == "[Content_Types].xml"
         assert archive.read("word/styles.xml") == STYLES
         assert archive.read("docProps/core.xml") == b"<core/>"
+        assert untouched.encode("utf-8") in archive.read("word/document.xml")
         for name in names:
             if name.endswith(".xml") or name.endswith(".rels"):
                 ElementTree.fromstring(archive.read(name))
@@ -555,3 +675,276 @@ def test_docx_cli_writes_a_docx(tmp_path):
     assert paragraph_texts(part(out.read_bytes(), "word/document.xml")) == [
         "CVE-2026-0001"
     ]
+
+
+def test_docx_ignores_paragraph_tokens_inside_comments():
+    document = "<!--" + "<w:p>" * 20_000 + "-->"
+    header = (
+        f'<w:hdr xmlns:w="{W}"><w:p><w:r>'
+        "<w:t>${cve_id}</w:t></w:r></w:p></w:hdr>"
+    )
+    started = time.monotonic()
+    result = render_docx(docx_bytes(document, header=header), all_fields())
+    assert time.monotonic() - started < 5
+    assert paragraph_texts(part(result, "word/header1.xml")) == [
+        "CVE-2026-0001"
+    ]
+
+
+def test_docx_rejects_malformed_input():
+    with pytest.raises(CVEBeaconError, match="malformed"):
+        render_docx(
+            docx_bytes("<w:p><w:r><w:t>${cve_id}</w:t>"), all_fields()
+        )
+    with pytest.raises(CVEBeaconError, match="unclosed comment"):
+        render_docx(docx_bytes("<!-- ${cve_id}"), all_fields())
+
+
+def test_docx_rejects_doctype_and_entities_in_every_xml_member():
+    document = (
+        '<?xml version="1.0"?>'
+        f'<!DOCTYPE w:document [<!ENTITY a "b">]>'
+        f'<w:document xmlns:w="{W}"><w:body><w:p>'
+        "<w:instrText>&a;</w:instrText>"
+        "</w:p></w:body></w:document>"
+    )
+    with pytest.raises(CVEBeaconError, match="DTD or XML entities"):
+        render_docx(docx_zip(document), all_fields())
+    styles = b'<!DOCTYPE x [<!ENTITY a "b">]><x>&a;</x>'
+    with pytest.raises(CVEBeaconError, match="word/styles.xml"):
+        render_docx(
+            docx_bytes(
+                "<w:p><w:r><w:t>${cve_id}</w:t></w:r></w:p>",
+                styles=styles,
+            ),
+            all_fields(),
+        )
+
+
+def test_docx_rejects_a_lying_member_size():
+    template = docx_bytes(
+        "<w:p><w:r><w:t>${cve_id}</w:t></w:r></w:p>",
+        styles=b"\0" * 2_000_000,
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    with pytest.raises(CVEBeaconError, match="invalid member size"):
+        render_docx(
+            lie_about_member_size(template, "word/styles.xml"), all_fields()
+        )
+
+
+def test_docx_rejects_corrupt_deflate_in_processed_and_untouched_members():
+    template = docx_zip(
+        f'<w:document xmlns:w="{W}"><w:body><w:p><w:r>'
+        "<w:t>${cve_id}</w:t></w:r></w:p></w:body></w:document>",
+        compression=zipfile.ZIP_DEFLATED,
+        extra={"word/media/image1.png": b"\0" * 4096},
+    )
+    for member in (
+        "word/document.xml",
+        "word/styles.xml",
+        "word/media/image1.png",
+    ):
+        with pytest.raises(CVEBeaconError, match="unreadable member"):
+            render_docx(corrupt_deflate(template, member), all_fields())
+
+
+def test_docx_corrupt_deflate_exits_two_from_the_cli(tmp_path, capsys):
+    config = write_config(tmp_path, sources=("nvd",))
+    populate(WatchStore(config.watch.database, clock=lambda: NOW))
+    template = tmp_path / "template.docx"
+    template.write_bytes(
+        corrupt_deflate(
+            docx_bytes(
+                "<w:p><w:r><w:t>${cve_id}</w:t></w:r></w:p>",
+                compression=zipfile.ZIP_DEFLATED,
+            ),
+            "word/document.xml",
+        )
+    )
+    out = tmp_path / "statement.docx"
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config.config_path),
+                "watch",
+                "statement",
+                "CVE-2026-0001",
+                "--template",
+                str(template),
+                "--out",
+                str(out),
+            ]
+        )
+        == 2
+    )
+    assert "unreadable member" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_atomic_write_refuses_a_racing_creation(tmp_path, monkeypatch):
+    out = tmp_path / "statement.md"
+    real_link = os.link
+
+    def racing_link(src, dst):
+        Path(dst).write_text("raced", encoding="utf-8")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", racing_link)
+    with pytest.raises(CVEBeaconError, match="refusing to overwrite"):
+        statements._atomic_write(out, b"new", force=False)
+    assert out.read_text(encoding="utf-8") == "raced"
+    assert not list(tmp_path.glob(".statement.md.*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink behavior")
+def test_atomic_write_does_not_replace_a_dangling_symlink(tmp_path):
+    out = tmp_path / "statement.md"
+    out.symlink_to(tmp_path / "missing.md")
+    with pytest.raises(CVEBeaconError, match="refusing to overwrite"):
+        statements._atomic_write(out, b"new", force=False)
+    assert out.is_symlink()
+    assert not (tmp_path / "missing.md").exists()
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/dev/zero").exists(),
+    reason="special files",
+)
+def test_template_reader_rejects_special_files(tmp_path):
+    zero = tmp_path / "zero.md"
+    zero.symlink_to("/dev/zero")
+    with pytest.raises(CVEBeaconError, match="regular file"):
+        statements._read_template(zero)
+    fifo = tmp_path / "fifo.md"
+    os.mkfifo(fifo)
+    with pytest.raises(CVEBeaconError, match="regular file"):
+        statements._read_template(fifo)
+
+
+def test_rendered_output_is_bounded(monkeypatch):
+    monkeypatch.setattr(statements, "MAX_RENDERED_BYTES", 100)
+    fields = all_fields()
+    fields["description"] = "x" * 100
+    with pytest.raises(CVEBeaconError, match="rendered statement is larger"):
+        render_text("${description}${description}", fields)
+    with pytest.raises(CVEBeaconError, match="rendered statement is larger"):
+        render_docx(
+            docx_bytes(
+                "<w:p><w:r><w:t>${description}${description}</w:t></w:r></w:p>"
+            ),
+            fields,
+        )
+
+
+def test_rendered_output_error_exits_two_from_the_cli(tmp_path, monkeypatch):
+    config = write_config(tmp_path, sources=("nvd",))
+    populate(WatchStore(config.watch.database, clock=lambda: NOW))
+    template = tmp_path / "template.md"
+    template.write_text("${description}${description}", encoding="utf-8")
+    monkeypatch.setattr(statements, "MAX_RENDERED_BYTES", 100)
+    out = tmp_path / "statement.md"
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config.config_path),
+                "watch",
+                "statement",
+                "CVE-2026-0001",
+                "--template",
+                str(template),
+                "--out",
+                str(out),
+            ]
+        )
+        == 2
+    )
+    assert not out.exists()
+
+
+def test_docx_replaces_nested_paragraph_placeholders():
+    document = (
+        "<w:p><w:r><w:t>${severity}</w:t></w:r>"
+        "<w:r><w:txbxContent><w:p><w:r><w:t>${cve_id}</w:t></w:r>"
+        "</w:p></w:txbxContent></w:r>"
+        "<w:r><w:t> tail ${status}</w:t></w:r></w:p>"
+    )
+    result = render_docx(docx_bytes(document), all_fields())
+    root = ElementTree.fromstring(part(result, "word/document.xml"))
+    texts = [node.text or "" for node in root.iter(f"{{{W}}}t")]
+    assert "critical" in texts
+    assert "CVE-2026-0001" in texts
+    assert " tail published" in texts
+    assert not any("${" in text for text in texts)
+
+
+def test_docx_does_not_join_placeholders_across_paragraphs():
+    document = (
+        "<w:p><w:r><w:t>${cve</w:t></w:r>"
+        "<w:r><w:txbxContent><w:p><w:r><w:t>_id}</w:t></w:r>"
+        "</w:p></w:txbxContent></w:r></w:p>"
+    )
+    with pytest.raises(CVEBeaconError, match="invalid statement placeholder"):
+        render_docx(docx_bytes(document), all_fields())
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        (
+            f'<w2:document xmlns:w2="{W}"><w2:body><w2:p><w2:r>'
+            "<w2:t>${cve_id}</w2:t></w2:r></w2:p></w2:body></w2:document>"
+        ),
+        (
+            f'<document xmlns="{W}"><body><p><r>'
+            "<t>${cve_id}</t></r></p></body></document>"
+        ),
+    ],
+)
+def test_docx_handles_alternate_namespace_prefixes(document):
+    result = render_docx(docx_zip(document), all_fields())
+    raw = part(result, "word/document.xml")
+    assert b"CVE-2026-0001" in raw
+    assert b"${" not in raw
+
+
+def test_docx_normalizes_mixed_line_endings():
+    fields = all_fields()
+    fields["references"] = "one\r\ntwo\rthree\nfour"
+    result = render_docx(
+        docx_bytes("<w:p><w:r><w:t>${references}</w:t></w:r></w:p>"),
+        fields,
+    )
+    raw = part(result, "word/document.xml").decode("utf-8")
+    assert raw.count("<w:br/>") == 3
+    assert "\r" not in raw
+
+
+def test_url_fields_percent_quote_identifiers():
+    view = WatchView(
+        cve_id="CVE-2026-1) odd",
+        status="published",
+        euvd_id="EUVD-1 )",
+    )
+    fields = build_fields(view, first_seen=None, generated_at=NOW)
+    assert fields["nvd_url"] == (
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-1%29%20odd"
+    )
+    assert fields["cve_org_url"] == (
+        "https://www.cve.org/CVERecord?id=CVE-2026-1%29%20odd"
+    )
+    assert fields["euvd_url"] == (
+        "https://euvd.enisa.europa.eu/vulnerability/EUVD-1%20%29"
+    )
+    assert fields["euvd_id"] == "EUVD-1 )"
+
+
+def test_docx_bare_dollar_error_mentions_doubling():
+    with pytest.raises(CVEBeaconError) as caught:
+        render_docx(
+            docx_bytes("<w:p><w:r><w:t>Budget $5 ${cve_id}</w:t></w:r></w:p>"),
+            all_fields(),
+        )
+    assert "write '$$'" in str(caught.value)
