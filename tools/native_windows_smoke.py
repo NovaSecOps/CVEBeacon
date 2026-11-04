@@ -488,7 +488,7 @@ def smoke() -> None:
         batch_ready = True
         try:
             grant_batch_logon(service_account)
-        except OSError as exc:
+        except Exception as exc:  # policy APIs vary; registration still proves XML
             batch_ready = False
             print(f"WARN: could not grant SeBatchLogonRight: {exc}", flush=True)
         step("local service account and ACLs")
