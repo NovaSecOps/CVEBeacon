@@ -1148,8 +1148,14 @@ def _reject_password_arguments(arguments: list[str]) -> None:
         if value == "--password-stdin":
             continue
         token = value.split("=", 1)[0]
+        # argparse expands any unique prefix of a long option, so an
+        # abbreviation such as --pa or --pas also names a password option.
+        abbreviates_password = token.startswith("--p") and (
+            "--password-stdin".startswith(token) or "--password".startswith(token)
+        )
         if (
-            token in {"--pass", "--pwd", "--pw", "-p", "-pass", "-pwd", "-pw"}
+            abbreviates_password
+            or token in {"--pass", "--pwd", "--pw", "-p", "-pass", "-pwd", "-pw"}
             or token.startswith("--pass")
             or token.startswith("--pwd")
             or token.startswith("--pw")

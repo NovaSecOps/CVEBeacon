@@ -981,11 +981,31 @@ def test_password_stdin_flag_is_allowed_by_the_prescan():
         "--pwd=secret",
         "--pw-stdin",
         "-psecret",
+        "--p=secret",
+        "--pa=secret",
+        "--pas=secret",
+        "--passw",
+        "--password-st=secret",
+        "--password-stdi",
     ],
 )
 def test_password_value_spellings_are_rejected_by_the_prescan(flag):
     with pytest.raises(CVEBeaconError, match="command line"):
         cli._reject_password_arguments([flag])
+
+
+def test_password_abbreviation_never_echoes_its_value(tmp_path, capsys):
+    secret = "abbrev-secret-value-123"
+    code = cli.main(
+        ["--config", str(tmp_path / "c.toml"), "schedule", "install", f"--pa={secret}"]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert secret not in captured.out + captured.err
+
+
+def test_other_p_options_are_not_rejected_by_the_prescan():
+    cli._reject_password_arguments(["--platform", "windows", "--pending"])
 
 
 def test_cli_schedule_run_logged_out_reads_password(tmp_path, monkeypatch, capsys):
