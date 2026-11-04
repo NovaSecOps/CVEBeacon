@@ -40,6 +40,10 @@ Platforms are `linux/amd64` and `linux/arm64` (Raspberry Pi class boards). The
 image runs as UID/GID 65532 with no shell and no scheduler. Manifest digest:
 `{{IMAGE_DIGEST}}`.
 
+The `latest` tag follows the highest stable version tag. An older version or a
+repeated run does not move it backward. The version tag above is immutable;
+publish a new patch version instead of replacing it.
+
 ## Upgrade notes
 
 - Stop running scans and back up the SQLite state before upgrading.

@@ -1,26 +1,55 @@
 # Release checklist
 
 This page covers the one-time repository setup, the per-release procedure, and
-the checks that must pass before a release is published. The release workflow
-builds every artifact without publishing; a `v*` tag push publishes only after
-the `release` environment approves the run.
+the checks that must pass before a release is published. The workflow builds
+every artifact on pull requests and manual runs. Only a `v*` tag push can
+publish, and only when the `release` environment is protected and sets the
+publishing opt-in described below.
+
+Naming an environment in a workflow does not create protection: GitHub
+automatically creates a referenced environment that does not exist, without
+reviewers or rules. The workflow therefore treats the environment as untrusted
+until it is configured. Both publishing jobs start by requiring the
+environment-scoped variable `RELEASE_PUBLISH_ENABLED=true`; when it is missing
+or not exactly `true`, they stop before checkout, registry login, image push or
+release creation.
 
 ## One-time setup
 
-1. Create the `release` environment in the repository settings and add the
-   required reviewers. The environment approval is the only path that allows
-   image pushes and the draft release; without it the publishing jobs stay
-   queued.
-2. Allow the workflow to use the environment from tag refs only. Do not add
-   branch deployment rules for this environment.
-3. Confirm that the repository packages namespace can host
-   `ghcr.io/novasecops/cvebeacon`. Make the package public after the first
-   publish, or grant the intended audience read access.
-4. Keep the default `GITHUB_TOKEN` permissions read-only at repository level.
+1. In the repository settings, open **Environments** and create `release`.
+2. Add at least one required reviewer. Enable **Prevent self-review** when the
+   plan offers it.
+3. Add a deployment **Tag** rule for `v*`. Use a tag rule, not a branch rule.
+4. Turn off **Allow administrators to bypass configured protection rules**.
+5. Only after steps 1-4, add an environment variable
+   `RELEASE_PUBLISH_ENABLED` with the value `true` to `release`. Do not create
+   this variable at repository or organization level. It must be scoped to the
+   protected environment so that a missing or recreated environment fails
+   closed instead of inheriting an unprotected opt-in.
+6. Keep the default `GITHUB_TOKEN` permissions read-only at repository level.
    The workflow requests `contents: write` only in the release job and
    `packages: write` only in the container publish job.
-5. Confirm that the `release` environment has no secrets. The workflow uses the
+7. Confirm that the repository packages namespace can host
+   `ghcr.io/novasecops/cvebeacon`. Make the package public after the first
+   publish, or grant the intended audience read access.
+8. Confirm that the `release` environment has no secrets. The workflow uses the
    repository token and does not need a personal token or a registry password.
+9. Verify the setup read-only after the variable is in place:
+
+   ```console
+   gh api repos/NovaSecOps/CVEBeacon/environments/release \
+     --jq '{can_admins_bypass, protection_rules, deployment_branch_policy}'
+   gh api repos/NovaSecOps/CVEBeacon/environments/release/deployment-branch-policies \
+     --jq '.branch_policies[] | {name, type}'
+   gh api repos/NovaSecOps/CVEBeacon/environments/release/variables \
+     --jq '.variables[] | {name, value}'
+   ```
+
+   Confirm `can_admins_bypass` is `false`, `protection_rules` contains a
+   `required_reviewers` rule, the branch policies list a `tag` named `v*`, and
+   the environment variables include `RELEASE_PUBLISH_ENABLED=true`. The last
+   check reads the environment directly; a repository-level variable with the
+   same name is not sufficient and must be removed.
 
 ## Before tagging
 
@@ -47,7 +76,10 @@ the `release` environment approves the run.
    publish job and the draft release job. Approval is required before any
    image push or release creation.
 4. Wait for the `verify`, `python-dist`, `windows-exe`, `container-publish` and
-   `release` jobs. Every job must pass; a failed job leaves no release.
+   `release` jobs. If a job fails, do not assume the run left nothing behind:
+   the image push happens before draft creation, and a draft can exist with
+   only some of its assets. Inspect the registry tags and any existing draft
+   before retrying or cleaning up; see [Recovery from a partial run](#recovery-from-a-partial-run).
 5. Open the draft release and review the generated notes, the asset list, and
    `SHA256SUMS`.
 6. Download the assets and verify the checksums with
@@ -55,10 +87,13 @@ the `release` environment approves the run.
    `cvebeacon --help`. Extract the Windows archive on a Windows host and run
    `cvebeacon.exe --help`.
 7. Confirm the published image tags and the manifest digest recorded in the
-   notes (replace `0.1.0` with the released version):
+   notes (replace `0.1.0` with the released version). The version tag is
+   immutable; `latest` moves only when the version is the highest stable tag
+   in the registry:
 
    ```console
    docker buildx imagetools inspect ghcr.io/novasecops/cvebeacon:0.1.0
+   docker buildx imagetools inspect ghcr.io/novasecops/cvebeacon:latest
    docker pull ghcr.io/novasecops/cvebeacon:0.1.0
    docker run --rm --network none --read-only --cap-drop ALL \
      --security-opt no-new-privileges:true \
@@ -70,6 +105,43 @@ the `release` environment approves the run.
 9. Confirm the release page lists every asset and the source archives.
 10. Announce the release only after the GHCR package visibility and the
     release assets are confirmed.
+
+## Recovery from a partial run
+
+GitHub release creation and its asset uploads are separate operations, and the
+image push happens before either. A failed or interrupted run can therefore
+leave a published image, a draft with only some assets, or both. The workflow
+does not roll either back. Inspect first; keep cleanup manual and
+owner-authorized.
+
+1. List the failed run's jobs and its downloadable artifacts. Confirm which
+   jobs completed.
+2. Inspect the image tags and digest:
+
+   ```console
+   docker buildx imagetools inspect ghcr.io/novasecops/cvebeacon:VERSION
+   docker buildx imagetools inspect ghcr.io/novasecops/cvebeacon:latest
+   ```
+
+3. Inspect any existing draft and its assets:
+
+   ```console
+   gh release view vVERSION --json isDraft,assets
+   ```
+
+4. If the version image already exists, do not re-run the publish job. It
+   refuses to overwrite an existing version tag. Reuse the digest recorded by
+   the original run when completing or repairing the release.
+5. If a draft contains only some assets, download and compare them against
+   `SHA256SUMS` before deleting or completing it. Delete or replace draft
+   assets only with owner approval, and never publish an incomplete draft.
+6. If the version image is wrong and its release is still unpublished, publish
+   a superseding patch version. Deleting an unpublished GHCR package version is
+   an owner decision; never move or retag an existing version.
+7. If `latest` was not moved, leave it. The workflow promotes `latest` only
+   when the released version is the highest stable tag. Publish the next higher
+   patch and let the workflow move `latest` forward; do not point it backward
+   by hand.
 
 ## After publishing
 
