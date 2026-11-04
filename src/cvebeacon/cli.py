@@ -80,6 +80,16 @@ def _parser() -> argparse.ArgumentParser:
     watch_sub = watch.add_subparsers(dest="watch_command", required=True)
     watch_sync = watch_sub.add_parser("sync", help="refresh the watch database from public sources")
     watch_sync.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
+    watch_statement = watch_sub.add_parser("statement", help="render one stored CVE from a statement template")
+    watch_statement.add_argument("cve_id")
+    watch_statement.add_argument(
+        "--template",
+        help="template path (.md, .txt or .docx); default is the built-in Markdown template",
+    )
+    watch_statement.add_argument("--out", required=True, help="output file")
+    watch_statement.add_argument(
+        "--force", action="store_true", help="overwrite an existing output file"
+    )
     watch_run = watch_sub.add_parser("run", help="refresh the watch database, evaluate rules and deliver alerts")
     watch_run.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
     watch_notify = watch_sub.add_parser("notify", help="deliver pending watch alerts")
@@ -206,6 +216,7 @@ def _run_watch(args, config: AppConfig) -> int:
     from .watch.delivery import deliver_pending, send_test
     from .watch.reported import default_identity, format_timestamp, normalize_cve_id
     from .watch.rules import describe_condition
+    from .watch.statements import write_statement
     from .watch.store import WatchStore
     from .watch.sync import sync_watch, watch_status
 
@@ -300,6 +311,18 @@ def _run_watch(args, config: AppConfig) -> int:
                 else:
                     line += "  notices: none"
             print(line)
+        return 0
+    if args.watch_command == "statement":
+        print(
+            write_statement(
+                store,
+                args.cve_id,
+                catalogs=config.watch.sources,
+                template=args.template,
+                out=args.out,
+                force=args.force,
+            )
+        )
         return 0
     if args.watch_command == "notify":
         with HttpClient(config.http) as http:
@@ -735,6 +758,8 @@ def main(argv: list[str] | None = None) -> int:
     try: return run(args)
     except CVEBeaconError as exc:
         print(f"error: {exc}", file=sys.stderr); return 2
+    except MemoryError:
+        print("error: not enough memory to complete the command", file=sys.stderr); return 2
     except KeyboardInterrupt:
         print("cancelled", file=sys.stderr); return 130
 
