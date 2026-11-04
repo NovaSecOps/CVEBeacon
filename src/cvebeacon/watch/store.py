@@ -1689,16 +1689,21 @@ class WatchStore:
         except _ClaimConflict:
             return ()
 
-    def mark_initial_sent(self, channel: str) -> int:
-        """Mark every initial row this run claimed for ``channel`` as sent."""
+    def _initial_claim_stamp(self, now: datetime) -> str:
+        """Return the ``updated_at`` value the claim wrote for ``now``."""
+        return _clock_value(lambda: now).isoformat()
+
+    def mark_initial_sent(self, channel: str, *, now: datetime) -> int:
+        """Mark the initial rows this run claimed for ``channel`` as sent."""
         self.initialize()
-        now = _timestamp(self._clock)
+        stamp = self._initial_claim_stamp(now)
         with self.transaction() as db:
             cursor = db.execute(
                 "UPDATE watch_delivery SET status='sent', last_error=NULL, "
                 "updated_at=? WHERE channel=? AND status='sending' "
+                "AND updated_at=? "
                 "AND event_id IN (SELECT id FROM watch_event WHERE initial=1)",
-                (now, channel),
+                (_timestamp(self._clock), channel, stamp),
             )
             return cursor.rowcount
 
@@ -1706,13 +1711,15 @@ class WatchStore:
         self,
         channel: str,
         *,
+        now: datetime,
         error: str,
         attempts_limit: int | None = None,
         ambiguous: bool = False,
     ) -> int:
         """Mark the claimed initial rows failed, keeping prior ambiguity."""
         self.initialize()
-        now = _timestamp(self._clock)
+        stamp = self._initial_claim_stamp(now)
+        marked = _timestamp(self._clock)
         if attempts_limit is None:
             attempts_sql = "attempts=attempts+1"
             attempts_parameters: tuple[Any, ...] = ()
@@ -1730,31 +1737,33 @@ class WatchStore:
                 + attempts_sql
                 + ", last_error=?, updated_at=?, "
                 "first_attempt_at=COALESCE(first_attempt_at, ?) "
-                "WHERE channel=? AND status='sending' "
+                "WHERE channel=? AND status='sending' AND updated_at=? "
                 "AND event_id IN (SELECT id FROM watch_event WHERE initial=1)",
                 (
                     1 if ambiguous else 0,
                     _INITIAL_AMBIGUOUS,
                     *attempts_parameters,
                     (error or "")[:500],
-                    now,
-                    now,
+                    marked,
+                    marked,
                     channel,
+                    stamp,
                 ),
             )
             return cursor.rowcount
 
-    def release_initial(self, channel: str) -> int:
+    def release_initial(self, channel: str, *, now: datetime) -> int:
         """Return claimed initial rows to pending (or their prior ambiguity)."""
         self.initialize()
-        now = _timestamp(self._clock)
+        stamp = self._initial_claim_stamp(now)
         with self.transaction() as db:
             cursor = db.execute(
                 "UPDATE watch_delivery SET "
                 "status=CASE WHEN last_error=? THEN 'ambiguous' ELSE 'pending' END, "
                 "last_error=NULL, updated_at=? WHERE channel=? AND status='sending' "
+                "AND updated_at=? "
                 "AND event_id IN (SELECT id FROM watch_event WHERE initial=1)",
-                (_INITIAL_AMBIGUOUS, now, channel),
+                (_INITIAL_AMBIGUOUS, _timestamp(self._clock), channel, stamp),
             )
             return cursor.rowcount
 

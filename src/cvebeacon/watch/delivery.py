@@ -871,7 +871,7 @@ def deliver_pending(
                         break
                     remaining = deadline - monotonic()
                     if remaining <= 0:
-                        store.release_initial(channel.name)
+                        store.release_initial(channel.name, now=now)
                         stop_channel = True
                         break
                     timeout = max(0.5, min(channel.timeout_seconds, remaining))
@@ -887,6 +887,7 @@ def deliver_pending(
                     if failure is not None:
                         store.mark_initial_failed(
                             channel.name,
+                            now=now,
                             error=failure.category,
                             attempts_limit=failure.attempts_limit,
                             ambiguous=failure.ambiguous,
@@ -902,7 +903,7 @@ def deliver_pending(
                         error = failure.category
                         stop_channel = True
                         break
-                    store.mark_initial_sent(channel.name)
+                    store.mark_initial_sent(channel.name, now=now)
                     messages_sent += 1
                     events_sent += len(chunk)
                     pace_needed = True
@@ -925,7 +926,7 @@ def deliver_pending(
                         initial=digest,
                     )
                     if len(initial_messages) > MAX_MESSAGES_PER_CHANNEL:
-                        store.release_initial(channel.name)
+                        store.release_initial(channel.name, now=now)
                         stop_channel = True
                     else:
                         (
@@ -941,11 +942,12 @@ def deliver_pending(
                             pace_needed,
                         )
                         if expired:
-                            store.release_initial(channel.name)
+                            store.release_initial(channel.name, now=now)
                             stop_channel = True
                         elif failure is not None:
                             store.mark_initial_failed(
                                 channel.name,
+                                now=now,
                                 error=failure.category,
                                 attempts_limit=failure.attempts_limit,
                                 ambiguous=failure.ambiguous,
@@ -958,10 +960,10 @@ def deliver_pending(
                             error = failure.category
                             stop_channel = True
                         elif delivered == len(initial_messages):
-                            store.mark_initial_sent(channel.name)
+                            store.mark_initial_sent(channel.name, now=now)
                             events_sent += digest.total
                         else:
-                            store.release_initial(channel.name)
+                            store.release_initial(channel.name, now=now)
                             stop_channel = True
 
         if not stop_channel and monotonic() < deadline:

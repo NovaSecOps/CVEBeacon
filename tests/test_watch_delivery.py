@@ -1764,6 +1764,93 @@ def test_two_runs_claim_each_delivery_once(tmp_path, monkeypatch):
     assert sum(report.channels[0].messages for report in reports) == 1
 
 
+@pytest.mark.parametrize(
+    ("method", "final_status"),
+    (
+        ("mark_initial_sent", "sent"),
+        ("mark_initial_failed", "failed"),
+        ("release_initial", "pending"),
+    ),
+)
+def test_initial_updates_are_scoped_to_the_claiming_run(
+    tmp_path, monkeypatch, method, final_status
+):
+    monkeypatch.setenv(
+        "SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
+    )
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+max_items = 10
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["slack"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(
+        config,
+        identifiers=("CVE-2026-0001", "CVE-2026-0002"),
+        initial=True,
+    )
+    run_a = NOW
+    run_b = NOW + timedelta(minutes=1)
+    digest_a = store.claim_initial_digest(
+        "slack", catalogs=config.watch.sources, now=run_a, max_items=10
+    )
+    assert digest_a is not None
+    assert digest_a.cves == 2
+
+    store.upsert_nvd(
+        [
+            WatchRecord(
+                cve_id="CVE-2026-0003",
+                status="published",
+                description="Acme Widget allows remote code execution.",
+                cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.8),),
+            )
+        ],
+        catalogs=config.watch.sources,
+    )
+    store.evaluate_touched(
+        config.watch.rules, catalogs=config.watch.sources, initial=True
+    )
+    digest_b = store.claim_initial_digest(
+        "slack", catalogs=config.watch.sources, now=run_b, max_items=10
+    )
+    assert digest_b is not None
+    assert [event.cve_id for event in digest_b.events] == ["CVE-2026-0003"]
+
+    def statuses():
+        with sqlite3.connect(store.path) as db:
+            return dict(
+                db.execute(
+                    "SELECT e.cve_id,d.status FROM watch_delivery d "
+                    "JOIN watch_event e ON e.id=d.event_id"
+                ).fetchall()
+            )
+
+    update = getattr(store, method)
+    if method == "mark_initial_failed":
+        assert update("slack", now=run_a, error="refused") == 2
+    else:
+        assert update("slack", now=run_a) == 2
+    assert statuses()["CVE-2026-0003"] == "sending"
+
+    if method == "mark_initial_failed":
+        assert update("slack", now=run_b, error="refused") == 1
+    else:
+        assert update("slack", now=run_b) == 1
+    assert statuses() == {
+        "CVE-2026-0001": final_status,
+        "CVE-2026-0002": final_status,
+        "CVE-2026-0003": final_status,
+    }
+
+
 def test_matrix_parts_get_distinct_transaction_ids(tmp_path, monkeypatch):
     from cvebeacon.watch import messages as messages_module
 
