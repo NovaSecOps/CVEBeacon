@@ -1228,6 +1228,39 @@ def test_epss_403_falls_back_and_records_the_file_day(tmp_path):
     assert len(requested) == 4
 
 
+def test_too_few_epss_rows_keeps_the_previous_table(tmp_path, monkeypatch):
+    monkeypatch.setattr(feeds, "EPSS_MIN_ROWS", 5)
+    config = write_config(tmp_path, sources=("nvd", "epss"), initial="backfill")
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    store.record_baseline(
+        nvd_cursor=(NOW - timedelta(minutes=5)).isoformat(),
+        initialized_at=NOW.isoformat(),
+    )
+    store.upsert_nvd([WatchRecord("CVE-2026-0001", "published")])
+    store.replace_epss(
+        [("CVE-2026-0001", 0.8, 0.9, date(2026, 11, 2))]
+    )
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def epss_request(request):
+        return httpx.Response(
+            200,
+            content=epss_gzip(
+                [("CVE-2026-0001", "0.1", "0.2")], score_date="2026-11-03"
+            ),
+        )
+
+    report = run(
+        config, handler_for(nvd=nvd_request, epss=epss_request)
+    )
+    assert report.failures == ("epss",)
+    assert store.view("CVE-2026-0001").epss == 0.8
+    assert store.status()["epss_rows"] == 1
+    assert store.metadata()["epss_file_day"] == "2026-11-02"
+
+
 def test_corrupt_epss_deflate_is_an_optional_cli_failure(tmp_path, monkeypatch, capsys):
     config = write_config(tmp_path, sources=("nvd", "epss"), initial="backfill")
     store = WatchStore(config.watch.database, clock=lambda: NOW)
