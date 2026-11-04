@@ -267,14 +267,26 @@ def test_watch_output_is_ascii_under_cp1252(tmp_path, monkeypatch):
         assert expected in buffer.getvalue().decode("cp1252")
 
 
-def test_watch_only_config_refuses_native_scheduling(tmp_path, capsys):
+def test_watch_only_config_can_schedule_watch_run(tmp_path, monkeypatch, capsys):
     config = write_config(tmp_path, inventory=False)
+    installed = []
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
+    monkeypatch.setattr(cli, "install", lambda plan: installed.append(plan))
     assert cli.main(
-        ["--config", str(config.config_path), "schedule", "install", "--dry-run"]
-    ) == 2
-    error = capsys.readouterr().err
-    assert "watch scheduling arrives in a later release" in error
-    assert "watch run" in error
+        [
+            "--config",
+            str(config.config_path),
+            "schedule",
+            "install",
+            "--times",
+            "07:00",
+            "--yes",
+        ]
+    ) == 0
+    assert installed[0].schedule_command == "watch"
+    output = capsys.readouterr().out
+    assert "watch run" in output
+    assert "Schedule: daily at 07:00" in output
 
 
 def test_watch_only_config_refuses_doctor_and_serve(tmp_path, capsys):

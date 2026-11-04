@@ -1639,6 +1639,27 @@ def test_full_confirmation_eof_is_cancelled(tmp_path, monkeypatch, capsys):
     assert "cancelled" in capsys.readouterr().out
 
 
+def test_full_confirmation_does_not_wait_without_a_terminal(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, initial="full")
+
+    class NotATerminal:
+        def isatty(self):
+            return False
+
+    def unexpected_input(message):
+        raise AssertionError("full history must not prompt without a terminal")
+
+    monkeypatch.setattr("sys.stdin", NotATerminal())
+    monkeypatch.setattr("builtins.input", unexpected_input)
+    assert cli.main(["--config", str(config.config_path), "watch", "sync"]) == 1
+    output = capsys.readouterr().out
+    assert "full history requires confirmation" in output
+    assert "watch sync --yes" in output
+    assert "cancelled" in output
+
+
 def test_changing_nvd_totals_fail_without_advancing_the_cursor(tmp_path):
     config = write_config(tmp_path, initial="backfill")
     calls: list[int] = []

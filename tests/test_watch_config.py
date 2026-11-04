@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from cvebeacon.config import load_config
@@ -292,3 +294,22 @@ channels = ["soc-email"]
 """,
     )
     assert config.watch.rules[0].name == "likely"
+
+
+def test_nvd_api_key_file_is_loaded(tmp_path, monkeypatch):
+    monkeypatch.delenv("NVD_API_KEY", raising=False)
+    key = tmp_path / "nvd-key"
+    key.write_text("secret", encoding="utf-8")
+    os.chmod(key, 0o600)
+    config = write(tmp_path, '\n[sources]\nnvd_api_key_file = "nvd-key"\n')
+    assert config.sources.nvd_api_key_file == key.resolve()
+    assert config.nvd_api_key() == "secret"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission check")
+def test_nvd_api_key_file_must_not_be_group_accessible(tmp_path):
+    key = tmp_path / "nvd-key"
+    key.write_text("secret", encoding="utf-8")
+    os.chmod(key, 0o644)
+    with pytest.raises(ConfigurationError, match="group or other accessible"):
+        write(tmp_path, '\n[sources]\nnvd_api_key_file = "nvd-key"\n')

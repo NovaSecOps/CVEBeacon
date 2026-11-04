@@ -32,6 +32,7 @@ cisa_kev_enabled = true
 eu_kev_enabled = true
 epss_enabled = true
 nvd_api_key_env = "NVD_API_KEY"
+# nvd_api_key_file = "secrets/nvd-api-key"
 minimum_request_interval = 6
 
 # Optional change history. See docs/WATCH.md.

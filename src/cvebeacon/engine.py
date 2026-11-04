@@ -24,7 +24,7 @@ class QueryEngine:
         self.config = config
         self.http = http or HttpClient(config.http)
         self._owned = http is None
-        api_key = config.secret(config.sources.nvd_api_key_env)
+        api_key = config.nvd_api_key()
         self.nvd = NVDSource(self.http, api_key=api_key, interval=config.sources.minimum_request_interval)
         self.cve = CVEListSource(self.http)
         self.euvd = EUVDSource(self.http)

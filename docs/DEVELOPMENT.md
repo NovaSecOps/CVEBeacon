@@ -103,7 +103,7 @@ combinations have passed.
 
 ## Exit codes
 
-Core reports `0`, `2`, `3`, and `4`. Automation preserves those codes and adds
+Core reports `0`, `1`, `2`, `3`, and `4`. Automation preserves those codes and adds
 `5` for degraded optional operations and `75` for a nonblocking resource-lock
 conflict. Container entrypoints translate SIGTERM into bounded cleanup and exit
 `143`.
@@ -111,6 +111,7 @@ conflict. Container entrypoints translate SIGTERM into bounded cleanup and exit
 | Code | Scope | Meaning |
 | --- | --- | --- |
 | 0 | Core, Automation | Operation or configured pipeline completed |
+| 1 | Core | Operation cancelled by the user or a required confirmation was refused |
 | 2 | Core, Automation | Validation or operational failure |
 | 3 | Core | Notification delivery failure (takes precedence over 4) |
 | 4 | Core, Automation | Uncertain coverage or degraded sources |

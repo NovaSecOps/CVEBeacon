@@ -93,7 +93,7 @@ The run queries each identical component identity/version target once, then asso
 
 The first scan may be slow without an NVD API key because the default respects NVD’s public-client pacing guidance. Set the configured API-key environment variable to use a key; never put the key in TOML.
 
-Exit codes are `0` for a successful operation, `2` for validation/operational failure, `3` for notification failure, and `4` for a scan with uncertain coverage or degraded sources. A completed scan can contain useful findings and still exit `4`; review its report and `source-status`. Notification failure takes precedence if both occur.
+Exit codes are `0` for a successful operation, `2` for validation/operational failure, `3` for notification failure, and `4` for a scan with uncertain coverage or degraded sources. A completed scan can contain useful findings and still exit `4`; review its report and `source-status`. Notification failure takes precedence if both occur. `cvebeacon run` uses the same codes across its parts: any part failing gives `2`, otherwise a notification or delivery failure gives `3`, otherwise coverage warnings or degraded sources give `4`.
 
 Package/PURL identities, category and system grouping work in all four input formats; `examples/general.toml` demonstrates a mixed inventory. No accounts or credentials are needed for core scans.
 
@@ -230,7 +230,7 @@ cvebeacon --config /absolute/path/cvebeacon.toml schedule install --dry-run
 cvebeacon --config /absolute/path/cvebeacon.toml schedule install
 ```
 
-The interactive setup asks for an interval, defaults to four hours, shows the proposal, and requires confirmation. For automation, provide a value such as `--every 4h --yes`; Windows accepts 2 through 24 whole hours, while Linux cron accepts 2, 3, 4, 6, 8, 12, or 24. Inspect and remove with `schedule status` and `schedule remove`. See [scheduling](SCHEDULING.md) for exact ownership and safe manual native scheduling.
+The interactive setup asks for an interval or fixed times, shows the proposal, and requires confirmation. Fixed times use `--times 07:00,19:00`; `--command scan|watch|both` selects the action and defaults to the configured mode. For automation, provide a value such as `--every 4h --yes`; Windows accepts 2 through 24 whole hours, while Linux cron accepts 2, 3, 4, 6, 8, 12, or 24. Inspect and remove with `schedule status` and `schedule remove`. See [scheduling](SCHEDULING.md) for exact ownership and safe manual native scheduling.
 
 Ensure the scheduled account can read the inventory/configuration, write state/reports, reach source endpoints, and obtain notification environment variables.
 

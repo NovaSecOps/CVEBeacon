@@ -38,6 +38,7 @@ coverage.xml
 *.pfx
 credentials.json
 secrets.*
+secrets/
 
 # Local monitoring databases and sidecars
 *.db

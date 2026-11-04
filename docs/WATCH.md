@@ -52,11 +52,14 @@ inventory (`scan`, `export`, `asset`, `inventory ...`, `doctor`, and the
 inventory dashboard pages) fail with a clear message until
 `[inventory] path` is added. A configuration with neither watch mode nor an
 inventory is rejected, so existing configurations keep their behavior.
-`schedule install`, `doctor`, and `serve` refuse in a watch-only configuration;
-run `cvebeacon --config <file> watch run` from cron or Task Scheduler instead.
+`schedule install` supports watch-only and combined configurations: it runs
+`watch run` by default when no inventory is configured, and the ordered `run`
+command (scan, then watch run) when both are configured. See
+[scheduling](SCHEDULING.md).
 
-The NVD API key is read from the existing `sources.nvd_api_key_env` variable.
-It is optional; pacing follows `sources.minimum_request_interval`.
+The NVD API key is read from the existing `sources.nvd_api_key_env` variable,
+or from `sources.nvd_api_key_file` when the variable is unset. It is optional;
+pacing follows `sources.minimum_request_interval`.
 
 ## Channels
 
@@ -196,10 +199,14 @@ twice. Ambiguous rows are never retried automatically; use
 [watch.channels.ntfy]
 type = "ntfy"
 server = "https://ntfy.sh"     # the default
-topic = "cvebeacon-alerts"
+topic = "cvebeacon-a1b2c3d4e5f6"  # choose a unique, unguessable topic
 # token_env = "CVEBEACON_NTFY_TOKEN"
 priority = 3                    # 1 to 5
 ```
+
+ntfy.sh topics are public unless the topic is protected: anyone who knows or
+guesses the name can read the alerts. Use a unique topic, a token, or a
+self-hosted ntfy server for private alerts.
 
 The body is plain text and does not repeat the title; the title is sent in the
 `Title` header. Subjects use ASCII, so the header needs no RFC 2047 encoding.
@@ -781,7 +788,9 @@ The first sync chooses what history to build:
 - `full`: reads NVD history from 1999-01-01 and EUVD history from 1999-01-01.
   Before starting it prints an estimate of the NVD windows, request counts, and
   the one EPSS file per day, then requires `--yes` or an interactive
-  confirmation. When stdin is closed, the prompt counts as "no".
+  confirmation. When stdin is not a terminal, it prints a one-line instruction
+  and cancels instead of waiting; run `watch sync --yes` once before the first
+  scheduled run.
 
 `initialized_at` is set only when an initial run reaches its last window. A
 resumed initial run continues from the stored cursor and does not ask for

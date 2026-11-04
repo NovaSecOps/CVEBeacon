@@ -10,6 +10,7 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from .config import AppConfig, InventoryConfig, load_config
 from .engine import QueryEngine
@@ -20,7 +21,7 @@ from .identity import normalize_asset, identity_conflict
 from .models import Asset, HealthStatus
 from .notifications import GraphMailNotifier, TeamsNotifier, alert_items, configured_channels
 from .reporting import write_json, write_xlsx
-from .scheduling import describe, install, make_plan, remove, status
+from .scheduling import default_command, describe, install, make_plan, remove, status
 from .sources import CVEListSource, EPSSSource, KEVSource
 from .sources.euvd import SEARCH_URL
 from .sources.nvd import CVE_URL
@@ -36,6 +37,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     scan = commands.add_parser("scan", help="scan the configured inventory and commit monitoring state")
     scan.add_argument("--report", choices=("xlsx", "json"), help="write an on-demand report")
+    run_all = commands.add_parser("run", help="run scan and watch run in one ordered command")
+    run_all.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
     query = commands.add_parser("query", help="query a product or package without changing monitoring or delivery state")
     for field in ("vendor", "product", "version", "ecosystem", "purl", "cpe", "repository", "commit"):
         query.add_argument("--" + field, default="")
@@ -65,9 +68,12 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--allow-unauthenticated-remote", action="store_true", help="acknowledge remote access without built-in authentication")
     dashboard = commands.add_parser("dashboard", help="dashboard security helpers")
     dashboard.add_subparsers(dest="dashboard_command", required=True).add_parser("hash-password", help="prompt privately and emit a password hash")
-    schedule = commands.add_parser("schedule", help="manage the native recurring scan")
+    setup = commands.add_parser("setup", help="write a validated configuration interactively")
+    setup.add_argument("--config", dest="setup_config", help="path to write the configuration")
+    setup.add_argument("--force", action="store_true", help="overwrite an existing configuration after backing it up")
+    schedule = commands.add_parser("schedule", help="manage the native recurring scan or watch")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
-    add = schedule_sub.add_parser("install"); add.add_argument("--every"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
+    add = schedule_sub.add_parser("install"); add.add_argument("--every", "--hours", dest="every"); add.add_argument("--times", help="comma-separated local times such as 07:00,19:00"); add.add_argument("--command", dest="schedule_target", choices=("scan", "watch", "both"), help="what the schedule runs"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
     schedule_status = schedule_sub.add_parser("status"); schedule_status.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto")
     delete = schedule_sub.add_parser("remove"); delete.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); delete.add_argument("--yes", action="store_true")
     watch = commands.add_parser("watch", help="keep a local database of recently changed CVEs")
@@ -324,7 +330,7 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
     checks: dict[str, str] = {}
     with HttpClient(config.http) as http:
         def nvd_check():
-            api_key = config.secret(config.sources.nvd_api_key_env)
+            api_key = config.nvd_api_key()
             payload = http.get_json(CVE_URL, source="nvd", params={"cveId": target}, headers={"apiKey": api_key} if api_key else None)
             if not isinstance(payload, dict) or not isinstance(payload.get("vulnerabilities"), list):
                 raise SourceError("nvd", "connectivity response omitted vulnerabilities")
@@ -367,11 +373,66 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
     return checks
 
 
+def _run_scan(config: AppConfig, *, report: str | None = None) -> int:
+    store = StateStore(config.database_path)
+    attempt_id = store.start_scan()
+    args = SimpleNamespace(command="scan", report=report)
+    try:
+        code = _run_configured(args, config, store, attempt_id=attempt_id)
+    except BaseException:
+        try:
+            store.finish_scan(attempt_id, successful=False)
+        except CVEBeaconError:
+            LOG.error("scan completion status could not be recorded")
+        raise
+    store.finish_scan(attempt_id, successful=code == 0)
+    return code
+
+
+def _run_all(config: AppConfig, *, yes: bool = False) -> int:
+    parts: list[int] = []
+    if config.inventory is not None:
+        try:
+            parts.append(_run_scan(config))
+        except CVEBeaconError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            parts.append(2)
+    if config.watch.enabled:
+        try:
+            parts.append(
+                _run_watch(
+                    SimpleNamespace(watch_command="run", yes=yes),
+                    config,
+                )
+            )
+        except CVEBeaconError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            parts.append(2)
+    if not parts:
+        raise CVEBeaconError(
+            "nothing to run; add an [inventory] path or set [watch] enabled = true"
+        )
+    if 2 in parts:
+        return 2
+    if 3 in parts:
+        return 3
+    if 4 in parts:
+        return 4
+    if 1 in parts:
+        return 1
+    if any(code != 0 for code in parts):
+        return 2
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     if args.command == "dashboard":
         from .dashboard_auth import hash_password
         print(hash_password())
         return 0
+    if args.command == "setup":
+        from .setup import run_setup
+        return run_setup(args.setup_config or args.config, force=args.force)
     if args.command == "inventory" and args.inventory_command == "inspect" and args.path:
         print(json.dumps(inspect_inventory(args.path), indent=2))
         return 0
@@ -385,6 +446,8 @@ def run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     if args.command == "watch":
         return _run_watch(args, config)
+    if args.command == "run":
+        return _run_all(config, yes=args.yes)
     if (
         args.command in {"doctor", "serve"}
         and config.inventory is None
@@ -399,19 +462,9 @@ def run(args: argparse.Namespace) -> int:
         _inventory_config(config)
     if args.command == "inventory" and not args.path:
         _inventory_config(config)
-    store = StateStore(config.database_path)
     if args.command == "scan":
-        attempt_id = store.start_scan()
-        try:
-            code = _run_configured(args, config, store, attempt_id=attempt_id)
-        except BaseException:
-            try:
-                store.finish_scan(attempt_id, successful=False)
-            except CVEBeaconError:
-                LOG.error("scan completion status could not be recorded")
-            raise
-        store.finish_scan(attempt_id, successful=code == 0)
-        return code
+        return _run_scan(config, report=args.report)
+    store = StateStore(config.database_path)
     return _run_configured(args, config, store)
 
 
@@ -496,22 +549,29 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         return 2 if "missing" in checks.values() or failed_live else 0
     if args.command == "source-status": print(json.dumps(_source_status(store), indent=2)); return 0
     if args.command == "schedule":
-        if config.inventory is None and config.watch.enabled:
-            raise CVEBeaconError(
-                "watch scheduling arrives in a later release; use cron/Task "
-                f"Scheduler with `cvebeacon --config {config.config_path} watch run`"
-            )
-        if args.every is None:
-            selected = input("Interval in hours [2/4/6/12/24, default 4]: ").strip() or "4"
+        target = args.schedule_target or default_command(
+            inventory=config.inventory is not None, watch=config.watch.enabled
+        )
+        if target in {"watch", "both"} and not config.watch.enabled:
+            raise CVEBeaconError("watch mode is disabled; set [watch] enabled = true")
+        if target in {"scan", "both"} and config.inventory is None:
+            raise CVEBeaconError("this configuration has no inventory; use --command watch")
+        if args.times is not None and args.every is not None:
+            raise CVEBeaconError("--times and --every are mutually exclusive")
+        if args.times is not None:
+            plan = make_plan(config.config_path, times=args.times, command=target, system=args.platform, allow_incompatible=args.dry_run)
         else:
-            selected = args.every
-        if selected.casefold().endswith("h"):
-            selected = selected[:-1]
-        try:
-            every = int(selected)
-        except ValueError as exc:
-            raise CVEBeaconError("schedule interval must look like 4 or 4h") from exc
-        plan = make_plan(config.config_path, every, system=args.platform, allow_incompatible=args.dry_run)
+            if args.every is None:
+                selected = input("Interval in hours [2/4/6/12/24, default 4]: ").strip() or "4"
+            else:
+                selected = args.every
+            if selected.casefold().endswith("h"):
+                selected = selected[:-1]
+            try:
+                every = int(selected)
+            except ValueError as exc:
+                raise CVEBeaconError("schedule interval must look like 4 or 4h") from exc
+            plan = make_plan(config.config_path, every, command=target, system=args.platform, allow_incompatible=args.dry_run)
         print(describe(plan))
         if args.dry_run: return 0
         if not args.yes and input("Install this schedule? [y/N] ").strip().casefold() not in {"y", "yes"}: print("cancelled"); return 1

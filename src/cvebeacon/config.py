@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import math
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +70,7 @@ class SourceConfig:
     eu_kev_enabled: bool = True
     epss_enabled: bool = True
     nvd_api_key_env: str = "NVD_API_KEY"
+    nvd_api_key_file: Path | None = None
     minimum_request_interval: float = 6.0
 
 
@@ -133,6 +135,18 @@ class AppConfig:
         if required and not value:
             raise ConfigurationError(f"required environment variable is not set: {env_name}")
         return value
+
+    def nvd_api_key(self) -> str | None:
+        value = self.secret(self.sources.nvd_api_key_env)
+        if value and value.strip():
+            return value.strip()
+        path = self.sources.nvd_api_key_file
+        if path is None:
+            return None
+        try:
+            return path.read_text(encoding="utf-8").strip() or None
+        except (OSError, UnicodeError):
+            return None
 
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -274,6 +288,28 @@ def load_config(path: str | Path) -> AppConfig:
     nvd_api_key_env = source_data.get("nvd_api_key_env", "NVD_API_KEY")
     if not isinstance(nvd_api_key_env, str) or not nvd_api_key_env.strip():
         raise ConfigurationError("sources.nvd_api_key_env cannot be blank")
+    raw_nvd_key_file = source_data.get("nvd_api_key_file")
+    nvd_api_key_file: Path | None = None
+    if raw_nvd_key_file is not None:
+        if not isinstance(raw_nvd_key_file, str) or not raw_nvd_key_file.strip():
+            raise ConfigurationError("sources.nvd_api_key_file must be a nonempty path")
+        nvd_api_key_file = _resolve(base, raw_nvd_key_file.strip())
+        try:
+            details = nvd_api_key_file.stat()
+        except OSError as exc:
+            raise ConfigurationError(
+                f"sources.nvd_api_key_file cannot be read: {nvd_api_key_file}"
+            ) from exc
+        if not nvd_api_key_file.is_file():
+            raise ConfigurationError(
+                f"sources.nvd_api_key_file must be a file: {nvd_api_key_file}"
+            )
+        if details.st_size > 16 * 1024:
+            raise ConfigurationError("sources.nvd_api_key_file must be at most 16384 bytes")
+        if os.name == "posix" and stat.S_IMODE(details.st_mode) & 0o077:
+            raise ConfigurationError(
+                "sources.nvd_api_key_file must not be group or other accessible"
+            )
     raw_recipients = email_data.get("recipients", [])
     if not isinstance(raw_recipients, list) or not all(
         isinstance(value, str) and value.strip() for value in raw_recipients
@@ -337,6 +373,7 @@ def load_config(path: str | Path) -> AppConfig:
             eu_kev_enabled=_boolean(source_data, "eu_kev_enabled", True),
             epss_enabled=_boolean(source_data, "epss_enabled", True),
             nvd_api_key_env=nvd_api_key_env.strip(),
+            nvd_api_key_file=nvd_api_key_file,
             minimum_request_interval=_positive_number(
                 source_data.get("minimum_request_interval", 6),
                 "sources.minimum_request_interval",

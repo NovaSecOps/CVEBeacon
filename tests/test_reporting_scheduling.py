@@ -111,4 +111,5 @@ def test_linux_install_preserves_unrelated_crontab(tmp_path, monkeypatch):
         writes.append(kwargs["input"]); return Result()
     plan = make_plan(tmp_path / "config.toml", 4, executable="/opt/cvebeacon")
     install(plan, run=fake_run)
-    assert "backup" in writes[0] and CRON_BEGIN in writes[0] and CRON_END in writes[0]
+    value = writes[0].decode("utf-8")
+    assert "backup" in value and CRON_BEGIN in value and CRON_END in value
