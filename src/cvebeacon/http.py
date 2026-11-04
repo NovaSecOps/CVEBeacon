@@ -115,21 +115,36 @@ class HttpClient:
         self._last_request[key] = self._monotonic()
 
     @staticmethod
+    def _retry_after_value(value: str | None, ceiling: float = 120.0) -> float | None:
+        """Parse a usable Retry-After, or return None for a missing or invalid one."""
+        if not value:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except (TypeError, ValueError, OverflowError):
+            number = None
+        if number is not None:
+            if not math.isfinite(number):
+                return None
+            return min(max(number, 0.0), ceiling)
+        try:
+            parsed = email.utils.parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return min(
+            max((parsed - datetime.now(timezone.utc)).total_seconds(), 0.0),
+            ceiling,
+        )
+
+    @staticmethod
     def _retry_after(value: str | None, fallback: float, ceiling: float = 120.0) -> float:
-        if value:
-            try:
-                number = float(value)
-                if math.isfinite(number):
-                    return min(max(number, 0), ceiling)
-            except ValueError:
-                try:
-                    parsed = email.utils.parsedate_to_datetime(value)
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=timezone.utc)
-                    return min(max((parsed - datetime.now(timezone.utc)).total_seconds(), 0), ceiling)
-                except (TypeError, ValueError, OverflowError):
-                    pass
-        return min(fallback, ceiling)
+        parsed = HttpClient._retry_after_value(value, ceiling)
+        return fallback if parsed is None else parsed
 
     def request_json(
         self,
@@ -181,14 +196,9 @@ class HttpClient:
                 and response.status_code in THROTTLE_STATUS
                 and throttle.succeeded
             ):
-                retry_after = (
-                    self._retry_after(
-                        response.headers.get("Retry-After"),
-                        0.0,
-                        throttle.maximum_delay,
-                    )
-                    if response.headers.get("Retry-After")
-                    else None
+                retry_after = self._retry_after_value(
+                    response.headers.get("Retry-After"),
+                    throttle.maximum_delay,
                 )
                 if throttle.wait(retry_after):
                     continue

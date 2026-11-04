@@ -876,6 +876,58 @@ def test_euvd_honors_retry_after_on_a_429(tmp_path):
     assert summary.throttle_wait == 30
 
 
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("not-a-date", [60.0]),
+        (" ", [60.0]),
+        ("", [60.0]),
+        ("nan", [60.0]),
+        ("inf", [60.0]),
+        ("-inf", [60.0]),
+        ("1e999", [60.0]),
+        ("9" * 400, [60.0]),
+        ("1" + "0" * 100, [240.0]),
+        ("120", [120.0]),
+        ("0", [0.0]),
+        ("Wed, 21 Oct 2015 07:28:00 GMT", [0.0]),
+        ("Sun, 06 Nov 2094 08:49:37 GMT", [240.0]),
+    ],
+)
+def test_euvd_retry_after_values(header, expected, tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
+    sleeps: list[float] = []
+    blocked = [True]
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def euvd_request(request):
+        page = int(dict(request.url.params)["page"])
+        if page == 0:
+            return httpx.Response(
+                200,
+                json={
+                    "total": 101,
+                    "items": [euvd_item(f"EUVD-{index}") for index in range(100)],
+                },
+            )
+        if blocked[0]:
+            blocked[0] = False
+            return httpx.Response(429, headers={"Retry-After": header})
+        return httpx.Response(
+            200, json={"total": 101, "items": [euvd_item("EUVD-100")]}
+        )
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=euvd_request),
+        sleep=sleeps.append,
+    )
+    assert not report.failures
+    assert sleeps == expected
+
+
 def test_euvd_gives_up_after_the_throttle_budget_and_resumes(tmp_path):
     config = write_config(
         tmp_path, sources=("nvd", "euvd"), initial="backfill", backfill_days=60

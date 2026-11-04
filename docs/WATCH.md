@@ -748,13 +748,14 @@ at the chunk end: same-day EUVD queries otherwise report a total below the
 number of items they return. Requests are paced at least one second apart.
 
 When a request returns HTTP 403 or 429 after at least one successful request in
-the run, watch mode treats it as throttling. It honours `Retry-After` when
-present and otherwise waits 60, 120, then 240 seconds, then retries the same
-request. Each wait is capped at 240 seconds and all waits share a 10-minute
-budget per run, including the EU KEV dump on the same host. When the budget is
-exhausted the source fails as usual and every completed chunk stays committed.
-A 403 on a run's first EUVD request still fails immediately, because a rejected
-query is a more likely cause than throttling.
+the run, watch mode treats it as throttling. It honours a usable `Retry-After`
+when present and otherwise waits 60, 120, then 240 seconds, then retries the
+same request; an unusable header uses those scheduled waits. Each wait is
+capped at 240 seconds and all waits share a 10-minute budget per run, including
+the EU KEV dump on the same host. When the budget is exhausted the source fails
+as usual and every completed chunk stays committed. A 403 on a run's first EUVD
+request still fails immediately, because a rejected query is a more likely
+cause than throttling.
 
 A page that repeats an EUVD id restarts the chunk through the same bounded
 retry path, and the distinct item count must equal the pinned total before the
