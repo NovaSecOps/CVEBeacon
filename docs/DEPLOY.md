@@ -370,6 +370,8 @@ counts and pending deliveries, and `cb watch notify test soc-email` checks a cha
 Pick one registration flow. Both must show
 `Runs as: CVEHOST\svc-cvebeacon (S4U, while logged off)` before `--yes`. S4U
 stores no password: HTTPS works, Windows-authenticated shares do not.
+CVEBeacon passes `/RU <account> /NP` and closes `schtasks` stdin, so registration
+does not prompt for or store a password.
 
 **The service account registers its own task.** In the service account's shell
 (`runas /user:CVEHOST\svc-cvebeacon powershell`), define `cb` there, then:
