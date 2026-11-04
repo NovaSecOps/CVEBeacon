@@ -537,11 +537,16 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
                     handle.write(_windows_xml(plan))
                     handle.flush()
                     os.fsync(handle.fileno())
+                arguments = ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK]
+                if plan.run_logged_out:
+                    arguments.extend(["/RU", plan.user_id, "/NP"])
+                arguments.append("/F")
                 result = run(
-                    ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK, "/F"],
+                    arguments,
                     capture_output=True,
                     text=True,
                     check=False,
+                    stdin=subprocess.DEVNULL,
                 )
             finally:
                 try:
@@ -549,7 +554,13 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
                 except OSError:
                     pass
         else:
-            result = run(_windows_args(plan), capture_output=True, text=True, check=False)
+            result = run(
+                _windows_args(plan),
+                capture_output=True,
+                text=True,
+                check=False,
+                stdin=subprocess.DEVNULL,
+            )
     else:
         existing = _read_crontab(run)
         clean = _without_managed_block(existing)
@@ -617,7 +628,12 @@ def _command_text(value) -> str:
 def status(*, system: str = "auto", run=subprocess.run) -> str:
     resolved = _host_system(system)
     if resolved == "windows":
-        result = run(["schtasks", "/Query", "/TN", WINDOWS_TASK, "/XML"], capture_output=True, check=False)
+        result = run(
+            ["schtasks", "/Query", "/TN", WINDOWS_TASK, "/XML"],
+            capture_output=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
         stdout = _command_text(getattr(result, "stdout", ""))
         stderr = _command_text(getattr(result, "stderr", ""))
         if result.returncode == 0:
@@ -640,7 +656,13 @@ def status(*, system: str = "auto", run=subprocess.run) -> str:
 def remove(*, system: str = "auto", run=subprocess.run) -> bool:
     resolved = _host_system(system)
     if resolved == "windows":
-        result = run(["schtasks", "/Delete", "/F", "/TN", WINDOWS_TASK], capture_output=True, text=True, check=False)
+        result = run(
+            ["schtasks", "/Delete", "/F", "/TN", WINDOWS_TASK],
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
         if result.returncode == 0: return True
         message = f"{result.stdout}\n{result.stderr}".casefold()
         if any(value in message for value in ("cannot find", "not found", "does not exist")): return False
