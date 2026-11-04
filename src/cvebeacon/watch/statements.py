@@ -21,7 +21,7 @@ from pathlib import Path
 from string import Template
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
-from xml.etree import ElementTree
+from xml.parsers import expat
 from xml.sax.saxutils import escape
 
 from ..errors import CVEBeaconError
@@ -36,6 +36,8 @@ MAX_TEMPLATE_BYTES = 20 * 1024 * 1024
 MAX_MEMBER_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_BYTES = 200 * 1024 * 1024
 MAX_RENDERED_BYTES = 50 * 1024 * 1024
+MAX_XML_DEPTH = 256
+MAX_XML_SPANS = 100_000
 WORDPROCESSING_NS = (
     "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 )
@@ -85,15 +87,6 @@ _PART_NAME = re.compile(
 _INVALID_XML = re.compile(
     "[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]"
 )
-_ENTITY = re.compile(r"&(#[0-9]+|#x[0-9A-Fa-f]+|amp|lt|gt|quot|apos);")
-_NAMED_ENTITIES = {
-    "amp": "&",
-    "lt": "<",
-    "gt": ">",
-    "quot": '"',
-    "apos": "'",
-}
-_ATTRIBUTE = re.compile(r"""([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 
 
 def _text(value: Any) -> str:
@@ -288,215 +281,173 @@ def render_text(template: str, fields: Mapping[str, str]) -> str:
     return "".join(pieces)
 
 
-def _xml_unescape(raw: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
-        if name in _NAMED_ENTITIES:
-            return _NAMED_ENTITIES[name]
-        base = 16 if name.startswith("#x") else 10
-        digits = name[2:] if base == 16 else name[1:]
-        try:
-            value = chr(int(digits, base))
-        except (ValueError, OverflowError) as exc:
-            raise CVEBeaconError(
-                "statement template contains an invalid character reference"
-            ) from exc
-        return value
-
-    value = _ENTITY.sub(replace, raw)
-    position = 0
-    while True:
-        amp = raw.find("&", position)
-        if amp < 0:
-            break
-        match = _ENTITY.match(raw, amp)
-        if match is None:
-            raise CVEBeaconError(
-                "statement template contains an invalid XML entity reference"
-            )
-        position = match.end()
-    return value
+def _xml_encoding(data: bytes) -> str:
+    if data.startswith((b"\xff\xfe\0\0", b"\0\0\xfe\xff", b"\0\0\0<", b"<\0\0\0")):
+        raise CVEBeaconError("statement template XML encoding must be UTF-8 or UTF-16")
+    if data.startswith((b"\xff\xfe", b"<\0")):
+        return "utf-16-le"
+    if data.startswith((b"\xfe\xff", b"\0<")):
+        return "utf-16-be"
+    return "utf-8"
 
 
-def _xml_escape(value: str) -> str:
-    return escape(_INVALID_XML.sub("", value))
-
-
-def _normalized_lines(value: str) -> list[str]:
-    value = value.replace("\r\n", "\n").replace("\r", "\n")
-    return value.split("\n")
-
-
-def _text_element(qname: str, attrs: str, value: str) -> str:
-    if "xml:space" not in attrs:
-        attrs += ' xml:space="preserve"'
-    lines = [_xml_escape(line) for line in _normalized_lines(value)]
-    if len(lines) == 1:
-        return f"<{qname}{attrs}>{lines[0]}</{qname}>"
-    prefix = qname.split(":", 1)[0] + ":" if ":" in qname else ""
-    separator = f"</{qname}><{prefix}br/><{qname}{attrs}>"
-    return f"<{qname}{attrs}>" + separator.join(lines) + f"</{qname}>"
-
-
-def _tag_end(xml: str, start: int) -> int:
-    quote_char = ""
-    index = start
-    while index < len(xml):
-        char = xml[index]
+def _tag_end(data: bytes, start: int, encoding: str) -> int:
+    """Find the end of an already validated tag without interpreting attributes."""
+    width = 1 if encoding == "utf-8" else 2
+    quote_char = b""
+    quotes = ("'".encode(encoding), '"'.encode(encoding))
+    close = ">".encode(encoding)
+    for index in range(start, len(data), width):
+        char = data[index:index + width]
         if quote_char:
             if char == quote_char:
-                quote_char = ""
-        elif char in "\"'":
+                quote_char = b""
+        elif char in quotes:
             quote_char = char
-        elif char == ">":
-            return index
-        index += 1
-    return -1
+        elif char == close:
+            return index + width
+    raise CVEBeaconError("statement template XML is malformed")
 
 
-def _name_end(body: str) -> int:
-    for index, char in enumerate(body):
-        if char.isspace() or char == "/":
-            return index
-    return len(body)
+@dataclass(slots=True)
+class _ContainerSpan:
+    start: int
+    end: int
+    empty: bool
+    texts: list[int]
 
 
-def _namespace_declarations(attrs: str) -> dict[str, str]:
-    declarations: dict[str, str] = {}
-    for match in _ATTRIBUTE.finditer(attrs):
-        name = match.group(1)
-        value = match.group(2) if match.group(2) is not None else match.group(3)
-        if name == "xmlns":
-            declarations[""] = _xml_unescape(value)
-        elif name.startswith("xmlns:"):
-            declarations[name[6:]] = _xml_unescape(value)
-    return declarations
-
-
-def _malformed(detail: str) -> CVEBeaconError:
-    return CVEBeaconError(f"statement template XML is malformed: {detail}")
-
-
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _TextSpan:
     start: int
     end: int
-    qname: str
-    attrs: str
+    opening: str
+    closing: str
+    line_break: str
     text: str
+    empty: bool
+    run: _ContainerSpan | None
 
 
-def _scan_part(xml: str) -> tuple[tuple[_TextSpan, ...], tuple[tuple[int, ...], ...]]:
-    """Scan one XML part once and return text spans grouped by paragraph.
+_Scan = tuple[list[_TextSpan], list[_ContainerSpan], str]
 
-    The scan understands comments, CDATA, processing instructions, namespace
-    prefixes and nested paragraphs.  A text element is attached to its
-    innermost paragraph, so placeholders cannot span two paragraphs.
-    """
+
+def _parse_xml(data: bytes, name: str, *, collect: bool = False) -> _Scan:
+    """Validate XML and optionally retain text byte spans by innermost paragraph."""
+    encoding = _xml_encoding(data)
+    empty_tag_end = "/>".encode(encoding)
+    parser = expat.ParserCreate(namespace_separator="|")
+    parser.namespace_prefixes = True
+    parser.buffer_text = True
+    parser.buffer_size = 64 * 1024
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
     spans: list[_TextSpan] = []
-    groups: list[list[int]] = []
-    stack: list[tuple[str, bool]] = []
-    namespaces: list[dict[str, str]] = [{"xml": "http://www.w3.org/XML/1998/namespace"}]
-    paragraphs: list[int] = []
-    index = 0
-    while index < len(xml):
-        start = xml.find("<", index)
-        if start < 0:
-            break
-        if xml.startswith("<!--", start):
-            end = xml.find("-->", start + 4)
-            if end < 0:
-                raise _malformed("unclosed comment")
-            index = end + 3
-            continue
-        if xml.startswith("<![CDATA[", start):
-            end = xml.find("]]>", start + 9)
-            if end < 0:
-                raise _malformed("unclosed CDATA section")
-            index = end + 3
-            continue
-        if xml.startswith("<?", start):
-            end = xml.find("?>", start + 2)
-            if end < 0:
-                raise _malformed("unclosed processing instruction")
-            index = end + 2
-            continue
-        if xml.startswith("<!DOCTYPE", start) or xml.startswith("<!ENTITY", start):
-            raise CVEBeaconError(
-                "statement template must not declare a DTD or XML entities"
-            )
-        if xml.startswith("<!", start):
-            raise _malformed("unsupported declaration")
-        if xml.startswith("</", start):
-            end = xml.find(">", start + 2)
-            if end < 0:
-                raise _malformed("unclosed closing tag")
-            qname = xml[start + 2 : end].strip()
-            if not stack or stack[-1][0] != qname:
-                raise _malformed("unexpected or mismatched closing tag")
-            _, is_paragraph = stack.pop()
-            namespaces.pop()
-            if is_paragraph:
-                paragraphs.pop()
-            index = end + 1
-            continue
-        end = _tag_end(xml, start + 1)
-        if end < 0:
-            raise _malformed("unclosed opening tag")
-        body = xml[start + 1 : end]
-        self_closing = body.rstrip().endswith("/")
-        if self_closing:
-            body = body.rstrip()[:-1]
-        name_end = _name_end(body)
-        qname = body[:name_end]
-        if not qname:
-            raise _malformed("empty element name")
-        attrs = body[name_end:]
-        prefix, local = (
-            qname.split(":", 1) if ":" in qname else ("", qname)
+    groups: list[_ContainerSpan] = []
+    paragraphs: list[_ContainerSpan] = []
+    runs: list[_ContainerSpan] = []
+    depth = count = 0
+    declarations: set[str] = set()
+    active: _TextSpan | None = None
+    text = io.StringIO()
+
+    def reject(*args):
+        raise CVEBeaconError(
+            f"statement template part {name} declares a DTD or XML entities"
         )
-        declarations = _namespace_declarations(attrs)
-        scope = namespaces[-1]
-        if declarations:
-            scope = dict(scope)
-            scope.update(declarations)
-        uri = scope.get(prefix, "") if prefix else scope.get("", "")
-        is_paragraph = uri == WORDPROCESSING_NS and local == "p"
-        is_text = uri == WORDPROCESSING_NS and local == "t"
-        if is_text:
-            if self_closing:
-                index = end + 1
-                continue
-            if not paragraphs:
-                raise _malformed("text outside a paragraph")
-            close = xml.find("<", end + 1)
-            if close < 0 or not xml.startswith("</", close):
-                raise _malformed("a text element contains nested markup")
-            close_end = _tag_end(xml, close + 2)
-            if close_end < 0 or xml[close + 2 : close_end].strip() != qname:
-                raise _malformed("mismatched text element")
-            spans.append(
-                _TextSpan(
-                    start,
-                    close_end + 1,
-                    qname,
-                    attrs,
-                    _xml_unescape(xml[end + 1 : close]),
-                )
+
+    def declaration(version, declared, standalone):
+        if declared and declared.lower() not in ("utf-8", "utf-16", "utf-16le", "utf-16be"):
+            raise CVEBeaconError("statement template XML encoding must be UTF-8 or UTF-16")
+
+    def namespace(prefix, uri):
+        nonlocal count
+        count += 1
+        if count > MAX_XML_SPANS:
+            raise CVEBeaconError("statement template XML span limit exceeded")
+        declarations.add(prefix or "")
+
+    def start(tag, attrs):
+        nonlocal depth, count, active, text
+        depth += 1
+        count += 1
+        if depth > MAX_XML_DEPTH or count > MAX_XML_SPANS:
+            raise CVEBeaconError("statement template XML depth or span limit exceeded")
+        if not collect:
+            declarations.clear()
+            return
+        if active is not None:
+            raise CVEBeaconError("statement template XML is malformed: nested text element")
+        parts = tag.split("|")
+        local = parts[1] if len(parts) > 1 and parts[0] == WORDPROCESSING_NS else ""
+        if local in ("p", "r"):
+            offset = parser.CurrentByteIndex
+            end = _tag_end(data, offset, encoding)
+            empty = data[end - len(empty_tag_end):end] == empty_tag_end
+            container = _ContainerSpan(offset, end, empty, [])
+            if local == "p":
+                paragraphs.append(container)
+                groups.append(container)
+            else:
+                runs.append(container)
+        elif local == "t" and paragraphs:
+            prefix = parts[2] if len(parts) == 3 else ""
+            qname = f"{prefix}:t" if prefix else "t"
+            offset = parser.CurrentByteIndex
+            end = _tag_end(data, offset, encoding)
+            opening = data[offset:end].decode(encoding)
+            # A declaration on t ceases to apply to its generated sibling br.
+            binding = (f' xmlns:{prefix}="{WORDPROCESSING_NS}"' if prefix
+                       else f' xmlns="{WORDPROCESSING_NS}"') if prefix in declarations else ""
+            br = f'<{prefix + ":" if prefix else ""}br{binding}/>'
+            active = _TextSpan(
+                offset, end, opening, f"</{qname}>", br, "",
+                opening.endswith("/>"), runs[-1] if runs else None,
             )
-            groups[paragraphs[-1]].append(len(spans) - 1)
-            index = close_end + 1
-            continue
-        if not self_closing:
-            if is_paragraph:
-                groups.append([])
-                paragraphs.append(len(groups) - 1)
-            stack.append((qname, is_paragraph))
-            namespaces.append(scope)
-        index = end + 1
-    if stack:
-        raise _malformed("unclosed element")
-    return tuple(spans), tuple(tuple(group) for group in groups)
+            text = io.StringIO()
+            paragraphs[-1].texts.append(len(spans))
+            spans.append(active)
+            if not active.empty and "http://www.w3.org/XML/1998/namespace|space|xml" not in attrs:
+                active.opening = opening[:-1] + ' xml:space="preserve">'
+        elif local == "t":
+            raise CVEBeaconError("statement template XML is malformed: text outside a paragraph")
+        declarations.clear()
+
+    def end(tag):
+        nonlocal depth, active
+        if active is not None:
+            # For an empty element Expat reports the byte after its opening tag.
+            if not active.empty:
+                active.end = _tag_end(data, parser.CurrentByteIndex, encoding)
+            active.text = text.getvalue()
+            active = None
+        if collect and tag.startswith(WORDPROCESSING_NS + "|"):
+            local = tag.split("|")[1]
+            if local in ("p", "r"):
+                container = (paragraphs if local == "p" else runs).pop()
+                if not container.empty:
+                    container.end = _tag_end(data, parser.CurrentByteIndex, encoding)
+        depth -= 1
+
+    def characters(value):
+        if active is not None:
+            text.write(value)
+
+    parser.XmlDeclHandler = declaration
+    parser.StartDoctypeDeclHandler = reject
+    parser.EntityDeclHandler = reject
+    parser.ExternalEntityRefHandler = reject
+    parser.StartNamespaceDeclHandler = namespace
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    if collect:
+        parser.CharacterDataHandler = characters
+    try:
+        parser.Parse(data, True)
+    except expat.ExpatError as exc:
+        raise CVEBeaconError(f"statement template part {name} XML is malformed") from exc
+    except (LookupError, ValueError) as exc:
+        raise CVEBeaconError("statement template XML encoding must be UTF-8 or UTF-16") from exc
+    return spans, groups, encoding
 
 
 def _append_literal(
@@ -518,83 +469,89 @@ def _append_literal(
 
 
 def _substitute_group(
-    joined: str,
-    texts: Sequence[str],
-    values: Mapping[str, str],
-    budget: int,
-) -> tuple[list[str], int]:
+    joined: str, texts: Sequence[str], values: Mapping[str, str]
+) -> list[list[str]]:
     starts: list[int] = []
     total = 0
     for text in texts:
         starts.append(total)
         total += len(text)
     fragments: list[list[str]] = [[] for _ in texts]
-    expansion = 0
     cursor = 0
-    for match in _PLACEHOLDER.finditer(joined):
+    for count, match in enumerate(_PLACEHOLDER.finditer(joined), 1):
+        if count > MAX_XML_SPANS:
+            raise CVEBeaconError("statement template placeholder limit exceeded")
         _append_literal(fragments, texts, starts, joined, cursor, match.start())
-        if match.group("invalid") is not None:
-            raise _invalid_placeholder()
-        if match.group("escaped") is not None:
-            replacement = "$"
-        else:
-            name = match.group("named") or match.group("braced")
-            replacement = values[str(name)]
-        expansion += len(replacement.encode("utf-8"))
-        if expansion > budget:
-            raise _rendered_too_large()
+        replacement = "$" if match.group("escaped") is not None else values[
+            str(match.group("named") or match.group("braced"))
+        ]
         fragments[bisect_right(starts, match.start()) - 1].append(replacement)
         cursor = match.end()
     _append_literal(fragments, texts, starts, joined, cursor, len(joined))
-    return ["".join(parts) for parts in fragments], expansion
+    return fragments
 
 
-def _paragraph_texts(
-    spans: Sequence[_TextSpan], groups: Sequence[Sequence[int]]
-) -> tuple[str, ...]:
-    return tuple("".join(spans[index].text for index in group) for group in groups)
+def _serialized_text(
+    span: _TextSpan, fragments: Sequence[str], encoding: str, budget: int
+) -> bytes:
+    """Count all escaped bytes and repeated markup before constructing a span."""
+    opening = span.opening.encode(encoding)
+    closing = span.closing.encode(encoding)
+    separator = (span.closing + span.line_break + span.opening).encode(encoding)
+    size = len(opening) + len(closing)
+    if size > budget:
+        raise _rendered_too_large()
+    for fragment in fragments:
+        value = _INVALID_XML.sub("", fragment.replace("\r\n", "\n").replace("\r", "\n"))
+        size += len(value.encode(encoding))
+        escapes = value.count("&") * 4 + value.count("<") * 3 + value.count(">") * 3
+        size += escapes * (1 if encoding == "utf-8" else 2)
+        size += value.count("\n") * (len(separator) - len("\n".encode(encoding)))
+        if size > budget:
+            raise _rendered_too_large()
+    output = io.BytesIO()
+    output.write(opening)
+    for fragment in fragments:
+        value = _INVALID_XML.sub("", fragment.replace("\r\n", "\n").replace("\r", "\n"))
+        for index, line in enumerate(value.split("\n")):
+            if index:
+                output.write(separator)
+            output.write(escape(line).encode(encoding))
+    output.write(closing)
+    return output.getvalue()
 
 
-def _render_scanned(
-    raw: str,
-    spans: Sequence[_TextSpan],
-    groups: Sequence[Sequence[int]],
-    paragraphs: Sequence[str],
-    values: Mapping[str, str],
-    budget: int,
-) -> tuple[str, int]:
-    texts = [span.text for span in spans]
-    updates: list[str | None] = [None] * len(spans)
-    expansion = 0
-    for group, paragraph in zip(groups, paragraphs):
+def _render_part(raw: bytes, scan: _Scan, values: Mapping[str, str], budget: int) -> bytes:
+    spans, groups, encoding = scan
+    updates: dict[int, bytes] = {}
+    size = len(raw)
+    for paragraph_span in groups:
+        group = paragraph_span.texts
+        texts = [spans[index].text for index in group]
+        paragraph = "".join(texts)
         if "$" not in paragraph:
             continue
-        new_texts, used = _substitute_group(
-            paragraph,
-            [texts[index] for index in group],
-            values,
-            budget - expansion,
-        )
-        expansion += used
-        for index, new in zip(group, new_texts):
-            if new != texts[index]:
-                updates[index] = new
-    if all(update is None for update in updates):
-        return raw, expansion
-    pieces: list[str] = []
-    cursor = 0
-    for span, update in zip(spans, updates):
-        pieces.append(raw[cursor : span.start])
-        if update is None:
-            pieces.append(raw[span.start : span.end])
-        else:
-            pieces.append(_text_element(span.qname, span.attrs, update))
-        cursor = span.end
-    pieces.append(raw[cursor:])
-    result = "".join(pieces)
-    if len(result.encode("utf-8")) > MAX_MEMBER_BYTES:
+        for index, fragments in zip(group, _substitute_group(paragraph, texts, values)):
+            span = spans[index]
+            if (not fragments and not span.text) or fragments == [span.text]:
+                continue
+            available = min(MAX_MEMBER_BYTES, budget) - size + span.end - span.start
+            replacement = _serialized_text(span, fragments, encoding, available)
+            size += len(replacement) - (span.end - span.start)
+            updates[index] = replacement
+    if size > min(MAX_MEMBER_BYTES, budget):
         raise _rendered_too_large()
-    return result, expansion
+    if not updates:
+        return raw
+    output = io.BytesIO()
+    cursor = 0
+    for index, span in enumerate(spans):
+        if index in updates:
+            output.write(memoryview(raw)[cursor:span.start])
+            output.write(updates[index])
+            cursor = span.end
+    output.write(memoryview(raw)[cursor:])
+    return output.getvalue()
 
 
 def _check_members(infos: Sequence[zipfile.ZipInfo]) -> None:
@@ -619,46 +576,53 @@ def _check_members(infos: Sequence[zipfile.ZipInfo]) -> None:
 
 
 def _read_member(source: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
-    if info.file_size > MAX_MEMBER_BYTES:
-        raise CVEBeaconError(
-            "statement template contains a member larger than "
-            f"{MAX_MEMBER_BYTES} bytes"
-        )
+    """Verify complete stored/DEFLATE streams without ZipExtFile's size truncation."""
+    if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        raise CVEBeaconError("statement template uses unsupported compression")
     try:
-        with source.open(info) as handle:
-            data = handle.read(MAX_MEMBER_BYTES + 1)
+        # Let zipfile validate local headers, names, flags and overlapping entries.
+        # Read the compressed stream directly: ZipExtFile trusts file_size and
+        # can silently truncate a stream with a forged size and matching CRC.
+        with source.open(info):
+            position = source.fp.tell()
+        source.fp.seek(position)
+        decoder = (
+            zlib.decompressobj(-15)
+            if info.compress_type == zipfile.ZIP_DEFLATED else None
+        )
+        output = io.BytesIO()
+        crc = count = 0
+        remaining = info.compress_size
+        while remaining:
+            chunk = source.fp.read(min(64 * 1024, remaining))
+            if not chunk:
+                raise zipfile.BadZipFile("incomplete compressed stream")
+            remaining -= len(chunk)
+            if decoder:
+                chunk = decoder.decompress(
+                    chunk, min(info.file_size, MAX_MEMBER_BYTES) - count + 1
+                )
+            count += len(chunk)
+            if count > min(info.file_size, MAX_MEMBER_BYTES):
+                raise zipfile.BadZipFile("invalid member size")
+            crc = zlib.crc32(chunk, crc)
+            output.write(chunk)
+            if decoder and (decoder.unconsumed_tail or decoder.unused_data):
+                raise zipfile.BadZipFile("inconsistent compressed stream")
+        if count != info.file_size or crc != info.CRC or (decoder and not decoder.eof):
+            raise zipfile.BadZipFile("inconsistent member")
+        return output.getvalue()
     except (
-        zipfile.BadZipFile,
-        OSError,
-        NotImplementedError,
-        RuntimeError,
-        EOFError,
-        zlib.error,
+        zipfile.BadZipFile, OSError, NotImplementedError, RuntimeError,
+        EOFError, zlib.error,
     ) as exc:
-        raise CVEBeaconError(
-            "statement template contains an unreadable member"
-        ) from exc
-    if len(data) > MAX_MEMBER_BYTES:
-        raise CVEBeaconError(
-            "statement template contains a member larger than "
-            f"{MAX_MEMBER_BYTES} bytes"
-        )
-    return data
-
-
-def _reject_declarations(data: bytes, name: str) -> None:
-    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
-        raise CVEBeaconError(
-            f"statement template part {name} declares a DTD or XML entities"
-        )
+        raise CVEBeaconError("statement template contains an unreadable member") from exc
 
 
 def render_docx(template: bytes, fields: Mapping[str, str]) -> bytes:
     """Fill placeholders in a .docx template and return the new document bytes."""
     if len(template) > MAX_TEMPLATE_BYTES:
-        raise CVEBeaconError(
-            f"statement template is larger than {MAX_TEMPLATE_BYTES} bytes"
-        )
+        raise CVEBeaconError(f"statement template is larger than {MAX_TEMPLATE_BYTES} bytes")
     values = _values(fields)
     try:
         source = zipfile.ZipFile(io.BytesIO(template))
@@ -667,80 +631,44 @@ def render_docx(template: bytes, fields: Mapping[str, str]) -> bytes:
     with source:
         infos = source.infolist()
         names = {info.filename for info in infos}
+        if len(names) != len(infos):
+            raise CVEBeaconError("statement template contains duplicate package members")
         if "[Content_Types].xml" not in names or "word/document.xml" not in names:
             raise CVEBeaconError("statement template is not a Word document")
         _check_members(infos)
-        processed: dict[str, str] = {}
-        scanned_total = 0
+        processed: dict[str, tuple[bytes, _Scan]] = {}
+        unknown: set[str] = set()
         for info in infos:
-            suffix = info.filename.casefold()
-            if not (suffix.endswith(".xml") or suffix.endswith(".rels")):
+            if not info.filename.casefold().endswith((".xml", ".rels")):
                 continue
             data = _read_member(source, info)
-            scanned_total += len(data)
-            if scanned_total > MAX_TOTAL_BYTES:
-                raise CVEBeaconError(
-                    f"statement template expands to more than {MAX_TOTAL_BYTES} bytes"
-                )
-            _reject_declarations(data, info.filename)
-            if _PART_NAME.match(info.filename):
-                try:
-                    processed[info.filename] = data.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise CVEBeaconError(
-                        "statement template contains an unreadable "
-                        "WordprocessingML part"
-                    ) from exc
-        rendered: dict[str, bytes] = {}
-        scans = {
-            name: _scan_part(raw) for name, raw in processed.items()
-        }
-        unknown: set[str] = set()
-        paragraphs_by_part: dict[str, tuple[str, ...]] = {}
-        for name, (spans, groups) in scans.items():
-            paragraphs = _paragraph_texts(spans, groups)
-            paragraphs_by_part[name] = paragraphs
-            for paragraph in paragraphs:
-                if "$" in paragraph:
-                    _check_text(paragraph, unknown)
+            collect = bool(_PART_NAME.fullmatch(info.filename))
+            scan = _parse_xml(data, info.filename, collect=collect)
+            if collect:
+                processed[info.filename] = data, scan
+                spans, groups, _ = scan
+                for group in groups:
+                    _check_text("".join(spans[index].text for index in group.texts), unknown)
         if unknown:
             raise _unknown_error(unknown)
-        expansion = 0
-        for name, raw in processed.items():
-            spans, groups = scans[name]
-            result, used = _render_scanned(
-                raw,
-                spans,
-                groups,
-                paragraphs_by_part[name],
-                values,
-                MAX_RENDERED_BYTES - expansion,
-            )
-            expansion += used
-            data = result.encode("utf-8")
-            try:
-                ElementTree.fromstring(data)
-            except ElementTree.ParseError as exc:
-                raise CVEBeaconError(
-                    f"generated statement part {name} is not well-formed XML"
-                ) from exc
-            rendered[name] = data
         output = io.BytesIO()
-        written = 0
+        written = rendered = 0
         with zipfile.ZipFile(output, "w") as target:
             target.comment = source.comment
-            ordered = sorted(
-                infos, key=lambda info: info.filename != "[Content_Types].xml"
-            )
-            for info in ordered:
-                data = rendered.get(info.filename)
-                if data is None:
+            for info in sorted(infos, key=lambda info: info.filename != "[Content_Types].xml"):
+                if info.filename in processed:
+                    raw, scan = processed.pop(info.filename)
+                    data = _render_part(
+                        raw, scan, values,
+                        min(MAX_RENDERED_BYTES - rendered, MAX_TOTAL_BYTES - written),
+                    )
+                    rendered += len(data)
+                else:
                     data = _read_member(source, info)
                 written += len(data)
                 if written > MAX_TOTAL_BYTES:
                     raise CVEBeaconError(
-                        "statement template expands to more than "
-                        f"{MAX_TOTAL_BYTES} bytes"
+                        f"statement template expands to more than {MAX_TOTAL_BYTES} bytes"
                     )
                 target.writestr(info, data)
         return output.getvalue()
