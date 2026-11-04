@@ -148,7 +148,7 @@ class HttpClient:
     @staticmethod
     def _retry_after(value: str | None, fallback: float, ceiling: float = 120.0) -> float:
         parsed = HttpClient._retry_after_value(value, ceiling)
-        return fallback if parsed is None else parsed
+        return min(fallback, ceiling) if parsed is None else parsed
 
     def request_json(
         self,
@@ -224,7 +224,7 @@ class HttpClient:
                     source,
                     f"HTTP {response.status_code}",
                     status_code=response.status_code,
-                    requests=attempt + 1,
+                    requests=self.requests - requests_before,
                 )
             delay = self.config.backoff_seconds * (2**attempt)
             self._sleep(self._retry_after(response.headers.get("Retry-After"), delay))
@@ -233,7 +233,7 @@ class HttpClient:
         raise SourceError(
             source,
             f"request failed after bounded retries ({failure_type})",
-            requests=retry_count + 1,
+            requests=self.requests - requests_before,
         )
 
     def stream_bytes(
