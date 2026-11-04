@@ -282,12 +282,16 @@ class UserStore:
         with the lock is still checked by the content verification below.
         """
         lock_path = path.with_name(path.name + ".lock")
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(
-                lock_path,
-                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
+            try:
+                descriptor = os.open(
+                    lock_path, flags | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                created = True
+            except FileExistsError:
+                descriptor = os.open(lock_path, flags)
+                created = False
         except OSError as exc:
             raise StateError(
                 f"cannot open CVEBeacon user database lock {lock_path}: {exc}"
@@ -305,6 +309,13 @@ class UserStore:
                         raise StateError(
                             "CVEBeacon user database lock must be owned by "
                             "this account"
+                        )
+                    if created:
+                        os.fchmod(descriptor, 0o600)
+                    elif stat.S_IMODE(details.st_mode) & 0o077:
+                        raise StateError(
+                            "CVEBeacon user database lock must not be group "
+                            "or other accessible"
                         )
                     import fcntl
 

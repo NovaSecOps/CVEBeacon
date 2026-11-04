@@ -1403,6 +1403,30 @@ def test_fresh_store_accepts_an_independent_write_during_open(
     assert reader.users()[0].is_admin == bootstrap
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX lock permissions")
+@pytest.mark.parametrize("mode", [0o640, 0o620, 0o604, 0o602, 0o666])
+def test_users_database_rejects_permissive_existing_locks(tmp_path, mode):
+    path = tmp_path / "users.db"
+    lock = tmp_path / "users.db.lock"
+    lock.touch()
+    lock.chmod(mode)
+    with pytest.raises(StateError, match="lock.*group or other"):
+        UserStore(path, clock=lambda: NOW).initialize()
+    assert stat.S_IMODE(lock.stat().st_mode) == mode
+    assert not path.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX lock permissions")
+@pytest.mark.parametrize("mask", [0o000, 0o777])
+def test_new_users_database_lock_is_0600_regardless_of_umask(tmp_path, mask):
+    previous = os.umask(mask)
+    try:
+        UserStore(tmp_path / "users.db", clock=lambda: NOW).initialize()
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((tmp_path / "users.db.lock").stat().st_mode) == 0o600
+
+
 def test_foreign_read_only_ancestor_is_not_trusted(tmp_path, monkeypatch):
     if os.name != "posix":
         pytest.skip("POSIX ownership model")
