@@ -339,4 +339,8 @@ sudo systemctl list-timers cvebeacon-container.timer
 
 ## C. Resource notes
 
-System requirements are still being measured; see [validation](VALIDATION.md) and the [README](../README.md).
+Measured memory, disk, time and request figures are in
+[System requirements](../README.md#system-requirements). Plan the first 120-day
+or full-history load on a machine with free disk and a stable connection; full
+history needs several syncs before EUVD is complete. Steady state after the
+initial load is small.
