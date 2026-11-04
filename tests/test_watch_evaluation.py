@@ -55,17 +55,27 @@ def test_event_uniqueness_constraint_and_pending_deliveries(tmp_path):
     configured = rule(channels=["soc-email", "teams"])
     store.evaluate_touched((configured,), catalogs=("nvd",))
     with sqlite3.connect(store.path) as db:
-        event = db.execute("SELECT id,rule,cve_id,kind,reasons_json FROM watch_event").fetchone()
+        event = db.execute(
+            "SELECT id,rule,cve_id,kind,reasons_json,occurrence FROM watch_event"
+        ).fetchone()
         deliveries = db.execute(
             "SELECT channel,status,attempts FROM watch_delivery WHERE event_id=? ORDER BY channel",
             (event[0],),
         ).fetchall()
         assert deliveries == [("soc-email", "pending", 0), ("teams", "pending", 0)]
+        assert event[5] == "match"
         with pytest.raises(sqlite3.IntegrityError):
             db.execute(
-                "INSERT INTO watch_event(rule,cve_id,kind,reasons_json,initial,created_at) "
-                "VALUES (?,?,?,?,0,?)",
-                (event[1], event[2], event[3], event[4], NOW.isoformat()),
+                "INSERT INTO watch_event(rule,cve_id,kind,reasons_json,occurrence,"
+                "initial,created_at) VALUES (?,?,?,?,?,0,?)",
+                (
+                    event[1],
+                    event[2],
+                    event[3],
+                    '["different reason"]',
+                    event[5],
+                    NOW.isoformat(),
+                ),
             )
 
 
