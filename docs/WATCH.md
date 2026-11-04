@@ -296,10 +296,10 @@ failed rows have reached the attempt cap, the line adds
 
 ## Messages
 
-All channels use the same formatter. Messages are short: one line per CVE, a
-description cut to 160 characters, each matching rule, and links. When several
-rules match the same CVE under the same label, they share one block and a
-`Rule: a, b` line.
+All channels use the same formatter. Messages are short: one header line per
+CVE, a description cut to 160 characters, each matching rule, and links. When
+several rules match the same CVE under the same label, they share one block and
+a `Rule: a, b` line.
 
 ```text
 [NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active
