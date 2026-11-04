@@ -804,6 +804,10 @@ initial sync finishes every enabled source without a failure.
 `initial_evaluated_at` is set after an initial evaluation completes during a
 clean sync, or by `watch evaluate --all` once `initial_sync_completed_at` is
 set; until then, later runs keep `initial = 1` for matches and backlog matches.
+A database whose initial sync finished before `initial_sync_completed_at`
+existed, and whose initial evaluation is still open, needs one successful
+`watch sync` after upgrading before `watch evaluate --all` can close it; one
+clean `watch run` also completes it.
 `initial_window_start` is the boundary used by the `old_cves` policy in
 baseline, backfill, and full mode.
 
