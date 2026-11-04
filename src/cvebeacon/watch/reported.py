@@ -58,6 +58,11 @@ class ReportedEntry:
     os_account: str | None = None
     host: str | None = None
     chain: str | None = None
+    chain_version: int = 1
+
+    @property
+    def legacy(self) -> bool:
+        return self.chain_version == 0
 
 
 @dataclass(frozen=True, slots=True)

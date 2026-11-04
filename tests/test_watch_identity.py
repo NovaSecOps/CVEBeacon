@@ -21,6 +21,7 @@ from cvebeacon.passwords import (
     verify_password,
 )
 from cvebeacon.watch.records import ReportedMark, WatchRecord
+from cvebeacon.watch.reporting import ReportService
 from cvebeacon.watch.reported import identity_label
 from cvebeacon.watch.store import WatchStore
 from cvebeacon.watch.users import UserStore
@@ -35,6 +36,14 @@ def config_with(tmp_path, extra: str = "", *, channels: str = ""):
 
 def reporting(mode: str) -> str:
     return f'\n[watch.reporting]\nidentity = "{mode}"\n'
+
+
+def open_report(store, *args, **kwargs):
+    return ReportService(store, None, "open").report_cve(*args, **kwargs)
+
+
+def open_unreport(store, *args, **kwargs):
+    return ReportService(store, None, "open").unreport_cve(*args, **kwargs)
 
 
 def seed(config) -> WatchStore:
@@ -344,7 +353,7 @@ def test_user_audit_chain_detects_edits_and_deletions(tmp_path):
     with sqlite3.connect(store.path) as db:
         db.execute("UPDATE cb_user_audit SET action='unlock' WHERE id=1")
     broken = store.verify_audit()
-    assert broken is not None and broken.id == 1
+    assert broken == 1
 
     fresh = UserStore(tmp_path / "fresh-users.db", clock=lambda: NOW)
     fresh.add("alice", password=PASSWORD)
@@ -353,7 +362,7 @@ def test_user_audit_chain_detects_edits_and_deletions(tmp_path):
     with sqlite3.connect(fresh.path) as db:
         db.execute("DELETE FROM cb_user_audit WHERE id=2")
     broken = fresh.verify_audit()
-    assert broken is not None and broken.id == 3
+    assert broken == 3
 
 
 def test_cli_users_verify_reports_a_broken_chain(tmp_path, capsys):
@@ -372,7 +381,7 @@ def test_cli_users_verify_reports_a_broken_chain(tmp_path, capsys):
 def test_open_mode_keeps_the_free_text_identity(tmp_path):
     config = config_with(tmp_path)
     store = seed(config)
-    outcome = store.report_cve(IDENTIFIER, by="alice")
+    outcome = open_report(store, IDENTIFIER, by="alice")
     assert outcome.entry is not None
     assert outcome.entry.identity_mode == "open"
     assert outcome.entry.user_id is None and outcome.entry.username is None
@@ -399,9 +408,9 @@ def test_registered_mode_requires_an_enabled_user(tmp_path, capsys):
     assert entry.user_id == alice.id
     assert entry.os_account and entry.host
 
-    store.unreport_cve(IDENTIFIER, by="Alice Smith")
+    open_unreport(store, IDENTIFIER, by="Alice Smith")
     assert cli.main([*base, "--by", "alice@example.com"]) == 0
-    store.unreport_cve(IDENTIFIER, by="Alice Smith")
+    open_unreport(store, IDENTIFIER, by="Alice Smith")
     assert cli.main([*base, "--by", "bob"]) == 2
     assert "enabled CVEBeacon user" in capsys.readouterr().err
     assert cli.main([*base, "--by", "nobody"]) == 2
@@ -483,11 +492,8 @@ def test_authenticated_unreport_records_the_identity(tmp_path, monkeypatch, caps
     store = seed(config)
     users = UserStore(config.watch.users_database, clock=lambda: NOW)
     users.add("alice", password=PASSWORD, display_name="Alice Smith")
-    store.report_cve(
-        IDENTIFIER,
-        by="Alice Smith",
-        user=users.find("alice"),
-        identity_mode="authenticated",
+    ReportService(store, users.path, "authenticated").report_cve(
+        IDENTIFIER, user="alice", password=PASSWORD
     )
     prompt(monkeypatch, PASSWORD)
     assert cli.main(
@@ -533,33 +539,33 @@ def test_authenticated_lockout_stays_generic_until_unlock(
     assert len(store.reported_entries()) == 1
 
 
-def test_password_is_never_a_command_line_option(tmp_path):
-    with pytest.raises(SystemExit):
-        cli.main(
-            [
-                "--config",
-                str(tmp_path / "config.toml"),
-                "users",
-                "add",
-                "alice",
-                "--password",
-                PASSWORD,
-            ]
-        )
-    with pytest.raises(SystemExit):
-        cli.main(
-            [
-                "--config",
-                str(tmp_path / "config.toml"),
-                "watch",
-                "report",
-                IDENTIFIER,
-                "--user",
-                "alice",
-                "--password",
-                PASSWORD,
-            ]
-        )
+def test_password_is_never_a_command_line_option(tmp_path, capsys):
+    for argv in (
+        [
+            "--config",
+            str(tmp_path / "config.toml"),
+            "users",
+            "add",
+            "alice",
+            "--password",
+            PASSWORD,
+        ],
+        [
+            "--config",
+            str(tmp_path / "config.toml"),
+            "watch",
+            "report",
+            IDENTIFIER,
+            "--user",
+            "alice",
+            "--password",
+            PASSWORD,
+        ],
+    ):
+        assert cli.main(argv) == 2
+        error = capsys.readouterr().err
+        assert PASSWORD not in error
+        assert "command line" in error
 
 
 def test_cli_users_add_passwd_and_list_never_print_secrets(
@@ -626,9 +632,9 @@ def test_cli_users_unknown_user_is_an_error(tmp_path, capsys, args):
 def test_reports_chain_detects_edits_and_deletions(tmp_path, capsys):
     config = config_with(tmp_path)
     store = seed(config)
-    store.report_cve(IDENTIFIER, by="first")
-    store.report_cve(IDENTIFIER, by="second", force=True)
-    store.report_cve(IDENTIFIER, by="third", force=True)
+    open_report(store, IDENTIFIER, by="first")
+    open_report(store, IDENTIFIER, by="second", force=True)
+    open_report(store, IDENTIFIER, by="third", force=True)
     assert store.verify_reports() is None
     assert cli.main(["--config", str(config.config_path), "watch", "reported", "--verify"]) == 0
     assert "verified" in capsys.readouterr().out
@@ -636,7 +642,7 @@ def test_reports_chain_detects_edits_and_deletions(tmp_path, capsys):
     with sqlite3.connect(store.path) as db:
         db.execute("UPDATE watch_report SET by='mallory' WHERE id=1")
     broken = store.verify_reports()
-    assert broken is not None and broken.id == 1
+    assert broken == 1
     assert cli.main(["--config", str(config.config_path), "watch", "reported", "--verify"]) == 2
     assert "broken at row 1" in capsys.readouterr().err
 
@@ -644,23 +650,23 @@ def test_reports_chain_detects_edits_and_deletions(tmp_path, capsys):
 def test_reports_chain_detects_a_deleted_middle_row(tmp_path):
     config = config_with(tmp_path)
     store = seed(config)
-    store.report_cve(IDENTIFIER, by="first")
-    store.report_cve(IDENTIFIER, by="second", force=True)
-    store.report_cve(IDENTIFIER, by="third", force=True)
+    open_report(store, IDENTIFIER, by="first")
+    open_report(store, IDENTIFIER, by="second", force=True)
+    open_report(store, IDENTIFIER, by="third", force=True)
     with sqlite3.connect(store.path) as db:
         db.execute("DELETE FROM watch_report WHERE id=2")
     broken = store.verify_reports()
-    assert broken is not None and broken.id == 3
+    assert broken == 3
 
 
 def test_reports_chain_rejects_a_non_ascii_chain_value(tmp_path):
     config = config_with(tmp_path)
     store = seed(config)
-    store.report_cve(IDENTIFIER, by="first")
+    open_report(store, IDENTIFIER, by="first")
     with sqlite3.connect(store.path) as db:
         db.execute("UPDATE watch_report SET chain='not-a-chain-\u00e9' WHERE id=1")
     broken = store.verify_reports()
-    assert broken is not None and broken.id == 1
+    assert broken == 1
 
 
 def test_schema_five_database_migrates_report_identity_in_place(tmp_path):
@@ -681,22 +687,27 @@ def test_schema_five_database_migrates_report_identity_in_place(tmp_path):
         db.execute("UPDATE watch_meta SET value='5' WHERE key='schema_version'")
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "6"
+    assert store.metadata()["schema_version"] == "7"
     entries = store.reported_entries()
     assert len(entries) == 1
     entry = entries[0]
     assert (entry.cve_id, entry.by, entry.note) == (IDENTIFIER, "legacy", "old note")
     assert (entry.user_id, entry.username, entry.identity_mode) == (None, None, None)
     assert (entry.os_account, entry.host) == (None, None)
-    assert len(entry.chain) == 64
+    assert entry.chain is None
+    assert entry.chain_version == 0
+    assert entry.legacy is True
     assert store.verify_reports() is None
+    assert store.report_chain_counts() == (0, 1)
 
     store.upsert_nvd(
         [WatchRecord(IDENTIFIER, "published", description="Acme Widget.")],
         catalogs=("nvd",),
     )
-    store.report_cve(IDENTIFIER, by="new", force=True)
+    open_report(store, IDENTIFIER, by="new", force=True)
     assert store.verify_reports() is None
+    assert store.report_chain_counts() == (1, 1)
+    assert len(store.reported_entries()[-1].chain) == 64
 
 
 def test_reported_export_formats_carry_the_audit_fields(tmp_path, capsys):
@@ -705,15 +716,11 @@ def test_reported_export_formats_carry_the_audit_fields(tmp_path, capsys):
     users = UserStore(config.watch.users_database, clock=lambda: NOW)
     users.add("alice", display_name="Alice Smith", email="alice@example.com")
     users.add("bob", display_name="Bob")
-    store.report_cve(
-        IDENTIFIER,
-        by="Alice Smith",
-        user=users.find("alice"),
-        identity_mode="registered",
-        note="=1+1",
-        email="alice@example.com",
+    reporting_service = ReportService(store, users.path, "registered")
+    reporting_service.report_cve(
+        IDENTIFIER, by="alice", note="=1+1"
     )
-    store.report_cve(IDENTIFIER, by="Bob", user=users.find("bob"), identity_mode="registered", force=True)
+    reporting_service.report_cve(IDENTIFIER, by="bob", force=True)
     base = ["--config", str(config.config_path), "watch", "reported", "--all"]
 
     assert cli.main([*base, "--format", "json"]) == 0
@@ -751,13 +758,8 @@ def test_notice_text_uses_display_name_username_and_email(tmp_path):
     store = seed(config)
     users = UserStore(config.watch.users_database, clock=lambda: NOW)
     users.add("alice", display_name="Alice Smith", email="alice@example.com")
-    store.report_cve(
-        IDENTIFIER,
-        by="Alice Smith",
-        user=users.find("alice"),
-        identity_mode="registered",
-        email="alice@example.com",
-        notify_channels=("hook",),
+    ReportService(store, users.path, "registered").report_cve(
+        IDENTIFIER, by="alice", notify_channels=("hook",)
     )
     with sqlite3.connect(store.path) as db:
         details = json.loads(
@@ -803,23 +805,19 @@ def test_report_mark_display_includes_the_username():
     assert identity_label(mark.by, mark.username) == "Alice Smith (alice)"
 
 
-def test_registered_mode_rejects_a_store_identity_mismatch(tmp_path):
-    config = config_with(tmp_path)
+def test_registered_mode_rejects_unknown_and_disabled_users(tmp_path):
+    config = config_with(tmp_path, reporting("registered"))
     store = seed(config)
     users = UserStore(config.watch.users_database, clock=lambda: NOW)
-    alice = users.add("alice", display_name="Alice Smith")
-    with pytest.raises(ConfigurationError, match="resolved user"):
-        store.report_cve(
-            IDENTIFIER, by="Mallory", user=alice, identity_mode="registered"
-        )
-    with pytest.raises(ConfigurationError, match="resolved user"):
-        store.report_cve(IDENTIFIER, by="Alice Smith", identity_mode="registered")
+    users.add("alice", display_name="Alice Smith")
+    reporting_service = ReportService(store, users.path, "registered")
+    with pytest.raises(ConfigurationError, match="enabled CVEBeacon user"):
+        reporting_service.report_cve(IDENTIFIER, by="Mallory")
+    with pytest.raises(ConfigurationError, match="reported by is required"):
+        reporting_service.report_cve(IDENTIFIER)
     users.disable("alice")
-    alice = users.find("alice")
-    with pytest.raises(ConfigurationError, match="disabled"):
-        store.report_cve(
-            IDENTIFIER, by="Alice Smith", user=alice, identity_mode="registered"
-        )
+    with pytest.raises(ConfigurationError, match="enabled CVEBeacon user"):
+        reporting_service.report_cve(IDENTIFIER, by="Alice Smith")
     assert store.reported_entries() == ()
 
 
@@ -827,4 +825,4 @@ def test_unknown_identity_mode_is_rejected(tmp_path):
     config = config_with(tmp_path)
     store = seed(config)
     with pytest.raises(ConfigurationError, match="identity"):
-        store.report_cve(IDENTIFIER, by="alice", identity_mode="trusted")
+        ReportService(store, config.watch.users_database, "trusted")

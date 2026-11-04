@@ -259,17 +259,23 @@ def _run_users(args, config: AppConfig) -> int:
     if command == "verify":
         broken = store.verify_audit()
         if broken is not None:
+            detail = "an unreadable row" if broken == -1 else f"row {broken}"
             raise CVEBeaconError(
-                f"user audit trail is broken at row {broken.id}"
+                f"user audit trail is broken at {detail}"
             )
         print(
-            f"user audit trail verified: {len(store.audit_entries())} row(s)"
+            f"user-admin audit log verified: {store.audit_count()} row(s)"
         )
         return 0
     if command == "add":
         username = validate_username(args.username)
         display = validate_display_name(args.name)
         email = validate_email(args.email)
+        if args.no_password and config.watch.reporting_identity == "authenticated":
+            raise CVEBeaconError(
+                "--no-password is not available when "
+                "watch.reporting.identity = authenticated"
+            )
         if store.find(username) is not None or (
             email is not None and store.resolve(email) is not None
         ):
@@ -341,47 +347,11 @@ def _require_watch(config: AppConfig) -> None:
         raise CVEBeaconError("watch mode is disabled; set [watch] enabled = true")
 
 
-def _resolve_report_actor(args, config: AppConfig):
+def _password_prompt(username: str) -> str:
     from .passwords import read_password
-    from .watch.reported import default_identity
-    from .watch.users import UserStore, audit_name
+    from .watch.users import audit_name
 
-    mode = config.watch.reporting_identity
-    by = args.by
-    user_arg = getattr(args, "user", None)
-    if by is not None and mode == "authenticated":
-        raise CVEBeaconError(
-            "--by is not available when watch.reporting.identity = "
-            "authenticated; use --user"
-        )
-    if user_arg is not None and mode != "authenticated":
-        raise CVEBeaconError(
-            "--user is only available when watch.reporting.identity = "
-            "authenticated"
-        )
-    if mode == "open":
-        return (by if by is not None else default_identity()), "open", None, None
-    users = UserStore(config.watch.users_database)
-    if mode == "registered":
-        if by is None:
-            raise CVEBeaconError(
-                "reported by is required; name an enabled CVEBeacon user with --by"
-            )
-        user = users.resolve_enabled(by)
-        if user is None:
-            raise CVEBeaconError(
-                "reported by must name an enabled CVEBeacon user"
-            )
-        return user.identity, "registered", user, user.email
-    if user_arg is None:
-        raise CVEBeaconError(
-            "--user is required when watch.reporting.identity = authenticated"
-        )
-    password = read_password(f"Password for {audit_name(user_arg)}: ")
-    user = users.authenticate(user_arg, password)
-    if user is None:
-        raise CVEBeaconError("invalid username or password")
-    return user.identity, "authenticated", user, user.email
+    return read_password(f"Password for {audit_name(username)}: ")
 
 
 def _report_export_record(entry) -> dict[str, object]:
@@ -398,6 +368,8 @@ def _report_export_record(entry) -> dict[str, object]:
         "at": entry.at,
         "note": entry.note,
         "chain": entry.chain,
+        "chain_version": entry.chain_version,
+        "legacy": entry.legacy,
     }
 
 
@@ -419,6 +391,7 @@ def _run_watch(args, config: AppConfig) -> int:
         identity_label,
         normalize_cve_id,
     )
+    from .watch.reporting import ReportService
     from .watch.rules import describe_condition
     from .watch.statements import write_statement
     from .watch.store import WatchStore
@@ -436,6 +409,11 @@ def _run_watch(args, config: AppConfig) -> int:
         return 0
     _require_watch(config)
     store = WatchStore(config.watch.database)
+    reporting = ReportService(
+        store,
+        config.watch.users_database,
+        config.watch.reporting_identity,
+    )
 
     def notify_channels() -> tuple[str, ...]:
         return tuple(
@@ -445,16 +423,14 @@ def _run_watch(args, config: AppConfig) -> int:
         )
 
     if args.watch_command == "report":
-        identity, mode, user, email = _resolve_report_actor(args, config)
-        outcome = store.report_cve(
+        outcome = reporting.report_cve(
             args.cve_id,
-            by=identity,
+            by=args.by,
+            user=getattr(args, "user", None),
+            password_prompt=_password_prompt,
             note=args.note,
             force=args.force,
             notify_channels=notify_channels(),
-            user=user,
-            identity_mode=mode,
-            email=email,
         )
         entry = outcome.entry
         if not outcome.changed:
@@ -475,15 +451,13 @@ def _run_watch(args, config: AppConfig) -> int:
         return _deliver_report_notice(config, store, outcome)
     if args.watch_command == "unreport":
         identifier = normalize_cve_id(args.cve_id)
-        identity, mode, user, email = _resolve_report_actor(args, config)
-        outcome = store.unreport_cve(
+        outcome = reporting.unreport_cve(
             identifier,
-            by=identity,
+            by=args.by,
+            user=getattr(args, "user", None),
+            password_prompt=_password_prompt,
             note=args.note,
             notify_channels=notify_channels(),
-            user=user,
-            identity_mode=mode,
-            email=email,
         )
         entry = outcome.entry
         if not outcome.changed or entry is None:
@@ -499,13 +473,22 @@ def _run_watch(args, config: AppConfig) -> int:
         if getattr(args, "verify", False):
             broken = store.verify_reports()
             if broken is not None:
-                raise CVEBeaconError(
-                    f"watch report audit trail is broken at row {broken.id}"
+                detail = (
+                    "an unreadable row"
+                    if broken == -1
+                    else f"row {broken}"
                 )
-            print(
+                raise CVEBeaconError(
+                    f"watch report audit trail is broken at {detail}"
+                )
+            chained, legacy = store.report_chain_counts()
+            message = (
                 f"watch report audit trail verified: "
-                f"{len(store.reported_entries())} row(s)"
+                f"{chained} chained row(s)"
             )
+            if legacy:
+                message += f"; {legacy} legacy row(s) unchained"
+            print(message)
             return 0
         export = getattr(args, "format", "text")
         if export != "text" and not args.all_history:
@@ -545,6 +528,8 @@ def _run_watch(args, config: AppConfig) -> int:
                 )
             if entry.note:
                 line += f"  {entry.note}"
+            if entry.legacy:
+                line += "  [legacy unchained]"
             if args.all_history:
                 states = notice_states.get((entry.action, entry.id), ())
                 if states:
@@ -994,13 +979,29 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
     raise CVEBeaconError("unsupported command")
 
 
+def _reject_password_arguments(arguments: list[str]) -> None:
+    for value in arguments:
+        if (
+            value in {"--pass", "-p", "-pass"}
+            or value.startswith("--pass")
+            or value.startswith("-pass")
+        ):
+            raise CVEBeaconError(
+                "password input is not accepted on the command line; "
+                "use the hidden prompt"
+            )
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = _parser(); args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
-    # The HTTP library logs full request URLs at INFO. A Teams Workflow URL is a secret.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    try: return run(args)
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    try:
+        _reject_password_arguments(arguments)
+        parser = _parser(); args = parser.parse_args(arguments)
+        logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
+        # The HTTP library logs full request URLs at INFO. A Teams Workflow URL is a secret.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        return run(args)
     except CVEBeaconError as exc:
         print(f"error: {exc}", file=sys.stderr); return 2
     except MemoryError:

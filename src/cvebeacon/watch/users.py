@@ -10,12 +10,14 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import stat
 import unicodedata
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..errors import ConfigurationError, StateError
 from ..passwords import (
@@ -26,6 +28,9 @@ from ..passwords import (
 )
 from .chain import chain_hash, verify_chain
 from .reported import checked_text, host_name, os_account
+
+if TYPE_CHECKING:
+    from .identity import ReportIdentity
 
 USERNAME_LIMIT = 64
 DISPLAY_LIMIT = 100
@@ -46,6 +51,7 @@ _SCHEMA = (
         username TEXT NOT NULL UNIQUE COLLATE NOCASE,
         display_name TEXT,
         email TEXT COLLATE NOCASE,
+        email_key TEXT,
         password_hash TEXT,
         is_admin INTEGER NOT NULL DEFAULT 0 CHECK(is_admin IN (0,1)),
         disabled INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN (0,1)),
@@ -55,8 +61,6 @@ _SCHEMA = (
         failed_logins INTEGER NOT NULL DEFAULT 0,
         locked_until TEXT
     )""",
-    "CREATE UNIQUE INDEX IF NOT EXISTS cb_user_email "
-    "ON cb_user(email) WHERE email IS NOT NULL",
     """CREATE TABLE IF NOT EXISTS cb_user_audit (
         id INTEGER PRIMARY KEY,
         action TEXT NOT NULL,
@@ -88,6 +92,26 @@ class User:
     @property
     def identity(self) -> str:
         return self.display_name or self.username
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedUser:
+    """Proof of one successful password login, not a roster lookup."""
+
+    user: User
+    login_id: int
+
+    @property
+    def id(self) -> int:
+        return self.user.id
+
+    @property
+    def username(self) -> str:
+        return self.user.username
+
+    @property
+    def identity(self) -> str:
+        return self.user.identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +178,11 @@ def validate_email(value: object | None) -> str | None:
     return text
 
 
+def email_lookup_key(value: str) -> str:
+    """One Unicode-aware key for uniqueness and registered-mode lookup."""
+    return unicodedata.normalize("NFC", value).casefold()
+
+
 def audit_name(value: object) -> str:
     """Sanitise a typed login name before it enters the audit table."""
     text = "" if value is None else str(value)
@@ -173,21 +202,92 @@ class UserStore:
         self.path = Path(path)
         self._clock = clock
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, create: bool = True) -> sqlite3.Connection:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            parent = self.path.parent
+            if create:
+                parent.mkdir(parents=True, exist_ok=True)
+            resolved_parent = parent.resolve()
+            path = resolved_parent / self.path.name
+            connection = None
             if os.name == "posix":
-                descriptor = os.open(
-                    self.path, os.O_RDWR | os.O_CREAT, 0o600
-                )
+                directory_mode = stat.S_IMODE(resolved_parent.stat().st_mode)
+                if directory_mode & 0o022:
+                    raise StateError(
+                        "CVEBeacon user database directory must not be group "
+                        "or other writable"
+                    )
+                flags = (
+                    os.O_RDWR if create else os.O_RDONLY
+                ) | getattr(os, "O_NOFOLLOW", 0)
                 try:
-                    os.fchmod(descriptor, 0o600)
+                    if create:
+                        descriptor = os.open(
+                            path, flags | os.O_CREAT | os.O_EXCL, 0o600
+                        )
+                        created = True
+                    else:
+                        descriptor = os.open(path, flags)
+                        created = False
+                except FileExistsError:
+                    descriptor = os.open(path, flags)
+                    created = False
+                except FileNotFoundError as exc:
+                    raise StateError(
+                        "CVEBeacon user database not found"
+                    ) from exc
+                try:
+                    details = os.fstat(descriptor)
+                    if not stat.S_ISREG(details.st_mode):
+                        raise StateError(
+                            "CVEBeacon user database must be a regular file"
+                        )
+                    if details.st_uid != os.geteuid():
+                        raise StateError(
+                            "CVEBeacon user database must be owned by this "
+                            "account"
+                        )
+                    if created:
+                        os.fchmod(descriptor, 0o600)
+                    elif stat.S_IMODE(details.st_mode) & 0o077:
+                        raise StateError(
+                            "CVEBeacon user database must not be group or "
+                            "other accessible"
+                        )
+                    expected = (details.st_dev, details.st_ino)
                 finally:
                     os.close(descriptor)
-            connection = sqlite3.connect(self.path, timeout=30)
+                connection = sqlite3.connect(
+                    f"{path.as_uri()}?mode={'rwc' if create else 'ro'}",
+                    uri=True,
+                    timeout=30,
+                )
+                try:
+                    current = os.stat(path, follow_symlinks=False)
+                except OSError as exc:
+                    connection.close()
+                    raise StateError(
+                        "CVEBeacon user database was replaced while opening"
+                    ) from exc
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or (current.st_dev, current.st_ino) != expected
+                ):
+                    connection.close()
+                    raise StateError(
+                        "CVEBeacon user database was replaced while opening"
+                    )
+            else:
+                if not create and not path.exists():
+                    raise StateError("CVEBeacon user database not found")
+                connection = sqlite3.connect(
+                    str(path), timeout=30
+                )
             connection.row_factory = sqlite3.Row
             return connection
-        except (sqlite3.Error, OSError) as exc:
+        except StateError:
+            raise
+        except (sqlite3.Error, OSError, ValueError) as exc:
             raise StateError(
                 f"cannot open CVEBeacon user database {self.path}: {exc}"
             ) from exc
@@ -208,11 +308,40 @@ class UserStore:
         finally:
             connection.close()
 
-    def initialize(self) -> None:
-        with closing(self._connect()) as db:
+    def initialize(self, *, create: bool = True) -> None:
+        with closing(self._connect(create=create)) as db:
             for statement in _SCHEMA:
                 db.execute(statement)
+            self._migrate_email_keys(db)
             db.commit()
+
+    @staticmethod
+    def _migrate_email_keys(db: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(cb_user)")
+        }
+        if "email_key" not in columns:
+            db.execute("ALTER TABLE cb_user ADD COLUMN email_key TEXT")
+        rows = db.execute(
+            "SELECT id,email FROM cb_user WHERE email IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            key = email_lookup_key(str(row["email"]))
+            db.execute(
+                "UPDATE cb_user SET email_key=? WHERE id=?",
+                (key, row["id"]),
+            )
+        db.execute("DROP INDEX IF EXISTS cb_user_email")
+        try:
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS cb_user_email_key "
+                "ON cb_user(email_key) WHERE email_key IS NOT NULL"
+            )
+        except sqlite3.IntegrityError as exc:
+            raise StateError(
+                "CVEBeacon account emails collide under Unicode case "
+                "folding; correct the account file"
+            ) from exc
 
     @staticmethod
     def _user(row) -> User:
@@ -242,8 +371,8 @@ class UserStore:
         if row is None:
             row = db.execute(
                 f"SELECT {_USER_COLUMNS},password_hash FROM cb_user "
-                "WHERE email=? COLLATE NOCASE",
-                (identifier,),
+                "WHERE email_key=?",
+                (email_lookup_key(identifier),),
             ).fetchone()
         return row
 
@@ -308,14 +437,15 @@ class UserStore:
         else:
             encoded = None
         now = _timestamp(self._clock())
+        checks = [(name, name.casefold())]
+        if address is not None:
+            checks.append((address, email_lookup_key(address)))
         with self.transaction() as db:
-            for value in (name, address):
-                if value is None:
-                    continue
+            for value, key in checks:
                 existing = db.execute(
                     "SELECT 1 FROM cb_user WHERE username=? COLLATE NOCASE "
-                    "OR email=? COLLATE NOCASE",
-                    (value, value),
+                    "OR email_key=?",
+                    (value, key),
                 ).fetchone()
                 if existing is not None:
                     raise ConfigurationError(
@@ -323,14 +453,15 @@ class UserStore:
                     )
             try:
                 cursor = db.execute(
-                    "INSERT INTO cb_user(username,display_name,email,"
+                    "INSERT INTO cb_user(username,display_name,email,email_key,"
                     "password_hash,is_admin,disabled,created_at,updated_at,"
                     "password_changed_at,failed_logins,locked_until) "
-                    "VALUES (?,?,?,?,?,0,?,?,?,0,NULL)",
+                    "VALUES (?,?,?,?,?,?,0,?,?,?,0,NULL)",
                     (
                         name,
                         shown,
                         address,
+                        None if address is None else email_lookup_key(address),
                         encoded,
                         int(bool(is_admin)),
                         now,
@@ -441,13 +572,12 @@ class UserStore:
         self,
         identifier: object,
         password: object,
-        *,
-        os_account_value: str | None = None,
-        host_value: str | None = None,
-    ) -> User | None:
+    ) -> AuthenticatedUser | None:
         """Verify one username login. Every failure looks the same to the caller.
 
         Email addresses are a lookup and notice detail, not a login identifier.
+        A successful result carries the login audit row that proves the
+        password check; a roster lookup cannot produce this type.
         """
         self.initialize()
         now = self._clock()
@@ -455,8 +585,8 @@ class UserStore:
             now = now.replace(tzinfo=timezone.utc)
         now = now.astimezone(timezone.utc)
         stamp = _timestamp(now)
-        account = os_account_value or os_account()
-        host = host_value or host_name()
+        account = os_account()
+        host = host_name()
         typed = audit_name(identifier)
         with self.transaction() as db:
             row = self._find_username(db, identifier)
@@ -499,10 +629,87 @@ class UserStore:
                 "updated_at=? WHERE id=?",
                 (stamp, user.id),
             )
-            self._append_audit(
+            login_id = self._append_audit(
                 db, "login", user.username, stamp, account, host
             )
-        return replace(user, failed_logins=0, locked_until=None, updated_at=stamp)
+        return AuthenticatedUser(
+            replace(user, failed_logins=0, locked_until=None, updated_at=stamp),
+            login_id,
+        )
+
+    def require_current(self, identity: "ReportIdentity") -> None:
+        """Re-check one resolved identity before a report write.
+
+        This runs from inside the report transaction. It rejects a deleted or
+        disabled account, a changed username, and an authenticated proof that
+        is not a real successful login row for the current account.
+        """
+        if identity.mode == "open":
+            return
+        if identity.user is None:
+            raise ConfigurationError("the resolved CVEBeacon user is missing")
+        self.initialize()
+        with closing(self._connect()) as db:
+            row = db.execute(
+                f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?",
+                (identity.user.id,),
+            ).fetchone()
+            if row is None:
+                raise ConfigurationError(
+                    "the CVEBeacon user no longer exists"
+                )
+            current = self._user(row)
+            if current.username != identity.user.username:
+                raise ConfigurationError(
+                    "the CVEBeacon user no longer matches the resolved identity"
+                )
+            if current.disabled:
+                raise ConfigurationError("the CVEBeacon user is disabled")
+            if identity.mode != "authenticated":
+                return
+            proof = identity.authenticated
+            if (
+                proof is None
+                or proof.user.id != current.id
+                or proof.user.username != current.username
+            ):
+                raise ConfigurationError(
+                    "authenticated identity proof does not match the user"
+                )
+            login = db.execute(
+                "SELECT action,username,at FROM cb_user_audit WHERE id=?",
+                (proof.login_id,),
+            ).fetchone()
+            if (
+                login is None
+                or login["action"] != "login"
+                or login["username"] != current.username
+            ):
+                raise ConfigurationError(
+                    "authenticated identity proof is not a successful login"
+                )
+            changed = current.password_changed_at
+            if changed:
+                login_at = self._parse_time(login["at"])
+                changed_at = self._parse_time(changed)
+                if (
+                    login_at is None
+                    or changed_at is None
+                    or login_at < changed_at
+                ):
+                    raise ConfigurationError(
+                        "authenticated identity proof predates the password change"
+                    )
+
+    @staticmethod
+    def _parse_time(value: object) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _append_audit(
         self,
@@ -512,7 +719,7 @@ class UserStore:
         at: str,
         account: str | None = None,
         host: str | None = None,
-    ) -> None:
+    ) -> int:
         account = account or os_account()
         host = host or host_name()
         cursor = db.execute(
@@ -537,6 +744,7 @@ class UserStore:
             "UPDATE cb_user_audit SET chain=? WHERE id=?",
             (chain_hash(previous["chain"] if previous else "", values), row_id),
         )
+        return row_id
 
     def audit_entries(self) -> tuple[UserAuditEntry, ...]:
         self.initialize()
@@ -558,19 +766,32 @@ class UserStore:
             for row in rows
         )
 
-    def verify_audit(self) -> UserAuditEntry | None:
-        self.initialize()
-        with closing(self._connect()) as db:
-            rows = db.execute("SELECT * FROM cb_user_audit ORDER BY id").fetchall()
-        broken = verify_chain((dict(row) for row in rows), AUDIT_CHAIN_FIELDS)
-        if broken is None:
-            return None
-        return UserAuditEntry(
-            int(broken["id"]),
-            str(broken["action"]),
-            str(broken["username"]),
-            str(broken["at"]),
-            broken["os_account"],
-            broken["host"],
-            str(broken["chain"]),
-        )
+    def audit_count(self) -> int:
+        if not self.path.is_file():
+            raise StateError("CVEBeacon user database not found")
+        with closing(self._connect(create=False)) as db:
+            return int(
+                db.execute("SELECT COUNT(*) FROM cb_user_audit").fetchone()[0]
+            )
+
+    def verify_audit(self) -> int | None:
+        """Return the first broken user-audit row id, or ``None``.
+
+        The check never creates a missing account file or table. It covers the
+        user-admin audit log, not direct edits to the ``cb_user`` account rows.
+        """
+        if not self.path.is_file():
+            raise StateError("CVEBeacon user database not found")
+        with closing(self._connect(create=False)) as db:
+            tables = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "cb_user" not in tables or "cb_user_audit" not in tables:
+                raise StateError("CVEBeacon user audit trail is missing")
+            rows = db.execute(
+                "SELECT * FROM cb_user_audit ORDER BY id"
+            ).fetchall()
+        return verify_chain((dict(row) for row in rows), AUDIT_CHAIN_FIELDS)

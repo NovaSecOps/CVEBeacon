@@ -15,8 +15,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..errors import ConfigurationError, SourceError, StateError
-from .chain import chain_hash, verify_chain
+from ..errors import SourceError, StateError
+from .chain import chain_hash, chain_matches, row_id
+from .identity import ReportIdentity
 from .records import (
     EPSS_BANDS,
     CVSSEntry,
@@ -40,8 +41,6 @@ from .reported import (
     identity_label,
     normalize_cve_id,
     os_account,
-    validate_identity,
-    validate_identity_mode,
     validate_note,
 )
 from .rules import (
@@ -54,10 +53,9 @@ from .rules import (
     rebase_severity,
     rule_hash,
 )
-from .users import User, validate_email
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -72,7 +70,8 @@ DELIVERY_RECOVERY_SECONDS = 600
 DELIVERY_RETRY_FLOOR = "1970-01-01T00:00:00+00:00"
 _LATEST_REPORT_SQL = (
     "SELECT r.id,r.cve_id,r.action,r.by,r.note,r.at,r.user_id,r.username,"
-    "r.identity_mode,r.os_account,r.host,r.chain FROM watch_report r "
+    "r.identity_mode,r.os_account,r.host,r.chain,r.chain_version "
+    "FROM watch_report r "
     "WHERE r.action='report' AND NOT EXISTS ("
     "SELECT 1 FROM watch_report x WHERE x.cve_id=r.cve_id AND x.id > r.id)"
 )
@@ -240,7 +239,8 @@ _SCHEMA = (
         host TEXT,
         note TEXT,
         at TEXT NOT NULL,
-        chain TEXT NOT NULL
+        chain TEXT,
+        chain_version INTEGER NOT NULL DEFAULT 1 CHECK(chain_version IN (0,1))
     )""",
     "CREATE INDEX IF NOT EXISTS watch_event_created ON watch_event(created_at, id)",
     "CREATE INDEX IF NOT EXISTS watch_delivery_status ON watch_delivery(status)",
@@ -421,20 +421,39 @@ class WatchStore:
         self.path = Path(path)
         self._clock = clock
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, create: bool = True) -> sqlite3.Connection:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(self.path, timeout=30)
+            if create:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode={'rwc' if create else 'rw'}",
+                uri=True,
+                timeout=30,
+            )
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA foreign_keys = ON")
             return connection
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
             raise StateError(f"cannot open watch database {self.path}: {exc}") from exc
 
+    def _connect_readonly(self) -> sqlite3.Connection:
+        try:
+            connection = sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=30,
+            )
+            connection.row_factory = sqlite3.Row
+            return connection
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            raise StateError(
+                f"cannot read watch database {self.path}: {exc}"
+            ) from exc
+
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        connection = self._connect()
+    def transaction(self, *, create: bool = True) -> Iterator[sqlite3.Connection]:
+        connection = self._connect(create=create)
         try:
             connection.execute("BEGIN IMMEDIATE")
             yield connection
@@ -448,8 +467,8 @@ class WatchStore:
         finally:
             connection.close()
 
-    def initialize(self) -> None:
-        with self.transaction() as db:
+    def initialize(self, *, create: bool = True) -> None:
+        with self.transaction(create=create) as db:
             self._ensure_schema(db, _timestamp(self._clock))
 
     @staticmethod
@@ -470,9 +489,9 @@ class WatchStore:
             )
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5", "6"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5", "6", "7"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -522,7 +541,7 @@ class WatchStore:
                 db.execute(
                     "ALTER TABLE watch_delivery ADD COLUMN first_attempt_at TEXT"
                 )
-        if version in {"1", "2", "3", "4", "5"}:
+        if version in {"1", "2", "3", "4", "5", "6"}:
             WatchStore._migrate_report_identity(db)
         if version != str(SCHEMA_VERSION):
             db.execute(
@@ -572,31 +591,56 @@ class WatchStore:
 
     @staticmethod
     def _migrate_report_identity(db: sqlite3.Connection) -> None:
-        """Add identity fields and give legacy rows a starting chain value."""
+        """Add identity/chain columns without ever rewriting a stored chain.
+
+        A genuine table from before the identity release has no ``chain``
+        column. Its existing rows are marked ``chain_version=0`` and remain
+        unchained; the chain starts with the first row written after the
+        upgrade. A table that already has chain values is never re-chained,
+        even when its metadata claims to be older.
+        """
         columns = {
             row["name"] for row in db.execute("PRAGMA table_info(watch_report)")
         }
+        had_chain = "chain" in columns
         for name, definition in (
             ("user_id", "INTEGER"),
             ("username", "TEXT"),
             ("identity_mode", "TEXT"),
             ("os_account", "TEXT"),
             ("host", "TEXT"),
-            ("chain", "TEXT NOT NULL DEFAULT ''"),
         ):
             if name not in columns:
                 db.execute(f"ALTER TABLE watch_report ADD COLUMN {name} {definition}")
-        previous = ""
-        rows = db.execute("SELECT * FROM watch_report ORDER BY id").fetchall()
-        for row in rows:
-            values = {field: row[field] for field in REPORT_CHAIN_FIELDS}
-            chain = chain_hash(previous, values)
-            if row["chain"] != chain:
+        if not had_chain:
+            if "chain" not in columns:
+                db.execute("ALTER TABLE watch_report ADD COLUMN chain TEXT")
+            if "chain_version" not in columns:
                 db.execute(
-                    "UPDATE watch_report SET chain=? WHERE id=?",
-                    (chain, row["id"]),
+                    "ALTER TABLE watch_report ADD COLUMN "
+                    "chain_version INTEGER NOT NULL DEFAULT 0"
                 )
-            previous = chain
+            return
+        rows = db.execute(
+            "SELECT id,chain FROM watch_report ORDER BY id"
+        ).fetchall()
+        if "chain_version" in columns:
+            return
+        values = [row["chain"] for row in rows]
+        chained = [value for value in values if isinstance(value, str) and value]
+        if values and len(chained) == len(values):
+            default = 1
+        elif not values or not chained:
+            default = 0
+        else:
+            raise StateError(
+                "watch_report has mixed chained and unchained rows; refusing to "
+                "guess their history"
+            )
+        db.execute(
+            "ALTER TABLE watch_report ADD COLUMN "
+            f"chain_version INTEGER NOT NULL DEFAULT {default}"
+        )
 
     def metadata(self) -> dict[str, str]:
         self.initialize()
@@ -1477,6 +1521,7 @@ class WatchStore:
     @staticmethod
     def _report_entry(row: Mapping[str, Any]) -> ReportedEntry:
         user_id = row["user_id"]
+        chain_version = row["chain_version"]
         return ReportedEntry(
             int(row["id"]),
             str(row["cve_id"]),
@@ -1490,6 +1535,7 @@ class WatchStore:
             row["os_account"],
             row["host"],
             row["chain"],
+            1 if chain_version is None else int(chain_version),
         )
 
     @staticmethod
@@ -1498,7 +1544,7 @@ class WatchStore:
     ) -> sqlite3.Row | None:
         return db.execute(
             "SELECT id,cve_id,action,by,note,at,user_id,username,identity_mode,"
-            "os_account,host,chain FROM watch_report "
+            "os_account,host,chain,chain_version FROM watch_report "
             "WHERE cve_id=? ORDER BY id DESC LIMIT 1",
             (identifier,),
         ).fetchone()
@@ -1562,27 +1608,25 @@ class WatchStore:
         db: sqlite3.Connection,
         identifier: str,
         action: str,
-        identity: str,
+        identity: ReportIdentity,
         text: str | None,
         now: str,
-        *,
-        user: User | None,
-        identity_mode: str,
     ) -> ReportedEntry:
         account = os_account()
         host = host_name()
         cursor = db.execute(
             "INSERT INTO watch_report(cve_id,action,by,note,at,user_id,username,"
-            "identity_mode,os_account,host,chain) VALUES (?,?,?,?,?,?,?,?,?,?,'')",
+            "identity_mode,os_account,host,chain,chain_version) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,'',1)",
             (
                 identifier,
                 action,
-                identity,
+                identity.display,
                 text,
                 now,
-                None if user is None else user.id,
-                None if user is None else user.username,
-                identity_mode,
+                identity.user_id,
+                identity.username,
+                identity.mode,
                 account,
                 host,
             ),
@@ -1592,17 +1636,18 @@ class WatchStore:
             "id": row_id,
             "cve_id": identifier,
             "action": action,
-            "by": identity,
-            "user_id": None if user is None else user.id,
-            "username": None if user is None else user.username,
-            "identity_mode": identity_mode,
+            "by": identity.display,
+            "user_id": identity.user_id,
+            "username": identity.username,
+            "identity_mode": identity.mode,
             "os_account": account,
             "host": host,
             "note": text,
             "at": now,
         }
         previous = db.execute(
-            "SELECT chain FROM watch_report WHERE id<? ORDER BY id DESC LIMIT 1",
+            "SELECT chain FROM watch_report WHERE id<? AND chain_version=1 "
+            "ORDER BY id DESC LIMIT 1",
             (row_id,),
         ).fetchone()
         chain = chain_hash(previous["chain"] if previous else "", values)
@@ -1613,69 +1658,37 @@ class WatchStore:
             row_id,
             identifier,
             action,
-            identity,
+            identity.display,
             text,
             now,
-            values["user_id"],
-            values["username"],
-            identity_mode,
+            identity.user_id,
+            identity.username,
+            identity.mode,
             account,
             host,
             chain,
+            1,
         )
 
-    @staticmethod
-    def _report_identity(
-        by: object,
-        user: User | None,
-        identity_mode: object,
-    ) -> tuple[str, str, User | None, str | None]:
-        mode = validate_identity_mode(identity_mode)
-        identity = validate_identity(by)
-        if mode == "open":
-            if user is not None:
-                raise ConfigurationError(
-                    "open identity does not accept a resolved user"
-                )
-            return identity, mode, None, None
-        if user is None:
-            raise ConfigurationError(
-                "a resolved user is required for this identity mode"
-            )
-        if user.disabled:
-            raise ConfigurationError("the CVEBeacon user is disabled")
-        display = validate_identity(user.display_name or user.username)
-        if identity != display:
-            raise ConfigurationError(
-                "reported by does not match the resolved user"
-            )
-        return identity, mode, user, validate_email(user.email)
-
-    def report_cve(
+    def _report_cve(
         self,
         cve_id: object,
         *,
-        by: object,
+        identity: ReportIdentity,
+        recheck: Callable[[], None],
         note: object | None = None,
         force: bool = False,
         notify_channels: Iterable[str] = (),
-        user: User | None = None,
-        identity_mode: object = "open",
-        email: object | None = None,
     ) -> ReportOutcome:
-        """Mark a stored CVE as reported to clients.
+        """Persist one report mark behind a resolved identity boundary.
 
-        The caller resolves the identity and, in registered or authenticated
-        mode, passes the resolved user. The latest ``watch_report`` row is the
-        current state. A repeated mark keeps the existing row and notification;
-        ``force`` appends a new one.
+        ``recheck`` runs inside the write transaction, so a deleted, disabled
+        or otherwise changed account cannot be recorded from a stale object.
         """
+        if not isinstance(identity, ReportIdentity):
+            raise TypeError("a resolved report identity is required")
         identifier = normalize_cve_id(cve_id)
-        identity, mode, resolved, user_email = self._report_identity(
-            by, user, identity_mode
-        )
         text = validate_note(note)
-        notice_email = validate_email(email) if email is not None else user_email
         channels = tuple(sorted({str(name) for name in notify_channels if name}))
         self.initialize()
         now = _timestamp(self._clock)
@@ -1688,39 +1701,29 @@ class WatchStore:
             latest = self._latest_report(db, identifier)
             if latest is not None and latest.action == "report" and not force:
                 return ReportOutcome(latest, False)
+            recheck()
             entry = self._insert_report(
-                db,
-                identifier,
-                "report",
-                identity,
-                text,
-                now,
-                user=resolved,
-                identity_mode=mode,
+                db, identifier, "report", identity, text, now
             )
             event_id = self._record_report_notice(
-                db, entry, channels, now, email=notice_email
+                db, entry, channels, now, email=identity.email
             )
         return ReportOutcome(entry, True, event_id, channels)
 
-    def unreport_cve(
+    def _unreport_cve(
         self,
         cve_id: object,
         *,
-        by: object,
+        identity: ReportIdentity,
+        recheck: Callable[[], None],
         note: object | None = None,
         notify_channels: Iterable[str] = (),
-        user: User | None = None,
-        identity_mode: object = "open",
-        email: object | None = None,
     ) -> ReportOutcome:
-        """Withdraw the current report mark by appending an ``unreport`` row."""
+        """Withdraw the current report mark behind the same boundary."""
+        if not isinstance(identity, ReportIdentity):
+            raise TypeError("a resolved report identity is required")
         identifier = normalize_cve_id(cve_id)
-        identity, mode, resolved, user_email = self._report_identity(
-            by, user, identity_mode
-        )
         text = validate_note(note)
-        notice_email = validate_email(email) if email is not None else user_email
         channels = tuple(sorted({str(name) for name in notify_channels if name}))
         self.initialize()
         now = _timestamp(self._clock)
@@ -1728,18 +1731,12 @@ class WatchStore:
             latest = self._latest_report(db, identifier)
             if latest is None or latest.action != "report":
                 return ReportOutcome(None, False)
+            recheck()
             entry = self._insert_report(
-                db,
-                identifier,
-                "unreport",
-                identity,
-                text,
-                now,
-                user=resolved,
-                identity_mode=mode,
+                db, identifier, "unreport", identity, text, now
             )
             event_id = self._record_report_notice(
-                db, entry, channels, now, email=notice_email
+                db, entry, channels, now, email=identity.email
             )
         return ReportOutcome(entry, True, event_id, channels)
 
@@ -1749,20 +1746,94 @@ class WatchStore:
         with closing(self._connect()) as db:
             rows = db.execute(
                 "SELECT id,cve_id,action,by,note,at,user_id,username,"
-                "identity_mode,os_account,host,chain "
+                "identity_mode,os_account,host,chain,chain_version "
                 "FROM watch_report ORDER BY id"
             ).fetchall()
         return tuple(self._report_entry(row) for row in rows)
 
-    def verify_reports(self) -> ReportedEntry | None:
-        """Return the first report row whose stored chain does not recompute."""
-        self.initialize()
-        with closing(self._connect()) as db:
-            rows = db.execute("SELECT * FROM watch_report ORDER BY id").fetchall()
-        broken = verify_chain(
-            (dict(row) for row in rows), REPORT_CHAIN_FIELDS
-        )
-        return None if broken is None else self._report_entry(broken)
+    def verify_reports(self) -> int | None:
+        """Return the first broken report row id, or ``None`` when valid.
+
+        The check never creates a missing database or table. Legacy rows are
+        marked ``chain_version=0`` and skipped; the chain covers the rows
+        written after the upgrade.
+        """
+        if not self.path.is_file():
+            raise StateError("watch database not found")
+        version = None
+        with closing(self._connect_readonly()) as db:
+            tables = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "watch_report" not in tables:
+                raise StateError("watch_report table is missing")
+            meta = {
+                row["key"]: row["value"]
+                for row in db.execute("SELECT key,value FROM watch_meta")
+            } if "watch_meta" in tables else {}
+            if "schema_version" not in meta:
+                raise StateError("watch schema metadata is missing")
+            version = meta["schema_version"]
+        if version != str(SCHEMA_VERSION):
+            self.initialize(create=False)
+        with closing(self._connect_readonly()) as db:
+            rows = db.execute(
+                "SELECT * FROM watch_report ORDER BY id"
+            ).fetchall()
+        return self._verify_report_rows(rows)
+
+    @staticmethod
+    def _verify_report_rows(rows: Sequence[Mapping[str, object]]) -> int | None:
+        previous = ""
+        seen_chained = False
+        for row in rows:
+            try:
+                version = row["chain_version"]
+                if version == 0:
+                    if seen_chained or row["chain"] not in (None, ""):
+                        return row_id(row)
+                    continue
+                if version != 1:
+                    return row_id(row)
+                seen_chained = True
+                values = {field: row[field] for field in REPORT_CHAIN_FIELDS}
+                expected = chain_hash(previous, values)
+            except (KeyError, TypeError, ValueError, UnicodeError, OverflowError):
+                return row_id(row)
+            if not chain_matches(expected, row["chain"]):
+                return row_id(row)
+            previous = expected
+        return None
+
+    def report_chain_counts(self) -> tuple[int, int]:
+        """Return ``(chained, legacy)`` report row counts."""
+        if not self.path.is_file():
+            raise StateError("watch database not found")
+        with closing(self._connect_readonly()) as db:
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(watch_report)")
+            }
+            if "chain_version" not in columns:
+                raise StateError("watch report chain is not migrated")
+            rows = db.execute(
+                "SELECT chain_version,COUNT(*) FROM watch_report "
+                "GROUP BY chain_version"
+            ).fetchall()
+        chained = legacy = 0
+        for version, count in rows:
+            if version == 1:
+                chained = int(count)
+            elif version == 0:
+                legacy = int(count)
+            else:
+                raise StateError(
+                    "watch report chain has an invalid version marker"
+                )
+        return chained, legacy
 
     def reported_cves(self) -> tuple[ReportedEntry, ...]:
         """Return the latest ``report`` row of every currently reported CVE."""

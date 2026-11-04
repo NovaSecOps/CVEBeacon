@@ -20,6 +20,7 @@ from cvebeacon.watch.records import (
     WatchRecord,
     WatchView,
 )
+from cvebeacon.watch.reporting import ReportService
 from cvebeacon.watch.reported import (
     default_identity,
     normalize_cve_id,
@@ -61,6 +62,14 @@ def record(identifier: str = "CVE-2026-0001") -> WatchRecord:
         description="Acme Widget allows remote code execution.",
         cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.8),),
     )
+
+
+def record_report(store, *args, **kwargs):
+    return ReportService(store, None, "open").report_cve(*args, **kwargs)
+
+
+def record_unreport(store, *args, **kwargs):
+    return ReportService(store, None, "open").unreport_cve(*args, **kwargs)
 
 
 def seed(config, identifiers: tuple[str, ...] = ("CVE-2026-0001",)) -> WatchStore:
@@ -131,7 +140,7 @@ def test_report_and_unreport_keep_an_append_only_trail(tmp_path):
     config = write_config(tmp_path, channels="")
     store = seed(config)
 
-    first = store.report_cve("cve-2026-0001", by="alice", note="Ticket OPS-42")
+    first = record_report(store, "cve-2026-0001", by="alice", note="Ticket OPS-42")
     assert first.changed is True
     assert first.entry is not None
     assert (first.entry.cve_id, first.entry.action, first.entry.by) == (
@@ -144,17 +153,17 @@ def test_report_and_unreport_keep_an_append_only_trail(tmp_path):
     assert current[0].note == "Ticket OPS-42"
     assert store.reported_marks(["CVE-2026-0001"])["CVE-2026-0001"] == MARK
 
-    repeated = store.report_cve("CVE-2026-0001", by="bob")
+    repeated = record_report(store, "CVE-2026-0001", by="bob")
     assert repeated.changed is False
     assert repeated.entry is not None and repeated.entry.by == "alice"
     assert len(store.reported_entries()) == 1
 
-    forced = store.report_cve("CVE-2026-0001", by="bob", force=True)
+    forced = record_report(store, "CVE-2026-0001", by="bob", force=True)
     assert forced.changed is True
     assert forced.entry is not None and forced.entry.by == "bob"
     assert len(store.reported_entries()) == 2
 
-    withdrawn = store.unreport_cve("CVE-2026-0001", by="carol", note="Sent in error")
+    withdrawn = record_unreport(store, "CVE-2026-0001", by="carol", note="Sent in error")
     assert withdrawn.changed is True
     assert withdrawn.entry is not None and withdrawn.entry.action == "unreport"
     assert store.reported_cves() == ()
@@ -164,7 +173,7 @@ def test_report_and_unreport_keep_an_append_only_trail(tmp_path):
         "report",
         "unreport",
     ]
-    assert store.unreport_cve("CVE-2026-0001", by="dave").changed is False
+    assert record_unreport(store, "CVE-2026-0001", by="dave").changed is False
     assert len(store.reported_entries()) == 3
 
 
@@ -172,7 +181,7 @@ def test_report_requires_a_stored_cve(tmp_path):
     config = write_config(tmp_path, channels="")
     store = WatchStore(config.watch.database, clock=lambda: NOW)
     with pytest.raises(StateError, match="CVE-2026-9999 is not in the watch database"):
-        store.report_cve("CVE-2026-9999", by="alice")
+        record_report(store, "CVE-2026-9999", by="alice")
     assert store.reported_entries() == ()
 
 
@@ -190,7 +199,7 @@ def test_report_validates_identity_and_note(tmp_path, kwargs, match):
     config = write_config(tmp_path, channels="")
     store = seed(config)
     with pytest.raises(ConfigurationError, match=match):
-        store.report_cve("CVE-2026-0001", **kwargs)
+        record_report(store, "CVE-2026-0001", **kwargs)
     assert store.reported_entries() == ()
 
 
@@ -198,7 +207,7 @@ def test_report_validates_the_cve_format(tmp_path):
     config = write_config(tmp_path, channels="")
     store = WatchStore(config.watch.database, clock=lambda: NOW)
     with pytest.raises(ConfigurationError, match="CVE id must look like"):
-        store.report_cve("not-a-cve", by="alice")
+        record_report(store, "not-a-cve", by="alice")
 
 
 def test_identity_default_uses_the_os_login_or_unknown(monkeypatch):
@@ -220,15 +229,13 @@ def test_identity_default_uses_the_os_login_or_unknown(monkeypatch):
         validate_identity(None)
 
 
-def test_store_requires_an_explicit_identity(tmp_path):
+def test_raw_store_reports_require_a_resolved_identity(tmp_path):
     config = write_config(tmp_path, channels="")
     store = seed(config)
     with pytest.raises(TypeError):
-        store.report_cve("CVE-2026-0001")
+        store._report_cve("CVE-2026-0001", note=None)
     with pytest.raises(TypeError):
-        store.unreport_cve("CVE-2026-0001")
-    with pytest.raises(ConfigurationError, match="required"):
-        store.report_cve("CVE-2026-0001", by=None)
+        store._unreport_cve("CVE-2026-0001", note=None)
     assert store.reported_entries() == ()
 
 
@@ -248,7 +255,7 @@ def test_identity_rejects_raw_controls_and_invalid_unicode(tmp_path, text):
     config = write_config(tmp_path, channels="")
     store = seed(config)
     with pytest.raises(ConfigurationError, match="control characters"):
-        store.report_cve("CVE-2026-0001", by=text)
+        record_report(store, "CVE-2026-0001", by=text)
     assert store.reported_entries() == ()
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT COUNT(*) FROM watch_delivery").fetchone()[0] == 0
@@ -270,7 +277,7 @@ def test_note_rejects_raw_controls_and_invalid_unicode(tmp_path, text):
     config = write_config(tmp_path, channels="")
     store = seed(config)
     with pytest.raises(ConfigurationError, match="control characters"):
-        store.report_cve("CVE-2026-0001", by="alice", note=text)
+        record_report(store, "CVE-2026-0001", by="alice", note=text)
     assert store.reported_entries() == ()
 
 
@@ -332,7 +339,7 @@ def test_notice_rule_names_are_reserved():
         )
 
 
-def test_schema_four_database_migrates_to_six_and_keeps_rows(tmp_path):
+def test_schema_four_database_migrates_to_seven_and_keeps_rows(tmp_path):
     config = write_config(tmp_path, channels="")
     store = seed(config)
     with sqlite3.connect(store.path) as db:
@@ -352,7 +359,7 @@ def test_schema_four_database_migrates_to_six_and_keeps_rows(tmp_path):
         db.execute("DROP TABLE watch_report")
     upgraded = WatchStore(store.path, clock=lambda: NOW)
     upgraded.initialize()
-    assert upgraded.metadata()["schema_version"] == "6"
+    assert upgraded.metadata()["schema_version"] == "7"
     assert upgraded.status()["rows"] == 1
     with sqlite3.connect(store.path) as db:
         tables = {
@@ -364,7 +371,9 @@ def test_schema_four_database_migrates_to_six_and_keeps_rows(tmp_path):
             "SELECT channel,status,attempts FROM watch_delivery"
         ).fetchall() == [("hook", "failed", 3)]
     assert "watch_report" in tables
-    assert upgraded.report_cve("CVE-2026-0001", by="alice").changed is True
+    assert ReportService(upgraded, None, "open").report_cve(
+        "CVE-2026-0001", by="alice"
+    ).changed is True
 
 
 def test_cli_report_list_and_unreport(tmp_path, capsys):
@@ -417,7 +426,7 @@ url = "https://example.test/hook"
 """, extra=RULE)
     store = seed(config)
     store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources)
-    store.report_cve("CVE-2026-0001", by="alice", note="Ticket OPS-42")
+    record_report(store, "CVE-2026-0001", by="alice", note="Ticket OPS-42")
 
     assert cli.main(["--config", str(config.config_path), "watch", "events"]) == 0
     output = capsys.readouterr().out
@@ -536,7 +545,7 @@ def test_report_notification_is_sent_once_through_the_ledger(tmp_path):
         requests.append(request)
         return httpx.Response(200, json={})
 
-    outcome = store.report_cve(
+    outcome = record_report(store, 
         "CVE-2026-0001", by="alice", note="Ticket OPS-42", notify_channels=("hook",)
     )
     assert outcome.channels == ("hook",)
@@ -567,7 +576,7 @@ def test_report_notification_is_sent_once_through_the_ledger(tmp_path):
 def test_failed_report_notification_waits_for_backoff_and_retries_once(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    store.report_cve("CVE-2026-0001", by="alice", notify_channels=("hook",))
+    record_report(store, "CVE-2026-0001", by="alice", notify_channels=("hook",))
     attempts: list[str] = []
 
     def failing(request):
@@ -630,13 +639,13 @@ def posted_events(requests) -> list[dict]:
 def test_notices_follow_the_audit_order_in_one_run(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
-    store.unreport_cve(
+    record_unreport(store, 
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="third", notify_channels=("hook",)
     )
     requests: list[httpx.Request] = []
@@ -664,7 +673,7 @@ def test_notices_follow_the_audit_order_in_one_run(tmp_path):
 def test_withdrawal_waits_for_a_failed_report_during_backoff(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
 
@@ -673,7 +682,7 @@ def test_withdrawal_waits_for_a_failed_report_during_backoff(tmp_path):
 
     first = deliver(config, store, failing)
     assert first.channels[0].failed == 1
-    store.unreport_cve(
+    record_unreport(store, 
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
 
@@ -701,7 +710,7 @@ def test_withdrawal_waits_for_a_failed_report_during_backoff(tmp_path):
 def test_given_up_notice_no_longer_blocks_later_notices(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
 
@@ -714,7 +723,7 @@ def test_given_up_notice_no_longer_blocks_later_notices(tmp_path):
         db.execute(
             "UPDATE watch_delivery SET status='failed', last_error='connection failed'"
         )
-    store.unreport_cve(
+    record_unreport(store, 
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
     requests: list[httpx.Request] = []
@@ -731,7 +740,7 @@ def test_given_up_notice_no_longer_blocks_later_notices(tmp_path):
 def test_retry_failed_sends_the_predecessor_then_the_successor(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
 
@@ -739,7 +748,7 @@ def test_retry_failed_sends_the_predecessor_then_the_successor(tmp_path):
         raise httpx.ConnectError("refused")
 
     deliver(config, store, failing)
-    store.unreport_cve(
+    record_unreport(store, 
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
     requests: list[httpx.Request] = []
@@ -759,7 +768,7 @@ def test_retry_failed_sends_the_predecessor_then_the_successor(tmp_path):
 def test_retry_ambiguous_sends_the_predecessor_then_the_successor(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
 
@@ -767,7 +776,7 @@ def test_retry_ambiguous_sends_the_predecessor_then_the_successor(tmp_path):
         raise httpx.ReadTimeout("timeout")
 
     deliver(config, store, ambiguous)
-    store.unreport_cve(
+    record_unreport(store, 
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
     requests: list[httpx.Request] = []
@@ -928,11 +937,11 @@ def test_repeated_report_does_not_add_a_second_notice(tmp_path):
         requests.append(request)
         return httpx.Response(200, json={})
 
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="alice", notify_channels=("hook",)
     )
     deliver(config, store, handler)
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="alice", notify_channels=("hook",)
     )
     deliver(config, store, handler)
@@ -944,7 +953,7 @@ def test_repeated_report_does_not_add_a_second_notice(tmp_path):
 def test_reported_all_shows_notice_delivery_states(tmp_path, capsys):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    store.report_cve(
+    record_report(store, 
         "CVE-2026-0001", by="alice", notify_channels=("hook",)
     )
     assert cli.main(
@@ -1109,7 +1118,7 @@ def test_channels_without_notify_reported_get_nothing(tmp_path):
     assert channels["quiet"].notify_reported is False
 
     store = seed(config)
-    store.report_cve("CVE-2026-0001", by="alice", notify_channels=("hook",))
+    record_report(store, "CVE-2026-0001", by="alice", notify_channels=("hook",))
     with sqlite3.connect(store.path) as db:
         assert db.execute(
             "SELECT COUNT(*) FROM watch_delivery WHERE channel='quiet'"
