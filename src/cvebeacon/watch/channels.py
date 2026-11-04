@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from ..errors import ConfigurationError
+from .catalog import canonical_language
 from .rules import Rule
 
 LOG = logging.getLogger("cvebeacon")
@@ -46,6 +47,7 @@ COMMON_KEYS = {
     "timeout_seconds",
     "allow_insecure",
     "notify_reported",
+    "language",
 }
 TYPE_KEYS = {
     "smtp": {
@@ -59,6 +61,7 @@ TYPE_KEYS = {
         "to",
         "cc",
         "bcc",
+        "format",
     },
     "graph": {
         "tenant_id",
@@ -69,6 +72,7 @@ TYPE_KEYS = {
         "to",
         "cc",
         "bcc",
+        "format",
     },
     "teams": {"webhook_url_env", "webhook_url_file"},
     "slack": {"webhook_url_env", "webhook_url_file"},
@@ -85,6 +89,7 @@ TYPE_KEYS = {
     },
 }
 SMTP_SECURITY = ("starttls", "tls", "none")
+MESSAGE_FORMATS = ("text", "html")
 
 
 def _fail(label: str, message: str) -> None:
@@ -153,6 +158,8 @@ class ChannelConfig:
     min_interval_seconds: float = 0.0
     timeout_seconds: float = 30.0
     notify_reported: bool = False
+    format: str = "text"
+    language: str | None = None
     options: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -375,6 +382,14 @@ def _common(table: Mapping[str, Any], label: str, channel_type: str) -> dict[str
     )
     if channel_type == "telegram" and interval < 3.0:
         _fail(f"{label} min_interval_seconds", "must be at least 3 for Telegram")
+    language = _string(table, "language", label, maximum=20)
+    if language is not None:
+        language = canonical_language(language, label=f"{label} language")
+    message_format = (
+        _string(table, "format", label, maximum=20) or "text"
+    ).casefold()
+    if message_format not in MESSAGE_FORMATS:
+        _fail(f"{label} format", "must be text or html")
     return {
         "enabled": enabled,
         "grouping": grouping,
@@ -383,6 +398,8 @@ def _common(table: Mapping[str, Any], label: str, channel_type: str) -> dict[str
         "min_interval_seconds": interval,
         "allow_insecure": _boolean(table, "allow_insecure", label, False),
         "notify_reported": _boolean(table, "notify_reported", label, False),
+        "format": message_format,
+        "language": language,
     }
 
 
@@ -644,6 +661,8 @@ def parse_channels(raw: Any, *, base: Path) -> tuple[ChannelConfig, ...]:
                 min_interval_seconds=float(options["min_interval_seconds"]),
                 timeout_seconds=float(options["timeout_seconds"]),
                 notify_reported=bool(options["notify_reported"]),
+                format=str(options["format"]),
+                language=options["language"],
                 options=options,
             )
         )

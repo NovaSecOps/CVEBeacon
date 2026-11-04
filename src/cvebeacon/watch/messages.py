@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as html_module
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -9,10 +10,11 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
+from .catalog import DEFAULT_LANGUAGE, catalog_for, translate
 from .records import CVSSEntry, DeliveryEvent, InitialDigest, WatchView
 from .reported import (
     NOTICE_KINDS,
-    NOTICE_LABELS,
+    NOTICE_LABEL_KEYS,
     format_reported,
     format_timestamp,
 )
@@ -43,15 +45,7 @@ CHANNEL_LIMITS = {
     "gotify": 32_768,
     "webhook": 32_768,
 }
-KIND_NAMES = {
-    "match": "match",
-    "kev_added": "KEV added",
-    "exploitation_active": "actively exploited",
-    "severity_increase": "severity up",
-    "epss_increase": "EPSS up",
-    "nvd_score_added": "NVD scored",
-    "rejected": "rejected",
-}
+EMAIL_CHANNELS = ("smtp", "graph")
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -61,6 +55,7 @@ class OutgoingMessage:
     subject: str
     text: str
     body: str
+    html: str = ""
     initial: bool = False
     content: str = ""
     part_index: int = 0
@@ -84,11 +79,11 @@ def _clean(value: Any, limit: int | None = None) -> str:
     return text
 
 
-def _date_text(value: Any) -> str:
-    """Return a UTC date as ``YYYY-MM-DD``, or ``unknown`` when it is absent."""
+def _date_text(value: Any, catalog: Mapping[str, str]) -> str:
+    """Return a UTC date as ``YYYY-MM-DD``, or the unknown label when absent."""
     text = _clean(value)
     if not text:
-        return "unknown"
+        return catalog["unknown"]
     try:
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is not None:
@@ -99,14 +94,19 @@ def _date_text(value: Any) -> str:
     try:
         return datetime.strptime(text[:10], "%Y-%m-%d").date().isoformat()
     except ValueError:
-        return "unknown"
+        return catalog["unknown"]
 
 
-def date_phrase(published: Any, first_seen: Any) -> str:
+def date_phrase(
+    published: Any, first_seen: Any, language: str = DEFAULT_LANGUAGE
+) -> str:
     """Return the short publication and first-seen phrase for one CVE."""
-    return (
-        f"Published {_date_text(published)} · "
-        f"first seen {_date_text(first_seen)}"
+    catalog = catalog_for(language)
+    return translate(
+        catalog,
+        "date_line",
+        published=_date_text(published, catalog),
+        first_seen=_date_text(first_seen, catalog),
     )
 
 
@@ -177,31 +177,53 @@ def _cna_name(entry: CVSSEntry, view: WatchView) -> str:
     return "CNA"
 
 
-def _provider_label(provider: str, entry: CVSSEntry, view: WatchView) -> str:
+def _provider_label(
+    provider: str,
+    entry: CVSSEntry,
+    view: WatchView,
+    catalog: Mapping[str, str],
+) -> str:
     if provider == "cna":
-        return f"CNA: {_cna_name(entry, view)}"
+        return translate(
+            catalog, "provider_cna", name=_cna_name(entry, view)
+        )
     if provider == "nvd":
-        return "NVD"
+        return catalog["provider_nvd"]
     if provider == "cisa-adp":
-        return "CISA-ADP"
+        return catalog["provider_cisa_adp"]
     if provider == "euvd":
-        return "EUVD"
-    return "Other"
+        return catalog["provider_euvd"]
+    return catalog["provider_other"]
 
 
-def _cvss_field(view: WatchView, style: str = STYLE_PLAIN) -> str:
+def _cvss_field(
+    view: WatchView,
+    style: str = STYLE_PLAIN,
+    catalog: Mapping[str, str] | None = None,
+) -> str:
+    if catalog is None:
+        catalog = catalog_for(DEFAULT_LANGUAGE)
     best = _best_by_provider(view.cvss)
     parts: list[str] = []
     for provider in PROVIDER_ORDER:
         entry = best.get(provider)
         if entry is None:
             continue
-        label = _dynamic(_provider_label(provider, entry, view), style, 80)
-        parts.append(f"CVSS {entry.score:g} ({label})")
+        label = _dynamic(
+            _provider_label(provider, entry, view, catalog), style, 80
+        )
+        parts.append(
+            translate(
+                catalog,
+                "cvss_score",
+                score=f"{entry.score:g}",
+                provider=label,
+            )
+        )
     if not parts:
-        return "CVSS not scored"
+        return catalog["cvss_not_scored"]
     if "nvd" not in best and view.status != "rejected":
-        parts.append("NVD pending")
+        parts.append(catalog["nvd_pending"])
     return ", ".join(parts)
 
 
@@ -211,18 +233,12 @@ def _epss_field(view: WatchView) -> str:
     return f"{view.epss:.2f}"
 
 
-def _kev_field(view: WatchView) -> str:
-    cisa = "✓" if view.cisa_kev_added is not None else "–"
-    eu = "✓" if view.eu_kev_added is not None else "–"
-    return f"CISA {cisa} EU {eu}"
-
-
-def _exploitation_field(view: WatchView) -> str:
+def _exploitation_value(view: WatchView, catalog: Mapping[str, str]) -> str:
     if view.ssvc_exploitation == "active" or view.euvd_exploited_since:
-        return "active"
+        return catalog["exploitation_active"]
     if view.ssvc_exploitation == "poc":
-        return "poc"
-    return "none"
+        return catalog["exploitation_poc"]
+    return catalog["exploitation_none"]
 
 
 def _reason_transition(reasons: Sequence[str], prefix: str) -> tuple[str, str] | None:
@@ -234,104 +250,217 @@ def _reason_transition(reasons: Sequence[str], prefix: str) -> tuple[str, str] |
     return None
 
 
-def _kind_label(event: DeliveryEvent, style: str) -> str:
+def _kind_label(
+    event: DeliveryEvent, style: str, catalog: Mapping[str, str]
+) -> str:
     kind = event.kind
     if kind == "match":
-        return "[NEW]"
+        return catalog["label_match"]
     if kind == "kev_added":
-        catalog = "CISA"
+        catalog_name = "CISA"
         for reason in event.reasons:
             if "kev eu" in reason:
-                catalog = "EU"
+                catalog_name = "EU"
             elif "kev cisa" in reason:
-                catalog = "CISA"
-        return f"[KEV ADDED: {catalog}]"
+                catalog_name = "CISA"
+        return translate(
+            catalog, "label_kev_added", catalog=catalog_name
+        )
     if kind == "exploitation_active":
-        return "[ACTIVELY EXPLOITED]"
+        return catalog["label_exploited"]
     if kind == "severity_increase":
         transition = _reason_transition(event.reasons, "severity")
         if transition is not None:
-            return f"[SEVERITY UP {transition[0]}->{transition[1]}]"
-        return "[SEVERITY UP]"
+            return translate(
+                catalog,
+                "label_severity_up",
+                previous=transition[0],
+                current=transition[1],
+            )
+        return catalog["label_severity_up_plain"]
     if kind == "epss_increase":
         previous = event.details.get("previous_epss")
         current = event.details.get("epss")
         if not isinstance(current, (int, float)):
             current = event.view.epss
         if isinstance(previous, (int, float)) and isinstance(current, (int, float)):
-            return f"[EPSS UP {float(previous):.2f}->{float(current):.2f}]"
+            return translate(
+                catalog,
+                "label_epss_up",
+                previous=f"{float(previous):.2f}",
+                current=f"{float(current):.2f}",
+            )
         transition = _reason_transition(event.reasons, "epss")
         if transition is not None:
-            return f"[EPSS UP {transition[0]}->{transition[1]}]"
-        return "[EPSS UP]"
+            return translate(
+                catalog,
+                "label_epss_up",
+                previous=transition[0],
+                current=transition[1],
+            )
+        return catalog["label_epss_up_plain"]
     if kind == "nvd_score_added":
         nvd = _best_by_provider(event.view.cvss).get("nvd")
         if nvd is not None:
-            return f"[NVD SCORED {nvd.score:g}]"
-        return "[NVD SCORED]"
+            return translate(
+                catalog, "label_nvd_scored", score=f"{nvd.score:g}"
+            )
+        return catalog["label_nvd_scored_plain"]
     if kind == "rejected":
-        return "[REJECTED]"
-    return f"[{kind.upper()}]"
+        return catalog["label_rejected"]
+    if kind == "reported":
+        return catalog["label_reported"]
+    if kind == "unreported":
+        return catalog["label_unreported"]
+    return translate(catalog, "label_unknown", kind=kind.upper())
 
 
-def _links(event: DeliveryEvent, style: str) -> str:
+def _link_pairs(
+    event: DeliveryEvent, catalog: Mapping[str, str]
+) -> tuple[tuple[str, str], ...]:
     view = event.view
     cve_id = quote(str(event.cve_id), safe="-_.")
-    values = [
-        _link(NVD_URL.format(cve_id=cve_id), "NVD", style),
-        _link(CVE_URL.format(cve_id=cve_id), "CVE.org", style),
+    values: list[tuple[str, str]] = [
+        (NVD_URL.format(cve_id=cve_id), catalog["link_nvd"]),
+        (CVE_URL.format(cve_id=cve_id), catalog["link_cve"]),
     ]
     if view.euvd_id:
         euvd_id = quote(str(view.euvd_id), safe="-_.")
-        values.append(_link(EUVD_URL.format(euvd_id=euvd_id), "EUVD", style))
+        values.append(
+            (EUVD_URL.format(euvd_id=euvd_id), catalog["link_euvd"])
+        )
     if view.cisa_kev_added is not None or view.eu_kev_added is not None:
-        values.append(_link(KEV_URL, "KEV catalog", style))
-    return " · ".join(values)
+        values.append((KEV_URL, catalog["link_kev"]))
+    return tuple(values)
+
+
+def _links(
+    event: DeliveryEvent, style: str, catalog: Mapping[str, str]
+) -> str:
+    return " · ".join(
+        _link(url, label, style) for url, label in _link_pairs(event, catalog)
+    )
 
 
 def _group_events(
-    events: Iterable[DeliveryEvent], style: str
+    events: Iterable[DeliveryEvent],
+    style: str,
+    catalog: Mapping[str, str],
 ) -> list[list[DeliveryEvent]]:
     """Merge events that render the same CVE line under the same label."""
     grouped: dict[tuple[str, str], list[DeliveryEvent]] = {}
     for event in events:
-        key = (event.cve_id, _kind_label(event, style))
+        key = (event.cve_id, _kind_label(event, style, catalog))
         grouped.setdefault(key, []).append(event)
     return list(grouped.values())
 
 
-def _event_lines(
-    group: Sequence[DeliveryEvent], style: str, names: Mapping[str, str]
-) -> list[str]:
+@dataclass(frozen=True, slots=True)
+class _EventFacts:
+    """The facts one CVE block shows, shared by the text and HTML renderers."""
+
+    label: str
+    cve_id: str
+    cvss: str
+    epss: str
+    kev: str
+    exploitation: str
+    published: str
+    first_seen: str
+    date_line: str
+    description: str
+    extras: tuple[str, ...]
+    reported: str
+    rules: tuple[str, ...]
+    links: tuple[tuple[str, str], ...]
+
+
+def _event_facts(
+    group: Sequence[DeliveryEvent],
+    names: Mapping[str, str],
+    catalog: Mapping[str, str],
+    language: str,
+) -> _EventFacts:
     event = group[0]
-    label = _kind_label(event, style)
-    line = (
-        f"{label} {event.cve_id} · {_cvss_field(event.view, style)} · "
-        f"EPSS {_epss_field(event.view)} · KEV: {_kev_field(event.view)} · "
-        f"Exploitation: {_exploitation_field(event.view)}"
-    )
-    lines = [
-        line,
-        f"  {date_phrase(event.view.published, event.view.first_seen)}",
-    ]
-    description = _dynamic(event.view.description, style, DESCRIPTION_LIMIT)
-    if description:
-        lines.append(f"  {description}")
-    if event.kind == "kev_added" and event.view.cisa_kev_added is not None:
-        extras: list[str] = []
-        if event.view.cisa_kev_due:
-            extras.append(f"Due {_dynamic(event.view.cisa_kev_due, style, 40)}")
-        if event.view.cisa_required_action:
+    view = event.view
+    published = _date_text(view.published, catalog)
+    first_seen = _date_text(view.first_seen, catalog)
+    extras: list[str] = []
+    if event.kind == "kev_added" and view.cisa_kev_added is not None:
+        if view.cisa_kev_due:
             extras.append(
-                _dynamic(event.view.cisa_required_action, style, KEV_ACTION_LIMIT)
+                translate(
+                    catalog, "due", date=_clean(view.cisa_kev_due, 40)
+                )
             )
-        if extras:
-            lines.append("  " + " · ".join(extras))
-    if event.reported is not None:
-        lines.append("  " + _dynamic(format_reported(event.reported), style))
-    rule_names = sorted({_display_name(item, names) for item in group})
-    rules = ", ".join(_dynamic(name, style, 80) for name in rule_names)
-    lines.append(f"  Rule: {rules} · {_links(event, style)}")
+        if view.cisa_required_action:
+            extras.append(_clean(view.cisa_required_action, KEV_ACTION_LIMIT))
+    return _EventFacts(
+        label=_kind_label(event, STYLE_PLAIN, catalog),
+        cve_id=str(event.cve_id),
+        cvss=_cvss_field(view, STYLE_PLAIN, catalog),
+        epss=_epss_field(view),
+        kev=translate(
+            catalog,
+            "kev_value",
+            cisa="✓" if view.cisa_kev_added is not None else "–",
+            eu="✓" if view.eu_kev_added is not None else "–",
+        ),
+        exploitation=_exploitation_value(view, catalog),
+        published=published,
+        first_seen=first_seen,
+        date_line=translate(
+            catalog, "date_line", published=published, first_seen=first_seen
+        ),
+        description=_clean(view.description, DESCRIPTION_LIMIT),
+        extras=tuple(extras),
+        reported=(
+            format_reported(event.reported, language)
+            if event.reported is not None
+            else ""
+        ),
+        rules=tuple(
+            sorted({_display_name(item, names) for item in group})
+        ),
+        links=_link_pairs(event, catalog),
+    )
+
+
+def _event_summary(
+    facts: _EventFacts, style: str, catalog: Mapping[str, str]
+) -> str:
+    return (
+        f"{facts.label} {_dynamic(facts.cve_id, style)} · "
+        f"{_dynamic(facts.cvss, style)} · "
+        f"{_dynamic(translate(catalog, 'epss_field', score=facts.epss), style)} · "
+        f"{_dynamic(translate(catalog, 'kev_field', kev=facts.kev), style)} · "
+        f"{_dynamic(translate(catalog, 'exploitation_field', value=facts.exploitation), style)}"
+    )
+
+
+def _event_lines(
+    facts: _EventFacts, style: str, catalog: Mapping[str, str]
+) -> list[str]:
+    lines = [
+        _event_summary(facts, style, catalog),
+        f"  {_dynamic(facts.date_line, style)}",
+    ]
+    if facts.description:
+        lines.append(f"  {_dynamic(facts.description, style)}")
+    if facts.extras:
+        lines.append(
+            "  " + " · ".join(_dynamic(item, style) for item in facts.extras)
+        )
+    if facts.reported:
+        lines.append("  " + _dynamic(facts.reported, style))
+    rules = ", ".join(_dynamic(name, style, 80) for name in facts.rules)
+    links = " · ".join(
+        _link(url, label, style) for url, label in facts.links
+    )
+    lines.append(
+        "  "
+        + translate(catalog, "rule_line", rules=rules, links=links)
+    )
     return lines
 
 
@@ -359,41 +488,62 @@ def sort_events(events: Iterable[DeliveryEvent]) -> tuple[DeliveryEvent, ...]:
     return tuple(sorted(events, key=key))
 
 
-def _counts_phrase(groups: Sequence[Sequence[DeliveryEvent]]) -> str:
+def _counts_phrase(
+    groups: Sequence[Sequence[DeliveryEvent]], catalog: Mapping[str, str]
+) -> str:
     counts = Counter(group[0].kind for group in groups)
     parts: list[str] = []
     for kind in EVENT_KINDS:
         count = counts.get(kind, 0)
         if not count:
             continue
-        name = KIND_NAMES[kind]
-        if kind == "match":
-            parts.append(f"{count} new")
-        else:
-            parts.append(f"{count} {name}")
-    return ", ".join(parts) or f"{len(groups)} event(s)"
+        suffix = "one" if count == 1 else "other"
+        parts.append(
+            translate(
+                catalog, f"count_{kind}_{suffix}", count=count
+            )
+        )
+    if parts:
+        return ", ".join(parts)
+    suffix = "one" if len(groups) == 1 else "other"
+    return translate(catalog, f"count_events_{suffix}", count=len(groups))
 
 
-def _rule_label(events: Sequence[DeliveryEvent], names: Mapping[str, str]) -> str:
+def _rule_label(
+    events: Sequence[DeliveryEvent],
+    names: Mapping[str, str],
+    catalog: Mapping[str, str],
+) -> str:
     rules = {event.rule for event in events}
     if len(rules) == 1:
         folded = next(iter(rules))
         return names.get(folded, folded)
-    return f"{len(rules)} rules"
+    return translate(catalog, "rule_count_other", count=len(rules))
 
 
 def _display_name(event: DeliveryEvent, names: Mapping[str, str]) -> str:
     return names.get(event.rule, event.rule)
 
 
-def _run_subject(events: Sequence[DeliveryEvent], names: Mapping[str, str]) -> str:
-    groups = _group_events(sort_events(events), STYLE_PLAIN)
-    return f"CVEBeacon: {_counts_phrase(groups)} ({_rule_label(events, names)})"
+def _run_subject(
+    events: Sequence[DeliveryEvent],
+    names: Mapping[str, str],
+    catalog: Mapping[str, str],
+) -> str:
+    groups = _group_events(sort_events(events), STYLE_PLAIN, catalog)
+    return translate(
+        catalog,
+        "subject_run",
+        counts=_counts_phrase(groups, catalog),
+        rules=_rule_label(events, names, catalog),
+    )
 
 
-def _event_subject(event: DeliveryEvent, names: Mapping[str, str]) -> str:
-    label = _kind_label(event, STYLE_PLAIN).strip("[]")
-    return f"CVEBeacon: [{label}] {event.cve_id}"
+def _event_subject(
+    event: DeliveryEvent, names: Mapping[str, str], catalog: Mapping[str, str]
+) -> str:
+    label = _kind_label(event, STYLE_PLAIN, catalog)
+    return translate(catalog, "subject_event", label=label, cve=event.cve_id)
 
 
 def _size(value: str, byte_limit: bool) -> int:
@@ -473,58 +623,315 @@ def _partials(
     return split_message(text, limit, byte_limit=byte_limit)
 
 
-def _event_body(
+_HTML_FONT = (
+    "font-family:Arial,Helvetica,sans-serif;font-size:14px;"
+    "line-height:1.5;color:#1b1f24;"
+)
+_HTML_MUTED = "color:#475467;font-size:12px;"
+_HTML_LINK = "color:#0b57d0;text-decoration:underline;"
+_HTML_TD = "padding:4px 6px;vertical-align:top;border-bottom:1px solid #e4e7ec;"
+_HTML_TH = (
+    "padding:6px;text-align:left;border-bottom:2px solid #d0d5dd;"
+    "font-size:11px;letter-spacing:0.03em;text-transform:uppercase;"
+    "color:#475467;"
+)
+_HTML_BLOCK = (
+    "border:1px solid #d0d5dd;border-left:4px solid #0b57d0;"
+    "border-radius:4px;padding:10px 12px;margin:0 0 12px 0;"
+    "background-color:#f8fafc;"
+)
+
+
+def _h(value: str) -> str:
+    """Escape one dynamic value for HTML text and attribute contexts."""
+    return html_module.escape(value, quote=True)
+
+
+def _html_link(url: str, label: str) -> str:
+    return (
+        f'<a href="{_h(url)}" style="{_HTML_LINK}" '
+        f'rel="noopener noreferrer">{_h(label)}</a>'
+    )
+
+
+def _html_links(facts: _EventFacts) -> str:
+    return " · ".join(
+        _html_link(url, label) for url, label in facts.links
+    )
+
+
+def _html_document(language: str, subject: str, fragment: str) -> str:
+    """Wrap a fragment in a small table-based email document.
+
+    Every style is inline, there are no images, scripts, fonts or remote
+    stylesheets, and the layout uses tables only.
+    """
+    return (
+        "<!doctype html>\n"
+        f'<html lang="{_h(language)}">\n<head>\n'
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta name="color-scheme" content="light dark">\n'
+        f"<title>{_h(subject)}</title>\n</head>\n"
+        '<body style="margin:0;padding:0;background-color:#f2f4f7;">\n'
+        '<table role="presentation" width="100%" cellpadding="0" '
+        'cellspacing="0" border="0" style="background-color:#f2f4f7;">\n'
+        '<tr><td align="center" style="padding:16px;">\n'
+        '<table role="presentation" width="100%" cellpadding="0" '
+        'cellspacing="0" border="0" style="max-width:720px;'
+        'background-color:#ffffff;border:1px solid #d0d5dd;'
+        'border-radius:6px;">\n'
+        f'<tr><td style="padding:16px 18px;{_HTML_FONT}">\n'
+        '<h1 style="font-size:18px;line-height:1.3;margin:0 0 12px 0;">'
+        f"{_h(subject)}</h1>\n"
+        f"{fragment}\n"
+        "</td></tr>\n</table>\n</td></tr>\n</table>\n</body>\n</html>"
+    )
+
+
+def _html_event_block(facts: _EventFacts, catalog: Mapping[str, str]) -> str:
+    rows = [
+        f'<tr><td style="{_HTML_TD}"><strong>'
+        f"{_h(_event_summary(facts, STYLE_PLAIN, catalog))}"
+        "</strong></td></tr>",
+        f'<tr><td style="{_HTML_TD}{_HTML_MUTED}">'
+        f"{_h(facts.date_line)}</td></tr>",
+    ]
+    if facts.description:
+        rows.append(
+            f'<tr><td style="{_HTML_TD}">{_h(facts.description)}</td></tr>'
+        )
+    if facts.extras:
+        rows.append(
+            f'<tr><td style="{_HTML_TD}{_HTML_MUTED}">'
+            f'{_h(" · ".join(facts.extras))}</td></tr>'
+        )
+    if facts.reported:
+        rows.append(
+            f'<tr><td style="{_HTML_TD}">{_h(facts.reported)}</td></tr>'
+        )
+    rules = _h(", ".join(facts.rules))
+    rows.append(
+        f'<tr><td style="{_HTML_TD}">'
+        f'<span style="{_HTML_MUTED}">{_h(catalog["rule_label"])}:</span> '
+        f"{rules} · {_html_links(facts)}</td></tr>"
+    )
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" '
+        'cellspacing="0" border="0" '
+        f'style="{_HTML_BLOCK}">' + "".join(rows) + "</table>"
+    )
+
+
+def _html_run_fragment(
+    facts: Sequence[_EventFacts],
+    omitted: int,
+    catalog: Mapping[str, str],
+) -> str:
+    blocks = [_html_event_block(item, catalog) for item in facts]
+    if omitted:
+        blocks.append(
+            f'<p style="margin:8px 0;{_HTML_MUTED}">'
+            f'{_h(translate(catalog, "and_more", count=omitted))}</p>'
+        )
+    return "\n".join(blocks)
+
+
+def _html_digest_fragment(
+    rule_pairs: Sequence[tuple[str, str]],
+    facts: Sequence[_EventFacts],
+    omitted: int,
+    hint: str,
+    catalog: Mapping[str, str],
+) -> str:
+    parts: list[str] = []
+    for rule, counts in rule_pairs:
+        parts.append(
+            '<h2 style="font-size:14px;line-height:1.3;margin:14px 0 2px 0;">'
+            f"{_h(rule)}</h2>"
+        )
+        parts.append(
+            f'<p style="margin:0 0 8px 0;{_HTML_MUTED}">{_h(counts)}</p>'
+        )
+    columns = (
+        "html_column_cve",
+        "html_column_severity",
+        "html_column_epss",
+        "html_column_kev",
+        "html_column_exploitation",
+        "html_column_published",
+        "html_column_first_seen",
+    )
+    header = "".join(
+        f'<th style="{_HTML_TH}">{_h(catalog[key])}</th>'
+        for key in columns
+    )
+    rows: list[str] = []
+    for item in facts:
+        cell: list[str] = [
+            f"<strong>{_h(item.label)}</strong>",
+            _h(item.cve_id),
+        ]
+        if item.description:
+            cell.append(
+                f'<span style="{_HTML_MUTED}">{_h(item.description)}</span>'
+            )
+        if item.extras:
+            cell.append(
+                f'<span style="{_HTML_MUTED}">'
+                f'{_h(" · ".join(item.extras))}</span>'
+            )
+        if item.reported:
+            cell.append(
+                f'<span style="{_HTML_MUTED}">{_h(item.reported)}</span>'
+            )
+        cell.append(
+            f'<span style="{_HTML_MUTED}">{_h(catalog["rule_label"])}: '
+            f'{_h(", ".join(item.rules))}</span>'
+        )
+        cell.append(
+            f'<span style="{_HTML_MUTED}">{_html_links(item)}</span>'
+        )
+        values = (
+            "<br>".join(cell),
+            _h(item.cvss),
+            _h(item.epss),
+            _h(item.kev),
+            _h(item.exploitation),
+            _h(item.published),
+            _h(item.first_seen),
+        )
+        rows.append(
+            "<tr>"
+            + "".join(
+                f'<td style="{_HTML_TD}">{value}</td>' for value in values
+            )
+            + "</tr>"
+        )
+    parts.append(
+        '<table role="presentation" width="100%" cellpadding="0" '
+        'cellspacing="0" border="0" '
+        'style="border-collapse:collapse;width:100%;font-size:12px;">'
+        f"<tr>{header}</tr>{''.join(rows)}</table>"
+    )
+    if omitted:
+        parts.append(
+            f'<p style="margin:8px 0;{_HTML_MUTED}">'
+            f'{_h(translate(catalog, "and_more", count=omitted))}</p>'
+        )
+    else:
+        parts.append(
+            f'<p style="margin:8px 0;{_HTML_MUTED}">{_h(hint)}</p>'
+        )
+    return "\n".join(parts)
+
+
+def _event_body_and_html(
     events: Sequence[DeliveryEvent],
     *,
     style: str,
     names: Mapping[str, str],
+    catalog: Mapping[str, str],
+    language: str,
+    subject: str,
     limit: int,
     max_items: int | None = None,
     byte_limit: bool = False,
-) -> str:
-    listed = _group_events(sort_events(events), style)
+    with_html: bool = False,
+) -> tuple[str, str]:
+    listed = _group_events(sort_events(events), style, catalog)
+    current = max_items
     while True:
-        shown = listed if max_items is None else listed[:max_items]
+        shown = listed if current is None else listed[:current]
+        facts = [
+            _event_facts(group, names, catalog, language) for group in shown
+        ]
         lines: list[str] = []
-        for group in shown:
-            lines.extend(_event_lines(group, style, names))
+        for item in facts:
+            lines.extend(_event_lines(item, style, catalog))
         omitted = len(listed) - len(shown)
         if omitted:
-            lines.append(
-                f"and {omitted} more. "
-                "Run `cvebeacon watch events` to list all."
-            )
+            lines.append(translate(catalog, "and_more", count=omitted))
         body = "\n".join(lines)
-        if len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS:
-            return body
-        if not shown:
-            return body
-        if max_items is None:
-            max_items = len(shown) - 1
+        markup = ""
+        if with_html:
+            markup = _html_document(
+                language,
+                subject,
+                _html_run_fragment(facts, omitted, catalog),
+            )
+        fits = len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS
+        if with_html and (len(body) > limit or len(markup) > limit):
+            fits = False
+        if fits or not shown:
+            return body, markup
+        if current is None:
+            current = len(shown) - 1
         else:
-            max_items = max(0, min(max_items, len(shown)) - 1)
+            current = max(0, min(current, len(shown)) - 1)
 
 
-def _kind_count_name(kind: str, count: int) -> str:
-    if kind == "match":
-        return "match" if count == 1 else "matches"
-    return KIND_NAMES[kind]
+def _rule_count_pairs(
+    totals: Mapping[str, Counter[str]],
+    names: Mapping[str, str],
+    catalog: Mapping[str, str],
+) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for rule in sorted(totals):
+        parts: list[str] = []
+        for kind in EVENT_KINDS:
+            count = totals[rule].get(kind, 0)
+            if not count:
+                continue
+            suffix = "one" if count == 1 else "other"
+            parts.append(
+                f"{count} "
+                + translate(catalog, f"item_{kind}_{suffix}", count=count)
+            )
+        pairs.append(
+            (_display_name_for(rule, names), ", ".join(parts))
+        )
+    return pairs
 
 
-def _initial_body(
+def _digest_hint(
+    totals: Mapping[str, Counter[str]],
+    names: Mapping[str, str],
+    style: str,
+    catalog: Mapping[str, str],
+) -> str:
+    rule_names = sorted(
+        {_display_name_for(rule, names) for rule in totals}
+    )
+    if rule_names:
+        example = rule_names[0]
+        if any(character.isspace() for character in example):
+            example = f'"{example}"'
+        return translate(
+            catalog,
+            "list_all_rule",
+            rule=_dynamic(example, style, 80),
+        )
+    return catalog["list_all"]
+
+
+def _initial_body_and_html(
     events: Sequence[DeliveryEvent],
     *,
     style: str,
     names: Mapping[str, str],
+    catalog: Mapping[str, str],
+    language: str,
+    subject: str,
     limit: int,
     max_items: int,
-    since: str | None,
     byte_limit: bool = False,
     counts: Sequence[tuple[str, str, int]] | None = None,
     total_cves: int | None = None,
-) -> str:
+    with_html: bool = False,
+) -> tuple[str, str]:
     ordered = sort_events(events)
-    groups = _group_events(ordered, style)
+    groups = _group_events(ordered, style, catalog)
     totals: dict[str, Counter[str]] = {}
     if counts is None:
         for event in ordered:
@@ -532,68 +939,110 @@ def _initial_body(
     else:
         for rule, kind, count in counts:
             totals.setdefault(rule, Counter())[kind] += count
-    cves = total_cves if total_cves is not None else len({event.cve_id for event in ordered})
+    cves = (
+        total_cves
+        if total_cves is not None
+        else len({event.cve_id for event in ordered})
+    )
+    current = max_items
     while True:
-        shown = groups[:max_items]
-        lines: list[str] = []
-        for rule in sorted(totals):
-            parts = [
-                f"{count} {_kind_count_name(kind, count)}"
-                for kind in EVENT_KINDS
-                if (count := totals[rule].get(kind, 0))
-            ]
-            lines.append(f"{_display_name_for(rule, names)}: " + ", ".join(parts))
+        shown = groups[:current]
+        facts = [
+            _event_facts(group, names, catalog, language) for group in shown
+        ]
+        rule_pairs = _rule_count_pairs(totals, names, catalog)
+        lines = [
+            translate(
+                catalog,
+                "per_rule_line",
+                rule=_dynamic(rule, style, 80),
+                counts=_dynamic(counts_text, style),
+            )
+            for rule, counts_text in rule_pairs
+        ]
         lines.append("")
-        for group in shown:
-            lines.extend(_event_lines(group, style, names))
+        for item in facts:
+            lines.extend(_event_lines(item, style, catalog))
         shown_cves = len({event.cve_id for group in shown for event in group})
         omitted = max(0, cves - shown_cves)
+        hint = _digest_hint(totals, names, style, catalog)
         if omitted:
-            lines.append(
-                f"and {omitted} more. "
-                "Run `cvebeacon watch events` to list all."
-            )
+            lines.append(translate(catalog, "and_more", count=omitted))
         else:
-            rule_names = sorted(
-                {_display_name_for(rule, names) for rule in totals}
-            )
             lines.append("")
-            if rule_names:
-                example = rule_names[0]
-                if any(character.isspace() for character in example):
-                    example = f'"{example}"'
-                lines.append(
-                    "Run `cvebeacon watch events --rule "
-                    f"{_dynamic(example, style, 80)}` to list all."
-                )
-            else:
-                lines.append("Run `cvebeacon watch events` to list all.")
+            lines.append(hint)
         body = "\n".join(lines)
-        if (
-            len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS
-            or not shown
-        ):
-            return body
-        max_items = max(0, len(shown) - 1)
+        markup = ""
+        if with_html:
+            markup = _html_document(
+                language,
+                subject,
+                _html_digest_fragment(
+                    rule_pairs,
+                    facts,
+                    omitted,
+                    _digest_hint(totals, names, STYLE_PLAIN, catalog),
+                    catalog,
+                ),
+            )
+        fits = len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS
+        if with_html and (len(body) > limit or len(markup) > limit):
+            fits = False
+        if fits or not shown:
+            return body, markup
+        current = max(0, len(shown) - 1)
 
 
 def _display_name_for(folded: str, names: Mapping[str, str]) -> str:
     return names.get(folded, folded)
 
 
-def _initial_subject(cves: int, rules: int, since: str | None) -> str:
-    suffix = f" since {since}" if since else ""
-    cve_word = "CVE" if cves == 1 else "CVEs"
-    rule_word = "rule" if rules == 1 else "rules"
-    return (
-        f"CVEBeacon initial summary: {cves} {cve_word} across {rules} "
-        f"{rule_word}{suffix}"
+def _initial_subject(
+    cves: int,
+    rules: int,
+    since: str | None,
+    catalog: Mapping[str, str],
+) -> str:
+    suffix = (
+        translate(catalog, "since_suffix", since=since) if since else ""
+    )
+    cve_word = translate(
+        catalog,
+        "cve_word_one" if cves == 1 else "cve_word_other",
+    )
+    rule_word = translate(
+        catalog,
+        "rule_word_one" if rules == 1 else "rule_word_other",
+    )
+    return translate(
+        catalog,
+        "subject_initial",
+        cves=cves,
+        cve_word=cve_word,
+        rules=rules,
+        rule_word=rule_word,
+        since=suffix,
     )
 
 
-def _notice_subject(event: DeliveryEvent) -> str:
-    label = NOTICE_LABELS.get(event.kind, f"[{event.kind.upper()}]")
-    return f"CVEBeacon: {label} {event.cve_id}"
+def _notice_label(
+    event: DeliveryEvent, catalog: Mapping[str, str]
+) -> str:
+    key = NOTICE_LABEL_KEYS.get(event.kind)
+    if key is None:
+        return translate(catalog, "label_unknown", kind=event.kind.upper())
+    return catalog[key]
+
+
+def _notice_subject(
+    event: DeliveryEvent, catalog: Mapping[str, str]
+) -> str:
+    return translate(
+        catalog,
+        "subject_notice",
+        label=_notice_label(event, catalog),
+        cve=event.cve_id,
+    )
 
 
 def _sorted_notices(events: Iterable[DeliveryEvent]) -> tuple[DeliveryEvent, ...]:
@@ -606,19 +1055,63 @@ def _sorted_notices(events: Iterable[DeliveryEvent]) -> tuple[DeliveryEvent, ...
     )
 
 
-def _notice_text(event: DeliveryEvent, style: str) -> str:
-    label = NOTICE_LABELS.get(event.kind, f"[{event.kind.upper()}]")
+def _notice_by(event: DeliveryEvent, catalog: Mapping[str, str]) -> str:
     by = event.details.get("by")
-    by_text = _dynamic(by if isinstance(by, str) else "unknown", style, 100)
+    if isinstance(by, str) and by.strip():
+        return by
+    return catalog["unknown"]
+
+
+def _notice_text(
+    event: DeliveryEvent, style: str, catalog: Mapping[str, str]
+) -> str:
+    label = _notice_label(event, catalog)
+    by_text = _dynamic(_notice_by(event, catalog), style, 100)
     stamp = format_timestamp(event.created_at)
-    if event.kind == "unreported":
-        line = f"{label} {event.cve_id} report withdrawn by {by_text} at {stamp}"
-    else:
-        line = f"{label} {event.cve_id} reported to clients by {by_text} at {stamp}"
+    key = (
+        "notice_unreported"
+        if event.kind == "unreported"
+        else "notice_reported"
+    )
+    line = translate(
+        catalog,
+        key,
+        label=label,
+        cve=event.cve_id,
+        by=by_text,
+        at=stamp,
+    )
     note = event.details.get("note")
     if isinstance(note, str) and note.strip():
         line += "\n  " + _dynamic(note, style, 500)
     return line
+
+
+def _notice_html(
+    event: DeliveryEvent, catalog: Mapping[str, str]
+) -> str:
+    key = (
+        "notice_unreported"
+        if event.kind == "unreported"
+        else "notice_reported"
+    )
+    line = translate(
+        catalog,
+        key,
+        label=_notice_label(event, catalog),
+        cve=event.cve_id,
+        by=_notice_by(event, catalog),
+        at=format_timestamp(event.created_at),
+    )
+    parts = [
+        f'<p style="margin:0 0 8px 0;"><strong>{_h(line)}</strong></p>'
+    ]
+    note = event.details.get("note")
+    if isinstance(note, str) and note.strip():
+        parts.append(
+            f'<p style="margin:0;{_HTML_MUTED}">{_h(_clean(note, 500))}</p>'
+        )
+    return "\n".join(parts)
 
 
 def build_messages(
@@ -630,14 +1123,24 @@ def build_messages(
     names: Mapping[str, str],
     since: str | None = None,
     initial: InitialDigest | None = None,
+    language: str = DEFAULT_LANGUAGE,
+    format: str = "text",
 ) -> tuple[OutgoingMessage, ...]:
-    """Build the messages one channel should send for the selected events."""
+    """Build the messages one channel should send for the selected events.
+
+    ``format`` only adds an HTML alternative for the email channels; every
+    other provider keeps its single text body. ``language`` selects the
+    message catalog, and the text and HTML renderers always use the same
+    facts.
+    """
+    catalog = catalog_for(language)
     style = style_for(channel_type)
     limit = CHANNEL_LIMITS.get(channel_type, 32_768)
     byte_limit = channel_type in {"ntfy", "matrix", "teams"}
     chat = channel_type not in {"smtp", "graph", "webhook"}
     title_in_body = chat and channel_type not in {"ntfy", "gotify"}
     body_limit = limit - 300 if chat else limit
+    with_html = format == "html" and channel_type in EMAIL_CHANNELS
     ordered = sort_events(events)
     notices = _sorted_notices(ordered)
     normal = tuple(
@@ -666,17 +1169,20 @@ def build_messages(
     output: list[OutgoingMessage] = []
     if initial is not None and initial.total:
         rules = len({rule for rule, _, _ in initial.counts})
-        subject = _initial_subject(initial.cves, rules, since)
-        body = _initial_body(
+        subject = _initial_subject(initial.cves, rules, since, catalog)
+        body, markup = _initial_body_and_html(
             initial.events,
             style=style,
             names=names,
+            catalog=catalog,
+            language=language,
+            subject=subject,
             limit=body_limit,
             max_items=max_items,
-            since=since,
             byte_limit=byte_limit,
             counts=initial.counts,
             total_cves=initial.cves,
+            with_html=with_html,
         )
         parts = _partials(
             subject,
@@ -694,6 +1200,7 @@ def build_messages(
                     subject,
                     part,
                     body,
+                    html=markup,
                     initial=True,
                     content=part,
                     part_index=index,
@@ -701,8 +1208,15 @@ def build_messages(
                 )
             )
     for notice in notices:
-        subject = _notice_subject(notice)
-        body = _notice_text(notice, style)
+        subject = _notice_subject(notice, catalog)
+        body = _notice_text(notice, style, catalog)
+        markup = (
+            _html_document(
+                language, subject, _notice_html(notice, catalog)
+            )
+            if with_html
+            else ""
+        )
         parts = _partials(
             subject,
             body,
@@ -719,6 +1233,7 @@ def build_messages(
                     subject,
                     part,
                     body,
+                    html=markup,
                     content=part,
                     part_index=index,
                     part_count=len(parts),
@@ -732,17 +1247,21 @@ def build_messages(
         if not group:
             continue
         subject = (
-            _event_subject(group[0], names)
+            _event_subject(group[0], names, catalog)
             if grouping == "event"
-            else _run_subject(group, names)
+            else _run_subject(group, names, catalog)
         )
-        body = _event_body(
+        body, markup = _event_body_and_html(
             group,
             style=style,
             names=names,
+            catalog=catalog,
+            language=language,
+            subject=subject,
             limit=body_limit,
             max_items=None if grouping == "event" else max_items,
             byte_limit=byte_limit,
+            with_html=with_html,
         )
         parts = _partials(
             subject,
@@ -760,12 +1279,29 @@ def build_messages(
                     subject,
                     part,
                     body,
+                    html=markup,
                     content=part,
                     part_index=index,
                     part_count=len(parts),
                 )
             )
     return tuple(output)
+
+
+def test_message(
+    language: str = DEFAULT_LANGUAGE,
+) -> tuple[str, str]:
+    """Return the localized subject and body of a test message."""
+    catalog = catalog_for(language)
+    return catalog["test_subject"], catalog["test_message"]
+
+
+def simple_html(language: str, subject: str, body: str) -> str:
+    """Render one short paragraph as an HTML email document."""
+    fragment = (
+        f'<p style="margin:0;{_HTML_FONT}">{_h(body)}</p>'
+    )
+    return _html_document(language, subject, fragment)
 
 
 def webhook_payload(

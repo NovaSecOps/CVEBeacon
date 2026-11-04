@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ..errors import ConfigurationError
+from .catalog import DEFAULT_LANGUAGE, catalog_for, translate
 from .records import ReportedMark
 
 BY_LIMIT = 100
@@ -16,7 +17,10 @@ NOTE_LIMIT = 500
 # parser reserves every ``@``-prefixed name for internal notice events.
 NOTICE_RULE = "@reported"
 NOTICE_KINDS = ("reported", "unreported")
-NOTICE_LABELS = {"reported": "[REPORTED]", "unreported": "[UNREPORTED]"}
+NOTICE_LABEL_KEYS = {
+    "reported": "label_reported",
+    "unreported": "label_unreported",
+}
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
@@ -125,6 +129,13 @@ def format_timestamp(value: str | None) -> str:
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def format_reported(mark: ReportedMark) -> str:
+def format_reported(
+    mark: ReportedMark, language: str = DEFAULT_LANGUAGE
+) -> str:
     """The single display form used by events, messages and status output."""
-    return f"Reported to clients by {mark.by} at {format_timestamp(mark.at)}"
+    return translate(
+        catalog_for(language),
+        "reported_line",
+        by=mark.by,
+        at=format_timestamp(mark.at),
+    )

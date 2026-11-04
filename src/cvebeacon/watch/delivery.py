@@ -21,10 +21,13 @@ from ..errors import ConfigurationError
 from ..http import HttpClient, HttpResult
 from .channels import ChannelConfig, channel_map, validate_webhook_url
 from .messages import (
+    EMAIL_CHANNELS,
     WEBHOOK_VERSION,
     OutgoingMessage,
     build_messages,
     rule_display_names,
+    simple_html,
+    test_message,
     webhook_payload,
 )
 from .records import DeliveryEvent
@@ -38,7 +41,6 @@ DELIVERY_BUDGET_SECONDS = 60.0
 MAX_MESSAGES_PER_CHANNEL = 10
 AUTH_MAX_ATTEMPTS = 3
 INITIAL_WEBHOOK_CHUNK = 1000
-TEST_MESSAGE = "CVEBeacon test message — no action needed"
 
 
 class DeliveryFailure(Exception):
@@ -414,6 +416,11 @@ def _email_message(
     email["Message-ID"] = make_msgid(domain=domain or None)
     # A 7-bit safe body works with relays that do not offer 8BITMIME.
     email.set_content(message.body, cte="quoted-printable")
+    if message.html:
+        # The plain-text part stays first for clients that prefer it.
+        email.add_alternative(
+            message.html, subtype="html", cte="quoted-printable"
+        )
     return email
 
 
@@ -606,7 +613,11 @@ def _send_graph(
     ]
     message_body: dict[str, Any] = {
         "subject": message.subject,
-        "body": {"contentType": "Text", "content": message.body},
+        "body": (
+            {"contentType": "HTML", "content": message.html}
+            if message.html
+            else {"contentType": "Text", "content": message.body}
+        ),
         "toRecipients": recipients,
     }
     cc = channel.options.get("cc") or ()
@@ -703,6 +714,7 @@ def _channel_messages(
     *,
     names: Mapping[str, str],
     since: str | None,
+    language: str,
 ) -> tuple[OutgoingMessage, ...]:
     return build_messages(
         events,
@@ -711,6 +723,8 @@ def _channel_messages(
         max_items=channel.max_items,
         names=names,
         since=since,
+        language=language,
+        format=channel.format,
     )
 
 
@@ -779,6 +793,7 @@ def deliver_pending(
         pace_needed = False
         stop_channel = False
         interval = channel.min_interval_seconds
+        language = channel.language or config.watch.language
 
         def send_messages(
             messages: Sequence[OutgoingMessage],
@@ -930,6 +945,8 @@ def deliver_pending(
                         names=names,
                         since=since,
                         initial=digest,
+                        language=language,
+                        format=channel.format,
                     )
                     if len(initial_messages) > MAX_MESSAGES_PER_CHANNEL:
                         store.release_initial(channel.name, now=now)
@@ -1013,7 +1030,9 @@ def deliver_pending(
             for batch in batches:
                 index = _event_index(batch)
                 for group in _group_messages(
-                    _channel_messages(channel, batch, names=names, since=since)
+                    _channel_messages(
+                        channel, batch, names=names, since=since, language=language
+                    )
                 ):
                     if stop_channel or messages_sent >= MAX_MESSAGES_PER_CHANNEL:
                         stop_channel = True
@@ -1143,12 +1162,20 @@ def send_test(
         return TestOutcome(
             channel.name, channel.type, False, "channel is disabled"
         )
+    language = channel.language or config.watch.language
+    subject, body = test_message(language)
+    html = (
+        simple_html(language, subject, body)
+        if channel.format == "html" and channel.type in EMAIL_CHANNELS
+        else ""
+    )
     message = OutgoingMessage(
         (int(clock().timestamp() * 1000),) if channel.type == "matrix" else (),
-        "CVEBeacon test message",
-        TEST_MESSAGE,
-        TEST_MESSAGE,
-        content=TEST_MESSAGE,
+        subject,
+        body,
+        body,
+        html=html,
+        content=body,
     )
     try:
         if channel.type == "webhook":
@@ -1164,7 +1191,7 @@ def send_test(
                 json_body={
                     "version": WEBHOOK_VERSION,
                     "test": True,
-                    "message": TEST_MESSAGE,
+                    "message": body,
                     "events": [],
                 },
                 timeout=min(timeout_seconds, channel.timeout_seconds),
