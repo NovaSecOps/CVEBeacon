@@ -55,6 +55,10 @@ field does not apply to the CVE, for example `kev_due_date` when CISA KEV has no
 entry. The reported-to-clients fields render `not reported` because that mark is
 not stored in the watch database yet.
 
+The default statement shows publication, first-seen and last-modified dates as
+`YYYY-MM-DD` in UTC. Custom templates can use either the date-only fields or the
+original full timestamps. Timestamps without a time-zone offset are treated as
+UTC for the date-only fields; missing or invalid dates render `not available`.
 Templates permit at most 100,000 placeholders or dollar escapes in total.
 Unknown-name diagnostics list every unique unknown name up to 128 names and
 16 KiB of identifier text; larger inputs stop with a resource-limit error.
@@ -67,8 +71,11 @@ Unknown-name diagnostics list every unique unknown name up to 128 names and
 | `title` | Record title. Current sources store no separate title, so this is always `not available`. |
 | `description` | Description from the stored record, for example `Acme Widget before 4.2.1 allows unauthenticated remote code execution.` |
 | `published` | NVD publication timestamp, for example `2026-10-28T10:00:00.000`. |
+| `published_date` | Publication date in UTC, for example `2026-10-28`. |
 | `first_seen` | When the CVE first entered this watch database, for example `2026-11-04T14:00:00+00:00`. |
+| `first_seen_date` | First-seen date in UTC, for example `2026-11-04`. |
 | `last_modified` | NVD last-modified timestamp, for example `2026-11-03T08:30:00.000`. |
+| `last_modified_date` | Last-modified date in UTC, for example `2026-11-03`. |
 | `status` | `published` or `rejected`. |
 | `cvss_max` | Highest stored CVSS base score across providers, for example `9.8`. |
 | `cvss_max_provider` | Provider of the highest score: `NVD`, `CISA-ADP`, `EUVD`, `CNA: <source>`, or `Other`. |

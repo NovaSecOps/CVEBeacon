@@ -1327,6 +1327,28 @@ def test_docx_accepts_namespace_uri_with_pipe():
     assert part(output, "word/styles.xml") == raw
 
 
+@pytest.mark.parametrize("timestamp,expected", [
+    ("2026-11-04T00:30:00+02:00", "2026-11-03"),
+    ("2026-11-03T23:30:00-02:00", "2026-11-04"),
+    ("2026-11-04T12:34:56Z", "2026-11-04"),
+    ("2026-11-04T12:34:56.123", "2026-11-04"),
+    ("2026-11-04", "2026-11-04"), (None, MISSING), ("invalid", MISSING),
+])
+def test_statement_date_fields_are_utc_and_preserve_timestamps(timestamp, expected):
+    fields = build_fields(WatchView(cve_id="CVE-2026-1234", status="published", published=timestamp, last_modified=timestamp), first_seen=timestamp, generated_at=NOW)
+    for name in ("published", "first_seen", "last_modified"):
+        assert fields[name + "_date"] == expected
+        assert fields[name] == (timestamp or MISSING)
+
+
+def test_default_statement_uses_utc_date_fields(tmp_path):
+    fields = fields_for(full_store(tmp_path))
+    text = render_text(default_template_text(), fields)
+    assert "- Published: 2026-10-28\n" in text
+    assert "- First seen: 2026-11-03\n" in text
+    assert "- Last modified: 2026-11-03\n" in text
+
+
 def test_bounded_render_ignores_inherited_high_water_mark():
     script = '''
 import sys

@@ -7,9 +7,9 @@ Generated ${generated_at}.
 ## Summary
 
 - Status: ${status}
-- Published: ${published}
-- First seen: ${first_seen}
-- Last modified: ${last_modified}
+- Published: ${published_date}
+- First seen: ${first_seen_date}
+- Last modified: ${last_modified_date}
 - Severity: ${severity}
 - Highest CVSS: ${cvss_max} (version ${cvss_max_version}, ${cvss_max_provider})
 - CVSS vector: ${cvss_max_vector}

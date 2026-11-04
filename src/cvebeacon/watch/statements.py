@@ -67,8 +67,11 @@ FIELD_NAMES = (
     "title",
     "description",
     "published",
+    "published_date",
     "first_seen",
+    "first_seen_date",
     "last_modified",
+    "last_modified_date",
     "status",
     "cvss_max",
     "cvss_max_provider",
@@ -117,6 +120,18 @@ def _generated_at(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _utc_date(value: str | None) -> str:
+    if not value:
+        return MISSING
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).date().isoformat()
+    except (ValueError, OverflowError):
+        return MISSING
 
 
 def _cna_name(entry: CVSSEntry, view: WatchView) -> str:
@@ -190,8 +205,11 @@ def build_fields(
         "title": MISSING,
         "description": _text(view.description),
         "published": _text(view.published),
+        "published_date": _utc_date(view.published),
         "first_seen": _text(first_seen),
+        "first_seen_date": _utc_date(first_seen),
         "last_modified": _text(view.last_modified),
+        "last_modified_date": _utc_date(view.last_modified),
         "status": view.status,
         "cvss_max": f"{score:g}" if score is not None else MISSING,
         "cvss_max_provider": (
