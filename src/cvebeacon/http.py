@@ -168,6 +168,7 @@ class HttpClient:
     ) -> Any:
         last_error: Exception | None = None
         retry_count = self.config.retries if max_retries is None else max_retries
+        requests_before = self.requests
         attempt = 0
         while True:
             self.requests += 1
@@ -210,7 +211,7 @@ class HttpClient:
                     source,
                     f"HTTP {response.status_code}",
                     status_code=response.status_code,
-                    requests=attempt + 1,
+                    requests=self.requests - requests_before,
                 )
             if response.status_code not in RETRYABLE_STATUS or attempt >= retry_count:
                 # Upstream headers/reason phrases can echo secret URLs or tokens.

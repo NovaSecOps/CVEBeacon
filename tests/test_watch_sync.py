@@ -10,7 +10,7 @@ from watch_support import NOW, epss_gzip, mock_client, nvd_cve, nvd_page, write_
 from cvebeacon import cli
 from cvebeacon.config import HttpConfig
 from cvebeacon.errors import SourceError
-from cvebeacon.http import HttpClient
+from cvebeacon.http import HttpClient, Throttle
 from cvebeacon.sources.euvd import SEARCH_URL
 from cvebeacon.sources.kev import CISA_URL, EU_URL
 from cvebeacon.sources.nvd import CVE_URL
@@ -971,6 +971,35 @@ def test_euvd_gives_up_after_the_throttle_budget_and_resumes(tmp_path):
     assert dates == ["2026-10-03", "2026-11-02"]
     assert "2026-09-04" not in dates
     assert metadata(config)["euvd_cursor"] == "2026-11-03"
+
+
+def test_throttle_give_up_reports_every_request():
+    calls: list[int] = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "total": 101,
+                    "items": [euvd_item(f"EUVD-{index}") for index in range(100)],
+                },
+            )
+        return httpx.Response(403)
+
+    http = mock_client(handler)
+    throttle = Throttle(sleep=lambda _: None)
+    with pytest.raises(SourceError) as caught:
+        feeds.fetch_euvd(
+            http,
+            start=date(2026, 11, 1),
+            end=date(2026, 11, 2),
+            throttle=throttle,
+        )
+    assert caught.value.status_code == 403
+    assert caught.value.requests == 5
+    assert len(calls) == 6
 
 
 def test_first_euvd_403_fails_without_backoff(tmp_path):
