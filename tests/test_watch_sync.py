@@ -212,6 +212,47 @@ def test_euvd_cursor_is_read_in_days(tmp_path):
     assert metadata(config)["euvd_cursor"] == "2026-11-03"
 
 
+def test_committed_touches_survive_a_later_nvd_failure(tmp_path):
+    config = write_config(tmp_path, sources=("nvd",))
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    store.record_baseline(
+        nvd_cursor=(NOW - timedelta(days=200)).isoformat(),
+        initialized_at=(NOW - timedelta(days=200)).isoformat(),
+    )
+    calls: list[dict[str, str]] = []
+
+    def interrupted(request):
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            raw = nvd_cve(lastModified=(NOW - timedelta(days=100)).isoformat())
+            return httpx.Response(200, json=nvd_page([raw]))
+        return httpx.Response(503)
+
+    with pytest.raises(SourceError):
+        run(config, handler_for(nvd=interrupted))
+    assert store.view("CVE-2026-0001") is not None
+    assert store.pending_evaluations(10) == ("CVE-2026-0001",)
+    assert store.metadata()["nvd_cursor"] == (
+        NOW - timedelta(days=80, minutes=15)
+    ).isoformat()
+
+    resumed: list[dict[str, str]] = []
+
+    def resumed_nvd(request):
+        resumed.append(dict(request.url.params))
+        return httpx.Response(200, json=nvd_page([]))
+
+    report = run(config, handler_for(nvd=resumed_nvd))
+    assert not report.failures
+    assert report.touched_ids == ()
+    assert resumed[0]["lastModStartDate"] == iso_timestamp(
+        NOW - timedelta(days=80, minutes=30)
+    )
+    assert store.pending_evaluations(10) == ("CVE-2026-0001",)
+    store.acknowledge(["CVE-2026-0001"])
+    assert store.pending_evaluations(10) == ()
+
+
 def test_nvd_failure_does_not_advance_cursors_or_commit_records(tmp_path):
     config = write_config(tmp_path, sources=("nvd", "euvd"))
     store = WatchStore(config.watch.database)
@@ -413,7 +454,7 @@ def test_optional_source_failure_exits_four_and_keeps_nvd_data(
     assert stored_meta["nvd_cursor"]
     assert "initialized_at" in stored_meta
     if source == "euvd":
-        assert stored_meta["euvd_cursor"] == "2026-10-27"
+        assert stored_meta["euvd_cursor"] == stored_meta["initial_window_start"]
 
 
 def test_nvd_failure_exits_two_and_commits_nothing(tmp_path, monkeypatch, capsys):

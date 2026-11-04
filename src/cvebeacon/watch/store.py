@@ -15,8 +15,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..errors import StateError
+from ..errors import SourceError, StateError
 from .records import (
+    EPSS_BANDS,
     CVSSEntry,
     EUVDUpdate,
     KEVFields,
@@ -24,13 +25,14 @@ from .records import (
     WatchRecord,
     build_view,
     canonical_json,
-    epss_band,
 )
 
 SCHEMA_VERSION = 1
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
+VIEW_POLICY_SOURCES = ("cisa_kev", "eu_kev", "euvd")
+VIEW_POLICY_BATCH = 5000
 
 _NVD_CONTENT_COLUMNS = (
     "published",
@@ -47,12 +49,6 @@ _NVD_CONTENT_COLUMNS = (
     "cisa_kev_due",
     "cisa_required_action",
     "cisa_ransomware",
-)
-
-_EPSS_BAND_SQL = (
-    "CASE WHEN {column} < 0.1 THEN 0 "
-    "WHEN {column} < 0.5 THEN 1 "
-    "WHEN {column} < 0.9 THEN 2 ELSE 3 END"
 )
 
 _SCHEMA = (
@@ -120,6 +116,10 @@ _SCHEMA = (
         fingerprint TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS watch_touched (
+        cve_id TEXT PRIMARY KEY,
+        touched_at TEXT NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS watch_lookup (
         cve_id TEXT PRIMARY KEY,
         attempts INTEGER NOT NULL DEFAULT 0,
@@ -164,6 +164,8 @@ class _ViewCounts:
     new: int = 0
     changed: int = 0
     unchanged: int = 0
+    new_ids: tuple[str, ...] = ()
+    changed_ids: tuple[str, ...] = ()
 
 
 def _utc_now() -> datetime:
@@ -322,6 +324,59 @@ class WatchStore:
         with self.transaction() as db:
             self._set_meta(db, values)
 
+    def pending_evaluations(self, limit: int = 1000) -> tuple[str, ...]:
+        """Return queued CVE ids in the order they were first touched."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT cve_id FROM watch_touched "
+                "ORDER BY touched_at, cve_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(row["cve_id"] for row in rows)
+
+    def acknowledge(self, identifiers: Iterable[str]) -> None:
+        """Remove evaluation obligations that a consumer has completed."""
+        self.initialize()
+        with self.transaction() as db:
+            db.executemany(
+                "DELETE FROM watch_touched WHERE cve_id=?",
+                ((identifier,) for identifier in sorted(set(identifiers))),
+            )
+
+    def apply_view_policy(self, catalogs: Sequence[str]) -> tuple[str, ...]:
+        """Recompute stored views when the configured source selection changes."""
+        policy = ",".join(
+            sorted(set(catalogs).intersection(VIEW_POLICY_SOURCES))
+        )
+        self.initialize()
+        now = _timestamp(self._clock)
+        changed_ids: list[str] = []
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT value FROM watch_meta WHERE key='view_policy'"
+            ).fetchone()
+            current = row["value"] if row is not None else None
+            if current == policy:
+                return ()
+            last = ""
+            while True:
+                rows = db.execute(
+                    "SELECT cve_id FROM watch_cve WHERE cve_id > ? "
+                    "ORDER BY cve_id LIMIT ?",
+                    (last, VIEW_POLICY_BATCH),
+                ).fetchall()
+                if not rows:
+                    break
+                identifiers = [item["cve_id"] for item in rows]
+                views = self._refresh_views(db, identifiers, catalogs, now)
+                changed_ids.extend(views.new_ids)
+                changed_ids.extend(views.changed_ids)
+                last = identifiers[-1]
+            self._mark_touched(db, changed_ids, now)
+            self._set_meta(db, {"view_policy": policy})
+        return tuple(sorted(set(changed_ids)))
+
     @staticmethod
     def _record(row: Mapping[str, Any]) -> WatchRecord:
         try:
@@ -439,6 +494,8 @@ class WatchStore:
         now: str,
     ) -> _ViewCounts:
         new = changed = unchanged = 0
+        new_ids: list[str] = []
+        changed_ids: list[str] = []
         for identifier in dict.fromkeys(identifiers):
             view = self._view(db, identifier, catalogs)
             if view is None:
@@ -454,6 +511,7 @@ class WatchStore:
                     (identifier, fingerprint, now),
                 )
                 new += 1
+                new_ids.append(identifier)
             elif row["fingerprint"] == fingerprint:
                 unchanged += 1
             else:
@@ -462,7 +520,44 @@ class WatchStore:
                     (fingerprint, now, identifier),
                 )
                 changed += 1
-        return _ViewCounts(new, changed, unchanged)
+                changed_ids.append(identifier)
+        return _ViewCounts(
+            new,
+            changed,
+            unchanged,
+            tuple(new_ids),
+            tuple(changed_ids),
+        )
+
+    @staticmethod
+    def _known_identifiers(
+        db: sqlite3.Connection, identifiers: Iterable[str]
+    ) -> tuple[str, ...]:
+        values = sorted(set(identifiers))
+        known: set[str] = set()
+        for start in range(0, len(values), 500):
+            chunk = values[start : start + 500]
+            marks = ",".join("?" for _ in chunk)
+            known.update(
+                row["cve_id"]
+                for row in db.execute(
+                    f"SELECT cve_id FROM watch_cve WHERE cve_id IN ({marks})",
+                    chunk,
+                )
+            )
+        return tuple(sorted(known))
+
+    @classmethod
+    def _mark_touched(
+        cls, db: sqlite3.Connection, identifiers: Iterable[str], now: str
+    ) -> tuple[str, ...]:
+        """Queue evaluation for CVEs that already have an NVD row."""
+        known = cls._known_identifiers(db, identifiers)
+        db.executemany(
+            "INSERT OR IGNORE INTO watch_touched(cve_id,touched_at) VALUES (?,?)",
+            ((identifier, now) for identifier in known),
+        )
+        return known
 
     def upsert_nvd(
         self,
@@ -485,6 +580,7 @@ class WatchStore:
                 if outcome in ("new", "changed")
             ]
             views = self._refresh_views(db, written, catalogs, now)
+            queued = self._mark_touched(db, written, now)
             if meta:
                 self._set_meta(db, meta)
         new_ids = tuple(identifier for identifier, outcome in outcomes if outcome == "new")
@@ -497,7 +593,7 @@ class WatchStore:
             unchanged=sum(outcome == "unchanged" for _, outcome in outcomes),
             new_ids=new_ids,
             changed_ids=changed_ids,
-            touched_ids=tuple(identifier for identifier, _ in outcomes if outcome != "unchanged"),
+            touched_ids=queued,
         )
 
     def replace_euvd_items(
@@ -557,6 +653,11 @@ class WatchStore:
                     else None
                 )
                 if current == desired:
+                    db.execute(
+                        "UPDATE watch_euvd_item SET seen_at=? WHERE euvd_id=?",
+                        (now, euvd_id),
+                    )
+                    outcomes.append((euvd_id, "unchanged"))
                     continue
                 if row is None:
                     db.execute(
@@ -583,6 +684,7 @@ class WatchStore:
                 touched.update(old_aliases)
                 touched.update(cve_ids)
             views = self._refresh_views(db, sorted(touched), catalogs, now)
+            queued = self._mark_touched(db, touched, now)
             if meta:
                 self._set_meta(db, meta)
         new_items = tuple(identifier for identifier, outcome in outcomes if outcome == "new")
@@ -591,11 +693,11 @@ class WatchStore:
         )
         return StepCounts(
             new=len(new_items),
-            changed=views.changed + views.new,
-            unchanged=0,
+            changed=views.changed,
+            unchanged=sum(outcome == "unchanged" for _, outcome in outcomes),
             new_ids=new_items,
             changed_ids=changed_items,
-            touched_ids=tuple(sorted(touched)),
+            touched_ids=queued,
         )
 
     def replace_kev(
@@ -644,17 +746,18 @@ class WatchStore:
                 ),
             )
             views = self._refresh_views(db, sorted(touched), catalogs, now)
+            queued = self._mark_touched(db, touched, now)
             if meta:
                 self._set_meta(db, meta)
         added = set(new) - set(old)
         common = set(old) & set(new)
         return StepCounts(
             new=len(added),
-            changed=views.changed + views.new,
+            changed=views.changed,
             unchanged=len(common - touched),
             new_ids=tuple(sorted(added)),
             changed_ids=tuple(sorted(touched)),
-            touched_ids=tuple(sorted(touched)),
+            touched_ids=queued,
         )
 
     def replace_epss(
@@ -662,31 +765,26 @@ class WatchStore:
         rows: Iterable[tuple[str, float, float, date]],
         *,
         meta: Mapping[str, str] | None = None,
+        thresholds: Iterable[float] = EPSS_BANDS,
     ) -> EpssLoadResult:
         self.initialize()
         with self.transaction() as db:
+            old_rows = db.execute("SELECT COUNT(*) FROM watch_epss").fetchone()[0]
             db.execute(
                 "CREATE TEMP TABLE watch_epss_load ("
                 "cve_id TEXT PRIMARY KEY, epss REAL NOT NULL, "
-                "percentile REAL NOT NULL, score_date TEXT NOT NULL, "
-                "band INTEGER NOT NULL)"
+                "percentile REAL NOT NULL, score_date TEXT NOT NULL)"
             )
-            batch: list[tuple[str, float, float, str, int]] = []
+            batch: list[tuple[str, float, float, str]] = []
             total = batches = 0
             for identifier, score, percentile, score_date in rows:
                 batch.append(
-                    (
-                        identifier,
-                        score,
-                        percentile,
-                        score_date.isoformat(),
-                        epss_band(score),
-                    )
+                    (identifier, score, percentile, score_date.isoformat())
                 )
                 if len(batch) >= EPSS_WRITE_BATCH:
                     db.executemany(
                         "INSERT OR REPLACE INTO watch_epss_load"
-                        "(cve_id,epss,percentile,score_date,band) VALUES (?,?,?,?,?)",
+                        "(cve_id,epss,percentile,score_date) VALUES (?,?,?,?)",
                         batch,
                     )
                     total += len(batch)
@@ -695,35 +793,52 @@ class WatchStore:
             if batch:
                 db.executemany(
                     "INSERT OR REPLACE INTO watch_epss_load"
-                    "(cve_id,epss,percentile,score_date,band) VALUES (?,?,?,?,?)",
+                    "(cve_id,epss,percentile,score_date) VALUES (?,?,?,?)",
                     batch,
                 )
                 total += len(batch)
                 batches += 1
-            old_band = _EPSS_BAND_SQL.format(column="o.epss")
-            new_band = _EPSS_BAND_SQL.format(column="n.epss")
+            if old_rows and total < old_rows / 2:
+                raise SourceError("epss", "source returned too few EPSS scores")
+            clauses = []
+            parameters: list[float] = []
+            for threshold in sorted(set(thresholds)):
+                clauses.append(
+                    "((o.epss < ? AND n.epss >= ?) OR (o.epss >= ? AND n.epss < ?))"
+                )
+                parameters.extend(
+                    (threshold, threshold, threshold, threshold)
+                )
+            crossing = " OR ".join(clauses) if clauses else "0"
             changed = {
                 row["cve_id"]
                 for row in db.execute(
                     "SELECT n.cve_id FROM watch_epss_load n "
                     "JOIN watch_cve c ON c.cve_id=n.cve_id "
                     "LEFT JOIN watch_epss o ON o.cve_id=n.cve_id "
-                    f"WHERE o.cve_id IS NULL OR {old_band} <> {new_band} "
+                    f"WHERE o.cve_id IS NULL OR ({crossing}) "
                     "UNION "
                     "SELECT o.cve_id FROM watch_epss o "
                     "JOIN watch_cve c ON c.cve_id=o.cve_id "
                     "LEFT JOIN watch_epss_load n ON n.cve_id=o.cve_id "
-                    "WHERE n.cve_id IS NULL"
+                    "WHERE n.cve_id IS NULL",
+                    parameters,
                 )
             }
+            file_day = db.execute(
+                "SELECT MAX(score_date) FROM watch_epss_load"
+            ).fetchone()[0]
             db.execute("DELETE FROM watch_epss")
             db.execute(
                 "INSERT INTO watch_epss(cve_id,epss,percentile,score_date) "
                 "SELECT cve_id,epss,percentile,score_date FROM watch_epss_load"
             )
             db.execute("DROP TABLE watch_epss_load")
-            if meta:
-                self._set_meta(db, meta)
+            values = {"epss_file_day": file_day} if file_day else {}
+            values.update(meta or {})
+            if values:
+                self._set_meta(db, values)
+            self._mark_touched(db, changed, _timestamp(self._clock))
         return EpssLoadResult(total, batches, tuple(sorted(changed)))
 
     def prune_euvd(self, *, now: datetime) -> int | None:

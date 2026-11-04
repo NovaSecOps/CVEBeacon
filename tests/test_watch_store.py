@@ -85,6 +85,45 @@ def test_upsert_is_idempotent_and_updates_only_on_change(tmp_path):
     assert updated["nvd_fingerprint"] == first["nvd_fingerprint"]
 
 
+@pytest.mark.parametrize("changed_index", [0, 1])
+def test_touched_ids_follow_each_records_own_outcome(tmp_path, changed_index):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    first = record("CVE-2026-0001")
+    second = record("CVE-2026-0002")
+    store.upsert_nvd([first, second])
+    store.acknowledge(store.pending_evaluations(10))
+
+    updates = [first, second]
+    updates[changed_index] = record(
+        f"CVE-2026-{changed_index + 1:04d}",
+        description="Changed",
+    )
+    counts = store.upsert_nvd(updates)
+    assert counts.touched_ids == (
+        f"CVE-2026-{changed_index + 1:04d}",
+    )
+    assert store.pending_evaluations(10) == counts.touched_ids
+
+
+def test_pending_evaluations_only_include_known_cves_and_can_be_acknowledged(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.replace_euvd_items(
+        [euvd("EUVD-2026-9", ("CVE-2026-9999",), exploited="2026-11-01")],
+        catalogs=("nvd", "euvd"),
+    )
+    assert store.pending_evaluations(10) == ()
+
+    store.upsert_nvd([record("CVE-2026-0001"), record("CVE-2026-9999")])
+    assert set(store.pending_evaluations(10)) == {
+        "CVE-2026-0001",
+        "CVE-2026-9999",
+    }
+    store.acknowledge(["CVE-2026-0001"])
+    assert store.pending_evaluations(10) == ("CVE-2026-9999",)
+    store.acknowledge(["CVE-2026-9999"])
+    assert store.pending_evaluations(10) == ()
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -231,7 +270,7 @@ def test_kev_catalog_replacement_adds_changes_and_removes(tmp_path):
         },
         catalogs=("nvd", "cisa_kev"),
     )
-    assert set(second.touched_ids) == {"CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"}
+    assert set(second.touched_ids) == {"CVE-2026-0001", "CVE-2026-0002"}
     assert second.new == 1
     assert second.changed == 2
     view = store.view("CVE-2026-0001", catalogs=("nvd", "cisa_kev"))
@@ -270,17 +309,34 @@ def test_view_uses_nvd_cisa_fields_only_when_no_catalog_is_configured(tmp_path):
 
 def test_epss_load_is_idempotent_and_reports_band_changes(tmp_path):
     store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
-    store.upsert_nvd([record()])
-    first = store.replace_epss([("CVE-2026-0001", 0.8, 0.99, date(2026, 11, 1))])
-    assert (first.rows, first.batches) == (1, 1)
-    assert first.changed_ids == ("CVE-2026-0001",)
-    same = store.replace_epss([("CVE-2026-0001", 0.8, 0.99, date(2026, 11, 2))])
+    store.upsert_nvd([record("CVE-2026-0001"), record("CVE-2026-0002")])
+    first = store.replace_epss(
+        [
+            ("CVE-2026-0001", 0.8, 0.99, date(2026, 11, 1)),
+            ("CVE-2026-0002", 0.2, 0.5, date(2026, 11, 1)),
+        ]
+    )
+    assert (first.rows, first.batches) == (2, 1)
+    assert first.changed_ids == ("CVE-2026-0001", "CVE-2026-0002")
+    same = store.replace_epss(
+        [
+            ("CVE-2026-0001", 0.8, 0.99, date(2026, 11, 2)),
+            ("CVE-2026-0002", 0.2, 0.5, date(2026, 11, 2)),
+        ]
+    )
     assert same.changed_ids == ()
-    down = store.replace_epss([("CVE-2026-0001", 0.05, 0.2, date(2026, 11, 3))])
+    down = store.replace_epss(
+        [
+            ("CVE-2026-0001", 0.05, 0.2, date(2026, 11, 3)),
+            ("CVE-2026-0002", 0.2, 0.5, date(2026, 11, 3)),
+        ]
+    )
     assert down.changed_ids == ("CVE-2026-0001",)
-    missing = store.replace_epss([])
-    assert missing.changed_ids == ("CVE-2026-0001",)
-    assert store.view("CVE-2026-0001").epss is None
+    missing = store.replace_epss(
+        [("CVE-2026-0001", 0.05, 0.2, date(2026, 11, 4))]
+    )
+    assert missing.changed_ids == ("CVE-2026-0002",)
+    assert store.view("CVE-2026-0002").epss is None
 
 
 def test_epss_write_batches_do_not_materialise_the_iterator(tmp_path, monkeypatch):

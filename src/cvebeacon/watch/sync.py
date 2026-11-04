@@ -139,6 +139,7 @@ def sync_watch(
     mode = stored_mode or (watch.initial if first_run else "baseline")
     interval = config.sources.minimum_request_interval
     catalogs = tuple(watch.sources)
+    policy_touched = store.apply_view_policy(catalogs)
 
     if first_run and stored_mode is None and watch.initial == "baseline":
         store.record_baseline(
@@ -221,7 +222,7 @@ def sync_watch(
     api_key = config.secret(config.sources.nvd_api_key_env)
     nvd_requests = nvd_records = nvd_new = nvd_changed = 0
     lookup_failures = 0
-    touched: set[str] = set()
+    touched: set[str] = set(policy_touched)
     summaries: list[SourceSummary] = []
     pending_windows = list(reversed(feeds.nvd_windows(nvd_start, nvd_end)))
     first_commit = True
