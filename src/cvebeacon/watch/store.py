@@ -24,9 +24,18 @@ from .records import (
     InitialDigest,
     KEVFields,
     Product,
+    ReportedMark,
     WatchRecord,
     build_view,
     canonical_json,
+)
+from .reported import (
+    NOTICE_KINDS,
+    NOTICE_RULE,
+    ReportedEntry,
+    normalize_cve_id,
+    validate_identity,
+    validate_note,
 )
 from .rules import (
     EVENT_KINDS,
@@ -39,7 +48,7 @@ from .rules import (
     rule_hash,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -204,8 +213,17 @@ _SCHEMA = (
         updated_at TEXT NOT NULL,
         PRIMARY KEY(event_id, channel)
     )""",
+    """CREATE TABLE IF NOT EXISTS watch_report (
+        id INTEGER PRIMARY KEY,
+        cve_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('report','unreport')),
+        by TEXT NOT NULL,
+        note TEXT,
+        at TEXT NOT NULL
+    )""",
     "CREATE INDEX IF NOT EXISTS watch_event_created ON watch_event(created_at, id)",
     "CREATE INDEX IF NOT EXISTS watch_delivery_status ON watch_delivery(status)",
+    "CREATE INDEX IF NOT EXISTS watch_report_cve ON watch_report(cve_id, id)",
 )
 
 
@@ -268,6 +286,16 @@ class DeliveryStatusRow:
     given_up: int = 0
     ambiguous: int = 0
     last_success: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReportOutcome:
+    """The result of recording or withdrawing one client-report mark."""
+
+    entry: ReportedEntry | None = None
+    changed: bool = False
+    event_id: int | None = None
+    channels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,9 +448,9 @@ class WatchStore:
             )
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4"}:
+        if version not in {"1", "2", "3", "4", "5"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -463,10 +491,6 @@ class WatchStore:
         if version in {"1", "2"}:
             WatchStore._migrate_event_details(db)
             WatchStore._migrate_delivery_statuses(db)
-            db.execute(
-                "UPDATE watch_meta SET value=? WHERE key='schema_version'",
-                (str(SCHEMA_VERSION),),
-            )
         elif version == "3":
             columns = {
                 row["name"]
@@ -476,6 +500,7 @@ class WatchStore:
                 db.execute(
                     "ALTER TABLE watch_delivery ADD COLUMN first_attempt_at TEXT"
                 )
+        if version != str(SCHEMA_VERSION):
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -1313,8 +1338,10 @@ class WatchStore:
         if limit < 1:
             raise StateError("event limit must be positive")
         self.initialize()
-        clauses = []
-        parameters: list[Any] = []
+        clauses = [
+            "e.kind NOT IN (" + ",".join("?" for _ in NOTICE_KINDS) + ")"
+        ]
+        parameters: list[Any] = list(NOTICE_KINDS)
         if rule is not None:
             clauses.append("e.rule = ?")
             parameters.append(rule.casefold())
@@ -1359,6 +1386,200 @@ class WatchStore:
                 )
             )
         return tuple(output)
+
+    @staticmethod
+    def _report_entry(row: Mapping[str, Any]) -> ReportedEntry:
+        return ReportedEntry(
+            int(row["id"]),
+            str(row["cve_id"]),
+            str(row["action"]),
+            str(row["by"]),
+            row["note"],
+            str(row["at"]),
+        )
+
+    @staticmethod
+    def _latest_report(
+        db: sqlite3.Connection, identifier: str
+    ) -> ReportedEntry | None:
+        row = db.execute(
+            "SELECT id,cve_id,action,by,note,at FROM watch_report "
+            "WHERE cve_id=? ORDER BY id DESC LIMIT 1",
+            (identifier,),
+        ).fetchone()
+        return None if row is None else WatchStore._report_entry(row)
+
+    @staticmethod
+    def _record_report_notice(
+        db: sqlite3.Connection,
+        entry: ReportedEntry,
+        channels: Sequence[str],
+        now: str,
+    ) -> int | None:
+        """Queue the optional notice through the normal delivery ledger."""
+        if not channels:
+            return None
+        if entry.action == "report":
+            kind = "reported"
+            reason = f"reported to clients by {entry.by}"
+        else:
+            kind = "unreported"
+            reason = f"report withdrawn by {entry.by}"
+        cursor = db.execute(
+            "INSERT INTO watch_event("
+            "rule,cve_id,kind,reasons_json,details_json,occurrence,initial,created_at) "
+            "VALUES (?,?,?,?,?,?,0,?)",
+            (
+                NOTICE_RULE,
+                entry.cve_id,
+                kind,
+                canonical_json([reason]),
+                canonical_json({"by": entry.by, "note": entry.note}),
+                f"{entry.action}:{entry.id}",
+                now,
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+        db.executemany(
+            "INSERT INTO watch_delivery("
+            "event_id,channel,status,attempts,last_error,updated_at) "
+            "VALUES (?,?,'pending',0,NULL,?)",
+            ((event_id, channel, now) for channel in channels),
+        )
+        return event_id
+
+    def report_cve(
+        self,
+        cve_id: object,
+        *,
+        by: object | None = None,
+        note: object | None = None,
+        force: bool = False,
+        notify_channels: Iterable[str] = (),
+    ) -> ReportOutcome:
+        """Mark a stored CVE as reported to clients.
+
+        The latest ``watch_report`` row is the current state. A repeated mark
+        keeps the existing row and notification; ``force`` appends a new one.
+        """
+        identifier = normalize_cve_id(cve_id)
+        identity = validate_identity(by)
+        text = validate_note(note)
+        channels = tuple(sorted({str(name) for name in notify_channels if name}))
+        self.initialize()
+        now = _timestamp(self._clock)
+        with self.transaction() as db:
+            known = db.execute(
+                "SELECT 1 FROM watch_cve WHERE cve_id=?", (identifier,)
+            ).fetchone()
+            if known is None:
+                raise StateError(f"{identifier} is not in the watch database")
+            latest = self._latest_report(db, identifier)
+            if latest is not None and latest.action == "report" and not force:
+                return ReportOutcome(latest, False)
+            cursor = db.execute(
+                "INSERT INTO watch_report(cve_id,action,by,note,at) "
+                "VALUES (?,?,?,?,?)",
+                (identifier, "report", identity, text, now),
+            )
+            entry = ReportedEntry(
+                int(cursor.lastrowid), identifier, "report", identity, text, now
+            )
+            event_id = self._record_report_notice(db, entry, channels, now)
+        return ReportOutcome(entry, True, event_id, channels)
+
+    def unreport_cve(
+        self,
+        cve_id: object,
+        *,
+        by: object | None = None,
+        note: object | None = None,
+        notify_channels: Iterable[str] = (),
+    ) -> ReportOutcome:
+        """Withdraw the current report mark by appending an ``unreport`` row."""
+        identifier = normalize_cve_id(cve_id)
+        identity = validate_identity(by)
+        text = validate_note(note)
+        channels = tuple(sorted({str(name) for name in notify_channels if name}))
+        self.initialize()
+        now = _timestamp(self._clock)
+        with self.transaction() as db:
+            latest = self._latest_report(db, identifier)
+            if latest is None or latest.action != "report":
+                return ReportOutcome(None, False)
+            cursor = db.execute(
+                "INSERT INTO watch_report(cve_id,action,by,note,at) "
+                "VALUES (?,?,?,?,?)",
+                (identifier, "unreport", identity, text, now),
+            )
+            entry = ReportedEntry(
+                int(cursor.lastrowid), identifier, "unreport", identity, text, now
+            )
+            event_id = self._record_report_notice(db, entry, channels, now)
+        return ReportOutcome(entry, True, event_id, channels)
+
+    def reported_entries(self) -> tuple[ReportedEntry, ...]:
+        """Return the full append-only audit trail, oldest first."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT id,cve_id,action,by,note,at FROM watch_report ORDER BY id"
+            ).fetchall()
+        return tuple(self._report_entry(row) for row in rows)
+
+    def reported_cves(self) -> tuple[ReportedEntry, ...]:
+        """Return the latest ``report`` row of every currently reported CVE."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT r.id,r.cve_id,r.action,r.by,r.note,r.at FROM watch_report r "
+                "WHERE r.action='report' AND NOT EXISTS ("
+                "SELECT 1 FROM watch_report x "
+                "WHERE x.cve_id=r.cve_id AND x.id > r.id) "
+                "ORDER BY r.at, r.id"
+            ).fetchall()
+        return tuple(self._report_entry(row) for row in rows)
+
+    def reported_marks(
+        self, identifiers: Iterable[str]
+    ) -> dict[str, ReportedMark]:
+        """Return the current mark for each of ``identifiers`` that has one."""
+        values = sorted({str(value) for value in identifiers if value})
+        if not values:
+            return {}
+        self.initialize()
+        output: dict[str, ReportedMark] = {}
+        with closing(self._connect()) as db:
+            for start in range(0, len(values), 500):
+                chunk = values[start : start + 500]
+                marks = ",".join("?" for _ in chunk)
+                rows = db.execute(
+                    "SELECT r.cve_id,r.by,r.note,r.at FROM watch_report r "
+                    "JOIN (SELECT cve_id,MAX(id) AS id FROM watch_report "
+                    f"WHERE cve_id IN ({marks}) GROUP BY cve_id) m ON m.id=r.id "
+                    "WHERE r.action='report'",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    output[str(row["cve_id"])] = ReportedMark(
+                        str(row["cve_id"]), str(row["by"]), row["note"], str(row["at"])
+                    )
+        return output
+
+    @staticmethod
+    def _reported_mark(
+        db: sqlite3.Connection, identifier: object
+    ) -> ReportedMark | None:
+        row = db.execute(
+            "SELECT cve_id,action,by,note,at FROM watch_report "
+            "WHERE cve_id=? ORDER BY id DESC LIMIT 1",
+            (identifier,),
+        ).fetchone()
+        if row is None or row["action"] != "report":
+            return None
+        return ReportedMark(
+            str(row["cve_id"]), str(row["by"]), row["note"], str(row["at"])
+        )
 
     @staticmethod
     def _parse_timestamp(value: str | None) -> datetime | None:
@@ -1526,6 +1747,7 @@ class WatchStore:
             view,
             details,
             str(row["status"]),
+            self._reported_mark(db, row["cve_id"]),
         )
 
     def delivery_events(
@@ -2208,6 +2430,12 @@ class WatchStore:
                     "SELECT MAX(score_date) FROM watch_epss"
                 ).fetchone()[0]
                 lookups = db.execute("SELECT COUNT(*) FROM watch_lookup").fetchone()[0]
+                reported = db.execute(
+                    "SELECT COUNT(*) FROM watch_report r "
+                    "WHERE r.action='report' AND NOT EXISTS ("
+                    "SELECT 1 FROM watch_report x "
+                    "WHERE x.cve_id=r.cve_id AND x.id > r.id)"
+                ).fetchone()[0]
             finally:
                 db.rollback()
         return {
@@ -2225,4 +2453,5 @@ class WatchStore:
             "epss_rows": epss_rows,
             "epss_date": epss_date,
             "lookups": lookups,
+            "reported": reported,
         }

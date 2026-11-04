@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
 from .records import CVSSEntry, DeliveryEvent, InitialDigest, WatchView
+from .reported import NOTICE_KINDS, NOTICE_LABELS, format_reported
 from .rules import EVENT_KINDS, Rule
 
 NVD_URL = "https://nvd.nist.gov/vuln/detail/{cve_id}"
@@ -321,6 +322,8 @@ def _event_lines(
             )
         if extras:
             lines.append("  " + " · ".join(extras))
+    if event.reported is not None:
+        lines.append("  " + _dynamic(format_reported(event.reported), style))
     rule_names = sorted({_display_name(item, names) for item in group})
     rules = ", ".join(_dynamic(name, style, 80) for name in rule_names)
     lines.append(f"  Rule: {rules} · {_links(event, style)}")
@@ -583,6 +586,25 @@ def _initial_subject(cves: int, rules: int, since: str | None) -> str:
     )
 
 
+def _notice_subject(event: DeliveryEvent) -> str:
+    label = NOTICE_LABELS.get(event.kind, f"[{event.kind.upper()}]")
+    return f"CVEBeacon: {label} {event.cve_id}"
+
+
+def _notice_text(event: DeliveryEvent, style: str) -> str:
+    label = NOTICE_LABELS.get(event.kind, f"[{event.kind.upper()}]")
+    by = event.details.get("by")
+    by_text = _dynamic(by if isinstance(by, str) else "unknown", style, 100)
+    if event.kind == "unreported":
+        line = f"{label} {event.cve_id} report withdrawn by {by_text}"
+    else:
+        line = f"{label} {event.cve_id} reported to clients by {by_text}"
+    note = event.details.get("note")
+    if isinstance(note, str) and note.strip():
+        line += "\n  " + _dynamic(note, style, 500)
+    return line
+
+
 def build_messages(
     events: Sequence[DeliveryEvent],
     *,
@@ -601,7 +623,12 @@ def build_messages(
     title_in_body = chat and channel_type not in {"ntfy", "gotify"}
     body_limit = limit - 300 if chat else limit
     ordered = sort_events(events)
-    normal = tuple(event for event in ordered if not event.initial)
+    notices = tuple(event for event in ordered if event.kind in NOTICE_KINDS)
+    normal = tuple(
+        event
+        for event in ordered
+        if not event.initial and event.kind not in NOTICE_KINDS
+    )
     if initial is None:
         selected = tuple(event for event in ordered if event.initial)
         if selected:
@@ -652,6 +679,30 @@ def build_messages(
                     part,
                     body,
                     initial=True,
+                    content=part,
+                    part_index=index,
+                    part_count=len(parts),
+                )
+            )
+    for notice in notices:
+        subject = _notice_subject(notice)
+        body = _notice_text(notice, style)
+        parts = _partials(
+            subject,
+            body,
+            style=style,
+            chat=chat,
+            limit=limit,
+            byte_limit=byte_limit,
+            title_in_body=title_in_body,
+        )
+        for index, part in enumerate(parts[:MAX_PARTS]):
+            output.append(
+                OutgoingMessage(
+                    (notice.event_id,),
+                    subject,
+                    part,
+                    body,
                     content=part,
                     part_index=index,
                     part_count=len(parts),
@@ -754,6 +805,15 @@ def webhook_payload(
                         if view.epss is not None
                         else None
                     ),
+                    "reported": (
+                        {
+                            "by": event.reported.by,
+                            "at": event.reported.at,
+                            "note": event.reported.note,
+                        }
+                        if event.reported is not None
+                        else None
+                    ),
                     "vendors": list(view.vendors),
                     "products": list(view.products),
                     "links": {
@@ -775,6 +835,12 @@ def webhook_payload(
                 },
             }
         )
+        if event.kind in NOTICE_KINDS:
+            output[-1]["notice"] = {
+                "action": "report" if event.kind == "reported" else "unreport",
+                "by": str(event.details.get("by") or "unknown"),
+                "note": event.details.get("note"),
+            }
     return {"version": WEBHOOK_VERSION, "events": output}
 
 

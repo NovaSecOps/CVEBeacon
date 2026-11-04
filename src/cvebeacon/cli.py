@@ -102,6 +102,17 @@ def _parser() -> argparse.ArgumentParser:
     watch_events.add_argument("--limit", type=int, default=50)
     watch_events.add_argument("--rule")
     watch_events.add_argument("--pending", action="store_true", help="only events with pending deliveries")
+    watch_report = watch_sub.add_parser("report", help="mark a CVE as reported to clients")
+    watch_report.add_argument("cve_id")
+    watch_report.add_argument("--by", help="who reported it; defaults to the OS login name")
+    watch_report.add_argument("--note", help="optional single-line note")
+    watch_report.add_argument("--force", action="store_true", help="append another mark and notification")
+    watch_unreport = watch_sub.add_parser("unreport", help="withdraw a CVE report mark")
+    watch_unreport.add_argument("cve_id")
+    watch_unreport.add_argument("--by", help="who withdrew it; defaults to the OS login name")
+    watch_unreport.add_argument("--note", help="optional single-line note")
+    watch_reported = watch_sub.add_parser("reported", help="list CVEs marked as reported to clients")
+    watch_reported.add_argument("--all", action="store_true", dest="all_history", help="print the full audit trail")
     watch_evaluate = watch_sub.add_parser("evaluate", help="re-evaluate stored CVEs against the current rules")
     watch_evaluate.add_argument("--all", action="store_true", required=True, dest="all_cves", help="evaluate every stored CVE")
     watch_evaluate.add_argument("--yes", action="store_true", help="skip the confirmation")
@@ -160,7 +171,7 @@ def _print_evaluation(result) -> None:
         print(f"events: {result.events} new")
 
 
-def _event_line(row, rule_name: str | None = None) -> str:
+def _event_line(row, rule_name: str | None = None, reported=None) -> str:
     from .watch.messages import date_phrase
 
     try:
@@ -174,6 +185,10 @@ def _event_line(row, rule_name: str | None = None) -> str:
     if reasons:
         line += f"  {reasons}"
     line += f"  {date_phrase(row.published, row.first_seen)}"
+    if reported is not None:
+        from .watch.reported import format_reported
+
+        line += f"  {format_reported(reported)}"
     return line
 
 
@@ -184,6 +199,7 @@ def _require_watch(config: AppConfig) -> None:
 
 def _run_watch(args, config: AppConfig) -> int:
     from .watch.delivery import deliver_pending, send_test
+    from .watch.reported import format_timestamp, normalize_cve_id
     from .watch.rules import describe_condition
     from .watch.store import WatchStore
     from .watch.sync import sync_watch, watch_status
@@ -200,6 +216,74 @@ def _run_watch(args, config: AppConfig) -> int:
         return 0
     _require_watch(config)
     store = WatchStore(config.watch.database)
+
+    def notify_channels() -> tuple[str, ...]:
+        return tuple(
+            channel.name
+            for channel in config.watch.channels
+            if channel.enabled and channel.notify_reported
+        )
+
+    if args.watch_command == "report":
+        outcome = store.report_cve(
+            args.cve_id,
+            by=args.by,
+            note=args.note,
+            force=args.force,
+            notify_channels=notify_channels(),
+        )
+        entry = outcome.entry
+        if not outcome.changed:
+            print(
+                f"{entry.cve_id} is already reported to clients by "
+                f"{entry.by} at {format_timestamp(entry.at)}"
+            )
+            return 0
+        print(
+            f"{entry.cve_id}  reported to clients by {entry.by} "
+            f"at {format_timestamp(entry.at)}"
+        )
+        return _deliver_report_notice(config, store, outcome)
+    if args.watch_command == "unreport":
+        identifier = normalize_cve_id(args.cve_id)
+        outcome = store.unreport_cve(
+            identifier,
+            by=args.by,
+            note=args.note,
+            notify_channels=notify_channels(),
+        )
+        entry = outcome.entry
+        if not outcome.changed or entry is None:
+            print(f"{identifier} is not marked as reported to clients")
+            return 0
+        print(
+            f"{entry.cve_id}  report withdrawn by {entry.by} "
+            f"at {format_timestamp(entry.at)}"
+        )
+        return _deliver_report_notice(config, store, outcome)
+    if args.watch_command == "reported":
+        entries = (
+            store.reported_entries() if args.all_history else store.reported_cves()
+        )
+        if not entries:
+            print("no CVEs are marked as reported to clients")
+            return 0
+        for entry in entries:
+            if args.all_history:
+                action = "reported" if entry.action == "report" else "unreported"
+                line = (
+                    f"{format_timestamp(entry.at)}  {entry.cve_id}  "
+                    f"{action} by {entry.by}"
+                )
+            else:
+                line = (
+                    f"{entry.cve_id}  {entry.by}  "
+                    f"{format_timestamp(entry.at)}"
+                )
+            if entry.note:
+                line += f"  {entry.note}"
+            print(line)
+        return 0
     if args.watch_command == "notify":
         with HttpClient(config.http) as http:
             if getattr(args, "notify_command", None) == "test":
@@ -224,8 +308,16 @@ def _run_watch(args, config: AppConfig) -> int:
         return 3 if delivery.failed else 0
     if args.watch_command == "events":
         display = {rule.name.casefold(): rule.name for rule in config.watch.rules}
-        for row in store.events(limit=args.limit, rule=args.rule, pending=args.pending):
-            print(_event_line(row, display.get(row.rule.casefold(), row.rule)))
+        rows = store.events(limit=args.limit, rule=args.rule, pending=args.pending)
+        marks = store.reported_marks(row.cve_id for row in rows)
+        for row in rows:
+            print(
+                _event_line(
+                    row,
+                    display.get(row.rule.casefold(), row.rule),
+                    marks.get(row.cve_id),
+                )
+            )
         return 0
     if args.watch_command == "evaluate":
         if not args.yes:
@@ -276,6 +368,19 @@ def _run_watch(args, config: AppConfig) -> int:
     if delivery.failed:
         return 3
     return 4 if report.failures else 0
+
+
+def _deliver_report_notice(config: AppConfig, store, outcome) -> int:
+    if not outcome.channels:
+        return 0
+    from .watch.delivery import deliver_pending
+
+    with HttpClient(config.http) as http:
+        delivery = deliver_pending(
+            config, store, http, channel_names=outcome.channels
+        )
+    _print_delivery(delivery, only_selected=True)
+    return 3 if delivery.failed else 0
 
 
 def _print_delivery(report, *, only_selected: bool = False) -> None:

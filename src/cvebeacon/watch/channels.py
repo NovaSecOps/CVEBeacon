@@ -45,6 +45,7 @@ COMMON_KEYS = {
     "min_interval_seconds",
     "timeout_seconds",
     "allow_insecure",
+    "notify_reported",
 }
 TYPE_KEYS = {
     "smtp": {
@@ -151,6 +152,7 @@ class ChannelConfig:
     max_items: int = 20
     min_interval_seconds: float = 0.0
     timeout_seconds: float = 30.0
+    notify_reported: bool = False
     options: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -380,6 +382,7 @@ def _common(table: Mapping[str, Any], label: str, channel_type: str) -> dict[str
         "timeout_seconds": timeout,
         "min_interval_seconds": interval,
         "allow_insecure": _boolean(table, "allow_insecure", label, False),
+        "notify_reported": _boolean(table, "notify_reported", label, False),
     }
 
 
@@ -640,6 +643,7 @@ def parse_channels(raw: Any, *, base: Path) -> tuple[ChannelConfig, ...]:
                 max_items=int(options["max_items"]),
                 min_interval_seconds=float(options["min_interval_seconds"]),
                 timeout_seconds=float(options["timeout_seconds"]),
+                notify_reported=bool(options["notify_reported"]),
                 options=options,
             )
         )

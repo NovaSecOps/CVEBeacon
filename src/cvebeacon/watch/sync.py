@@ -488,6 +488,7 @@ def watch_status(watch: WatchConfig) -> str:
         f"with active SSVC: {status['active_ssvc']}",
         f"with EPSS: {status['epss_rows']}",
         f"lookups pending/backing off: {status['lookups']}",
+        f"reported to clients: {status['reported']}",
     ]
     for row in store.delivery_status(channel.name for channel in watch.channels):
         lines.append(
