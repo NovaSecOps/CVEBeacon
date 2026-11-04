@@ -30,6 +30,13 @@ def config_with(tmp_path, mode: str = "open"):
     )
 
 
+def prompt(monkeypatch, *values: str) -> None:
+    pending = iter(values)
+    monkeypatch.setattr(
+        "cvebeacon.passwords.getpass.getpass", lambda _: next(pending)
+    )
+
+
 def seed(config) -> WatchStore:
     store = WatchStore(config.watch.database, clock=lambda: NOW)
     store.upsert_nvd(
@@ -530,6 +537,14 @@ def test_security_documentation_is_explicit():
     assert "user-admin audit log only" in watch.casefold()
     assert "wall-clock" in watch.casefold()
     assert "host clock" in watch.casefold()
+    assert "administrator login" in watch.casefold()
+    assert "--admin-user" in watch
+    assert "bootstrap" in watch.casefold()
+    assert "service account" in watch.casefold()
+    assert "planned dashboard" in watch.casefold()
+    assert "must be owned by" in watch.casefold()
+    assert "cvebeacon account (or root)" in watch.casefold()
+    assert "highest legacy row id" in watch.casefold()
 
 
 OLD_USER_SCHEMA = (
@@ -591,7 +606,15 @@ def test_old_account_email_collisions_fail_closed(tmp_path):
 def test_no_password_is_rejected_in_authenticated_mode(tmp_path, capsys):
     config = config_with(tmp_path, "authenticated")
     assert cli.main(
-        ["--config", str(config.config_path), "users", "add", "alice", "--no-password"]
+        [
+            "--config",
+            str(config.config_path),
+            "users",
+            "add",
+            "alice",
+            "--admin",
+            "--no-password",
+        ]
     ) == 2
     assert "--no-password" in capsys.readouterr().err
 
@@ -656,3 +679,326 @@ def test_cli_users_verify_reports_a_malformed_row_without_a_traceback(
         db.execute("UPDATE cb_user_audit SET action=CAST('blob' AS BLOB) WHERE id=1")
     assert cli.main(["--config", str(config.config_path), "users", "verify"]) == 2
     assert "broken at row 1" in capsys.readouterr().err
+
+
+def test_authenticated_admin_bootstrap_and_admin_login(tmp_path, monkeypatch, capsys):
+    config = config_with(tmp_path, "authenticated")
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    base = ["--config", str(config.config_path), "users"]
+
+    prompt(monkeypatch, PASSWORD, PASSWORD)
+    assert cli.main([*base, "add", "alice", "--admin"]) == 0
+    alice = users.find("alice")
+    assert alice is not None and alice.is_admin
+    assert users.audit_entries()[-1].actor == "bootstrap"
+
+    assert cli.main([*base, "add", "bob"]) == 2
+    assert "administrator login required" in capsys.readouterr().err
+    assert users.find("bob") is None
+
+    prompt(monkeypatch, PASSWORD, PASSWORD, PASSWORD)
+    assert cli.main([*base, "add", "bob", "--admin-user", "alice"]) == 0
+    bob = users.find("bob")
+    assert bob is not None and not bob.is_admin
+    assert users.audit_entries()[-1].actor == "alice"
+
+    prompt(monkeypatch, PASSWORD)
+    assert cli.main([*base, "add", "carol", "--admin-user", "bob"]) == 2
+    assert "administrator login required" in capsys.readouterr().err
+    assert users.find("carol") is None
+
+
+def test_admin_only_user_actions_require_an_admin_login(tmp_path, monkeypatch, capsys):
+    config = config_with(tmp_path, "authenticated")
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    base = ["--config", str(config.config_path), "users"]
+    prompt(monkeypatch, PASSWORD, PASSWORD)
+    cli.main([*base, "add", "alice", "--admin"])
+    prompt(monkeypatch, PASSWORD, PASSWORD, PASSWORD)
+    cli.main([*base, "add", "bob", "--admin-user", "alice"])
+
+    assert cli.main([*base, "disable", "bob"]) == 2
+    assert "administrator login required" in capsys.readouterr().err
+    prompt(monkeypatch, PASSWORD)
+    assert cli.main([*base, "disable", "bob", "--admin-user", "bob"]) == 2
+    assert "administrator login required" in capsys.readouterr().err
+    assert users.find("bob").disabled is False
+
+    prompt(monkeypatch, PASSWORD)
+    assert cli.main([*base, "disable", "bob", "--admin-user", "alice"]) == 0
+    assert users.find("bob").disabled is True
+    assert users.audit_entries()[-1].actor == "alice"
+    prompt(monkeypatch, PASSWORD)
+    assert cli.main([*base, "enable", "bob", "--admin-user", "alice"]) == 0
+    prompt(monkeypatch, PASSWORD)
+    assert cli.main([*base, "unlock", "bob", "--admin-user", "alice"]) == 0
+
+
+def test_users_change_their_own_password_or_an_admin_resets_it(
+    tmp_path, monkeypatch, capsys
+):
+    config = config_with(tmp_path, "authenticated")
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    base = ["--config", str(config.config_path), "users"]
+    prompt(monkeypatch, PASSWORD, PASSWORD)
+    cli.main([*base, "add", "alice", "--admin"])
+    prompt(monkeypatch, PASSWORD, PASSWORD, PASSWORD)
+    cli.main([*base, "add", "bob", "--admin-user", "alice"])
+
+    new_self = PASSWORD + " self"
+    prompt(monkeypatch, PASSWORD, new_self, new_self)
+    assert cli.main([*base, "passwd", "bob"]) == 0
+    assert any(
+        entry.action == "passwd" and entry.actor == "bob"
+        for entry in users.audit_entries()
+    )
+    assert users.authenticate("bob", new_self) is not None
+    assert users.authenticate("bob", PASSWORD) is None
+
+    new_admin = PASSWORD + " reset"
+    prompt(monkeypatch, PASSWORD, new_admin, new_admin)
+    assert cli.main([*base, "passwd", "bob", "--admin-user", "alice"]) == 0
+    assert any(
+        entry.action == "passwd" and entry.actor == "alice"
+        for entry in users.audit_entries()
+    )
+    assert users.authenticate("bob", new_admin) is not None
+
+    prompt(monkeypatch, "wrong password value")
+    assert cli.main([*base, "passwd", "bob", "--admin-user", "alice"]) == 2
+    assert "administrator login required" in capsys.readouterr().err
+
+
+def test_report_holds_the_user_lock_through_the_report_write(
+    tmp_path, monkeypatch
+):
+    config = config_with(tmp_path, "authenticated")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", password=PASSWORD)
+    actor = service(config, store)
+    original = store._report_cve
+
+    def locked_check(*args, **kwargs):
+        with sqlite3.connect(users.path, timeout=0) as db:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                db.execute("BEGIN IMMEDIATE")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_report_cve", locked_check)
+    assert actor.report_cve(
+        IDENTIFIER, user="alice", password=PASSWORD
+    ).changed is True
+
+
+def test_unreport_holds_the_user_lock_through_the_write(tmp_path, monkeypatch):
+    config = config_with(tmp_path, "authenticated")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", password=PASSWORD)
+    actor = service(config, store)
+    actor.report_cve(IDENTIFIER, user="alice", password=PASSWORD)
+    original = store._unreport_cve
+
+    def locked_check(*args, **kwargs):
+        with sqlite3.connect(users.path, timeout=0) as db:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                db.execute("BEGIN IMMEDIATE")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_unreport_cve", locked_check)
+    assert actor.unreport_cve(
+        IDENTIFIER, user="alice", password=PASSWORD
+    ).changed is True
+
+
+def test_flipped_chain_version_cannot_launder_an_edit(tmp_path, capsys):
+    config = config_with(tmp_path)
+    store = seed(config)
+    for name in ("first", "second", "third"):
+        open_service(store).report_cve(IDENTIFIER, by=name, force=True)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET by='Mallory' WHERE id=2")
+    assert store.verify_reports() == 2
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET chain_version=0, chain=NULL")
+    assert store.verify_reports() == 1
+    assert cli.main(
+        ["--config", str(config.config_path), "watch", "reported", "--verify"]
+    ) == 2
+    assert "broken at row 1" in capsys.readouterr().err
+
+
+def test_nulling_identity_and_flipping_chain_version_is_still_broken(tmp_path):
+    config = config_with(tmp_path)
+    store = seed(config)
+    for name in ("first", "second", "third"):
+        open_service(store).report_cve(IDENTIFIER, by=name, force=True)
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_report SET by='Mallory', username='mallory', "
+            "note='forged', user_id=NULL, identity_mode=NULL, os_account=NULL, "
+            "host=NULL, chain_version=0, chain=NULL WHERE id=2"
+        )
+    assert store.verify_reports() == 2
+
+
+def test_dropped_chain_columns_fail_closed(tmp_path):
+    config = config_with(tmp_path)
+    store = seed(config)
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE watch_report DROP COLUMN chain")
+        db.execute("ALTER TABLE watch_report DROP COLUMN chain_version")
+        db.execute("UPDATE watch_meta SET value='5' WHERE key='schema_version'")
+    with pytest.raises(StateError, match="boundary exists"):
+        store.verify_reports()
+
+
+def test_verify_requires_a_legacy_boundary(tmp_path):
+    store = WatchStore(tmp_path / "watch.db")
+    store.initialize()
+    with sqlite3.connect(store.path) as db:
+        db.execute("DELETE FROM watch_meta WHERE key='report_legacy_max_id'")
+    with pytest.raises(StateError, match="boundary is missing"):
+        store.verify_reports()
+
+
+def test_empty_schema6_chains_are_damage_not_legacy(tmp_path):
+    config = config_with(tmp_path)
+    store = seed(config)
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    open_service(store).report_cve(IDENTIFIER, by="second", force=True)
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE watch_report DROP COLUMN chain_version")
+        db.execute("UPDATE watch_report SET chain=NULL")
+        db.execute("DELETE FROM watch_meta WHERE key='report_legacy_max_id'")
+        db.execute("UPDATE watch_meta SET value='6' WHERE key='schema_version'")
+    reopened = WatchStore(store.path, clock=lambda: NOW)
+    reopened.initialize()
+    assert reopened.verify_reports() == 1
+
+
+def test_old_username_email_collision_fails_migration(tmp_path):
+    path = tmp_path / "users.db"
+    old_user_database(path, "é@example.com")
+    now = NOW.isoformat()
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO cb_user(username,email,created_at,updated_at) "
+            "VALUES ('É@example.com',NULL,?,?)",
+            (now, now),
+        )
+    with pytest.raises(StateError, match="collide"):
+        UserStore(path, clock=lambda: NOW).initialize()
+
+
+def test_invalid_utf8_report_text_is_a_controlled_broken_row(tmp_path, capsys):
+    config = config_with(tmp_path)
+    store = seed(config)
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    open_service(store).report_cve(IDENTIFIER, by="second", force=True)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET by=CAST(X'80' AS TEXT) WHERE id=1")
+    assert store.verify_reports() == 1
+    assert cli.main(
+        ["--config", str(config.config_path), "watch", "reported", "--verify"]
+    ) == 2
+    assert "broken at row 1" in capsys.readouterr().err
+
+
+def test_invalid_utf8_user_audit_text_is_a_controlled_broken_row(tmp_path):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.add("alice")
+    store.disable("alice")
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE cb_user_audit SET action=CAST(X'80' AS TEXT) WHERE id=1")
+    assert store.verify_audit() == 1
+
+
+def test_missing_report_chain_column_is_a_controlled_failure(tmp_path, capsys):
+    config = config_with(tmp_path)
+    store = seed(config)
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE watch_report DROP COLUMN chain")
+    with pytest.raises(StateError, match="missing required columns"):
+        store.verify_reports()
+    assert cli.main(
+        ["--config", str(config.config_path), "watch", "reported", "--verify"]
+    ) == 2
+    assert "missing required columns" in capsys.readouterr().err
+
+
+def test_missing_user_audit_chain_column_is_a_controlled_failure(tmp_path):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.add("alice")
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE cb_user_audit DROP COLUMN chain")
+    with pytest.raises(StateError, match="missing required columns"):
+        store.verify_audit()
+
+
+def test_expired_lock_does_not_rearm_after_one_failure(tmp_path):
+    now = [NOW]
+    store = UserStore(tmp_path / "users.db", clock=lambda: now[0])
+    store.add("alice", password=PASSWORD)
+    for _ in range(5):
+        store.authenticate("alice", "wrong password value")
+    now[0] = NOW + timedelta(minutes=16)
+    assert store.authenticate("alice", "wrong password value") is None
+    current = store.find("alice")
+    assert current.failed_logins == 1
+    assert current.locked_until is None
+    assert store.authenticate("alice", PASSWORD) is not None
+
+
+def test_password_like_invalid_username_is_not_retained(tmp_path):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.add("alice", password=PASSWORD)
+    secret = "Tr0ub4dor&3-my-real-pass"
+    assert store.authenticate(secret, "wrong password value") is None
+    row = store.audit_entries()[-1]
+    assert row.action == "login_failed"
+    assert row.username == "(invalid name)"
+    assert all(secret not in str(entry) for entry in store.audit_entries())
+
+
+def test_parent_directory_ownership_is_checked(tmp_path, monkeypatch):
+    if os.name != "posix":
+        pytest.skip("POSIX ownership model")
+    real_euid = os.geteuid()
+    monkeypatch.setattr(
+        "cvebeacon.watch.users.os.geteuid", lambda: real_euid + 1
+    )
+    with pytest.raises(StateError, match="directory must be owned"):
+        UserStore(tmp_path / "users.db", clock=lambda: NOW).initialize()
+
+
+def test_password_spellings_never_echo_the_value(capsys):
+    secret = "synthetic-argparse-secret"
+    cases = [
+        ["users", "add", "alice", "-p" + secret],
+        ["users", "add", "alice", "--pwd", secret],
+        ["users", "add", "alice", "--pw=" + secret],
+        [
+            "--config",
+            "absent.toml",
+            "watch",
+            "report",
+            IDENTIFIER,
+            "--user",
+            "alice",
+            "--p",
+            secret,
+        ],
+    ]
+    for argv in cases:
+        try:
+            code = cli.main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        assert code == 2
+        error = capsys.readouterr().err
+        assert secret not in error
+        assert "command line" in error or "unrecognized arguments" in error
