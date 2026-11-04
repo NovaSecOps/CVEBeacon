@@ -243,6 +243,8 @@ def _run_watch(args, config: AppConfig) -> int:
         )
         print(f"evaluated: {result.evaluated} CVE(s)")
         _print_evaluation(result)
+        if result.initial_sync_pending:
+            print("initialization stays open until the initial sync completes")
         return 0
     with HttpClient(config.http) as http:
         if args.watch_command == "sync":

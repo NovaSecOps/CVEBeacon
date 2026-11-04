@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timezone
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -164,6 +165,53 @@ def test_evaluate_all_rechecks_existing_state_without_duplicates(tmp_path):
     store.evaluate_touched((configured,), catalogs=("nvd",))
     result = store.evaluate_all((configured,), catalogs=("nvd",), initial=True)
     assert (result.evaluated, result.events) == (1, 0)
+
+
+def test_evaluate_all_keeps_changes_committed_between_batches(tmp_path, monkeypatch):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    writer = WatchStore(store.path, clock=lambda: NOW + timedelta(seconds=1))
+    store.upsert_nvd(
+        [record(cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 7.5),))]
+    )
+    store.set_metadata(
+        {
+            "initial_mode": "backfill",
+            "initialized_at": NOW.isoformat(),
+            "initial_sync_completed_at": NOW.isoformat(),
+        }
+    )
+    original_transaction = store.transaction
+    original_batch = store._evaluate_batch
+    state = {"evaluated": False, "written": False}
+
+    def track_batch(*args):
+        state["evaluated"] = True
+        return original_batch(*args)
+
+    @contextmanager
+    def interleaved_transaction():
+        state["evaluated"] = False
+        with original_transaction() as db:
+            yield db
+        if state["evaluated"] and not state["written"]:
+            state["written"] = True
+            writer.upsert_nvd([record(), record("CVE-2026-0000")])
+
+    monkeypatch.setattr(store, "_evaluate_batch", track_batch)
+    monkeypatch.setattr(store, "transaction", interleaved_transaction)
+    result = store.evaluate_all((rule(),), catalogs=("nvd",), initial=True, limit=1)
+
+    assert result.evaluated == 1
+    assert "initial_evaluated_at" in store.metadata()
+    assert set(store.pending_evaluations(10)) == {
+        "CVE-2026-0000",
+        "CVE-2026-0001",
+    }
+    store.evaluate_touched((rule(),), catalogs=("nvd",), initial=False)
+    assert {event.cve_id for event in store.events()} == {
+        "CVE-2026-0000",
+        "CVE-2026-0001",
+    }
 
 
 def test_event_listing_filters_rule_limit_and_pending(tmp_path):

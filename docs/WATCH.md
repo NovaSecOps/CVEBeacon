@@ -614,12 +614,16 @@ rule sets `old_cves = "alert"`.
 An evaluation during the first sync of a database in `backfill` or `full` mode
 marks its `match` events `initial = 1`. `cvebeacon watch evaluate --all` marks
 only the `match` events it creates as initial; escalations keep `initial = 0`.
-It requires `--yes` or a confirmation. `initial_evaluated_at` is set only after
-an initial evaluation whose sync had no source failures, so a later clean sync
-can finish an interrupted initial window. Initial events are intended for one
-summary digest rather than individual alerts. A baseline first sync stores
-no history, so it produces no events. Later syncs evaluate only the CVEs
-touched by that sync.
+It always does this, including after initialization is closed, so re-evaluating
+after a rule change produces a summary digest instead of individual alerts. It
+requires `--yes` or a confirmation. Once a failure-free initial sync has
+finished all enabled sources, `evaluate --all` also records
+`initial_evaluated_at` and clears the touch queue it evaluated, closing
+initialization. Before that, for example after a source failure or an
+interrupted full history, initialization stays open and the command says so.
+Initial events are intended for one summary digest rather than individual
+alerts. A baseline first sync stores no history, so it produces no events.
+Later syncs evaluate only the CVEs touched by that sync.
 
 ## Vendor and product data
 
@@ -811,13 +815,20 @@ The first sync chooses what history to build:
   and cancels instead of waiting; run `watch sync --yes` once before the first
   scheduled run.
 
-`initialized_at` is set only when an initial run reaches its last window. A
-resumed initial run continues from the stored cursor and does not ask for
-confirmation again. `initial_evaluated_at` is set only after the initial
-evaluation completes during a sync with no source failures; until then, later
-runs keep `initial = 1` for matches and backlog matches. `initial_window_start`
-is the boundary used by the `old_cves` policy in baseline, backfill, and full
-mode.
+`initialized_at` is set only when an initial run reaches its last NVD window,
+so it records NVD progress and resume state, not completion of the whole initial
+sync. A resumed initial run continues from the stored cursor and does not ask
+for confirmation again. `initial_sync_completed_at` is set only after an
+initial sync finishes every enabled source without a failure.
+`initial_evaluated_at` is set after an initial evaluation completes during a
+clean sync, or by `watch evaluate --all` once `initial_sync_completed_at` is
+set; until then, later runs keep `initial = 1` for matches and backlog matches.
+A database whose initial sync finished before `initial_sync_completed_at`
+existed, and whose initial evaluation is still open, needs one successful
+`watch sync` after upgrading before `watch evaluate --all` can close it; one
+clean `watch run` also completes it.
+`initial_window_start` is the boundary used by the `old_cves` policy in
+baseline, backfill, and full mode.
 
 After the first sync, `nvd_cursor` advances to the end of the window that was
 read. Later runs start `overlap_minutes` before that cursor and end at the
@@ -834,7 +845,9 @@ sync on the same day reads the same EUVD day again.
   successful chunk. A failed EPSS download keeps the previous table.
 - Committed source changes also remain in `watch_touched`, so a later failure or
   interruption does not lose an evaluation obligation. The initial window stays
-  open until an evaluation completes after a sync with no failures.
+  open until every enabled source has finished a sync without a failure and an
+  evaluation completes. That failure-free sync records `initial_sync_completed_at`;
+  `watch evaluate --all` closes initialization only when that marker exists.
 - A successful sync exits 0. A refused or cancelled sync does not contact the
   sources.
 

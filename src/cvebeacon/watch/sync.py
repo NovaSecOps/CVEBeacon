@@ -462,11 +462,14 @@ def sync_watch(
             )
         )
 
-    return SyncReport(
+    report = SyncReport(
         summaries=tuple(summaries),
         touched_ids=tuple(sorted(touched)),
         initial_evaluation=initial_evaluation,
     )
+    if initial_evaluation and not report.failures:
+        store.set_metadata({"initial_sync_completed_at": now.isoformat()})
+    return report
 
 
 def watch_status(watch: WatchConfig) -> str:
