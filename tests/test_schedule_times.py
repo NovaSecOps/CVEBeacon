@@ -538,8 +538,9 @@ def test_windows_registration_timeout_is_one_error(tmp_path, monkeypatch):
     def fake_run(args, **kwargs):
         raise subprocess.TimeoutExpired(args, kwargs["timeout"])
 
-    with pytest.raises(SchedulingError, match="timed out"):
+    with pytest.raises(SchedulingError, match="timed out") as error:
         install(plan, run=fake_run)
+    assert "\n" not in str(error.value)
 
 
 def test_windows_access_denied_accepts_the_hresult_without_english_text(
