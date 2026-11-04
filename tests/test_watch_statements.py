@@ -691,6 +691,21 @@ def test_docx_ignores_paragraph_tokens_inside_comments():
     ]
 
 
+def test_docx_many_placeholders_in_one_run_stay_linear():
+    fields = all_fields()
+    fields["description"] = "x" * 1000
+    document = (
+        "<w:p><w:r><w:t>"
+        + "${description}" * 10_000
+        + "</w:t></w:r></w:p>"
+    )
+    started = time.monotonic()
+    result = render_docx(docx_bytes(document), fields)
+    assert time.monotonic() - started < 5
+    raw = part(result, "word/document.xml")
+    assert raw.count(b"x" * 1000) == 10_000
+
+
 def test_docx_rejects_malformed_input():
     with pytest.raises(CVEBeaconError, match="malformed"):
         render_docx(
