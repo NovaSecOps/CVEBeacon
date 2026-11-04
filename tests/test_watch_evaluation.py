@@ -210,6 +210,7 @@ def test_v1_database_migrates_in_place(tmp_path):
             row[1] for row in db.execute("PRAGMA table_info(watch_delivery)")
         }
     assert {"watch_alert_state", "watch_event", "watch_delivery"} <= tables
+    assert "watch_report" in tables
     assert "vendors_json" in columns
     assert event_columns >= {"id", "rule", "cve_id", "kind", "reasons_json", "initial", "created_at"}
     assert delivery_columns >= {
@@ -321,6 +322,11 @@ def test_v2_database_keeps_deliveries_and_adds_statuses(tmp_path):
     assert upgraded.delivery_status()[0].ambiguous == 1
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT COUNT(*) FROM watch_delivery").fetchone()[0] == 1
+        tables = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert "watch_report" in tables
 
 
 def test_rejected_escalation_is_recorded(tmp_path):
@@ -348,6 +354,79 @@ def test_deliveries_are_not_duplicated_when_an_event_already_exists(tmp_path):
     assert result.events == 0
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT COUNT(*) FROM watch_delivery").fetchone()[0] == 1
+
+
+V3_SCHEMA = (
+    "CREATE TABLE watch_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    """CREATE TABLE watch_cve (
+        cve_id TEXT PRIMARY KEY, published TEXT, last_modified TEXT,
+        status TEXT NOT NULL CHECK(status IN ('published','rejected')),
+        description TEXT, source_identifier TEXT, cvss_json TEXT NOT NULL,
+        cwes_json TEXT NOT NULL, products_json TEXT NOT NULL,
+        references_json TEXT NOT NULL,
+        ssvc_exploitation TEXT CHECK(ssvc_exploitation IN ('none','poc','active') OR ssvc_exploitation IS NULL),
+        cisa_kev_added TEXT, cisa_kev_due TEXT, cisa_required_action TEXT,
+        cisa_ransomware TEXT, first_seen TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    """CREATE TABLE watch_alert_state (
+        rule TEXT NOT NULL, cve_id TEXT NOT NULL,
+        first_matched_at TEXT NOT NULL, snapshot_json TEXT NOT NULL,
+        rule_hash TEXT NOT NULL, providers_hash TEXT NOT NULL,
+        PRIMARY KEY(rule, cve_id))""",
+    """CREATE TABLE watch_event (
+        id INTEGER PRIMARY KEY, rule TEXT NOT NULL, cve_id TEXT NOT NULL,
+        kind TEXT NOT NULL, reasons_json TEXT NOT NULL,
+        details_json TEXT NOT NULL DEFAULT '{}', occurrence TEXT NOT NULL,
+        initial INTEGER NOT NULL, created_at TEXT NOT NULL,
+        UNIQUE(rule, cve_id, kind, occurrence))""",
+    """CREATE TABLE watch_delivery (
+        event_id INTEGER NOT NULL, channel TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','ambiguous')),
+        attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+        updated_at TEXT NOT NULL, PRIMARY KEY(event_id, channel))""",
+)
+
+
+def test_v3_database_adds_first_attempt_at_and_keeps_rows(tmp_path):
+    path = tmp_path / "watch.db"
+    with sqlite3.connect(path) as db:
+        for statement in V3_SCHEMA:
+            db.execute(statement)
+        db.execute("INSERT INTO watch_meta VALUES ('schema_version','3')")
+        db.execute(
+            "INSERT INTO watch_cve(cve_id,status,cvss_json,cwes_json,"
+            "products_json,references_json,first_seen,updated_at) "
+            "VALUES ('CVE-2026-0001','published','[]','[]','[]','[]',?,?)",
+            (NOW.isoformat(), NOW.isoformat()),
+        )
+        db.execute(
+            "INSERT INTO watch_event(rule,cve_id,kind,reasons_json,details_json,"
+            "occurrence,initial,created_at) VALUES "
+            "('critical','CVE-2026-0001','match','[]','{}','match',0,?)",
+            (NOW.isoformat(),),
+        )
+        db.execute(
+            "INSERT INTO watch_delivery(event_id,channel,status,attempts,"
+            "last_error,updated_at) VALUES (1,'hook','failed',2,?,?)",
+            ("connection failed", NOW.isoformat()),
+        )
+    store = WatchStore(path, clock=lambda: NOW)
+    store.initialize()
+    assert store.metadata()["schema_version"] == "5"
+    with sqlite3.connect(path) as db:
+        columns = {
+            row[1] for row in db.execute("PRAGMA table_info(watch_delivery)")
+        }
+        assert "first_attempt_at" in columns
+        assert db.execute(
+            "SELECT channel,status,attempts FROM watch_delivery"
+        ).fetchall() == [("hook", "failed", 2)]
+        assert db.execute("SELECT COUNT(*) FROM watch_event").fetchone()[0] == 1
+        tables = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert "watch_report" in tables
+    assert store.report_cve("CVE-2026-0001", by="alice").changed is True
 
 
 P1A_SCHEMA = (

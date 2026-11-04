@@ -38,6 +38,8 @@ LEAF_KEYS = (
     "status",
 )
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
+# Notice events use this prefix. Configured rules may not start with it.
+RESERVED_RULE_PREFIX = "@"
 CWE_PATTERN = re.compile(r"(?i)^(?:cwe-)?(\d{1,9})$")
 MAX_DEPTH = 4
 MAX_LEAVES = 32
@@ -425,6 +427,11 @@ def parse_rules(raw: Any, *, path: str = "watch.rules") -> tuple[Rule, ...]:
         if not isinstance(name, str):
             _fail(f"{item_path}.name", "is required")
         name = name.strip()
+        if name.startswith(RESERVED_RULE_PREFIX):
+            _fail(
+                f"{item_path}.name",
+                "must not start with @; @-prefixed names are reserved",
+            )
         if NAME_PATTERN.fullmatch(name) is None:
             _fail(
                 f"{item_path}.name",

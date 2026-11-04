@@ -10,7 +10,7 @@ from typing import Any
 
 from ..models import HealthStatus, SourceHealth
 
-CVE_PATTERN = re.compile(r"^CVE-(1999|2\d{3})-\d{4,}$", re.IGNORECASE)
+CVE_PATTERN = re.compile(r"^CVE-(1999|2[0-9]{3})-[0-9]{4,19}$")
 
 
 def cve_id(value: Any) -> str | None:

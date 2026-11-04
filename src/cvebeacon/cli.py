@@ -199,7 +199,7 @@ def _require_watch(config: AppConfig) -> None:
 
 def _run_watch(args, config: AppConfig) -> int:
     from .watch.delivery import deliver_pending, send_test
-    from .watch.reported import format_timestamp, normalize_cve_id
+    from .watch.reported import default_identity, format_timestamp, normalize_cve_id
     from .watch.rules import describe_condition
     from .watch.store import WatchStore
     from .watch.sync import sync_watch, watch_status
@@ -227,7 +227,7 @@ def _run_watch(args, config: AppConfig) -> int:
     if args.watch_command == "report":
         outcome = store.report_cve(
             args.cve_id,
-            by=args.by,
+            by=args.by if args.by is not None else default_identity(),
             note=args.note,
             force=args.force,
             notify_channels=notify_channels(),
@@ -237,6 +237,9 @@ def _run_watch(args, config: AppConfig) -> int:
             print(
                 f"{entry.cve_id} is already reported to clients by "
                 f"{entry.by} at {format_timestamp(entry.at)}"
+            )
+            _print_notice_hint(
+                store.notice_deliveries().get(("report", entry.id), ())
             )
             return 0
         print(
@@ -248,7 +251,7 @@ def _run_watch(args, config: AppConfig) -> int:
         identifier = normalize_cve_id(args.cve_id)
         outcome = store.unreport_cve(
             identifier,
-            by=args.by,
+            by=args.by if args.by is not None else default_identity(),
             note=args.note,
             notify_channels=notify_channels(),
         )
@@ -268,6 +271,7 @@ def _run_watch(args, config: AppConfig) -> int:
         if not entries:
             print("no CVEs are marked as reported to clients")
             return 0
+        notice_states = store.notice_deliveries() if args.all_history else {}
         for entry in entries:
             if args.all_history:
                 action = "reported" if entry.action == "report" else "unreported"
@@ -282,6 +286,14 @@ def _run_watch(args, config: AppConfig) -> int:
                 )
             if entry.note:
                 line += f"  {entry.note}"
+            if args.all_history:
+                states = notice_states.get((entry.action, entry.id), ())
+                if states:
+                    line += "  notices: " + ", ".join(
+                        f"{state.channel} {state.status}" for state in states
+                    )
+                else:
+                    line += "  notices: none"
             print(line)
         return 0
     if args.watch_command == "notify":
@@ -370,14 +382,34 @@ def _run_watch(args, config: AppConfig) -> int:
     return 4 if report.failures else 0
 
 
+def _print_notice_hint(states) -> None:
+    statuses = {state.status for state in states}
+    if "failed" in statuses:
+        print(
+            "notice delivery failed earlier; run "
+            "`cvebeacon watch notify --retry-failed`"
+        )
+    elif "ambiguous" in statuses:
+        print(
+            "notice delivery outcome is unknown; run "
+            "`cvebeacon watch notify --retry-ambiguous`"
+        )
+    elif "pending" in statuses:
+        print("notice delivery is still pending; run `cvebeacon watch notify`")
+
+
 def _deliver_report_notice(config: AppConfig, store, outcome) -> int:
-    if not outcome.channels:
+    if not outcome.channels or outcome.event_id is None:
         return 0
     from .watch.delivery import deliver_pending
 
     with HttpClient(config.http) as http:
         delivery = deliver_pending(
-            config, store, http, channel_names=outcome.channels
+            config,
+            store,
+            http,
+            channel_names=outcome.channels,
+            event_ids=(outcome.event_id,),
         )
     _print_delivery(delivery, only_selected=True)
     return 3 if delivery.failed else 0

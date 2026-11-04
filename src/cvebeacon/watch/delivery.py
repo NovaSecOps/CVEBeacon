@@ -28,6 +28,7 @@ from .messages import (
     webhook_payload,
 )
 from .records import DeliveryEvent
+from .reported import NOTICE_KINDS
 from .store import (
     DeliveryStatusRow,
     WatchStore,
@@ -719,6 +720,7 @@ def deliver_pending(
     http: HttpClient,
     *,
     channel_names: Iterable[str] | None = None,
+    event_ids: Iterable[int] | None = None,
     retry_ambiguous: bool = False,
     retry_failed: bool = False,
     clock: Callable[[], datetime] = _utc_now,
@@ -730,6 +732,11 @@ def deliver_pending(
         monotonic = time.monotonic
     if sleep is None:
         sleep = time.sleep
+    selected_events: tuple[int, ...] | None = None
+    if event_ids is not None:
+        selected_events = tuple(sorted({int(value) for value in event_ids}))
+        if not selected_events:
+            return DeliveryReport()
     selected_names = set(channel_names) if channel_names is not None else None
     channels = tuple(
         channel
@@ -840,7 +847,7 @@ def deliver_pending(
                 pace = True
             return delivered, sent, failure, expired, pace
 
-        if monotonic() < deadline:
+        if selected_events is None and monotonic() < deadline:
             if channel.type == "webhook":
                 # Initial events are JSON documents of at most 1,000 rows.
                 while (
@@ -971,6 +978,7 @@ def deliver_pending(
                 catalogs=config.watch.sources,
                 now=now,
                 include_ambiguous=include_ambiguous,
+                event_ids=selected_events,
             )
             batches: list[tuple[DeliveryEvent, ...]] = []
             if include_ambiguous:
@@ -1016,10 +1024,23 @@ def deliver_pending(
                     covered = [index[value] for value in event_ids if value in index]
                     if not covered:
                         continue
-                    if not store.claim_delivery(
-                        event_ids, channel.name, statuses=claim_statuses
+                    if (
+                        len(event_ids) == 1
+                        and covered[0].kind in NOTICE_KINDS
                     ):
-                        # Another run owns these rows.
+                        claimed = store.claim_notice(
+                            event_ids[0],
+                            channel.name,
+                            statuses=claim_statuses,
+                            include_ambiguous=include_ambiguous,
+                        )
+                    else:
+                        claimed = store.claim_delivery(
+                            event_ids, channel.name, statuses=claim_statuses
+                        )
+                    if not claimed:
+                        # Another run owns these rows, or an earlier notice
+                        # for this CVE and channel is still unresolved.
                         continue
                     (
                         delivered,

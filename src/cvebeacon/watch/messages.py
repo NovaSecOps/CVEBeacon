@@ -10,7 +10,12 @@ from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
 from .records import CVSSEntry, DeliveryEvent, InitialDigest, WatchView
-from .reported import NOTICE_KINDS, NOTICE_LABELS, format_reported
+from .reported import (
+    NOTICE_KINDS,
+    NOTICE_LABELS,
+    format_reported,
+    format_timestamp,
+)
 from .rules import EVENT_KINDS, Rule
 
 NVD_URL = "https://nvd.nist.gov/vuln/detail/{cve_id}"
@@ -591,14 +596,25 @@ def _notice_subject(event: DeliveryEvent) -> str:
     return f"CVEBeacon: {label} {event.cve_id}"
 
 
+def _sorted_notices(events: Iterable[DeliveryEvent]) -> tuple[DeliveryEvent, ...]:
+    """Notices follow the durable audit order, never alert severity."""
+    return tuple(
+        sorted(
+            (event for event in events if event.kind in NOTICE_KINDS),
+            key=lambda event: event.event_id,
+        )
+    )
+
+
 def _notice_text(event: DeliveryEvent, style: str) -> str:
     label = NOTICE_LABELS.get(event.kind, f"[{event.kind.upper()}]")
     by = event.details.get("by")
     by_text = _dynamic(by if isinstance(by, str) else "unknown", style, 100)
+    stamp = format_timestamp(event.created_at)
     if event.kind == "unreported":
-        line = f"{label} {event.cve_id} report withdrawn by {by_text}"
+        line = f"{label} {event.cve_id} report withdrawn by {by_text} at {stamp}"
     else:
-        line = f"{label} {event.cve_id} reported to clients by {by_text}"
+        line = f"{label} {event.cve_id} reported to clients by {by_text} at {stamp}"
     note = event.details.get("note")
     if isinstance(note, str) and note.strip():
         line += "\n  " + _dynamic(note, style, 500)
@@ -623,7 +639,7 @@ def build_messages(
     title_in_body = chat and channel_type not in {"ntfy", "gotify"}
     body_limit = limit - 300 if chat else limit
     ordered = sort_events(events)
-    notices = tuple(event for event in ordered if event.kind in NOTICE_KINDS)
+    notices = _sorted_notices(ordered)
     normal = tuple(
         event
         for event in ordered
@@ -757,7 +773,10 @@ def webhook_payload(
 ) -> dict[str, Any]:
     """Return the stable version 2 webhook document."""
     output = []
-    for event in sort_events(events):
+    alerts = tuple(
+        event for event in sort_events(events) if event.kind not in NOTICE_KINDS
+    )
+    for event in (*alerts, *_sorted_notices(events)):
         view = event.view
         output.append(
             {
