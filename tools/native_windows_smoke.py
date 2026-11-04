@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import re
 import secrets
 import shutil
 import sqlite3
@@ -16,7 +15,6 @@ from contextlib import closing
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = "CVEBeacon Monitor"
@@ -31,110 +29,12 @@ STEPS = (
     "run the baseline watch run offline, then watch status and check the resolved database path",
     "install a fixed-time interactive task, run it and assert last result 0 and a baseline database",
     "create the local service account, grant ACLs and the batch-logon right",
-    "register, run and remove a fixed-time S4U task for the service account",
-    "register, query and remove an interval S4U task",
+    "register, run and remove a fixed-time stored-password task for the service account",
+    "register, query and remove an interval stored-password task",
     "remove the service account",
 )
 
 _step = 0
-
-PROBE_COM_SCRIPT = """param(
-    [Parameter(Mandatory = $true)][string]$TaskName,
-    [Parameter(Mandatory = $true)][string]$XmlPath,
-    [Parameter(Mandatory = $true)][string]$Account,
-    [switch]$UseXmlPrincipal
-)
-$ErrorActionPreference = 'Stop'
-$xml = [System.IO.File]::ReadAllText($XmlPath)
-$service = New-Object -ComObject Schedule.Service
-$service.Connect()
-$folder = $service.GetFolder('\\')
-$userId = if ($UseXmlPrincipal) { $null } else { $Account }
-$null = $folder.RegisterTask($TaskName, $xml, 6, $userId, $null, 2, $null)
-"""
-
-PROBE_CMDLET_SCRIPT = """param(
-    [Parameter(Mandatory = $true)][string]$TaskName,
-    [Parameter(Mandatory = $true)][string]$XmlPath,
-    [Parameter(Mandatory = $true)][string]$Account,
-    [Parameter(Mandatory = $true)][string]$Method
-)
-$ErrorActionPreference = 'Stop'
-if ($Method -eq 'd') {
-    $xml = [System.IO.File]::ReadAllText($XmlPath)
-    Register-ScheduledTask -Xml $xml -TaskName $TaskName -User $Account | Out-Null
-} elseif ($Method -eq 'e') {
-    $principal = New-ScheduledTaskPrincipal -UserId $Account -LogonType S4U -RunLevel Limited
-    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0'
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(2)
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal | Out-Null
-} else {
-    throw "unknown probe method"
-}
-"""
-
-HELPER_TASK = "CVEBeacon Smoke Helper"
-
-SERVICE_PROBE_SCRIPT = """param(
-    [Parameter(Mandatory = $true)][string]$XmlPath,
-    [Parameter(Mandatory = $true)][string]$LogPath,
-    [Parameter(Mandatory = $true)][string]$Prefix
-)
-$ErrorActionPreference = 'Stop'
-$self = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-function Log([string]$text) { Add-Content -LiteralPath $LogPath -Value $text }
-function ShowPrincipal([string]$name) {
-    $text = & schtasks.exe /Query /TN $name /XML 2>&1 | Out-String
-    $logon = [regex]::Match($text, '<LogonType>(.*?)</LogonType>').Groups[1].Value
-    $user = [regex]::Match($text, '<UserId>(.*?)</UserId>').Groups[1].Value
-    Log "  xml LogonType=$logon UserId=$user"
-}
-Log "self=$self"
-$xml = [System.IO.File]::ReadAllText($XmlPath)
-$name = "$Prefix a"
-try {
-    $out = & schtasks.exe /Create /XML $XmlPath /TN $name /RU $self /NP /F /HRESULT 2>&1 | Out-String
-    $rc = $LASTEXITCODE
-    Log "a rc=$rc $out"
-    if ($rc -eq 0) { ShowPrincipal $name }
-} catch { Log "a exception $($_.Exception.Message)" }
-& schtasks.exe /Delete /F /TN $name 2>&1 | Out-Null
-$name = "$Prefix b"
-try {
-    $service = New-Object -ComObject Schedule.Service
-    $service.Connect()
-    $folder = $service.GetFolder('\\')
-    $null = $folder.RegisterTask($name, $xml, 6, $self, $null, 2, $null)
-    Log "b rc=0"
-    ShowPrincipal $name
-} catch { Log "b exception $($_.Exception.Message)" }
-& schtasks.exe /Delete /F /TN $name 2>&1 | Out-Null
-$name = "$Prefix e"
-try {
-    $principal = New-ScheduledTaskPrincipal -UserId $self -LogonType S4U -RunLevel Limited
-    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0'
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(2)
-    Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal | Out-Null
-    Log "e rc=0"
-    ShowPrincipal $name
-} catch { Log "e exception $($_.Exception.Message)" }
-& schtasks.exe /Delete /F /TN $name 2>&1 | Out-Null
-"""
-
-PASSWORD_PROBE_SCRIPT = """param(
-    [Parameter(Mandatory = $true)][string]$TaskName,
-    [Parameter(Mandatory = $true)][string]$XmlPath,
-    [Parameter(Mandatory = $true)][string]$Account
-)
-$ErrorActionPreference = 'Stop'
-$password = [Console]::In.ReadLine()
-if (-not $password) { throw "no password on stdin" }
-$xml = [System.IO.File]::ReadAllText($XmlPath)
-$service = New-Object -ComObject Schedule.Service
-$service.Connect()
-$folder = $service.GetFolder('\\')
-$null = $folder.RegisterTask($TaskName, $xml, 6, $Account, $password, 1, $null)
-"""
 
 def step(description: str) -> None:
     global _step
@@ -143,7 +43,8 @@ def step(description: str) -> None:
 
 
 def command(args, **kwargs):
-    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    if "input" not in kwargs:
+        kwargs.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.run(
         args, capture_output=True, text=True, errors="replace", check=False, **kwargs
     )
@@ -250,21 +151,6 @@ def wait_for_task(before: str, timeout: float = 120, name: str = TASK) -> str:
         f"task did not finish in {timeout:.0f}s: state={state} code={code} last={last_run}"
     )
 
-
-def hresult(code: str) -> str:
-    try:
-        return f"{int(code, 0) & 0xFFFFFFFF:08X}"
-    except ValueError:
-        return ""
-
-
-LOGON_FAILURES = {
-    "80070569",  # ERROR_LOGON_TYPE_NOT_GRANTED
-    "80070533",  # ERROR_ACCOUNT_RESTRICTION
-    "8007052E",  # ERROR_LOGON_FAILURE
-    "800704EC",  # ERROR_ACCOUNT_DISABLED
-    "80070005",  # ERROR_ACCESS_DENIED
-}
 
 
 class Sink(BaseHTTPRequestHandler):
@@ -518,231 +404,6 @@ def database_owner(database: Path) -> str:
     ).stdout.strip()
 
 
-def write_probe_xml(
-    path: Path,
-    account: str,
-    *,
-    logon: str = "S4U",
-    arguments: str = "/c exit 0",
-) -> None:
-    boundary = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
-    path.write_text(
-        f"""<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>CVEBeacon S4U probe</Description></RegistrationInfo>
-  <Triggers>
-    <CalendarTrigger>
-      <StartBoundary>{boundary}</StartBoundary>
-      <Enabled>true</Enabled>
-      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
-    </CalendarTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>{escape(account)}</UserId>
-      <LogonType>{escape(logon)}</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Enabled>true</Enabled></Settings>
-  <Actions Context="Author">
-    <Exec><Command>cmd.exe</Command><Arguments>{escape(arguments)}</Arguments></Exec>
-  </Actions>
-</Task>
-""",
-        encoding="utf-16",
-    )
-
-
-def probe_principal(task_name: str) -> str:
-    result = subprocess.run(
-        ["schtasks", "/Query", "/TN", task_name, "/XML"],
-        capture_output=True,
-        check=False,
-        stdin=subprocess.DEVNULL,
-    )
-    if result.returncode != 0:
-        return f"query failed: {decode(result.stderr).strip()}"
-    text = decode(result.stdout)
-    logon = re.search(r"<LogonType>(.*?)</LogonType>", text)
-    user = re.search(r"<UserId>(.*?)</UserId>", text)
-    return "LogonType={} UserId={}".format(
-        logon.group(1) if logon else "?",
-        user.group(1) if user else "?",
-    )
-
-
-def probe_registration(
-    label: str, account: str, task_name: str, args: list[str]
-) -> None:
-    print(f"PROBE {label}: account={account} task={task_name}", flush=True)
-    try:
-        result = command(args, timeout=120)
-    except Exception as exc:
-        print(f"PROBE {label}: EXCEPTION {exc}", flush=True)
-        command(
-            ["schtasks", "/Delete", "/F", "/TN", task_name],
-            stdin=subprocess.DEVNULL,
-        )
-        return
-    print(f"PROBE {label}: returncode={result.returncode}", flush=True)
-    if result.stdout.strip():
-        print(f"PROBE {label} stdout:\n{result.stdout}", flush=True)
-    if result.stderr.strip():
-        print(f"PROBE {label} stderr:\n{result.stderr}", flush=True)
-    if result.returncode == 0:
-        print(f"PROBE {label}: {probe_principal(task_name)}", flush=True)
-    cleanup = command(
-        ["schtasks", "/Delete", "/F", "/TN", task_name],
-        stdin=subprocess.DEVNULL,
-    )
-    if cleanup.returncode != 0:
-        print(
-            f"PROBE {label} cleanup stderr:\n{cleanup.stderr}", flush=True
-        )
-
-
-def probe_s4u_registration(current: str) -> None:
-    print("PROBE whoami /user:", flush=True)
-    for name, args in (
-        ("user", ["whoami", "/user"]),
-        ("groups", ["whoami", "/groups"]),
-        ("priv", ["whoami", "/priv"]),
-    ):
-        result = command(args, stdin=subprocess.DEVNULL)
-        print(f"PROBE whoami /{name}:\n{result.stdout}{result.stderr}", flush=True)
-    token = secrets.token_hex(3)
-    with tempfile.TemporaryDirectory(
-        prefix="cvebeacon-probe-", ignore_cleanup_errors=True
-    ) as directory:
-        directory = Path(directory)
-        com_script = directory / "probe-com.ps1"
-        cmdlet_script = directory / "probe-cmdlet.ps1"
-        com_script.write_text(PROBE_COM_SCRIPT, encoding="utf-8")
-        cmdlet_script.write_text(PROBE_CMDLET_SCRIPT, encoding="utf-8")
-        for kind, account in (("current", current),):
-            xml_path = directory / f"probe-{kind}.xml"
-            write_probe_xml(xml_path, account)
-            for method in ("a", "b", "c", "d", "e"):
-                task_name = f"CVEBeacon Probe {token} {kind} {method}"
-                if method == "a":
-                    args = [
-                        "schtasks",
-                        "/Create",
-                        "/XML",
-                        str(xml_path),
-                        "/TN",
-                        task_name,
-                        "/RU",
-                        account,
-                        "/NP",
-                        "/F",
-                        "/HRESULT",
-                    ]
-                elif method in {"b", "c"}:
-                    args = [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        str(com_script),
-                        "-TaskName",
-                        task_name,
-                        "-XmlPath",
-                        str(xml_path),
-                        "-Account",
-                        account,
-                    ]
-                    if method == "c":
-                        args.append("-UseXmlPrincipal")
-                else:
-                    args = [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        str(cmdlet_script),
-                        "-TaskName",
-                        task_name,
-                        "-XmlPath",
-                        str(xml_path),
-                        "-Account",
-                        account,
-                        "-Method",
-                        method,
-                    ]
-                try:
-                    probe_registration(f"{kind}-{method}", account, task_name, args)
-                except Exception as exc:
-                    print(
-                        f"PROBE {kind}-{method}: harness exception {exc}",
-                        flush=True,
-                    )
-                    command(
-                        ["schtasks", "/Delete", "/F", "/TN", task_name],
-                        stdin=subprocess.DEVNULL,
-                    )
-
-
-def query_task_text(task_name: str) -> str:
-    result = subprocess.run(
-        ["schtasks", "/Query", "/TN", task_name, "/XML"],
-        capture_output=True,
-        check=False,
-        stdin=subprocess.DEVNULL,
-    )
-    if result.returncode != 0:
-        return "query failed: " + decode(result.stderr).strip()
-    return decode(result.stdout)
-
-
-def write_helper_xml(path: Path, account: str, wrapper: Path) -> None:
-    command = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"
-    path.write_text(
-        f"""<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>CVEBeacon smoke helper</Description></RegistrationInfo>
-  <Principals>
-    <Principal id="Author">
-      <UserId>{escape(account)}</UserId>
-      <LogonType>Password</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Enabled>true</Enabled></Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>{escape(str(command))}</Command>
-      <Arguments>/c "{escape(str(wrapper))}"</Arguments>
-      <WorkingDirectory>{escape(str(wrapper.parent))}</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-""",
-        encoding="utf-16",
-    )
-
-
-def dump_helper_diagnostics(
-    marker: Path, wrapper: Path, helper_xml: Path, task_name: str
-) -> None:
-    print(f"HELPER marker exists={marker.exists()}", flush=True)
-    if marker.exists():
-        print(f"HELPER marker:\n{marker.read_text(errors='replace')}", flush=True)
-    acl = command(["icacls", str(wrapper)], stdin=subprocess.DEVNULL)
-    print(f"HELPER icacls wrapper:\n{acl.stdout}{acl.stderr}", flush=True)
-    print(
-        f"HELPER task XML file:\n"
-        f"{helper_xml.read_text(encoding='utf-16', errors='replace')}",
-        flush=True,
-    )
-    print(f"HELPER queried XML:\n{query_task_text(task_name)}", flush=True)
-
-
 def cleanup_account(batch_sid: bytes | None) -> bool:
     """Best-effort removal of the fixture's right and local account."""
     ok = True
@@ -786,7 +447,6 @@ def smoke() -> None:
     )
     installed = False
     user_created = False
-    helper_created = False
     batch_sid: bytes | None = None
     sink = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
     thread = threading.Thread(target=sink.serve_forever, daemon=True)
@@ -939,249 +599,64 @@ def smoke() -> None:
                     "/T",
                 ]
             )
-        batch_ready = True
         try:
             batch_sid = change_batch_logon(account=service_account, add=True)
         except Exception as exc:  # policy APIs vary; registration still proves XML
-            batch_ready = False
             print(f"WARN: could not grant SeBatchLogonRight: {exc}", flush=True)
         step("local service account and ACLs")
 
-        try:
-            probe_s4u_registration(current)
-        except Exception as exc:
-            print(f"PROBE harness failed: {exc}", flush=True)
-
         installed = True
-        helper_cmd = data / "smoke-install.cmd"
-        helper_xml = data / "smoke-helper.xml"
-        marker = data / "smoke-install.started"
-        out_file = data / "smoke-install.out"
-        err_file = data / "smoke-install.err"
-        service_probe = data / "service-probe.ps1"
-        service_probe_xml = data / "service-probe.xml"
-        service_probe_log = data / "service-probe.log"
-        service_probe.write_text(SERVICE_PROBE_SCRIPT, encoding="utf-8")
-        write_probe_xml(service_probe_xml, service_account)
-        probe_prefix = f"CVEBeacon SvcProbe {secrets.token_hex(3)}"
-        helper_cmd.write_text(
-            f'@echo off\r\n'
-            f'echo started> "{marker}"\r\n'
-            f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
-            f'-File "{service_probe}" -XmlPath "{service_probe_xml}" '
-            f'-LogPath "{service_probe_log}" -Prefix "{probe_prefix}"\r\n'
-            f'echo probe-exit %ERRORLEVEL%>> "{service_probe_log}"\r\n'
-            f'"{executable}" --config "{config}" schedule install '
-            f'--times {times_arg} --command watch --run-logged-out --yes '
-            f'> "{out_file}" 2> "{err_file}"\r\n'
-            f"exit /b %ERRORLEVEL%\r\n",
-            encoding="utf-8",
-        )
-        write_helper_xml(helper_xml, service_account, helper_cmd)
-        helper = command(
+        install = checked(
             [
-                "schtasks",
-                "/Create",
-                "/XML",
-                str(helper_xml),
-                "/TN",
-                HELPER_TASK,
-                "/RU",
+                *base,
+                "schedule",
+                "install",
+                "--times",
+                times_arg,
+                "--command",
+                "watch",
+                "--run-logged-out",
+                "--account",
                 service_account,
-                "/RP",
-                password,
-                "/F",
+                "--password-stdin",
+                "--yes",
             ],
-            stdin=subprocess.DEVNULL,
-            timeout=60,
+            timeout=120,
+            env=env,
+            input=password + "\n",
         )
-        if helper.returncode != 0:
-            print(
-                "FAILED COMMAND: schtasks /Create /XML ... /TN CVEBeacon Smoke "
-                "Helper ... <password omitted>",
-                flush=True,
-            )
-            print(f"stdout:\n{helper.stdout}\nstderr:\n{helper.stderr}", flush=True)
-            dump_helper_diagnostics(marker, helper_cmd, helper_xml, HELPER_TASK)
-        assert helper.returncode == 0, helper.stderr
-        helper_created = True
-        _, _, helper_before = task_state(HELPER_TASK)
-        helper_run = command(
-            ["schtasks", "/Run", "/TN", HELPER_TASK], stdin=subprocess.DEVNULL
-        )
-        assert helper_run.returncode == 0, helper_run.stderr
-        helper_code = wait_for_task(helper_before, name=HELPER_TASK)
-        install_stdout = (
-            out_file.read_text(encoding="utf-8", errors="replace")
-            if out_file.exists()
-            else ""
-        )
-        install_stderr = (
-            err_file.read_text(encoding="utf-8", errors="replace")
-            if err_file.exists()
-            else ""
-        )
-        print(f"HELPER stdout:\n{install_stdout}", flush=True)
-        print(f"HELPER stderr:\n{install_stderr}", flush=True)
-        print(f"HELPER LastTaskResult={helper_code}", flush=True)
-        service_log = (
-            service_probe_log.read_text(encoding="utf-8", errors="replace")
-            if service_probe_log.exists()
-            else "<missing>"
-        )
-        print(f"SERVICE PROBE:\n{service_log}", flush=True)
-        if helper_code != "0" or not out_file.exists():
-            dump_helper_diagnostics(marker, helper_cmd, helper_xml, HELPER_TASK)
-        helper_delete = command(
-            ["schtasks", "/Delete", "/F", "/TN", HELPER_TASK],
-            stdin=subprocess.DEVNULL,
-        )
-        if helper_delete.returncode != 0:
-            print(
-                f"WARN: could not delete {HELPER_TASK}: {helper_delete.stderr}",
-                flush=True,
-            )
-        helper_created = False
-
-        password_probe_name = f"CVEBeacon Probe Password {secrets.token_hex(3)}"
-        try:
-            password_probe_xml = data / "password-probe.xml"
-            password_probe_ps1 = data / "password-probe.ps1"
-            password_marker = data / "password-probe.txt"
-            write_probe_xml(
-                password_probe_xml,
-                service_account,
-                logon="Password",
-                arguments=f'/c echo password-probe > "{password_marker}"',
-            )
-            password_probe_ps1.write_text(
-                PASSWORD_PROBE_SCRIPT, encoding="utf-8"
-            )
-            registered = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(password_probe_ps1),
-                    "-TaskName",
-                    password_probe_name,
-                    "-XmlPath",
-                    str(password_probe_xml),
-                    "-Account",
-                    service_account,
-                ],
-                input=password + "\n",
-                capture_output=True,
-                text=True,
-                errors="replace",
-                check=False,
-            )
-            print(
-                f"PASSWORD PROBE register rc={registered.returncode}",
-                flush=True,
-            )
-            if registered.stdout.strip():
-                print(f"PASSWORD PROBE stdout:\n{registered.stdout}", flush=True)
-            if registered.stderr.strip():
-                print(f"PASSWORD PROBE stderr:\n{registered.stderr}", flush=True)
-            if registered.returncode == 0:
-                try:
-                    _, _, probe_before = task_state(password_probe_name)
-                    probe_run = command(
-                        ["schtasks", "/Run", "/TN", password_probe_name],
-                        stdin=subprocess.DEVNULL,
-                    )
-                    assert probe_run.returncode == 0, probe_run.stderr
-                    probe_code = wait_for_task(
-                        probe_before, name=password_probe_name
-                    )
-                    print(
-                        f"PASSWORD PROBE LastTaskResult={probe_code} "
-                        f"marker={password_marker.exists()}",
-                        flush=True,
-                    )
-                    if probe_code == "0" and password_marker.exists():
-                        owner = database_owner(password_marker)
-                        print(f"PASSWORD PROBE marker owner={owner}", flush=True)
-                        if SERVICE_ACCOUNT.casefold() not in owner.casefold():
-                            print(
-                                "WARN: password probe marker is not owned by "
-                                f"{SERVICE_ACCOUNT}",
-                                flush=True,
-                            )
-                    elif probe_code != "0":
-                        print(
-                            f"WARN: password probe LastTaskResult={probe_code}",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            "WARN: password probe wrote no marker file",
-                            flush=True,
-                        )
-                finally:
-                    command(
-                        ["schtasks", "/Delete", "/F", "/TN", password_probe_name],
-                        stdin=subprocess.DEVNULL,
-                    )
-        except Exception as exc:
-            print(f"WARN: password probe failed: {exc}", flush=True)
-
         assert (
-            f"Runs as: {service_account} (S4U, while logged off)".casefold()
-            in install_stdout.casefold()
-        ), install_stdout
+            f"Runs as: {service_account} (stored password, while logged off)".casefold()
+            in install.stdout.casefold()
+        ), install.stdout
         status = checked([*base, "schedule", "status"], timeout=120, env=env)
         assert f"Account: {service_account}".casefold() in status.stdout.casefold(), (
             status.stdout
         )
         assert "Runs while logged off: yes" in status.stdout, status.stdout
         xml = query_xml()
-        assert "<LogonType>S4U</LogonType>" in xml, xml
+        assert "<LogonType>Password</LogonType>" in xml, xml
         assert (
             f"<UserId>{service_account}</UserId>".casefold() in xml.casefold()
         ), xml
-        if batch_ready:
-            reset_database(data)
-            _, _, before = task_state()
-            checked(
-                ["schtasks", "/Run", "/TN", TASK],
-                timeout=60,
-                stdin=subprocess.DEVNULL,
-            )
-            code = wait_for_task(before)
-            if code == "0":
-                assert database.exists(), "the S4U run did not write the database"
-                assert_baseline(database)
-                owner = database_owner(database)
-                assert SERVICE_ACCOUNT.casefold() in owner.casefold(), owner
-                s4u_executed = True
-            elif hresult(code) in LOGON_FAILURES:
-                s4u_executed = False
-                print(
-                    f"WARN: S4U run reported {code} (0x{hresult(code)}); "
-                    "registration-only proof",
-                    flush=True,
-                )
-            else:
-                raise AssertionError(f"the S4U watch run reported {code}")
-        else:
-            s4u_executed = False
-            print(
-                "WARN: S4U execution skipped; registration and XML only",
-                flush=True,
-            )
+        reset_database(data)
+        _, _, before = task_state()
+        checked(
+            ["schtasks", "/Run", "/TN", TASK],
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        code = wait_for_task(before)
+        assert code == "0", f"the stored-password watch run reported {code}"
+        assert database.exists(), "the scheduled run did not write the database"
+        assert_baseline(database)
+        owner = database_owner(database)
+        assert SERVICE_ACCOUNT.casefold() in owner.casefold(), owner
         checked([*base, "schedule", "remove", "--yes"], timeout=120, env=env)
         status = checked([*base, "schedule", "status"], timeout=120, env=env)
         assert status.stdout.strip() == "not installed", status.stdout
         installed = False
-        step(
-            "fixed-time S4U task registration"
-            + (", execution and removal" if s4u_executed else " and removal")
-        )
+        step("stored-password task install, execution and removal")
 
         installed = True
         reset_database(data)
@@ -1195,18 +670,25 @@ def smoke() -> None:
                 "--command",
                 "watch",
                 "--run-logged-out",
+                "--account",
+                service_account,
+                "--password-stdin",
                 "--yes",
             ],
             timeout=120,
             env=env,
+            input=password + "\n",
         )
         xml = query_xml()
         assert "<TimeTrigger>" in xml, xml
         assert "<Interval>PT4H</Interval>" in xml, xml
-        assert "<LogonType>S4U</LogonType>" in xml, xml
+        assert "<LogonType>Password</LogonType>" in xml, xml
+        assert (
+            f"<UserId>{service_account}</UserId>".casefold() in xml.casefold()
+        ), xml
         checked([*base, "schedule", "remove", "--yes"], timeout=120, env=env)
         installed = False
-        step("interval S4U XML registration and removal")
+        step("interval stored-password XML registration and removal")
 
         assert cleanup_account(batch_sid), "service account cleanup failed"
         user_created = False
@@ -1214,11 +696,6 @@ def smoke() -> None:
     finally:
         if installed:
             delete_task()
-        if helper_created:
-            command(
-                ["schtasks", "/Delete", "/F", "/TN", HELPER_TASK],
-                stdin=subprocess.DEVNULL,
-            )
         if user_created:
             cleanup_account(batch_sid)
         sink.shutdown()
