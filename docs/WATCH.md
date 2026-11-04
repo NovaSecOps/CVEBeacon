@@ -3,13 +3,21 @@
 Watch mode keeps a separate local history of recently changed CVEs. It is
 independent of the inventory database: `cvebeacon watch` never reads the
 inventory file, and enabling watch mode does not change `scan`, `query`, or any
-other command. This phase stores changes only; it does not send alerts or
-notifications.
+other command. Watch mode can select matching CVEs with rules and stores the
+resulting alert events. It does not deliver them yet.
 
 ```console
 cvebeacon --config cvebeacon.toml watch sync
+cvebeacon --config cvebeacon.toml watch run
 cvebeacon --config cvebeacon.toml watch status
+cvebeacon --config cvebeacon.toml watch events
+cvebeacon --config cvebeacon.toml watch rules check
+cvebeacon --config cvebeacon.toml watch evaluate --all
 ```
+
+`watch run` syncs the sources and then evaluates the CVEs touched by that sync.
+`watch sync` only syncs; the durable touch queue keeps the evaluation for the
+next `watch run`.
 
 ## Configuration
 
@@ -36,13 +44,130 @@ overlap_minutes = 15
 - `overlap_minutes`: 0 to 1440. Later runs re-read this much before the stored
   NVD cursor so that late-published changes are not missed.
 
+When `[watch].enabled = true`, `[inventory]` is optional. Commands that need an
+inventory (`scan`, `export`, `asset`, `inventory ...`, `doctor`, and the
+inventory dashboard pages) fail with a clear message until
+`[inventory] path` is added. A configuration with neither watch mode nor an
+inventory is rejected, so existing configurations keep their behavior.
+
 The NVD API key is read from the existing `sources.nvd_api_key_env` variable.
 It is optional; pacing follows `sources.minimum_request_interval`.
+
+## Rules
+
+Rules select CVEs from the watch database. Each rule has a name, a condition,
+and one or more channel names. Channel names are validated when delivery is
+added; this phase stores pending deliveries for them.
+
+```toml
+[[watch.rules]]
+name = "critical-or-likely"
+enabled = true
+condition = { any = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
+channels = ["soc-email"]
+events = ["match", "kev_added", "exploitation_active", "severity_increase", "epss_increase", "nvd_score_added", "rejected"]
+cvss_providers = ["cna", "nvd", "cisa-adp", "euvd", "other"]
+```
+
+- `name`: required and unique, case-insensitively. It starts with a letter or
+  digit and contains at most 64 letters, digits, spaces, underscores, dots, or
+  hyphens.
+- `enabled`: defaults to `true`.
+- `condition`: required. See the syntax below.
+- `channels`: required, at least one name.
+- `events`: defaults to every event kind above.
+- `cvss_providers`: defaults to every provider. Only these scores count as "the
+  CVSS" for `cvss_min` and `cvss_max`.
+
+A condition is a small boolean tree. A node is a table holding exactly one of
+`all`, `any`, or `not`, or one or more leaf keys. Several leaf keys in one table
+are ANDed:
+
+```toml
+condition = { all = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
+condition = { any = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
+condition = { cvss_min = 9.0 }
+condition = { epss_min = 0.5 }
+condition = { kev = "any" }
+condition = { all = [ { kev = "any" }, { any = [ { cvss_min = 8 }, { epss_min = 0.5 } ] } ] }
+condition = { all = [ { vendor = ["microsoft"] }, { cvss_min = 8 } ] }
+condition = { all = [ { cvss_min = 9 }, { not = { vendor = ["examplecorp"] } } ] }
+```
+
+Limits: nesting depth at most 4, at most 32 leaves per rule, list values at
+most 100 items, and strings at most 200 characters. Unknown keys are rejected,
+empty `all`/`any` lists are rejected, and a boolean key cannot be mixed with
+leaf keys in the same table.
+
+Leaf keys:
+
+- `cvss_min` (0 to 10): the highest score among `cvss_providers` is at least
+  this value. A missing score is false.
+- `cvss_max` (0 to 10): that highest score is at most this value.
+- `epss_min` (0 to 1): EPSS is at least this value. A missing EPSS is false.
+- `kev = "cisa" | "eu" | "any"`: the CVE is in that KEV catalog.
+- `exploitation = "poc" | "active"`: SSVC exploitation. `poc` also matches
+  `active`.
+- `vendor`, `product`: case-insensitive exact names. They match against NVD CPE
+  products and the selected EUVD item's vendor and product names.
+- `keyword`: case-insensitive substring match in the description.
+- `cwe`: CWE identifiers such as `CWE-79`.
+- `cna`: case-insensitive exact match against `source_identifier`.
+- `status = "published" | "rejected"`.
+
+A rejected CVE never produces a `match` event unless the condition explicitly
+contains `status = "rejected"`.
+
+The rule combinations above cover CVSS and EPSS together, either one alone, any
+KEV addition, KEV gated by a score, vendor filters, and exclusions. `watch rules
+check` prints each condition in readable form.
+
+## Events
+
+A rule produces a `match` event the first time its condition is true for a CVE.
+The event records which leaves were true, for example `cvss 9.8 (cna)`,
+`epss 0.62`, and `kev cisa`. Later evaluations of that rule and CVE only produce
+escalations, even when the condition is no longer true:
+
+- `kev_added`: the CVE enters the CISA or EU KEV catalog.
+- `exploitation_active`: SSVC exploitation becomes `active`.
+- `severity_increase`: the highest selected CVSS moves to a higher band.
+- `epss_increase`: EPSS moves to a higher band.
+- `nvd_score_added`: an NVD score appears.
+- `rejected`: the CVE changes from published to rejected.
+
+Decreases update the stored snapshot silently. Each event lists what changed,
+such as `severity high → critical`. Events are stored once per rule, CVE, kind,
+and reason, so repeating a run cannot duplicate them. Every event creates one
+pending delivery row per channel for the delivery phase.
+
+`cvebeacon watch events [--limit N] [--rule NAME] [--pending]` lists stored
+events, newest first. `--pending` keeps events that still have a pending
+delivery.
+
+### First-run and `initial`
+
+An evaluation during the first sync of a database in `backfill` or `full` mode
+marks its events `initial = 1`. `cvebeacon watch evaluate --all` does the same
+for every event it creates; it requires `--yes` or a confirmation. Initial
+events are intended for one summary digest rather than individual alerts. A
+baseline first sync stores no history, so it produces no events. Later syncs
+evaluate only the CVEs touched by that sync.
+
+## Vendor and product data
+
+Vendor and product filters depend on source data being present. NVD supplies
+CPE products after analysis, and EUVD supplies vendor and product names from
+its `enisaIdVendor` and `enisaIdProduct` fields. Fresh CVEs often have no CPE
+data yet. When a vendor filter matters, also add a `keyword` alternative for
+important names.
 
 ## Storage model
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
-is needed. The schema is not migrated from earlier watch builds.
+is needed. Watch databases created by earlier watch builds are migrated in
+place from schema version 1 to version 2. An unknown version still fails
+closed.
 
 - `watch_cve` holds NVD-owned data only: status, description, CNA, CVSS from
   NVD, CNA, CISA ADP and other providers, SSVC, CPE products, references, and
@@ -67,6 +192,12 @@ is needed. The schema is not migrated from earlier watch builds.
   the obligation. Only ids with a `watch_cve` row are queued; an id first seen
   from EUVD or KEV is queued when NVD inserts its row. `pending_evaluations`
   reads the queue and `acknowledge` removes completed entries.
+- `watch_alert_state` keeps the first match time and alert snapshot for each
+  rule and CVE. A later evaluation compares against that snapshot.
+- `watch_event` stores each event once. Its uniqueness key covers the rule,
+  CVE, event kind, and reason text.
+- `watch_delivery` creates one pending row per event and channel. Delivery
+  updates it in the next phase.
 - `watch_meta.view_policy` records the configured sources that affect view
   derivation: `cisa_kev`, `eu_kev`, and `euvd`. When it changes, every stored
   view is recomputed in batches of 5,000 and each changed CVE is queued.
@@ -157,8 +288,9 @@ including corrupt gzip data.
 
 The view reads EPSS directly. The daily load queues a watched CVE when its
 score appears or disappears, or when the old-to-new move crosses any threshold
-in the set passed to the store. P1a passes the band edges `0.1`, `0.5`, and
-`0.9`; later rule evaluation adds every configured `epss_min`.
+in the set passed to the store. The sync always includes the band edges `0.1`,
+`0.5`, and `0.9`, plus every `epss_min` used by an enabled rule, so a rule sees
+threshold crossings even when the score stays inside the same band.
 
 ## Initial modes
 

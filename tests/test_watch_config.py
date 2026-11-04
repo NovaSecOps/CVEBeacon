@@ -105,3 +105,55 @@ def test_watch_must_be_a_table(tmp_path):
     path.write_text("watch = true\n" + BASE, encoding="utf-8")
     with pytest.raises(ConfigurationError, match="must be a table"):
         load_config(path)
+
+
+def test_watch_only_config_without_inventory_loads(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[watch]
+enabled = true
+database = "watch.db"
+sources = ["nvd"]
+
+[[watch.rules]]
+name = "critical-or-likely"
+condition = { any = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
+channels = ["soc-email"]
+""",
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    assert config.inventory is None
+    assert config.watch.enabled is True
+    assert len(config.watch.rules) == 1
+    rule = config.watch.rules[0]
+    assert rule.name == "critical-or-likely"
+    assert rule.channels == ("soc-email",)
+    assert rule.enabled is True
+    assert rule.events[0] == "match"
+
+
+def test_inventory_is_still_required_without_watch(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[state]\ndatabase = \"state.db\"\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="inventory.path is required"):
+        load_config(path)
+
+
+def test_watch_rules_are_validated_while_loading(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[watch]
+enabled = true
+
+[[watch.rules]]
+name = "bad"
+condition = { all = [] }
+channels = ["soc-email"]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="watch rule 'bad' condition.all"):
+        load_config(path)

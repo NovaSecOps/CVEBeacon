@@ -11,6 +11,7 @@ from ..errors import CVEBeaconError, SourceError, StateError
 from ..http import HttpClient
 from . import feeds
 from .records import EPSS_BANDS
+from .rules import rule_epss_thresholds
 from .store import WatchStore
 
 FULL_HISTORY_START = datetime(1999, 1, 1, tzinfo=timezone.utc)
@@ -42,6 +43,7 @@ class SyncReport:
     cancelled: bool = False
     baseline: bool = False
     touched_ids: tuple[str, ...] = ()
+    initial_evaluation: bool = False
 
     @property
     def failures(self) -> tuple[str, ...]:
@@ -138,6 +140,10 @@ def sync_watch(
     first_run = "initialized_at" not in metadata
     stored_mode = metadata.get("initial_mode")
     mode = stored_mode or (watch.initial if first_run else "baseline")
+    initial_evaluation = (
+        metadata.get("initial_mode") in ("backfill", "full")
+        and "initial_evaluated_at" not in metadata
+    ) or (first_run and mode in ("backfill", "full"))
     interval = config.sources.minimum_request_interval
     catalogs = tuple(watch.sources)
     policy_touched = store.apply_view_policy(catalogs)
@@ -413,6 +419,8 @@ def sync_watch(
         if stored_day is None or stored_day < today:
             counter = [0]
             fallback = stored_day is None or stored_day < today - timedelta(days=1)
+            thresholds = set(EPSS_BANDS)
+            thresholds.update(rule_epss_thresholds(watch.rules))
             try:
                 result = store.replace_epss(
                     feeds.fetch_epss_daily(
@@ -421,7 +429,7 @@ def sync_watch(
                         counter=counter,
                         fallback=fallback,
                     ),
-                    thresholds=EPSS_BANDS,
+                    thresholds=thresholds,
                 )
             except SourceError as exc:
                 if not fallback and exc.status_code in (403, 404):
@@ -442,7 +450,11 @@ def sync_watch(
             )
         )
 
-    return SyncReport(summaries=tuple(summaries), touched_ids=tuple(sorted(touched)))
+    return SyncReport(
+        summaries=tuple(summaries),
+        touched_ids=tuple(sorted(touched)),
+        initial_evaluation=initial_evaluation,
+    )
 
 
 def watch_status(watch: WatchConfig) -> str:

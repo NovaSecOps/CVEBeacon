@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import AppConfig, load_config
+from .config import AppConfig, InventoryConfig, load_config
 from .engine import QueryEngine
 from .errors import CVEBeaconError, SourceError
 from .http import HttpClient
@@ -74,7 +74,19 @@ def _parser() -> argparse.ArgumentParser:
     watch_sub = watch.add_subparsers(dest="watch_command", required=True)
     watch_sync = watch_sub.add_parser("sync", help="refresh the watch database from public sources")
     watch_sync.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
+    watch_run = watch_sub.add_parser("run", help="refresh the watch database and evaluate watch rules")
+    watch_run.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
     watch_sub.add_parser("status", help="show watch database cursors and counts")
+    watch_events = watch_sub.add_parser("events", help="list stored watch alert events")
+    watch_events.add_argument("--limit", type=int, default=50)
+    watch_events.add_argument("--rule")
+    watch_events.add_argument("--pending", action="store_true", help="only events with pending deliveries")
+    watch_evaluate = watch_sub.add_parser("evaluate", help="re-evaluate stored CVEs against the current rules")
+    watch_evaluate.add_argument("--all", action="store_true", required=True, dest="all_cves", help="evaluate every stored CVE")
+    watch_evaluate.add_argument("--yes", action="store_true", help="skip the confirmation")
+    watch_rules = watch_sub.add_parser("rules", help="inspect watch rules")
+    watch_rules_sub = watch_rules.add_subparsers(dest="watch_rules_command", required=True)
+    watch_rules_sub.add_parser("check", help="validate rules and print their conditions")
     return parser
 
 
@@ -101,17 +113,7 @@ def _notify_pending(config: AppConfig, store: StateStore, http: HttpClient, chan
     return len(items)
 
 
-def _run_watch(args, config: AppConfig) -> int:
-    from .watch.sync import sync_watch, watch_status
-
-    if args.watch_command == "status":
-        print(watch_status(config.watch))
-        return 0
-    with HttpClient(config.http) as http:
-        report = sync_watch(config, http, assume_yes=args.yes)
-    if report.cancelled:
-        print("cancelled")
-        return 1
+def _print_sync_report(report) -> None:
     if report.baseline:
         print("baseline mode stores no history; the next sync starts from now")
     for summary in report.summaries:
@@ -127,7 +129,103 @@ def _run_watch(args, config: AppConfig) -> int:
         if summary.error:
             line += f"; failed: {summary.error}"
         print(line)
+
+
+def _print_evaluation(result) -> None:
+    if result.by_kind:
+        counts = ", ".join(f"{kind} {count}" for kind, count in result.by_kind)
+        print(f"events: {result.events} new ({counts})")
+    else:
+        print(f"events: {result.events} new")
+
+
+def _event_line(row) -> str:
+    try:
+        stamp = datetime.fromisoformat(row.created_at).astimezone(timezone.utc).strftime(
+            "%Y-%m-%d %H:%MZ"
+        )
+    except ValueError:
+        stamp = row.created_at
+    reasons = "; ".join(row.reasons)
+    line = f"{stamp}  {row.rule}  {row.cve_id}  {row.kind}"
+    if reasons:
+        line += f"  {reasons}"
+    return line
+
+
+def _require_watch(config: AppConfig) -> None:
+    if not config.watch.enabled:
+        raise CVEBeaconError("watch mode is disabled; set [watch] enabled = true")
+
+
+def _run_watch(args, config: AppConfig) -> int:
+    from .watch.rules import describe_condition
+    from .watch.store import WatchStore
+    from .watch.sync import sync_watch, watch_status
+
+    if args.watch_command == "status":
+        print(watch_status(config.watch))
+        return 0
+    if args.watch_command == "rules":
+        if not config.watch.rules:
+            print("no watch rules configured")
+        for rule in config.watch.rules:
+            suffix = "" if rule.enabled else " [disabled]"
+            print(f"{rule.name}: {describe_condition(rule.condition)}{suffix}")
+        return 0
+    _require_watch(config)
+    store = WatchStore(config.watch.database)
+    if args.watch_command == "events":
+        for row in store.events(limit=args.limit, rule=args.rule, pending=args.pending):
+            print(_event_line(row))
+        return 0
+    if args.watch_command == "evaluate":
+        if not args.yes:
+            try:
+                confirmed = input(
+                    "Evaluate every stored CVE against the current watch rules? [y/N] "
+                ).strip().casefold() in {"y", "yes"}
+            except EOFError:
+                confirmed = False
+            if not confirmed:
+                print("cancelled")
+                return 1
+        result = store.evaluate_all(
+            config.watch.rules, catalogs=config.watch.sources, initial=True
+        )
+        print(f"evaluated: {result.evaluated} CVE(s)")
+        _print_evaluation(result)
+        return 0
+    with HttpClient(config.http) as http:
+        report = sync_watch(config, http, assume_yes=args.yes)
+    if report.cancelled:
+        print("cancelled")
+        return 1
+    _print_sync_report(report)
+    if args.watch_command == "sync":
+        return 4 if report.failures else 0
+    result = store.evaluate_touched(
+        config.watch.rules,
+        catalogs=config.watch.sources,
+        initial=report.initial_evaluation,
+    )
+    _print_evaluation(result)
     return 4 if report.failures else 0
+
+
+def _inventory_config(config: AppConfig) -> InventoryConfig:
+    if config.inventory is None:
+        raise CVEBeaconError(
+            "this command requires an inventory; add [inventory] path to the configuration"
+        )
+    return config.inventory
+
+
+def _inventory_for(config: AppConfig, path: str | None) -> InventoryConfig:
+    if not path:
+        return _inventory_config(config)
+    base = config.inventory or InventoryConfig(path=Path(path).expanduser().resolve())
+    return replace(base, path=Path(path).expanduser().resolve())
 
 
 def _run_query(config: AppConfig, assets: list[Asset], *, known_findings=()):
@@ -216,6 +314,10 @@ def run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     if args.command == "watch":
         return _run_watch(args, config)
+    if args.command in {"scan", "export", "asset", "doctor", "serve"}:
+        _inventory_config(config)
+    if args.command == "inventory" and not args.path:
+        _inventory_config(config)
     store = StateStore(config.database_path)
     if args.command == "scan":
         attempt_id = store.start_scan()
@@ -238,17 +340,17 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         serve(config, host=args.host, port=args.port, allow_unauthenticated_remote=args.allow_unauthenticated_remote)
         return 0
     if args.command == "inventory":
+        inventory_config = _inventory_for(config, args.path)
         if args.inventory_command == "inspect":
-            print(json.dumps(inspect_inventory(args.path or config.inventory.path, header_row=config.inventory.header_row, encoding=config.inventory.encoding, delimiter=config.inventory.delimiter), indent=2))
+            print(json.dumps(inspect_inventory(inventory_config.path, header_row=inventory_config.header_row, encoding=inventory_config.encoding, delimiter=inventory_config.delimiter), indent=2))
         else:
-            inventory_config = replace(config.inventory, path=Path(args.path).expanduser().resolve()) if args.path else config.inventory
             assets = load_inventory(inventory_config); print(f"valid: {len(assets)} asset(s)")
             if args.identities:
                 for asset in assets:
                     print(f"{asset.asset_id}: {asset.identity_path}" + (" (conflicting identities require review)" if identity_conflict(asset) else ""))
         return 0
     if args.command == "asset":
-        asset = next((item for item in load_inventory(config.inventory) if item.asset_id.casefold() == args.asset_id.casefold()), None)
+        asset = next((item for item in load_inventory(_inventory_config(config)) if item.asset_id.casefold() == args.asset_id.casefold()), None)
         if not asset: raise CVEBeaconError(f"asset not found: {args.asset_id}")
         result = _run_query(config, [asset])
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
@@ -261,7 +363,8 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         result = _run_query(config, [asset])
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
     if args.command in {"scan", "export"}:
-        assets = load_inventory(config.inventory)
+        inventory_config = _inventory_config(config)
+        assets = load_inventory(inventory_config)
         results = _run_query(config, assets, known_findings=store.latest_findings()) if args.command == "scan" else _run_query(config, assets)
         if args.command == "scan":
             channels = configured_channels(config)
@@ -285,7 +388,7 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
                 return 3
             return 4 if warnings or degraded else 0
         path = Path(args.output).resolve() if args.output else _report_path(config, args.format)
-        if path in {config.inventory.path, config.config_path, config.database_path}:
+        if path in {inventory_config.path, config.config_path, config.database_path}:
             raise CVEBeaconError("report output cannot overwrite inventory, configuration or state")
         (write_xlsx if args.format == "xlsx" else write_json)(results, path); print(path); return 0
     if args.command == "history":
@@ -302,7 +405,8 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
                 print(f"{channel}: accepted by remote service")
         return 0
     if args.command == "doctor":
-        assets = load_inventory(config.inventory); store.initialize()
+        inventory_config = _inventory_config(config)
+        assets = load_inventory(inventory_config); store.initialize()
         checks = {"configuration": "ok", "inventory": f"ok ({len(assets)} assets)", "state": "ok", "teams_secret": "not required" if not config.teams.enabled else ("set" if config.secret(config.teams.webhook_env) else "missing"), "email_secrets": "not required" if not config.email.enabled else ("set" if all(config.secret(x) for x in (config.email.tenant_id_env, config.email.client_id_env, config.email.client_secret_env)) else "missing")}
         if args.live:
             checks["live_sources"] = _live_source_checks(config)

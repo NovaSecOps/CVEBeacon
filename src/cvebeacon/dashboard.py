@@ -56,6 +56,10 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
 
 
 def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
+    if config.inventory is None:
+        raise CVEBeaconError(
+            "inventory dashboard pages require an inventory; add [inventory] path to the configuration"
+        )
     encoded = password_hash(config)
     auth = DashboardAuth(encoded, config.dashboard.session_lifetime_seconds) if encoded else None
     app = Flask(__name__)
