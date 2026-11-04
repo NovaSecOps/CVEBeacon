@@ -371,23 +371,24 @@ counts and pending deliveries, and `cb watch notify test soc-email` checks a cha
 
 ### Schedule it
 
-The task must be registered by the account that runs it. Windows does not allow
-an administrator to register a passwordless S4U task for another account; doing
-so would require storing that account's password. Sign in as the service account
-(`runas /user:CVEHOST\svc-cvebeacon powershell`), define `cb` there, and check
-that the plan shows `Runs as: CVEHOST\svc-cvebeacon (S4U, while logged off)`
-before `--yes`:
+From an elevated administrator shell, register the task as the service account:
 
 ```powershell
-cb schedule install --times '07:00,19:00' --command watch --run-logged-out --yes
+function cb { & C:\CVEBeacon\app\.venv\Scripts\cvebeacon.exe --config C:\CVEBeacon\data\cvebeacon.toml @args }
+cb schedule install --times '07:00,19:00' --command watch --run-logged-out --account CVEHOST\svc-cvebeacon --yes
 cb schedule status
 ```
 
-The service account created the task and can change or remove it; members of
-Administrators can manage any task, but they cannot register this passwordless
-task for the service account without its password. Check Task Scheduler: General
-shows `CVEHOST\svc-cvebeacon` and "Run whether user is logged on or not";
-Triggers shows 07:00 and 19:00. Then test it immediately:
+The command prompts for the service account password; Windows stores it in its
+own credential store and CVEBeacon does not. The plan must show
+`Runs as: CVEHOST\svc-cvebeacon (stored password, while logged off)` before
+`--yes`. Changing the service account password later requires re-running this
+install. For automation, `--password-stdin` reads one line from stdin instead of
+prompting.
+
+Check Task Scheduler: General shows `CVEHOST\svc-cvebeacon` and "Run whether
+user is logged on or not"; Triggers shows 07:00 and 19:00. The creator or an
+administrator can change or remove the task. Then test it immediately:
 
 ```powershell
 schtasks /Run /TN "CVEBeacon Monitor"
@@ -399,22 +400,26 @@ does not run, check "Log on as a batch job" in `secpol.msc` and any domain GPO.
 A scheduled `watch run` needs an unattended first run: use `baseline` or
 `backfill`, or run `cb watch sync --yes` once first.
 
+S4U is not used: Windows refuses passwordless S4U for this setup (a standard
+account cannot self-register it, and an administrator cannot register it for
+another account), so the task uses the stored service-account password.
+
 ### Upgrade
 
-Run the first and last commands as the service account that owns the task. Wait
-for a running job to finish. Run the backup, pull and pip commands as the same
-service account; do not run Git maintenance for its checkout as an
-administrator.
+Run the first and last commands as the administrator who registered the task.
+Wait for a running job to finish. Run the backup, pull and pip commands as the
+service account that owns `C:\CVEBeacon\app`; do not run Git maintenance for
+that checkout as an administrator.
 
 ```powershell
-# Task owner
+# Task owner (administrator)
 schtasks /Change /TN "CVEBeacon Monitor" /DISABLE
 # Service account
 $Backup = "C:\CVEBeacon\data\backup-$(Get-Date -Format yyyyMMdd-HHmm)"
 New-Item -ItemType Directory $Backup | Out-Null; Copy-Item C:\CVEBeacon\data\cvebeacon-watch.db* $Backup
 git -C C:\CVEBeacon\app pull --ff-only
 C:\CVEBeacon\app\.venv\Scripts\python.exe -m pip install C:\CVEBeacon\app
-# Task owner
+# Task owner (administrator)
 schtasks /Change /TN "CVEBeacon Monitor" /ENABLE
 ```
 
@@ -423,8 +428,8 @@ schtasks /Change /TN "CVEBeacon Monitor" /ENABLE
 ### Docker Desktop or WSL 2 on Windows
 
 Docker Desktop's Linux engine runs in the signed-in user's session, so a
-logged-out or S4U task cannot use it; schedule it with an interactive task that
-runs only while that user is signed in, and use native Windows or a Linux VM for
+logged-out task cannot use it; schedule it with an interactive task that runs
+only while that user is signed in, and use native Windows or a Linux VM for
 unattended service. The WSL 2 backend runs Section B's compose file as-is: use
 `C:\CVEBeacon\docker` in place of `/srv/cvebeacon`, build `cvebeacon:local` from
 the checkout as in B, and call `docker compose -f

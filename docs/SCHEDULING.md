@@ -41,22 +41,26 @@ file that is deleted after `schtasks` returns. Interval mode uses the plain
 hours, or `/SC DAILY` for 24 hours.
 
 Add `--run-logged-out` to run the task whether the account is signed in or not.
-It is Windows-only, and Linux rejects it. The task principal becomes `LogonType
-S4U` with an explicit `UserId` for the current OS account, and `RunLevel` stays
-least privilege. The task is registered with `schtasks /Create /XML ... /RU
-<current account> /NP /F`, so no password is requested or stored. The plan
-prints `Runs as: <account> (S4U, while logged off)`; check that line before
-`--yes`. S4U stores no password, so outbound HTTPS works but
-Windows-authenticated network shares do not. The account must already exist and,
-unless policy grants it, needs the "Log on as a batch job" right (`secpol.msc`,
-Local Policies, User Rights Assignment; a domain GPO can override it). Run the
-command from that account's own shell: Windows does not allow an administrator
-to register a passwordless S4U task for another account, so registering on a
-service account's behalf would require storing its password. An identifiable
-access-denied failure prints a one-line hint. With this flag, interval mode also
-uses the XML form. Without it the default stays `InteractiveToken` for desktops.
-`schedule status` shows the account when the task XML has a `UserId`, and whether
-the task runs while logged off.
+It is Windows-only, and Linux rejects it. The task principal uses `LogonType
+Password` with an explicit `UserId` and `RunLevel` least privilege. The account
+defaults to the current OS account; use `--account DOMAIN\user` to run the task
+as another account from an elevated administrator shell. The password comes from
+a hidden prompt, or from `--password-stdin`, which reads one line from stdin for
+automation. CVEBeacon passes it to PowerShell only on stdin and never stores it;
+Windows stores it in its own credential store. Changing the account password
+requires re-running `schedule install --run-logged-out`.
+
+The task is registered through the Task Scheduler COM API with
+`RegisterTask` and `TASK_LOGON_PASSWORD`. The plan prints `Runs as: <account>
+(stored password, while logged off)`; check that line before `--yes`. The account
+must already exist and, unless policy grants it, needs the "Log on as a batch
+job" right (`secpol.msc`, Local Policies, User Rights Assignment; a domain GPO
+can override it). An identifiable access-denied, bad-password or missing-right
+failure prints a one-line hint. With this flag, interval mode also uses the XML
+form. Without it the default stays `InteractiveToken` for desktops. `schedule
+status` shows the account when the task XML has a `UserId`, and whether the task
+runs while logged off. S4U is not used: Windows refuses passwordless S4U for
+this setup, and a password-logon task is the documented alternative.
 
 ## What runs
 
@@ -113,4 +117,4 @@ For manual administration, create an equivalent task or cron entry that runs
 an account with read access to the inventory and configuration, write access to
 the state/output directories, and access to required environment variables.
 
-Linux user cron requires an installed, running cron service. It uses the host's local clock and does not recover runs missed while the host is off; daylight-saving transitions can skip or repeat executions. Its environment is usually smaller than an interactive shell, so provision notification credentials for the scheduled account. Percent characters and line breaks in schedule paths are rejected. Avoid concurrent scanner invocations against the same state database. Windows task credentials and execution while logged out must be verified for the intended account through Task Scheduler; the CLI provisions only the S4U principal described above.
+Linux user cron requires an installed, running cron service. It uses the host's local clock and does not recover runs missed while the host is off; daylight-saving transitions can skip or repeat executions. Its environment is usually smaller than an interactive shell, so provision notification credentials for the scheduled account. Percent characters and line breaks in schedule paths are rejected. Avoid concurrent scanner invocations against the same state database. Windows task credentials and execution while logged out must be verified for the intended account through Task Scheduler; CVEBeacon passes the password to Task Scheduler and does not retain it.
