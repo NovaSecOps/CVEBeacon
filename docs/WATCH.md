@@ -414,6 +414,34 @@ cvebeacon --config cvebeacon.toml users list
 cvebeacon --config cvebeacon.toml users verify
 ```
 
+In `authenticated` mode, account administration needs an administrator login:
+`--admin-user NAME` plus a hidden password prompt, verified through the same
+account store. The action is audited with the administrator as its actor. The
+first `users add --admin` is the bootstrap exception when no administrator
+account exists; it is audited as `bootstrap` and requires a password. A user may
+change their own password with `users passwd USERNAME` and their current
+password; resetting another user's password, disabling, enabling or unlocking
+an account requires `--admin-user` and an administrator account. In `open` and
+`registered` modes, these commands keep the direct behavior and `--admin` is a
+stored label rather than an enforced privilege.
+
+```console
+cvebeacon --config cvebeacon.toml users add alice --admin
+cvebeacon --config cvebeacon.toml users add bob --admin-user alice
+cvebeacon --config cvebeacon.toml users passwd bob
+cvebeacon --config cvebeacon.toml users passwd bob --admin-user alice
+cvebeacon --config cvebeacon.toml users disable bob --admin-user alice
+```
+
+The CLI runs as the CVEBeacon service account. Anyone who can use that shell can
+still edit the database files directly, so authenticated mode attributes a
+report to whoever knows the password (or could reset it under the administrator
+rules); it guards against mistakes and casual misattribution, not against
+co-administrators or someone with the service account. Person-level separation
+needs a front end that people use instead of a service-account shell, such as
+the planned dashboard. The hash chain makes direct edits detectable unless the
+person also recomputes it.
+
 - A username is 1–64 characters from letters, digits, dot, underscore, at sign,
   or hyphen, and is unique case-insensitively. A display name is optional and at
   most 100 characters. An email address is optional, lightly checked, and
@@ -448,8 +476,11 @@ operating-system account and host, never the password.
 The account file is `cvebeacon-users.db` beside the watch database. It is
 created owner-only (`0600`) on POSIX and is separate from the CVE history so
 credentials are not copied with a public watch database and accounts survive a
-watch database rebuild. Back up both files together, and keep account backups
-at `0600` as well. On Windows, place both in the
+watch database rebuild. On POSIX the account file's directory must be owned by
+the CVEBeacon account (or root) and must not be writable by group or other
+accounts; do not place it in a directory that untrusted people can replace.
+Back up both files together, and keep account backups at `0600` as well. On
+Windows, place both in the
 [ACL-protected data directory](DEPLOY.md#windows-data-directory-acls). The same
 account store and verify function are intended for a future dashboard login.
 
@@ -474,10 +505,14 @@ legacy and unchained. The user audit table uses the same construction.
 
 The watch database schema is version 7. Rows written before the identity upgrade
 have `chain_version = 0`, a null chain, and are reported as legacy unchained;
-the chain starts with the first report written after the upgrade. Verification
-never rewrites a stored chain, even if the schema metadata is rolled back. A
-schema 6 database keeps its existing chains and gains the explicit version
-marker without re-hashing them.
+the chain starts with the first report written after the upgrade. Migration
+records the highest legacy row id in `watch_meta` once. A legacy row must be at
+or below that boundary and have null identity columns; marking an identity-era
+row as legacy is reported as damage. Verification never rewrites a stored
+chain, even if the schema metadata is rolled back. If the chain columns are
+dropped after the boundary exists, migration fails closed rather than
+recreating legacy history. A schema 6 database keeps its existing chains and
+gains the explicit version marker without re-hashing them.
 
 A reported CVE is displayed as
 `Reported to clients by X at YYYY-MM-DD HH:MM UTC`; registered and
