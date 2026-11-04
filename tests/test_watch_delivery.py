@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import base64
+import email
+import email.policy
 import json
+import shutil
 import socket
 import socketserver
 import sqlite3
+import ssl
+import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -211,7 +218,10 @@ def test_crash_recovery_marks_sending_ambiguous(tmp_path):
     config = make_config(tmp_path)
     store = seed(config)
     with sqlite3.connect(store.path) as db:
-        db.execute("UPDATE watch_delivery SET status='sending'")
+        db.execute(
+            "UPDATE watch_delivery SET status='sending', updated_at=?",
+            ((NOW - timedelta(minutes=11)).isoformat(),),
+        )
     requests = []
 
     def handler(request):
@@ -226,6 +236,23 @@ def test_crash_recovery_marks_sending_ambiguous(tmp_path):
     report = deliver(config, store, handler, retry_ambiguous=True)
     assert report.channels[0].messages == 1
     assert rows(store)[0][1] == "sent"
+
+
+def test_fresh_sending_rows_belong_to_a_live_run(tmp_path):
+    config = make_config(tmp_path)
+    store = seed(config)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_delivery SET status='sending'")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    report = deliver(config, store, handler)
+    assert report.recovered == 0
+    assert requests == []
+    assert rows(store)[0][1] == "sending"
 
 
 def test_matrix_retry_reuses_the_transaction_id(tmp_path, monkeypatch):
@@ -466,6 +493,7 @@ channels = ["discord"]
     assert report.channels[0].ok
     body = json.loads(seen[0].content)
     assert body["allowed_mentions"] == {"parse": []}
+    assert body["flags"] == 4
     assert "\\@everyone" in body["content"]
     assert "\\*urgent\\*" in body["content"]
 
@@ -706,17 +734,104 @@ channels = ["hook"]
 class FakeSMTPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    implicit_tls = False
 
-    def __init__(self, *args, mode: str = "ok", **kwargs):
+    def __init__(
+        self,
+        *args,
+        mode: str = "ok",
+        certificate: tuple[str, str] | None = None,
+        auth: tuple[str, str] | None = None,
+        eightbitmime: bool = False,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.mode = mode
-        self.messages: list[list[str]] = []
+        self.auth = auth
+        self.eightbitmime = eightbitmime
+        self.certificate = certificate
+        self.messages: list[dict[str, Any]] = []
+        self.auth_attempts: list[tuple[str, str]] = []
+        self.context = None
+        if certificate is not None:
+            certfile, keyfile = certificate
+            self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.context.load_cert_chain(certfile, keyfile)
+
+    def handle_error(self, request, client_address):
+        pass
+
+
+class FakeSMTPSSLServer(FakeSMTPServer):
+    implicit_tls = True
+
+    def get_request(self):
+        sock, address = super().get_request()
+        return self.context.wrap_socket(sock, server_side=True), address
 
 
 class FakeSMTPHandler(socketserver.StreamRequestHandler):
+    def _reset(self) -> None:
+        self.envelope = {"from": None, "rcpt": []}
+        self.data_lines: list[bytes] = []
+
+    def setup(self) -> None:
+        super().setup()
+        self._tls = bool(self.server.implicit_tls)
+        self._reset()
+
+    def _record(self) -> None:
+        self.server.messages.append(
+            {
+                "from": self.envelope["from"],
+                "rcpt": list(self.envelope["rcpt"]),
+                "data": b"".join(self.data_lines),
+                "tls": self._tls,
+            }
+        )
+        self._reset()
+
+    def _auth(self, command: bytes) -> None:
+        server = self.server
+        parts = command.split(None, 2)
+        if len(parts) < 3:
+            self.wfile.write(b"334 \r\n")
+            response = self.rfile.readline().strip()
+        else:
+            response = parts[2]
+        try:
+            _, user, password = base64.b64decode(response).split(b"\x00")
+        except Exception:
+            user = password = b""
+        attempt = (user.decode("utf-8", "replace"), password.decode("utf-8", "replace"))
+        server.auth_attempts.append(attempt)
+        if server.auth is not None and attempt == server.auth:
+            self.wfile.write(b"235 2.7.0 accepted\r\n")
+        else:
+            self.wfile.write(b"535 5.7.8 authentication failed\r\n")
+
+    def _login(self, command: bytes) -> None:
+        server = self.server
+        parts = command.split(None, 2)
+        if len(parts) == 3:
+            user = base64.b64decode(parts[2]).decode("utf-8", "replace")
+        else:
+            self.wfile.write(b"334 VXNlcm5hbWU6\r\n")
+            user = base64.b64decode(self.rfile.readline().strip()).decode(
+                "utf-8", "replace"
+            )
+        self.wfile.write(b"334 UGFzc3dvcmQ6\r\n")
+        password = base64.b64decode(self.rfile.readline().strip()).decode(
+            "utf-8", "replace"
+        )
+        server.auth_attempts.append((user, password))
+        if server.auth is not None and (user, password) == server.auth:
+            self.wfile.write(b"235 2.7.0 accepted\r\n")
+        else:
+            self.wfile.write(b"535 5.7.8 authentication failed\r\n")
+
     def handle(self):
         server = self.server
-        server.messages.append([])
         self.wfile.write(b"220 fake ESMTP\r\n")
         in_data = False
         while True:
@@ -724,42 +839,92 @@ class FakeSMTPHandler(socketserver.StreamRequestHandler):
             if not line:
                 return
             if in_data:
-                if line.strip() == b".":
-                    if server.mode == "data-error":
+                if line == b".\r\n":
+                    mode = server.mode
+                    if mode == "data-error":
                         self.wfile.write(b"451 4.3.0 rejected\r\n")
-                    elif server.mode == "drop":
+                    elif mode == "drop":
                         return
                     else:
+                        self._record()
                         self.wfile.write(b"250 2.0.0 queued\r\n")
                     in_data = False
                 else:
-                    server.messages[-1].append(line.decode("utf-8", "replace"))
+                    # RFC 5321 dot-unstuffing: the first dot of ".." is not
+                    # part of the message.
+                    if line.startswith(b".."):
+                        line = line[1:]
+                    self.data_lines.append(line)
                 continue
-            command = line.strip().upper()
-            if command.startswith(b"EHLO") or command.startswith(b"HELO"):
-                self.wfile.write(b"250-fake\r\n250-8BITMIME\r\n250 OK\r\n")
-            elif command.startswith(b"MAIL FROM") or command.startswith(b"RCPT TO"):
+            command = line.strip()
+            upper = command.upper()
+            if upper.startswith(b"EHLO") or upper.startswith(b"HELO"):
+                capabilities = [b"250-fake"]
+                if (
+                    server.certificate is not None
+                    and not server.implicit_tls
+                    and not self._tls
+                ):
+                    capabilities.append(b"250-STARTTLS")
+                if server.auth is not None:
+                    capabilities.append(b"250-AUTH PLAIN LOGIN")
+                if server.eightbitmime:
+                    capabilities.append(b"250-8BITMIME")
+                capabilities.append(b"250 HELP")
+                self.wfile.write(b"\r\n".join(capabilities) + b"\r\n")
+            elif upper == b"STARTTLS":
+                self.wfile.write(b"220 Ready to start TLS\r\n")
+                self.wfile.flush()
+                self.rfile.close()
+                self.wfile.close()
+                self.connection = server.context.wrap_socket(
+                    self.connection, server_side=True
+                )
+                self.rfile = self.connection.makefile("rb")
+                self.wfile = self.connection.makefile("wb", 0)
+                self._tls = True
+            elif upper.startswith(b"AUTH PLAIN"):
+                self._auth(command)
+            elif upper.startswith(b"AUTH LOGIN"):
+                self._login(command)
+            elif upper.startswith(b"MAIL FROM"):
+                self.envelope["from"] = command.decode("utf-8", "replace")
                 self.wfile.write(b"250 OK\r\n")
-            elif command == b"DATA":
+            elif upper.startswith(b"RCPT TO"):
+                if server.mode == "rcpt-refused" and self.envelope["rcpt"]:
+                    self.wfile.write(b"550 5.1.1 no such user\r\n")
+                else:
+                    self.envelope["rcpt"].append(command.decode("utf-8", "replace"))
+                    self.wfile.write(b"250 OK\r\n")
+            elif upper == b"DATA":
                 self.wfile.write(b"354 End data with <CR><LF>.<CR><LF>\r\n")
                 in_data = True
-            elif command == b"QUIT":
+            elif upper == b"QUIT":
                 self.wfile.write(b"221 Bye\r\n")
                 return
             else:
                 self.wfile.write(b"250 OK\r\n")
 
 
-def smtp_channel(port: int) -> str:
+def smtp_channel(
+    port: int,
+    *,
+    security: str = "none",
+    extra: str = "",
+    to: tuple[str, ...] = ("soc@example.org",),
+) -> str:
+    allow_insecure = "allow_insecure = true" if security == "none" else ""
+    recipients = ", ".join(f'"{address}"' for address in to)
     return f"""
 [watch.channels.mail]
 type = "smtp"
 host = "127.0.0.1"
 port = {port}
-security = "none"
-allow_insecure = true
+security = "{security}"
+{allow_insecure}
 from = "beacon@example.org"
-to = ["soc@example.org"]
+to = [{recipients}]
+{extra}
 """
 
 
@@ -772,37 +937,258 @@ channels = ["mail"]
 """
 
 
-def run_smtp_test(tmp_path, monkeypatch, mode: str):
+@pytest.fixture(scope="module")
+def smtp_certificate(tmp_path_factory):
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl is not available")
+    directory = tmp_path_factory.mktemp("smtp-certificate")
+    certfile = directory / "cert.pem"
+    keyfile = directory / "key.pem"
+    completed = subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(keyfile),
+            "-out",
+            str(certfile),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        pytest.skip("openssl could not create a test certificate")
+    return str(certfile), str(keyfile)
+
+
+def run_smtp_test(
+    tmp_path,
+    monkeypatch,
+    mode: str = "ok",
+    *,
+    extra: str = "",
+    security: str = "none",
+    certificate: tuple[str, str] | None = None,
+    auth: tuple[str, str] | None = None,
+    eightbitmime: bool = False,
+    trusted: bool = False,
+    to: tuple[str, ...] = ("soc@example.org",),
+):
     monkeypatch.setattr(socket.socket, "connect", REAL_CONNECT)
     monkeypatch.setattr(socket, "getaddrinfo", loopback_getaddrinfo)
-    server = FakeSMTPServer(("127.0.0.1", 0), FakeSMTPHandler, mode=mode)
+    server_class = FakeSMTPSSLServer if security == "tls" else FakeSMTPServer
+    server = server_class(
+        ("127.0.0.1", 0),
+        FakeSMTPHandler,
+        mode=mode,
+        certificate=certificate,
+        auth=auth,
+        eightbitmime=eightbitmime,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        if trusted and certificate is not None:
+            context = ssl.create_default_context(cafile=certificate[0])
+            monkeypatch.setattr(
+                "cvebeacon.watch.delivery.ssl.create_default_context",
+                lambda: context,
+            )
         config = make_config(
-            tmp_path, channels=smtp_channel(server.server_address[1]), rules=smtp_rule()
+            tmp_path,
+            channels=smtp_channel(
+                server.server_address[1],
+                security=security,
+                extra=extra,
+                to=to,
+            ),
+            rules=smtp_rule(),
         )
         store = seed(config)
         report = deliver(config, store, lambda request: httpx.Response(500))
-        return report, store, server
+        return report, store, server, config
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
 
+def parsed_message(server: FakeSMTPServer) -> email.message.Message:
+    return email.message_from_bytes(
+        server.messages[0]["data"], policy=email.policy.default
+    )
+
+
+def smtp_recipients(server: FakeSMTPServer) -> list[str]:
+    return [
+        recipient.split("<", 1)[1].rstrip(">")
+        for recipient in server.messages[0]["rcpt"]
+    ]
+
+
 def test_smtp_delivers_through_a_real_conversation(tmp_path, monkeypatch):
-    report, store, server = run_smtp_test(tmp_path, monkeypatch, "ok")
+    report, store, server, _ = run_smtp_test(tmp_path, monkeypatch)
     assert report.channels[0].ok
     assert report.channels[0].messages == 1
-    message = "\n".join(server.messages[0])
-    assert "Subject: CVEBeacon:" in message
-    assert "CVE-2026-0001" in message
+    message = parsed_message(server)
+    assert message["Subject"].startswith("CVEBeacon:")
+    assert message["Auto-Submitted"] == "auto-generated"
+    date_header = next(
+        line
+        for line in server.messages[0]["data"].split(b"\r\n")
+        if line.lower().startswith(b"date:")
+    )
+    assert date_header.endswith(b"+0000")
+    assert message["Content-Transfer-Encoding"] == "quoted-printable"
+    body = message.get_content()
+    assert "CVE-2026-0001" in body
+    assert "https://www.cve.org" in body
+    assert smtp_recipients(server) == ["soc@example.org"]
     assert rows(store)[0][1] == "sent"
 
 
+def test_smtp_bcc_is_in_the_envelope_without_a_header(tmp_path, monkeypatch):
+    extra = 'cc = ["cc@example.org"]\nbcc = ["archive@example.org"]'
+    report, store, server, _ = run_smtp_test(tmp_path, monkeypatch, extra=extra)
+    assert report.channels[0].ok
+    assert smtp_recipients(server) == [
+        "soc@example.org",
+        "cc@example.org",
+        "archive@example.org",
+    ]
+    message = parsed_message(server)
+    assert message["Bcc"] is None
+    assert message["Cc"] == "cc@example.org"
+
+
+def test_smtp_test_message_is_quoted_printable(tmp_path, monkeypatch):
+    monkeypatch.setattr(socket.socket, "connect", REAL_CONNECT)
+    monkeypatch.setattr(socket, "getaddrinfo", loopback_getaddrinfo)
+    server = FakeSMTPServer(("127.0.0.1", 0), FakeSMTPHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = make_config(
+            tmp_path,
+            channels=smtp_channel(server.server_address[1]),
+            rules=smtp_rule(),
+        )
+        outcome = send_test(config, mock_client(lambda request: httpx.Response(500)), "mail")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert outcome.ok
+    assert b"=E2=80=94" in server.messages[0]["data"]
+    message = parsed_message(server)
+    assert "test message — no action needed" in message.get_content()
+
+
+def test_smtp_starttls_and_auth(tmp_path, monkeypatch, smtp_certificate):
+    monkeypatch.setenv("TEST_SMTP_PASSWORD", "smtp-password")
+    report, store, server, _ = run_smtp_test(
+        tmp_path,
+        monkeypatch,
+        certificate=smtp_certificate,
+        auth=("beacon", "smtp-password"),
+        security="starttls",
+        extra='username = "beacon"\npassword_env = "TEST_SMTP_PASSWORD"',
+        trusted=True,
+    )
+    assert report.channels[0].ok, report.channels[0].error
+    assert server.messages[0]["tls"] is True
+    assert server.auth_attempts == [("beacon", "smtp-password")]
+    assert rows(store)[0][1] == "sent"
+
+
+def test_smtp_implicit_tls(tmp_path, monkeypatch, smtp_certificate):
+    report, store, server, _ = run_smtp_test(
+        tmp_path,
+        monkeypatch,
+        certificate=smtp_certificate,
+        security="tls",
+        trusted=True,
+    )
+    assert report.channels[0].ok, report.channels[0].error
+    assert server.messages[0]["tls"] is True
+    assert rows(store)[0][1] == "sent"
+
+
+def test_smtp_rejects_an_untrusted_certificate(tmp_path, monkeypatch, smtp_certificate):
+    report, store, server, _ = run_smtp_test(
+        tmp_path,
+        monkeypatch,
+        certificate=smtp_certificate,
+        security="starttls",
+    )
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+    assert "certificate verification failed" in report.channels[0].error
+    assert server.messages == []
+    assert rows(store)[0][1] == "failed"
+
+
+def test_smtp_authentication_gives_up_after_three_attempts(tmp_path, monkeypatch):
+    monkeypatch.setattr(socket.socket, "connect", REAL_CONNECT)
+    monkeypatch.setattr(socket, "getaddrinfo", loopback_getaddrinfo)
+    monkeypatch.setenv("TEST_SMTP_PASSWORD", "wrong-password")
+    server = FakeSMTPServer(
+        ("127.0.0.1", 0), FakeSMTPHandler, auth=("beacon", "right-password")
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = make_config(
+            tmp_path,
+            channels=smtp_channel(
+                server.server_address[1],
+                extra='username = "beacon"\npassword_env = "TEST_SMTP_PASSWORD"',
+            ),
+            rules=smtp_rule(),
+        )
+        store = seed(config)
+        times = [NOW, NOW + timedelta(minutes=5), NOW + timedelta(minutes=15)]
+        reports = [
+            deliver_pending(
+                config,
+                store,
+                mock_client(lambda request: httpx.Response(500)),
+                clock=lambda value=value: value,
+                monotonic=lambda: 0.0,
+            )
+            for value in times
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert all(report.channels[0].failed == 1 for report in reports)
+    assert set(server.auth_attempts) == {("beacon", "wrong-password")}
+    assert len(server.auth_attempts) >= 3
+    assert store.delivery_status()[0].given_up == 1
+    assert (
+        store.delivery_events(
+            "mail",
+            catalogs=config.watch.sources,
+            now=NOW + timedelta(days=30),
+        )
+        == ()
+    )
+
+
 def test_smtp_data_rejection_is_a_definite_failure(tmp_path, monkeypatch):
-    report, store, server = run_smtp_test(tmp_path, monkeypatch, "data-error")
+    report, store, server, _ = run_smtp_test(tmp_path, monkeypatch, "data-error")
     assert report.channels[0].failed == 1
     assert report.channels[0].ambiguous == 0
     assert "SMTP rejected" in report.channels[0].error
@@ -810,7 +1196,7 @@ def test_smtp_data_rejection_is_a_definite_failure(tmp_path, monkeypatch):
 
 
 def test_smtp_drop_after_data_is_ambiguous(tmp_path, monkeypatch):
-    report, store, server = run_smtp_test(tmp_path, monkeypatch, "drop")
+    report, store, server, _ = run_smtp_test(tmp_path, monkeypatch, "drop")
     assert report.channels[0].ambiguous == 1
     assert rows(store)[0][1] == "ambiguous"
 
@@ -928,7 +1314,10 @@ def test_watch_status_shows_delivery_counts(tmp_path):
     from cvebeacon.watch.sync import watch_status
 
     output = watch_status(config.watch)
-    assert "channel hook: pending 0, failed 0, ambiguous 0, last success " in output
+    assert (
+        "channel hook: pending 0, failed 0 (0 given up), ambiguous 0, "
+        "sending 0, last success "
+    ) in output
 
 
 def test_cli_notify_test_and_exit_codes(tmp_path, monkeypatch, capsys):
@@ -1061,3 +1450,780 @@ def test_cli_watch_run_sends_initial_digest(tmp_path, monkeypatch, capsys):
     assert cli.main(["--config", str(config.config_path), "watch", "run"]) == 0
     assert len(seen) == 1
     assert seen[0]["events"][0]["initial"] is True
+
+
+def test_telegram_success_status_without_a_body_is_ambiguous(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
+    channels = """
+[watch.channels.telegram]
+type = "telegram"
+bot_token_env = "TELEGRAM_TOKEN"
+chat_id = 1
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["telegram"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, content=b"")
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].failed == 0
+    assert report.channels[0].ambiguous == 1
+    assert rows(store) == [("telegram", "ambiguous", 1, "Telegram confirmation was unreadable")]
+
+    deliver(config, store, handler, clock=lambda: NOW + timedelta(minutes=30))
+    assert len(seen) == 1
+
+
+def test_telegram_success_status_with_an_unreadable_body_is_ambiguous(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
+    channels = """
+[watch.channels.telegram]
+type = "telegram"
+bot_token_env = "TELEGRAM_TOKEN"
+chat_id = 1
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["telegram"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+
+    for content in (b"{}", b"not json"):
+        with sqlite3.connect(store.path) as db:
+            db.execute(
+                "UPDATE watch_delivery SET status='pending', attempts=0, "
+                "first_attempt_at=NULL, last_error=NULL"
+            )
+        report = deliver(config, store, lambda request, body=content: httpx.Response(200, content=body))
+        assert report.channels[0].ambiguous == 1
+        assert rows(store)[0][1] == "ambiguous"
+
+
+def test_matrix_success_without_an_event_id_is_ambiguous(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATRIX_TOKEN", "matrix-token")
+    channels = """
+[watch.channels.matrix]
+type = "matrix"
+homeserver = "https://matrix.example.org"
+room_id = "!room:example.org"
+access_token_env = "MATRIX_TOKEN"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["matrix"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(404, json={"errcode": "M_NOT_FOUND"})
+        return httpx.Response(200, json={})
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].ambiguous == 1
+    assert rows(store) == [("matrix", "ambiguous", 1, "Matrix confirmation was unreadable")]
+
+
+def test_an_ambiguous_retry_that_fails_definitely_stays_ambiguous(tmp_path):
+    config = make_config(tmp_path)
+    store = seed(config)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_delivery SET status='ambiguous', attempts=1")
+    seen = []
+
+    def failing(request):
+        seen.append(request)
+        raise httpx.ConnectError("refused")
+
+    report = deliver(config, store, failing, retry_ambiguous=True)
+    assert report.channels[0].failed == 0
+    assert report.channels[0].ambiguous == 1
+    assert rows(store) == [("hook", "ambiguous", 2, "connection failed")]
+
+    deliver(config, store, failing, clock=lambda: NOW + timedelta(days=1))
+    assert len(seen) == 1
+
+
+def test_mark_delivery_never_leaves_sent_or_ambiguous(tmp_path):
+    config = make_config(tmp_path)
+    store = seed(config)
+    event_id = store.events()[0].id
+    assert store.mark_delivery([event_id], "hook", "sent") == 1
+    assert store.mark_delivery([event_id], "hook", "failed", error="late") == 0
+    assert store.mark_delivery([event_id], "hook", "ambiguous", error="late") == 0
+    assert store.mark_delivery([event_id], "hook", "sending") == 0
+    assert rows(store) == [("hook", "sent", 0, None)]
+
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_delivery SET status='ambiguous'")
+    assert store.mark_delivery([event_id], "hook", "failed", error="late") == 0
+    assert store.mark_delivery([event_id], "hook", "ambiguous", error="again") == 1
+    assert store.mark_delivery([event_id], "hook", "sent") == 1
+    assert rows(store) == [("hook", "sent", 1, None)]
+
+
+def test_matrix_auto_retry_stops_after_one_hour(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATRIX_TOKEN", "matrix-token")
+    channels = """
+[watch.channels.matrix]
+type = "matrix"
+homeserver = "https://matrix.example.org"
+room_id = "!room:example.org"
+access_token_env = "MATRIX_TOKEN"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["matrix"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    puts = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(404, json={"errcode": "M_NOT_FOUND"})
+        puts.append(str(request.url))
+        return httpx.Response(200, json={"event_id": "$event"})
+
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_delivery SET status='ambiguous', attempts=1, "
+            "first_attempt_at=?",
+            ((NOW - timedelta(hours=2)).isoformat(),),
+        )
+    report = deliver(config, store, handler, clock=lambda: NOW)
+    assert report.channels[0].messages == 0
+    assert puts == []
+    assert rows(store)[0][1] == "ambiguous"
+
+    report = deliver(config, store, handler, clock=lambda: NOW, retry_ambiguous=True)
+    assert report.channels[0].messages == 1
+    assert len(puts) == 1
+    assert rows(store)[0][1] == "sent"
+
+
+def test_matrix_auto_retry_uses_a_recent_ambiguous_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATRIX_TOKEN", "matrix-token")
+    channels = """
+[watch.channels.matrix]
+type = "matrix"
+homeserver = "https://matrix.example.org"
+room_id = "!room:example.org"
+access_token_env = "MATRIX_TOKEN"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["matrix"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    puts = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(404, json={"errcode": "M_NOT_FOUND"})
+        puts.append(str(request.url))
+        return httpx.Response(200, json={"event_id": "$event"})
+
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_delivery SET status='ambiguous', attempts=1, "
+            "first_attempt_at=?",
+            ((NOW - timedelta(minutes=30)).isoformat(),),
+        )
+    report = deliver(config, store, handler, clock=lambda: NOW)
+    assert report.channels[0].messages == 1
+    assert len(puts) == 1
+    assert rows(store)[0][1] == "sent"
+
+
+def test_two_runs_claim_each_delivery_once(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    store = seed(config)
+    requests = []
+    barrier = threading.Barrier(2, timeout=10)
+    original = store.delivery_events
+
+    def synchronized(*args, **kwargs):
+        events = original(*args, **kwargs)
+        barrier.wait()
+        return events
+
+    monkeypatch.setattr(store, "delivery_events", synchronized)
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    reports = []
+    errors = []
+
+    def run():
+        try:
+            reports.append(
+                deliver_pending(
+                    config,
+                    store,
+                    mock_client(handler),
+                    clock=lambda: NOW,
+                    monotonic=lambda: 0.0,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert errors == []
+    assert len(requests) == 1
+    assert rows(store) == [("hook", "sent", 0, None)]
+    assert sum(report.channels[0].messages for report in reports) == 1
+
+
+def test_matrix_parts_get_distinct_transaction_ids(tmp_path, monkeypatch):
+    from cvebeacon.watch import messages as messages_module
+
+    monkeypatch.setitem(messages_module.CHANNEL_LIMITS, "matrix", 700)
+    monkeypatch.setenv("MATRIX_TOKEN", "matrix-token")
+    channels = """
+[watch.channels.matrix]
+type = "matrix"
+homeserver = "https://matrix.example.org"
+room_id = "!room:example.org"
+access_token_env = "MATRIX_TOKEN"
+max_items = 100
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["matrix"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 9))
+    store = seed(
+        config,
+        identifiers=identifiers,
+        description="A long description that forces the message to split. " * 4,
+    )
+    transactions: dict[str, str] = {}
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(404, json={"errcode": "M_NOT_FOUND"})
+        transaction = str(request.url).rsplit("/", 1)[-1]
+        transactions.setdefault(transaction, f"$event-{len(transactions)}")
+        return httpx.Response(200, json={"event_id": transactions[transaction]})
+
+    report = deliver(config, store, handler)
+    summary = report.channels[0]
+    assert summary.ok
+    assert summary.messages > 1
+    assert len(transactions) == summary.messages
+    with sqlite3.connect(store.path) as db:
+        sent = db.execute(
+            "SELECT COUNT(*) FROM watch_delivery WHERE status='sent'"
+        ).fetchone()[0]
+    assert sent == len(identifiers)
+
+
+def test_graph_sends_bcc_recipients(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRAPH_SECRET", "graph-secret")
+    channels = """
+[watch.channels.graph]
+type = "graph"
+tenant_id = "tenant"
+client_id = "client"
+client_secret_env = "GRAPH_SECRET"
+sender = "beacon@example.org"
+to = ["soc@example.org"]
+cc = ["cc@example.org"]
+bcc = ["archive@example.org"]
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["graph"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if "login.microsoftonline.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "graph-token"})
+        return httpx.Response(202)
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].ok
+    body = json.loads(seen[1].content)["message"]
+    assert body["bccRecipients"] == [
+        {"emailAddress": {"address": "archive@example.org"}}
+    ]
+
+
+def test_graph_auth_failure_gives_up_after_three_attempts(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRAPH_SECRET", "graph-secret")
+    channels = """
+[watch.channels.graph]
+type = "graph"
+tenant_id = "tenant"
+client_id = "client"
+client_secret_env = "GRAPH_SECRET"
+sender = "beacon@example.org"
+to = ["soc@example.org"]
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["graph"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    tokens = []
+
+    def handler(request):
+        tokens.append(request)
+        return httpx.Response(401)
+
+    for offset in (0, 5, 15):
+        report = deliver(
+            config,
+            store,
+            handler,
+            clock=lambda value=offset: NOW + timedelta(minutes=value),
+        )
+        assert report.channels[0].failed == 1
+    assert len(tokens) == 3
+    assert store.delivery_status()[0].given_up == 1
+    assert (
+        store.delivery_events(
+            "graph", catalogs=config.watch.sources, now=NOW + timedelta(days=30)
+        )
+        == ()
+    )
+
+
+def test_retry_failed_resets_attempts_and_backoff(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    store = seed(config)
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_delivery SET status='failed', attempts=10, updated_at=?",
+            ((NOW - timedelta(days=1)).isoformat(),),
+        )
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(cli, "HttpClient", lambda http_config: mock_client(handler))
+    assert cli.main(["--config", str(config.config_path), "watch", "notify"]) == 0
+    assert seen == []
+
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config.config_path),
+                "watch",
+                "notify",
+                "--retry-failed",
+            ]
+        )
+        == 0
+    )
+    assert len(seen) == 1
+    assert rows(store) == [("hook", "sent", 0, None)]
+
+
+def test_status_counts_are_per_channel(tmp_path):
+    channels = """
+[watch.channels.alpha]
+type = "webhook"
+url = "https://example.test/alpha"
+[watch.channels.beta]
+type = "webhook"
+url = "https://example.test/beta"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["alpha", "beta"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_delivery SET status='ambiguous' WHERE channel='alpha'")
+        db.execute("UPDATE watch_delivery SET status='sent' WHERE channel='beta'")
+    report = deliver(config, store, lambda request: httpx.Response(200, json={}))
+    by_name = {summary.channel: summary for summary in report.channels}
+    assert by_name["alpha"].ambiguous_total == 1
+    assert by_name["beta"].ambiguous_total == 0
+    from cvebeacon.watch.delivery import format_channel_line
+
+    assert "ambiguous" not in format_channel_line(by_name["beta"])
+
+
+def test_pacing_sleeps_once_between_messages(tmp_path):
+    channels = """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.test/hook"
+grouping = "event"
+min_interval_seconds = 5
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["hook"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config, identifiers=("CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"))
+    sleeps = []
+    report = deliver(
+        config,
+        store,
+        lambda request: httpx.Response(200, json={}),
+        sleep=sleeps.append,
+        budget_seconds=300,
+    )
+    assert report.channels[0].messages == 3
+    assert sleeps == [5, 5]
+
+
+def test_budget_exhaustion_before_a_message_keeps_rows_pending(tmp_path):
+    channels = """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.test/hook"
+grouping = "event"
+min_interval_seconds = 30
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["hook"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(
+        config,
+        identifiers=("CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"),
+    )
+    state = {"now": 0.0}
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        state["now"] += seconds
+
+    report = deliver(
+        config,
+        store,
+        lambda request: httpx.Response(200, json={}),
+        monotonic=lambda: state["now"],
+        sleep=fake_sleep,
+        budget_seconds=60,
+    )
+    assert report.channels[0].messages == 2
+    assert report.channels[0].failed == 0
+    assert report.channels[0].ambiguous == 0
+    assert store.delivery_status()[0].pending == 1
+
+
+class SlowDripServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        pass
+
+
+class SlowDripHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        try:
+            self.request.recv(65536)
+        except OSError:
+            return
+        try:
+            self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n")
+            for _ in range(100):
+                self.request.sendall(b"x")
+                time.sleep(0.1)
+        except OSError:
+            return
+
+
+def test_request_once_stops_a_slow_drip_body(tmp_path, monkeypatch):
+    from cvebeacon.config import HttpConfig
+    from cvebeacon.http import HttpClient
+
+    monkeypatch.setattr(socket.socket, "connect", REAL_CONNECT)
+    monkeypatch.setattr(socket, "getaddrinfo", loopback_getaddrinfo)
+    server = SlowDripServer(("127.0.0.1", 0), SlowDripHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = HttpClient(HttpConfig(retries=0))
+        started = time.monotonic()
+        result = client.request_once(
+            "POST",
+            f"http://127.0.0.1:{server.server_address[1]}/drip",
+            json={"test": True},
+            timeout=1.0,
+        )
+        elapsed = time.monotonic() - started
+        client.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert result.status_code == 200
+    assert elapsed < 4
+
+
+def test_ntfy_and_gotify_do_not_repeat_the_title_in_the_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("NTFY_TOKEN", "ntfy-token")
+    monkeypatch.setenv("GOTIFY_TOKEN", "gotify-token")
+    channels = """
+[watch.channels.ntfy]
+type = "ntfy"
+topic = "cvebeacon"
+token_env = "NTFY_TOKEN"
+[watch.channels.gotify]
+type = "gotify"
+server = "https://gotify.example.org"
+app_token_env = "GOTIFY_TOKEN"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["ntfy", "gotify"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={})
+
+    report = deliver(config, store, handler)
+    assert all(summary.ok for summary in report.channels)
+    ntfy = next(request for request in seen if request.url.host == "ntfy.sh")
+    ntfy_body = ntfy.content.decode("utf-8")
+    assert "[NEW] CVE-2026-0001" in ntfy_body
+    assert "CVEBeacon:" not in ntfy_body
+    gotify = next(request for request in seen if request.url.host == "gotify.example.org")
+    gotify_body = json.loads(gotify.content)
+    assert "CVEBeacon:" not in gotify_body["message"]
+    assert "[NEW] CVE-2026-0001" in gotify_body["message"]
+    assert gotify_body["title"].startswith("CVEBeacon:")
+
+
+def test_slack_url_is_revalidated_at_send_time(tmp_path, monkeypatch):
+    monkeypatch.delenv("SLACK_URL", raising=False)
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["slack"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    seen = []
+    monkeypatch.setenv(
+        "SLACK_URL", "https://evil.test/services/T000/B000/abcdefghijklmnop"
+    )
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, content=b"ok")
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].failed == 1
+    assert "hooks.slack.com" in report.channels[0].error
+    assert seen == []
+    assert rows(store) == [("slack", "failed", 1, report.channels[0].error)]
+
+
+def test_cli_watch_run_delivers_pending_alerts_when_the_source_fails(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(
+        tmp_path,
+        initial="backfill",
+        channels=WEBHOOK,
+        extra=RULE,
+    )
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        if "example.test" in str(request.url):
+            seen.append(request)
+            return httpx.Response(200, json={})
+        return httpx.Response(500)
+
+    monkeypatch.setattr(cli, "HttpClient", lambda http_config: mock_client(handler))
+    assert cli.main(["--config", str(config.config_path), "watch", "run"]) == 2
+    assert len(seen) == 1
+    assert rows(store) == [("hook", "sent", 0, None)]
+    assert "hook (webhook): 1 message, 1 event sent" in capsys.readouterr().out
+
+
+def test_initial_digest_covers_more_than_one_thousand_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop")
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+max_items = 5
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["slack"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    records = [
+        WatchRecord(
+            cve_id=f"CVE-2026-{index:04d}",
+            status="published",
+            description="Example vulnerability.",
+            cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.8),),
+        )
+        for index in range(1, 1501)
+    ]
+    store.upsert_nvd(records, catalogs=config.watch.sources)
+    store.evaluate_touched(
+        config.watch.rules, catalogs=config.watch.sources, initial=True
+    )
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, content=b"ok")
+
+    report = deliver(config, store, handler)
+    assert len(seen) == 1
+    text = json.loads(seen[0].content)["text"]
+    assert "1500 matches across 1 rule" in text
+    assert "and 1495 more" in text
+    assert report.channels[0].messages == 1
+    assert report.channels[0].events == 1500
+    with sqlite3.connect(store.path) as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM watch_delivery WHERE status='sent'"
+            ).fetchone()[0]
+            == 1500
+        )
+
+
+def test_fake_smtp_server_unstuffs_leading_dots(tmp_path, monkeypatch):
+    import smtplib
+
+    monkeypatch.setattr(socket.socket, "connect", REAL_CONNECT)
+    monkeypatch.setattr(socket, "getaddrinfo", loopback_getaddrinfo)
+    server = FakeSMTPServer(("127.0.0.1", 0), FakeSMTPHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = smtplib.SMTP("127.0.0.1", server.server_address[1], timeout=5)
+        client.sendmail(
+            "beacon@example.org",
+            ["soc@example.org"],
+            b"Subject: dotted\r\n\r\n.hidden\r\n..also hidden\r\n",
+        )
+        client.quit()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    data = server.messages[0]["data"]
+    assert b"\r\n.hidden\r\n" in data
+    assert b"\r\n..hidden\r\n" not in data
+
+
+def test_smtp_partial_recipient_refusal_is_ambiguous(tmp_path, monkeypatch):
+    report, store, server, _ = run_smtp_test(
+        tmp_path,
+        monkeypatch,
+        "rcpt-refused",
+        to=("soc@example.org", "other@example.org"),
+    )
+    assert report.channels[0].failed == 0
+    assert report.channels[0].ambiguous == 1
+    assert "refused some recipients" in report.channels[0].error
+    assert rows(store)[0][1] == "ambiguous"
+
+
+def test_graph_token_failure_is_a_definite_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRAPH_SECRET", "graph-secret")
+    channels = """
+[watch.channels.graph]
+type = "graph"
+tenant_id = "tenant"
+client_id = "client"
+client_secret_env = "GRAPH_SECRET"
+sender = "beacon@example.org"
+to = ["soc@example.org"]
+"""
+    rules = """
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["graph"]
+"""
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    store = seed(config)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(500)
+
+    report = deliver(config, store, handler)
+    assert report.channels[0].failed == 1
+    assert report.channels[0].ambiguous == 0
+    assert "Graph token request failed" in report.channels[0].error
+    assert len(seen) == 1
+    assert rows(store)[0][1] == "failed"

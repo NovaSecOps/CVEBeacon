@@ -197,7 +197,7 @@ def test_v1_database_migrates_in_place(tmp_path):
         )
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "3"
+    assert store.metadata()["schema_version"] == "4"
     with sqlite3.connect(path) as db:
         tables = {
             row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -212,7 +212,15 @@ def test_v1_database_migrates_in_place(tmp_path):
     assert {"watch_alert_state", "watch_event", "watch_delivery"} <= tables
     assert "vendors_json" in columns
     assert event_columns >= {"id", "rule", "cve_id", "kind", "reasons_json", "initial", "created_at"}
-    assert delivery_columns >= {"event_id", "channel", "status", "attempts", "last_error", "updated_at"}
+    assert delivery_columns >= {
+        "event_id",
+        "channel",
+        "status",
+        "attempts",
+        "last_error",
+        "first_attempt_at",
+        "updated_at",
+    }
 
 
 def test_v1_upgrade_rewinds_the_euvd_cursor_to_the_initial_window(tmp_path):
@@ -307,7 +315,7 @@ def test_v2_database_keeps_deliveries_and_adds_statuses(tmp_path):
         )
     upgraded = WatchStore(path, clock=lambda: NOW)
     upgraded.initialize()
-    assert upgraded.metadata()["schema_version"] == "3"
+    assert upgraded.metadata()["schema_version"] == "4"
     assert upgraded.delivery_status()[0].pending == 1
     upgraded.mark_delivery([event_id], "soc-email", "ambiguous", error="test")
     assert upgraded.delivery_status()[0].ambiguous == 1
@@ -409,7 +417,7 @@ def test_p1a_queue_upgrade_drops_stale_obligations(tmp_path, initial_mode):
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
     metadata = store.metadata()
-    assert metadata["schema_version"] == "3"
+    assert metadata["schema_version"] == "4"
     assert metadata["initial_evaluated_at"] == NOW.isoformat()
     assert store.pending_evaluations(10) == ()
     assert store.status()["rows"] == 1

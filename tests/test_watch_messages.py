@@ -97,8 +97,8 @@ def test_kev_added_label_and_detail():
     "kind,reasons,kwargs,expected",
     [
         ("exploitation_active", ("exploitation poc -> active (cisa-adp)",), {"ssvc_exploitation": "active"}, "[ACTIVELY EXPLOITED]"),
-        ("severity_increase", ("severity high -> critical",), {}, "[SEVERITY UP high→critical]"),
-        ("epss_increase", ("epss <0.1 -> <0.5",), {}, "[EPSS UP 0.08→0.61]"),
+        ("severity_increase", ("severity high -> critical",), {}, "[SEVERITY UP high->critical]"),
+        ("epss_increase", ("epss <0.1 -> <0.5",), {}, "[EPSS UP 0.08->0.61]"),
         ("nvd_score_added", ("nvd score absent -> present",), {"cvss": (CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.1),)}, "[NVD SCORED 9.1]"),
         ("rejected", ("status published -> rejected",), {"status": "rejected"}, "[REJECTED]"),
     ],
@@ -235,7 +235,7 @@ def test_initial_events_become_one_digest():
     assert message.subject == "CVEBeacon initial summary: 2 matches across 2 rules since 2026-10-27"
     assert "first: 1 match" in message.text
     assert "second: 1 match, 1 KEV added" in message.text
-    assert "Run `cvebeacon watch events --rule X` to list all." in message.text
+    assert "Run `cvebeacon watch events --rule first` to list all." in message.text
     assert len(message.event_ids) == 3
 
 
@@ -363,3 +363,170 @@ def test_webhook_payload_is_stable_and_descriptive():
     assert view_payload["vendors"] == ["Acme"]
     assert view_payload["products"] == ["Widget"]
     assert view_payload["links"]["euvd"].endswith("EUVD-2026-1234")
+
+
+def test_one_cve_matched_by_two_rules_is_one_block():
+    events = (
+        event("match", cve_id="CVE-2026-0001", event_id=1, rule="alpha"),
+        event("match", cve_id="CVE-2026-0001", event_id=2, rule="beta"),
+    )
+    message = build_messages(
+        events,
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={"alpha": "alpha", "beta": "beta"},
+    )[0]
+    assert message.text.count("[NEW] CVE-2026-0001") == 1
+    assert "Rule: alpha, beta" in message.text
+    assert message.subject == "CVEBeacon: 1 new (2 rules)"
+    assert message.event_ids == (1, 2)
+
+
+def test_different_labels_for_one_cve_stay_separate():
+    events = (
+        event(
+            "kev_added",
+            cve_id="CVE-2026-0001",
+            event_id=1,
+            rule="alpha",
+            reasons=("kev cisa false -> true",),
+            current=view("CVE-2026-0001", cisa_kev_added="2026-11-03"),
+        ),
+        event(
+            "kev_added",
+            cve_id="CVE-2026-0001",
+            event_id=2,
+            rule="beta",
+            reasons=("kev eu false -> true",),
+            current=view("CVE-2026-0001", eu_kev_added="2026-11-03"),
+        ),
+    )
+    text = build_messages(
+        events,
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={"alpha": "alpha", "beta": "beta"},
+    )[0].text
+    assert "[KEV ADDED: CISA]" in text
+    assert "[KEV ADDED: EU]" in text
+    assert text.count("[KEV ADDED: CISA] CVE-2026-0001") == 1
+    assert text.count("[KEV ADDED: EU] CVE-2026-0001") == 1
+
+
+def test_max_items_counts_merged_entries():
+    events = tuple(
+        event(
+            "match",
+            cve_id=f"CVE-2026-{index:04d}",
+            event_id=index * 10 + rule,
+            rule=name,
+        )
+        for index in (1, 2)
+        for rule, name in ((1, "alpha"), (2, "beta"))
+    )
+    message = build_messages(
+        events,
+        channel_type="slack",
+        grouping="run",
+        max_items=2,
+        names={"alpha": "alpha", "beta": "beta"},
+    )[0]
+    assert message.text.count("[NEW]") == 2
+    assert "and 1 more" not in message.text
+    assert message.subject == "CVEBeacon: 2 new (2 rules)"
+
+
+def test_teams_escapes_untrusted_markdown():
+    item = event(
+        current=view(
+            description="[Click here](https://evil.test/login) *bold* `code` @everyone"
+        )
+    )
+    text = body_for(item, "teams")
+    assert "[Click here](https://evil.test/login)" not in text
+    assert "\\[Click here\\]" in text
+    assert "\\*bold\\*" in text
+    assert "\\`code\\`" in text
+    assert "\\@everyone" not in text
+    assert "@everyone" in text
+
+
+def test_matrix_uses_plain_text():
+    text = body_for(event(), "matrix")
+    assert not text.startswith("**")
+    assert "[NVD](https://" not in text
+    assert "**CVEBeacon:" not in text
+    assert "https://nvd.nist.gov/vuln/detail/CVE-2026-1234" in text
+
+
+def test_ntfy_and_gotify_content_omits_the_title():
+    item = event()
+    for channel in ("ntfy", "gotify"):
+        message = build_messages(
+            (item,),
+            channel_type=channel,
+            grouping="run",
+            max_items=20,
+            names={item.rule: item.rule},
+        )[0]
+        assert message.text.startswith("[NEW]")
+        assert "CVEBeacon:" not in message.text
+        assert message.content == message.text
+        assert message.subject.startswith("CVEBeacon:")
+
+
+def test_byte_limits_are_counted_in_utf8_bytes():
+    text = "→" * 200
+    assert split_message(text, 300) == (text,)
+    parts = split_message(text, 300, byte_limit=True)
+    assert len(parts) > 1
+    assert all(len(part.encode("utf-8")) <= 300 for part in parts)
+
+
+def test_initial_subject_pluralises_matches_and_rules():
+    item = event("match", initial=True, rule="only")
+    message = build_messages(
+        (item,),
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={"only": "only"},
+        since="2026-10-27",
+    )[0]
+    assert message.subject == (
+        "CVEBeacon initial summary: 1 match across 1 rule since 2026-10-27"
+    )
+
+
+def test_and_more_points_at_the_events_command():
+    events = tuple(
+        event("match", cve_id=f"CVE-2026-{index:04d}", event_id=index)
+        for index in range(1, 6)
+    )
+    text = build_messages(
+        events,
+        channel_type="slack",
+        grouping="run",
+        max_items=2,
+        names={"critical-or-likely": "critical-or-likely"},
+    )[0].text
+    assert "and 3 more" in text
+    assert "Run `cvebeacon watch events` to list all." in text
+
+
+def test_rejected_cves_do_not_say_nvd_pending():
+    item = event("rejected", current=view(status="rejected"))
+    text = body_for(item)
+    assert "[REJECTED]" in text
+    assert "NVD pending" not in text
+
+
+def test_webhook_document_links_the_kev_catalog():
+    item = event()
+    payload = webhook_payload((item,), {item.rule: item.rule})
+    assert (
+        payload["events"][0]["view"]["links"]["kev"]
+        == "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
+    )

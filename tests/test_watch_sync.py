@@ -545,7 +545,7 @@ def test_watch_status_reports_cursors_rows_and_signals(tmp_path, capsys):
     assert cli.main(["--config", str(config.config_path), "watch", "status"]) == 0
     output = capsys.readouterr().out
     assert f"database: {config.watch.database}" in output
-    assert "schema version: 3" in output
+    assert "schema version: 4" in output
     assert f"nvd cursor: {NOW.isoformat()}" in output
     assert "euvd cursor: 2026-11-03" in output
     assert "epss score date: 2026-11-03" in output

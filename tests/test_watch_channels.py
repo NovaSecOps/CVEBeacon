@@ -419,3 +419,30 @@ def test_channel_number_limits_are_strict(tmp_path):
 def test_watch_channels_must_be_a_table(tmp_path):
     with pytest.raises(ConfigurationError, match="must be a table"):
         write(tmp_path, WATCH + "channels = true\n")
+
+
+def test_secret_env_names_are_validated_without_echoing_the_value(tmp_path):
+    canary = "123456:CANARY-PASTED-TOKEN"
+    with pytest.raises(ConfigurationError) as excinfo:
+        write(
+            tmp_path,
+            WATCH
+            + f"""
+[watch.channels.a]
+type = "telegram"
+bot_token_env = "{canary}"
+chat_id = 1
+""",
+        )
+    message = str(excinfo.value)
+    assert canary not in message
+    assert "must be an environment variable name" in message
+
+
+def test_runtime_secret_errors_do_not_echo_a_bad_env_name():
+    reference = SecretRef("bot token", "123456:CANARY-PASTED-TOKEN")
+    with pytest.raises(ConfigurationError) as excinfo:
+        reference.resolve()
+    message = str(excinfo.value)
+    assert "CANARY" not in message
+    assert "is not set" in message
