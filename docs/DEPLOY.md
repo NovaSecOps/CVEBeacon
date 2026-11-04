@@ -142,7 +142,12 @@ Back up the watch database with SQLite's online backup (use the path
 
 ```console
 sudo -u cvebeacon sqlite3 /var/lib/cvebeacon/cvebeacon-watch.db ".backup '/var/lib/cvebeacon/watch-backup.db'"
+sudo -u cvebeacon sqlite3 /var/lib/cvebeacon/cvebeacon-users.db ".backup '/var/lib/cvebeacon/users-backup.db'"
 ```
+
+The account file holds password hashes and is created `0600` on POSIX. Back it
+up with the watch database and keep both inside the same protected directory on
+Windows.
 
 If you copy the database, `-wal` and `-shm` files instead, do so only while
 nothing runs. Then upgrade and restore the scheduler you removed:
