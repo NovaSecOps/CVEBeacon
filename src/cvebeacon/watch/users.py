@@ -340,7 +340,6 @@ class UserStore:
         *,
         create: bool = True,
         _creation_locked: bool = False,
-        _was_missing: bool = False,
     ) -> sqlite3.Connection:
         descriptor = None
         try:
@@ -360,7 +359,6 @@ class UserStore:
                     return self._connect(
                         create=create,
                         _creation_locked=True,
-                        _was_missing=not present or empty,
                     )
             connection = None
             if os.name == "posix":
@@ -403,8 +401,6 @@ class UserStore:
                 expected = (
                     details.st_dev,
                     details.st_ino,
-                    details.st_size,
-                    details.st_mtime_ns,
                 )
                 # Pin the validated inode until SQLite and the post-open
                 # identity checks finish, so an unlinked inode cannot be reused.
@@ -420,20 +416,11 @@ class UserStore:
                     raise StateError(
                         "CVEBeacon user database was replaced while opening"
                     ) from exc
-                metadata_changed = (
-                    current.st_size,
-                    getattr(current, "st_mtime_ns", 0),
-                ) != expected[2:]
                 if (
                     not stat.S_ISREG(current.st_mode)
-                    or (current.st_dev, current.st_ino) != expected[:2]
+                    or (current.st_dev, current.st_ino) != expected
                     or self._trusted_directory_chain(resolved_parent)
                     != directory_chain
-                    or (
-                        metadata_changed
-                        and not _was_missing
-                        and self._store_id is None
-                    )
                 ):
                     connection.close()
                     raise StateError(
@@ -563,21 +550,17 @@ class UserStore:
                     self._initialize(
                         create=create,
                         creation_locked=True,
-                        was_missing=not present or empty,
                     )
                 return
-        self._initialize(
-            create=create, creation_locked=False, was_missing=False
-        )
+        self._initialize(create=create, creation_locked=False)
 
     def _initialize(
-        self, *, create: bool, creation_locked: bool, was_missing: bool
+        self, *, create: bool, creation_locked: bool
     ) -> None:
         with closing(
             self._connect(
                 create=create,
                 _creation_locked=creation_locked,
-                _was_missing=was_missing,
             )
         ) as db:
             for statement in _SCHEMA:

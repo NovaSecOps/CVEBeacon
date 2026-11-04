@@ -1378,6 +1378,31 @@ def test_same_store_id_replacement_cannot_recycle_the_validated_inode(
         store.users()
 
 
+@pytest.mark.parametrize("bootstrap", [False, True])
+def test_fresh_store_accepts_an_independent_write_during_open(
+    tmp_path, monkeypatch, bootstrap
+):
+    path = tmp_path / "users.db"
+    writer = UserStore(path, clock=lambda: NOW)
+    writer.initialize()
+    reader = UserStore(path, clock=lambda: NOW)
+    real_connect = sqlite3.connect
+    injected = []
+
+    def writing_connect(database, *args, **kwargs):
+        if not injected:
+            injected.append(True)
+            writer.add("first", is_admin=bootstrap, authorization=BOOTSTRAP)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr("cvebeacon.watch.users.sqlite3.connect", writing_connect)
+    if bootstrap:
+        with pytest.raises(ConfigurationError, match="administrator login"):
+            reader.add("second", is_admin=True, authorization=BOOTSTRAP)
+    assert [user.username for user in reader.users()] == ["first"]
+    assert reader.users()[0].is_admin == bootstrap
+
+
 def test_foreign_read_only_ancestor_is_not_trusted(tmp_path, monkeypatch):
     if os.name != "posix":
         pytest.skip("POSIX ownership model")
