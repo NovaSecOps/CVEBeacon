@@ -71,8 +71,8 @@ Common keys:
 - `enabled`: `true` by default. A disabled channel keeps its pending deliveries.
 - `grouping`: `"run"` (default) sends one message per channel per run that lists
   that run's events. `"event"` sends one message per event.
-- `max_items`: 1 to 100, default 20. A long message lists this many event lines
-  and then "and N more".
+- `max_items`: 1 to 100, default 20. A long message lists this many CVEs and
+  then "and N more" with a pointer to `cvebeacon watch events`.
 - `min_interval_seconds`: 0 to 3600, default 0. Telegram defaults to 3 and
   rejects smaller values.
 - `timeout_seconds`: 1 to 300, default 30.
@@ -102,11 +102,14 @@ to = ["soc@example.com"]
 ```
 
 `security = "none"` requires `allow_insecure = true` and logs a warning. Every
-TLS connection verifies certificates with the system trust store. Gmail needs an
-app password; use `smtp.gmail.com:587` with STARTTLS. Microsoft 365 uses
+TLS connection verifies certificates with the system trust store; a certificate
+failure is reported as "certificate verification failed". Gmail needs an app
+password; use `smtp.gmail.com:587` with STARTTLS. Microsoft 365 uses
 `smtp.office365.com:587`, but SMTP AUTH must be enabled on the mailbox;
 otherwise use the `graph` channel. `timeout_seconds` bounds the connection and
-every socket operation.
+every socket operation. Bodies are always quoted-printable, so relays do not
+need 8BITMIME. `bcc` recipients are part of the SMTP envelope and never appear
+as a message header.
 
 ### Microsoft Graph
 
@@ -121,7 +124,8 @@ to = ["soc@example.com"]
 ```
 
 This sends through the Microsoft Graph `sendMail` endpoint and needs an
-application permission such as `Mail.Send` for the sender mailbox.
+application permission such as `Mail.Send` for the sender mailbox. `cc` and
+`bcc` recipients are sent as Graph `ccRecipients` and `bccRecipients`.
 
 ### Teams
 
@@ -131,7 +135,8 @@ type = "teams"
 webhook_url_env = "CVEBEACON_TEAMS_WEBHOOK_URL"
 ```
 
-Use a Teams Workflows webhook URL. Messages are Adaptive Cards.
+Use a Teams Workflows webhook URL. Messages are Adaptive Cards; dynamic CVE text
+is Markdown-escaped so a description cannot inject a link or formatting.
 
 ### Slack
 
@@ -178,8 +183,10 @@ access_token_env = "CVEBEACON_MATRIX_ACCESS_TOKEN"
 ```
 
 Only unencrypted rooms are supported. The channel first asks for the
-`m.room.encryption` state and requires a 404 `M_NOT_FOUND`. Sends use a
-deterministic transaction id per delivery, so a retry cannot post twice.
+`m.room.encryption` state and requires a 404 `M_NOT_FOUND`. Messages use the
+plain-text form. Sends use a deterministic transaction id per message part, so a
+retry cannot post twice. An ambiguous row is retried automatically for one hour
+after its first attempt; after that, use `--retry-ambiguous`.
 
 ### ntfy
 
@@ -192,7 +199,8 @@ topic = "cvebeacon-alerts"
 priority = 3                    # 1 to 5
 ```
 
-The body is plain text with the message title in the `Title` header.
+The body is plain text and does not repeat the title; the title is sent in the
+`Title` header. Subjects use ASCII, so the header needs no RFC 2047 encoding.
 
 ### Gotify
 
@@ -233,36 +241,49 @@ a message may already have arrived when the outcome is unknown, ambiguous rows
 are not resent automatically. A row moves through these states:
 
 - `pending`: queued but not attempted.
-- `sending`: committed immediately before the request or SMTP `DATA`.
-- `sent`: the provider accepted the message.
+- `sending`: committed atomically immediately before the request or SMTP
+  `DATA`. Rows are claimed with a conditional update, so two runs cannot send
+  the same delivery.
+- `sent`: the provider accepted the message. This state is final.
 - `failed`: a definite failure (connection, DNS, TLS, an HTTP error, or SMTP
   rejecting the message before `DATA`). The row is retried with backoff.
 - `ambiguous`: the request or `DATA` may have reached the provider (a timeout or
-  connection drop after sending), or a `sending` row was found at startup. It is
-  never resent automatically, except for Matrix, because its transaction id
-  makes the retry idempotent.
+  connection drop after sending), a success status arrived without a readable
+  confirmation, or a stale `sending` row was found. It is never downgraded to
+  `failed`, and never resent automatically, except for Matrix within one hour
+  of the first attempt, because its transaction id makes the retry idempotent.
 
 Failed rows wait 5 minutes, then double the delay up to 6 hours, and stay
-`failed` after 10 attempts. `cvebeacon watch notify` sends pending rows and due
-retries; `--retry-ambiguous` also resends ambiguous rows, and `--channel NAME`
-limits the run to one channel. `cvebeacon watch notify test <channel>` sends a
-clearly labelled test message directly, outside this state machine. If a
-previous run stopped after committing `sending`, the next delivery prints a
-recovery line and marks those rows ambiguous before it continues.
+`failed` after 10 attempts. Authentication failures (SMTP 535 and Graph
+401/403) give up after 3 attempts to avoid an account lockout.
+`cvebeacon watch notify` sends pending rows and due retries;
+`--retry-ambiguous` also resends ambiguous rows, `--retry-failed` retries every
+failed row regardless of attempts or backoff, and `--channel NAME` limits the
+run to one channel. `cvebeacon watch notify test <channel>` sends a clearly
+labelled test message directly, outside this state machine. If a previous run
+stopped after committing `sending` more than 10 minutes ago, the next delivery
+prints a recovery line and marks those rows ambiguous before it continues.
+Newer `sending` rows belong to a live run and are left alone.
 
 A channel sends at most 10 messages per run and the whole delivery step has a
-60-second budget. Leftovers stay `pending` for the next run. One channel failing
-never blocks the others. `watch run` exits 3 when a delivery failed or became
-ambiguous in that run, before the usual source-failure exit code 4.
+60-second budget. Leftovers stay `pending` for the next run; a group whose
+budget ran out before its first message stays pending. The budget also bounds
+each HTTP response body read, so a slow provider cannot hold the run open. One
+channel failing never blocks the others. `watch run` exits 3 when a delivery
+failed or became ambiguous in that run, before the usual source-failure exit
+code 4. A source failure still delivers rows that were already pending.
 
-`watch status` prints pending, failed, and ambiguous counts and the last success
-time for each channel. `watch run` prints a delivery line per channel, for
-example `soc (smtp): 1 message, 4 events sent`.
+`watch status` prints pending, failed (with the number that reached the attempt
+cap), ambiguous, stuck `sending`, and the last success time for each channel.
+`watch run` prints a delivery line per channel, for example
+`soc (smtp): 1 message, 4 events sent`, using that channel's own counts.
 
 ## Messages
 
-All channels use the same formatter. Messages are short: one line per event, a
-description cut to 160 characters, a rule name, and links.
+All channels use the same formatter. Messages are short: one line per CVE, a
+description cut to 160 characters, each matching rule, and links. When several
+rules match the same CVE under the same label, they share one block and a
+`Rule: a, b` line.
 
 ```text
 [NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active
@@ -277,15 +298,17 @@ Event labels:
 | `match` | `[NEW]` |
 | `kev_added` | `[KEV ADDED: CISA]` or `[KEV ADDED: EU]` |
 | `exploitation_active` | `[ACTIVELY EXPLOITED]` |
-| `severity_increase` | `[SEVERITY UP high→critical]` |
-| `epss_increase` | `[EPSS UP 0.08→0.61]` |
+| `severity_increase` | `[SEVERITY UP high->critical]` |
+| `epss_increase` | `[EPSS UP 0.08->0.61]` |
 | `nvd_score_added` | `[NVD SCORED 9.1]` |
 | `rejected` | `[REJECTED]` |
 
 Every CVSS score names its provider: `CNA` (with the CNA's short name or email
 domain), `NVD`, `CISA-ADP`, `EUVD`, or `Other`. When only a CNA or ADP score
-exists, the line adds `NVD pending`. A KEV-added line also shows the CISA due
-date and required action, cut to 120 characters.
+exists, the line adds `NVD pending`; a rejected CVE does not. A KEV-added line
+also shows the CISA due date and required action, cut to 120 characters.
+Dynamic text is escaped for each channel's markup, so a CVE description cannot
+inject a Slack link, a Discord mention, or a Teams Markdown link.
 
 Events are ordered with KEV entries and active exploitation first, then the
 highest CVSS, then EPSS. A run message has a title such as
@@ -304,13 +327,18 @@ kev-watch: 4 match
 [NEW] CVE-2026-1234 · …
 …
 
-Run `cvebeacon watch events --rule X` to list all.
+Run `cvebeacon watch events --rule critical-or-likely` to list all.
 ```
+
+The digest counts every initial pending row, even beyond 1,000. It lists the
+top `max_items` CVEs and reports the rest as "and N more". A one-item digest
+uses "1 match across 1 rule".
 
 Provider limits are respected by splitting at line boundaries into numbered
 parts: Telegram 4,096 characters, Discord 2,000, Slack 3,800, Matrix 30,000,
-Teams about 25 KB of card text, and ntfy 4,096. Email has no practical limit but
-still applies `max_items`.
+Teams about 25 KB of card text, and ntfy 4,096. The Matrix, Teams and ntfy limits
+are counted in UTF-8 bytes. Email has no practical limit but still applies
+`max_items`.
 
 Links: the NVD detail page is always present, the CVE.org record is always
 present, the EUVD detail page appears when an EUVD id exists, and the CISA KEV
@@ -345,7 +373,8 @@ The generic webhook receives a stable JSON document:
         "links": {
           "nvd": "https://nvd.nist.gov/vuln/detail/CVE-2026-1234",
           "cve": "https://www.cve.org/CVERecord?id=CVE-2026-1234",
-          "euvd": null
+          "euvd": null,
+          "kev": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
         }
       }
     }
@@ -576,7 +605,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 3. An unknown version still fails closed. The version 1
+place to schema version 4. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to
@@ -585,7 +614,9 @@ re-reads that window once. P1a stored EUVD items without vendor names, and that
 re-read gives pre-upgrade items their names. In `full` mode
 `initial_window_start` is 1999-01-01, so this re-reads the whole EUVD history
 once. The version 2 upgrade keeps delivery rows and adds the `sending` and
-`ambiguous` states. After the upgrade, run `cvebeacon watch evaluate --all --yes`
+`ambiguous` states. The version 3 upgrade adds `first_attempt_at`, which bounds
+the Matrix automatic retry. After the upgrade, run
+`cvebeacon watch evaluate --all --yes`
 BEFORE the first `watch run`, as after adding a rule. Otherwise every CVE from
 the initial window alerts one by one as NVD touches it. Schema 2 databases
 written by a pre-release build of this branch are refused with a message to
@@ -763,8 +794,8 @@ sync on the same day reads the same EUVD day again.
 `watch status` prints the database path, schema version, cursors, EPSS score
 date, row counts, EUVD items, KEV catalog entries, watched CVEs in KEV, active
 SSVC exploitation, EPSS rows, and pending/backing-off lookups. It also prints
-each channel's pending, failed, and ambiguous counts and last success time. It
-creates an empty database if none exists.
+each channel's pending, failed (with the given-up count), ambiguous, sending,
+and last success counts. It creates an empty database if none exists.
 
 ## Summary lines
 
