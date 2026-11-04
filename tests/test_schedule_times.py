@@ -404,6 +404,26 @@ def test_windows_logged_out_fixed_times_uses_passwordless_schtasks(
     assert kwargs["stdin"] is subprocess.DEVNULL
 
 
+def test_windows_success_uses_return_code_not_absence_of_prompt_text(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
+    plan = windows_plan(tmp_path, run_logged_out=True)
+
+    class Result:
+        returncode = 0
+        stdout = (
+            "Please enter the run as password for svc: \n"
+            "SUCCESS: The scheduled task has successfully been created."
+        )
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        return Result()
+
+    install(plan, run=fake_run)
+
+
 def test_windows_logged_out_interval_installs_xml(tmp_path, monkeypatch):
     monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Windows")
     monkeypatch.setattr(
