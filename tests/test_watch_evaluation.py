@@ -387,6 +387,72 @@ def test_cvss_provider_edit_does_not_create_a_false_increase(tmp_path):
         ).fetchone()[0] == 0
 
 
+def cna_and_nvd(cna: float, nvd: float = 9.8) -> tuple[CVSSEntry, CVSSEntry]:
+    return (
+        CVSSEntry("cna", "security@example.com", "3.1", cna),
+        CVSSEntry("nvd", "nvd@nist.gov", "3.1", nvd),
+    )
+
+
+def test_rule_edit_keeps_escalations_that_arrive_with_it(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    identifiers = [f"CVE-2026-{number:04d}" for number in range(1, 101)]
+    store.upsert_nvd([record(identifier) for identifier in identifiers])
+    store.evaluate_touched((rule(condition={"cvss_min": 9}),), catalogs=("nvd", "cisa_kev"))
+    assert len(store.events(limit=500)) == 100
+    store.acknowledge(store.pending_evaluations(500))
+
+    store.replace_kev(
+        "cisa",
+        {identifier: KEVFields("2026-11-03") for identifier in identifiers[:10]},
+        catalogs=("nvd", "cisa_kev"),
+    )
+    edited = rule(condition={"cvss_min": 8.5})
+    result = store.evaluate_touched((edited,), catalogs=("nvd", "cisa_kev"))
+    assert result.by_kind == (("kev_added", 10),)
+    kinds = [event.kind for event in store.events(limit=500)]
+    assert kinds.count("kev_added") == 10
+    assert kinds.count("severity_increase") == 0
+
+
+def test_provider_edit_with_a_kev_addition_alerts_once(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert_nvd([record(cvss=cna_and_nvd(5.0))])
+    store.evaluate_touched(
+        (rule(condition={"cvss_min": 1}, cvss_providers=["cna"]),),
+        catalogs=("nvd", "cisa_kev"),
+    )
+    store.acknowledge(store.pending_evaluations(10))
+
+    store.replace_kev(
+        "cisa", {"CVE-2026-0001": KEVFields("2026-11-03")}, catalogs=("nvd", "cisa_kev")
+    )
+    all_providers = rule(condition={"cvss_min": 1})
+    result = store.evaluate_touched((all_providers,), catalogs=("nvd", "cisa_kev"))
+    assert result.by_kind == (("kev_added", 1),)
+
+
+def test_provider_edit_rebaselines_the_severity_high_water_mark(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert_nvd([record(cvss=cna_and_nvd(5.0))])
+    store.evaluate_touched((rule(condition={"cvss_min": 1}),), catalogs=("nvd",))
+    store.acknowledge(store.pending_evaluations(10))
+
+    # Going from critical (all providers) to medium (CNA only) is not an alert.
+    only_cna = rule(condition={"cvss_min": 1}, cvss_providers=["cna"])
+    touch(store, "CVE-2026-0001")
+    result = store.evaluate_touched((only_cna,), catalogs=("nvd",))
+    assert result.events == 0
+    store.acknowledge(store.pending_evaluations(10))
+
+    # Under the new providers the band is medium, so a rise to high alerts.
+    store.upsert_nvd([record(cvss=cna_and_nvd(7.5))])
+    result = store.evaluate_touched((only_cna,), catalogs=("nvd",))
+    assert result.by_kind == (("severity_increase", 1),)
+    increases = [event for event in store.events(limit=10) if event.kind == "severity_increase"]
+    assert increases[0].reasons == ("severity medium -> high",)
+
+
 def test_case_only_rule_rename_reuses_state(tmp_path):
     store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
     store.upsert_nvd([record()])

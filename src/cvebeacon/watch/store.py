@@ -32,8 +32,9 @@ from .rules import (
     AlertState,
     Rule,
     evaluate,
+    providers_hash,
+    rebase_severity,
     rule_hash,
-    snapshot_for,
 )
 
 SCHEMA_VERSION = 2
@@ -142,6 +143,7 @@ _SCHEMA = (
         first_matched_at TEXT NOT NULL,
         snapshot_json TEXT NOT NULL,
         rule_hash TEXT NOT NULL,
+        providers_hash TEXT NOT NULL,
         PRIMARY KEY(rule, cve_id)
     )""",
     """CREATE TABLE IF NOT EXISTS watch_event (
@@ -954,7 +956,7 @@ class WatchStore:
         db: sqlite3.Connection, rule: str, identifier: str
     ) -> tuple[AlertState, str] | None:
         row = db.execute(
-            "SELECT first_matched_at,snapshot_json,rule_hash FROM watch_alert_state "
+            "SELECT first_matched_at,snapshot_json,providers_hash FROM watch_alert_state "
             "WHERE rule=? AND cve_id=?",
             (rule, identifier),
         ).fetchone()
@@ -962,13 +964,13 @@ class WatchStore:
             return None
         try:
             snapshot = AlertSnapshot.from_dict(json.loads(row["snapshot_json"]))
-            stored_hash = str(row["rule_hash"])
+            stored_providers = str(row["providers_hash"])
         except (TypeError, ValueError, KeyError) as exc:
             raise StateError(
                 f"watch alert state for rule {rule!r} and CVE {identifier} "
                 "is invalid"
             ) from exc
-        return AlertState(row["first_matched_at"], snapshot), stored_hash
+        return AlertState(row["first_matched_at"], snapshot), stored_providers
 
     @staticmethod
     def _backlog_before(db: sqlite3.Connection) -> date | None:
@@ -1011,23 +1013,16 @@ class WatchStore:
                     continue
                 key = rule.name.casefold()
                 current_hash = rule_hash(rule)
+                current_providers = providers_hash(rule)
                 stored = self._alert_state(db, key, identifier)
-                if stored is not None and stored[1] != current_hash:
-                    # The definition changed. Keep the old match, refresh the
-                    # comparison baseline, and emit nothing for this evaluation.
-                    snapshot = snapshot_for(view, rule)
-                    db.execute(
-                        "UPDATE watch_alert_state SET snapshot_json=?,rule_hash=? "
-                        "WHERE rule=? AND cve_id=?",
-                        (
-                            canonical_json(snapshot.as_dict()),
-                            current_hash,
-                            key,
-                            identifier,
-                        ),
-                    )
-                    continue
-                previous = stored[0] if stored is not None else None
+                previous = None
+                if stored is not None:
+                    previous, stored_providers = stored
+                    # Only a CVSS provider change moves the stored severity bands.
+                    # Other edits keep the old marks, so escalations that arrive
+                    # with the edit still fire.
+                    if stored_providers != current_providers:
+                        previous = rebase_severity(previous, view, rule)
                 state, events = evaluate(
                     view,
                     previous,
@@ -1039,17 +1034,19 @@ class WatchStore:
                     continue
                 db.execute(
                     "INSERT INTO watch_alert_state("
-                    "rule,cve_id,first_matched_at,snapshot_json,rule_hash) "
-                    "VALUES (?,?,?,?,?) "
+                    "rule,cve_id,first_matched_at,snapshot_json,rule_hash,providers_hash) "
+                    "VALUES (?,?,?,?,?,?) "
                     "ON CONFLICT(rule,cve_id) DO UPDATE SET "
                     "snapshot_json=excluded.snapshot_json,"
-                    "rule_hash=excluded.rule_hash",
+                    "rule_hash=excluded.rule_hash,"
+                    "providers_hash=excluded.providers_hash",
                     (
                         key,
                         identifier,
                         state.first_matched_at,
                         canonical_json(state.snapshot.as_dict()),
                         current_hash,
+                        current_providers,
                     ),
                 )
                 for event in events:

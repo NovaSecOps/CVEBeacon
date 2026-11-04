@@ -608,6 +608,23 @@ def rule_hash(rule: Rule) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()[:16]
 
 
+def providers_hash(rule: Rule) -> str:
+    """Hash the CVSS providers alone, since they decide the severity band."""
+    value = list(rule.cvss_providers)
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()[:16]
+
+
+def rebase_severity(previous: AlertState, view: WatchView, rule: Rule) -> AlertState:
+    """Restart the severity marks from the band that the current providers give.
+
+    Used when ``cvss_providers`` changed. The stored marks came from other scores,
+    so keeping them would alert on the edit itself or hide a later real rise.
+    """
+    band = snapshot_for(view, rule).severity_band
+    snapshot = replace(previous.snapshot, severity_band=band, max_severity_band=band)
+    return AlertState(previous.first_matched_at, snapshot)
+
+
 def _first_match(values: Iterable[str], target: str) -> str | None:
     folded = target.casefold()
     for value in values:
