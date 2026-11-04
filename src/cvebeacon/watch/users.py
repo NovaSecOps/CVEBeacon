@@ -264,6 +264,24 @@ def _pin_database(path: Path, *, create: bool) -> tuple[int, bool]:
         return descriptor, created
 
 
+def _retain_database_descriptor(
+    descriptor: int,
+    identity: tuple[int, int],
+    target: tuple[int, int] | None,
+) -> bool:
+    """Keep a descriptor open when closing it could drop database locks.
+
+    POSIX releases this process's record locks on a file when any descriptor
+    for it closes. A descriptor that shares an inode with the target database
+    or a pinned database therefore joins the registry instead of being closed.
+    """
+    with _DATABASE_PINS_LOCK:
+        if identity not in _DATABASE_PINS and identity != target:
+            return False
+        _DATABASE_PINS.setdefault(identity, []).append(descriptor)
+        return True
+
+
 class UserStore:
     def __init__(
         self, path: str | Path, *, clock=_utc_now
@@ -340,9 +358,28 @@ class UserStore:
                 f"cannot open CVEBeacon user database lock {lock_path}: {exc}"
             ) from exc
         acquired = False
+        retained = False
+        identity: tuple[int, int] | None = None
         try:
             try:
                 details = os.fstat(descriptor)
+                identity = (details.st_dev, details.st_ino)
+                try:
+                    target_details = os.stat(path, follow_symlinks=False)
+                except OSError:
+                    target = None
+                else:
+                    target = (target_details.st_dev, target_details.st_ino)
+                if _retain_database_descriptor(descriptor, identity, target):
+                    retained = True
+                    raise StateError(
+                        "CVEBeacon user database lock must not be the account "
+                        "database or a hardlink to it"
+                    )
+                if details.st_nlink != 1:
+                    raise StateError(
+                        "CVEBeacon user database lock must not be a hardlink"
+                    )
                 if not stat.S_ISREG(details.st_mode):
                     raise StateError(
                         "CVEBeacon user database lock must be a regular file"
@@ -385,7 +422,14 @@ class UserStore:
 
                     os.lseek(descriptor, 0, os.SEEK_SET)
                     msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-            os.close(descriptor)
+            if (
+                not retained
+                and identity is not None
+                and _retain_database_descriptor(descriptor, identity, None)
+            ):
+                retained = True
+            if not retained:
+                os.close(descriptor)
 
     def _connect(
         self,

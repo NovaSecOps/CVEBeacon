@@ -1371,6 +1371,65 @@ def test_opening_another_store_preserves_external_writer_exclusion(
     assert external_writer() == "acquired"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SQLite record locks")
+def test_creation_lock_hardlink_cannot_release_live_database_locks(tmp_path):
+    import subprocess
+    import sys
+
+    live_path = tmp_path / "users.db"
+    live = UserStore(live_path, clock=lambda: NOW)
+    live.initialize()
+
+    target_path = tmp_path / "other-users.db"
+    target = UserStore(target_path, clock=lambda: NOW)
+    os.link(live_path, target_path.with_name(target_path.name + ".lock"))
+
+    def external_writer():
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sqlite3, sys\n"
+                "db = sqlite3.connect(sys.argv[1], timeout=0)\n"
+                "try:\n"
+                "    db.execute('BEGIN IMMEDIATE')\n"
+                "except sqlite3.OperationalError as exc:\n"
+                "    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY:\n"
+                "        raise\n"
+                "    print('blocked')\n"
+                "else:\n"
+                "    db.rollback()\n"
+                "    print('acquired')\n"
+                "finally:\n"
+                "    db.close()\n",
+                str(live_path),
+            ],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        return result.stdout.strip()
+
+    with live.transaction():
+        assert external_writer() == "blocked"
+        with pytest.raises(
+            StateError, match="lock must not be the account database"
+        ):
+            target.initialize()
+        assert not target_path.exists()
+        assert external_writer() == "blocked"
+    assert external_writer() == "acquired"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX inode pins")
+def test_creation_lock_rejects_a_hardlinked_lock_file(tmp_path):
+    path = tmp_path / "users.db"
+    lock = tmp_path / "users.db.lock"
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    os.link(lock, tmp_path / "other.lock")
+    with pytest.raises(StateError, match="lock must not be a hardlink"):
+        UserStore(path, clock=lambda: NOW).initialize()
+    assert not path.exists()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX inode pins")
 def test_repeated_store_opens_reuse_one_database_descriptor(tmp_path, monkeypatch):
     path = tmp_path / "users.db"
