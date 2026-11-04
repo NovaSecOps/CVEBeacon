@@ -833,6 +833,12 @@ def test_report_mark_display_includes_the_username():
         username="alice",
     )
     assert identity_label(mark.by, mark.username) == "Alice Smith (alice)"
+    from cvebeacon.watch.reported import format_reported
+
+    assert "Alice Smith (alice)" in format_reported(mark)
+    assert "Comunicado aos clientes por Alice Smith (alice)" in format_reported(
+        mark, "pt-PT"
+    )
 
 
 def test_registered_mode_rejects_unknown_and_disabled_users(tmp_path):
