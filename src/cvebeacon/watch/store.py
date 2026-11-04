@@ -1282,10 +1282,11 @@ class WatchStore:
 
         When a ``backfill`` or ``full`` database has finished a failure-free
         initial sync and still owes the initial evaluation, this pass closes
-        initialization the same way ``watch run`` does: it records
-        ``initial_evaluated_at`` and clears the touch queue in one transaction
-        after the whole pass succeeds. While the initial sync is unproven or
-        incomplete, initialization stays open and the queue is kept.
+        initialization the same way ``watch run`` does: it acknowledges each
+        evaluated batch inside that batch's transaction and records
+        ``initial_evaluated_at`` after the whole pass succeeds. While the
+        initial sync is unproven or incomplete, initialization stays open and
+        the queue is kept.
         """
         if limit < 1:
             raise StateError("watch evaluation batch size must be positive")
@@ -1318,14 +1319,17 @@ class WatchStore:
                 )
                 for kind, count in counts.items():
                     created[kind] = created.get(kind, 0) + count
+                if close_initial:
+                    db.executemany(
+                        "DELETE FROM watch_touched WHERE cve_id=?",
+                        ((identifier,) for identifier in identifiers),
+                    )
                 evaluated += len(identifiers)
                 last = identifiers[-1]
         if close_initial:
-            with self.transaction() as db:
-                db.execute("DELETE FROM watch_touched")
-                self._set_meta(
-                    db, {"initial_evaluated_at": _timestamp(self._clock)}
-                )
+            self.set_metadata(
+                {"initial_evaluated_at": _timestamp(self._clock)}
+            )
         return self._evaluation_result(
             evaluated,
             created,
