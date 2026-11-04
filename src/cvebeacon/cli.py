@@ -20,7 +20,7 @@ from .identity import normalize_asset, identity_conflict
 from .models import Asset, HealthStatus
 from .notifications import GraphMailNotifier, TeamsNotifier, alert_items, configured_channels
 from .reporting import write_json, write_xlsx
-from .scheduling import describe, install, make_plan, remove, status
+from .scheduling import default_command, describe, install, make_plan, remove, status
 from .sources import CVEListSource, EPSSSource, KEVSource
 from .sources.euvd import SEARCH_URL
 from .sources.nvd import CVE_URL
@@ -67,7 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     dashboard.add_subparsers(dest="dashboard_command", required=True).add_parser("hash-password", help="prompt privately and emit a password hash")
     schedule = commands.add_parser("schedule", help="manage the native recurring scan")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
-    add = schedule_sub.add_parser("install"); add.add_argument("--every"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
+    add = schedule_sub.add_parser("install"); add.add_argument("--every", "--hours", dest="every"); add.add_argument("--times", help="comma-separated local times such as 07:00,19:00"); add.add_argument("--command", dest="schedule_target", choices=("scan", "watch", "both"), help="what the schedule runs"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
     schedule_status = schedule_sub.add_parser("status"); schedule_status.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto")
     delete = schedule_sub.add_parser("remove"); delete.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); delete.add_argument("--yes", action="store_true")
     watch = commands.add_parser("watch", help="keep a local database of recently changed CVEs")
@@ -324,7 +324,7 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
     checks: dict[str, str] = {}
     with HttpClient(config.http) as http:
         def nvd_check():
-            api_key = config.secret(config.sources.nvd_api_key_env)
+            api_key = config.nvd_api_key()
             payload = http.get_json(CVE_URL, source="nvd", params={"cveId": target}, headers={"apiKey": api_key} if api_key else None)
             if not isinstance(payload, dict) or not isinstance(payload.get("vulnerabilities"), list):
                 raise SourceError("nvd", "connectivity response omitted vulnerabilities")
@@ -496,22 +496,29 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         return 2 if "missing" in checks.values() or failed_live else 0
     if args.command == "source-status": print(json.dumps(_source_status(store), indent=2)); return 0
     if args.command == "schedule":
-        if config.inventory is None and config.watch.enabled:
-            raise CVEBeaconError(
-                "watch scheduling arrives in a later release; use cron/Task "
-                f"Scheduler with `cvebeacon --config {config.config_path} watch run`"
-            )
-        if args.every is None:
-            selected = input("Interval in hours [2/4/6/12/24, default 4]: ").strip() or "4"
+        target = args.schedule_target or default_command(
+            inventory=config.inventory is not None, watch=config.watch.enabled
+        )
+        if target in {"watch", "both"} and not config.watch.enabled:
+            raise CVEBeaconError("watch mode is disabled; set [watch] enabled = true")
+        if target in {"scan", "both"} and config.inventory is None:
+            raise CVEBeaconError("this configuration has no inventory; use --command watch")
+        if args.times is not None and args.every is not None:
+            raise CVEBeaconError("--times and --every are mutually exclusive")
+        if args.times is not None:
+            plan = make_plan(config.config_path, times=args.times, command=target, system=args.platform, allow_incompatible=args.dry_run)
         else:
-            selected = args.every
-        if selected.casefold().endswith("h"):
-            selected = selected[:-1]
-        try:
-            every = int(selected)
-        except ValueError as exc:
-            raise CVEBeaconError("schedule interval must look like 4 or 4h") from exc
-        plan = make_plan(config.config_path, every, system=args.platform, allow_incompatible=args.dry_run)
+            if args.every is None:
+                selected = input("Interval in hours [2/4/6/12/24, default 4]: ").strip() or "4"
+            else:
+                selected = args.every
+            if selected.casefold().endswith("h"):
+                selected = selected[:-1]
+            try:
+                every = int(selected)
+            except ValueError as exc:
+                raise CVEBeaconError("schedule interval must look like 4 or 4h") from exc
+            plan = make_plan(config.config_path, every, command=target, system=args.platform, allow_incompatible=args.dry_run)
         print(describe(plan))
         if args.dry_run: return 0
         if not args.yes and input("Install this schedule? [y/N] ").strip().casefold() not in {"y", "yes"}: print("cancelled"); return 1
