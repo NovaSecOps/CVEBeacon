@@ -73,6 +73,23 @@ if ($Method -eq 'd') {
 }
 """
 
+RUN_AS_SCRIPT = """param(
+    [Parameter(Mandatory = $true)][string]$User,
+    [Parameter(Mandatory = $true)][string]$Exe,
+    [Parameter(Mandatory = $true)][string]$Config,
+    [Parameter(Mandatory = $true)][string]$Times,
+    [Parameter(Mandatory = $true)][string]$Out,
+    [Parameter(Mandatory = $true)][string]$Err
+)
+$ErrorActionPreference = 'Stop'
+$secure = ConvertTo-SecureString $env:CVB_SMOKE_PASSWORD -AsPlainText -Force
+$env:CVB_SMOKE_PASSWORD = $null
+$cred = New-Object System.Management.Automation.PSCredential($User, $secure)
+$arguments = @('--config', $Config, 'schedule', 'install', '--times', $Times, '--command', 'watch', '--run-logged-out', '--yes')
+$process = Start-Process -FilePath $Exe -ArgumentList $arguments -Credential $cred -Wait -NoNewWindow -PassThru -RedirectStandardOutput $Out -RedirectStandardError $Err
+exit $process.ExitCode
+"""
+
 
 def step(description: str) -> None:
     global _step
@@ -534,7 +551,7 @@ def probe_registration(
         )
 
 
-def probe_s4u_registration(current: str, service: str) -> None:
+def probe_s4u_registration(current: str) -> None:
     print("PROBE whoami /user:", flush=True)
     for name, args in (
         ("user", ["whoami", "/user"]),
@@ -552,7 +569,7 @@ def probe_s4u_registration(current: str, service: str) -> None:
         cmdlet_script = directory / "probe-cmdlet.ps1"
         com_script.write_text(PROBE_COM_SCRIPT, encoding="utf-8")
         cmdlet_script.write_text(PROBE_CMDLET_SCRIPT, encoding="utf-8")
-        for kind, account in (("current", current), ("service", service)):
+        for kind, account in (("current", current),):
             xml_path = directory / f"probe-{kind}.xml"
             write_probe_xml(xml_path, account)
             for method in ("a", "b", "c", "d", "e"):
@@ -813,31 +830,62 @@ def smoke() -> None:
         step("local service account and ACLs")
 
         try:
-            probe_s4u_registration(current, service_account)
+            probe_s4u_registration(current)
         except Exception as exc:
             print(f"PROBE harness failed: {exc}", flush=True)
 
         installed = True
-        install = checked(
+        run_script = root / "run-as-service.ps1"
+        run_script.write_text(RUN_AS_SCRIPT, encoding="utf-8")
+        out_file = root / "run-as-service.out"
+        err_file = root / "run-as-service.err"
+        run_env = dict(env)
+        run_env["CVB_SMOKE_PASSWORD"] = password
+        install = command(
             [
-                *base,
-                "schedule",
-                "install",
-                "--times",
-                times_arg,
-                "--command",
-                "watch",
-                "--run-logged-out",
-                "--account",
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(run_script),
+                "-User",
                 service_account,
-                "--yes",
+                "-Exe",
+                str(executable),
+                "-Config",
+                str(config),
+                "-Times",
+                times_arg,
+                "-Out",
+                str(out_file),
+                "-Err",
+                str(err_file),
             ],
-            timeout=120,
-            env=env,
+            timeout=180,
+            env=run_env,
+        )
+        install_stdout = (
+            out_file.read_text(encoding="utf-8", errors="replace")
+            if out_file.exists()
+            else ""
+        )
+        install_stderr = (
+            err_file.read_text(encoding="utf-8", errors="replace")
+            if err_file.exists()
+            else ""
+        )
+        print(f"RUN AS SERVICE stdout:\n{install_stdout}", flush=True)
+        print(f"RUN AS SERVICE stderr:\n{install_stderr}", flush=True)
+        assert install.returncode == 0, (
+            f"schedule install as service failed ({install.returncode}):\n"
+            f"{install.stdout}\n{install.stderr}"
         )
         assert (
-            f"Runs as: {service_account} (S4U, while logged off)" in install.stdout
-        ), install.stdout
+            f"Runs as: {service_account} (S4U, while logged off)".casefold()
+            in install_stdout.casefold()
+        ), install_stdout
         status = checked([*base, "schedule", "status"], timeout=120, env=env)
         assert f"Account: {service_account}".casefold() in status.stdout.casefold(), (
             status.stdout
@@ -899,8 +947,6 @@ def smoke() -> None:
                 "--command",
                 "watch",
                 "--run-logged-out",
-                "--account",
-                service_account,
                 "--yes",
             ],
             timeout=120,
