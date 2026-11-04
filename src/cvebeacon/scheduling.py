@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import os
 import platform
 import re
@@ -37,6 +38,8 @@ class SchedulePlan:
     module_mode: bool = False
     times: tuple[str, ...] = ()
     schedule_command: str = "scan"
+    run_logged_out: bool = False
+    user_id: str = ""
 
     def _command(self, action: str) -> list[str]:
         prefix = (
@@ -92,6 +95,21 @@ def parse_times(value: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
     return tuple(sorted(times, key=lambda item: (int(item[:2]), int(item[3:]))))
 
 
+def _current_windows_user() -> str:
+    user = os.environ.get("USERNAME", "").strip()
+    if not user:
+        try:
+            user = getpass.getuser().strip()
+        except (KeyError, OSError):
+            user = ""
+    if not user:
+        raise SchedulingError(
+            "cannot determine the current Windows account; set USERNAME in the environment"
+        )
+    domain = os.environ.get("USERDOMAIN", "").strip()
+    return f"{domain}\\{user}" if domain else user
+
+
 def make_plan(
     config_path: str | Path,
     every_hours: int | None = None,
@@ -101,6 +119,8 @@ def make_plan(
     system: str = "auto",
     executable: str | Path | None = None,
     allow_incompatible: bool = False,
+    run_logged_out: bool = False,
+    user_id: str | None = None,
 ) -> SchedulePlan:
     if times is not None and every_hours is not None:
         raise SchedulingError("--times and --every are mutually exclusive")
@@ -125,6 +145,8 @@ def make_plan(
         raise SchedulingError("platform must be auto, windows, or linux")
     if requested != detected and not allow_incompatible:
         raise SchedulingError(f"cannot manage a {requested} schedule on a {detected} host")
+    if run_logged_out and requested != "windows":
+        raise SchedulingError("--run-logged-out is supported only on Windows")
     if requested == "linux" and interval is not None and 24 % interval:
         raise SchedulingError("Linux cron intervals must divide 24: choose 2, 3, 4, 6, 8, 12, or 24 hours")
     if executable:
@@ -144,6 +166,15 @@ def make_plan(
         raise SchedulingError("schedule paths cannot contain line breaks")
     if requested == "linux" and any("%" in str(value) for value in (config_target, target)):
         raise SchedulingError("Linux cron paths cannot contain percent characters")
+    account = ""
+    if run_logged_out:
+        account = (user_id if user_id is not None else _current_windows_user()).strip()
+        if not account:
+            raise SchedulingError(
+                "--run-logged-out needs the Windows account that runs the task"
+            )
+        if any(character in account for character in "\r\n"):
+            raise SchedulingError("schedule account cannot contain line breaks")
     return SchedulePlan(
         requested,
         interval,
@@ -152,6 +183,8 @@ def make_plan(
         module_mode,
         fixed_times,
         command,
+        run_logged_out=run_logged_out,
+        user_id=account,
     )
 
 
@@ -168,6 +201,10 @@ def describe(plan: SchedulePlan) -> str:
     lines.extend(
         "  " + _display_command(command, plan.system) for command in plan.commands
     )
+    if plan.run_logged_out:
+        lines.append(
+            f"Runs while logged off: yes (S4U, account {plan.user_id})"
+        )
     return "\n".join(lines)
 
 
@@ -205,23 +242,31 @@ def _add(parent: ET.Element, name: str, text: str | None = None) -> ET.Element:
 
 
 def _windows_xml(plan: SchedulePlan, *, now: datetime | None = None) -> bytes:
-    if not plan.times:
-        raise SchedulingError("the Windows task XML is used only for fixed times")
-    stamp = (now or datetime.now()).strftime("%Y-%m-%d")
+    current = now or datetime.now()
+    stamp = current.strftime("%Y-%m-%d")
     root = ET.Element(_tag("Task"), {"version": "1.2"})
     registration = _add(root, "RegistrationInfo")
     _add(registration, "Description", "CVEBeacon scan and watch schedule")
     triggers = _add(root, "Triggers")
-    for value in plan.times:
-        trigger = _add(triggers, "CalendarTrigger")
-        _add(trigger, "StartBoundary", f"{stamp}T{value}:00")
+    if plan.times:
+        for value in plan.times:
+            trigger = _add(triggers, "CalendarTrigger")
+            _add(trigger, "StartBoundary", f"{stamp}T{value}:00")
+            _add(trigger, "Enabled", "true")
+            daily = _add(trigger, "ScheduleByDay")
+            _add(daily, "DaysInterval", "1")
+    else:
+        trigger = _add(triggers, "TimeTrigger")
+        repetition = _add(trigger, "Repetition")
+        _add(repetition, "Interval", f"PT{plan.every_hours}H")
+        _add(trigger, "StartBoundary", current.strftime("%Y-%m-%dT%H:%M:%S"))
         _add(trigger, "Enabled", "true")
-        daily = _add(trigger, "ScheduleByDay")
-        _add(daily, "DaysInterval", "1")
     principals = _add(root, "Principals")
     principal = _add(principals, "Principal", None)
     principal.set("id", "Author")
-    _add(principal, "LogonType", "InteractiveToken")
+    if plan.run_logged_out:
+        _add(principal, "UserId", plan.user_id)
+    _add(principal, "LogonType", "S4U" if plan.run_logged_out else "InteractiveToken")
     _add(principal, "RunLevel", "LeastPrivilege")
     settings = _add(root, "Settings")
     _add(settings, "MultipleInstancesPolicy", "IgnoreNew")
@@ -279,6 +324,14 @@ def _describe_windows_xml(text: str) -> str | None:
     else:
         schedule = None
     lines = ["Task: " + WINDOWS_TASK]
+    principal = root.find(f".//{_tag('Principal')}")
+    if principal is not None:
+        account = principal.findtext(_tag("UserId"))
+        logon_type = principal.findtext(_tag("LogonType")) or "InteractiveToken"
+        if account:
+            lines.append("Account: " + account)
+        logged_out = logon_type.casefold() in {"s4u", "password", "serviceaccount"}
+        lines.append("Runs while logged off: " + ("yes" if logged_out else "no"))
     if schedule:
         lines.append(schedule)
     lines.append("Commands:")
@@ -379,7 +432,7 @@ def _without_managed_block(text: str) -> str:
 
 def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
     if plan.system == "windows":
-        if plan.times:
+        if plan.times or plan.run_logged_out:
             descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
             try:
                 with os.fdopen(descriptor, "wb") as handle:
@@ -411,9 +464,17 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
             ["crontab", "-"], input=payload, capture_output=True, check=False
         )
     if result.returncode != 0:
-        raise SchedulingError(
-            f"schedule installation failed: {_crontab_text(result.stderr).strip()}"
-        )
+        detail = _crontab_text(result.stderr).strip() or _crontab_text(
+            getattr(result, "stdout", "")
+        ).strip()
+        hint = ""
+        if any(
+            value in detail.casefold()
+            for value in ("access is denied", "access denied")
+        ):
+            detail = detail.rstrip(".")
+            hint = "; run from an elevated prompt"
+        raise SchedulingError(f"schedule installation failed: {detail}{hint}")
 
 
 def _host_system(system: str) -> str:

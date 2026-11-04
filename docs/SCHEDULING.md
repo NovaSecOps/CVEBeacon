@@ -40,6 +40,17 @@ file that is deleted after `schtasks` returns. Interval mode uses the plain
 `schtasks /SC` form and needs no XML: `/SC HOURLY /MO N` for intervals below 24
 hours, or `/SC DAILY` for 24 hours.
 
+Add `--run-logged-out` to run the task whether the account is signed in or not.
+It is Windows-only, and Linux rejects it. The task principal becomes `LogonType
+S4U` with the current account as an explicit `UserId` (the environment's
+`USERDOMAIN\USERNAME`), and `RunLevel` stays least privilege. S4U stores no
+password, so outbound HTTPS works but Windows-authenticated network shares do
+not. The account must already exist; the CLI does not provision credentials.
+Creating an S4U task normally requires an elevated prompt, and an access-denied
+failure prints a one-line reminder. With this flag, interval mode also uses the
+XML form. Without it the default stays `InteractiveToken` for desktops.
+`schedule status` shows the account and whether the task runs while logged off.
+
 ## What runs
 
 `--command scan|watch|both` chooses the scheduled action. With no value, it
@@ -95,4 +106,4 @@ For manual administration, create an equivalent task or cron entry that runs
 an account with read access to the inventory and configuration, write access to
 the state/output directories, and access to required environment variables.
 
-Linux user cron requires an installed, running cron service. It uses the host's local clock and does not recover runs missed while the host is off; daylight-saving transitions can skip or repeat executions. Its environment is usually smaller than an interactive shell, so provision notification credentials for the scheduled account. Percent characters and line breaks in schedule paths are rejected. Avoid concurrent scanner invocations against the same state database. Windows task credentials and execution while logged out must be verified for the intended account through Task Scheduler; the CLI does not provision credentials.
+Linux user cron requires an installed, running cron service. It uses the host's local clock and does not recover runs missed while the host is off; daylight-saving transitions can skip or repeat executions. Its environment is usually smaller than an interactive shell, so provision notification credentials for the scheduled account. Percent characters and line breaks in schedule paths are rejected. Avoid concurrent scanner invocations against the same state database. Windows task credentials and execution while logged out must be verified for the intended account through Task Scheduler; the CLI provisions only the S4U principal described above.

@@ -73,7 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument("--force", action="store_true", help="overwrite an existing configuration after backing it up")
     schedule = commands.add_parser("schedule", help="manage the native recurring scan or watch")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
-    add = schedule_sub.add_parser("install"); add.add_argument("--every", "--hours", dest="every"); add.add_argument("--times", help="comma-separated local times such as 07:00,19:00"); add.add_argument("--command", dest="schedule_target", choices=("scan", "watch", "both"), help="what the schedule runs"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
+    add = schedule_sub.add_parser("install"); add.add_argument("--every", "--hours", dest="every"); add.add_argument("--times", help="comma-separated local times such as 07:00,19:00"); add.add_argument("--command", dest="schedule_target", choices=("scan", "watch", "both"), help="what the schedule runs"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--run-logged-out", action="store_true", help="Windows: run whether the account is logged on (S4U)"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
     schedule_status = schedule_sub.add_parser("status"); schedule_status.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto")
     delete = schedule_sub.add_parser("remove"); delete.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); delete.add_argument("--yes", action="store_true")
     watch = commands.add_parser("watch", help="keep a local database of recently changed CVEs")
@@ -559,7 +559,7 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         if args.times is not None and args.every is not None:
             raise CVEBeaconError("--times and --every are mutually exclusive")
         if args.times is not None:
-            plan = make_plan(config.config_path, times=args.times, command=target, system=args.platform, allow_incompatible=args.dry_run)
+            plan = make_plan(config.config_path, times=args.times, command=target, system=args.platform, allow_incompatible=args.dry_run, run_logged_out=args.run_logged_out)
         else:
             if args.every is None:
                 selected = input("Interval in hours [2/4/6/12/24, default 4]: ").strip() or "4"
@@ -571,7 +571,7 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
                 every = int(selected)
             except ValueError as exc:
                 raise CVEBeaconError("schedule interval must look like 4 or 4h") from exc
-            plan = make_plan(config.config_path, every, command=target, system=args.platform, allow_incompatible=args.dry_run)
+            plan = make_plan(config.config_path, every, command=target, system=args.platform, allow_incompatible=args.dry_run, run_logged_out=args.run_logged_out)
         print(describe(plan))
         if args.dry_run: return 0
         if not args.yes and input("Install this schedule? [y/N] ").strip().casefold() not in {"y", "yes"}: print("cancelled"); return 1
