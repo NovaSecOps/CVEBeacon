@@ -186,16 +186,21 @@ class HttpClient:
                 attempt += 1
                 continue
             if response.status_code in expected:
-                if throttle is not None:
-                    throttle.succeeded = True
                 if not decode_json:
+                    if throttle is not None:
+                        throttle.succeeded = True
                     return None
                 if response.status_code == 204 or not response.content:
+                    if throttle is not None:
+                        throttle.succeeded = True
                     return None
                 try:
-                    return response.json()
+                    payload = response.json()
                 except ValueError as exc:
                     raise SourceError(source, "source returned invalid JSON") from exc
+                if throttle is not None:
+                    throttle.succeeded = True
+                return payload
             if (
                 throttle is not None
                 and response.status_code in THROTTLE_STATUS

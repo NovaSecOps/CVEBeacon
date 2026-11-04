@@ -1002,6 +1002,21 @@ def test_throttle_give_up_reports_every_request():
     assert len(calls) == 6
 
 
+def test_malformed_success_does_not_enable_throttling():
+    def handler(request):
+        return httpx.Response(200, content=b"not json")
+
+    http = mock_client(handler)
+    throttle = Throttle(sleep=lambda _: None)
+    with pytest.raises(SourceError):
+        http.get_json(
+            "https://example.invalid/api",
+            source="euvd",
+            throttle=throttle,
+        )
+    assert throttle.succeeded is False
+
+
 def test_first_euvd_403_fails_without_backoff(tmp_path):
     config = write_config(tmp_path, sources=("nvd", "euvd"), initial="backfill")
     sleeps: list[float] = []
