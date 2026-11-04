@@ -545,7 +545,7 @@ def test_report_notification_is_sent_once_through_the_ledger(tmp_path):
         requests.append(request)
         return httpx.Response(200, json={})
 
-    outcome = record_report(store, 
+    outcome = record_report(store,
         "CVE-2026-0001", by="alice", note="Ticket OPS-42", notify_channels=("hook",)
     )
     assert outcome.channels == ("hook",)
@@ -639,13 +639,13 @@ def posted_events(requests) -> list[dict]:
 def test_notices_follow_the_audit_order_in_one_run(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
-    record_unreport(store, 
+    record_unreport(store,
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="third", notify_channels=("hook",)
     )
     requests: list[httpx.Request] = []
@@ -673,7 +673,7 @@ def test_notices_follow_the_audit_order_in_one_run(tmp_path):
 def test_withdrawal_waits_for_a_failed_report_during_backoff(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
 
@@ -682,7 +682,7 @@ def test_withdrawal_waits_for_a_failed_report_during_backoff(tmp_path):
 
     first = deliver(config, store, failing)
     assert first.channels[0].failed == 1
-    record_unreport(store, 
+    record_unreport(store,
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
 
@@ -710,7 +710,7 @@ def test_withdrawal_waits_for_a_failed_report_during_backoff(tmp_path):
 def test_given_up_notice_no_longer_blocks_later_notices(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
 
@@ -723,7 +723,7 @@ def test_given_up_notice_no_longer_blocks_later_notices(tmp_path):
         db.execute(
             "UPDATE watch_delivery SET status='failed', last_error='connection failed'"
         )
-    record_unreport(store, 
+    record_unreport(store,
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
     requests: list[httpx.Request] = []
@@ -740,7 +740,7 @@ def test_given_up_notice_no_longer_blocks_later_notices(tmp_path):
 def test_retry_failed_sends_the_predecessor_then_the_successor(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
 
@@ -748,7 +748,7 @@ def test_retry_failed_sends_the_predecessor_then_the_successor(tmp_path):
         raise httpx.ConnectError("refused")
 
     deliver(config, store, failing)
-    record_unreport(store, 
+    record_unreport(store,
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
     requests: list[httpx.Request] = []
@@ -768,7 +768,7 @@ def test_retry_failed_sends_the_predecessor_then_the_successor(tmp_path):
 def test_retry_ambiguous_sends_the_predecessor_then_the_successor(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="first", notify_channels=("hook",)
     )
 
@@ -776,7 +776,7 @@ def test_retry_ambiguous_sends_the_predecessor_then_the_successor(tmp_path):
         raise httpx.ReadTimeout("timeout")
 
     deliver(config, store, ambiguous)
-    record_unreport(store, 
+    record_unreport(store,
         "CVE-2026-0001", by="second", notify_channels=("hook",)
     )
     requests: list[httpx.Request] = []
@@ -937,11 +937,11 @@ def test_repeated_report_does_not_add_a_second_notice(tmp_path):
         requests.append(request)
         return httpx.Response(200, json={})
 
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="alice", notify_channels=("hook",)
     )
     deliver(config, store, handler)
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="alice", notify_channels=("hook",)
     )
     deliver(config, store, handler)
@@ -953,7 +953,7 @@ def test_repeated_report_does_not_add_a_second_notice(tmp_path):
 def test_reported_all_shows_notice_delivery_states(tmp_path, capsys):
     config = write_config(tmp_path, channels=CHANNELS)
     store = seed(config)
-    record_report(store, 
+    record_report(store,
         "CVE-2026-0001", by="alice", notify_channels=("hook",)
     )
     assert cli.main(
