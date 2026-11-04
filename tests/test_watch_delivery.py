@@ -708,6 +708,7 @@ def test_notify_test_sends_a_labelled_message(tmp_path):
     outcome = send_test(config, http, "hook")
     assert outcome.ok
     body = json.loads(seen[0].content)
+    assert body["version"] == 2
     assert body["test"] is True
     assert "no action needed" in body["message"]
     assert store.delivery_status() == ()
