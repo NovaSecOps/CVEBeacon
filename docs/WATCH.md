@@ -18,12 +18,15 @@ cvebeacon --config cvebeacon.toml watch evaluate --all
 cvebeacon --config cvebeacon.toml watch report CVE-2026-1234
 cvebeacon --config cvebeacon.toml watch unreport CVE-2026-1234
 cvebeacon --config cvebeacon.toml watch reported
+cvebeacon --config cvebeacon.toml watch statement CVE-2026-1234 --out statement.md
 ```
 
 `watch run` syncs the sources, evaluates the CVEs touched by that sync, and
 delivers pending alerts. `watch sync` only syncs; the durable touch queue keeps
 the evaluation for the next `watch run`. `watch notify` delivers pending alerts
-without syncing or evaluating.
+without syncing or evaluating. `watch statement` renders one stored CVE from a
+Markdown or Word template without syncing or delivering; see
+[statements](STATEMENTS.md).
 
 ## Configuration
 
