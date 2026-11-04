@@ -1311,6 +1311,90 @@ def test_concurrent_write_while_opening_an_existing_database_is_not_replacement(
     assert store.users() == ()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SQLite record locks")
+@pytest.mark.parametrize("start_during_open", [False, True])
+def test_opening_another_store_preserves_external_writer_exclusion(
+    tmp_path, monkeypatch, start_during_open
+):
+    import subprocess
+    import sys
+    from contextlib import ExitStack
+
+    path = tmp_path / "users.db"
+    writer = UserStore(path, clock=lambda: NOW)
+    writer.initialize()
+    reader = UserStore(path, clock=lambda: NOW)
+    real_verify = UserStore._verify_store_content
+
+    def external_writer():
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sqlite3, sys\n"
+                "db = sqlite3.connect(sys.argv[1], timeout=0)\n"
+                "try:\n"
+                "    db.execute('BEGIN IMMEDIATE')\n"
+                "except sqlite3.OperationalError as exc:\n"
+                "    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY:\n"
+                "        raise\n"
+                "    print('blocked')\n"
+                "else:\n"
+                "    db.rollback()\n"
+                "    print('acquired')\n"
+                "finally:\n"
+                "    db.close()\n",
+                str(path),
+            ],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        return result.stdout.strip()
+
+    with ExitStack() as transactions:
+        def verify_with_overlapping_writer(self, connection, **kwargs):
+            real_verify(self, connection, **kwargs)
+            if self is reader and start_during_open:
+                transactions.enter_context(writer.transaction())
+                assert external_writer() == "blocked"
+
+        monkeypatch.setattr(
+            UserStore, "_verify_store_content", verify_with_overlapping_writer
+        )
+        if not start_during_open:
+            transactions.enter_context(writer.transaction())
+            assert external_writer() == "blocked"
+        connection = reader._connect(create=False)
+        try:
+            assert external_writer() == "blocked"
+        finally:
+            connection.close()
+        assert external_writer() == "blocked"
+    assert external_writer() == "acquired"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX inode pins")
+def test_repeated_store_opens_reuse_one_database_descriptor(tmp_path, monkeypatch):
+    path = tmp_path / "users.db"
+    real_open = os.open
+    opened = []
+
+    def recording_open(candidate, *args, **kwargs):
+        descriptor = real_open(candidate, *args, **kwargs)
+        if Path(candidate) == path:
+            opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr("cvebeacon.watch.users.os.open", recording_open)
+    UserStore(path, clock=lambda: NOW).initialize()
+    for _ in range(20):
+        reader = UserStore(path, clock=lambda: NOW)
+        assert reader.users() == ()
+        reader._store_id = "different-store"
+        with pytest.raises(StateError, match="replaced"):
+            reader.users()
+    assert len(opened) == 1
+    assert os.fstat(opened[0]).st_ino == path.stat().st_ino
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file identity")
 def test_same_store_id_replacement_cannot_recycle_the_validated_inode(
     tmp_path, monkeypatch
@@ -1329,17 +1413,17 @@ def test_same_store_id_replacement_cannot_recycle_the_validated_inode(
     changed.add("replacement")
     assert changed._store_id == store._store_id
 
-    real_open, real_stat = os.open, os.stat
+    real_fstat, real_stat = os.fstat, os.stat
     real_connect = sqlite3.connect
     validated = []
     recycled = []
     swapped = []
 
-    def recording_open(candidate, *args, **kwargs):
-        descriptor = real_open(candidate, *args, **kwargs)
-        if Path(candidate) == path:
+    def recording_fstat(descriptor):
+        details = real_fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (original.st_dev, original.st_ino):
             validated.append(descriptor)
-        return descriptor
+        return details
 
     def swapping_connect(database, *args, **kwargs):
         if swapped:
@@ -1369,7 +1453,7 @@ def test_same_store_id_replacement_cannot_recycle_the_validated_inode(
             )
         return current
 
-    monkeypatch.setattr("cvebeacon.watch.users.os.open", recording_open)
+    monkeypatch.setattr("cvebeacon.watch.users.os.fstat", recording_fstat)
     monkeypatch.setattr("cvebeacon.watch.users.os.stat", recycling_stat)
     monkeypatch.setattr("cvebeacon.watch.users.sqlite3.connect", swapping_connect)
     with pytest.raises(

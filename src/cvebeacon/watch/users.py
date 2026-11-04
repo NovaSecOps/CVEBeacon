@@ -12,6 +12,7 @@ import re
 import secrets
 import sqlite3
 import stat
+import threading
 import unicodedata
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
@@ -221,6 +222,48 @@ def audit_name(value: object) -> str:
     return text
 
 
+# Closing any raw descriptor of a database can drop every POSIX record lock
+# this process holds on it, including another instance's SQLite transaction.
+# Reuse inode pins and leave cleanup to process exit, even after a failed open.
+_DATABASE_PINS: dict[tuple[int, int], list[int]] = {}
+_DATABASE_PINS_LOCK = threading.Lock()
+
+
+def _pin_database(path: Path, *, create: bool) -> tuple[int, bool]:
+    with _DATABASE_PINS_LOCK:
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            current = None
+        if current is not None and stat.S_ISREG(current.st_mode):
+            pins = _DATABASE_PINS.get((current.st_dev, current.st_ino))
+            if pins:
+                return pins[0], False
+
+        flags = (
+            os.O_RDWR if create else os.O_RDONLY
+        ) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            if create:
+                descriptor = os.open(
+                    path, flags | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                created = True
+            else:
+                descriptor = os.open(path, flags)
+                created = False
+        except FileExistsError:
+            descriptor = os.open(path, flags)
+            created = False
+        details = os.fstat(descriptor)
+        # A path swap between stat and open could select an already pinned
+        # inode. Retain that extra descriptor too: closing it is unsafe.
+        _DATABASE_PINS.setdefault(
+            (details.st_dev, details.st_ino), []
+        ).append(descriptor)
+        return descriptor, created
+
+
 class UserStore:
     def __init__(
         self, path: str | Path, *, clock=_utc_now
@@ -350,7 +393,6 @@ class UserStore:
         create: bool = True,
         _creation_locked: bool = False,
     ) -> sqlite3.Connection:
-        descriptor = None
         try:
             parent = self.path.parent
             if create:
@@ -371,21 +413,8 @@ class UserStore:
                     )
             connection = None
             if os.name == "posix":
-                flags = (
-                    os.O_RDWR if create else os.O_RDONLY
-                ) | getattr(os, "O_NOFOLLOW", 0)
                 try:
-                    if create:
-                        descriptor = os.open(
-                            path, flags | os.O_CREAT | os.O_EXCL, 0o600
-                        )
-                        created = True
-                    else:
-                        descriptor = os.open(path, flags)
-                        created = False
-                except FileExistsError:
-                    descriptor = os.open(path, flags)
-                    created = False
+                    descriptor, created = _pin_database(path, create=create)
                 except FileNotFoundError as exc:
                     raise StateError(
                         "CVEBeacon user database not found"
@@ -411,8 +440,8 @@ class UserStore:
                     details.st_dev,
                     details.st_ino,
                 )
-                # Pin the validated inode until SQLite and the post-open
-                # identity checks finish, so an unlinked inode cannot be reused.
+                # The process-lifetime pin prevents an unlinked inode from
+                # being reused during SQLite and post-open identity checks.
                 connection = sqlite3.connect(
                     f"{path.as_uri()}?mode={'rwc' if create else 'ro'}",
                     uri=True,
@@ -461,9 +490,6 @@ class UserStore:
             raise StateError(
                 f"cannot open CVEBeacon user database {self.path}: {exc}"
             ) from exc
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
 
     def _verify_store_content(
         self,
