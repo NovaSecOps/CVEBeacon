@@ -669,7 +669,8 @@ def dump_helper_diagnostics(
     acl = command(["icacls", str(wrapper)], stdin=subprocess.DEVNULL)
     print(f"HELPER icacls wrapper:\n{acl.stdout}{acl.stderr}", flush=True)
     print(
-        f"HELPER task XML file:\n{helper_xml.read_text(errors='replace')}",
+        f"HELPER task XML file:\n"
+        f"{helper_xml.read_text(encoding='utf-16', errors='replace')}",
         flush=True,
     )
     print(f"HELPER queried XML:\n{query_task_text(task_name)}", flush=True)
@@ -915,6 +916,7 @@ def smoke() -> None:
                 "/F",
             ],
             stdin=subprocess.DEVNULL,
+            timeout=60,
         )
         if helper.returncode != 0:
             print(
