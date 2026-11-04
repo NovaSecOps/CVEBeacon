@@ -2,7 +2,8 @@
 
 The core image runs the same CLI as a source installation. It contains no
 optional companion, host collectors, Kubernetes clients, cron or supervisor.
-No image publication is part of the reference build.
+No image publication is part of the reference build. See the
+[deployment guide](DEPLOY.md) for a complete Linux VM and Docker walkthrough.
 
 ```console
 docker build --target core --tag cvebeacon:local .
@@ -82,10 +83,10 @@ Allow a shutdown grace period before forced kill.
 
 ## Compose and dashboard
 
-[The Compose reference](../deploy/container/compose.yml) has explicit `scan` and
-`dashboard` profiles. Prepare private `state`, `reports`, `inventory` directories
-beside it with the ownership above and the sample configuration. Build once and
-invoke scans from your scheduler:
+[The Compose reference](../deploy/container/compose.yml) has explicit `scan`,
+`watch`, `run` and `dashboard` profiles. Prepare private `state`, `reports`,
+`inventory` directories beside it with the ownership above and the sample
+configuration. Build once and invoke scans from your scheduler:
 
 ```console
 cp deploy/container/cvebeacon.example.toml deploy/container/cvebeacon.toml

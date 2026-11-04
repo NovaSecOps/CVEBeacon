@@ -17,6 +17,54 @@ services:
       - ./state:/state:rw
       - ./reports:/reports:rw
     stop_grace_period: 30s
+  watch:
+    image: cvebeacon:local
+    build:
+      context: ../..
+      target: core
+    profiles: [watch]
+    command: [--config, /config/cvebeacon.toml, watch, run]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
+    env_file:
+      - path: ./cvebeacon.env
+        required: false
+    volumes:
+      - ./cvebeacon.toml:/config/cvebeacon.toml:ro
+      - ./inventory:/inventory:ro
+      - ./state:/state:rw
+      - ./reports:/reports:rw
+      # Optional file-based channel secrets. Docker creates a missing host
+      # directory as root; secret files must be mode 0600 and owned by 65532.
+      - ./secrets:/config/secrets:ro
+    stop_grace_period: 30s
+  run:
+    image: cvebeacon:local
+    build:
+      context: ../..
+      target: core
+    profiles: [run]
+    command: [--config, /config/cvebeacon.toml, run]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
+    env_file:
+      - path: ./cvebeacon.env
+        required: false
+    volumes:
+      - ./cvebeacon.toml:/config/cvebeacon.toml:ro
+      - ./inventory:/inventory:ro
+      - ./state:/state:rw
+      - ./reports:/reports:rw
+      # Optional file-based channel secrets. Docker creates a missing host
+      # directory as root; secret files must be mode 0600 and owned by 65532.
+      - ./secrets:/config/secrets:ro
+    stop_grace_period: 30s
   dashboard:
     image: cvebeacon:local
     build:

@@ -31,11 +31,38 @@ def write(tmp_path, extra: str):
 def test_old_config_without_watch_still_loads(tmp_path):
     config = write(tmp_path, "")
     assert config.watch.enabled is False
-    assert config.watch.database == (tmp_path / "cvebeacon-watch.db").resolve()
+    assert config.watch.database == (tmp_path / "state" / "cvebeacon-watch.db").resolve()
     assert config.watch.sources == ("nvd", "euvd", "cisa_kev", "eu_kev", "epss")
     assert config.watch.initial == "baseline"
     assert config.watch.backfill_days == 7
     assert config.watch.overlap_minutes == 15
+
+
+def test_watch_database_defaults_beside_an_absolute_state_database(tmp_path):
+    state = tmp_path / "var" / "state" / "state.db"
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[inventory]\npath = "inventory.csv"\n'
+        f'[state]\ndatabase = "{state.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    assert config.watch.database == (state.parent / "cvebeacon-watch.db").resolve()
+
+
+def test_watch_database_defaults_under_the_state_directory(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[inventory]\npath = "inventory.csv"\n', encoding="utf-8")
+    config = load_config(path)
+    assert config.watch.database == (
+        tmp_path / ".cvebeacon" / "cvebeacon-watch.db"
+    ).resolve()
+
+
+def test_explicit_absolute_watch_database_is_unchanged(tmp_path):
+    database = tmp_path / "elsewhere" / "watch.db"
+    config = write(tmp_path, f'\n[watch]\ndatabase = "{database.as_posix()}"\n')
+    assert config.watch.database == database.resolve()
 
 
 def test_watch_table_parses_and_resolves_the_database_path(tmp_path):
