@@ -6,8 +6,9 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import quote
 
-from .records import CVSS_PROVIDERS, CVSSEntry, DeliveryEvent, WatchView
+from .records import CVSSEntry, DeliveryEvent, WatchView
 from .rules import EVENT_KINDS, Rule
 
 NVD_URL = "https://nvd.nist.gov/vuln/detail/{cve_id}"
@@ -230,12 +231,14 @@ def _kind_label(event: DeliveryEvent, style: str) -> str:
 
 def _links(event: DeliveryEvent, style: str) -> str:
     view = event.view
+    cve_id = quote(str(event.cve_id), safe="-_.")
     values = [
-        _link(NVD_URL.format(cve_id=event.cve_id), "NVD", style),
-        _link(CVE_URL.format(cve_id=event.cve_id), "CVE.org", style),
+        _link(NVD_URL.format(cve_id=cve_id), "NVD", style),
+        _link(CVE_URL.format(cve_id=cve_id), "CVE.org", style),
     ]
     if view.euvd_id:
-        values.append(_link(EUVD_URL.format(euvd_id=view.euvd_id), "EUVD", style))
+        euvd_id = quote(str(view.euvd_id), safe="-_.")
+        values.append(_link(EUVD_URL.format(euvd_id=euvd_id), "EUVD", style))
     if view.cisa_kev_added is not None or view.eu_kev_added is not None:
         values.append(_link(KEV_URL, "KEV catalog", style))
     return " · ".join(values)
@@ -588,10 +591,16 @@ def webhook_payload(
                     "vendors": list(view.vendors),
                     "products": list(view.products),
                     "links": {
-                        "nvd": NVD_URL.format(cve_id=event.cve_id),
-                        "cve": CVE_URL.format(cve_id=event.cve_id),
+                        "nvd": NVD_URL.format(
+                            cve_id=quote(str(event.cve_id), safe="-_.")
+                        ),
+                        "cve": CVE_URL.format(
+                            cve_id=quote(str(event.cve_id), safe="-_.")
+                        ),
                         "euvd": (
-                            EUVD_URL.format(euvd_id=view.euvd_id)
+                            EUVD_URL.format(
+                                euvd_id=quote(str(view.euvd_id), safe="-_.")
+                            )
                             if view.euvd_id
                             else None
                         ),

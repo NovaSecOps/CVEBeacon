@@ -14,6 +14,7 @@ import pytest
 from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
 
 from cvebeacon import cli
+from cvebeacon.errors import ConfigurationError
 from cvebeacon.watch.delivery import deliver_pending, send_test
 from cvebeacon.watch.records import CVSSEntry, WatchRecord
 from cvebeacon.watch.store import WatchStore
@@ -640,7 +641,7 @@ def test_notify_test_sends_a_labelled_message(tmp_path):
     body = json.loads(seen[0].content)
     assert body["test"] is True
     assert "no action needed" in body["message"]
-    with pytest.raises(Exception):
+    with pytest.raises(ConfigurationError, match="unknown watch channel"):
         send_test(config, http, "missing")
 
 

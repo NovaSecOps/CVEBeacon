@@ -109,7 +109,7 @@ class SecretRef:
         if self.file is not None:
             try:
                 return self.file.read_text(encoding="utf-8").strip() or None
-            except OSError:
+            except (OSError, UnicodeError):
                 return None
         return None
 
