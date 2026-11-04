@@ -1042,7 +1042,9 @@ delete them and run `watch sync` again. They are not migrated.
   host, an optional note, a UTC time, and the audit chain value. The latest row
   for a CVE is its current state.
 - `cvebeacon-users.db` sits beside the watch database and holds `cb_user`
-  accounts and the `cb_user_audit` trail. It is not part of the watch database,
+  accounts and the `cb_user_audit` trail. Audit rows record the action, subject
+  username, optional actor (administrator or `bootstrap`), time, operating-system
+  account, host and chain value. It is not part of the watch database,
   so the watch history can be rebuilt without losing accounts, and its POSIX
   mode is `0600`. It contains password hashes; keep it with the watch database
   backup and inside the same ACL-protected directory on Windows.

@@ -728,6 +728,11 @@ def test_admin_only_user_actions_require_an_admin_login(tmp_path, monkeypatch, c
     assert cli.main([*base, "disable", "bob", "--admin-user", "alice"]) == 0
     assert users.find("bob").disabled is True
     assert users.audit_entries()[-1].actor == "alice"
+    assert users.verify_audit() is None
+    action_id = users.audit_entries()[-1].id
+    with sqlite3.connect(users.path) as db:
+        db.execute("UPDATE cb_user_audit SET actor=NULL WHERE id=?", (action_id,))
+    assert users.verify_audit() == action_id
     prompt(monkeypatch, PASSWORD)
     assert cli.main([*base, "enable", "bob", "--admin-user", "alice"]) == 0
     prompt(monkeypatch, PASSWORD)
@@ -1002,3 +1007,27 @@ def test_password_spellings_never_echo_the_value(capsys):
         error = capsys.readouterr().err
         assert secret not in error
         assert "command line" in error or "unrecognized arguments" in error
+
+
+def test_creation_rejects_normalized_username_email_collisions(tmp_path):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.initialize()
+    now = NOW.isoformat()
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "INSERT INTO cb_user(username,created_at,updated_at) VALUES (?,?,?)",
+            ("É@example.com", now, now),
+        )
+    with pytest.raises(ConfigurationError, match="already registered"):
+        store.add("bob", email="é@example.com")
+
+
+def test_schema6_with_no_chain_column_fails_closed(tmp_path):
+    config = config_with(tmp_path)
+    store = seed(config)
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE watch_report DROP COLUMN chain")
+        db.execute("UPDATE watch_meta SET value='6' WHERE key='schema_version'")
+    with pytest.raises(StateError, match="no chain column"):
+        store.verify_reports()

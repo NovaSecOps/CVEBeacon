@@ -352,10 +352,16 @@ class UserStore:
                 (key, row["id"]),
             )
         db.execute("DROP INDEX IF EXISTS cb_user_email")
-        username_keys = {
-            email_lookup_key(str(row["username"])): str(row["username"])
-            for row in db.execute("SELECT username FROM cb_user")
-        }
+        username_keys: dict[str, str] = {}
+        for row in db.execute("SELECT username FROM cb_user"):
+            name = str(row["username"])
+            key = email_lookup_key(name)
+            if key in username_keys and username_keys[key] != name:
+                raise StateError(
+                    "CVEBeacon account usernames collide under Unicode case "
+                    "folding; correct the account file"
+                )
+            username_keys[key] = name
         for row in db.execute(
             "SELECT username,email_key FROM cb_user "
             "WHERE email_key IS NOT NULL"

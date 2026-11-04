@@ -556,7 +556,7 @@ class WatchStore:
                     "ALTER TABLE watch_delivery ADD COLUMN first_attempt_at TEXT"
                 )
         if version in {"1", "2", "3", "4", "5", "6"}:
-            WatchStore._migrate_report_identity(db)
+            WatchStore._migrate_report_identity(db, version)
         if version != str(SCHEMA_VERSION):
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
@@ -604,7 +604,9 @@ class WatchStore:
         )
 
     @staticmethod
-    def _migrate_report_identity(db: sqlite3.Connection) -> None:
+    def _migrate_report_identity(
+        db: sqlite3.Connection, version: str
+    ) -> None:
         """Add identity/chain columns without ever rewriting a stored chain.
 
         The legacy boundary is recorded once in ``watch_meta``. A genuine
@@ -633,6 +635,11 @@ class WatchStore:
             if name not in columns:
                 db.execute(f"ALTER TABLE watch_report ADD COLUMN {name} {definition}")
         if not had_chain:
+            if version != "5":
+                raise StateError(
+                    "watch_report has no chain column on schema version "
+                    f"{version}; refusing to guess its history"
+                )
             if boundary is not None:
                 raise StateError(
                     "report legacy boundary exists but the chain column is "
