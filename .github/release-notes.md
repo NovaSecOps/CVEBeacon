@@ -33,16 +33,17 @@ When published, the core image is available from GHCR:
 
 ```console
 docker pull ghcr.io/novasecops/cvebeacon:{{VERSION}}
-docker pull ghcr.io/novasecops/cvebeacon:latest
 ```
 
 Platforms are `linux/amd64` and `linux/arm64` (Raspberry Pi class boards). The
 image runs as UID/GID 65532 with no shell and no scheduler. Manifest digest:
 `{{IMAGE_DIGEST}}`.
 
-The `latest` tag follows the highest stable version tag. An older version or a
-repeated run does not move it backward. The version tag above is immutable;
-publish a new patch version instead of replacing it.
+The `latest` tag follows the highest stable version tag present in the
+registry. Publishing runs are serialized across release tags, so an older or
+repeated release does not move it backward. Pre-releases publish only their
+version tag. The version tag above is immutable; publish a new patch version
+instead of replacing it.
 
 ## Upgrade notes
 

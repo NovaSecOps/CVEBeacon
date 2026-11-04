@@ -74,7 +74,11 @@ release creation.
    starts the release workflow; it does not publish anything by itself.
 3. Approve the `release` environment deployment requests for the container
    publish job and the draft release job. Approval is required before any
-   image push or release creation.
+   image push or release creation. Container publishing is serialized across
+   all release tags: one shared concurrency group with cancellation disabled
+   covers the registry check through the image push. Queued publish runs
+   execute one at a time, and a newer queued run can replace an older waiting
+   run, so publish tags one at a time.
 4. Wait for the `verify`, `python-dist`, `windows-exe`, `container-publish` and
    `release` jobs. If a job fails, do not assume the run left nothing behind:
    the image push happens before draft creation, and a draft can exist with
@@ -86,19 +90,22 @@ release creation.
    `sha256sum -c SHA256SUMS`. Install the wheel in a clean environment and run
    `cvebeacon --help`. Extract the Windows archive on a Windows host and run
    `cvebeacon.exe --help`.
-7. Confirm the published image tags and the manifest digest recorded in the
+7. Confirm the published image tag and the manifest digest recorded in the
    notes (replace `0.1.0` with the released version). The version tag is
-   immutable; `latest` moves only when the version is the highest stable tag
-   in the registry:
+   immutable. For a stable release, also confirm `latest`:
 
    ```console
    docker buildx imagetools inspect ghcr.io/novasecops/cvebeacon:0.1.0
-   docker buildx imagetools inspect ghcr.io/novasecops/cvebeacon:latest
    docker pull ghcr.io/novasecops/cvebeacon:0.1.0
    docker run --rm --network none --read-only --cap-drop ALL \
      --security-opt no-new-privileges:true \
      ghcr.io/novasecops/cvebeacon:0.1.0 --help
+   docker buildx imagetools inspect ghcr.io/novasecops/cvebeacon:latest
    ```
+
+   `latest` moves only when the version is the highest stable tag in the
+   registry at the time the serialized publish job runs. A pre-release
+   publishes only its version tag and does not create or move `latest`.
 
 8. Publish the draft release only after the checks above pass. Publishing is a
    separate manual action; the workflow never publishes a release.
@@ -139,9 +146,9 @@ owner-authorized.
    a superseding patch version. Deleting an unpublished GHCR package version is
    an owner decision; never move or retag an existing version.
 7. If `latest` was not moved, leave it. The workflow promotes `latest` only
-   when the released version is the highest stable tag. Publish the next higher
-   patch and let the workflow move `latest` forward; do not point it backward
-   by hand.
+   when the released version is the highest stable tag present when the
+   serialized publish job runs. Publish the next higher patch and let the
+   workflow move `latest` forward; do not point it backward by hand.
 
 ## After publishing
 
