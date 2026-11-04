@@ -271,6 +271,7 @@ class ReportedMark:
     by: str
     note: str | None
     at: str
+    username: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

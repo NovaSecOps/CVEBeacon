@@ -19,6 +19,7 @@ cvebeacon --config cvebeacon.toml watch report CVE-2026-1234
 cvebeacon --config cvebeacon.toml watch unreport CVE-2026-1234
 cvebeacon --config cvebeacon.toml watch reported
 cvebeacon --config cvebeacon.toml watch statement CVE-2026-1234 --out statement.md
+cvebeacon --config cvebeacon.toml users list
 ```
 
 `watch run` syncs the sources, evaluates the CVEs touched by that sync, and
@@ -64,6 +65,19 @@ language = "en"
   unknown value is rejected with the supported list. Each channel can override
   it; see [message format and language](#format-and-language). These
   messages use the catalog even when the CLI output around them stays English.
+
+Optional client-report identity policy:
+
+```toml
+[watch.reporting]
+identity = "open"   # open, registered, or authenticated
+```
+
+- `open` is the default and keeps the free-text `--by` behavior.
+- `registered` requires `--by` to name an enabled CVEBeacon user.
+- `authenticated` requires `--user` plus that user's password, and refuses
+  `--by`. The three modes are described under
+  [reported to clients](#reported-to-clients).
 
 When `[watch].enabled = true`, `[inventory]` is optional. Commands that need an
 inventory (`scan`, `export`, `asset`, `inventory ...`, `doctor`, and the
@@ -330,8 +344,9 @@ failed rows have reached the attempt cap, the line adds
 
 A per-CVE mark records that clients have been informed, so the same CVE is not
 reported twice. The mark is append-only: every report or withdrawal is kept,
-and the latest row is the current state. The watch store exposes the same
-operations for other front ends.
+and the latest row is the current state. A single reporting service binds the
+configured identity policy and user store for every front end; the raw store
+write methods are private.
 
 ```console
 cvebeacon --config cvebeacon.toml watch report CVE-2026-1234
@@ -343,10 +358,6 @@ cvebeacon --config cvebeacon.toml watch reported --all
 
 - `watch report` requires the CVE to exist in the watch database; otherwise it
   prints a clear error and exits 2.
-- `--by` is free text of at most 100 characters. It must be single-line UTF-8
-  without control characters. The value is unauthenticated free text: in open
-  mode the CLI defaults it to the OS login name, or `unknown` when that name is
-  unavailable or unsafe. A store caller must pass it explicitly.
 - `--note` is optional, at most 500 characters, and single-line UTF-8 without
   control characters.
 - Reporting a CVE that is already reported prints the existing mark and exits 0
@@ -359,13 +370,177 @@ cvebeacon --config cvebeacon.toml watch reported --all
   time, and note. `--all` prints the full audit trail and each notice's
   per-channel delivery state (`pending`, `sent`, `failed`, `ambiguous`, or
   `sending`). Notice delivery errors remain visible in `watch status` counts.
+- `watch reported --verify` recomputes the report audit chain and exits 2 at
+  the first row that no longer matches.
+- `watch reported --all --format text|csv|json` exports the audit trail.
+  CSV and JSON additionally carry the account id, username, identity mode,
+  operating-system account, host, chain value, and a legacy flag. CSV cells
+  that start with a spreadsheet formula marker are prefixed with an apostrophe.
+  `--format` other than `text` requires `--all`.
+
+### Identity modes and accounts
+
+The `[watch.reporting] identity` setting selects how a report identifies the
+person:
+
+| Mode | Who may report | Recorded identity |
+| --- | --- | --- |
+| `open` (default) | anyone with local access | free-text `--by`, or the OS login name |
+| `registered` | an enabled CVEBeacon user named by `--by` | display name, username and user id |
+| `authenticated` | a CVEBeacon user who enters the password | display name, username and user id |
+
+In `registered` mode `--by` accepts a username or email address,
+case-insensitively, and must match an enabled account. In `authenticated` mode
+the command is `watch report CVE-2026-1234 --user alice`; `--by` is refused and
+the login name is the username, never the email address. An unknown user, a
+disabled user, and a wrong password all print the same error and exit 2 without
+adding a report row.
+
+In open mode `--by` is free text of at most 100 characters and must be
+single-line UTF-8 without control characters. It defaults to the OS login name,
+or `unknown` when that name is unavailable or unsafe.
+
+Accounts are managed from the server command line; access to the account file
+is the administrator boundary:
+
+```console
+cvebeacon --config cvebeacon.toml users add alice --name "Alice Smith" --email alice@example.com
+cvebeacon --config cvebeacon.toml users add bob --no-password
+cvebeacon --config cvebeacon.toml users passwd alice
+cvebeacon --config cvebeacon.toml users disable alice
+cvebeacon --config cvebeacon.toml users enable alice
+cvebeacon --config cvebeacon.toml users unlock alice
+cvebeacon --config cvebeacon.toml users list
+cvebeacon --config cvebeacon.toml users verify
+```
+
+In `authenticated` mode, account administration needs an administrator login:
+`--admin-user NAME` plus a hidden password prompt, verified through the same
+account store. The action is audited with the administrator as its actor. The
+first `users add --admin` is the bootstrap exception when no administrator
+account exists; it is audited as `(bootstrap)` and requires a password. A user may
+change their own password with `users passwd USERNAME` and their current
+password; resetting another user's password, disabling, enabling or unlocking
+an account requires `--admin-user` and an administrator account. In `open` and
+`registered` modes, these commands keep the direct behavior and `--admin` is a
+stored label rather than an enforced privilege.
+
+```console
+cvebeacon --config cvebeacon.toml users add alice --admin
+cvebeacon --config cvebeacon.toml users add bob --admin-user alice
+cvebeacon --config cvebeacon.toml users passwd bob
+cvebeacon --config cvebeacon.toml users passwd bob --admin-user alice
+cvebeacon --config cvebeacon.toml users disable bob --admin-user alice
+```
+
+The CLI runs as the CVEBeacon service account. Anyone who can use that shell can
+still edit the database files directly, so authenticated mode attributes a
+report to whoever knows the password (or could reset it under the administrator
+rules); it guards against mistakes and casual misattribution, not against
+co-administrators or someone with the service account. Person-level separation
+needs a front end that people use instead of a service-account shell, such as
+the planned dashboard. The report and user-admin audit chains make edits to
+those logs detectable unless the person also recomputes them; `cb_user` account
+rows and the configuration file are not covered by either chain. An action with
+an empty actor after bootstrap in authenticated mode means it was performed
+outside the administrator gate.
+
+- A username is 1–64 characters from letters, digits, dot, underscore, at sign,
+  or hyphen, and is unique case-insensitively. A display name is optional and at
+  most 100 characters. An email address is optional, lightly checked, and
+  unique case-insensitively when present.
+- `--no-password` is intended for `registered` mode. An account without a
+  password cannot log in until `users passwd` sets one; `authenticated` mode
+  rejects it.
+- There is no delete command because the audit trail refers to accounts. Use
+  `disable`; the account and its history remain.
+- `users list` never displays password material. `users verify` recomputes the
+  user-admin audit chain and exits 2 at the first broken row. It covers the
+  user-admin audit log only; direct edits to `cb_user` (password hash, disabled
+  flag, role, email) are not part of that chain. Treat file access as
+  administrator access and compare against a trusted backup if account-row
+  tampering matters.
+
+Passwords are read with hidden input and confirmation; there is no
+`--password` option and no environment variable for a password. They must be
+12–1024 characters, cannot be all whitespace, and cannot equal the account's
+username or email address. They are hashed with the dashboard's
+`scrypt:32768:8:1` scheme, which stores a salt and its parameters in the hash so
+the parameters can be raised later. Verification is constant-time for the hash
+comparison; an unknown or unusable account still runs a fixed dummy hash so
+timing does not reveal valid usernames. Five consecutive failures lock the
+account for 15 minutes; a success resets the count, and `users unlock` clears a
+lock. Lockout is wall-clock UTC based: moving the host clock forward past the
+deadline ends the lock, and moving it backward extends it. Control of the host
+clock is administrator access. Every failed attempt is recorded in the user
+audit trail with the typed name (sanitized and truncated), time,
+operating-system account and host, never the password.
+
+The account file is `cvebeacon-users.db` beside the watch database. It is
+created owner-only (`0600`) on POSIX and is separate from the CVE history so
+credentials are not copied with a public watch database and accounts survive a
+watch database rebuild. On POSIX every ancestor of the account file up to the
+filesystem root must be owned by the CVEBeacon account or root, or be
+sticky-bit protected; a root-owned sticky directory such as `/tmp` is accepted.
+An ancestor owned by another account is rejected unless it is sticky-bit
+protected; read-only mode alone is not trusted because that owner could change
+it. When
+CVEBeacon creates a missing data directory it uses mode `0700` regardless of
+the process umask; an existing directory that fails the check is reported with
+an actionable `chmod go-w <dir>` message. The account database stores a random
+store id in `cb_user_meta`; after SQLite opens the file, a read-only first
+transaction checks the `cb_user` schema and that id, and compares the file's
+device, inode, size and modification time. A replacement is rejected even when
+the filesystem reuses an inode number. Existing account databases without a
+store id receive one once. Back up both files together, and keep account
+backups at `0600` as well. On
+Windows, place both in the
+[ACL-protected data directory](DEPLOY.md#windows-data-directory-acls). The same
+account store and verify function are intended for a future dashboard login.
+
+### Report audit trail
+
+Every `watch_report` row records the CVE, the action, the display identity, the
+user id and username (registered and authenticated modes only), the identity
+mode, the operating-system account, the host, the UTC time, and an optional
+note. The operating-system account comes from `pwd.getpwuid` on POSIX,
+`GetUserNameExW` on Windows, or `getpass.getuser()` as a fallback; it is
+informational and never used for authorization.
+
+Each chained row stores `chain = sha256(previous chain || canonical JSON of the
+row)`. The chain is **unkeyed**: it detects edits and deletions that do not also
+recompute the hashes, and it is not a signature or authentication of the writer.
+Anyone who can write the database can recompute the remaining chain, append a
+forged row with a valid chain, or remove the newest rows. Keep an external
+reference (a backup, an off-box copy of the head, or write-once storage) for
+that stronger claim. `watch reported --verify` reports the first broken row and
+exits 2; when it succeeds it prints how many rows are chained and how many are
+legacy and unchained. The user audit table uses the same construction.
+
+The watch database schema is version 7. Rows written before the identity upgrade
+have `chain_version = 0`, a null chain, and are reported as legacy unchained;
+the chain starts with the first report written after the upgrade. Migration
+records the highest legacy row id in `watch_meta` once. A legacy row must be at
+or below that boundary and have null identity columns; marking an identity-era
+row as legacy is reported as damage. Verification never rewrites a stored
+chain, even if the schema metadata is rolled back. If the chain columns are
+dropped after the boundary exists, migration fails closed rather than
+recreating legacy history. A schema 6 database keeps its existing chains and
+gains the explicit version marker without re-hashing them.
+
+A writer who can edit the database can still relabel the whole trail as legacy
+by changing the boundary or the schema. That state is indistinguishable from a
+genuine never-reported schema-5 database, so compare the printed chained count
+with an external reference; the chain alone cannot rule out a total rewrite.
 
 A reported CVE is displayed as
-`Reported to clients by X at YYYY-MM-DD HH:MM UTC`. The mark appears in
-`watch events` lines, in alert messages and the initial digest when the CVE is
-already reported at send time, and in the generic webhook document as
-`view.reported` (`null` or an object with `by`, `at`, and `note`). `watch status`
-prints the number of currently reported CVEs.
+`Reported to clients by X at YYYY-MM-DD HH:MM UTC`; registered and
+authenticated marks add the username in parentheses when it differs from the
+display name. The mark appears in `watch events` lines, in alert messages and
+the initial digest when the CVE is already reported at send time, and in the
+generic webhook document as `view.reported` (`null` or an object with `by`,
+`at`, and `note`, plus `username` when present). `watch status` prints the
+number of currently reported CVEs.
 
 ### Reported notification
 
@@ -380,10 +555,12 @@ notify_reported = true
 ```
 
 The message is
-`[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-04 12:00 UTC`,
+`[REPORTED] CVE-2026-1234 reported to clients by Alice Smith (alice) <alice@example.com> at 2026-11-04 12:00 UTC`,
 with the optional note as a second line, or
-`[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-04 12:00 UTC`.
-Channels without the setting receive nothing.
+`[UNREPORTED] CVE-2026-1234 report withdrawn by Alice Smith (alice) at 2026-11-04 12:00 UTC`.
+The username appears when it differs from the display name, and the email
+address when the account has one. In open mode the free-text name is used
+unchanged. Channels without the setting receive nothing.
 
 Notices use the same delivery ledger as alerts. `watch report` and
 `watch unreport` attempt only their own notice immediately and print the
@@ -401,10 +578,10 @@ earlier notice first, and the successor follows it in the same ordered run.
 
 The generic webhook receives a notice as a normal version 2 document whose
 event has `kind` `reported` or `unreported`, `rule` `@reported`, and an extra
-`notice` object (`action`, `by`, and `note`). Notice events are delivery records
-rather than alert events, so `watch events` does not list them; use
-`watch reported --all` or the channel counts in `watch status` to inspect their
-delivery state.
+`notice` object (`action`, `by`, and `note`, plus `username` and `email` when
+present). Notice events are delivery records rather than alert events, so
+`watch events` does not list them; use `watch reported --all` or the channel
+counts in `watch status` to inspect their delivery state.
 
 ## Messages
 
@@ -585,12 +762,13 @@ is `null` when the CVE record has none. Version 2 adds these two `view` fields.
 Every version 1 field keeps its meaning. `view.kev.cisa` and `view.kev.eu` are
 `null` when the CVE is not in that catalog. `epss` and `links.euvd` are `null`
 when the value is absent. `view.reported` is `null` or an object with `by`,
-`at`, and `note`. The order is the same as the text messages, with notice
+`at`, and `note`, plus `username` when the identity came from a CVEBeacon
+account. The order is the same as the text messages, with notice
 events after alert events. A test message adds `"test": true` and `"message"`
 and has an empty `events` list. A report or unreport notice event has `kind`
 `reported` or `unreported`, `rule` `@reported` (an `@`-prefixed name is reserved
 and cannot be a configured rule), and a `notice` object with `action` (`report`
-or `unreport`), `by`, and `note`.
+or `unreport`), `by`, and `note`, plus `username` and `email` when present.
 
 ### Privacy
 
@@ -817,7 +995,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 5. An unknown version still fails closed. The version 1
+place to schema version 7. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to
@@ -829,7 +1007,15 @@ once. The version 2 upgrade keeps delivery rows and adds the `sending` and
 `ambiguous` states. The version 3 upgrade adds `first_attempt_at`, which records
 when a row was first claimed. The version 4 to 5 upgrade adds the
 `watch_report` trail; the table is created by the schema step for every
-upgrade, so older versions get it too, and no existing row is rewritten.
+upgrade, so older versions get it too, and no existing row is rewritten. The
+version 5 to 7 upgrade adds the identity, operating-system account, host and
+chain columns to `watch_report`. Existing rows keep their CVE, action, name,
+note and time; the identity fields stay null, `chain_version` is 0 and the chain
+is null, so those rows are explicitly legacy and unchained. The chain starts
+with the first report written after the upgrade. A version 6 database keeps its
+existing chains and gains `chain_version = 1` without re-hashing them. Migration
+never rewrites a stored chain, even when the version metadata claims to be
+older. Later edits and middle deletions then fail `watch reported --verify`.
 After the upgrade, run
 `cvebeacon watch evaluate --all --yes`
 BEFORE the first `watch run`, as after adding a rule. Otherwise every CVE from
@@ -870,8 +1056,17 @@ delete them and run `watch sync` again. They are not migrated.
   `pending`, `sending`, `sent`, `failed`, or `ambiguous`; `attempts`,
   `last_error`, and `updated_at` drive retries and status output.
 - `watch_report` is the append-only report trail. Each row records the CVE,
-  `report` or `unreport`, the free-text identity, an optional note, and a UTC
-  time. The latest row for a CVE is its current state.
+  `report` or `unreport`, the display identity, user id and username when the
+  identity mode provides them, the identity mode, the operating-system account,
+  host, an optional note, a UTC time, and the audit chain value. The latest row
+  for a CVE is its current state.
+- `cvebeacon-users.db` sits beside the watch database and holds `cb_user`
+  accounts and the `cb_user_audit` trail. Audit rows record the action, subject
+  username, optional actor (administrator or `(bootstrap)`), time, operating-system
+  account, host and chain value. It is not part of the watch database,
+  so the watch history can be rebuilt without losing accounts, and its POSIX
+  mode is `0600`. It contains password hashes; keep it with the watch database
+  backup and inside the same ACL-protected directory on Windows.
 - `watch_meta.view_policy` records the configured sources that affect view
   derivation: `cisa_kev`, `eu_kev`, `euvd`, and `epss`. When it changes, every stored
   view is recomputed in batches of 5,000 and every stored CVE is queued,

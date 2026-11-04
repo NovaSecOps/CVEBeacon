@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import getpass
+import os
+import socket
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +15,9 @@ from .records import ReportedMark
 
 BY_LIMIT = 100
 NOTE_LIMIT = 500
+OS_ACCOUNT_LIMIT = 100
+HOST_LIMIT = 255
+IDENTITY_MODES = ("open", "registered", "authenticated")
 # Not a valid rule name: rule names must start with a letter or digit, and the
 # parser reserves every ``@``-prefixed name for internal notice events.
 NOTICE_RULE = "@reported"
@@ -22,6 +27,19 @@ NOTICE_LABEL_KEYS = {
     "unreported": "label_unreported",
 }
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+REPORT_CHAIN_FIELDS = (
+    "id",
+    "cve_id",
+    "action",
+    "by",
+    "user_id",
+    "username",
+    "identity_mode",
+    "os_account",
+    "host",
+    "note",
+    "at",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +52,17 @@ class ReportedEntry:
     by: str
     note: str | None
     at: str
+    user_id: int | None = None
+    username: str | None = None
+    identity_mode: str | None = None
+    os_account: str | None = None
+    host: str | None = None
+    chain: str | None = None
+    chain_version: int = 1
+
+    @property
+    def legacy(self) -> bool:
+        return self.chain_version == 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +84,7 @@ def normalize_cve_id(value: object) -> str:
     return identifier
 
 
-def _checked_text(value: object, label: str) -> str:
+def checked_text(value: object, label: str) -> str:
     """Reject controls, line boundaries and invalid Unicode before trimming.
 
     The error never includes the supplied value, so a terminal control or a
@@ -80,6 +109,66 @@ def _checked_text(value: object, label: str) -> str:
     return text
 
 
+def safe_environment_text(value: object, limit: int) -> str:
+    """Return a bounded single-line environment value or ``unknown``."""
+    try:
+        text = checked_text(value, "environment value").strip(" ")
+    except ConfigurationError:
+        return "unknown"
+    if not text:
+        return "unknown"
+    return text[:limit]
+
+
+def os_account() -> str:
+    """The operating-system account, informational only and never trusted."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(257)
+            size = ctypes.c_ulong(257)
+            if ctypes.windll.secur32.GetUserNameExW(2, buffer, ctypes.byref(size)):
+                return safe_environment_text(buffer.value, OS_ACCOUNT_LIMIT)
+        except (AttributeError, OSError, ValueError):
+            pass
+    else:
+        try:
+            import pwd
+
+            return safe_environment_text(
+                pwd.getpwuid(os.getuid()).pw_name, OS_ACCOUNT_LIMIT
+            )
+        except (ImportError, KeyError, OSError):
+            pass
+    try:
+        return safe_environment_text(getpass.getuser(), OS_ACCOUNT_LIMIT)
+    except (OSError, KeyError, ImportError):
+        return "unknown"
+
+
+def host_name() -> str:
+    try:
+        return safe_environment_text(socket.gethostname(), HOST_LIMIT)
+    except OSError:
+        return "unknown"
+
+
+def validate_identity_mode(value: object) -> str:
+    text = str(value).strip().casefold()
+    if text not in IDENTITY_MODES:
+        raise ConfigurationError(
+            "watch.reporting.identity must be open, registered, or authenticated"
+        )
+    return text
+
+
+def identity_label(by: str, username: str | None = None) -> str:
+    if username and username.casefold() != by.casefold():
+        return f"{by} ({username})"
+    return by
+
+
 def default_identity() -> str:
     """Return the OS login name, or ``unknown`` when it cannot be used safely."""
     try:
@@ -87,7 +176,7 @@ def default_identity() -> str:
     except (OSError, KeyError, ImportError):
         return "unknown"
     try:
-        text = _checked_text(name, "OS login name").strip(" ")
+        text = checked_text(name, "OS login name").strip(" ")
     except ConfigurationError:
         return "unknown"
     if not text or len(text) > BY_LIMIT:
@@ -98,7 +187,7 @@ def default_identity() -> str:
 def validate_identity(value: object) -> str:
     if value is None:
         raise ConfigurationError("reported by is required")
-    text = _checked_text(value, "reported by").strip(" ")
+    text = checked_text(value, "reported by").strip(" ")
     if not text:
         raise ConfigurationError("reported by must not be empty")
     if len(text) > BY_LIMIT:
@@ -111,7 +200,7 @@ def validate_identity(value: object) -> str:
 def validate_note(value: object | None) -> str | None:
     if value is None:
         return None
-    text = _checked_text(value, "note").strip(" ")
+    text = checked_text(value, "note").strip(" ")
     if not text:
         return None
     if len(text) > NOTE_LIMIT:
@@ -136,6 +225,6 @@ def format_reported(
     return translate(
         catalog_for(language),
         "reported_line",
-        by=mark.by,
+        by=identity_label(mark.by, mark.username),
         at=format_timestamp(mark.at),
     )
