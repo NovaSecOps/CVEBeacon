@@ -374,7 +374,7 @@ class _XMLBudget:
 
 
 def _xml_limit(resource: str) -> CVEBeaconError:
-    return CVEBeaconError(f"statement template XML {resource} limit exceeded")
+    return CVEBeaconError(f"statement template {resource} limit exceeded")
 
 
 def _utf8_width(char: str) -> int:
@@ -399,6 +399,12 @@ def _preflight_xml(data: bytes, encoding: str, budget: _XMLBudget, name: str) ->
     # Include the implicit xml namespace. Every name is conservatively charged
     # against the longest namespace spelling, even when it is unqualified.
     longest_uri = 36
+    def check_names() -> None:
+        expanded = name_bytes + names * (longest_uri + 2)
+        if (expanded > MAX_PART_EXPANDED_BYTES
+            or budget.expanded_bytes + expanded > MAX_PACKAGE_EXPANDED_BYTES):
+            raise _xml_limit("expanded name byte")
+
     index = 0
     while (start := xml.find("<", index)) >= 0:
         for opening, closing in (("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")):
@@ -414,11 +420,13 @@ def _preflight_xml(data: bytes, encoding: str, budget: _XMLBudget, name: str) ->
                 index = len(xml) if end < 0 else end + 1
                 continue
             index = start + 1
-            while index < len(xml) and xml[index] not in " \t\r\n" and xml[index] not in "/>":
-                name_bytes += _utf8_width(xml[index]) * 2
-                index += 1
             elements += 1
             names += 2  # start and end callbacks
+            check_names()
+            while index < len(xml) and xml[index] not in " \t\r\n" and xml[index] not in "/>":
+                name_bytes += _utf8_width(xml[index]) * 2
+                check_names()
+                index += 1
             element_attributes = element_bytes = uri_bytes = 0
             quote_char = ""
             namespace_value = False
@@ -441,7 +449,9 @@ def _preflight_xml(data: bytes, encoding: str, budget: _XMLBudget, name: str) ->
                         uri_bytes += width
                         if uri_bytes > MAX_NAMESPACE_URI_BYTES:
                             raise _xml_limit("namespace URI byte")
-                        longest_uri = max(longest_uri, uri_bytes)
+                        if uri_bytes > longest_uri:
+                            longest_uri = uri_bytes
+                            check_names()
                 elif char in "\"'":
                     quote_char = char
                     uri_bytes = 0
@@ -452,6 +462,8 @@ def _preflight_xml(data: bytes, encoding: str, budget: _XMLBudget, name: str) ->
                     namespace_value = attr_name == "xmlns" or attr_name.startswith("xmlns:")
                     names += 1
                     name_bytes += sum(_utf8_width(c) for c in attr_name)
+                    token_start = token_end = index + 1
+                    check_names()
                     if (element_attributes > MAX_ELEMENT_ATTRIBUTES
                         or attributes + element_attributes > MAX_PART_ATTRIBUTES
                         or budget.attributes + attributes + element_attributes > MAX_PACKAGE_ATTRIBUTES):
@@ -466,10 +478,7 @@ def _preflight_xml(data: bytes, encoding: str, budget: _XMLBudget, name: str) ->
             records = elements + attributes
             if records > MAX_XML_SPANS or budget.records + records > MAX_PACKAGE_XML_SPANS:
                 raise _xml_limit("span")
-            expanded = name_bytes + names * (longest_uri + 2)
-            if (expanded > MAX_PART_EXPANDED_BYTES
-                or budget.expanded_bytes + expanded > MAX_PACKAGE_EXPANDED_BYTES):
-                raise _xml_limit("expanded name byte")
+            check_names()
             continue
         continue
     budget.records += elements + attributes

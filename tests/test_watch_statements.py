@@ -1431,3 +1431,42 @@ def test_xml_input_budget_runs_before_member_decompression(monkeypatch):
     monkeypatch.setattr(statements, "_read_member", reader)
     with pytest.raises(CVEBeaconError, match="input byte limit"):
         render_docx(template, all_fields())
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("name_size,delimiters", [(8000, 8000), (128000, 8192)], ids=["balanced", "long_name"])
+def test_docx_bounds_repeated_attribute_delimiters(encoding, name_size, delimiters):
+    raw = ('<s ' + 'a' * name_size + '=' * delimiters + '/>').encode(encoding)
+    result = bounded_render(docx_bytes('', styles=raw, compression=zipfile.ZIP_DEFLATED))
+    assert result["seconds"] < 1.0
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16-be"])
+def test_preflight_accounts_for_each_name_token_once(monkeypatch, encoding):
+    raw = ('<s ' + 'a' * 4000 + '=' * 4000 + '/>').encode(encoding)
+    width = statements._utf8_width
+    calls = 0
+    def counted(char):
+        nonlocal calls
+        calls += 1
+        assert calls <= 3 * len(raw), "the same name was rescanned"
+        return width(char)
+    monkeypatch.setattr(statements, "_utf8_width", counted)
+    with pytest.raises(CVEBeaconError):
+        statements._parse_xml(raw, "styles.xml")
+
+
+def test_preflight_applies_name_budget_inside_opening_tag(monkeypatch):
+    monkeypatch.setattr(statements, "MAX_PART_EXPANDED_BYTES", 80)
+    width = statements._utf8_width
+    calls = 0
+    def counted(char):
+        nonlocal calls
+        calls += 1
+        assert calls < 100, "expanded-name limit was deferred until the tag ended"
+        return width(char)
+    monkeypatch.setattr(statements, "_utf8_width", counted)
+    with pytest.raises(CVEBeaconError, match="expanded name.*limit"):
+        statements._parse_xml(b'<s a="' + b'x' * 100_000 + b'"/>', "styles.xml")
+
+
