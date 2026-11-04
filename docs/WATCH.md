@@ -418,7 +418,7 @@ In `authenticated` mode, account administration needs an administrator login:
 `--admin-user NAME` plus a hidden password prompt, verified through the same
 account store. The action is audited with the administrator as its actor. The
 first `users add --admin` is the bootstrap exception when no administrator
-account exists; it is audited as `bootstrap` and requires a password. A user may
+account exists; it is audited as `(bootstrap)` and requires a password. A user may
 change their own password with `users passwd USERNAME` and their current
 password; resetting another user's password, disabling, enabling or unlocking
 an account requires `--admin-user` and an administrator account. In `open` and
@@ -439,8 +439,11 @@ report to whoever knows the password (or could reset it under the administrator
 rules); it guards against mistakes and casual misattribution, not against
 co-administrators or someone with the service account. Person-level separation
 needs a front end that people use instead of a service-account shell, such as
-the planned dashboard. The hash chain makes direct edits detectable unless the
-person also recomputes it.
+the planned dashboard. The report and user-admin audit chains make edits to
+those logs detectable unless the person also recomputes them; `cb_user` account
+rows and the configuration file are not covered by either chain. An action with
+an empty actor after bootstrap in authenticated mode means it was performed
+outside the administrator gate.
 
 - A username is 1–64 characters from letters, digits, dot, underscore, at sign,
   or hyphen, and is unique case-insensitively. A display name is optional and at
@@ -476,10 +479,14 @@ operating-system account and host, never the password.
 The account file is `cvebeacon-users.db` beside the watch database. It is
 created owner-only (`0600`) on POSIX and is separate from the CVE history so
 credentials are not copied with a public watch database and accounts survive a
-watch database rebuild. On POSIX the account file's directory must be owned by
-the CVEBeacon account (or root) and must not be writable by group or other
-accounts; do not place it in a directory that untrusted people can replace.
-Back up both files together, and keep account backups at `0600` as well. On
+watch database rebuild. On POSIX every ancestor of the account file up to the
+filesystem root must be owned by the CVEBeacon account (or root) and must not be
+writable by untrusted accounts; a root-owned sticky directory such as `/tmp` is
+accepted, but a shared writable directory owned by another user is not. When
+CVEBeacon creates a missing data directory it uses mode `0700` regardless of
+the process umask; an existing directory that fails the check is reported with
+an actionable `chmod go-w <dir>` message. Back up both files together, and keep
+account backups at `0600` as well. On
 Windows, place both in the
 [ACL-protected data directory](DEPLOY.md#windows-data-directory-acls). The same
 account store and verify function are intended for a future dashboard login.
@@ -513,6 +520,11 @@ chain, even if the schema metadata is rolled back. If the chain columns are
 dropped after the boundary exists, migration fails closed rather than
 recreating legacy history. A schema 6 database keeps its existing chains and
 gains the explicit version marker without re-hashing them.
+
+A writer who can edit the database can still relabel the whole trail as legacy
+by changing the boundary or the schema. That state is indistinguishable from a
+genuine never-reported schema-5 database, so compare the printed chained count
+with an external reference; the chain alone cannot rule out a total rewrite.
 
 A reported CVE is displayed as
 `Reported to clients by X at YYYY-MM-DD HH:MM UTC`; registered and
@@ -1043,7 +1055,7 @@ delete them and run `watch sync` again. They are not migrated.
   for a CVE is its current state.
 - `cvebeacon-users.db` sits beside the watch database and holds `cb_user`
   accounts and the `cb_user_audit` trail. Audit rows record the action, subject
-  username, optional actor (administrator or `bootstrap`), time, operating-system
+  username, optional actor (administrator or `(bootstrap)`), time, operating-system
   account, host and chain value. It is not part of the watch database,
   so the watch history can be rebuilt without losing accounts, and its POSIX
   mode is `0600`. It contains password hashes; keep it with the watch database
