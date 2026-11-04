@@ -1,8 +1,9 @@
 name: Release
 
 # Builds every release artifact on pull requests and manual runs. Publishing
-# happens only for a v* tag push and only after the `release` environment
-# approves the run. See docs/RELEASE_CHECKLIST.md for the owner setup.
+# happens only for a v* tag push, only after the `release` environment approves
+# the run, and only when that environment sets RELEASE_PUBLISH_ENABLED=true.
+# See docs/RELEASE_CHECKLIST.md for the owner setup.
 
 on:
   push:
