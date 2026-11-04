@@ -16,6 +16,7 @@ cvebeacon --config cvebeacon.toml watch events
 cvebeacon --config cvebeacon.toml watch rules check
 cvebeacon --config cvebeacon.toml watch evaluate --all
 cvebeacon --config cvebeacon.toml watch report CVE-2026-1234
+cvebeacon --config cvebeacon.toml watch unreport CVE-2026-1234
 cvebeacon --config cvebeacon.toml watch reported
 ```
 
@@ -321,16 +322,22 @@ cvebeacon --config cvebeacon.toml watch reported --all
 
 - `watch report` requires the CVE to exist in the watch database; otherwise it
   prints a clear error and exits 2.
-- `--by` is free text of at most 100 characters and must not contain control
-  characters. When it is omitted, the OS login name is used, or `unknown` when
-  it cannot be read.
-- `--note` is optional, at most 500 characters, and single-line.
+- `--by` is free text of at most 100 characters. It must be single-line UTF-8
+  without control characters. The value is unauthenticated free text: in open
+  mode the CLI defaults it to the OS login name, or `unknown` when that name is
+  unavailable or unsafe. A store caller must pass it explicitly.
+- `--note` is optional, at most 500 characters, and single-line UTF-8 without
+  control characters.
 - Reporting a CVE that is already reported prints the existing mark and exits 0
   without a new row. `--force` appends another report row and notification.
+  When the earlier notice failed, the repeated report also prints a hint to run
+  `watch notify --retry-failed`.
 - `watch unreport` appends a withdrawal row. When the CVE is not currently
   reported, it says so and exits 0.
 - `watch reported` lists the currently reported CVEs with the reporter, UTC
-  time, and note. `--all` prints the full audit trail.
+  time, and note. `--all` prints the full audit trail and each notice's
+  per-channel delivery state (`pending`, `sent`, `failed`, `ambiguous`, or
+  `sending`). Notice delivery errors remain visible in `watch status` counts.
 
 A reported CVE is displayed as
 `Reported to clients by X at YYYY-MM-DD HH:MM UTC`. The mark appears in
@@ -351,18 +358,32 @@ webhook_url_env = "CVEBEACON_SLACK_WEBHOOK_URL"
 notify_reported = true
 ```
 
-The message is `[REPORTED] CVE-2026-1234 reported to clients by alice`, with the
-optional note as a second line, or
-`[UNREPORTED] CVE-2026-1234 report withdrawn by alice`. Channels without the
-setting receive nothing.
+The message is
+`[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-04 12:00 UTC`,
+with the optional note as a second line, or
+`[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-04 12:00 UTC`.
+Channels without the setting receive nothing.
 
 Notices use the same delivery ledger as alerts. `watch report` and
-`watch unreport` attempt them immediately and print the delivery line. A failed
-notice is retried by `watch notify` or `watch run` with the usual backoff, and a
-successful one is final, so the delivery phase never sends it twice. The generic
-webhook receives a notice as a normal version 2 document with an extra `notice`
-object (`action`, `by`, and `note`). Notice events are delivery records rather
-than alert events, so `watch events` does not list them.
+`watch unreport` attempt only their own notice immediately and print the
+delivery line; they do not flush other pending alerts or the initial digest.
+A failed notice is retried by `watch notify` or `watch run` with the usual
+backoff, and a successful one is final, so the delivery phase never sends it
+twice.
+
+Notices for one CVE and channel follow the audit order, by durable insertion
+sequence rather than alert severity. A newer notice waits while an earlier
+notice for the same CVE and channel is pending, sending, ambiguous, or failed
+below the attempt cap. A notice that reached the attempt cap no longer blocks
+later notices. `watch notify --retry-ambiguous` or `--retry-failed` revives the
+earlier notice first, and the successor follows it in the same ordered run.
+
+The generic webhook receives a notice as a normal version 2 document whose
+event has `kind` `reported` or `unreported`, `rule` `@reported`, and an extra
+`notice` object (`action`, `by`, and `note`). Notice events are delivery records
+rather than alert events, so `watch events` does not list them; use
+`watch reported --all` or the channel counts in `watch status` to inspect their
+delivery state.
 
 ## Messages
 
@@ -394,6 +415,8 @@ Event labels:
 | `epss_increase` | `[EPSS UP 0.08->0.61]` |
 | `nvd_score_added` | `[NVD SCORED 9.1]` |
 | `rejected` | `[REJECTED]` |
+| `reported` | `[REPORTED]` (notice, not an alert) |
+| `unreported` | `[UNREPORTED]` (notice, not an alert) |
 
 Every CVSS score names its provider: `CNA` (with the CNA's short name or email
 domain), `NVD`, `CISA-ADP`, `EUVD`, or `Other`. When only a CNA or ADP score
@@ -492,10 +515,12 @@ is `null` when the CVE record has none. Version 2 adds these two `view` fields.
 Every version 1 field keeps its meaning. `view.kev.cisa` and `view.kev.eu` are
 `null` when the CVE is not in that catalog. `epss` and `links.euvd` are `null`
 when the value is absent. `view.reported` is `null` or an object with `by`,
-`at`, and `note`. The order is the same as the text messages. A test message
-adds `"test": true` and `"message"` and has an empty `events` list. A report or
-unreport notice event adds a `notice` object with `action` (`report` or
-`unreport`), `by`, and `note`.
+`at`, and `note`. The order is the same as the text messages, with notice
+events after alert events. A test message adds `"test": true` and `"message"`
+and has an empty `events` list. A report or unreport notice event has `kind`
+`reported` or `unreported`, `rule` `@reported` (an `@`-prefixed name is reserved
+and cannot be a configured rule), and a `notice` object with `action` (`report`
+or `unreport`), `by`, and `note`.
 
 ### Privacy
 
@@ -728,8 +753,10 @@ re-read gives pre-upgrade items their names. In `full` mode
 `initial_window_start` is 1999-01-01, so this re-reads the whole EUVD history
 once. The version 2 upgrade keeps delivery rows and adds the `sending` and
 `ambiguous` states. The version 3 upgrade adds `first_attempt_at`, which records
-when a row was first claimed. The version 4 upgrade creates `watch_report`; it
-changes no other data. After the upgrade, run
+when a row was first claimed. The version 4 to 5 upgrade adds the
+`watch_report` trail; the table is created by the schema step for every
+upgrade, so older versions get it too, and no existing row is rewritten.
+After the upgrade, run
 `cvebeacon watch evaluate --all --yes`
 BEFORE the first `watch run`, as after adding a rule. Otherwise every CVE from
 the initial window alerts one by one as NVD touches it. Schema 2 databases
