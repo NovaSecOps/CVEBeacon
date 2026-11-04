@@ -36,6 +36,14 @@ tagged source with the commands on this page; the checksums in the release
 cover only the uploaded files. Container images, when published, are described
 in the [container guide](CONTAINERS.md).
 
+The release job installs `requirements/release-build.txt` with
+`pip --require-hashes` and builds with `python -m build --no-isolation`. That
+file pins the build toolchain (pip, build, setuptools, wheel, packaging and
+pyproject_hooks) to reviewed versions and SHA-256 hashes. Application, test,
+PyInstaller and container dependencies keep the ranges declared in
+`pyproject.toml`; a cross-platform hash lock for those is not maintained, so
+their resolved versions are not guaranteed to match between builds.
+
 Native CI exercises CPython 3.11–3.14 on Windows Server 2025 and Ubuntu 24.04. Both package formats are built with Python 3.13 and smoke-tested outside the checkout on each platform. Use a current patched interpreter for distribution builds; older Python compatibility jobs are not recommendations to deploy their hosted installer versions. The one-file executable is the recommended portable format; the one-folder bundle is useful for troubleshooting. Workflow artifacts contain both formats and are retained for 14 days. They are validation builds, not formal releases.
 
 Templates and stylesheets are bundled into the same executable. Start the dashboard with `cvebeacon.exe serve` on Windows or `./cvebeacon serve` on Linux; see [dashboard usage](DASHBOARD.md). The package jobs exercise server startup, static assets, manual queries, reports, and preservation of monitoring state.

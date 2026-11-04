@@ -17,6 +17,7 @@ on:
       - 'Dockerfile'
       - 'pyproject.toml'
       - 'deploy/container/entrypoint.py'
+      - 'requirements/release-build.txt'
       - 'scripts/build-windows.ps1'
       - 'scripts/release_registry_check.py'
 
@@ -78,9 +79,9 @@ jobs:
           python-version: '3.13'
       - name: Build core sdist and wheel
         run: |
-          python -m pip install --upgrade 'pip>=26.2'
-          python -m pip install build
-          python -m build --sdist --wheel --outdir dist
+          python -m pip install --require-hashes --only-binary :all: -r requirements/release-build.txt
+          python -m pip show pip build setuptools wheel packaging pyproject_hooks | grep -E '^(Name|Version):'
+          python -m build --no-isolation --sdist --wheel --outdir dist
       - name: Install and smoke-test the wheel
         run: |
           python -m venv "$RUNNER_TEMP/wheel-venv"
@@ -205,12 +206,15 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       digest: ${{ steps.build.outputs.digest }}
     steps:
+      # The workflow can only read the merged vars context. Reviewer approval,
+      # the v* tag rule and the admin-bypass setting are enforced by the
+      # environment configuration, not by this step. See the checklist.
       - name: Require release publishing opt-in
         env:
           RELEASE_PUBLISH_ENABLED: ${{ vars.RELEASE_PUBLISH_ENABLED }}
         run: |
           if [ "${RELEASE_PUBLISH_ENABLED:-}" != "true" ]; then
-            echo "::error::RELEASE_PUBLISH_ENABLED is not true in the 'release' environment. Publishing is disabled; configure the protected environment first (docs/RELEASE_CHECKLIST.md)."
+            echo "::error::RELEASE_PUBLISH_ENABLED is not exactly 'true' in the merged vars context. Publishing is disabled; the protected 'release' environment must exist and set this variable (docs/RELEASE_CHECKLIST.md)."
             exit 1
           fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -320,6 +324,32 @@ jobs:
           pathlib.Path("release-notes.md").write_text(notes)
           print(notes)
           PY
+      - name: Verify the tag still points at the built commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          built=$(git rev-parse HEAD)
+          reference=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha + " " + .object.type')
+          target=${reference%% *}
+          kind=${reference##* }
+          depth=0
+          while [ "$kind" = "tag" ]; do
+            depth=$((depth + 1))
+            if [ "$depth" -gt 3 ]; then
+              echo "::error::tag ${TAG} has an unsupported tag chain; refusing to create the release."
+              exit 1
+            fi
+            reference=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${target}" --jq '.object.sha + " " + .object.type')
+            target=${reference%% *}
+            kind=${reference##* }
+          done
+          if [ "$kind" != "commit" ] || [ "$target" != "$built" ]; then
+            echo "::error::tag ${TAG} no longer points at the built commit ${built}; refusing to create the release."
+            exit 1
+          fi
+          echo "Tag ${TAG} still points at ${built}."
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

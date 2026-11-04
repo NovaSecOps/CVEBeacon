@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 import yaml
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+REQUIREMENTS = ROOT / "requirements" / "release-build.txt"
 
 
 @pytest.fixture(scope="module")
@@ -64,3 +67,39 @@ def test_registry_guard_runs_from_the_versioned_script(jobs):
     assert guard["run"].strip() == "python3 scripts/release_registry_check.py"
     build = step_with(steps, step_id="build")
     assert build["with"]["tags"] == "${{ steps.registry.outputs.tags }}"
+
+
+def test_release_verifies_the_tag_target_before_creating_the_draft(jobs):
+    steps = jobs["release"]["steps"]
+    names = [step.get("name") for step in steps]
+    verify_index = names.index("Verify the tag still points at the built commit")
+    create_index = names.index("Create the draft release")
+    assert verify_index < create_index
+    run = steps[verify_index]["run"]
+    assert "git rev-parse HEAD" in run
+    assert "git/ref/tags" in run
+
+
+def test_python_distribution_build_uses_the_hashed_toolchain(jobs):
+    step = step_with(jobs["python-dist"]["steps"], name="Build core sdist and wheel")
+    run = step["run"]
+    assert "--require-hashes" in run
+    assert "requirements/release-build.txt" in run
+    assert "--no-isolation" in run
+
+
+def test_release_build_toolchain_is_hash_pinned():
+    text = REQUIREMENTS.read_text(encoding="utf-8")
+    pins = re.findall(
+        r"^([A-Za-z0-9_.-]+)==(\S+) \\\n\s+--hash=sha256:([0-9a-f]{64})$",
+        text,
+        re.MULTILINE,
+    )
+    assert {name for name, _, _ in pins} == {
+        "build",
+        "packaging",
+        "pip",
+        "pyproject_hooks",
+        "setuptools",
+        "wheel",
+    }
