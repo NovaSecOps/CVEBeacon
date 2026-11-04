@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -56,7 +56,7 @@ def assert_match(condition: dict, record: WatchView | None = None) -> tuple:
 
 def test_every_leaf():
     reasons = assert_match({"cvss_min": 9.0})
-    assert reasons == ("cvss 9.8 (cna)",)
+    assert reasons == ("cvss 9.8 v3.1 (cna)",)
     assert_match({"cvss_max": 10.0})
     with pytest.raises(AssertionError):
         assert_match({"cvss_min": 10.0})
@@ -252,6 +252,7 @@ def test_defaults_and_enabled_flag():
     )
     assert parsed.cvss_providers == ("nvd", "cna", "cisa-adp", "euvd", "other")
     assert parsed.channels == ("soc",)
+    assert parsed.old_cves == "digest"
 
 
 def test_band_computations():
@@ -278,7 +279,8 @@ def test_match_reasons_and_state():
     assert state.first_matched_at == NOW.isoformat()
     assert state.snapshot.severity_band == "critical"
     assert len(events) == 1 and events[0].kind == "match"
-    assert "cvss 9.8 (cna)" in events[0].reasons
+    assert events[0].occurrence == "match"
+    assert "cvss 9.8 v3.1 (cna)" in events[0].reasons
     assert "epss 0.62" in events[0].reasons
 
 
@@ -288,17 +290,38 @@ def test_no_previous_state_and_no_match_stores_nothing():
 
 
 @pytest.mark.parametrize(
-    "changed,kind,expected",
+    "changed,kind,expected,occurrence",
     [
-        ({"cisa_kev_added": "2026-11-03"}, "kev_added", "kev cisa false \u2192 true"),
-        ({"eu_kev_added": "2026-11-03"}, "kev_added", "kev eu false \u2192 true"),
-        ({"ssvc_exploitation": "active"}, "exploitation_active", "exploitation none \u2192 active"),
+        (
+            {"cisa_kev_added": "2026-11-03"},
+            "kev_added",
+            "kev cisa false -> true",
+            "cisa:2026-11-03",
+        ),
+        (
+            {"eu_kev_added": "2026-11-03"},
+            "kev_added",
+            "kev eu false -> true",
+            "eu:2026-11-03",
+        ),
+        (
+            {"ssvc_exploitation": "active"},
+            "exploitation_active",
+            "exploitation none -> active (cisa-adp)",
+            "active",
+        ),
         (
             {"cvss": (CVSSEntry("cna", "security@example.com", "3.1", 9.8),)},
             "severity_increase",
-            "severity high \u2192 critical",
+            "severity high -> critical",
+            "critical",
         ),
-        ({"epss": 0.6}, "epss_increase", "epss <0.5 \u2192 <0.9"),
+        (
+            {"epss": 0.6},
+            "epss_increase",
+            "epss <0.5 -> <0.9",
+            "<0.9",
+        ),
         (
             {
                 "cvss": (
@@ -307,12 +330,18 @@ def test_no_previous_state_and_no_match_stores_nothing():
                 )
             },
             "nvd_score_added",
-            "nvd score absent \u2192 present",
+            "nvd score absent -> present",
+            "nvd",
         ),
-        ({"status": "rejected"}, "rejected", "status published \u2192 rejected"),
+        (
+            {"status": "rejected", "last_modified": "2026-11-03T00:00:00.000"},
+            "rejected",
+            "status published -> rejected",
+            "rejected:2026-11-03",
+        ),
     ],
 )
-def test_each_escalation_kind(changed, kind, expected):
+def test_each_escalation_kind(changed, kind, expected, occurrence):
     baseline = view(
         cvss=(CVSSEntry("cna", "security@example.com", "3.1", 8.0),),
         epss=0.2,
@@ -324,6 +353,7 @@ def test_each_escalation_kind(changed, kind, expected):
     state, events = evaluate(updated, state, configured, now=NOW)
     assert [event.kind for event in events] == [kind]
     assert events[0].reasons == (expected,)
+    assert events[0].occurrence == occurrence
     assert state is not None
 
 
@@ -359,7 +389,7 @@ def test_first_epss_score_in_the_first_alert_band_escalates():
     state, events = evaluate(view(epss=0.2), state, configured, now=NOW)
     assert state is not None
     assert [event.kind for event in events] == ["epss_increase"]
-    assert events[0].reasons == ("epss none \u2192 <0.5",)
+    assert events[0].reasons == ("epss none -> <0.5",)
     assert state.snapshot.epss_band == "<0.5"
 
 
@@ -369,7 +399,7 @@ def test_epss_crossing_from_the_lowest_band_escalates():
     state, events = evaluate(view(epss=0.2), state, configured, now=NOW)
     assert state is not None
     assert [event.kind for event in events] == ["epss_increase"]
-    assert events[0].reasons == ("epss <0.1 \u2192 <0.5",)
+    assert events[0].reasons == ("epss <0.1 -> <0.5",)
     assert state.snapshot.epss_band == "<0.5"
 
 
@@ -449,7 +479,7 @@ def test_describe_condition_and_epss_thresholds():
             "name": "critical-or-likely",
         }
     )
-    assert describe_condition(configured.condition) == "(cvss \u2265 9.0 OR epss \u2265 0.5)"
+    assert describe_condition(configured.condition) == "(cvss >= 9.0 OR epss >= 0.5)"
     disabled = rule(
         {"condition": {"epss_min": 0.3}, "enabled": False, "name": "off"}
     )
@@ -461,3 +491,251 @@ def test_snapshot_json_round_trip():
     assert AlertSnapshot.from_dict(snapshot.as_dict()) == snapshot
     with pytest.raises(ValueError):
         AlertSnapshot.from_dict({"cisa_kev": "yes"})
+
+
+def test_old_cve_first_match_is_backlog_by_default():
+    configured = rule({"name": "old"})
+    state, events = evaluate(
+        view(published="2015-01-01T00:00:00.000"),
+        None,
+        configured,
+        now=NOW,
+        backlog_before=date(2026, 10, 27),
+    )
+    assert state is not None
+    assert [event.kind for event in events] == ["match"]
+    assert events[0].initial is True
+
+
+def test_old_cve_with_a_recent_kev_addition_alerts_normally():
+    configured = rule({"name": "old"})
+    for added in ("2026-10-27", "2026-11-01"):
+        state, events = evaluate(
+            view(published="2015-01-01T00:00:00.000", cisa_kev_added=added),
+            None,
+            configured,
+            now=NOW,
+            backlog_before=date(2026, 10, 27),
+        )
+        assert state is not None
+        assert events[0].initial is False
+
+
+def test_old_cves_modes_alert_and_ignore():
+    old = view(published="2015-01-01T00:00:00.000")
+    alerting = rule({"name": "old", "old_cves": "alert"})
+    state, events = evaluate(
+        old, None, alerting, now=NOW, backlog_before=date(2026, 10, 27)
+    )
+    assert state is not None and events[0].initial is False
+
+    ignoring = rule({"name": "old", "old_cves": "ignore"})
+    state, events = evaluate(
+        old, None, ignoring, now=NOW, backlog_before=date(2026, 10, 27)
+    )
+    assert state is not None
+    assert events == ()
+
+
+def test_old_cves_is_validated_strictly():
+    with pytest.raises(ConfigurationError, match="old_cves"):
+        rule({"name": "old", "old_cves": "loud"})
+    with pytest.raises(ConfigurationError, match="old_cves"):
+        rule({"name": "old", "old_cves": True})
+
+
+def test_kev_readdition_occurrences_use_the_catalog_date():
+    configured = rule({"condition": {"cvss_min": 1}})
+    state, _ = evaluate(view(cisa_kev_added="2026-11-01"), None, configured, now=NOW)
+    state, events = evaluate(view(cisa_kev_added=None), state, configured, now=NOW)
+    assert events == ()
+    state, events = evaluate(
+        view(cisa_kev_added="2026-11-03"), state, configured, now=NOW
+    )
+    assert [event.kind for event in events] == ["kev_added"]
+    assert events[0].occurrence == "cisa:2026-11-03"
+
+
+def test_severity_oscillation_reaches_the_high_water_mark_once():
+    configured = rule({"condition": {"cvss_min": 1}})
+    low = view(cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 8.0),))
+    high = view(cvss=(CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.8),))
+    state, _ = evaluate(low, None, configured, now=NOW)
+    state, events = evaluate(high, state, configured, now=NOW)
+    assert [event.kind for event in events] == ["severity_increase"]
+    assert events[0].occurrence == "critical"
+    state, events = evaluate(low, state, configured, now=NOW)
+    assert events == ()
+    assert state.snapshot.severity_band == "high"
+    assert state.snapshot.max_severity_band == "critical"
+    state, events = evaluate(high, state, configured, now=NOW)
+    assert events == ()
+
+
+def test_epss_oscillation_reaches_each_new_maximum_once():
+    configured = rule({"condition": {"cvss_min": 1}})
+    medium = view(epss=0.6)
+    high = view(epss=0.95)
+    state, _ = evaluate(medium, None, configured, now=NOW)
+    state, events = evaluate(high, state, configured, now=NOW)
+    assert [event.kind for event in events] == ["epss_increase"]
+    assert events[0].occurrence == ">=0.9"
+    state, events = evaluate(medium, state, configured, now=NOW)
+    assert events == ()
+    state, events = evaluate(high, state, configured, now=NOW)
+    assert events == ()
+    assert state.snapshot.epss_band == ">=0.9"
+    assert state.snapshot.max_epss_band == ">=0.9"
+
+
+def test_cvss_v2_is_ignored_when_the_same_provider_has_a_modern_score():
+    current = view(
+        cvss=(
+            CVSSEntry("nvd", "nvd@nist.gov", "2.0", 9.3),
+            CVSSEntry("nvd", "nvd@nist.gov", "3.1", 7.8),
+        )
+    )
+    reasons = assert_match({"cvss_min": 7}, current)
+    assert reasons == ("cvss 7.8 v3.1 (nvd)",)
+    with pytest.raises(AssertionError):
+        assert_match({"cvss_min": 9}, current)
+
+
+def test_cvss_uses_the_highest_modern_score_from_one_provider():
+    current = view(
+        cvss=(
+            CVSSEntry("nvd", "nvd@nist.gov", "3.1", 8.0),
+            CVSSEntry("nvd", "nvd@nist.gov", "4.0", 9.0),
+        )
+    )
+    assert assert_match({"cvss_min": 9}, current) == ("cvss 9.0 v4.0 (nvd)",)
+
+
+def test_exploitation_active_uses_ssvc_or_euvd_with_source_names():
+    ssvc = view(ssvc_exploitation="active")
+    assert assert_match({"exploitation": "active"}, ssvc) == (
+        "exploitation active (cisa-adp)",
+    )
+    euvd = view(euvd_exploited_since="2026-11-01")
+    assert assert_match({"exploitation": "active"}, euvd) == (
+        "exploitation active (euvd)",
+    )
+    both = view(
+        ssvc_exploitation="active", euvd_exploited_since="2026-11-01"
+    )
+    assert assert_match({"exploitation": "active"}, both) == (
+        "exploitation active (cisa-adp, euvd)",
+    )
+    assert_match({"exploitation": "poc"}, view(ssvc_exploitation="poc"))
+    with pytest.raises(AssertionError):
+        assert_match(
+            {"exploitation": "poc"}, view(euvd_exploited_since="2026-11-01")
+        )
+
+
+def test_euvd_exploitation_escalates_the_snapshot():
+    configured = rule({"condition": {"cvss_min": 1}})
+    state, _ = evaluate(view(), None, configured, now=NOW)
+    state, events = evaluate(
+        view(euvd_exploited_since="2026-11-01"), state, configured, now=NOW
+    )
+    assert [event.kind for event in events] == ["exploitation_active"]
+    assert state.snapshot.exploitation == "active"
+    assert "euvd" in events[0].reasons[0]
+
+
+def test_cwe_values_are_normalized_and_invalid_values_rejected():
+    parsed = parse_condition({"cwe": ["79", "cwe-80", "CWE-81", 82]})
+    assert parsed.leaves == (
+        ("cwe", ("CWE-79", "CWE-80", "CWE-81", "CWE-82")),
+    )
+    for value in ("79x", "CWE", "cwe-", "CWE-79-1"):
+        with pytest.raises(ConfigurationError, match="CWE number"):
+            parse_condition({"cwe": [value]})
+    with pytest.raises(ConfigurationError, match="CWE number"):
+        parse_condition({"cwe": [True]})
+
+
+def test_empty_events_list_is_rejected():
+    with pytest.raises(ConfigurationError, match="at least one event kind"):
+        rule({"name": "a", "events": []})
+
+
+def test_rejected_suppression_uses_only_true_leaves():
+    rejected = view(status="rejected", cisa_kev_added="2026-11-01")
+    hidden = rule(
+        {
+            "condition": {
+                "any": [{"kev": "any"}, {"not": {"status": "rejected"}}]
+            }
+        }
+    )
+    state, events = evaluate(rejected, None, hidden, now=NOW)
+    assert state is None and events == ()
+
+    explicit = rule(
+        {"condition": {"any": [{"status": "rejected"}, {"kev": "any"}]}}
+    )
+    state, events = evaluate(rejected, None, explicit, now=NOW)
+    assert state is not None and events[0].kind == "match"
+    assert "status rejected" in events[0].reasons
+
+
+def test_cvss_max_without_a_score_is_false():
+    configured = rule({"condition": {"cvss_max": 4}})
+    state, events = evaluate(view(cvss=()), None, configured, now=NOW)
+    assert state is None and events == ()
+
+
+def test_not_over_missing_vendor_or_product_data_is_true():
+    condition = {
+        "all": [
+            {"cvss_min": 9},
+            {"not": {"vendor": ["examplecorp"], "product": ["widget"]}},
+        ]
+    }
+    assert_match(condition, view(vendors=(), products=()))
+    with pytest.raises(AssertionError):
+        assert_match(condition, view(vendors=("ExampleCorp",), products=("Widget",)))
+
+
+def test_rule_hash_is_stable_and_tracks_the_definition():
+    from cvebeacon.watch.rules import rule_hash
+
+    configured = rule({"condition": {"any": [{"cvss_min": 9}, {"epss_min": 0.5}]}})
+    digest = rule_hash(configured)
+    assert len(digest) == 16
+    assert rule_hash(rule({"condition": {"any": [{"cvss_min": 9}, {"epss_min": 0.5}]}})) == digest
+    assert rule_hash(rule({"condition": {"cvss_min": 9}})) != digest
+    changed_providers = rule(
+        {
+            "condition": {"any": [{"cvss_min": 9}, {"epss_min": 0.5}]},
+            "cvss_providers": ["nvd"],
+        }
+    )
+    assert rule_hash(changed_providers) != digest
+
+
+def test_describe_condition_keeps_leaf_parentheses_inside_any():
+    parsed = parse_condition(
+        {"any": [{"cvss_min": 9, "epss_min": 0.5}, {"kev": "any"}]}
+    )
+    assert describe_condition(parsed) == (
+        "((cvss >= 9.0 AND epss >= 0.5) OR kev any)"
+    )
+
+
+def test_reason_text_is_ascii():
+    reasons = assert_match({"cvss_min": 9}, view())
+    text = " ".join(reasons)
+    assert text.isascii()
+    configured = rule({"condition": {"cvss_min": 1}})
+    state, _ = evaluate(view(cisa_kev_added="2026-11-01"), None, configured, now=NOW)
+    _, events = evaluate(
+        view(cisa_kev_added="2026-11-01", status="rejected"),
+        state,
+        configured,
+        now=NOW,
+    )
+    assert events
+    assert all(reason.isascii() for event in events for reason in event.reasons)

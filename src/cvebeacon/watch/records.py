@@ -144,7 +144,7 @@ class WatchRecord:
         object.__setattr__(self, "cwes", tuple(sorted({str(value) for value in self.cwes if value})))
         products = {(item.vendor, item.product): item for item in self.products if item.vendor and item.product}
         object.__setattr__(
-            self, "products", tuple(products[key] for key in sorted(products))[:50]
+            self, "products", tuple(products[key] for key in sorted(products))[:1000]
         )
         references = {item.url: item for item in self.references if item.url}
         object.__setattr__(
@@ -242,7 +242,7 @@ class WatchView:
         return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _names(values: Iterable[str], limit: int = 50) -> tuple[str, ...]:
+def _names(values: Iterable[str], limit: int = 500) -> tuple[str, ...]:
     unique: dict[str, str] = {}
     for value in values:
         text = str(value).strip()

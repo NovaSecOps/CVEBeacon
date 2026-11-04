@@ -32,6 +32,8 @@ from .rules import (
     AlertState,
     Rule,
     evaluate,
+    rule_hash,
+    snapshot_for,
 )
 
 SCHEMA_VERSION = 2
@@ -139,6 +141,7 @@ _SCHEMA = (
         cve_id TEXT NOT NULL,
         first_matched_at TEXT NOT NULL,
         snapshot_json TEXT NOT NULL,
+        rule_hash TEXT NOT NULL,
         PRIMARY KEY(rule, cve_id)
     )""",
     """CREATE TABLE IF NOT EXISTS watch_event (
@@ -147,9 +150,10 @@ _SCHEMA = (
         cve_id TEXT NOT NULL,
         kind TEXT NOT NULL,
         reasons_json TEXT NOT NULL,
+        occurrence TEXT NOT NULL,
         initial INTEGER NOT NULL,
         created_at TEXT NOT NULL,
-        UNIQUE(rule, cve_id, kind, reasons_json)
+        UNIQUE(rule, cve_id, kind, occurrence)
     )""",
     """CREATE TABLE IF NOT EXISTS watch_delivery (
         event_id INTEGER NOT NULL,
@@ -336,10 +340,10 @@ class WatchStore:
 
     def initialize(self) -> None:
         with self.transaction() as db:
-            self._ensure_schema(db)
+            self._ensure_schema(db, _timestamp(self._clock))
 
     @staticmethod
-    def _ensure_schema(db: sqlite3.Connection) -> None:
+    def _ensure_schema(db: sqlite3.Connection, now: str) -> None:
         db.execute(
             "CREATE TABLE IF NOT EXISTS watch_meta ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -369,6 +373,18 @@ class WatchStore:
                 db.execute(
                     "ALTER TABLE watch_euvd_item ADD COLUMN "
                     "vendors_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            # P1a stored its touch queue but never evaluated it. No rules
+            # existed, so there is no evaluation obligation to carry forward.
+            db.execute("DELETE FROM watch_touched")
+            meta = {
+                row["key"]: row["value"]
+                for row in db.execute("SELECT key,value FROM watch_meta")
+            }
+            if "initial_mode" in meta and "initial_evaluated_at" not in meta:
+                db.execute(
+                    "INSERT INTO watch_meta(key,value) VALUES ('initial_evaluated_at',?)",
+                    (meta.get("initialized_at") or now,),
                 )
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
@@ -443,7 +459,7 @@ class WatchStore:
         )
         self.initialize()
         now = _timestamp(self._clock)
-        changed_ids: list[str] = []
+        touched_ids: list[str] = []
         with self.transaction() as db:
             row = db.execute(
                 "SELECT value FROM watch_meta WHERE key='view_policy'"
@@ -461,13 +477,14 @@ class WatchStore:
                 if not rows:
                     break
                 identifiers = [item["cve_id"] for item in rows]
-                views = self._refresh_views(db, identifiers, catalogs, now)
-                changed_ids.extend(views.new_ids)
-                changed_ids.extend(views.changed_ids)
+                self._refresh_views(db, identifiers, catalogs, now)
+                # Vendor and product names are not in the view fingerprint,
+                # so every CVE is queued when the derivation policy changes.
+                self._mark_touched(db, identifiers, now)
+                touched_ids.extend(identifiers)
                 last = identifiers[-1]
-            self._mark_touched(db, changed_ids, now)
             self._set_meta(db, {"view_policy": policy})
-        return tuple(sorted(set(changed_ids)))
+        return tuple(sorted(set(touched_ids)))
 
     @staticmethod
     def _record(row: Mapping[str, Any]) -> WatchRecord:
@@ -565,9 +582,10 @@ class WatchStore:
         if row is None:
             return None
         record = self._record(row)
+        euvd = self._best_euvd(db, identifier) if "euvd" in catalogs else None
         return build_view(
             record,
-            euvd=self._best_euvd(db, identifier),
+            euvd=euvd,
             cisa_kev=self._kev_row(db, "cisa", identifier),
             eu_kev=self._kev_row(db, "eu", identifier),
             cisa_catalog="cisa_kev" in catalogs,
@@ -934,9 +952,9 @@ class WatchStore:
     @staticmethod
     def _alert_state(
         db: sqlite3.Connection, rule: str, identifier: str
-    ) -> AlertState | None:
+    ) -> tuple[AlertState, str] | None:
         row = db.execute(
-            "SELECT first_matched_at,snapshot_json FROM watch_alert_state "
+            "SELECT first_matched_at,snapshot_json,rule_hash FROM watch_alert_state "
             "WHERE rule=? AND cve_id=?",
             (rule, identifier),
         ).fetchone()
@@ -944,9 +962,30 @@ class WatchStore:
             return None
         try:
             snapshot = AlertSnapshot.from_dict(json.loads(row["snapshot_json"]))
+            stored_hash = str(row["rule_hash"])
         except (TypeError, ValueError, KeyError) as exc:
-            raise StateError("watch database contains an invalid alert state") from exc
-        return AlertState(row["first_matched_at"], snapshot)
+            raise StateError(
+                f"watch alert state for rule {rule!r} and CVE {identifier} "
+                "is invalid"
+            ) from exc
+        return AlertState(row["first_matched_at"], snapshot), stored_hash
+
+    @staticmethod
+    def _backlog_before(db: sqlite3.Connection) -> date | None:
+        rows = {
+            row["key"]: row["value"]
+            for row in db.execute(
+                "SELECT key,value FROM watch_meta "
+                "WHERE key IN ('initial_window_start','initialized_at')"
+            )
+        }
+        value = rows.get("initial_window_start") or rows.get("initialized_at")
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except ValueError:
+            return None
 
     def _evaluate_batch(
         self,
@@ -959,6 +998,7 @@ class WatchStore:
     ) -> dict[str, int]:
         created: dict[str, int] = {}
         stamp = _timestamp(lambda: now)
+        backlog_before = self._backlog_before(db)
         for identifier in identifiers:
             view = self._view(db, identifier, catalogs)
             if view is None:
@@ -966,34 +1006,62 @@ class WatchStore:
             for rule in rules:
                 if not rule.enabled:
                     continue
-                previous = self._alert_state(db, rule.name, identifier)
-                state, events = evaluate(view, previous, rule, now=now)
+                key = rule.name.casefold()
+                current_hash = rule_hash(rule)
+                stored = self._alert_state(db, key, identifier)
+                if stored is not None and stored[1] != current_hash:
+                    # The definition changed. Keep the old match, refresh the
+                    # comparison baseline, and emit nothing for this evaluation.
+                    snapshot = snapshot_for(view, rule)
+                    db.execute(
+                        "UPDATE watch_alert_state SET snapshot_json=?,rule_hash=? "
+                        "WHERE rule=? AND cve_id=?",
+                        (
+                            canonical_json(snapshot.as_dict()),
+                            current_hash,
+                            key,
+                            identifier,
+                        ),
+                    )
+                    continue
+                previous = stored[0] if stored is not None else None
+                state, events = evaluate(
+                    view,
+                    previous,
+                    rule,
+                    now=now,
+                    backlog_before=backlog_before,
+                )
                 if state is None:
                     continue
                 db.execute(
                     "INSERT INTO watch_alert_state("
-                    "rule,cve_id,first_matched_at,snapshot_json) VALUES (?,?,?,?) "
+                    "rule,cve_id,first_matched_at,snapshot_json,rule_hash) "
+                    "VALUES (?,?,?,?,?) "
                     "ON CONFLICT(rule,cve_id) DO UPDATE SET "
-                    "snapshot_json=excluded.snapshot_json",
+                    "snapshot_json=excluded.snapshot_json,"
+                    "rule_hash=excluded.rule_hash",
                     (
-                        rule.name,
+                        key,
                         identifier,
                         state.first_matched_at,
                         canonical_json(state.snapshot.as_dict()),
+                        current_hash,
                     ),
                 )
                 for event in events:
                     reasons_json = canonical_json(list(event.reasons))
                     cursor = db.execute(
                         "INSERT OR IGNORE INTO watch_event("
-                        "rule,cve_id,kind,reasons_json,initial,created_at) "
-                        "VALUES (?,?,?,?,?,?)",
+                        "rule,cve_id,kind,reasons_json,occurrence,initial,created_at) "
+                        "VALUES (?,?,?,?,?,?,?)",
                         (
-                            event.rule,
+                            event.rule.casefold(),
                             event.cve_id,
                             event.kind,
                             reasons_json,
-                            1 if initial else 0,
+                            event.occurrence,
+                            1 if event.initial or (initial and event.kind == "match") else 0,
                             stamp,
                         ),
                     )
@@ -1028,9 +1096,14 @@ class WatchStore:
         *,
         catalogs: Sequence[str] = (),
         initial: bool = False,
+        complete: bool = True,
         limit: int = EVALUATION_BATCH,
     ) -> EvaluationResult:
-        """Evaluate and acknowledge the durable touched queue in batches."""
+        """Evaluate and acknowledge the durable touched queue in batches.
+
+        ``complete`` is false when the originating sync had source failures, so
+        an initial evaluation is repeated before the initial window is closed.
+        """
         if limit < 1:
             raise StateError("watch evaluation batch size must be positive")
         self.initialize()
@@ -1057,7 +1130,7 @@ class WatchStore:
                     ((identifier,) for identifier in identifiers),
                 )
                 evaluated += len(identifiers)
-        if initial:
+        if initial and complete:
             self.set_metadata(
                 {"initial_evaluated_at": _timestamp(self._clock)}
             )
@@ -1112,7 +1185,7 @@ class WatchStore:
         parameters: list[Any] = []
         if rule is not None:
             clauses.append("e.rule = ?")
-            parameters.append(rule)
+            parameters.append(rule.casefold())
         if pending:
             clauses.append(
                 "EXISTS (SELECT 1 FROM watch_delivery d "

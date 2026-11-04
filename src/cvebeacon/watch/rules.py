@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..errors import ConfigurationError
-from .records import CVSS_PROVIDERS, WatchView
+from .records import CVSS_PROVIDERS, WatchView, canonical_json
 
 EVENT_KINDS = (
     "match",
@@ -37,10 +38,12 @@ LEAF_KEYS = (
     "status",
 )
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
+CWE_PATTERN = re.compile(r"(?i)^(?:cwe-)?(\d{1,9})$")
 MAX_DEPTH = 4
 MAX_LEAVES = 32
 MAX_LIST_ITEMS = 100
 MAX_STRING = 200
+OLD_CVES_MODES = ("digest", "alert", "ignore")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +78,7 @@ class Rule:
     events: tuple[str, ...] = DEFAULT_EVENTS
     cvss_providers: tuple[str, ...] = CVSS_PROVIDERS
     enabled: bool = True
+    old_cves: str = "digest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +90,8 @@ class AlertSnapshot:
     epss_band: str
     nvd_score: bool
     status: str
+    max_severity_band: str = "none"
+    max_epss_band: str = "none"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +102,8 @@ class AlertSnapshot:
             "epss_band": self.epss_band,
             "nvd_score": self.nvd_score,
             "status": self.status,
+            "max_severity_band": self.max_severity_band,
+            "max_epss_band": self.max_epss_band,
         }
 
     @classmethod
@@ -109,8 +117,12 @@ class AlertSnapshot:
                 epss_band=str(value["epss_band"]),
                 nvd_score=value["nvd_score"],
                 status=str(value["status"]),
+                max_severity_band=str(
+                    value.get("max_severity_band", value["severity_band"])
+                ),
+                max_epss_band=str(value.get("max_epss_band", value["epss_band"])),
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ValueError("invalid alert snapshot") from exc
         if not isinstance(snapshot.cisa_kev, bool) or not isinstance(snapshot.nvd_score, bool):
             raise ValueError("invalid alert snapshot")
@@ -123,6 +135,10 @@ class AlertSnapshot:
         if snapshot.epss_band not in EPSS_BAND_LABELS:
             raise ValueError("invalid alert snapshot")
         if snapshot.status not in {"published", "rejected"}:
+            raise ValueError("invalid alert snapshot")
+        if snapshot.max_severity_band not in SEVERITY_BANDS:
+            raise ValueError("invalid alert snapshot")
+        if snapshot.max_epss_band not in EPSS_BAND_LABELS:
             raise ValueError("invalid alert snapshot")
         return snapshot
 
@@ -139,6 +155,8 @@ class AlertEvent:
     cve_id: str
     kind: str
     reasons: tuple[str, ...]
+    occurrence: str
+    initial: bool = False
 
 
 def _fail(path: str, message: str) -> None:
@@ -190,6 +208,37 @@ def _strings(value: Any, path: str) -> tuple[str, ...]:
     return tuple(output)
 
 
+def _cwe_values(value: Any, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        _fail(path, "must be a list of CWE identifiers")
+    if not value:
+        _fail(path, "must contain at least one item")
+    if len(value) > MAX_LIST_ITEMS:
+        _fail(path, f"must contain at most {MAX_LIST_ITEMS} items")
+    output: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            _fail(f"{path}[{index}]", "must be a CWE number or string")
+        text = str(item).strip()
+        if not text:
+            _fail(f"{path}[{index}]", "must not be empty")
+        if len(text) > MAX_STRING:
+            _fail(f"{path}[{index}]", f"must be at most {MAX_STRING} characters")
+        match = CWE_PATTERN.fullmatch(text)
+        if match is None:
+            _fail(
+                f"{path}[{index}]",
+                "must be a CWE number such as 79, cwe-79 or CWE-79",
+            )
+        normalized = f"CWE-{int(match.group(1))}"
+        key = normalized.casefold()
+        if key not in seen:
+            seen.add(key)
+            output.append(normalized)
+    return tuple(output)
+
+
 def _leaf_value(key: str, value: Any, path: str) -> Any:
     if key in {"cvss_min", "cvss_max"}:
         return _number(value, path, 0.0, 10.0)
@@ -199,7 +248,9 @@ def _leaf_value(key: str, value: Any, path: str) -> Any:
         return _enum(value, path, ("cisa", "eu", "any"))
     if key == "exploitation":
         return _enum(value, path, ("poc", "active"))
-    if key in {"vendor", "product", "keyword", "cwe", "cna"}:
+    if key == "cwe":
+        return _cwe_values(value, path)
+    if key in {"vendor", "product", "keyword", "cna"}:
         return _strings(value, path)
     if key == "status":
         return _enum(value, path, ("published", "rejected"))
@@ -282,7 +333,20 @@ def _rule_events(value: Any, path: str) -> tuple[str, ...]:
         if kind not in seen:
             seen.add(kind)
             output.append(kind)
+    if not output:
+        _fail(path, "must contain at least one event kind")
     return tuple(output)
+
+
+def _rule_old_cves(value: Any, path: str) -> str:
+    if value is None:
+        return "digest"
+    if not isinstance(value, str):
+        _fail(path, "must be one of digest, alert, ignore")
+    text = value.strip().casefold()
+    if text not in OLD_CVES_MODES:
+        _fail(path, "must be one of digest, alert, ignore")
+    return text
 
 
 def _rule_providers(value: Any, path: str) -> tuple[str, ...]:
@@ -333,7 +397,8 @@ def parse_rules(raw: Any, *, path: str = "watch.rules") -> tuple[Rule, ...]:
         if not isinstance(item, dict):
             _fail(item_path, "must be a table")
         unknown = sorted(set(item) - {
-            "name", "enabled", "condition", "channels", "events", "cvss_providers"
+            "name", "enabled", "condition", "channels", "events", "cvss_providers",
+            "old_cves",
         })
         if unknown:
             _fail(item_path, "has unknown key " + ", ".join(repr(key) for key in unknown))
@@ -365,8 +430,35 @@ def parse_rules(raw: Any, *, path: str = "watch.rules") -> tuple[Rule, ...]:
         providers = _rule_providers(
             item.get("cvss_providers"), f"{label} cvss_providers"
         )
-        rules.append(Rule(name, condition, channels, events, providers, enabled))
+        old_cves = _rule_old_cves(item.get("old_cves"), f"{label} old_cves")
+        rules.append(
+            Rule(
+                name=name,
+                condition=condition,
+                channels=channels,
+                events=events,
+                cvss_providers=providers,
+                enabled=enabled,
+                old_cves=old_cves,
+            )
+        )
     return tuple(rules)
+
+
+def validate_rule_sources(rules: Iterable[Rule], sources: Iterable[str]) -> None:
+    """Reject rules whose only evidence source is not configured."""
+    configured = set(sources)
+    for rule in rules:
+        if rule.condition.contains_leaf("kev", "eu") and "eu_kev" not in configured:
+            raise ConfigurationError(
+                f"watch rule {rule.name!r} uses kev = \"eu\" but eu_kev "
+                "is not in watch.sources"
+            )
+        if set(rule.cvss_providers) == {"euvd"} and "euvd" not in configured:
+            raise ConfigurationError(
+                f"watch rule {rule.name!r} selects only the euvd CVSS provider "
+                "but euvd is not in watch.sources"
+            )
 
 
 def _provider_priority(provider: str) -> int:
@@ -376,8 +468,34 @@ def _provider_priority(provider: str) -> int:
         return len(CVSS_PROVIDERS)
 
 
+def _provider_best(entries: Iterable[Any]) -> list[Any]:
+    """Pick one score per provider, ignoring legacy v2 when a modern score exists."""
+    grouped: dict[str, list[Any]] = {}
+    for entry in entries:
+        grouped.setdefault(entry.provider, []).append(entry)
+    output: list[Any] = []
+    for provider in sorted(grouped):
+        candidates = grouped[provider]
+        modern = [entry for entry in candidates if entry.version != "2.0"]
+        pool = modern or candidates
+        output.append(
+            max(
+                pool,
+                key=lambda entry: (
+                    entry.score,
+                    entry.source,
+                    entry.version,
+                    entry.vector or "",
+                ),
+            )
+        )
+    return output
+
+
 def highest_cvss(view: WatchView, providers: Sequence[str]) -> Any | None:
-    selected = [entry for entry in view.cvss if entry.provider in providers]
+    selected = _provider_best(
+        entry for entry in view.cvss if entry.provider in providers
+    )
     if not selected:
         return None
     return max(
@@ -415,17 +533,79 @@ def _epss_band(value: float | None) -> str:
     return ">=0.9"
 
 
+def _exploitation_level(view: WatchView) -> str:
+    if view.ssvc_exploitation == "active" or view.euvd_exploited_since:
+        return "active"
+    if view.ssvc_exploitation == "poc":
+        return "poc"
+    return "none"
+
+
+def _exploitation_sources(view: WatchView) -> tuple[str, ...]:
+    sources: list[str] = []
+    if view.ssvc_exploitation in {"poc", "active"}:
+        sources.append("cisa-adp")
+    if view.euvd_exploited_since:
+        sources.append("euvd")
+    return tuple(sources)
+
+
 def snapshot_for(view: WatchView, rule: Rule) -> AlertSnapshot:
     highest = highest_cvss(view, rule.cvss_providers)
+    severity_band = _severity_band(highest.score if highest is not None else None)
+    epss_band = _epss_band(view.epss)
     return AlertSnapshot(
         cisa_kev=view.cisa_kev_added is not None,
         eu_kev=view.eu_kev_added is not None,
-        exploitation=view.ssvc_exploitation or "none",
-        severity_band=_severity_band(highest.score if highest is not None else None),
-        epss_band=_epss_band(view.epss),
+        exploitation=_exploitation_level(view),
+        severity_band=severity_band,
+        epss_band=epss_band,
         nvd_score=any(entry.provider == "nvd" for entry in view.cvss),
         status=view.status,
+        max_severity_band=severity_band,
+        max_epss_band=epss_band,
     )
+
+
+def _date_prefix(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _is_backlog(view: WatchView, backlog_before: date | None) -> bool:
+    if backlog_before is None:
+        return False
+    published = _date_prefix(view.published)
+    if published is None or published >= backlog_before:
+        return False
+    for added in (view.cisa_kev_added, view.eu_kev_added):
+        value = _date_prefix(added)
+        if value is not None and value >= backlog_before:
+            return False
+    return True
+
+
+def condition_payload(condition: Condition) -> dict[str, Any]:
+    if condition.kind == "leaf":
+        return {"leaf": [[key, value] for key, value in condition.leaves]}
+    if condition.kind == "not":
+        return {"not": condition_payload(condition.children[0])}
+    return {
+        condition.kind: [condition_payload(child) for child in condition.children]
+    }
+
+
+def rule_hash(rule: Rule) -> str:
+    """Hash the parts of a rule that define which CVEs and scores it sees."""
+    value = {
+        "condition": condition_payload(rule.condition),
+        "cvss_providers": list(rule.cvss_providers),
+    }
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()[:16]
 
 
 def _first_match(values: Iterable[str], target: str) -> str | None:
@@ -455,7 +635,10 @@ def _matches_leaf(view: WatchView, key: str, value: Any, rule: Rule) -> tuple[bo
             matched = highest.score >= value
         else:
             matched = highest.score <= value
-        return matched, f"cvss {highest.score:g} ({highest.provider})"
+        return matched, (
+            f"cvss {_format_number(highest.score)} v{highest.version} "
+            f"({highest.provider})"
+        )
     if key == "epss_min":
         if view.epss is None:
             return False, None
@@ -469,9 +652,17 @@ def _matches_leaf(view: WatchView, key: str, value: Any, rule: Rule) -> tuple[bo
         selected = [reason for catalog, reason in present if value in ("any", catalog)]
         return bool(selected), selected[0] if selected else None
     if key == "exploitation":
-        current = view.ssvc_exploitation or "none"
-        matched = current == "active" or (value == "poc" and current == "poc")
-        return matched, f"exploitation {current}"
+        if value == "poc":
+            current = view.ssvc_exploitation
+            if current not in {"poc", "active"}:
+                return False, None
+            return True, f"exploitation {current} (cisa-adp)"
+        current = _exploitation_level(view)
+        if current != "active":
+            return False, None
+        sources = _exploitation_sources(view)
+        suffix = f" ({', '.join(sources)})" if sources else ""
+        return True, f"exploitation active{suffix}"
     if key == "vendor":
         found = next(
             (match for name in value if (match := _first_match(view.vendors, name))),
@@ -544,17 +735,24 @@ def evaluate_condition(
     raise AssertionError(f"unknown condition kind {condition.kind}")
 
 
-def _epss_increased(previous: str, current: str) -> bool:
-    """Compare EPSS bands, ignoring a first score below the lowest alert band."""
-    if previous == "none":
-        return current not in {"none", "<0.1"}
-    return EPSS_BAND_LABELS.index(current) > EPSS_BAND_LABELS.index(previous)
-
-
 def _event(
-    view: WatchView, rule: Rule, kind: str, reasons: Sequence[str]
+    view: WatchView,
+    rule: Rule,
+    kind: str,
+    reasons: Sequence[str],
+    occurrence: str,
+    *,
+    initial: bool = False,
 ) -> AlertEvent:
-    return AlertEvent(rule.name, view.cve_id, kind, tuple(reasons))
+    return AlertEvent(
+        rule.name, view.cve_id, kind, tuple(reasons), occurrence, initial
+    )
+
+
+def _raised_band(current: str, mark: str, labels: Sequence[str]) -> str:
+    if labels.index(current) > labels.index(mark):
+        return current
+    return mark
 
 
 def evaluate(
@@ -562,6 +760,8 @@ def evaluate(
     previous: AlertState | None,
     rule: Rule,
     now: datetime,
+    *,
+    backlog_before: date | None = None,
 ) -> tuple[AlertState | None, tuple[AlertEvent, ...]]:
     """Evaluate one rule against one view without reading state or the clock."""
     if not rule.enabled:
@@ -572,78 +772,129 @@ def evaluate(
     snapshot = snapshot_for(view, rule)
     if previous is None:
         matched, reasons = evaluate_condition(view, rule.condition, rule)
-        if matched and view.status == "rejected" and not rule.condition.contains_leaf(
-            "status", "rejected"
-        ):
+        if matched and view.status == "rejected" and "status rejected" not in reasons:
             matched, reasons = False, ()
         if not matched:
             return None, ()
         state = AlertState(timestamp, snapshot)
+        backlog = _is_backlog(view, backlog_before)
+        if backlog and rule.old_cves == "ignore":
+            return state, ()
         if "match" not in rule.events:
             return state, ()
-        return state, (_event(view, rule, "match", reasons),)
+        return state, (
+            _event(
+                view,
+                rule,
+                "match",
+                reasons,
+                "match",
+                initial=backlog and rule.old_cves == "digest",
+            ),
+        )
 
     events: list[AlertEvent] = []
     old = previous.snapshot
     if "kev_added" in rule.events:
         if not old.cisa_kev and snapshot.cisa_kev:
+            added = _date_prefix(view.cisa_kev_added)
             events.append(
-                _event(view, rule, "kev_added", ("kev cisa false \u2192 true",))
+                _event(
+                    view,
+                    rule,
+                    "kev_added",
+                    ("kev cisa false -> true",),
+                    f"cisa:{added.isoformat() if added else ''}",
+                )
             )
         if not old.eu_kev and snapshot.eu_kev:
+            added = _date_prefix(view.eu_kev_added)
             events.append(
-                _event(view, rule, "kev_added", ("kev eu false \u2192 true",))
+                _event(
+                    view,
+                    rule,
+                    "kev_added",
+                    ("kev eu false -> true",),
+                    f"eu:{added.isoformat() if added else ''}",
+                )
             )
     if (
         "exploitation_active" in rule.events
         and old.exploitation != "active"
         and snapshot.exploitation == "active"
     ):
+        sources = _exploitation_sources(view)
+        suffix = f" ({', '.join(sources)})" if sources else ""
         events.append(
             _event(
                 view,
                 rule,
                 "exploitation_active",
-                (f"exploitation {old.exploitation} \u2192 active",),
+                (f"exploitation {old.exploitation} -> active{suffix}",),
+                "active",
             )
         )
-    if (
-        "severity_increase" in rule.events
-        and SEVERITY_BANDS.index(snapshot.severity_band)
-        > SEVERITY_BANDS.index(old.severity_band)
-    ):
+    max_severity = _raised_band(
+        snapshot.severity_band, old.max_severity_band, SEVERITY_BANDS
+    )
+    if "severity_increase" in rule.events and max_severity != old.max_severity_band:
         events.append(
             _event(
                 view,
                 rule,
                 "severity_increase",
-                (f"severity {old.severity_band} \u2192 {snapshot.severity_band}",),
+                (
+                    f"severity {old.severity_band} -> "
+                    f"{snapshot.severity_band}",
+                ),
+                snapshot.severity_band,
             )
         )
-    if (
-        "epss_increase" in rule.events
-        and _epss_increased(old.epss_band, snapshot.epss_band)
-    ):
+    max_epss = old.max_epss_band
+    if not (old.max_epss_band == "none" and snapshot.epss_band == "<0.1"):
+        max_epss = _raised_band(
+            snapshot.epss_band, old.max_epss_band, EPSS_BAND_LABELS
+        )
+    if "epss_increase" in rule.events and max_epss != old.max_epss_band:
         events.append(
             _event(
                 view,
                 rule,
                 "epss_increase",
-                (f"epss {old.epss_band} \u2192 {snapshot.epss_band}",),
+                (f"epss {old.epss_band} -> {snapshot.epss_band}",),
+                snapshot.epss_band,
             )
         )
     if "nvd_score_added" in rule.events and not old.nvd_score and snapshot.nvd_score:
         events.append(
-            _event(view, rule, "nvd_score_added", ("nvd score absent \u2192 present",))
+            _event(
+                view,
+                rule,
+                "nvd_score_added",
+                ("nvd score absent -> present",),
+                "nvd",
+            )
         )
     if (
         "rejected" in rule.events
         and old.status != "rejected"
         and snapshot.status == "rejected"
     ):
+        rejected_on = _date_prefix(view.last_modified)
         events.append(
-            _event(view, rule, "rejected", (f"status {old.status} \u2192 rejected",))
+            _event(
+                view,
+                rule,
+                "rejected",
+                (f"status {old.status} -> rejected",),
+                f"rejected:{rejected_on.isoformat() if rejected_on else ''}",
+            )
         )
+    snapshot = replace(
+        snapshot,
+        max_severity_band=max_severity,
+        max_epss_band=max_epss,
+    )
     return AlertState(previous.first_matched_at, snapshot), tuple(events)
 
 
@@ -653,11 +904,11 @@ def _format_number(value: float) -> str:
 
 def _describe_leaf(key: str, value: Any) -> str:
     if key == "cvss_min":
-        return f"cvss \u2265 {_format_number(value)}"
+        return f"cvss >= {_format_number(value)}"
     if key == "cvss_max":
-        return f"cvss \u2264 {_format_number(value)}"
+        return f"cvss <= {_format_number(value)}"
     if key == "epss_min":
-        return f"epss \u2265 {_format_number(value)}"
+        return f"epss >= {_format_number(value)}"
     if key == "kev":
         return f"kev {value}"
     if key == "exploitation":
@@ -677,6 +928,13 @@ def _describe_leaf(key: str, value: Any) -> str:
     return f"{key} = {value}"
 
 
+def _describe_any_child(condition: Condition) -> str:
+    text = describe_condition(condition)
+    if condition.kind == "leaf" and len(condition.leaves) > 1:
+        return f"({text})"
+    return text
+
+
 def describe_condition(condition: Condition) -> str:
     if condition.kind == "leaf":
         return " AND ".join(
@@ -688,7 +946,7 @@ def describe_condition(condition: Condition) -> str:
         ) + ")"
     if condition.kind == "any":
         return "(" + " OR ".join(
-            describe_condition(child) for child in condition.children
+            _describe_any_child(child) for child in condition.children
         ) + ")"
     if condition.kind == "not":
         inner = describe_condition(condition.children[0])

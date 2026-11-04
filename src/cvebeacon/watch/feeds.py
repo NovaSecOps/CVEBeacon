@@ -277,6 +277,8 @@ def _products(raw: dict[str, Any]) -> tuple[Product, ...]:
             continue
         for node in nodes:
             for match in _cpe_matches(node):
+                if match.get("vulnerable") is False:
+                    continue
                 parts = split_cpe23(str(match.get("criteria") or ""))
                 if len(parts) != 11:
                     continue
@@ -550,7 +552,7 @@ def _euvd_name(value: Any) -> str | None:
     if isinstance(value, str):
         return _text(value)
     if isinstance(value, dict):
-        return _text(value.get("name")) or _text(value.get("vendor"))
+        return _text(value.get("name"))
     return None
 
 
