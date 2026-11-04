@@ -344,8 +344,9 @@ failed rows have reached the attempt cap, the line adds
 
 A per-CVE mark records that clients have been informed, so the same CVE is not
 reported twice. The mark is append-only: every report or withdrawal is kept,
-and the latest row is the current state. The watch store exposes the same
-operations for other front ends.
+and the latest row is the current state. A single reporting service binds the
+configured identity policy and user store for every front end; the raw store
+write methods are private.
 
 ```console
 cvebeacon --config cvebeacon.toml watch report CVE-2026-1234
@@ -373,9 +374,9 @@ cvebeacon --config cvebeacon.toml watch reported --all
   the first row that no longer matches.
 - `watch reported --all --format text|csv|json` exports the audit trail.
   CSV and JSON additionally carry the account id, username, identity mode,
-  operating-system account, host, and chain value. CSV cells that start with a
-  spreadsheet formula marker are prefixed with an apostrophe. `--format` other
-  than `text` requires `--all`.
+  operating-system account, host, chain value, and a legacy flag. CSV cells
+  that start with a spreadsheet formula marker are prefixed with an apostrophe.
+  `--format` other than `text` requires `--all`.
 
 ### Identity modes and accounts
 
@@ -417,12 +418,17 @@ cvebeacon --config cvebeacon.toml users verify
   or hyphen, and is unique case-insensitively. A display name is optional and at
   most 100 characters. An email address is optional, lightly checked, and
   unique case-insensitively when present.
-- `--no-password` creates a name for `registered` mode only. An account without
-  a password cannot log in.
+- `--no-password` is intended for `registered` mode. An account without a
+  password cannot log in until `users passwd` sets one; `authenticated` mode
+  rejects it.
 - There is no delete command because the audit trail refers to accounts. Use
   `disable`; the account and its history remain.
 - `users list` never displays password material. `users verify` recomputes the
-  user-admin audit chain and exits 2 at the first broken row.
+  user-admin audit chain and exits 2 at the first broken row. It covers the
+  user-admin audit log only; direct edits to `cb_user` (password hash, disabled
+  flag, role, email) are not part of that chain. Treat file access as
+  administrator access and compare against a trusted backup if account-row
+  tampering matters.
 
 Passwords are read with hidden input and confirmation; there is no
 `--password` option and no environment variable for a password. They must be
@@ -433,16 +439,19 @@ the parameters can be raised later. Verification is constant-time for the hash
 comparison; an unknown or unusable account still runs a fixed dummy hash so
 timing does not reveal valid usernames. Five consecutive failures lock the
 account for 15 minutes; a success resets the count, and `users unlock` clears a
-lock. Every failed attempt is recorded in the user audit trail with the typed
-name (sanitized and truncated), time, operating-system account and host, never
-the password.
+lock. Lockout is wall-clock UTC based: moving the host clock forward past the
+deadline ends the lock, and moving it backward extends it. Control of the host
+clock is administrator access. Every failed attempt is recorded in the user
+audit trail with the typed name (sanitized and truncated), time,
+operating-system account and host, never the password.
 
 The account file is `cvebeacon-users.db` beside the watch database. It is
 created owner-only (`0600`) on POSIX and is separate from the CVE history so
 credentials are not copied with a public watch database and accounts survive a
-watch database rebuild. Back up both files together. On Windows, place both in
-the documented ACL-protected data directory. The same account store and verify
-function are intended for a future dashboard login.
+watch database rebuild. Back up both files together, and keep account backups
+at `0600` as well. On Windows, place both in the
+[ACL-protected data directory](DEPLOY.md#windows-data-directory-acls). The same
+account store and verify function are intended for a future dashboard login.
 
 ### Report audit trail
 
@@ -453,14 +462,22 @@ note. The operating-system account comes from `pwd.getpwuid` on POSIX,
 `GetUserNameExW` on Windows, or `getpass.getuser()` as a fallback; it is
 informational and never used for authorization.
 
-Each row also stores `chain = sha256(previous chain || canonical JSON of the
-row)`. `watch reported --verify` recomputes the chain from the first row and
-reports the first mismatch; an edit or a deletion in the middle of the trail is
-detected. Removing only the newest rows cannot be detected by a chain alone, so
-keep the database backup as the external reference for the trail end. The user
-audit table uses the same construction. The watch database schema is version 6;
-older databases migrate in place, and rows created before the upgrade keep null
-identity fields but receive a chain value.
+Each chained row stores `chain = sha256(previous chain || canonical JSON of the
+row)`. The chain is **unkeyed**: it detects edits and deletions that do not also
+recompute the hashes, and it is not a signature or authentication of the writer.
+Anyone who can write the database can recompute the remaining chain, append a
+forged row with a valid chain, or remove the newest rows. Keep an external
+reference (a backup, an off-box copy of the head, or write-once storage) for
+that stronger claim. `watch reported --verify` reports the first broken row and
+exits 2; when it succeeds it prints how many rows are chained and how many are
+legacy and unchained. The user audit table uses the same construction.
+
+The watch database schema is version 7. Rows written before the identity upgrade
+have `chain_version = 0`, a null chain, and are reported as legacy unchained;
+the chain starts with the first report written after the upgrade. Verification
+never rewrites a stored chain, even if the schema metadata is rolled back. A
+schema 6 database keeps its existing chains and gains the explicit version
+marker without re-hashing them.
 
 A reported CVE is displayed as
 `Reported to clients by X at YYYY-MM-DD HH:MM UTC`; registered and
@@ -924,7 +941,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 6. An unknown version still fails closed. The version 1
+place to schema version 7. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to
@@ -937,11 +954,14 @@ once. The version 2 upgrade keeps delivery rows and adds the `sending` and
 when a row was first claimed. The version 4 to 5 upgrade adds the
 `watch_report` trail; the table is created by the schema step for every
 upgrade, so older versions get it too, and no existing row is rewritten. The
-version 5 to 6 upgrade adds the identity, operating-system account, host and
+version 5 to 7 upgrade adds the identity, operating-system account, host and
 chain columns to `watch_report`. Existing rows keep their CVE, action, name,
-note and time; the new identity fields stay null and a chain value is computed
-once during the upgrade. Later edits and middle deletions then fail
-`watch reported --verify`.
+note and time; the identity fields stay null, `chain_version` is 0 and the chain
+is null, so those rows are explicitly legacy and unchained. The chain starts
+with the first report written after the upgrade. A version 6 database keeps its
+existing chains and gains `chain_version = 1` without re-hashing them. Migration
+never rewrites a stored chain, even when the version metadata claims to be
+older. Later edits and middle deletions then fail `watch reported --verify`.
 After the upgrade, run
 `cvebeacon watch evaluate --all --yes`
 BEFORE the first `watch run`, as after adding a rule. Otherwise every CVE from
