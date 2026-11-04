@@ -262,6 +262,12 @@ def _severity_text(value: str, catalog: Mapping[str, str]) -> str:
     return value
 
 
+def _epss_text(value: str, catalog: Mapping[str, str]) -> str:
+    if value == "none":
+        return catalog["epss_band_none"]
+    return value
+
+
 def _kind_label(
     event: DeliveryEvent, style: str, catalog: Mapping[str, str]
 ) -> str:
@@ -307,8 +313,8 @@ def _kind_label(
             return translate(
                 catalog,
                 "label_epss_up",
-                previous=transition[0],
-                current=transition[1],
+                previous=_epss_text(transition[0], catalog),
+                current=_epss_text(transition[1], catalog),
             )
         return catalog["label_epss_up_plain"]
     if kind == "nvd_score_added":

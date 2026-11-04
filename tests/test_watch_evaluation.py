@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from cvebeacon.errors import StateError
+from cvebeacon.watch.messages import build_messages
 from cvebeacon.watch.records import CVSSEntry, EUVDUpdate, KEVFields, Product, WatchRecord
 from cvebeacon.watch.rules import parse_rules
 from cvebeacon.watch.store import WatchStore
@@ -853,3 +854,32 @@ def test_crash_mid_batch_keeps_completed_batches_and_no_duplicates(tmp_path, mon
     assert (result.evaluated, result.events) == (4, 4)
     assert len(store.events(limit=10)) == 5
     assert store.pending_evaluations(10) == ()
+
+
+def test_pt_pt_epss_transition_without_a_previous_score(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.upsert_nvd([record()])
+    configured = rule(condition={"cvss_min": 1})
+    store.evaluate_touched((configured,), catalogs=("nvd", "epss"))
+    store.replace_epss(
+        [("CVE-2026-0001", 0.62, 0.9, date(2026, 11, 3))]
+    )
+    store.evaluate_touched((configured,), catalogs=("nvd", "epss"))
+    events = store.delivery_events(
+        "soc-email", catalogs=("nvd", "epss"), now=NOW
+    )
+    epss = [event for event in events if event.kind == "epss_increase"]
+    assert len(epss) == 1
+    assert epss[0].reasons == ("epss none -> <0.9",)
+    assert epss[0].details["previous_epss"] is None
+    message = build_messages(
+        epss,
+        channel_type="smtp",
+        grouping="run",
+        max_items=20,
+        names={configured.name: configured.name},
+        language="pt-PT",
+        format="text",
+    )[0]
+    assert "[EPSS AUMENTOU nenhuma-><0.9]" in message.body
+    assert "none" not in message.body.splitlines()[0]
