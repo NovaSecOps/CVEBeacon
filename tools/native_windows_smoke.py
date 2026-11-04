@@ -404,6 +404,31 @@ def database_owner(database: Path) -> str:
     ).stdout.strip()
 
 
+def sid_to_string(sid: bytes) -> str | None:
+    """Return the string form of a binary SID."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.ConvertSidToStringSidW.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.LocalFree.argtypes = [wintypes.LPVOID]
+    advapi32.LocalFree.restype = wintypes.LPVOID
+    buffer = ctypes.create_string_buffer(sid)
+    text = wintypes.LPWSTR()
+    if not advapi32.ConvertSidToStringSidW(
+        ctypes.cast(buffer, wintypes.LPVOID), ctypes.byref(text)
+    ):
+        return None
+    try:
+        return text.value
+    finally:
+        advapi32.LocalFree(text)
+
+
 def cleanup_account(batch_sid: bytes | None) -> bool:
     """Best-effort removal of the fixture's right and local account."""
     ok = True
@@ -603,6 +628,7 @@ def smoke() -> None:
             batch_sid = change_batch_logon(account=service_account, add=True)
         except Exception as exc:  # policy APIs vary; registration still proves XML
             print(f"WARN: could not grant SeBatchLogonRight: {exc}", flush=True)
+        account_sid = sid_to_string(batch_sid) if batch_sid else None
         step("local service account and ACLs")
 
         installed = True
@@ -630,14 +656,23 @@ def smoke() -> None:
             in install.stdout.casefold()
         ), install.stdout
         status = checked([*base, "schedule", "status"], timeout=120, env=env)
-        assert f"Account: {service_account}".casefold() in status.stdout.casefold(), (
-            status.stdout
+        status_text = status.stdout.casefold()
+        name_match = f"Account: {service_account}".casefold() in status_text
+        sid_match = bool(
+            account_sid
+            and f"Account: {account_sid}".casefold() in status_text
         )
+        assert name_match or sid_match, status.stdout
         assert "Runs while logged off: yes" in status.stdout, status.stdout
         xml = query_xml()
         assert "<LogonType>Password</LogonType>" in xml, xml
+        xml_text = xml.casefold()
         assert (
-            f"<UserId>{service_account}</UserId>".casefold() in xml.casefold()
+            f"<UserId>{service_account}</UserId>".casefold() in xml_text
+            or (
+                account_sid
+                and f"<UserId>{account_sid}</UserId>".casefold() in xml_text
+            )
         ), xml
         reset_database(data)
         _, _, before = task_state()
@@ -683,8 +718,13 @@ def smoke() -> None:
         assert "<TimeTrigger>" in xml, xml
         assert "<Interval>PT4H</Interval>" in xml, xml
         assert "<LogonType>Password</LogonType>" in xml, xml
+        xml_text = xml.casefold()
         assert (
-            f"<UserId>{service_account}</UserId>".casefold() in xml.casefold()
+            f"<UserId>{service_account}</UserId>".casefold() in xml_text
+            or (
+                account_sid
+                and f"<UserId>{account_sid}</UserId>".casefold() in xml_text
+            )
         ), xml
         checked([*base, "schedule", "remove", "--yes"], timeout=120, env=env)
         installed = False
