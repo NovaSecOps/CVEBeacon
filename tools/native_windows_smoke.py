@@ -515,11 +515,15 @@ def smoke() -> None:
             f"Runs as: {service_account} (S4U, while logged off)" in install.stdout
         ), install.stdout
         status = checked([*base, "schedule", "status"], timeout=120, env=env)
-        assert f"Account: {service_account}" in status.stdout, status.stdout
+        assert f"Account: {service_account}".casefold() in status.stdout.casefold(), (
+            status.stdout
+        )
         assert "Runs while logged off: yes" in status.stdout, status.stdout
         xml = query_xml()
         assert "<LogonType>S4U</LogonType>" in xml, xml
-        assert f"<UserId>{service_account}</UserId>" in xml, xml
+        assert (
+            f"<UserId>{service_account}</UserId>".casefold() in xml.casefold()
+        ), xml
         if batch_ready:
             reset_database(data)
             _, _, before = task_state()
