@@ -412,6 +412,7 @@ def test_users_database_detects_replacement_between_check_and_open(
 ):
     path = tmp_path / "users.db"
     store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
     import cvebeacon.watch.users as users_module
     import sqlite3 as sqlite_module
 
