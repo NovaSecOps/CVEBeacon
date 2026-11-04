@@ -325,14 +325,18 @@ computer or domain name, and never add the service account to Administrators.
 New-LocalUser svc-cvebeacon -Password (Read-Host -AsSecureString "Password") -PasswordNeverExpires
 New-Item -ItemType Directory -Force C:\CVEBeacon\app, C:\CVEBeacon\data | Out-Null
 icacls C:\CVEBeacon\app /grant "CVEHOST\svc-cvebeacon:(OI)(CI)M"
+icacls C:\CVEBeacon\app /setowner "CVEHOST\svc-cvebeacon"
 icacls C:\CVEBeacon\data /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F" "CVEHOST\svc-cvebeacon:(OI)(CI)F"
 ```
 
 `/inheritance:r` drops inherited permissions and `(OI)(CI)` applies the grants
 to new files and subdirectories, including `data\secrets`. Run it before the
 first secret is created; on an existing directory, add `/T` and review
-unrelated explicit entries. On non-English Windows, use localized names or
-equivalent SIDs.
+unrelated explicit entries. `setowner` makes the service account the owner of
+the checkout so Git accepts its own pulls; if ownership must stay with an
+administrator, add a `safe.directory` entry for only `C:/CVEBeacon/app` for the
+maintenance account, never disable Git's ownership checks globally. On
+non-English Windows, use localized names or equivalent SIDs.
 
 ### Install
 
@@ -407,15 +411,21 @@ A scheduled `watch run` needs an unattended first run: use `baseline` or
 
 ### Upgrade
 
-In the same account context that owns the task, disable it, wait for a running
-job, back up the watch database, upgrade, and re-enable:
+Run the first and last commands as the task owner (an administrator for an
+`--account` task, or the service account for a self-registered task). Wait for
+a running job to finish. Run the backup, pull and pip commands as the service
+account that owns `C:\CVEBeacon\app`; do not run Git maintenance for that
+checkout as an administrator.
 
 ```powershell
+# Task owner
 schtasks /Change /TN "CVEBeacon Monitor" /DISABLE
+# Service account
 $Backup = "C:\CVEBeacon\data\backup-$(Get-Date -Format yyyyMMdd-HHmm)"
 New-Item -ItemType Directory $Backup | Out-Null; Copy-Item C:\CVEBeacon\data\cvebeacon-watch.db* $Backup
 git -C C:\CVEBeacon\app pull --ff-only
 C:\CVEBeacon\app\.venv\Scripts\python.exe -m pip install C:\CVEBeacon\app
+# Task owner
 schtasks /Change /TN "CVEBeacon Monitor" /ENABLE
 ```
 
