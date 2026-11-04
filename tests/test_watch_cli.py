@@ -40,7 +40,7 @@ def test_watch_rules_check_prints_readable_conditions(tmp_path, capsys):
     config = write_config(tmp_path, extra=RULES)
     assert cli.main(["--config", str(config.config_path), "watch", "rules", "check"]) == 0
     output = capsys.readouterr().out
-    assert "critical-or-likely: (cvss \u2265 9.0 OR epss \u2265 0.5)" in output
+    assert "critical-or-likely: (cvss >= 9.0 OR epss >= 0.5)" in output
     assert "kev-watch: kev any" in output
 
 
@@ -63,7 +63,7 @@ def test_watch_events_lists_concise_lines_and_filters(tmp_path, capsys):
     store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources)
     assert cli.main(["--config", str(config.config_path), "watch", "events"]) == 0
     output = capsys.readouterr().out
-    assert "2026-11-03 12:00Z  critical-or-likely  CVE-2026-0001  match  cvss 9.8 (cna)" in output
+    assert "2026-11-03 12:00Z  critical-or-likely  CVE-2026-0001  match  cvss 9.8 v3.1 (cna)" in output
     assert "2026-11-03 12:00Z  kev-watch  CVE-2026-0002  match" in output
     assert cli.main(
         ["--config", str(config.config_path), "watch", "events", "--rule", "kev-watch"]
@@ -209,3 +209,63 @@ def test_known_rules_still_load_from_the_old_config_shape(tmp_path):
     config = write_config(tmp_path)
     assert config.watch.rules == ()
     assert config.inventory is not None
+
+
+def test_watch_events_rule_filter_and_display_are_case_insensitive(tmp_path, capsys):
+    config = write_config(
+        tmp_path,
+        extra="""
+[[watch.rules]]
+name = "Critical"
+condition = { cvss_min = 9 }
+channels = ["soc-email"]
+""",
+    )
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    store.upsert_nvd([record()])
+    store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources)
+    assert cli.main(
+        ["--config", str(config.config_path), "watch", "events", "--rule", "CRITICAL"]
+    ) == 0
+    output = capsys.readouterr().out
+    assert "  Critical  CVE-2026-0001  match" in output
+
+
+def test_watch_output_is_ascii_under_cp1252(tmp_path, monkeypatch):
+    import io
+    import sys
+
+    config = write_config(tmp_path, extra=RULES)
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    store.upsert_nvd([record()])
+    store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources)
+
+    for command, expected in (
+        (["watch", "rules", "check"], "cvss >= 9.0"),
+        (["watch", "events"], "cvss 9.8 v3.1 (cna)"),
+    ):
+        buffer = io.BytesIO()
+        wrapper = io.TextIOWrapper(buffer, encoding="cp1252")
+        monkeypatch.setattr(sys, "stdout", wrapper)
+        assert cli.main(["--config", str(config.config_path), *command]) == 0
+        wrapper.flush()
+        assert expected in buffer.getvalue().decode("cp1252")
+
+
+def test_watch_only_config_refuses_native_scheduling(tmp_path, capsys):
+    config = write_config(tmp_path, inventory=False)
+    assert cli.main(
+        ["--config", str(config.config_path), "schedule", "install", "--dry-run"]
+    ) == 2
+    error = capsys.readouterr().err
+    assert "watch scheduling arrives in a later release" in error
+    assert "watch run" in error
+
+
+def test_watch_only_config_refuses_doctor_and_serve(tmp_path, capsys):
+    config = write_config(tmp_path, inventory=False)
+    for command in ("doctor", "serve"):
+        assert cli.main(["--config", str(config.config_path), command]) == 2
+        error = capsys.readouterr().err
+        assert "requires an inventory" in error
+        assert "watch run" in error

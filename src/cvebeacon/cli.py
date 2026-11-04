@@ -139,7 +139,7 @@ def _print_evaluation(result) -> None:
         print(f"events: {result.events} new")
 
 
-def _event_line(row) -> str:
+def _event_line(row, rule_name: str | None = None) -> str:
     try:
         stamp = datetime.fromisoformat(row.created_at).astimezone(timezone.utc).strftime(
             "%Y-%m-%d %H:%MZ"
@@ -147,7 +147,7 @@ def _event_line(row) -> str:
     except ValueError:
         stamp = row.created_at
     reasons = "; ".join(row.reasons)
-    line = f"{stamp}  {row.rule}  {row.cve_id}  {row.kind}"
+    line = f"{stamp}  {rule_name or row.rule}  {row.cve_id}  {row.kind}"
     if reasons:
         line += f"  {reasons}"
     return line
@@ -176,8 +176,9 @@ def _run_watch(args, config: AppConfig) -> int:
     _require_watch(config)
     store = WatchStore(config.watch.database)
     if args.watch_command == "events":
+        display = {rule.name.casefold(): rule.name for rule in config.watch.rules}
         for row in store.events(limit=args.limit, rule=args.rule, pending=args.pending):
-            print(_event_line(row))
+            print(_event_line(row, display.get(row.rule.casefold(), row.rule)))
         return 0
     if args.watch_command == "evaluate":
         if not args.yes:
@@ -208,6 +209,7 @@ def _run_watch(args, config: AppConfig) -> int:
         config.watch.rules,
         catalogs=config.watch.sources,
         initial=report.initial_evaluation,
+        complete=not report.failures,
     )
     _print_evaluation(result)
     return 4 if report.failures else 0
@@ -314,6 +316,16 @@ def run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     if args.command == "watch":
         return _run_watch(args, config)
+    if (
+        args.command in {"doctor", "serve"}
+        and config.inventory is None
+        and config.watch.enabled
+    ):
+        raise CVEBeaconError(
+            f"{args.command} requires an inventory; add [inventory] path, or use "
+            f"'cvebeacon --config {config.config_path} watch run' from cron or "
+            "Task Scheduler"
+        )
     if args.command in {"scan", "export", "asset", "doctor", "serve"}:
         _inventory_config(config)
     if args.command == "inventory" and not args.path:
@@ -415,6 +427,11 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         return 2 if "missing" in checks.values() or failed_live else 0
     if args.command == "source-status": print(json.dumps(_source_status(store), indent=2)); return 0
     if args.command == "schedule":
+        if config.inventory is None and config.watch.enabled:
+            raise CVEBeaconError(
+                "watch scheduling arrives in a later release; use cron/Task "
+                f"Scheduler with `cvebeacon --config {config.config_path} watch run`"
+            )
         if args.every is None:
             selected = input("Interval in hours [2/4/6/12/24, default 4]: ").strip() or "4"
         else:

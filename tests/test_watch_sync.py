@@ -1854,3 +1854,52 @@ def test_unknown_euvd_score_versions_are_ignored_and_counted(
     assert view2.euvd_id == "EUVD-2026-9"
     assert not any(entry.provider == "euvd" for entry in view1.cvss)
     assert not any(entry.provider == "euvd" for entry in view2.cvss)
+
+
+def test_first_sync_with_a_failed_source_keeps_the_initial_window_open(tmp_path):
+    config = write_config(
+        tmp_path,
+        sources=("nvd", "euvd"),
+        initial="backfill",
+        extra="""
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["soc-email"]
+""",
+    )
+    euvd_failed = [False]
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([nvd_cve()]))
+
+    def euvd_request(request):
+        if not euvd_failed[0]:
+            euvd_failed[0] = True
+            return httpx.Response(500)
+        return httpx.Response(200, json={"total": 0, "items": []})
+
+    handler = handler_for(nvd=nvd_request, euvd=euvd_request)
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    first = run(config, handler)
+    assert first.failures == ("euvd",)
+    assert first.initial_evaluation is True
+    store.evaluate_touched(
+        config.watch.rules,
+        catalogs=config.watch.sources,
+        initial=first.initial_evaluation,
+        complete=not first.failures,
+    )
+    assert "initial_evaluated_at" not in store.metadata()
+    assert all(event.initial for event in store.events())
+
+    second = run(config, handler, now=NOW + timedelta(hours=1))
+    assert not second.failures
+    assert second.initial_evaluation is True
+    store.evaluate_touched(
+        config.watch.rules,
+        catalogs=config.watch.sources,
+        initial=second.initial_evaluation,
+        complete=not second.failures,
+    )
+    assert "initial_evaluated_at" in store.metadata()

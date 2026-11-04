@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
-from .watch.rules import Rule, parse_rules
+from .watch.rules import Rule, parse_rules, validate_rule_sources
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
 OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit")
@@ -200,6 +200,7 @@ def load_config(path: str | Path) -> AppConfig:
     if not isinstance(watch_database, str) or not watch_database.strip():
         raise ConfigurationError("watch.database must be a nonempty path")
     watch_rules = parse_rules(watch_data.get("rules"))
+    validate_rule_sources(watch_rules, watch_sources)
 
     inv = _table(data, "inventory")
     inventory_config: InventoryConfig | None = None

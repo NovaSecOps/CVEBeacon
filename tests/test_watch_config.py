@@ -157,3 +157,94 @@ channels = ["soc-email"]
     )
     with pytest.raises(ConfigurationError, match="watch rule 'bad' condition.all"):
         load_config(path)
+
+
+def test_rule_sources_are_checked_against_the_configured_watch_sources(tmp_path):
+    with pytest.raises(ConfigurationError, match="eu_kev is not in watch.sources"):
+        write(
+            tmp_path,
+            """
+[watch]
+sources = ["nvd"]
+
+[[watch.rules]]
+name = "eu-only"
+condition = { kev = "eu" }
+channels = ["soc-email"]
+""",
+        )
+    with pytest.raises(ConfigurationError, match="euvd is not in watch.sources"):
+        write(
+            tmp_path,
+            """
+[watch]
+sources = ["nvd"]
+
+[[watch.rules]]
+name = "euvd-only"
+condition = { cvss_min = 1 }
+channels = ["soc-email"]
+cvss_providers = ["euvd"]
+""",
+        )
+    write(
+        tmp_path,
+        """
+[watch]
+sources = ["nvd", "cisa_kev"]
+
+[[watch.rules]]
+name = "cisa-only"
+condition = { kev = "cisa" }
+channels = ["soc-email"]
+""",
+    )
+
+
+def test_rule_options_are_validated_while_loading(tmp_path):
+    with pytest.raises(ConfigurationError, match="old_cves"):
+        write(
+            tmp_path,
+            """
+[watch]
+enabled = true
+
+[[watch.rules]]
+name = "old"
+condition = { cvss_min = 1 }
+channels = ["soc-email"]
+old_cves = "loud"
+""",
+        )
+    with pytest.raises(ConfigurationError, match="at least one event kind"):
+        write(
+            tmp_path,
+            """
+[watch]
+enabled = true
+
+[[watch.rules]]
+name = "silent"
+condition = { cvss_min = 1 }
+channels = ["soc-email"]
+events = []
+""",
+        )
+
+
+def test_watch_rules_store_normalized_cwe_values(tmp_path):
+    config = write(
+        tmp_path,
+        """
+[watch]
+enabled = true
+
+[[watch.rules]]
+name = "cwe"
+condition = { cwe = ["79", "cwe-80", "CWE-81"] }
+channels = ["soc-email"]
+""",
+    )
+    assert config.watch.rules[0].condition.leaves == (
+        ("cwe", ("CWE-79", "CWE-80", "CWE-81")),
+    )
