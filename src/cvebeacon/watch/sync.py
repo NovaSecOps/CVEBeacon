@@ -103,11 +103,18 @@ class _EUVDResume:
     end: date
     page: int
     total: int
-    ids: tuple[str, ...] = ()
+    phase: str = "scan"
+    verify: int = 0
+    restart: bool = False
 
 
 def _euvd_resume(value: str | None) -> _EUVDResume | None:
-    """Read the page-level EUVD resume cursor, or None when there is none."""
+    """Read the page-level EUVD cursor, or None when there is none.
+
+    A cursor without the current page size and phase is restarted from the
+    window's first page. Interpreting an old offset at the current page size
+    could skip items.
+    """
     if not value:
         return None
     try:
@@ -118,20 +125,31 @@ def _euvd_resume(value: str | None) -> _EUVDResume | None:
         end = date.fromisoformat(payload["end"])
         page = payload["page"]
         total = payload["total"]
-        ids = payload.get("ids", [])
         if type(page) is not int or type(total) is not int:
             raise ValueError("invalid offsets")
-        if not isinstance(ids, list) or not all(
-            isinstance(item, str) and item for item in ids
-        ):
-            raise ValueError("invalid identifiers")
-        if page < 1 or total < 0 or start > end or len(ids) > feeds.EUVD_PAGE_SIZE:
+        if page < 0 or total < 0 or start > end:
             raise ValueError("invalid range")
-        if page * feeds.EUVD_PAGE_SIZE >= total:
+        size = payload.get("size")
+        phase = payload.get("phase")
+        if (
+            type(size) is not int
+            or size != feeds.EUVD_PAGE_SIZE
+            or phase not in ("scan", "verify")
+        ):
+            return _EUVDResume(start, end, 0, total, "scan", 0, restart=True)
+        pages = (total + size - 1) // size
+        if page > max(pages - 1, 0):
             raise ValueError("invalid page")
+        if phase == "scan":
+            return _EUVDResume(start, end, page, total)
+        verify = payload.get("verify")
+        if type(verify) is not int or verify <= 0 or verify > pages:
+            raise ValueError("invalid verification boundary")
+        if page >= verify:
+            raise ValueError("invalid page")
+        return _EUVDResume(start, end, page, total, "verify", verify)
     except (KeyError, TypeError, ValueError) as exc:
         raise StateError("watch database has an invalid EUVD page cursor") from exc
-    return _EUVDResume(start, end, page, total, tuple(ids))
 
 
 def _euvd_resume_value(
@@ -139,7 +157,8 @@ def _euvd_resume_value(
     end: date,
     page: int,
     total: int,
-    ids: tuple[str, ...],
+    phase: str = "scan",
+    verify: int = 0,
 ) -> str:
     return json.dumps(
         {
@@ -147,8 +166,35 @@ def _euvd_resume_value(
             "end": end.isoformat(),
             "page": page,
             "total": total,
-            "ids": list(ids),
+            "size": feeds.EUVD_PAGE_SIZE,
+            "phase": phase,
+            "verify": verify,
         },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _euvd_window(value: str | None) -> tuple[date, date] | None:
+    """Read the successor window saved when an earlier window completed."""
+    if not value:
+        return None
+    try:
+        payload = json.loads(value)
+        if not isinstance(payload, dict):
+            raise ValueError("not an object")
+        start = date.fromisoformat(payload["start"])
+        end = date.fromisoformat(payload["end"])
+        if start > end:
+            raise ValueError("invalid range")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StateError("watch database has an invalid EUVD pending window") from exc
+    return start, end
+
+
+def _euvd_window_value(start: date, end: date) -> str:
+    return json.dumps(
+        {"start": start.isoformat(), "end": end.isoformat()},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -156,11 +202,12 @@ def _euvd_resume_value(
 
 def _split_chunk(
     pending: list[tuple[date, date]], start: date, end: date
-) -> None:
-    """Queue the two halves of a window, earlier half first."""
+) -> tuple[date, date]:
+    """Queue the two halves of a window, earlier half first, and return it."""
     middle = start + timedelta(days=(end - start).days // 2)
     pending.append((middle + timedelta(days=1), end))
     pending.append((start, middle))
+    return start, middle
 
 
 def _confirm_full_history(
@@ -406,6 +453,7 @@ def sync_watch(
         euvd_waited_before = throttle.waited
         euvd_records = euvd_new = euvd_changed = euvd_ignored = 0
         euvd_error: str | None = None
+
         # The 403 heuristic is per source. A successful EU KEV request must not
         # turn the first EUVD 403 into a ten-minute wait; the wait counters stay
         # shared so the host budget is unchanged.
@@ -413,106 +461,303 @@ def sync_watch(
 
         euvd_cursor = _cursor_date(metadata.get("euvd_cursor"))
         resume = _euvd_resume(metadata.get("euvd_page_cursor"))
+        pending_window = _euvd_window(metadata.get("euvd_next_window"))
         if resume is not None and euvd_cursor is not None and resume.end < euvd_cursor:
             # The committed cursor is already past this window.
-            store.set_metadata({"euvd_page_cursor": ""})
-            resume = None
-        if resume is not None:
-            pending_chunks = list(
-                reversed(feeds.euvd_chunks(resume.end + timedelta(days=1), today))
+            store.replace_euvd_items(
+                (),
+                meta={"euvd_page_cursor": "", "euvd_next_window": ""},
+                scan_reset=True,
             )
-            pending_chunks.append((resume.start, resume.end))
+            resume = None
+            pending_window = None
+        if resume is not None:
+            if pending_window is not None:
+                # The page cursor describes the same catch-up; rebuilding the
+                # later windows from its end covers the successor too.
+                store.set_metadata({"euvd_next_window": ""})
+            pending_window = None
+        elif (
+            pending_window is not None
+            and euvd_cursor is not None
+            and pending_window[1] < euvd_cursor
+        ):
+            store.set_metadata({"euvd_next_window": ""})
+            pending_window = None
+        if resume is None:
+            store.clear_euvd_scan()
+
+        if resume is not None:
+            windows = [(resume.start, resume.end)]
+            windows.extend(feeds.euvd_chunks(resume.end + timedelta(days=1), today))
+        elif pending_window is not None:
+            windows = [pending_window]
+            windows.extend(
+                feeds.euvd_chunks(pending_window[1] + timedelta(days=1), today)
+            )
         else:
-            pending_chunks = list(reversed(feeds.euvd_chunks(euvd_start, today)))
+            windows = list(feeds.euvd_chunks(euvd_start, today))
+        pending_chunks = list(reversed(windows))
+
+        def add_euvd_counts(feed, counts) -> None:
+            nonlocal euvd_records, euvd_new, euvd_changed, euvd_ignored
+            euvd_records += len(feed.updates)
+            euvd_new += counts.new
+            euvd_changed += counts.changed
+            euvd_ignored += feed.ignored
+            touched.update(counts.touched_ids)
+
+        def finish_euvd_window(end: date) -> tuple[dict[str, str], date]:
+            cursor_day = end if euvd_cursor is None else max(euvd_cursor, end)
+            meta = {
+                "euvd_cursor": cursor_day.isoformat(),
+                "euvd_page_cursor": "",
+            }
+            if pending_chunks:
+                # Persist the unread successor with the completed window. A
+                # following request can be throttled; the next run must not
+                # replay this window's last day from the inclusive cursor.
+                meta["euvd_next_window"] = _euvd_window_value(*pending_chunks[-1])
+            else:
+                meta["euvd_next_window"] = ""
+            return meta, cursor_day
+
         while pending_chunks:
             chunk_start, chunk_end = pending_chunks.pop()
+            saved = (
+                resume
+                if resume is not None
+                and (resume.start, resume.end) == (chunk_start, chunk_end)
+                else None
+            )
+            resume = None
             page = 0
             pinned_total: int | None = None
-            if resume is not None and (resume.start, resume.end) == (
-                chunk_start,
-                chunk_end,
-            ):
-                page = resume.page
-                pinned_total = resume.total
-                seen_ids = set(resume.ids)
-                resume = None
-            else:
-                seen_ids = set()
+            ledger: set[str] = set()
+            verify_pages = 0
             restarts = 0
-            while True:
-                try:
-                    feed = feeds.fetch_euvd_page(
-                        http,
-                        start=chunk_start,
-                        end=chunk_end,
-                        page=page,
-                        throttle=throttle,
-                    )
-                except SourceError as exc:
-                    euvd_error = str(exc)
-                    break
-                if page == 0:
-                    pinned_total = feed.total
-                    if (
-                        feed.total > feeds.EUVD_SPLIT_TOTAL
-                        and chunk_end > chunk_start
-                    ):
-                        _split_chunk(pending_chunks, chunk_start, chunk_end)
-                        break
-                elif feed.total != pinned_total:
-                    restarts += 1
-                    if restarts >= feeds.EUVD_ATTEMPTS:
-                        euvd_error = "source returned unstable pagination"
-                        break
-                    page = 0
-                    pinned_total = feed.total
-                    seen_ids.clear()
-                    continue
-                page_ids = [update.euvd_id for update in feed.updates]
-                if len(set(page_ids)) != len(page_ids) or any(
-                    identifier in seen_ids for identifier in page_ids
-                ):
-                    restarts += 1
-                    if restarts >= feeds.EUVD_ATTEMPTS:
-                        euvd_error = "source returned unstable pagination"
-                        break
-                    page = 0
-                    seen_ids.clear()
-                    continue
-                seen_ids.update(page_ids)
-                complete = (page + 1) * feeds.EUVD_PAGE_SIZE >= pinned_total
-                if complete:
-                    cursor_day = (
-                        chunk_end
-                        if euvd_cursor is None
-                        else max(euvd_cursor, chunk_end)
-                    )
-                    meta = {
-                        "euvd_cursor": cursor_day.isoformat(),
-                        "euvd_page_cursor": "",
-                    }
+            mode = "scan"
+            restart_saved = False
+            if saved is not None and saved.phase == "verify":
+                ledger = store.euvd_scan_ids()
+                if len(ledger) == saved.total:
+                    mode = "verify"
+                    page = saved.page
+                    pinned_total = saved.total
+                    verify_pages = saved.verify
                 else:
+                    restart_saved = True
+            elif saved is not None and not saved.restart:
+                ledger = store.euvd_scan_ids()
+                if len(ledger) == saved.page * feeds.EUVD_PAGE_SIZE:
+                    mode = "scan"
+                    page = saved.page
+                    pinned_total = saved.total
+                    verify_pages = saved.page
+                else:
+                    restart_saved = True
+            elif saved is not None:
+                restart_saved = True
+            if restart_saved:
+                ledger = set()
+                store.replace_euvd_items(
+                    (),
+                    meta={
+                        "euvd_page_cursor": _euvd_resume_value(
+                            chunk_start, chunk_end, 0, 0
+                        ),
+                        "euvd_next_window": "",
+                    },
+                    scan_reset=True,
+                )
+
+            def restart_scan() -> bool:
+                nonlocal restarts, page, pinned_total, verify_pages
+                restarts += 1
+                if restarts >= feeds.EUVD_ATTEMPTS:
+                    return False
+                page = 0
+                pinned_total = None
+                verify_pages = 0
+                ledger.clear()
+                store.replace_euvd_items(
+                    (),
+                    meta={
+                        "euvd_page_cursor": _euvd_resume_value(
+                            chunk_start, chunk_end, 0, 0
+                        ),
+                        "euvd_next_window": "",
+                    },
+                    scan_reset=True,
+                )
+                return True
+
+            while mode in ("scan", "verify"):
+                if mode == "scan":
+                    try:
+                        feed = feeds.fetch_euvd_page(
+                            http,
+                            start=chunk_start,
+                            end=chunk_end,
+                            page=page,
+                            throttle=throttle,
+                        )
+                    except SourceError as exc:
+                        euvd_error = str(exc)
+                        break
+                    if page == 0:
+                        pinned_total = feed.total
+                        if (
+                            feed.total > feeds.EUVD_SPLIT_TOTAL
+                            and chunk_end > chunk_start
+                        ):
+                            first = _split_chunk(
+                                pending_chunks, chunk_start, chunk_end
+                            )
+                            # Save the first child before reading it. A run that
+                            # ends after this probe must not repeat it or lose
+                            # the earlier dates; later windows rebuild from the
+                            # child end and therefore cover the second half.
+                            store.replace_euvd_items(
+                                (),
+                                meta={
+                                    "euvd_next_window": _euvd_window_value(*first),
+                                    "euvd_page_cursor": "",
+                                },
+                                scan_reset=True,
+                            )
+                            mode = "split"
+                            break
+                    elif feed.total != pinned_total:
+                        if not restart_scan():
+                            euvd_error = "source returned unstable pagination"
+                            break
+                        continue
+                    page_ids = [update.euvd_id for update in feed.updates]
+                    if len(set(page_ids)) != len(page_ids) or any(
+                        identifier in ledger for identifier in page_ids
+                    ):
+                        if not restart_scan():
+                            euvd_error = "source returned unstable pagination"
+                            break
+                        continue
+                    if (page + 1) * feeds.EUVD_PAGE_SIZE >= pinned_total:
+                        ledger.update(page_ids)
+                        if len(ledger) != pinned_total:
+                            if not restart_scan():
+                                euvd_error = "source returned unstable pagination"
+                                break
+                            continue
+                        if verify_pages:
+                            meta = {
+                                "euvd_page_cursor": _euvd_resume_value(
+                                    chunk_start,
+                                    chunk_end,
+                                    0,
+                                    pinned_total,
+                                    "verify",
+                                    verify_pages,
+                                ),
+                                "euvd_next_window": "",
+                            }
+                            counts = store.replace_euvd_items(
+                                feed.updates,
+                                meta=meta,
+                                catalogs=catalogs,
+                                scan_page=page,
+                            )
+                            add_euvd_counts(feed, counts)
+                            mode = "verify"
+                            page = 0
+                            continue
+                        meta, cursor_day = finish_euvd_window(chunk_end)
+                        counts = store.replace_euvd_items(
+                            feed.updates,
+                            meta=meta,
+                            catalogs=catalogs,
+                            scan_complete=True,
+                        )
+                        add_euvd_counts(feed, counts)
+                        euvd_cursor = cursor_day
+                        mode = "done"
+                        break
                     meta = {
                         "euvd_page_cursor": _euvd_resume_value(
                             chunk_start,
                             chunk_end,
                             page + 1,
                             pinned_total,
-                            tuple(update.euvd_id for update in feed.updates),
-                        )
+                        ),
+                        "euvd_next_window": "",
                     }
-                counts = store.replace_euvd_items(
-                    feed.updates, meta=meta, catalogs=catalogs
-                )
-                euvd_records += len(feed.updates)
-                euvd_new += counts.new
-                euvd_changed += counts.changed
-                euvd_ignored += feed.ignored
-                touched.update(counts.touched_ids)
-                if complete:
-                    euvd_cursor = cursor_day
-                    break
-                page += 1
+                    counts = store.replace_euvd_items(
+                        feed.updates,
+                        meta=meta,
+                        catalogs=catalogs,
+                        scan_page=page,
+                    )
+                    add_euvd_counts(feed, counts)
+                    ledger.update(page_ids)
+                    page += 1
+                else:
+                    try:
+                        feed = feeds.fetch_euvd_page(
+                            http,
+                            start=chunk_start,
+                            end=chunk_end,
+                            page=page,
+                            throttle=throttle,
+                        )
+                    except SourceError as exc:
+                        euvd_error = str(exc)
+                        break
+                    if feed.total != pinned_total:
+                        if not restart_scan():
+                            euvd_error = "source returned unstable pagination"
+                            break
+                        mode = "scan"
+                        continue
+                    page_ids = {update.euvd_id for update in feed.updates}
+                    if page_ids != store.euvd_scan_page_ids(page):
+                        if not restart_scan():
+                            euvd_error = "source returned unstable pagination"
+                            break
+                        mode = "scan"
+                        continue
+                    if page + 1 >= verify_pages:
+                        if len(ledger) != pinned_total:
+                            if not restart_scan():
+                                euvd_error = "source returned unstable pagination"
+                                break
+                            mode = "scan"
+                            continue
+                        meta, cursor_day = finish_euvd_window(chunk_end)
+                        counts = store.replace_euvd_items(
+                            feed.updates,
+                            meta=meta,
+                            catalogs=catalogs,
+                            scan_complete=True,
+                        )
+                        add_euvd_counts(feed, counts)
+                        euvd_cursor = cursor_day
+                        mode = "done"
+                        break
+                    meta = {
+                        "euvd_page_cursor": _euvd_resume_value(
+                            chunk_start,
+                            chunk_end,
+                            page + 1,
+                            pinned_total,
+                            "verify",
+                            verify_pages,
+                        ),
+                        "euvd_next_window": "",
+                    }
+                    counts = store.replace_euvd_items(
+                        feed.updates, meta=meta, catalogs=catalogs
+                    )
+                    add_euvd_counts(feed, counts)
+                    page += 1
             if euvd_error:
                 break
         summaries.append(
@@ -645,15 +890,33 @@ def watch_status(watch: WatchConfig) -> str:
     status = store.status(catalogs=watch.sources)
     meta = status["meta"]
     euvd_cursor = f"euvd cursor: {meta.get('euvd_cursor', 'not set')}"
-    resume = _euvd_resume(meta.get("euvd_page_cursor"))
-    if resume is not None:
-        pages = (
-            resume.total + feeds.EUVD_PAGE_SIZE - 1
-        ) // feeds.EUVD_PAGE_SIZE
-        euvd_cursor += (
-            f" (resuming {resume.start.isoformat()}..{resume.end.isoformat()}, "
-            f"page {resume.page + 1} of {pages})"
-        )
+    if "euvd" in watch.sources:
+        cursor_value = meta.get("euvd_cursor")
+        resume = _euvd_resume(meta.get("euvd_page_cursor"))
+        if resume is not None and (
+            cursor_value is None or resume.end.isoformat() >= cursor_value
+        ):
+            if resume.phase == "verify":
+                action, pages = "verifying", resume.verify
+            else:
+                action = "scanning"
+                pages = max(
+                    (resume.total + feeds.EUVD_PAGE_SIZE - 1)
+                    // feeds.EUVD_PAGE_SIZE,
+                    1,
+                )
+            euvd_cursor += (
+                f" ({action} {resume.start.isoformat()}..{resume.end.isoformat()}, "
+                f"page {resume.page + 1} of {pages})"
+            )
+        else:
+            pending = _euvd_window(meta.get("euvd_next_window"))
+            if pending is not None and (
+                cursor_value is None or pending[1].isoformat() >= cursor_value
+            ):
+                euvd_cursor += (
+                    f" (next {pending[0].isoformat()}..{pending[1].isoformat()})"
+                )
     lines = [
         f"database: {status['database']}",
         f"schema version: {meta.get('schema_version', 'unknown')}",

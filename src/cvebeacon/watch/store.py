@@ -171,6 +171,11 @@ _SCHEMA = (
         FOREIGN KEY(euvd_id) REFERENCES watch_euvd_item(euvd_id) ON DELETE CASCADE
     )""",
     "CREATE INDEX IF NOT EXISTS watch_euvd_alias_euvd ON watch_euvd_alias(euvd_id)",
+    """CREATE TABLE IF NOT EXISTS watch_euvd_scan (
+        euvd_id TEXT PRIMARY KEY,
+        page INTEGER NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS watch_euvd_scan_page ON watch_euvd_scan(page)",
     """CREATE TABLE IF NOT EXISTS watch_kev (
         catalog TEXT NOT NULL CHECK(catalog IN ('cisa','eu')),
         cve_id TEXT NOT NULL,
@@ -720,6 +725,32 @@ class WatchStore:
         with self.transaction() as db:
             self._set_meta(db, values)
 
+    def euvd_scan_ids(self) -> set[str]:
+        """Return every identifier accepted so far in the active EUVD scan."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            return {
+                row["euvd_id"]
+                for row in db.execute("SELECT euvd_id FROM watch_euvd_scan")
+            }
+
+    def euvd_scan_page_ids(self, page: int) -> set[str]:
+        """Return the identifiers accepted for one page of the active scan."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            return {
+                row["euvd_id"]
+                for row in db.execute(
+                    "SELECT euvd_id FROM watch_euvd_scan WHERE page=?", (page,)
+                )
+            }
+
+    def clear_euvd_scan(self) -> None:
+        """Discard the active-scan identifier ledger."""
+        self.initialize()
+        with self.transaction() as db:
+            db.execute("DELETE FROM watch_euvd_scan")
+
     def pending_evaluations(self, limit: int = 1000) -> tuple[str, ...]:
         """Return queued CVE ids in the order they were first touched."""
         self.initialize()
@@ -998,6 +1029,9 @@ class WatchStore:
         *,
         meta: Mapping[str, str] | None = None,
         catalogs: Sequence[str] = (),
+        scan_page: int | None = None,
+        scan_reset: bool = False,
+        scan_complete: bool = False,
     ) -> StepCounts:
         self.initialize()
         now = _timestamp(self._clock)
@@ -1009,6 +1043,8 @@ class WatchStore:
         outcomes: list[tuple[str, str]] = []
         touched: set[str] = set()
         with self.transaction() as db:
+            if scan_reset:
+                db.execute("DELETE FROM watch_euvd_scan")
             for euvd_id in sorted(by_id):
                 update = by_id[euvd_id]
                 cve_ids = tuple(sorted(set(update.cve_ids)))
@@ -1079,6 +1115,13 @@ class WatchStore:
                     )
                 touched.update(old_aliases)
                 touched.update(cve_ids)
+            if scan_page is not None:
+                db.executemany(
+                    "INSERT OR IGNORE INTO watch_euvd_scan(euvd_id,page) VALUES (?,?)",
+                    ((euvd_id, scan_page) for euvd_id in sorted(by_id)),
+                )
+            if scan_complete:
+                db.execute("DELETE FROM watch_euvd_scan")
             views = self._refresh_views(db, sorted(touched), catalogs, now)
             queued = self._mark_touched(db, touched, now)
             if meta:
