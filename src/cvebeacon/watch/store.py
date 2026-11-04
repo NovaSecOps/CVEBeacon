@@ -1590,6 +1590,7 @@ class WatchStore:
     def _latest_report_row(
         db: sqlite3.Connection, identifier: object
     ) -> sqlite3.Row | None:
+        db.text_factory = decode_text
         return db.execute(
             "SELECT id,cve_id,action,by,note,at,user_id,username,identity_mode,"
             "os_account,host,chain,chain_version FROM watch_report "
@@ -1792,6 +1793,7 @@ class WatchStore:
         """Return the full append-only audit trail, oldest first."""
         self.initialize()
         with closing(self._connect()) as db:
+            db.text_factory = decode_text
             rows = db.execute(
                 "SELECT id,cve_id,action,by,note,at,user_id,username,"
                 "identity_mode,os_account,host,chain,chain_version "
@@ -1933,6 +1935,7 @@ class WatchStore:
         """Return the latest ``report`` row of every currently reported CVE."""
         self.initialize()
         with closing(self._connect()) as db:
+            db.text_factory = decode_text
             rows = db.execute(
                 _LATEST_REPORT_SQL + " ORDER BY r.at, r.id"
             ).fetchall()
@@ -1972,6 +1975,7 @@ class WatchStore:
         """Return the current mark for each of ``identifiers`` that has one."""
         self.initialize()
         with closing(self._connect()) as db:
+            db.text_factory = decode_text
             return self._reported_marks_in(db, identifiers)
 
     def notice_deliveries(

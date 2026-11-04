@@ -43,7 +43,7 @@ EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+\Z")
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _USER_COLUMNS = (
     "id,username,display_name,email,is_admin,disabled,created_at,updated_at,"
-    "password_changed_at,failed_logins,locked_until"
+    "password_changed_at,failed_logins,locked_until,credential_version"
 )
 AUDIT_CHAIN_FIELDS = ("id", "action", "username", "at", "os_account", "host")
 _SCHEMA = (
@@ -60,7 +60,8 @@ _SCHEMA = (
         updated_at TEXT NOT NULL,
         password_changed_at TEXT,
         failed_logins INTEGER NOT NULL DEFAULT 0,
-        locked_until TEXT
+        locked_until TEXT,
+        credential_version INTEGER NOT NULL DEFAULT 0
     )""",
     """CREATE TABLE IF NOT EXISTS cb_user_audit (
         id INTEGER PRIMARY KEY,
@@ -90,6 +91,7 @@ class User:
     password_changed_at: str | None
     failed_logins: int
     locked_until: str | None
+    credential_version: int = 0
 
     @property
     def identity(self) -> str:
@@ -102,6 +104,7 @@ class AuthenticatedUser:
 
     user: User
     login_id: int
+    credential_version: int = 0
 
     @property
     def id(self) -> int:
@@ -239,10 +242,10 @@ class UserStore:
                         "CVEBeacon user database directory must not be group "
                         f"or other writable: {current}; chmod go-w {current}"
                     )
-            elif mode & 0o222:
+            elif not mode & stat.S_ISVTX:
                 raise StateError(
                     "CVEBeacon user database directory must be owned by this "
-                    f"account or root: {current}"
+                    f"account or root, or be sticky-bit protected: {current}"
                 )
             identities.append((details.st_dev, details.st_ino))
             parent = current.parent
@@ -363,6 +366,7 @@ class UserStore:
                 db.execute(statement)
             self._migrate_email_keys(db)
             self._migrate_audit_actor(db)
+            self._migrate_credential_version(db)
             db.commit()
 
     @staticmethod
@@ -416,6 +420,17 @@ class UserStore:
             ) from exc
 
     @staticmethod
+    def _migrate_credential_version(db: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(cb_user)")
+        }
+        if "credential_version" not in columns:
+            db.execute(
+                "ALTER TABLE cb_user ADD COLUMN "
+                "credential_version INTEGER NOT NULL DEFAULT 0"
+            )
+
+    @staticmethod
     def _migrate_audit_actor(db: sqlite3.Connection) -> None:
         columns = {
             row["name"] for row in db.execute("PRAGMA table_info(cb_user_audit)")
@@ -437,6 +452,7 @@ class UserStore:
             row["password_changed_at"],
             int(row["failed_logins"]),
             row["locked_until"],
+            int(row["credential_version"]),
         )
 
     @staticmethod
@@ -624,7 +640,8 @@ class UserStore:
             now = _timestamp(self._clock())
             db.execute(
                 "UPDATE cb_user SET password_hash=?,password_changed_at=?,"
-                "updated_at=?,failed_logins=0,locked_until=NULL WHERE id=?",
+                "updated_at=?,failed_logins=0,locked_until=NULL,"
+                "credential_version=credential_version+1 WHERE id=?",
                 (hash_password_value(password), now, now, user.id),
             )
             self._append_audit(db, "passwd", user.username, now, actor=actor)
@@ -681,7 +698,8 @@ class UserStore:
                 actor = None
             now = _timestamp(self._clock())
             db.execute(
-                "UPDATE cb_user SET disabled=?,updated_at=? WHERE id=?",
+                "UPDATE cb_user SET disabled=?,updated_at=?,"
+                "credential_version=credential_version+1 WHERE id=?",
                 (int(value), now, user.id),
             )
             self._append_audit(db, action, user.username, now, actor=actor)
@@ -812,6 +830,7 @@ class UserStore:
         return AuthenticatedUser(
             replace(user, failed_logins=0, locked_until=None, updated_at=stamp),
             login_id,
+            user.credential_version,
         )
 
     def require_current(self, identity: "ReportIdentity") -> None:
@@ -859,18 +878,10 @@ class UserStore:
             raise ConfigurationError(
                 "authenticated identity proof is not a successful login"
             )
-        changed = current.password_changed_at
-        if changed:
-            login_at = self._parse_time(login["at"])
-            changed_at = self._parse_time(changed)
-            if (
-                login_at is None
-                or changed_at is None
-                or login_at < changed_at
-            ):
-                raise ConfigurationError(
-                    "authenticated identity proof predates the password change"
-                )
+        if current.credential_version != proof.credential_version:
+            raise ConfigurationError(
+                "authenticated identity proof predates a credential change"
+            )
         return current
 
     def require_current_in(
@@ -910,16 +921,6 @@ class UserStore:
                 "the current password does not match the target account"
             )
         return current
-
-    @staticmethod
-    def _parse_time(value: object) -> datetime | None:
-        try:
-            parsed = datetime.fromisoformat(str(value))
-        except (TypeError, ValueError):
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
 
     def _append_audit(
         self,
