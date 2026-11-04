@@ -246,7 +246,7 @@ def test_v1_database_migrates_in_place(tmp_path):
         )
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "5"
+    assert store.metadata()["schema_version"] == "6"
     with sqlite3.connect(path) as db:
         tables = {
             row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -365,7 +365,7 @@ def test_v2_database_keeps_deliveries_and_adds_statuses(tmp_path):
         )
     upgraded = WatchStore(path, clock=lambda: NOW)
     upgraded.initialize()
-    assert upgraded.metadata()["schema_version"] == "5"
+    assert upgraded.metadata()["schema_version"] == "6"
     assert upgraded.delivery_status()[0].pending == 1
     upgraded.mark_delivery([event_id], "soc-email", "ambiguous", error="test")
     assert upgraded.delivery_status()[0].ambiguous == 1
@@ -460,7 +460,7 @@ def test_v3_database_adds_first_attempt_at_and_keeps_rows(tmp_path):
         )
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "5"
+    assert store.metadata()["schema_version"] == "6"
     with sqlite3.connect(path) as db:
         columns = {
             row[1] for row in db.execute("PRAGMA table_info(watch_delivery)")
@@ -545,7 +545,7 @@ def test_p1a_queue_upgrade_drops_stale_obligations(tmp_path, initial_mode):
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
     metadata = store.metadata()
-    assert metadata["schema_version"] == "5"
+    assert metadata["schema_version"] == "6"
     assert metadata["initial_evaluated_at"] == NOW.isoformat()
     assert store.pending_evaluations(10) == ()
     assert store.status()["rows"] == 1

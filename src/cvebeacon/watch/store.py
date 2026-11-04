@@ -15,7 +15,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..errors import SourceError, StateError
+from ..errors import ConfigurationError, SourceError, StateError
+from .chain import chain_hash, verify_chain
 from .records import (
     EPSS_BANDS,
     CVSSEntry,
@@ -32,10 +33,15 @@ from .records import (
 from .reported import (
     NOTICE_KINDS,
     NOTICE_RULE,
+    REPORT_CHAIN_FIELDS,
     NoticeDelivery,
     ReportedEntry,
+    host_name,
+    identity_label,
     normalize_cve_id,
+    os_account,
     validate_identity,
+    validate_identity_mode,
     validate_note,
 )
 from .rules import (
@@ -48,8 +54,10 @@ from .rules import (
     rebase_severity,
     rule_hash,
 )
+from .users import User, validate_email
 
-SCHEMA_VERSION = 5
+
+SCHEMA_VERSION = 6
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -63,7 +71,8 @@ DELIVERY_SELECT_LIMIT = 1000
 DELIVERY_RECOVERY_SECONDS = 600
 DELIVERY_RETRY_FLOOR = "1970-01-01T00:00:00+00:00"
 _LATEST_REPORT_SQL = (
-    "SELECT r.id,r.cve_id,r.action,r.by,r.note,r.at FROM watch_report r "
+    "SELECT r.id,r.cve_id,r.action,r.by,r.note,r.at,r.user_id,r.username,"
+    "r.identity_mode,r.os_account,r.host,r.chain FROM watch_report r "
     "WHERE r.action='report' AND NOT EXISTS ("
     "SELECT 1 FROM watch_report x WHERE x.cve_id=r.cve_id AND x.id > r.id)"
 )
@@ -224,8 +233,14 @@ _SCHEMA = (
         cve_id TEXT NOT NULL,
         action TEXT NOT NULL CHECK(action IN ('report','unreport')),
         by TEXT NOT NULL,
+        user_id INTEGER,
+        username TEXT,
+        identity_mode TEXT CHECK(identity_mode IN ('open','registered','authenticated') OR identity_mode IS NULL),
+        os_account TEXT,
+        host TEXT,
         note TEXT,
-        at TEXT NOT NULL
+        at TEXT NOT NULL,
+        chain TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS watch_event_created ON watch_event(created_at, id)",
     "CREATE INDEX IF NOT EXISTS watch_delivery_status ON watch_delivery(status)",
@@ -455,9 +470,9 @@ class WatchStore:
             )
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5"}:
+        if version not in {"1", "2", "3", "4", "5", "6"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5", "6"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -507,6 +522,8 @@ class WatchStore:
                 db.execute(
                     "ALTER TABLE watch_delivery ADD COLUMN first_attempt_at TEXT"
                 )
+        if version in {"1", "2", "3", "4", "5"}:
+            WatchStore._migrate_report_identity(db)
         if version != str(SCHEMA_VERSION):
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
@@ -552,6 +569,34 @@ class WatchStore:
             "CREATE INDEX IF NOT EXISTS watch_delivery_status "
             "ON watch_delivery(status)"
         )
+
+    @staticmethod
+    def _migrate_report_identity(db: sqlite3.Connection) -> None:
+        """Add identity fields and give legacy rows a starting chain value."""
+        columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(watch_report)")
+        }
+        for name, definition in (
+            ("user_id", "INTEGER"),
+            ("username", "TEXT"),
+            ("identity_mode", "TEXT"),
+            ("os_account", "TEXT"),
+            ("host", "TEXT"),
+            ("chain", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in columns:
+                db.execute(f"ALTER TABLE watch_report ADD COLUMN {name} {definition}")
+        previous = ""
+        rows = db.execute("SELECT * FROM watch_report ORDER BY id").fetchall()
+        for row in rows:
+            values = {field: row[field] for field in REPORT_CHAIN_FIELDS}
+            chain = chain_hash(previous, values)
+            if row["chain"] != chain:
+                db.execute(
+                    "UPDATE watch_report SET chain=? WHERE id=?",
+                    (chain, row["id"]),
+                )
+            previous = chain
 
     def metadata(self) -> dict[str, str]:
         self.initialize()
@@ -1431,6 +1476,7 @@ class WatchStore:
 
     @staticmethod
     def _report_entry(row: Mapping[str, Any]) -> ReportedEntry:
+        user_id = row["user_id"]
         return ReportedEntry(
             int(row["id"]),
             str(row["cve_id"]),
@@ -1438,6 +1484,12 @@ class WatchStore:
             str(row["by"]),
             row["note"],
             str(row["at"]),
+            None if user_id is None else int(user_id),
+            row["username"],
+            row["identity_mode"],
+            row["os_account"],
+            row["host"],
+            row["chain"],
         )
 
     @staticmethod
@@ -1445,7 +1497,8 @@ class WatchStore:
         db: sqlite3.Connection, identifier: object
     ) -> sqlite3.Row | None:
         return db.execute(
-            "SELECT id,cve_id,action,by,note,at FROM watch_report "
+            "SELECT id,cve_id,action,by,note,at,user_id,username,identity_mode,"
+            "os_account,host,chain FROM watch_report "
             "WHERE cve_id=? ORDER BY id DESC LIMIT 1",
             (identifier,),
         ).fetchone()
@@ -1463,16 +1516,24 @@ class WatchStore:
         entry: ReportedEntry,
         channels: Sequence[str],
         now: str,
+        *,
+        email: str | None = None,
     ) -> int | None:
         """Queue the optional notice through the normal delivery ledger."""
         if not channels:
             return None
+        label = identity_label(entry.by, entry.username)
         if entry.action == "report":
             kind = "reported"
-            reason = f"reported to clients by {entry.by}"
+            reason = f"reported to clients by {label}"
         else:
             kind = "unreported"
-            reason = f"report withdrawn by {entry.by}"
+            reason = f"report withdrawn by {label}"
+        details: dict[str, object] = {"by": entry.by, "note": entry.note}
+        if entry.username:
+            details["username"] = entry.username
+        if email:
+            details["email"] = email
         cursor = db.execute(
             "INSERT INTO watch_event("
             "rule,cve_id,kind,reasons_json,details_json,occurrence,initial,created_at) "
@@ -1482,7 +1543,7 @@ class WatchStore:
                 entry.cve_id,
                 kind,
                 canonical_json([reason]),
-                canonical_json({"by": entry.by, "note": entry.note}),
+                canonical_json(details),
                 f"{entry.action}:{entry.id}",
                 now,
             ),
@@ -1496,6 +1557,100 @@ class WatchStore:
         )
         return event_id
 
+    @staticmethod
+    def _insert_report(
+        db: sqlite3.Connection,
+        identifier: str,
+        action: str,
+        identity: str,
+        text: str | None,
+        now: str,
+        *,
+        user: User | None,
+        identity_mode: str,
+    ) -> ReportedEntry:
+        account = os_account()
+        host = host_name()
+        cursor = db.execute(
+            "INSERT INTO watch_report(cve_id,action,by,note,at,user_id,username,"
+            "identity_mode,os_account,host,chain) VALUES (?,?,?,?,?,?,?,?,?,?,'')",
+            (
+                identifier,
+                action,
+                identity,
+                text,
+                now,
+                None if user is None else user.id,
+                None if user is None else user.username,
+                identity_mode,
+                account,
+                host,
+            ),
+        )
+        row_id = int(cursor.lastrowid)
+        values = {
+            "id": row_id,
+            "cve_id": identifier,
+            "action": action,
+            "by": identity,
+            "user_id": None if user is None else user.id,
+            "username": None if user is None else user.username,
+            "identity_mode": identity_mode,
+            "os_account": account,
+            "host": host,
+            "note": text,
+            "at": now,
+        }
+        previous = db.execute(
+            "SELECT chain FROM watch_report WHERE id<? ORDER BY id DESC LIMIT 1",
+            (row_id,),
+        ).fetchone()
+        chain = chain_hash(previous["chain"] if previous else "", values)
+        db.execute(
+            "UPDATE watch_report SET chain=? WHERE id=?", (chain, row_id)
+        )
+        return ReportedEntry(
+            row_id,
+            identifier,
+            action,
+            identity,
+            text,
+            now,
+            values["user_id"],
+            values["username"],
+            identity_mode,
+            account,
+            host,
+            chain,
+        )
+
+    @staticmethod
+    def _report_identity(
+        by: object,
+        user: User | None,
+        identity_mode: object,
+    ) -> tuple[str, str, User | None, str | None]:
+        mode = validate_identity_mode(identity_mode)
+        identity = validate_identity(by)
+        if mode == "open":
+            if user is not None:
+                raise ConfigurationError(
+                    "open identity does not accept a resolved user"
+                )
+            return identity, mode, None, None
+        if user is None:
+            raise ConfigurationError(
+                "a resolved user is required for this identity mode"
+            )
+        if user.disabled:
+            raise ConfigurationError("the CVEBeacon user is disabled")
+        display = validate_identity(user.display_name or user.username)
+        if identity != display:
+            raise ConfigurationError(
+                "reported by does not match the resolved user"
+            )
+        return identity, mode, user, validate_email(user.email)
+
     def report_cve(
         self,
         cve_id: object,
@@ -1504,16 +1659,23 @@ class WatchStore:
         note: object | None = None,
         force: bool = False,
         notify_channels: Iterable[str] = (),
+        user: User | None = None,
+        identity_mode: object = "open",
+        email: object | None = None,
     ) -> ReportOutcome:
         """Mark a stored CVE as reported to clients.
 
-        The caller resolves the identity; this store keeps it as free text.
-        The latest ``watch_report`` row is the current state. A repeated mark
-        keeps the existing row and notification; ``force`` appends a new one.
+        The caller resolves the identity and, in registered or authenticated
+        mode, passes the resolved user. The latest ``watch_report`` row is the
+        current state. A repeated mark keeps the existing row and notification;
+        ``force`` appends a new one.
         """
         identifier = normalize_cve_id(cve_id)
-        identity = validate_identity(by)
+        identity, mode, resolved, user_email = self._report_identity(
+            by, user, identity_mode
+        )
         text = validate_note(note)
+        notice_email = validate_email(email) if email is not None else user_email
         channels = tuple(sorted({str(name) for name in notify_channels if name}))
         self.initialize()
         now = _timestamp(self._clock)
@@ -1526,15 +1688,19 @@ class WatchStore:
             latest = self._latest_report(db, identifier)
             if latest is not None and latest.action == "report" and not force:
                 return ReportOutcome(latest, False)
-            cursor = db.execute(
-                "INSERT INTO watch_report(cve_id,action,by,note,at) "
-                "VALUES (?,?,?,?,?)",
-                (identifier, "report", identity, text, now),
+            entry = self._insert_report(
+                db,
+                identifier,
+                "report",
+                identity,
+                text,
+                now,
+                user=resolved,
+                identity_mode=mode,
             )
-            entry = ReportedEntry(
-                int(cursor.lastrowid), identifier, "report", identity, text, now
+            event_id = self._record_report_notice(
+                db, entry, channels, now, email=notice_email
             )
-            event_id = self._record_report_notice(db, entry, channels, now)
         return ReportOutcome(entry, True, event_id, channels)
 
     def unreport_cve(
@@ -1544,11 +1710,17 @@ class WatchStore:
         by: object,
         note: object | None = None,
         notify_channels: Iterable[str] = (),
+        user: User | None = None,
+        identity_mode: object = "open",
+        email: object | None = None,
     ) -> ReportOutcome:
         """Withdraw the current report mark by appending an ``unreport`` row."""
         identifier = normalize_cve_id(cve_id)
-        identity = validate_identity(by)
+        identity, mode, resolved, user_email = self._report_identity(
+            by, user, identity_mode
+        )
         text = validate_note(note)
+        notice_email = validate_email(email) if email is not None else user_email
         channels = tuple(sorted({str(name) for name in notify_channels if name}))
         self.initialize()
         now = _timestamp(self._clock)
@@ -1556,15 +1728,19 @@ class WatchStore:
             latest = self._latest_report(db, identifier)
             if latest is None or latest.action != "report":
                 return ReportOutcome(None, False)
-            cursor = db.execute(
-                "INSERT INTO watch_report(cve_id,action,by,note,at) "
-                "VALUES (?,?,?,?,?)",
-                (identifier, "unreport", identity, text, now),
+            entry = self._insert_report(
+                db,
+                identifier,
+                "unreport",
+                identity,
+                text,
+                now,
+                user=resolved,
+                identity_mode=mode,
             )
-            entry = ReportedEntry(
-                int(cursor.lastrowid), identifier, "unreport", identity, text, now
+            event_id = self._record_report_notice(
+                db, entry, channels, now, email=notice_email
             )
-            event_id = self._record_report_notice(db, entry, channels, now)
         return ReportOutcome(entry, True, event_id, channels)
 
     def reported_entries(self) -> tuple[ReportedEntry, ...]:
@@ -1572,9 +1748,21 @@ class WatchStore:
         self.initialize()
         with closing(self._connect()) as db:
             rows = db.execute(
-                "SELECT id,cve_id,action,by,note,at FROM watch_report ORDER BY id"
+                "SELECT id,cve_id,action,by,note,at,user_id,username,"
+                "identity_mode,os_account,host,chain "
+                "FROM watch_report ORDER BY id"
             ).fetchall()
         return tuple(self._report_entry(row) for row in rows)
+
+    def verify_reports(self) -> ReportedEntry | None:
+        """Return the first report row whose stored chain does not recompute."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT * FROM watch_report ORDER BY id").fetchall()
+        broken = verify_chain(
+            (dict(row) for row in rows), REPORT_CHAIN_FIELDS
+        )
+        return None if broken is None else self._report_entry(broken)
 
     def reported_cves(self) -> tuple[ReportedEntry, ...]:
         """Return the latest ``report`` row of every currently reported CVE."""
@@ -1597,7 +1785,7 @@ class WatchStore:
             chunk = values[start : start + 500]
             marks = ",".join("?" for _ in chunk)
             rows = db.execute(
-                "SELECT r.cve_id,r.by,r.note,r.at FROM watch_report r "
+                "SELECT r.cve_id,r.by,r.note,r.at,r.username FROM watch_report r "
                 "JOIN (SELECT cve_id,MAX(id) AS id FROM watch_report "
                 f"WHERE cve_id IN ({marks}) GROUP BY cve_id) m ON m.id=r.id "
                 "WHERE r.action='report'",
@@ -1605,7 +1793,11 @@ class WatchStore:
             ).fetchall()
             for row in rows:
                 output[str(row["cve_id"])] = ReportedMark(
-                    str(row["cve_id"]), str(row["by"]), row["note"], str(row["at"])
+                    str(row["cve_id"]),
+                    str(row["by"]),
+                    row["note"],
+                    str(row["at"]),
+                    row["username"],
                 )
         return output
 
@@ -1656,7 +1848,11 @@ class WatchStore:
         if row is None or row["action"] != "report":
             return None
         return ReportedMark(
-            str(row["cve_id"]), str(row["by"]), row["note"], str(row["at"])
+            str(row["cve_id"]),
+            str(row["by"]),
+            row["note"],
+            str(row["at"]),
+            row["username"],
         )
 
     @staticmethod

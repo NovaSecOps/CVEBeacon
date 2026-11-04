@@ -17,6 +17,7 @@ from .reported import (
     NOTICE_LABEL_KEYS,
     format_reported,
     format_timestamp,
+    identity_label,
 )
 from .rules import EVENT_KINDS, Rule
 
@@ -1131,16 +1132,21 @@ def _sorted_notices(events: Iterable[DeliveryEvent]) -> tuple[DeliveryEvent, ...
 
 def _notice_by(event: DeliveryEvent, catalog: Mapping[str, str]) -> str:
     by = event.details.get("by")
-    if isinstance(by, str) and by.strip():
-        return by
-    return catalog["unknown"]
+    text = by if isinstance(by, str) and by.strip() else catalog["unknown"]
+    username = event.details.get("username")
+    if isinstance(username, str) and username.strip():
+        text = identity_label(text, username)
+    email = event.details.get("email")
+    if isinstance(email, str) and email.strip():
+        text += f" <{email}>"
+    return text
 
 
 def _notice_text(
     event: DeliveryEvent, style: str, catalog: Mapping[str, str]
 ) -> str:
     label = _notice_label(event, catalog)
-    by_text = _dynamic(_notice_by(event, catalog), style, 100)
+    by_text = _dynamic(_notice_by(event, catalog), style, 450)
     stamp = format_timestamp(event.created_at)
     key = (
         "notice_unreported"
@@ -1442,6 +1448,11 @@ def webhook_payload(
                             "by": event.reported.by,
                             "at": event.reported.at,
                             "note": event.reported.note,
+                            **(
+                                {"username": event.reported.username}
+                                if event.reported.username
+                                else {}
+                            ),
                         }
                         if event.reported is not None
                         else None
@@ -1468,11 +1479,16 @@ def webhook_payload(
             }
         )
         if event.kind in NOTICE_KINDS:
-            output[-1]["notice"] = {
+            notice = {
                 "action": "report" if event.kind == "reported" else "unreport",
                 "by": str(event.details.get("by") or "unknown"),
                 "note": event.details.get("note"),
             }
+            for field in ("username", "email"):
+                value = event.details.get(field)
+                if isinstance(value, str) and value.strip():
+                    notice[field] = value
+            output[-1]["notice"] = notice
     return {"version": WEBHOOK_VERSION, "events": output}
 
 

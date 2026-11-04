@@ -115,20 +115,47 @@ def _parser() -> argparse.ArgumentParser:
     watch_report = watch_sub.add_parser("report", help="mark a CVE as reported to clients")
     watch_report.add_argument("cve_id")
     watch_report.add_argument("--by", help="who reported it; defaults to the OS login name")
+    watch_report.add_argument("--user", help="CVEBeacon username for authenticated mode")
     watch_report.add_argument("--note", help="optional single-line note")
     watch_report.add_argument("--force", action="store_true", help="append another mark and notification")
     watch_unreport = watch_sub.add_parser("unreport", help="withdraw a CVE report mark")
     watch_unreport.add_argument("cve_id")
     watch_unreport.add_argument("--by", help="who withdrew it; defaults to the OS login name")
+    watch_unreport.add_argument("--user", help="CVEBeacon username for authenticated mode")
     watch_unreport.add_argument("--note", help="optional single-line note")
     watch_reported = watch_sub.add_parser("reported", help="list CVEs marked as reported to clients")
     watch_reported.add_argument("--all", action="store_true", dest="all_history", help="print the full audit trail")
+    watch_reported.add_argument("--verify", action="store_true", help="verify the report audit chain")
+    watch_reported.add_argument(
+        "--format",
+        choices=("text", "csv", "json"),
+        default="text",
+        help="export format for --all",
+    )
     watch_evaluate = watch_sub.add_parser("evaluate", help="re-evaluate stored CVEs against the current rules")
     watch_evaluate.add_argument("--all", action="store_true", required=True, dest="all_cves", help="evaluate every stored CVE")
     watch_evaluate.add_argument("--yes", action="store_true", help="skip the confirmation")
     watch_rules = watch_sub.add_parser("rules", help="inspect watch rules")
     watch_rules_sub = watch_rules.add_subparsers(dest="watch_rules_command", required=True)
     watch_rules_sub.add_parser("check", help="validate rules and print their conditions")
+    users = commands.add_parser("users", help="manage CVEBeacon user accounts")
+    users_sub = users.add_subparsers(dest="users_command", required=True)
+    users_add = users_sub.add_parser("add", help="register a CVEBeacon user")
+    users_add.add_argument("username")
+    users_add.add_argument("--name", help="display name")
+    users_add.add_argument("--email", help="optional email address")
+    users_add.add_argument("--admin", action="store_true", help="mark the account as an administrator")
+    users_add.add_argument("--no-password", action="store_true", help="register a name for registered mode only")
+    users_passwd = users_sub.add_parser("passwd", help="set a user's password")
+    users_passwd.add_argument("username")
+    users_disable = users_sub.add_parser("disable", help="disable a user")
+    users_disable.add_argument("username")
+    users_enable = users_sub.add_parser("enable", help="enable a user")
+    users_enable.add_argument("username")
+    users_unlock = users_sub.add_parser("unlock", help="clear a user's failed-login lockout")
+    users_unlock.add_argument("username")
+    users_sub.add_parser("list", help="list users without password material")
+    users_sub.add_parser("verify", help="verify the user-admin audit chain")
     return parser
 
 
@@ -186,6 +213,108 @@ def _print_evaluation(result) -> None:
         print(f"events: {result.events} new")
 
 
+def _run_users(args, config: AppConfig) -> int:
+    from .passwords import read_new_password
+    from .watch.users import (
+        UserStore,
+        validate_display_name,
+        validate_email,
+        validate_username,
+    )
+
+    store = UserStore(config.watch.users_database)
+    command = args.users_command
+    if command == "list":
+        users = store.users()
+        if not users:
+            print("no CVEBeacon users")
+            return 0
+        current = datetime.now(timezone.utc)
+        for user in users:
+            if user.disabled:
+                status = "disabled"
+            else:
+                status = "enabled"
+            if user.locked_until:
+                try:
+                    locked = datetime.fromisoformat(str(user.locked_until))
+                    if locked.tzinfo is None:
+                        locked = locked.replace(tzinfo=timezone.utc)
+                    if locked.astimezone(timezone.utc) > current:
+                        status = "locked"
+                except ValueError:
+                    status = "locked"
+            print(
+                "  ".join(
+                    (
+                        user.username,
+                        user.display_name or "-",
+                        user.email or "-",
+                        "admin" if user.is_admin else "member",
+                        status,
+                    )
+                )
+            )
+        return 0
+    if command == "verify":
+        broken = store.verify_audit()
+        if broken is not None:
+            raise CVEBeaconError(
+                f"user audit trail is broken at row {broken.id}"
+            )
+        print(
+            f"user audit trail verified: {len(store.audit_entries())} row(s)"
+        )
+        return 0
+    if command == "add":
+        username = validate_username(args.username)
+        display = validate_display_name(args.name)
+        email = validate_email(args.email)
+        if store.find(username) is not None or (
+            email is not None and store.resolve(email) is not None
+        ):
+            raise CVEBeaconError("username or email is already registered")
+        password = None
+        if not args.no_password:
+            password = read_new_password(
+                f"Password for {username} (12–1024 characters): ",
+                forbidden=(username, email),
+            )
+        user = store.add(
+            username,
+            password=password,
+            display_name=display,
+            email=email,
+            is_admin=args.admin,
+        )
+        print(f"added {user.username}")
+        return 0
+    if command == "passwd":
+        user = store.find(args.username)
+        if user is None:
+            raise CVEBeaconError("user not found")
+        password = read_new_password(
+            f"New password for {user.username} (12–1024 characters): ",
+            forbidden=(user.username, user.email),
+        )
+        store.set_password(user.username, password)
+        print(f"password changed for {user.username}")
+        return 0
+    if command == "disable":
+        user = store.disable(args.username)
+        print(f"disabled {user.username}")
+        return 0
+    if command == "enable":
+        user = store.enable(args.username)
+        print(f"enabled {user.username}")
+        return 0
+    if command == "unlock":
+        user = store.unlock(args.username)
+        print(f"unlocked {user.username}")
+        return 0
+    raise CVEBeaconError("unsupported users command")
+
+
 def _event_line(row, rule_name: str | None = None, reported=None) -> str:
     from .watch.messages import date_phrase
 
@@ -212,9 +341,84 @@ def _require_watch(config: AppConfig) -> None:
         raise CVEBeaconError("watch mode is disabled; set [watch] enabled = true")
 
 
+def _resolve_report_actor(args, config: AppConfig):
+    from .passwords import read_password
+    from .watch.reported import default_identity
+    from .watch.users import UserStore, audit_name
+
+    mode = config.watch.reporting_identity
+    by = args.by
+    user_arg = getattr(args, "user", None)
+    if by is not None and mode == "authenticated":
+        raise CVEBeaconError(
+            "--by is not available when watch.reporting.identity = "
+            "authenticated; use --user"
+        )
+    if user_arg is not None and mode != "authenticated":
+        raise CVEBeaconError(
+            "--user is only available when watch.reporting.identity = "
+            "authenticated"
+        )
+    if mode == "open":
+        return (by if by is not None else default_identity()), "open", None, None
+    users = UserStore(config.watch.users_database)
+    if mode == "registered":
+        if by is None:
+            raise CVEBeaconError(
+                "reported by is required; name an enabled CVEBeacon user with --by"
+            )
+        user = users.resolve_enabled(by)
+        if user is None:
+            raise CVEBeaconError(
+                "reported by must name an enabled CVEBeacon user"
+            )
+        return user.identity, "registered", user, user.email
+    if user_arg is None:
+        raise CVEBeaconError(
+            "--user is required when watch.reporting.identity = authenticated"
+        )
+    password = read_password(f"Password for {audit_name(user_arg)}: ")
+    user = users.authenticate(user_arg, password)
+    if user is None:
+        raise CVEBeaconError("invalid username or password")
+    return user.identity, "authenticated", user, user.email
+
+
+def _report_export_record(entry) -> dict[str, object]:
+    return {
+        "id": entry.id,
+        "cve_id": entry.cve_id,
+        "action": entry.action,
+        "by": entry.by,
+        "user_id": entry.user_id,
+        "username": entry.username,
+        "identity_mode": entry.identity_mode,
+        "os_account": entry.os_account,
+        "host": entry.host,
+        "at": entry.at,
+        "note": entry.note,
+        "chain": entry.chain,
+    }
+
+
+def _csv_cell(value: object) -> object:
+    if value is None:
+        return ""
+    text = str(value)
+    if text[:1] in {"=", "+", "-", "@", "\t", "\r"}:
+        return "'" + text
+    return text
+
+
 def _run_watch(args, config: AppConfig) -> int:
+    import csv
+
     from .watch.delivery import deliver_pending, send_test
-    from .watch.reported import default_identity, format_timestamp, normalize_cve_id
+    from .watch.reported import (
+        format_timestamp,
+        identity_label,
+        normalize_cve_id,
+    )
     from .watch.rules import describe_condition
     from .watch.statements import write_statement
     from .watch.store import WatchStore
@@ -241,63 +445,102 @@ def _run_watch(args, config: AppConfig) -> int:
         )
 
     if args.watch_command == "report":
+        identity, mode, user, email = _resolve_report_actor(args, config)
         outcome = store.report_cve(
             args.cve_id,
-            by=args.by if args.by is not None else default_identity(),
+            by=identity,
             note=args.note,
             force=args.force,
             notify_channels=notify_channels(),
+            user=user,
+            identity_mode=mode,
+            email=email,
         )
         entry = outcome.entry
         if not outcome.changed:
             print(
                 f"{entry.cve_id} is already reported to clients by "
-                f"{entry.by} at {format_timestamp(entry.at)}"
+                f"{identity_label(entry.by, entry.username)} "
+                f"at {format_timestamp(entry.at)}"
             )
             _print_notice_hint(
                 store.notice_deliveries().get(("report", entry.id), ())
             )
             return 0
         print(
-            f"{entry.cve_id}  reported to clients by {entry.by} "
+            f"{entry.cve_id}  reported to clients by "
+            f"{identity_label(entry.by, entry.username)} "
             f"at {format_timestamp(entry.at)}"
         )
         return _deliver_report_notice(config, store, outcome)
     if args.watch_command == "unreport":
         identifier = normalize_cve_id(args.cve_id)
+        identity, mode, user, email = _resolve_report_actor(args, config)
         outcome = store.unreport_cve(
             identifier,
-            by=args.by if args.by is not None else default_identity(),
+            by=identity,
             note=args.note,
             notify_channels=notify_channels(),
+            user=user,
+            identity_mode=mode,
+            email=email,
         )
         entry = outcome.entry
         if not outcome.changed or entry is None:
             print(f"{identifier} is not marked as reported to clients")
             return 0
         print(
-            f"{entry.cve_id}  report withdrawn by {entry.by} "
+            f"{entry.cve_id}  report withdrawn by "
+            f"{identity_label(entry.by, entry.username)} "
             f"at {format_timestamp(entry.at)}"
         )
         return _deliver_report_notice(config, store, outcome)
     if args.watch_command == "reported":
+        if getattr(args, "verify", False):
+            broken = store.verify_reports()
+            if broken is not None:
+                raise CVEBeaconError(
+                    f"watch report audit trail is broken at row {broken.id}"
+                )
+            print(
+                f"watch report audit trail verified: "
+                f"{len(store.reported_entries())} row(s)"
+            )
+            return 0
+        export = getattr(args, "format", "text")
+        if export != "text" and not args.all_history:
+            raise CVEBeaconError("--format csv or json requires --all")
         entries = (
             store.reported_entries() if args.all_history else store.reported_cves()
         )
+        if export in {"csv", "json"}:
+            records = [_report_export_record(entry) for entry in entries]
+            if export == "json":
+                print(json.dumps(records, indent=2, ensure_ascii=False))
+            else:
+                writer = csv.writer(sys.stdout, lineterminator="\n")
+                writer.writerow(list(records[0]) if records else [
+                    "id", "cve_id", "action", "by", "user_id", "username",
+                    "identity_mode", "os_account", "host", "at", "note", "chain",
+                ])
+                for record in records:
+                    writer.writerow([_csv_cell(value) for value in record.values()])
+            return 0
         if not entries:
             print("no CVEs are marked as reported to clients")
             return 0
         notice_states = store.notice_deliveries() if args.all_history else {}
         for entry in entries:
+            label = identity_label(entry.by, entry.username)
             if args.all_history:
                 action = "reported" if entry.action == "report" else "unreported"
                 line = (
                     f"{format_timestamp(entry.at)}  {entry.cve_id}  "
-                    f"{action} by {entry.by}"
+                    f"{action} by {label}"
                 )
             else:
                 line = (
-                    f"{entry.cve_id}  {entry.by}  "
+                    f"{entry.cve_id}  {label}  "
                     f"{format_timestamp(entry.at)}"
                 )
             if entry.note:
@@ -614,6 +857,8 @@ def run(args: argparse.Namespace) -> int:
         print("removed" if remove(system=args.platform) else "not installed")
         return 0
     config = load_config(args.config)
+    if args.command == "users":
+        return _run_users(args, config)
     if args.command == "watch":
         return _run_watch(args, config)
     if args.command == "run":

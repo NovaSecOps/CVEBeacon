@@ -332,7 +332,7 @@ def test_notice_rule_names_are_reserved():
         )
 
 
-def test_schema_four_database_migrates_to_five_and_keeps_rows(tmp_path):
+def test_schema_four_database_migrates_to_six_and_keeps_rows(tmp_path):
     config = write_config(tmp_path, channels="")
     store = seed(config)
     with sqlite3.connect(store.path) as db:
@@ -352,7 +352,7 @@ def test_schema_four_database_migrates_to_five_and_keeps_rows(tmp_path):
         db.execute("DROP TABLE watch_report")
     upgraded = WatchStore(store.path, clock=lambda: NOW)
     upgraded.initialize()
-    assert upgraded.metadata()["schema_version"] == "5"
+    assert upgraded.metadata()["schema_version"] == "6"
     assert upgraded.status()["rows"] == 1
     with sqlite3.connect(store.path) as db:
         tables = {
