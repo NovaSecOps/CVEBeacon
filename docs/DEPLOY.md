@@ -330,8 +330,9 @@ icacls C:\CVEBeacon\data /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "BUILTIN\Adm
 
 `/inheritance:r` drops inherited permissions and `(OI)(CI)` applies the grants
 to new files and subdirectories, including `data\secrets`. Run it before the
-first secret is created; add `/T` on an existing directory. On non-English
-Windows, use localized names or equivalent SIDs.
+first secret is created; on an existing directory, add `/T` and review
+unrelated explicit entries. On non-English Windows, use localized names or
+equivalent SIDs.
 
 ### Install
 
