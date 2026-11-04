@@ -17,7 +17,9 @@ def command(args, **kwargs):
 
 def windows(config: Path, token: str) -> None:
     scheduling.WINDOWS_TASK = f"CVEBeacon CI {token}"
-    before = command(["schtasks", "/Query", "/FO", "CSV", "/NH"])
+    before = command(
+        ["schtasks", "/Query", "/FO", "CSV", "/NH"], stdin=subprocess.DEVNULL
+    )
     assert before.returncode == 0, before.stderr
     assert scheduling.status() == "not installed"
     try:
@@ -26,7 +28,9 @@ def windows(config: Path, token: str) -> None:
     finally:
         scheduling.remove()
     assert scheduling.status() == "not installed"
-    after = command(["schtasks", "/Query", "/FO", "CSV", "/NH"])
+    after = command(
+        ["schtasks", "/Query", "/FO", "CSV", "/NH"], stdin=subprocess.DEVNULL
+    )
     assert after.returncode == 0, after.stderr
     # Status and next-run fields can change while the test is running.
     import csv

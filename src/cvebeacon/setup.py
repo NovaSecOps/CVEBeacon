@@ -520,8 +520,8 @@ def _ask_nvd_key(base: Path) -> NvdKey:
             "NVD API key environment variable", "NVD_API_KEY", _validate_env_name
         )
         print(
-            f"Set {name} in the environment of the account that runs CVEBeacon "
-            "(including its scheduler)."
+            f"Set {name} in the environment of the account that runs CVEBeacon. "
+            "For scheduled runs, prefer a secret file."
         )
         return NvdKey("env", env=name)
     if choice == "file":
@@ -755,8 +755,8 @@ def _ask_secret_choice(
             "Environment variable name", default_env, _validate_env_name
         )
         print(
-            f"Set {name} in the environment of the account that runs CVEBeacon "
-            "(including its scheduler)."
+            f"Set {name} in the environment of the account that runs CVEBeacon. "
+            "For scheduled runs, prefer a secret file."
         )
         return SecretChoice(env=name)
     value = _ask_secret_value(label, validator)

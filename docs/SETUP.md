@@ -63,7 +63,8 @@ directory with NTFS permissions. An existing secret file is backed up to
 `<name>.bak-<timestamp>` before it is replaced. The configuration contains only
 the environment variable name or the relative file path. When you choose an
 environment variable, set it in the environment of the account that runs
-CVEBeacon, including its scheduler.
+CVEBeacon. For scheduled runs, prefer a secret file: a logged-out task's
+environment is not reliable.
 
 ## Example session
 
@@ -94,7 +95,7 @@ To addresses (e.g. security@example.com):
 SMTP username (use - for no authentication) [alerts@example.com]:
 Store the SMTP password in (env/file) [env]:
 Environment variable name [CVEBEACON_SMTP_PASSWORD]:
-Set CVEBEACON_SMTP_PASSWORD in the environment of the account that runs CVEBeacon (including its scheduler).
+Set CVEBEACON_SMTP_PASSWORD in the environment of the account that runs CVEBeacon. For scheduled runs, prefer a secret file.
 Channels for rule "critical" (comma-separated or all) [alerts]:
 Send a test message to each channel now? [y/N]:
 Schedule type (times/interval) [times]:

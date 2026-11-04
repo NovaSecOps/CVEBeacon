@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +18,8 @@ from pathlib import Path
 
 from .errors import SchedulingError
 
+LOG = logging.getLogger("cvebeacon")
+
 WINDOWS_TASK = "CVEBeacon Monitor"
 CRON_BEGIN = "# BEGIN CVEBEACON MANAGED"
 CRON_END = "# END CVEBEACON MANAGED"
@@ -24,6 +28,25 @@ SCHEDULE_COMMANDS = ("scan", "watch", "both")
 TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 MAX_TIMES = 12
+
+WINDOWS_REGISTRATION_SCRIPT = """param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][string]$XmlPath,
+    [Parameter(Mandatory = $true)][string]$Account
+)
+$ErrorActionPreference = 'Stop'
+$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false), $false)
+$password = $reader.ReadLine()
+$reader.Dispose()
+if (-not $password) { throw "no password on stdin" }
+$xml = [System.IO.File]::ReadAllText($XmlPath)
+$service = New-Object -ComObject Schedule.Service
+$service.Connect()
+$folder = $service.GetFolder('\\')
+$null = $folder.RegisterTask($TaskName, $xml, 6, $Account, $password, 1, $null)
+"""
+
+SID_PATTERN = re.compile(r"S-\d+(?:-\d+)+", re.IGNORECASE)
 
 ET.register_namespace("", TASK_NAMESPACE)
 
@@ -37,6 +60,9 @@ class SchedulePlan:
     module_mode: bool = False
     times: tuple[str, ...] = ()
     schedule_command: str = "scan"
+    run_logged_out: bool = False
+    user_id: str = ""
+    account_note: str = ""
 
     def _command(self, action: str) -> list[str]:
         prefix = (
@@ -92,6 +118,94 @@ def parse_times(value: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
     return tuple(sorted(times, key=lambda item: (int(item[:2]), int(item[3:]))))
 
 
+def _windows_extended_name() -> str:
+    """Return the current account as DOMAIN\\user through GetUserNameExW."""
+    import ctypes
+    from ctypes import wintypes
+
+    secur32 = ctypes.WinDLL("secur32", use_last_error=True)
+    secur32.GetUserNameExW.argtypes = [
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    secur32.GetUserNameExW.restype = wintypes.BOOLEAN
+    size = wintypes.ULONG(256)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if not secur32.GetUserNameExW(2, buffer, ctypes.byref(size)):
+        error = ctypes.get_last_error()
+        if error == 234 and size.value > 0:
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if secur32.GetUserNameExW(2, buffer, ctypes.byref(size)):
+                return buffer.value
+        raise OSError(error, "GetUserNameExW failed")
+    return buffer.value
+
+
+def _windows_user_name() -> str:
+    """Return the current user name through GetUserNameW."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.GetUserNameW.argtypes = [
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetUserNameW.restype = wintypes.BOOL
+    size = wintypes.DWORD(256)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if not advapi32.GetUserNameW(buffer, ctypes.byref(size)):
+        error = ctypes.get_last_error()
+        if error == 122 and size.value > 0:
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if advapi32.GetUserNameW(buffer, ctypes.byref(size)):
+                return buffer.value
+        raise OSError(error, "GetUserNameW failed")
+    return buffer.value
+
+
+def _current_windows_account(resolve_extended=None, resolve_user=None) -> tuple[str, str]:
+    """Return the effective account and an optional warning.
+
+    The account comes from the operating system, never from USERNAME or
+    USERDOMAIN. An injected resolver is used by the offline tests.
+    """
+    if resolve_extended is None and resolve_user is None and os.name != "nt":
+        raise SchedulingError(
+            "cannot determine the current Windows account on this host; "
+            "run the command from that account's shell"
+        )
+    extended = resolve_extended or _windows_extended_name
+    fallback = resolve_user or _windows_user_name
+    try:
+        account = extended().strip()
+    except (AttributeError, OSError):
+        account = ""
+    if account:
+        note = ""
+        folded = account.casefold()
+        if "@" in account or folded.startswith(("azuread\\", "microsoftaccount\\")):
+            note = (
+                "this looks like an Entra ID or Microsoft account; Task Scheduler "
+                "may not accept it, so verify it or pass a local or domain account"
+            )
+        return account, note
+    try:
+        account = fallback().strip()
+    except (AttributeError, OSError):
+        account = ""
+    if account:
+        return account, (
+            "the NameSamCompatible lookup failed; the fallback returns an "
+            "unqualified name, so verify the task account"
+        )
+    raise SchedulingError(
+        "cannot determine the current Windows account; "
+        "run the command from that account's shell"
+    )
+
+
 def make_plan(
     config_path: str | Path,
     every_hours: int | None = None,
@@ -101,6 +215,8 @@ def make_plan(
     system: str = "auto",
     executable: str | Path | None = None,
     allow_incompatible: bool = False,
+    run_logged_out: bool = False,
+    account: str | None = None,
 ) -> SchedulePlan:
     if times is not None and every_hours is not None:
         raise SchedulingError("--times and --every are mutually exclusive")
@@ -125,6 +241,12 @@ def make_plan(
         raise SchedulingError("platform must be auto, windows, or linux")
     if requested != detected and not allow_incompatible:
         raise SchedulingError(f"cannot manage a {requested} schedule on a {detected} host")
+    if account is not None and not run_logged_out:
+        raise SchedulingError("--account requires --run-logged-out")
+    if run_logged_out and requested != "windows":
+        raise SchedulingError("--run-logged-out is supported only on Windows")
+    if account is not None and requested != "windows":
+        raise SchedulingError("--account is supported only on Windows")
     if requested == "linux" and interval is not None and 24 % interval:
         raise SchedulingError("Linux cron intervals must divide 24: choose 2, 3, 4, 6, 8, 12, or 24 hours")
     if executable:
@@ -144,6 +266,19 @@ def make_plan(
         raise SchedulingError("schedule paths cannot contain line breaks")
     if requested == "linux" and any("%" in str(value) for value in (config_target, target)):
         raise SchedulingError("Linux cron paths cannot contain percent characters")
+    account_name = ""
+    account_note = ""
+    if run_logged_out:
+        if account is None:
+            account_name, account_note = _current_windows_account()
+        else:
+            account_name = account.strip()
+        if not account_name:
+            raise SchedulingError(
+                "--run-logged-out needs the Windows account that runs the task"
+            )
+        if any(character in account_name for character in "\r\n"):
+            raise SchedulingError("schedule account cannot contain line breaks")
     return SchedulePlan(
         requested,
         interval,
@@ -152,6 +287,9 @@ def make_plan(
         module_mode,
         fixed_times,
         command,
+        run_logged_out=run_logged_out,
+        user_id=account_name,
+        account_note=account_note,
     )
 
 
@@ -168,6 +306,10 @@ def describe(plan: SchedulePlan) -> str:
     lines.extend(
         "  " + _display_command(command, plan.system) for command in plan.commands
     )
+    if plan.run_logged_out:
+        lines.append(f"Runs as: {plan.user_id} (stored password, while logged off)")
+        if plan.account_note:
+            lines.append(f"Account note: {plan.account_note}")
     return "\n".join(lines)
 
 
@@ -190,7 +332,7 @@ def _cron_lines(plan: SchedulePlan) -> list[str]:
 
 def _windows_args(plan: SchedulePlan) -> list[str]:
     schedule = ["/SC", "DAILY", "/MO", "1"] if plan.every_hours == 24 else ["/SC", "HOURLY", "/MO", str(plan.every_hours)]
-    return ["schtasks", "/Create", "/F", "/TN", WINDOWS_TASK, *schedule, "/RL", "LIMITED", "/TR", subprocess.list2cmdline(plan.command)]
+    return ["schtasks", "/Create", "/F", "/TN", WINDOWS_TASK, *schedule, "/RL", "LIMITED", "/TR", subprocess.list2cmdline(plan.command), "/HRESULT"]
 
 
 def _tag(name: str) -> str:
@@ -205,23 +347,31 @@ def _add(parent: ET.Element, name: str, text: str | None = None) -> ET.Element:
 
 
 def _windows_xml(plan: SchedulePlan, *, now: datetime | None = None) -> bytes:
-    if not plan.times:
-        raise SchedulingError("the Windows task XML is used only for fixed times")
-    stamp = (now or datetime.now()).strftime("%Y-%m-%d")
+    current = now or datetime.now()
+    stamp = current.strftime("%Y-%m-%d")
     root = ET.Element(_tag("Task"), {"version": "1.2"})
     registration = _add(root, "RegistrationInfo")
     _add(registration, "Description", "CVEBeacon scan and watch schedule")
     triggers = _add(root, "Triggers")
-    for value in plan.times:
-        trigger = _add(triggers, "CalendarTrigger")
-        _add(trigger, "StartBoundary", f"{stamp}T{value}:00")
+    if plan.times:
+        for value in plan.times:
+            trigger = _add(triggers, "CalendarTrigger")
+            _add(trigger, "StartBoundary", f"{stamp}T{value}:00")
+            _add(trigger, "Enabled", "true")
+            daily = _add(trigger, "ScheduleByDay")
+            _add(daily, "DaysInterval", "1")
+    else:
+        trigger = _add(triggers, "TimeTrigger")
+        repetition = _add(trigger, "Repetition")
+        _add(repetition, "Interval", f"PT{plan.every_hours}H")
+        _add(trigger, "StartBoundary", current.strftime("%Y-%m-%dT%H:%M:%S"))
         _add(trigger, "Enabled", "true")
-        daily = _add(trigger, "ScheduleByDay")
-        _add(daily, "DaysInterval", "1")
     principals = _add(root, "Principals")
     principal = _add(principals, "Principal", None)
     principal.set("id", "Author")
-    _add(principal, "LogonType", "InteractiveToken")
+    if plan.run_logged_out:
+        _add(principal, "UserId", plan.user_id)
+    _add(principal, "LogonType", "Password" if plan.run_logged_out else "InteractiveToken")
     _add(principal, "RunLevel", "LeastPrivilege")
     settings = _add(root, "Settings")
     _add(settings, "MultipleInstancesPolicy", "IgnoreNew")
@@ -239,7 +389,74 @@ def _windows_xml(plan: SchedulePlan, *, now: datetime | None = None) -> bytes:
     return ET.tostring(root, encoding="utf-16", xml_declaration=True)
 
 
-def _describe_windows_xml(text: str) -> str | None:
+def _lookup_account_sid(sid: str) -> str | None:
+    """Resolve a SID string to DOMAIN\\name through LookupAccountSidW."""
+    if os.name != "nt" or SID_PATTERN.fullmatch(sid) is None:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32.ConvertStringSidToSidW.argtypes = [
+            wintypes.LPCWSTR,
+            ctypes.POINTER(wintypes.LPVOID),
+        ]
+        advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+        advapi32.LookupAccountSidW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPVOID,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.LookupAccountSidW.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [wintypes.LPVOID]
+        kernel32.LocalFree.restype = wintypes.LPVOID
+
+        sid_pointer = wintypes.LPVOID()
+        if not advapi32.ConvertStringSidToSidW(sid, ctypes.byref(sid_pointer)):
+            return None
+        try:
+            name_size = wintypes.DWORD()
+            domain_size = wintypes.DWORD()
+            use = wintypes.DWORD()
+            advapi32.LookupAccountSidW(
+                None,
+                sid_pointer,
+                None,
+                ctypes.byref(name_size),
+                None,
+                ctypes.byref(domain_size),
+                ctypes.byref(use),
+            )
+            if ctypes.get_last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
+                return None
+            name = ctypes.create_unicode_buffer(name_size.value)
+            domain = ctypes.create_unicode_buffer(domain_size.value)
+            if not advapi32.LookupAccountSidW(
+                None,
+                sid_pointer,
+                name,
+                ctypes.byref(name_size),
+                domain,
+                ctypes.byref(domain_size),
+                ctypes.byref(use),
+            ):
+                return None
+            return f"{domain.value}\\{name.value}" if domain.value else name.value
+        finally:
+            kernel32.LocalFree(sid_pointer)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _describe_windows_xml(
+    text: str, *, sid_resolver=_lookup_account_sid
+) -> str | None:
     clean = re.sub(r"^\s*<\?xml[^>]*\?>", "", text)
     try:
         root = ET.fromstring(clean)
@@ -279,6 +496,30 @@ def _describe_windows_xml(text: str) -> str | None:
     else:
         schedule = None
     lines = ["Task: " + WINDOWS_TASK]
+    principal = root.find(f".//{_tag('Principal')}")
+    if principal is not None:
+        account = principal.findtext(_tag("UserId"))
+        logon_type = principal.findtext(_tag("LogonType")) or "InteractiveToken"
+        if account:
+            if SID_PATTERN.fullmatch(account) is not None:
+                try:
+                    resolved = sid_resolver(account)
+                except Exception:
+                    resolved = None
+                lines.append(
+                    f"Account: {resolved} ({account})"
+                    if resolved
+                    else "Account: " + account
+                )
+            else:
+                lines.append("Account: " + account)
+        logged_out = logon_type.casefold() in {
+            "s4u",
+            "password",
+            "serviceaccount",
+            "interactivetokenorpassword",
+        }
+        lines.append("Runs while logged off: " + ("yes" if logged_out else "no"))
     if schedule:
         lines.append(schedule)
     lines.append("Commands:")
@@ -377,28 +618,159 @@ def _without_managed_block(text: str) -> str:
     return result
 
 
-def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
+def _windows_access_denied(detail: str, returncode: int) -> bool:
+    folded = detail.casefold()
+    code = returncode & 0xFFFFFFFF if isinstance(returncode, int) else returncode
+    return (
+        code in {5, 0x80070005}
+        or "0x80070005" in folded
+        or "2147942405" in folded
+        or "-2147024891" in folded
+        or "access is denied" in folded
+        or "access denied" in folded
+    )
+
+
+def _windows_registration_hint(
+    detail: str, returncode: int, plan: SchedulePlan
+) -> str:
+    folded = detail.casefold()
+    if _windows_access_denied(detail, returncode):
+        if plan.run_logged_out:
+            return (
+                "access denied: use an elevated administrator shell and verify "
+                "the account name"
+            )
+        return "access denied: run from an elevated prompt"
+    if "0x8007052e" in folded:
+        return (
+            "the account password was rejected: verify it and run the command again"
+        )
+    if "0x80070569" in folded:
+        return (
+            "the account needs the 'Log on as a batch job' right: grant it in "
+            "secpol.msc; a domain GPO can override it"
+        )
+    if "0x80070534" in folded:
+        return "the account was not found: verify the --account name"
+    if any(code in folded for code in ("0x80070533", "0x800704ec")):
+        return (
+            "account or logon error: verify the account and grant it the "
+            "'Log on as a batch job' right in secpol.msc"
+        )
+    return ""
+
+
+def windows_powershell_environment() -> dict[str, str]:
+    """Return the environment for Windows PowerShell 5.1 child processes.
+
+    PowerShell 7 exports its own PSModulePath. Windows PowerShell inherits it
+    and then cannot load its built-in modules, so drop it and let Windows
+    PowerShell use its default module path.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() != "PSMODULEPATH"
+    }
+
+
+def install(
+    plan: SchedulePlan, *, password: str | None = None, run=subprocess.run
+) -> None:
     if plan.system == "windows":
-        if plan.times:
-            descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
+        if plan.run_logged_out:
+            if not password:
+                raise SchedulingError(
+                    "--run-logged-out requires the account password"
+                )
+            directory = None
             try:
+                directory = tempfile.mkdtemp(prefix="cvebeacon-schedule-")
+                xml_path = Path(directory) / "task.xml"
+                script_path = Path(directory) / "register.ps1"
+                xml_path.write_bytes(_windows_xml(plan))
+                script_path.write_text(
+                    WINDOWS_REGISTRATION_SCRIPT, encoding="utf-8"
+                )
+                result = run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_path),
+                        "-TaskName",
+                        WINDOWS_TASK,
+                        "-XmlPath",
+                        str(xml_path),
+                        "-Account",
+                        plan.user_id,
+                    ],
+                    input=(password + "\n").encode("utf-8"),
+                    capture_output=True,
+                    check=False,
+                    timeout=120,
+                    env=windows_powershell_environment(),
+                )
+            except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+                detail = " ".join(str(exc).split())[:600]
+                raise SchedulingError(
+                    f"schedule installation failed: {detail}"
+                ) from exc
+            finally:
+                password = None
+                if directory is not None:
+                    try:
+                        shutil.rmtree(directory)
+                    except OSError as exc:
+                        LOG.warning(
+                            "could not remove temporary schedule directory %s: %s",
+                            directory,
+                            exc,
+                        )
+        elif plan.times:
+            name = None
+            try:
+                descriptor, name = tempfile.mkstemp(
+                    prefix="cvebeacon-schedule-", suffix=".xml"
+                )
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(_windows_xml(plan))
                     handle.flush()
                     os.fsync(handle.fileno())
                 result = run(
-                    ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK, "/F"],
+                    ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK, "/F", "/HRESULT"],
                     capture_output=True,
                     text=True,
                     check=False,
+                    stdin=subprocess.DEVNULL,
                 )
+            except OSError as exc:
+                detail = " ".join(str(exc).split())[:600]
+                raise SchedulingError(
+                    f"schedule installation failed: {detail}"
+                ) from exc
             finally:
-                try:
-                    os.unlink(name)
-                except OSError:
-                    pass
+                if name is not None:
+                    try:
+                        os.unlink(name)
+                    except OSError as exc:
+                        LOG.warning(
+                            "could not remove temporary schedule file %s: %s",
+                            name,
+                            exc,
+                        )
         else:
-            result = run(_windows_args(plan), capture_output=True, text=True, check=False)
+            result = run(
+                _windows_args(plan),
+                capture_output=True,
+                text=True,
+                check=False,
+                stdin=subprocess.DEVNULL,
+            )
     else:
         existing = _read_crontab(run)
         clean = _without_managed_block(existing)
@@ -411,9 +783,26 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
             ["crontab", "-"], input=payload, capture_output=True, check=False
         )
     if result.returncode != 0:
-        raise SchedulingError(
-            f"schedule installation failed: {_crontab_text(result.stderr).strip()}"
+        detail = " ".join(
+            (
+                _crontab_text(getattr(result, "stderr", ""))
+                or _crontab_text(getattr(result, "stdout", ""))
+            ).split()
         )
+        hint = ""
+        if plan.system == "windows":
+            hint = _windows_registration_hint(detail, result.returncode, plan)
+        if hint:
+            detail = detail.rstrip(".; ")
+        detail = detail[:600]
+        message = (
+            f"schedule installation failed: {detail}"
+            if detail
+            else "schedule installation failed"
+        )
+        if hint:
+            message = f"{message}; {hint}"
+        raise SchedulingError(message)
 
 
 def _host_system(system: str) -> str:
@@ -438,7 +827,12 @@ def _command_text(value) -> str:
 def status(*, system: str = "auto", run=subprocess.run) -> str:
     resolved = _host_system(system)
     if resolved == "windows":
-        result = run(["schtasks", "/Query", "/TN", WINDOWS_TASK, "/XML"], capture_output=True, check=False)
+        result = run(
+            ["schtasks", "/Query", "/TN", WINDOWS_TASK, "/XML"],
+            capture_output=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
         stdout = _command_text(getattr(result, "stdout", ""))
         stderr = _command_text(getattr(result, "stderr", ""))
         if result.returncode == 0:
@@ -461,7 +855,13 @@ def status(*, system: str = "auto", run=subprocess.run) -> str:
 def remove(*, system: str = "auto", run=subprocess.run) -> bool:
     resolved = _host_system(system)
     if resolved == "windows":
-        result = run(["schtasks", "/Delete", "/F", "/TN", WINDOWS_TASK], capture_output=True, text=True, check=False)
+        result = run(
+            ["schtasks", "/Delete", "/F", "/TN", WINDOWS_TASK],
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
         if result.returncode == 0: return True
         message = f"{result.stdout}\n{result.stderr}".casefold()
         if any(value in message for value in ("cannot find", "not found", "does not exist")): return False
