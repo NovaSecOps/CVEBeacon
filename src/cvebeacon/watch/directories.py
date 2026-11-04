@@ -22,6 +22,6 @@ def ensure_private_directory(path: Path) -> Path:
         except FileExistsError:
             if not item.is_dir():
                 raise
-        if os.name == "posix":
+        if os.name == "posix" and not item.is_symlink():
             os.chmod(item, 0o700)
     return path
