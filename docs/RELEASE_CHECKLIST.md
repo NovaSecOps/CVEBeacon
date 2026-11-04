@@ -1,18 +1,32 @@
 # Release checklist
 
 This page covers the one-time repository setup, the per-release procedure, and
-the checks that must pass before a release is published. The workflow builds
-every artifact on pull requests and manual runs. Only a `v*` tag push can
-publish, and only when the `release` environment is protected and sets the
-publishing opt-in described below.
+the checks that must pass before a release is published.
 
-Naming an environment in a workflow does not create protection: GitHub
-automatically creates a referenced environment that does not exist, without
-reviewers or rules. The workflow therefore treats the environment as untrusted
-until it is configured. Both publishing jobs start by requiring the
-environment-scoped variable `RELEASE_PUBLISH_ENABLED=true`; when it is missing
-or not exactly `true`, they stop before checkout, registry login, image push or
-release creation.
+The workflow itself enforces three things: publishing jobs run only for a `v*`
+tag push, both reference the `release` environment, and both require the
+`RELEASE_PUBLISH_ENABLED` value in the merged `vars` context to be exactly
+`true` before checkout, registry login, image push or release creation. GitHub
+creates a referenced environment automatically when it does not exist, without
+reviewers or rules, so the environment name alone is not protection. The
+workflow cannot prove that the variable is environment-scoped, that reviewers
+are required, or that the tag rule and admin-bypass settings exist; GitHub
+enforces those only when the environment is configured. The setup and
+verification below are release prerequisites.
+
+| Control | Enforced by |
+| --- | --- |
+| Publish on `v*` tag push only | Workflow conditions |
+| `RELEASE_PUBLISH_ENABLED` is exactly `true` in merged `vars` | Workflow step (cannot distinguish scope) |
+| Variable scoped to the `release` environment | Repository configuration; verified manually |
+| Required reviewers | GitHub environment protection |
+| Tag rule `v*` | GitHub environment protection |
+| Administrative bypass disabled | GitHub environment protection |
+
+The opt-in makes a missing environment fail closed only while the variable is
+absent. A repository- or organization-level variable would pass the workflow
+step, which is why step 5 below forbids that scope and step 9 verifies the
+environment directly.
 
 ## One-time setup
 
@@ -23,9 +37,10 @@ release creation.
 4. Turn off **Allow administrators to bypass configured protection rules**.
 5. Only after steps 1-4, add an environment variable
    `RELEASE_PUBLISH_ENABLED` with the value `true` to `release`. Do not create
-   this variable at repository or organization level. It must be scoped to the
-   protected environment so that a missing or recreated environment fails
-   closed instead of inheriting an unprotected opt-in.
+   this variable at repository or organization level. The workflow reads the
+   merged value and cannot verify its scope; a repository-level variable would
+   defeat the missing-environment protection. The verification below reads the
+   environment directly.
 6. Keep the default `GITHUB_TOKEN` permissions read-only at repository level.
    The workflow requests `contents: write` only in the release job and
    `packages: write` only in the container publish job.
@@ -50,6 +65,10 @@ release creation.
    the environment variables include `RELEASE_PUBLISH_ENABLED=true`. The last
    check reads the environment directly; a repository-level variable with the
    same name is not sufficient and must be removed.
+10. Add a repository tag ruleset that blocks updates and deletions for `v*`.
+    The release job also verifies that the tag still points at the built
+    commit before creating the draft, but the ruleset prevents the move in the
+    first place.
 
 ## Before tagging
 
@@ -63,6 +82,9 @@ release creation.
   version (`0.1.0` becomes `v0.1.0`).
 - Update the release notes template values that are not filled in by the
   workflow, and commit the version bump.
+- Treat changes to `requirements/release-build.txt` as reviewed changes. The
+  python distribution build fails when a pinned version or hash does not match
+  the index.
 - Open a pull request that touches `.github/workflows/release.yml` or a
   packaging file when the workflow itself changed, and confirm the build-only
   jobs pass.
@@ -84,6 +106,8 @@ release creation.
    the image push happens before draft creation, and a draft can exist with
    only some of its assets. Inspect the registry tags and any existing draft
    before retrying or cleaning up; see [Recovery from a partial run](#recovery-from-a-partial-run).
+   The release job also verifies that the tag still resolves to the commit the
+   run built; a moved or recreated tag stops draft creation.
 5. Open the draft release and review the generated notes, the asset list, and
    `SHA256SUMS`.
 6. Download the assets and verify the checksums with
