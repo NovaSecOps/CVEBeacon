@@ -1496,18 +1496,24 @@ class WatchStore:
         if not allowed:
             raise StateError("a delivery claim needs a retryable status")
         now = _timestamp(self._clock)
-        placeholders = ",".join("?" for _ in identifiers)
         allowed_placeholders = ",".join("?" for _ in allowed)
         try:
             with self.transaction() as db:
-                cursor = db.execute(
-                    "UPDATE watch_delivery SET status='sending', "
-                    "first_attempt_at=COALESCE(first_attempt_at, ?), updated_at=? "
-                    f"WHERE channel=? AND event_id IN ({placeholders}) "
-                    f"AND status IN ({allowed_placeholders})",
-                    (now, now, channel, *identifiers, *allowed),
-                )
-                if cursor.rowcount != len(identifiers):
+                changed = 0
+                # Keep each statement well below SQLite's variable limit while
+                # still claiming the whole group in one transaction.
+                for start in range(0, len(identifiers), 500):
+                    chunk = identifiers[start : start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    cursor = db.execute(
+                        "UPDATE watch_delivery SET status='sending', "
+                        "first_attempt_at=COALESCE(first_attempt_at, ?), updated_at=? "
+                        f"WHERE channel=? AND event_id IN ({placeholders}) "
+                        f"AND status IN ({allowed_placeholders})",
+                        (now, now, channel, *chunk, *allowed),
+                    )
+                    changed += cursor.rowcount
+                if changed != len(identifiers):
                     raise _ClaimConflict
         except _ClaimConflict:
             return False
