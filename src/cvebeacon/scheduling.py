@@ -25,21 +25,6 @@ TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 MAX_TIMES = 12
 
-WINDOWS_REGISTRATION_SCRIPT = """param(
-    [Parameter(Mandatory = $true)][string]$TaskName,
-    [Parameter(Mandatory = $true)][string]$XmlPath,
-    [Parameter(Mandatory = $true)][string]$Account,
-    [switch]$UseXmlPrincipal
-)
-$ErrorActionPreference = 'Stop'
-$xml = [System.IO.File]::ReadAllText($XmlPath)
-$service = New-Object -ComObject Schedule.Service
-$service.Connect()
-$folder = $service.GetFolder('\\')
-$userId = if ($UseXmlPrincipal) { $null } else { $Account }
-$null = $folder.RegisterTask($TaskName, $xml, 6, $userId, $null, 2, $null)
-"""
-
 ET.register_namespace("", TASK_NAMESPACE)
 
 
@@ -55,7 +40,6 @@ class SchedulePlan:
     run_logged_out: bool = False
     user_id: str = ""
     account_note: str = ""
-    account_explicit: bool = False
 
     def _command(self, action: str) -> list[str]:
         prefix = (
@@ -167,7 +151,7 @@ def _current_windows_account(resolve_extended=None, resolve_user=None) -> tuple[
     if resolve_extended is None and resolve_user is None and os.name != "nt":
         raise SchedulingError(
             "cannot determine the current Windows account on this host; "
-            "pass --account DOMAIN\\user"
+            "run the command from that account's shell"
         )
     extended = resolve_extended or _windows_extended_name
     fallback = resolve_user or _windows_user_name
@@ -194,7 +178,8 @@ def _current_windows_account(resolve_extended=None, resolve_user=None) -> tuple[
             "unqualified name, so verify the task account"
         )
     raise SchedulingError(
-        "cannot determine the current Windows account; pass --account DOMAIN\\user"
+        "cannot determine the current Windows account; "
+        "run the command from that account's shell"
     )
 
 
@@ -208,7 +193,6 @@ def make_plan(
     executable: str | Path | None = None,
     allow_incompatible: bool = False,
     run_logged_out: bool = False,
-    account: str | None = None,
 ) -> SchedulePlan:
     if times is not None and every_hours is not None:
         raise SchedulingError("--times and --every are mutually exclusive")
@@ -233,12 +217,8 @@ def make_plan(
         raise SchedulingError("platform must be auto, windows, or linux")
     if requested != detected and not allow_incompatible:
         raise SchedulingError(f"cannot manage a {requested} schedule on a {detected} host")
-    if account is not None and not run_logged_out:
-        raise SchedulingError("--account requires --run-logged-out")
     if run_logged_out and requested != "windows":
         raise SchedulingError("--run-logged-out is supported only on Windows")
-    if account is not None and requested != "windows":
-        raise SchedulingError("--account is supported only on Windows")
     if requested == "linux" and interval is not None and 24 % interval:
         raise SchedulingError("Linux cron intervals must divide 24: choose 2, 3, 4, 6, 8, 12, or 24 hours")
     if executable:
@@ -261,13 +241,10 @@ def make_plan(
     account_name = ""
     account_note = ""
     if run_logged_out:
-        if account is None:
-            account_name, account_note = _current_windows_account()
-        else:
-            account_name = account.strip()
+        account_name, account_note = _current_windows_account()
         if not account_name:
             raise SchedulingError(
-                "--run-logged-out needs the Windows account that runs the task"
+                "--run-logged-out needs the current Windows account"
             )
         if any(character in account_name for character in "\r\n"):
             raise SchedulingError("schedule account cannot contain line breaks")
@@ -282,7 +259,6 @@ def make_plan(
         run_logged_out=run_logged_out,
         user_id=account_name,
         account_note=account_note,
-        account_explicit=account is not None,
     )
 
 
@@ -551,15 +527,9 @@ def _windows_registration_hint(
 ) -> str:
     folded = detail.casefold()
     if _windows_access_denied(detail, returncode):
-        if plan.run_logged_out and plan.account_explicit:
-            return (
-                "access denied: use an elevated administrator shell with --account, "
-                "or the service account's own shell"
-            )
         if plan.run_logged_out:
             return (
-                "access denied: use the service account's own shell, or name it "
-                "with --account from an elevated administrator shell"
+                "access denied: register the task from the account that will run it"
             )
         return "access denied: run from an elevated prompt"
     if "0x80070569" in folded:
@@ -580,97 +550,19 @@ def _windows_registration_hint(
 
 def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
     if plan.system == "windows":
-        if plan.run_logged_out:
-            with tempfile.TemporaryDirectory(
-                prefix="cvebeacon-schedule-", ignore_cleanup_errors=True
-            ) as directory:
-                xml_path = Path(directory) / "task.xml"
-                script_path = Path(directory) / "register.ps1"
-                xml_path.write_bytes(_windows_xml(plan))
-                script_path.write_text(
-                    WINDOWS_REGISTRATION_SCRIPT, encoding="utf-8"
-                )
-
-                def run_com(use_xml_principal: bool):
-                    arguments = [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        str(script_path),
-                        "-TaskName",
-                        WINDOWS_TASK,
-                        "-XmlPath",
-                        str(xml_path),
-                        "-Account",
-                        plan.user_id,
-                    ]
-                    if use_xml_principal:
-                        arguments.append("-UseXmlPrincipal")
-                    return run(
-                        arguments,
-                        capture_output=True,
-                        text=True,
-                        errors="replace",
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        timeout=120,
-                    )
-
-                result = None
-                last_error: Exception | None = None
-                for use_xml_principal in (False, True):
-                    try:
-                        result = run_com(use_xml_principal)
-                    except (OSError, subprocess.TimeoutExpired) as exc:
-                        last_error = exc
-                        continue
-                    if result.returncode == 0:
-                        break
-                if result is None or result.returncode != 0:
-                    try:
-                        result = run(
-                            [
-                                "schtasks",
-                                "/Create",
-                                "/XML",
-                                str(xml_path),
-                                "/TN",
-                                WINDOWS_TASK,
-                                "/RU",
-                                plan.user_id,
-                                "/NP",
-                                "/F",
-                                "/HRESULT",
-                            ],
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                            stdin=subprocess.DEVNULL,
-                        )
-                    except (OSError, subprocess.TimeoutExpired) as exc:
-                        if result is None:
-                            detail = " ".join(str(exc).split())[:600]
-                            raise SchedulingError(
-                                f"schedule installation failed: {detail}"
-                            ) from exc
-                        last_error = exc
-                if result is None:
-                    detail = " ".join(str(last_error).split())[:600]
-                    raise SchedulingError(
-                        f"schedule installation failed: {detail}"
-                    ) from last_error
-        elif plan.times:
+        if plan.times or plan.run_logged_out:
             descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
             try:
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(_windows_xml(plan))
                     handle.flush()
                     os.fsync(handle.fileno())
+                arguments = ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK]
+                if plan.run_logged_out:
+                    arguments.extend(["/RU", plan.user_id, "/NP"])
+                arguments.extend(["/F", "/HRESULT"])
                 result = run(
-                    ["schtasks", "/Create", "/XML", name, "/TN", WINDOWS_TASK, "/F", "/HRESULT"],
+                    arguments,
                     capture_output=True,
                     text=True,
                     check=False,
