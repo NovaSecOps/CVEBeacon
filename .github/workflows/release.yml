@@ -18,6 +18,7 @@ on:
       - 'pyproject.toml'
       - 'deploy/container/entrypoint.py'
       - 'scripts/build-windows.ps1'
+      - 'scripts/release_registry_check.py'
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -191,6 +192,11 @@ jobs:
     needs: [verify, python-dist, windows-exe]
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    # One shared group across every release tag, with cancellation disabled:
+    # the registry check and push for different tags cannot overlap.
+    concurrency:
+      group: release-container-publish
+      cancel-in-progress: false
     environment: release
     permissions:
       contents: read
@@ -237,63 +243,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
           VERSION: ${{ steps.version.outputs.version }}
-          LC_ALL: C
-        run: |
-          set -euo pipefail
-          repository="${IMAGE_NAME#ghcr.io/}"
-          token=$(curl -fsS --config <(printf 'user = "%s:%s"\n' "${GITHUB_ACTOR}" "${GITHUB_TOKEN}") \
-            "https://ghcr.io/token?scope=repository:${repository}:pull&service=ghcr.io" \
-            | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
-          manifest_status=$(curl -sS -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer ${token}" \
-            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
-            "https://ghcr.io/v2/${repository}/manifests/${VERSION}")
-          case "$manifest_status" in
-            200)
-              echo "::error::${IMAGE_NAME}:${VERSION} already exists. Refusing to overwrite an immutable version tag; reuse the recorded digest (docs/RELEASE_CHECKLIST.md)."
-              exit 1
-              ;;
-            404) ;;
-            *)
-              echo "::error::GHCR returned HTTP ${manifest_status} while checking ${IMAGE_NAME}:${VERSION}; refusing to publish."
-              exit 1
-              ;;
-          esac
-          tags_status=$(curl -sS -o "$RUNNER_TEMP/ghcr-tags.json" -w '%{http_code}' \
-            -H "Authorization: Bearer ${token}" \
-            "https://ghcr.io/v2/${repository}/tags/list")
-          case "$tags_status" in
-            200)
-              tags=$(python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1])).get("tags") or []))' "$RUNNER_TEMP/ghcr-tags.json")
-              ;;
-            404) tags="" ;;
-            *)
-              echo "::error::GHCR returned HTTP ${tags_status} while listing tags; refusing to publish."
-              exit 1
-              ;;
-          esac
-          if printf '%s\n' "$tags" | grep -Fxq "$VERSION"; then
-            echo "::error::${IMAGE_NAME}:${VERSION} already exists. Refusing to overwrite an immutable version tag; reuse the recorded digest (docs/RELEASE_CHECKLIST.md)."
-            exit 1
-          fi
-          highest=$(printf '%s\n' "$tags" | grep -E '^[0-9]+(\.[0-9]+)*$' | sort -V | tail -n1 || true)
-          promote=false
-          if printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
-            if [ -z "$highest" ]; then
-              promote=true
-            elif [ "$VERSION" != "$highest" ] && [ "$(printf '%s\n%s\n' "$highest" "$VERSION" | sort -V | tail -n1)" = "$VERSION" ]; then
-              promote=true
-            fi
-          fi
-          echo "Highest stable tag: ${highest:-none}; promote latest: $promote"
-          {
-            echo "tags<<RELEASE_TAGS"
-            echo "${IMAGE_NAME}:${VERSION}"
-            if [ "$promote" = "true" ]; then
-              echo "${IMAGE_NAME}:latest"
-            fi
-            echo "RELEASE_TAGS"
-          } >> "$GITHUB_OUTPUT"
+        run: python3 scripts/release_registry_check.py
       - name: Build and push the multi-arch core image
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
