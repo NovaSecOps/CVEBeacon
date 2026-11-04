@@ -1250,6 +1250,371 @@ def test_concurrent_bootstrap_creates_only_one_administrator(tmp_path):
     assert sum(user.is_admin for user in store.users()) == 1
 
 
+def test_concurrent_creation_between_check_and_open_is_revalidated(
+    tmp_path, monkeypatch
+):
+    import shutil
+
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    other = UserStore(tmp_path / "concurrent-users.db", clock=lambda: NOW)
+    other.add("alice", password=PASSWORD)
+    import cvebeacon.watch.users as users_module
+    import sqlite3 as sqlite_module
+
+    real_connect = sqlite_module.connect
+    injected = []
+
+    def creating_connect(database, *args, **kwargs):
+        if not injected:
+            injected.append(True)
+            if not path.exists():
+                os.close(
+                    os.open(
+                        path,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                )
+            # The second first-time opener finished creating the account file
+            # after this opener checked for it but before SQLite opened it.
+            shutil.copyfile(other.path, path)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(users_module.sqlite3, "connect", creating_connect)
+    store.initialize()
+    assert store.users()[0].username == "alice"
+
+
+def test_concurrent_write_while_opening_an_existing_database_is_not_replacement(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
+    import cvebeacon.watch.users as users_module
+    import sqlite3 as sqlite_module
+
+    real_connect = sqlite_module.connect
+    injected = []
+
+    def writing_connect(database, *args, **kwargs):
+        if not injected:
+            injected.append(True)
+            with real_connect(path) as other:
+                other.execute(
+                    "INSERT INTO cb_user_meta(key,value) VALUES ('race','1')"
+                )
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(users_module.sqlite3, "connect", writing_connect)
+    assert store.users() == ()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SQLite record locks")
+@pytest.mark.parametrize("start_during_open", [False, True])
+def test_opening_another_store_preserves_external_writer_exclusion(
+    tmp_path, monkeypatch, start_during_open
+):
+    import subprocess
+    import sys
+    from contextlib import ExitStack
+
+    path = tmp_path / "users.db"
+    writer = UserStore(path, clock=lambda: NOW)
+    writer.initialize()
+    reader = UserStore(path, clock=lambda: NOW)
+    real_verify = UserStore._verify_store_content
+
+    def external_writer():
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sqlite3, sys\n"
+                "db = sqlite3.connect(sys.argv[1], timeout=0)\n"
+                "try:\n"
+                "    db.execute('BEGIN IMMEDIATE')\n"
+                "except sqlite3.OperationalError as exc:\n"
+                "    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY:\n"
+                "        raise\n"
+                "    print('blocked')\n"
+                "else:\n"
+                "    db.rollback()\n"
+                "    print('acquired')\n"
+                "finally:\n"
+                "    db.close()\n",
+                str(path),
+            ],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        return result.stdout.strip()
+
+    with ExitStack() as transactions:
+        def verify_with_overlapping_writer(self, connection, **kwargs):
+            real_verify(self, connection, **kwargs)
+            if self is reader and start_during_open:
+                transactions.enter_context(writer.transaction())
+                assert external_writer() == "blocked"
+
+        monkeypatch.setattr(
+            UserStore, "_verify_store_content", verify_with_overlapping_writer
+        )
+        if not start_during_open:
+            transactions.enter_context(writer.transaction())
+            assert external_writer() == "blocked"
+        connection = reader._connect(create=False)
+        try:
+            assert external_writer() == "blocked"
+        finally:
+            connection.close()
+        assert external_writer() == "blocked"
+    assert external_writer() == "acquired"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SQLite record locks")
+def test_creation_lock_hardlink_cannot_release_live_database_locks(tmp_path):
+    import subprocess
+    import sys
+
+    live_path = tmp_path / "users.db"
+    live = UserStore(live_path, clock=lambda: NOW)
+    live.initialize()
+
+    target_path = tmp_path / "other-users.db"
+    target = UserStore(target_path, clock=lambda: NOW)
+    os.link(live_path, target_path.with_name(target_path.name + ".lock"))
+
+    def external_writer():
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sqlite3, sys\n"
+                "db = sqlite3.connect(sys.argv[1], timeout=0)\n"
+                "try:\n"
+                "    db.execute('BEGIN IMMEDIATE')\n"
+                "except sqlite3.OperationalError as exc:\n"
+                "    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY:\n"
+                "        raise\n"
+                "    print('blocked')\n"
+                "else:\n"
+                "    db.rollback()\n"
+                "    print('acquired')\n"
+                "finally:\n"
+                "    db.close()\n",
+                str(live_path),
+            ],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        return result.stdout.strip()
+
+    with live.transaction():
+        assert external_writer() == "blocked"
+        with pytest.raises(
+            StateError, match="lock must not be the account database"
+        ):
+            target.initialize()
+        assert not target_path.exists()
+        assert external_writer() == "blocked"
+    assert external_writer() == "acquired"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX inode pins")
+def test_creation_lock_rejects_a_hardlinked_lock_file(tmp_path):
+    path = tmp_path / "users.db"
+    lock = tmp_path / "users.db.lock"
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    os.link(lock, tmp_path / "other.lock")
+    with pytest.raises(StateError, match="lock must not be a hardlink"):
+        UserStore(path, clock=lambda: NOW).initialize()
+    assert not path.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX inode pins")
+def test_repeated_store_opens_reuse_one_database_descriptor(tmp_path, monkeypatch):
+    path = tmp_path / "users.db"
+    real_open = os.open
+    opened = []
+
+    def recording_open(candidate, *args, **kwargs):
+        descriptor = real_open(candidate, *args, **kwargs)
+        if Path(candidate) == path:
+            opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr("cvebeacon.watch.users.os.open", recording_open)
+    UserStore(path, clock=lambda: NOW).initialize()
+    for _ in range(20):
+        reader = UserStore(path, clock=lambda: NOW)
+        assert reader.users() == ()
+        reader._store_id = "different-store"
+        with pytest.raises(StateError, match="replaced"):
+            reader.users()
+    assert len(opened) == 1
+    assert os.fstat(opened[0]).st_ino == path.stat().st_ino
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file identity")
+def test_same_store_id_replacement_cannot_recycle_the_validated_inode(
+    tmp_path, monkeypatch
+):
+    import shutil
+    from types import SimpleNamespace
+
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
+    original = path.stat()
+    copy = tmp_path / "copy.db"
+    shutil.copyfile(path, copy)
+    copy.chmod(0o600)
+    changed = UserStore(copy, clock=lambda: NOW)
+    changed.add("replacement")
+    assert changed._store_id == store._store_id
+
+    real_fstat, real_stat = os.fstat, os.stat
+    real_connect = sqlite3.connect
+    validated = []
+    recycled = []
+    swapped = []
+
+    def recording_fstat(descriptor):
+        details = real_fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (original.st_dev, original.st_ino):
+            validated.append(descriptor)
+        return details
+
+    def swapping_connect(database, *args, **kwargs):
+        if swapped:
+            return real_connect(database, *args, **kwargs)
+        swapped.append(True)
+        try:
+            os.fstat(validated[-1])
+        except OSError:
+            recycled.append(True)
+        path.unlink()
+        shutil.copyfile(copy, path)
+        path.chmod(0o600)
+        return real_connect(database, *args, **kwargs)
+
+    def recycling_stat(candidate, *args, **kwargs):
+        current = real_stat(candidate, *args, **kwargs)
+        if Path(candidate) == path and recycled:
+            recycled.pop()
+            # The OS may reuse an unlinked inode only after its last open
+            # descriptor closes. Model that reuse while keeping real metadata.
+            return SimpleNamespace(
+                st_dev=original.st_dev,
+                st_ino=original.st_ino,
+                st_mode=current.st_mode,
+                st_size=current.st_size,
+                st_mtime_ns=current.st_mtime_ns,
+            )
+        return current
+
+    monkeypatch.setattr("cvebeacon.watch.users.os.fstat", recording_fstat)
+    monkeypatch.setattr("cvebeacon.watch.users.os.stat", recycling_stat)
+    monkeypatch.setattr("cvebeacon.watch.users.sqlite3.connect", swapping_connect)
+    with pytest.raises(
+        StateError, match="^CVEBeacon user database was replaced while opening$"
+    ):
+        store.users()
+
+
+@pytest.mark.parametrize("bootstrap", [False, True])
+def test_fresh_store_accepts_an_independent_write_during_open(
+    tmp_path, monkeypatch, bootstrap
+):
+    path = tmp_path / "users.db"
+    writer = UserStore(path, clock=lambda: NOW)
+    writer.initialize()
+    reader = UserStore(path, clock=lambda: NOW)
+    real_connect = sqlite3.connect
+    injected = []
+
+    def writing_connect(database, *args, **kwargs):
+        if not injected:
+            injected.append(True)
+            writer.add("first", is_admin=bootstrap, authorization=BOOTSTRAP)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr("cvebeacon.watch.users.sqlite3.connect", writing_connect)
+    if bootstrap:
+        with pytest.raises(ConfigurationError, match="administrator login"):
+            reader.add("second", is_admin=True, authorization=BOOTSTRAP)
+    assert [user.username for user in reader.users()] == ["first"]
+    assert reader.users()[0].is_admin == bootstrap
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX lock permissions")
+@pytest.mark.parametrize("mode", [0o640, 0o620, 0o604, 0o602, 0o666])
+def test_users_database_rejects_permissive_existing_locks(tmp_path, mode):
+    path = tmp_path / "users.db"
+    lock = tmp_path / "users.db.lock"
+    lock.touch()
+    lock.chmod(mode)
+    with pytest.raises(StateError, match="lock.*group or other"):
+        UserStore(path, clock=lambda: NOW).initialize()
+    assert stat.S_IMODE(lock.stat().st_mode) == mode
+    assert not path.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX lock permissions")
+@pytest.mark.parametrize("mask", [0o000, 0o777])
+def test_new_users_database_lock_is_0600_regardless_of_umask(tmp_path, mask):
+    previous = os.umask(mask)
+    try:
+        UserStore(tmp_path / "users.db", clock=lambda: NOW).initialize()
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((tmp_path / "users.db.lock").stat().st_mode) == 0o600
+
+
+def test_windows_first_lock_waits_without_writing_a_locked_byte(
+    tmp_path, monkeypatch
+):
+    import sys
+    from types import SimpleNamespace
+
+    import cvebeacon.watch.users as users_module
+
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    calls = []
+    real_fstat = os.fstat
+
+    def empty_before_competing_lock(descriptor):
+        details = real_fstat(descriptor)
+        assert details.st_size == 0
+        # Another opener locks byte zero after this opener observes EOF.
+        calls.append("competitor locked")
+        return details
+
+    def mandatory_locked_write(*args):
+        raise OSError("byte zero is locked by the competing opener")
+
+    def locking(descriptor, operation, size):
+        assert os.lseek(descriptor, 0, os.SEEK_CUR) == 0
+        assert size == 1
+        calls.append(operation)
+
+    fake_os = SimpleNamespace(
+        **{name: getattr(os, name) for name in dir(os) if not name.startswith("__")}
+    )
+    fake_os.name = "nt"
+    fake_os.fstat = empty_before_competing_lock
+    fake_os.write = mandatory_locked_write
+    monkeypatch.setattr(users_module, "os", fake_os)
+    monkeypatch.setitem(
+        sys.modules, "msvcrt",
+        SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=locking),
+    )
+    with store._creation_lock(path):
+        calls.append("acquired")
+    assert calls == ["competitor locked", 1, "acquired", 0]
+    assert (tmp_path / "users.db.lock").stat().st_size == 0
+
+
 def test_foreign_read_only_ancestor_is_not_trusted(tmp_path, monkeypatch):
     if os.name != "posix":
         pytest.skip("POSIX ownership model")

@@ -490,9 +490,11 @@ the process umask; an existing directory that fails the check is reported with
 an actionable `chmod go-w <dir>` message. The account database stores a random
 store id in `cb_user_meta`; after SQLite opens the file, a read-only first
 transaction checks the `cb_user` schema and that id, and compares the file's
-device, inode, size and modification time. A replacement is rejected even when
-the filesystem reuses an inode number. Existing account databases without a
-store id receive one once. Back up both files together, and keep account
+device and inode. On POSIX the original inode stays pinned for the process
+lifetime, preventing reuse of its inode number during opening while preserving
+SQLite's transaction locks across account-store instances. Concurrent writes to
+the same file may change its size and modification time. Existing account
+databases without a store id receive one once. Back up both files together, and keep account
 backups at `0600` as well. On
 Windows, place both in the
 [ACL-protected data directory](DEPLOY.md#windows-data-directory-acls). The same

@@ -12,6 +12,7 @@ import re
 import secrets
 import sqlite3
 import stat
+import threading
 import unicodedata
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
@@ -221,6 +222,66 @@ def audit_name(value: object) -> str:
     return text
 
 
+# Closing any raw descriptor of a database can drop every POSIX record lock
+# this process holds on it, including another instance's SQLite transaction.
+# Reuse inode pins and leave cleanup to process exit, even after a failed open.
+_DATABASE_PINS: dict[tuple[int, int], list[int]] = {}
+_DATABASE_PINS_LOCK = threading.Lock()
+
+
+def _pin_database(path: Path, *, create: bool) -> tuple[int, bool]:
+    with _DATABASE_PINS_LOCK:
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            current = None
+        if current is not None and stat.S_ISREG(current.st_mode):
+            pins = _DATABASE_PINS.get((current.st_dev, current.st_ino))
+            if pins:
+                return pins[0], False
+
+        flags = (
+            os.O_RDWR if create else os.O_RDONLY
+        ) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            if create:
+                descriptor = os.open(
+                    path, flags | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                created = True
+            else:
+                descriptor = os.open(path, flags)
+                created = False
+        except FileExistsError:
+            descriptor = os.open(path, flags)
+            created = False
+        details = os.fstat(descriptor)
+        # A path swap between stat and open could select an already pinned
+        # inode. Retain that extra descriptor too: closing it is unsafe.
+        _DATABASE_PINS.setdefault(
+            (details.st_dev, details.st_ino), []
+        ).append(descriptor)
+        return descriptor, created
+
+
+def _retain_database_descriptor(
+    descriptor: int,
+    identity: tuple[int, int],
+    target: tuple[int, int] | None,
+) -> bool:
+    """Keep a descriptor open when closing it could drop database locks.
+
+    POSIX releases this process's record locks on a file when any descriptor
+    for it closes. A descriptor that shares an inode with the target database
+    or a pinned database therefore joins the registry instead of being closed.
+    """
+    with _DATABASE_PINS_LOCK:
+        if identity not in _DATABASE_PINS and identity != target:
+            return False
+        _DATABASE_PINS.setdefault(identity, []).append(descriptor)
+        return True
+
+
 class UserStore:
     def __init__(
         self, path: str | Path, *, clock=_utc_now
@@ -260,64 +321,171 @@ class UserStore:
             current = parent
         return tuple(identities)
 
-    def _connect(self, *, create: bool = True) -> sqlite3.Connection:
+    @staticmethod
+    def _path_state(path: Path) -> tuple[bool, bool]:
+        """Return whether the path exists and whether it is still empty.
+
+        A final symlink counts as existing; the open path rejects it later.
+        """
+        try:
+            details = os.lstat(path)
+        except FileNotFoundError:
+            return False, False
+        return True, details.st_size == 0
+
+    @contextmanager
+    def _creation_lock(self, path: Path) -> Iterator[None]:
+        """Serialize the first open that may create the account file.
+
+        The lock file lives beside the database in the same protected
+        directory. An advisory lock is released when the process exits, so a
+        crash cannot leave a permanent lock. A creator that does not cooperate
+        with the lock is still checked by the content verification below.
+        """
+        lock_path = path.with_name(path.name + ".lock")
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            try:
+                descriptor = os.open(
+                    lock_path, flags | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                created = True
+            except FileExistsError:
+                descriptor = os.open(lock_path, flags)
+                created = False
+        except OSError as exc:
+            raise StateError(
+                f"cannot open CVEBeacon user database lock {lock_path}: {exc}"
+            ) from exc
+        acquired = False
+        retained = False
+        identity: tuple[int, int] | None = None
+        try:
+            try:
+                details = os.fstat(descriptor)
+                identity = (details.st_dev, details.st_ino)
+                try:
+                    target_details = os.stat(path, follow_symlinks=False)
+                except OSError:
+                    target = None
+                else:
+                    target = (target_details.st_dev, target_details.st_ino)
+                if _retain_database_descriptor(descriptor, identity, target):
+                    retained = True
+                    raise StateError(
+                        "CVEBeacon user database lock must not be the account "
+                        "database or a hardlink to it"
+                    )
+                if details.st_nlink != 1:
+                    raise StateError(
+                        "CVEBeacon user database lock must not be a hardlink"
+                    )
+                if not stat.S_ISREG(details.st_mode):
+                    raise StateError(
+                        "CVEBeacon user database lock must be a regular file"
+                    )
+                if os.name == "posix":
+                    if details.st_uid != os.geteuid():
+                        raise StateError(
+                            "CVEBeacon user database lock must be owned by "
+                            "this account"
+                        )
+                    if created:
+                        os.fchmod(descriptor, 0o600)
+                    elif stat.S_IMODE(details.st_mode) & 0o077:
+                        raise StateError(
+                            "CVEBeacon user database lock must not be group "
+                            "or other accessible"
+                        )
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                else:
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            except OSError as exc:
+                raise StateError(
+                    f"cannot lock CVEBeacon user database {path}: {exc}"
+                ) from exc
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                if os.name == "posix":
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                else:
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            if (
+                not retained
+                and identity is not None
+                and _retain_database_descriptor(descriptor, identity, None)
+            ):
+                retained = True
+            if not retained:
+                os.close(descriptor)
+
+    def _connect(
+        self,
+        *,
+        create: bool = True,
+        _creation_locked: bool = False,
+    ) -> sqlite3.Connection:
         try:
             parent = self.path.parent
             if create:
                 ensure_private_directory(parent)
             resolved_parent = parent.resolve()
             path = resolved_parent / self.path.name
-            connection = None
+            present, empty = self._path_state(path)
+            directory_chain = None
             if os.name == "posix":
                 directory_chain = self._trusted_directory_chain(
                     resolved_parent
                 )
-                parent_identity = directory_chain[0]
-                flags = (
-                    os.O_RDWR if create else os.O_RDONLY
-                ) | getattr(os, "O_NOFOLLOW", 0)
+            if create and not _creation_locked and (not present or empty):
+                with self._creation_lock(path):
+                    return self._connect(
+                        create=create,
+                        _creation_locked=True,
+                    )
+            connection = None
+            if os.name == "posix":
                 try:
-                    if create:
-                        descriptor = os.open(
-                            path, flags | os.O_CREAT | os.O_EXCL, 0o600
-                        )
-                        created = True
-                    else:
-                        descriptor = os.open(path, flags)
-                        created = False
-                except FileExistsError:
-                    descriptor = os.open(path, flags)
-                    created = False
+                    descriptor, created = _pin_database(path, create=create)
                 except FileNotFoundError as exc:
                     raise StateError(
                         "CVEBeacon user database not found"
                     ) from exc
-                try:
-                    details = os.fstat(descriptor)
-                    if not stat.S_ISREG(details.st_mode):
-                        raise StateError(
-                            "CVEBeacon user database must be a regular file"
-                        )
-                    if details.st_uid != os.geteuid():
-                        raise StateError(
-                            "CVEBeacon user database must be owned by this "
-                            "account"
-                        )
-                    if created:
-                        os.fchmod(descriptor, 0o600)
-                    elif stat.S_IMODE(details.st_mode) & 0o077:
-                        raise StateError(
-                            "CVEBeacon user database must not be group or "
-                            "other accessible"
-                        )
-                    expected = (
-                        details.st_dev,
-                        details.st_ino,
-                        details.st_size,
-                        details.st_mtime_ns,
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode):
+                    raise StateError(
+                        "CVEBeacon user database must be a regular file"
                     )
-                finally:
-                    os.close(descriptor)
+                if details.st_uid != os.geteuid():
+                    raise StateError(
+                        "CVEBeacon user database must be owned by this "
+                        "account"
+                    )
+                if created:
+                    os.fchmod(descriptor, 0o600)
+                elif stat.S_IMODE(details.st_mode) & 0o077:
+                    raise StateError(
+                        "CVEBeacon user database must not be group or "
+                        "other accessible"
+                    )
+                expected = (
+                    details.st_dev,
+                    details.st_ino,
+                )
+                # The process-lifetime pin prevents an unlinked inode from
+                # being reused during SQLite and post-open identity checks.
                 connection = sqlite3.connect(
                     f"{path.as_uri()}?mode={'rwc' if create else 'ro'}",
                     uri=True,
@@ -332,13 +500,7 @@ class UserStore:
                     ) from exc
                 if (
                     not stat.S_ISREG(current.st_mode)
-                    or (
-                        current.st_dev,
-                        current.st_ino,
-                        current.st_size,
-                        getattr(current, "st_mtime_ns", 0),
-                    )
-                    != expected
+                    or (current.st_dev, current.st_ino) != expected
                     or self._trusted_directory_chain(resolved_parent)
                     != directory_chain
                 ):
@@ -346,6 +508,10 @@ class UserStore:
                     raise StateError(
                         "CVEBeacon user database was replaced while opening"
                     )
+                # A size or timestamp change is either the creator still
+                # initializing the file or a concurrent account write. The
+                # read-only content check below proves it is still the same
+                # store before the change is accepted.
             else:
                 created = create and not path.exists()
                 if not create and not path.exists():
@@ -445,7 +611,37 @@ class UserStore:
             connection.close()
 
     def initialize(self, *, create: bool = True) -> None:
-        with closing(self._connect(create=create)) as db:
+        if create:
+            try:
+                parent = self.path.parent
+                ensure_private_directory(parent)
+                resolved_parent = parent.resolve()
+                if os.name == "posix":
+                    self._trusted_directory_chain(resolved_parent)
+                path = resolved_parent / self.path.name
+                present, empty = self._path_state(path)
+            except OSError as exc:
+                raise StateError(
+                    f"cannot open CVEBeacon user database {self.path}: {exc}"
+                ) from exc
+            if not present or empty or self._store_id is None:
+                with self._creation_lock(path):
+                    self._initialize(
+                        create=create,
+                        creation_locked=True,
+                    )
+                return
+        self._initialize(create=create, creation_locked=False)
+
+    def _initialize(
+        self, *, create: bool, creation_locked: bool
+    ) -> None:
+        with closing(
+            self._connect(
+                create=create,
+                _creation_locked=creation_locked,
+            )
+        ) as db:
             for statement in _SCHEMA:
                 db.execute(statement)
             self._migrate_email_keys(db)
