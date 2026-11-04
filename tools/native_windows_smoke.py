@@ -51,6 +51,11 @@ def command(args, **kwargs):
 
 def checked(args, **kwargs):
     result = command(args, **kwargs)
+    if result.returncode != 0:
+        printable = subprocess.list2cmdline([str(item) for item in args])
+        print(f"FAILED COMMAND: {printable}", flush=True)
+        print(f"stdout:\n{result.stdout}", flush=True)
+        print(f"stderr:\n{result.stderr}", flush=True)
     assert result.returncode == 0, (
         f"command failed ({result.returncode}): {args}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -525,6 +530,14 @@ def smoke() -> None:
         created = command(
             ["net", "user", SERVICE_ACCOUNT, password, "/add", "/expires:never"]
         )
+        if created.returncode != 0:
+            print(
+                f"FAILED COMMAND: net user {SERVICE_ACCOUNT} <password omitted> "
+                "/add /expires:never",
+                flush=True,
+            )
+            print(f"stdout:\n{created.stdout}", flush=True)
+            print(f"stderr:\n{created.stderr}", flush=True)
         assert created.returncode == 0, created.stderr
         user_created = True
         for path, rights in ((root, "RX"), (app, "RX"), (data, "F")):
@@ -683,7 +696,11 @@ def main(argv=None) -> int:
         raise SystemExit(
             "native Windows task checks require a disposable GitHub-hosted runner"
         )
-    smoke()
+    try:
+        smoke()
+    except Exception:
+        print(f"FAILED at STEP {_step + 1}", flush=True)
+        raise
     print("PASS native Windows deployment smoke")
     return 0
 
