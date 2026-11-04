@@ -630,7 +630,10 @@ def smoke() -> None:
         assert existing_account.returncode != 0, (
             f"refusing to reuse an existing account named {SERVICE_ACCOUNT!r}"
         )
-        password = "Cvb-" + secrets.token_urlsafe(18) + "!9aA-é"
+        # Windows complexity rules reject passwords containing part of the
+        # account name, so no "cvb" prefix; keep a non-ASCII character to
+        # exercise the UTF-8 stdin transport.
+        password = "Q7#" + secrets.token_urlsafe(18) + "!9aA-é"
         try:
             create_local_user(SERVICE_ACCOUNT, password)
         except OSError as exc:
