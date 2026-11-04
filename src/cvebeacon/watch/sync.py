@@ -406,6 +406,11 @@ def sync_watch(
         euvd_waited_before = throttle.waited
         euvd_records = euvd_new = euvd_changed = euvd_ignored = 0
         euvd_error: str | None = None
+        # The 403 heuristic is per source. A successful EU KEV request must not
+        # turn the first EUVD 403 into a ten-minute wait; the wait counters stay
+        # shared so the host budget is unchanged.
+        throttle.succeeded = False
+
         euvd_cursor = _cursor_date(metadata.get("euvd_cursor"))
         resume = _euvd_resume(metadata.get("euvd_page_cursor"))
         if resume is not None and euvd_cursor is not None and resume.end < euvd_cursor:

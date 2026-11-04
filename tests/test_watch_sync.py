@@ -1118,6 +1118,81 @@ def test_euvd_single_large_day_makes_progress_across_throttled_runs(tmp_path):
     assert status["euvd_items"] == 25_000
 
 
+def test_eu_kev_success_then_first_euvd_403_fails_without_backoff(tmp_path):
+    config = write_config(
+        tmp_path, sources=("nvd", "euvd", "eu_kev"), initial="backfill"
+    )
+    sleeps: list[float] = []
+    order: list[str] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def eu_request(request):
+        order.append("eu_kev")
+        return httpx.Response(200, json=[])
+
+    def denied(request):
+        order.append("euvd")
+        return httpx.Response(403)
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=denied, eu=eu_request),
+        sleep=sleeps.append,
+    )
+    assert order == ["eu_kev", "euvd"]
+    assert sleeps == []
+    assert report.failures == ("euvd",)
+    euvd_summary = next(item for item in report.summaries if item.source == "euvd")
+    assert euvd_summary.requests == 1
+    assert euvd_summary.throttled == 0
+    eu_summary = next(item for item in report.summaries if item.source == "eu_kev")
+    assert eu_summary.error is None
+
+
+def test_eu_kev_success_keeps_the_shared_euvd_wait_budget(tmp_path):
+    config = write_config(
+        tmp_path, sources=("nvd", "euvd", "eu_kev"), initial="backfill"
+    )
+    sleeps: list[float] = []
+    blocked = [True]
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def eu_request(request):
+        return httpx.Response(200, json=[])
+
+    def euvd_request(request):
+        page = int(dict(request.url.params)["page"])
+        if page == 0:
+            return httpx.Response(
+                200,
+                json={
+                    "total": 101,
+                    "items": [euvd_item(f"EUVD-{index}") for index in range(100)],
+                },
+            )
+        if blocked[0]:
+            blocked[0] = False
+            return httpx.Response(403)
+        return httpx.Response(
+            200, json={"total": 101, "items": [euvd_item("EUVD-100")]}
+        )
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, euvd=euvd_request, eu=eu_request),
+        sleep=sleeps.append,
+    )
+    assert not report.failures
+    assert sleeps == [60.0]
+    summary = next(item for item in report.summaries if item.source == "euvd")
+    assert summary.throttled == 1
+    assert summary.throttle_wait == 60
+
+
 def test_eu_kev_is_fetched_before_the_euvd_backfill(tmp_path):
     config = write_config(
         tmp_path, sources=("nvd", "euvd", "eu_kev"), initial="backfill"
