@@ -2584,6 +2584,53 @@ channels = ["slack"]
     assert "and 20 more" in seen[0]
 
 
+def test_initial_digest_samples_distinct_cves_with_all_their_rules(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
+    )
+    channels = """
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+max_items = 5
+"""
+    rules = "".join(
+        f'[[watch.rules]]\nname = "{name}"\ncondition = {{ cvss_min = 9 }}\n'
+        'channels = ["slack"]\n'
+        for name in ("a", "b", "c")
+    )
+    config = make_config(tmp_path, channels=channels, rules=rules)
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 11))
+    store = seed(config, identifiers=identifiers, initial=True)
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["text"])
+        return httpx.Response(200, content=b"ok")
+
+    report = deliver(config, store, handler)
+    assert len(seen) == 1
+    text = seen[0]
+    assert "CVEBeacon initial summary: 10 CVEs across 3 rules" in text
+    assert text.count("Rule: a, b, c") == 5
+    for index in range(1, 6):
+        assert f"CVE-2026-{index:04d}" in text
+    for index in range(6, 11):
+        assert f"CVE-2026-{index:04d}" not in text
+    assert "and 5 more" in text
+    assert report.channels[0].messages == 1
+    assert report.channels[0].events == 30
+    with sqlite3.connect(store.path) as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM watch_delivery WHERE status='sent'"
+            ).fetchone()[0]
+            == 30
+        )
+
+
 def test_initial_digest_combines_pending_and_ambiguous_rows(
     tmp_path, monkeypatch
 ):

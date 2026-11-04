@@ -1413,12 +1413,17 @@ class WatchStore:
         )
 
     @staticmethod
-    def _initial_order(catalogs: Sequence[str]) -> tuple[str, str]:
+    def _initial_order(
+        catalogs: Sequence[str],
+    ) -> tuple[tuple[str, ...], tuple[str, ...], str]:
         """Order initial rows in SQL without building a view for each one.
 
         This is a close approximation of ``messages.sort_events``. KEV entries
         and active exploitation come first, then the highest CVSS score and
         EPSS. The sampled rows are sorted exactly before rendering.
+
+        The first tuple orders rows, the second orders distinct CVEs for the
+        sample, and the last value is the optional EPSS join.
         """
         kev = []
         if "cisa_kev" in catalogs:
@@ -1463,12 +1468,29 @@ class WatchStore:
             epss = "COALESCE(p.epss, -1)"
         else:
             epss = "(-1.0)"
-        order = (
-            f"CASE WHEN ({' OR '.join(kev)}) THEN 0 ELSE 1 END, "
-            f"CASE WHEN ({' OR '.join(exploitation)}) THEN 0 ELSE 1 END, "
-            f"{cvss} DESC, {epss} DESC, e.created_at, e.id"
+        kev_case = f"CASE WHEN ({' OR '.join(kev)}) THEN 0 ELSE 1 END"
+        exploitation_case = (
+            f"CASE WHEN ({' OR '.join(exploitation)}) THEN 0 ELSE 1 END"
         )
-        return order, join
+        order = (
+            kev_case,
+            exploitation_case,
+            f"{cvss} DESC",
+            f"{epss} DESC",
+            "e.created_at",
+            "e.id",
+        )
+        # Every sort key except the row identity is constant for one CVE, so
+        # the aggregate picks the same top CVEs as the row order would.
+        grouped = (
+            f"MIN({kev_case})",
+            f"MIN({exploitation_case})",
+            f"MAX({cvss}) DESC",
+            f"MAX({epss}) DESC",
+            "MIN(e.created_at)",
+            "MIN(e.id)",
+        )
+        return order, grouped, join
 
     def _delivery_event(
         self,
@@ -1597,14 +1619,31 @@ class WatchStore:
                         parameters,
                     ).fetchone()[0]
                 )
-                order, join = self._initial_order(catalogs)
+                order, grouped, join = self._initial_order(catalogs)
+                sampled_cves = [
+                    row["cve_id"]
+                    for row in db.execute(
+                        "SELECT e.cve_id FROM watch_event e "
+                        "JOIN watch_delivery d ON d.event_id=e.id "
+                        "JOIN watch_cve c ON c.cve_id=e.cve_id " + join +
+                        " WHERE " + condition +
+                        " GROUP BY e.cve_id ORDER BY " + ", ".join(grouped) +
+                        " LIMIT ?",
+                        (*parameters, max_items),
+                    )
+                ]
+                if not sampled_cves:
+                    return None
+                placeholders = ",".join("?" for _ in sampled_cves)
                 sampled = db.execute(
                     "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,"
                     "e.details_json,e.initial,e.created_at,d.status,d.attempts "
                     "FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id "
                     "JOIN watch_cve c ON c.cve_id=e.cve_id " + join +
-                    " WHERE " + condition + " ORDER BY " + order + " LIMIT ?",
-                    (*parameters, max_items),
+                    " WHERE " + condition +
+                    f" AND e.cve_id IN ({placeholders}) ORDER BY " +
+                    ", ".join(order),
+                    (*parameters, *sampled_cves),
                 ).fetchall()
                 cursor = db.execute(
                     "UPDATE watch_delivery SET status='sending', "
