@@ -6,6 +6,7 @@ import argparse
 import getpass
 import json
 import logging
+import secrets
 import sys
 import warnings
 from contextlib import closing
@@ -642,17 +643,25 @@ def run(args: argparse.Namespace) -> int:
 
 def _read_schedule_password(account: str, *, from_stdin: bool) -> str:
     if from_stdin:
-        line = sys.stdin.readline()
+        line = sys.stdin.buffer.readline()
         if not line:
             raise CVEBeaconError("no password was provided on stdin")
-        password = line.rstrip("\r\n")
+        try:
+            password = line.rstrip(b"\r\n").decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CVEBeaconError(
+                "the password on stdin is not valid UTF-8"
+            ) from exc
     else:
         with warnings.catch_warnings():
             warnings.simplefilter("error", getpass.GetPassWarning)
             try:
                 password = getpass.getpass(f"Password for {account}: ")
+                confirmation = getpass.getpass("Confirm password: ")
             except (getpass.GetPassWarning, EOFError) as exc:
                 raise CVEBeaconError("could not read the account password") from exc
+        if not secrets.compare_digest(password, confirmation):
+            raise CVEBeaconError("the account passwords do not match")
     if not password:
         raise CVEBeaconError("the account password cannot be empty")
     return password
@@ -750,6 +759,13 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
             raise CVEBeaconError("--times and --every are mutually exclusive")
         if args.password_stdin and not args.run_logged_out:
             raise CVEBeaconError("--password-stdin requires --run-logged-out")
+        if args.password_stdin and not args.dry_run:
+            if not args.yes:
+                raise CVEBeaconError("--password-stdin requires --yes")
+            if args.times is None and args.every is None:
+                raise CVEBeaconError(
+                    "--password-stdin requires --times or --every"
+                )
         if args.times is not None:
             plan = make_plan(config.config_path, times=args.times, command=target, system=args.platform, allow_incompatible=args.dry_run, run_logged_out=args.run_logged_out, account=args.account)
         else:

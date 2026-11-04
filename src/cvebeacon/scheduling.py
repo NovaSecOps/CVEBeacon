@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .errors import SchedulingError
+
+LOG = logging.getLogger("cvebeacon")
 
 WINDOWS_TASK = "CVEBeacon Monitor"
 CRON_BEGIN = "# BEGIN CVEBEACON MANAGED"
@@ -31,7 +35,9 @@ WINDOWS_REGISTRATION_SCRIPT = """param(
     [Parameter(Mandatory = $true)][string]$Account
 )
 $ErrorActionPreference = 'Stop'
-$password = [Console]::In.ReadLine()
+$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false))
+$password = $reader.ReadLine()
+$reader.Dispose()
 if (-not $password) { throw "no password on stdin" }
 $xml = [System.IO.File]::ReadAllText($XmlPath)
 $service = New-Object -ComObject Schedule.Service
@@ -678,47 +684,53 @@ def install(
                 raise SchedulingError(
                     "--run-logged-out requires the account password"
                 )
-            with tempfile.TemporaryDirectory(
-                prefix="cvebeacon-schedule-", ignore_cleanup_errors=True
-            ) as directory:
+            directory = None
+            try:
+                directory = tempfile.mkdtemp(prefix="cvebeacon-schedule-")
                 xml_path = Path(directory) / "task.xml"
                 script_path = Path(directory) / "register.ps1"
                 xml_path.write_bytes(_windows_xml(plan))
                 script_path.write_text(
                     WINDOWS_REGISTRATION_SCRIPT, encoding="utf-8"
                 )
-                try:
-                    result = run(
-                        [
-                            "powershell.exe",
-                            "-NoProfile",
-                            "-NonInteractive",
-                            "-ExecutionPolicy",
-                            "Bypass",
-                            "-File",
-                            str(script_path),
-                            "-TaskName",
-                            WINDOWS_TASK,
-                            "-XmlPath",
-                            str(xml_path),
-                            "-Account",
-                            plan.user_id,
-                        ],
-                        input=password + "\n",
-                        capture_output=True,
-                        text=True,
-                        errors="replace",
-                        check=False,
-                        timeout=120,
-                        env=windows_powershell_environment(),
-                    )
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    detail = " ".join(str(exc).split())[:600]
-                    raise SchedulingError(
-                        f"schedule installation failed: {detail}"
-                    ) from exc
-                finally:
-                    password = None
+                result = run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_path),
+                        "-TaskName",
+                        WINDOWS_TASK,
+                        "-XmlPath",
+                        str(xml_path),
+                        "-Account",
+                        plan.user_id,
+                    ],
+                    input=(password + "\n").encode("utf-8"),
+                    capture_output=True,
+                    check=False,
+                    timeout=120,
+                    env=windows_powershell_environment(),
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                detail = " ".join(str(exc).split())[:600]
+                raise SchedulingError(
+                    f"schedule installation failed: {detail}"
+                ) from exc
+            finally:
+                password = None
+                if directory is not None:
+                    try:
+                        shutil.rmtree(directory)
+                    except OSError as exc:
+                        LOG.warning(
+                            "could not remove temporary schedule directory %s: %s",
+                            directory,
+                            exc,
+                        )
         elif plan.times:
             descriptor, name = tempfile.mkstemp(prefix="cvebeacon-schedule-", suffix=".xml")
             try:
