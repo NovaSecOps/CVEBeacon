@@ -26,7 +26,7 @@ from ..passwords import (
     validate_password,
     verify_password,
 )
-from .chain import chain_hash, verify_chain
+from .chain import chain_hash, decode_text, verify_chain
 from .reported import checked_text, host_name, os_account
 
 if TYPE_CHECKING:
@@ -65,6 +65,7 @@ _SCHEMA = (
         id INTEGER PRIMARY KEY,
         action TEXT NOT NULL,
         username TEXT NOT NULL,
+        actor TEXT,
         at TEXT NOT NULL,
         os_account TEXT,
         host TEXT,
@@ -123,6 +124,7 @@ class UserAuditEntry:
     os_account: str | None
     host: str | None
     chain: str
+    actor: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -184,7 +186,12 @@ def email_lookup_key(value: str) -> str:
 
 
 def audit_name(value: object) -> str:
-    """Sanitise a typed login name before it enters the audit table."""
+    """Sanitise a typed login name before it enters the audit table.
+
+    A value that is not a syntactically valid username is replaced with a
+    fixed placeholder. This avoids retaining a password accidentally typed
+    into the username field in the chained audit trail.
+    """
     text = "" if value is None else str(value)
     text = text.encode("utf-8", "replace").decode("utf-8")
     text = "".join(
@@ -192,7 +199,9 @@ def audit_name(value: object) -> str:
         for character in text
         if unicodedata.category(character) not in _FORBIDDEN_CATEGORIES
     ).strip(" ")
-    return text[:DISPLAY_LIMIT] or "(blank)"
+    if not USERNAME_PATTERN.fullmatch(text):
+        return "(invalid name)"
+    return text
 
 
 class UserStore:
@@ -211,12 +220,19 @@ class UserStore:
             path = resolved_parent / self.path.name
             connection = None
             if os.name == "posix":
-                directory_mode = stat.S_IMODE(resolved_parent.stat().st_mode)
+                directory = resolved_parent.stat()
+                directory_mode = stat.S_IMODE(directory.st_mode)
+                if directory.st_uid not in {os.geteuid(), 0}:
+                    raise StateError(
+                        "CVEBeacon user database directory must be owned by "
+                        "this account or root"
+                    )
                 if directory_mode & 0o022:
                     raise StateError(
                         "CVEBeacon user database directory must not be group "
                         "or other writable"
                     )
+                parent_identity = (directory.st_dev, directory.st_ino)
                 flags = (
                     os.O_RDWR if create else os.O_RDONLY
                 ) | getattr(os, "O_NOFOLLOW", 0)
@@ -269,9 +285,12 @@ class UserStore:
                     raise StateError(
                         "CVEBeacon user database was replaced while opening"
                     ) from exc
+                current_parent = resolved_parent.stat()
                 if (
                     not stat.S_ISREG(current.st_mode)
                     or (current.st_dev, current.st_ino) != expected
+                    or (current_parent.st_dev, current_parent.st_ino)
+                    != parent_identity
                 ):
                     connection.close()
                     raise StateError(
@@ -313,6 +332,7 @@ class UserStore:
             for statement in _SCHEMA:
                 db.execute(statement)
             self._migrate_email_keys(db)
+            self._migrate_audit_actor(db)
             db.commit()
 
     @staticmethod
@@ -332,6 +352,22 @@ class UserStore:
                 (key, row["id"]),
             )
         db.execute("DROP INDEX IF EXISTS cb_user_email")
+        username_keys = {
+            email_lookup_key(str(row["username"])): str(row["username"])
+            for row in db.execute("SELECT username FROM cb_user")
+        }
+        for row in db.execute(
+            "SELECT username,email_key FROM cb_user "
+            "WHERE email_key IS NOT NULL"
+        ):
+            username = str(row["username"])
+            key = str(row["email_key"])
+            owner = username_keys.get(key)
+            if owner is not None and owner != username:
+                raise StateError(
+                    "CVEBeacon account usernames and emails collide under "
+                    "Unicode case folding; correct the account file"
+                )
         try:
             db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS cb_user_email_key "
@@ -342,6 +378,14 @@ class UserStore:
                 "CVEBeacon account emails collide under Unicode case "
                 "folding; correct the account file"
             ) from exc
+
+    @staticmethod
+    def _migrate_audit_actor(db: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(cb_user_audit)")
+        }
+        if "actor" not in columns:
+            db.execute("ALTER TABLE cb_user_audit ADD COLUMN actor TEXT")
 
     @staticmethod
     def _user(row) -> User:
@@ -408,6 +452,14 @@ class UserStore:
             return None
         return user
 
+    def has_admin(self) -> bool:
+        self.initialize()
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT 1 FROM cb_user WHERE is_admin=1 LIMIT 1"
+            ).fetchone()
+        return row is not None
+
     def users(self) -> tuple[User, ...]:
         self.initialize()
         with closing(self._connect()) as db:
@@ -424,6 +476,7 @@ class UserStore:
         display_name: object | None = None,
         email: object | None = None,
         is_admin: bool = False,
+        actor: str | None = None,
     ) -> User:
         name = validate_username(username)
         shown = validate_display_name(display_name)
@@ -437,11 +490,19 @@ class UserStore:
         else:
             encoded = None
         now = _timestamp(self._clock())
-        checks = [(name, name.casefold())]
+        checks = [(name, email_lookup_key(name))]
         if address is not None:
             checks.append((address, email_lookup_key(address)))
         with self.transaction() as db:
+            existing_usernames = {
+                email_lookup_key(str(row["username"]))
+                for row in db.execute("SELECT username FROM cb_user")
+            }
             for value, key in checks:
+                if key in existing_usernames:
+                    raise ConfigurationError(
+                        "username or email is already registered"
+                    )
                 existing = db.execute(
                     "SELECT 1 FROM cb_user WHERE username=? COLLATE NOCASE "
                     "OR email_key=?",
@@ -474,13 +535,15 @@ class UserStore:
                     "username or email is already registered"
                 ) from exc
             user_id = int(cursor.lastrowid)
-            self._append_audit(db, "add", name, now)
+            self._append_audit(db, "add", name, now, actor=actor)
             row = db.execute(
                 f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?", (user_id,)
             ).fetchone()
         return self._user(row)
 
-    def set_password(self, username: object, password: object) -> User:
+    def set_password(
+        self, username: object, password: object, *, actor: str | None = None
+    ) -> User:
         self.initialize()
         with self.transaction() as db:
             row = db.execute(
@@ -499,19 +562,26 @@ class UserStore:
                 "updated_at=?,failed_logins=0,locked_until=NULL WHERE id=?",
                 (hash_password_value(password), now, now, user.id),
             )
-            self._append_audit(db, "passwd", user.username, now)
+            self._append_audit(db, "passwd", user.username, now, actor=actor)
             updated = db.execute(
                 f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?", (user.id,)
             ).fetchone()
         return self._user(updated)
 
-    def disable(self, username: object) -> User:
-        return self._set_disabled(username, True, "disable")
+    def disable(self, username: object, *, actor: str | None = None) -> User:
+        return self._set_disabled(username, True, "disable", actor=actor)
 
-    def enable(self, username: object) -> User:
-        return self._set_disabled(username, False, "enable")
+    def enable(self, username: object, *, actor: str | None = None) -> User:
+        return self._set_disabled(username, False, "enable", actor=actor)
 
-    def _set_disabled(self, username: object, value: bool, action: str) -> User:
+    def _set_disabled(
+        self,
+        username: object,
+        value: bool,
+        action: str,
+        *,
+        actor: str | None = None,
+    ) -> User:
         self.initialize()
         with self.transaction() as db:
             row = db.execute(
@@ -526,13 +596,13 @@ class UserStore:
                 "UPDATE cb_user SET disabled=?,updated_at=? WHERE id=?",
                 (int(value), now, user.id),
             )
-            self._append_audit(db, action, user.username, now)
+            self._append_audit(db, action, user.username, now, actor=actor)
             updated = db.execute(
                 f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?", (user.id,)
             ).fetchone()
         return self._user(updated)
 
-    def unlock(self, username: object) -> User:
+    def unlock(self, username: object, *, actor: str | None = None) -> User:
         self.initialize()
         with self.transaction() as db:
             row = db.execute(
@@ -548,7 +618,7 @@ class UserStore:
                 "updated_at=? WHERE id=?",
                 (now, user.id),
             )
-            self._append_audit(db, "unlock", user.username, now)
+            self._append_audit(db, "unlock", user.username, now, actor=actor)
             updated = db.execute(
                 f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?", (user.id,)
             ).fetchone()
@@ -609,8 +679,13 @@ class UserStore:
             else:
                 accepted = verify_password(row["password_hash"], password)
             if not accepted:
-                failures = int(row["failed_logins"]) + 1
-                locked_until = row["locked_until"]
+                expired = bool(row["locked_until"]) and not self._locked(
+                    row, now
+                )
+                failures = (
+                    0 if expired else int(row["failed_logins"])
+                ) + 1
+                locked_until = None if expired else row["locked_until"]
                 if failures >= LOCKOUT_FAILURES:
                     locked_until = _timestamp(
                         now + timedelta(minutes=LOCKOUT_MINUTES)
@@ -638,68 +713,74 @@ class UserStore:
         )
 
     def require_current(self, identity: "ReportIdentity") -> None:
-        """Re-check one resolved identity before a report write.
+        """Standalone re-check used by tests and non-atomic probes."""
+        if identity.mode == "open":
+            return
+        self.initialize()
+        with closing(self._connect(create=False)) as db:
+            self.require_current_in(db, identity)
 
-        This runs from inside the report transaction. It rejects a deleted or
-        disabled account, a changed username, and an authenticated proof that
-        is not a real successful login row for the current account.
+    def require_current_in(
+        self, db: sqlite3.Connection, identity: "ReportIdentity"
+    ) -> None:
+        """Reject a deleted, renamed, disabled or unproven account.
+
+        The caller may hold the user-database lock; ``ReportService`` keeps a
+        ``transaction()`` open from this check through the report write so a
+        concurrent disable cannot slip between them.
         """
         if identity.mode == "open":
             return
         if identity.user is None:
             raise ConfigurationError("the resolved CVEBeacon user is missing")
-        self.initialize()
-        with closing(self._connect()) as db:
-            row = db.execute(
-                f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?",
-                (identity.user.id,),
-            ).fetchone()
-            if row is None:
-                raise ConfigurationError(
-                    "the CVEBeacon user no longer exists"
-                )
-            current = self._user(row)
-            if current.username != identity.user.username:
-                raise ConfigurationError(
-                    "the CVEBeacon user no longer matches the resolved identity"
-                )
-            if current.disabled:
-                raise ConfigurationError("the CVEBeacon user is disabled")
-            if identity.mode != "authenticated":
-                return
-            proof = identity.authenticated
+        row = db.execute(
+            f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?",
+            (identity.user.id,),
+        ).fetchone()
+        if row is None:
+            raise ConfigurationError("the CVEBeacon user no longer exists")
+        current = self._user(row)
+        if current.username != identity.user.username:
+            raise ConfigurationError(
+                "the CVEBeacon user no longer matches the resolved identity"
+            )
+        if current.disabled:
+            raise ConfigurationError("the CVEBeacon user is disabled")
+        if identity.mode != "authenticated":
+            return
+        proof = identity.authenticated
+        if (
+            proof is None
+            or proof.user.id != current.id
+            or proof.user.username != current.username
+        ):
+            raise ConfigurationError(
+                "authenticated identity proof does not match the user"
+            )
+        login = db.execute(
+            "SELECT action,username,at FROM cb_user_audit WHERE id=?",
+            (proof.login_id,),
+        ).fetchone()
+        if (
+            login is None
+            or login["action"] != "login"
+            or login["username"] != current.username
+        ):
+            raise ConfigurationError(
+                "authenticated identity proof is not a successful login"
+            )
+        changed = current.password_changed_at
+        if changed:
+            login_at = self._parse_time(login["at"])
+            changed_at = self._parse_time(changed)
             if (
-                proof is None
-                or proof.user.id != current.id
-                or proof.user.username != current.username
+                login_at is None
+                or changed_at is None
+                or login_at < changed_at
             ):
                 raise ConfigurationError(
-                    "authenticated identity proof does not match the user"
+                    "authenticated identity proof predates the password change"
                 )
-            login = db.execute(
-                "SELECT action,username,at FROM cb_user_audit WHERE id=?",
-                (proof.login_id,),
-            ).fetchone()
-            if (
-                login is None
-                or login["action"] != "login"
-                or login["username"] != current.username
-            ):
-                raise ConfigurationError(
-                    "authenticated identity proof is not a successful login"
-                )
-            changed = current.password_changed_at
-            if changed:
-                login_at = self._parse_time(login["at"])
-                changed_at = self._parse_time(changed)
-                if (
-                    login_at is None
-                    or changed_at is None
-                    or login_at < changed_at
-                ):
-                    raise ConfigurationError(
-                        "authenticated identity proof predates the password change"
-                    )
 
     @staticmethod
     def _parse_time(value: object) -> datetime | None:
@@ -719,13 +800,15 @@ class UserStore:
         at: str,
         account: str | None = None,
         host: str | None = None,
+        actor: str | None = None,
     ) -> int:
         account = account or os_account()
         host = host or host_name()
         cursor = db.execute(
-            "INSERT INTO cb_user_audit(action,username,at,os_account,host,chain) "
-            "VALUES (?,?,?,?,?,'')",
-            (action, username, at, account, host),
+            "INSERT INTO cb_user_audit("
+            "action,username,actor,at,os_account,host,chain) "
+            "VALUES (?,?,?,?,?,?,'')",
+            (action, username, actor, at, account, host),
         )
         row_id = int(cursor.lastrowid)
         previous = db.execute(
@@ -740,6 +823,8 @@ class UserStore:
             "os_account": account,
             "host": host,
         }
+        if actor is not None:
+            values["actor"] = actor
         db.execute(
             "UPDATE cb_user_audit SET chain=? WHERE id=?",
             (chain_hash(previous["chain"] if previous else "", values), row_id),
@@ -750,7 +835,7 @@ class UserStore:
         self.initialize()
         with closing(self._connect()) as db:
             rows = db.execute(
-                "SELECT id,action,username,at,os_account,host,chain "
+                "SELECT id,action,username,actor,at,os_account,host,chain "
                 "FROM cb_user_audit ORDER BY id"
             ).fetchall()
         return tuple(
@@ -762,6 +847,7 @@ class UserStore:
                 row["os_account"],
                 row["host"],
                 str(row["chain"]),
+                row["actor"],
             )
             for row in rows
         )
@@ -791,7 +877,19 @@ class UserStore:
             }
             if "cb_user" not in tables or "cb_user_audit" not in tables:
                 raise StateError("CVEBeacon user audit trail is missing")
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(cb_user_audit)")
+            }
+            required = {
+                "id", "action", "username", "at", "os_account", "host", "chain",
+            }
+            if not required <= columns:
+                raise StateError("cb_user_audit is missing required columns")
+            db.text_factory = decode_text
             rows = db.execute(
                 "SELECT * FROM cb_user_audit ORDER BY id"
             ).fetchall()
-        return verify_chain((dict(row) for row in rows), AUDIT_CHAIN_FIELDS)
+        return verify_chain(
+            rows, AUDIT_CHAIN_FIELDS, optional_fields=("actor",)
+        )

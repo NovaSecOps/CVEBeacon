@@ -525,7 +525,8 @@ def test_authenticated_lockout_stays_generic_until_unlock(
     store = seed(config)
     users = UserStore(config.watch.users_database, clock=lambda: NOW)
     users.add("alice", password=PASSWORD)
-    prompt(monkeypatch, *(["wrong password value"] * 6), PASSWORD)
+    users.add("bob", password=PASSWORD, is_admin=True)
+    prompt(monkeypatch, *(["wrong password value"] * 6), PASSWORD, PASSWORD)
     base = ["--config", str(config.config_path), "watch", "report", IDENTIFIER]
 
     for _ in range(6):
@@ -534,7 +535,17 @@ def test_authenticated_lockout_stays_generic_until_unlock(
     assert store.reported_entries() == ()
     assert users.find("alice").locked_until is not None
 
-    assert cli.main(["--config", str(config.config_path), "users", "unlock", "alice"]) == 0
+    assert cli.main(
+        [
+            "--config",
+            str(config.config_path),
+            "users",
+            "unlock",
+            "alice",
+            "--admin-user",
+            "bob",
+        ]
+    ) == 0
     assert cli.main([*base, "--user", "alice"]) == 0
     assert len(store.reported_entries()) == 1
 
@@ -684,6 +695,7 @@ def test_schema_five_database_migrates_report_identity_in_place(tmp_path):
             (IDENTIFIER, "report", "legacy", "old note", NOW.isoformat()),
         )
         db.execute("DROP TABLE watch_report_new")
+        db.execute("DELETE FROM watch_meta WHERE key='report_legacy_max_id'")
         db.execute("UPDATE watch_meta SET value='5' WHERE key='schema_version'")
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()

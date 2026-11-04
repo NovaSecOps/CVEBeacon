@@ -30,8 +30,15 @@ from .state import StateStore
 LOG = logging.getLogger("cvebeacon")
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        if message.startswith("unrecognized arguments:"):
+            message = "unrecognized arguments"
+        super().error(message)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cvebeacon", description="Conservative vulnerability monitoring for component inventories")
+    parser = _ArgumentParser(prog="cvebeacon", description="Conservative vulnerability monitoring for component inventories")
     parser.add_argument("--config", default="cvebeacon.toml", help="path to TOML configuration")
     parser.add_argument("--verbose", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -146,14 +153,19 @@ def _parser() -> argparse.ArgumentParser:
     users_add.add_argument("--email", help="optional email address")
     users_add.add_argument("--admin", action="store_true", help="mark the account as an administrator")
     users_add.add_argument("--no-password", action="store_true", help="register a name for registered mode only")
+    users_add.add_argument("--admin-user", help="administrator username for authenticated mode")
     users_passwd = users_sub.add_parser("passwd", help="set a user's password")
     users_passwd.add_argument("username")
+    users_passwd.add_argument("--admin-user", help="administrator username; omit to change your own password")
     users_disable = users_sub.add_parser("disable", help="disable a user")
     users_disable.add_argument("username")
+    users_disable.add_argument("--admin-user", help="administrator username for authenticated mode")
     users_enable = users_sub.add_parser("enable", help="enable a user")
     users_enable.add_argument("username")
+    users_enable.add_argument("--admin-user", help="administrator username for authenticated mode")
     users_unlock = users_sub.add_parser("unlock", help="clear a user's failed-login lockout")
     users_unlock.add_argument("username")
+    users_unlock.add_argument("--admin-user", help="administrator username for authenticated mode")
     users_sub.add_parser("list", help="list users without password material")
     users_sub.add_parser("verify", help="verify the user-admin audit chain")
     return parser
@@ -214,15 +226,40 @@ def _print_evaluation(result) -> None:
 
 
 def _run_users(args, config: AppConfig) -> int:
-    from .passwords import read_new_password
+    from .passwords import read_new_password, read_password
     from .watch.users import (
         UserStore,
+        audit_name,
         validate_display_name,
         validate_email,
         validate_username,
     )
 
     store = UserStore(config.watch.users_database)
+    authenticated = config.watch.reporting_identity == "authenticated"
+
+    def admin_login(name: str) -> str:
+        password = read_password(f"Admin password for {audit_name(name)}: ")
+        proof = store.authenticate(name, password)
+        if proof is None or not proof.user.is_admin:
+            raise CVEBeaconError("administrator login required")
+        return proof.user.username
+
+    def require_admin() -> str | None:
+        admin_user = getattr(args, "admin_user", None)
+        if not authenticated:
+            if admin_user is not None:
+                raise CVEBeaconError(
+                    "--admin-user is only available when "
+                    "watch.reporting.identity = authenticated"
+                )
+            return None
+        if admin_user is None:
+            raise CVEBeaconError(
+                "administrator login required; use --admin-user"
+            )
+        return admin_login(admin_user)
+
     command = args.users_command
     if command == "list":
         users = store.users()
@@ -271,9 +308,24 @@ def _run_users(args, config: AppConfig) -> int:
         username = validate_username(args.username)
         display = validate_display_name(args.name)
         email = validate_email(args.email)
-        if args.no_password and config.watch.reporting_identity == "authenticated":
+        if authenticated and args.no_password:
             raise CVEBeaconError(
                 "--no-password is not available when "
+                "watch.reporting.identity = authenticated"
+            )
+        actor = None
+        if authenticated:
+            if args.admin_user is not None:
+                actor = admin_login(args.admin_user)
+            elif args.admin and not store.has_admin():
+                actor = "bootstrap"
+            else:
+                raise CVEBeaconError(
+                    "administrator login required; use --admin-user"
+                )
+        elif getattr(args, "admin_user", None) is not None:
+            raise CVEBeaconError(
+                "--admin-user is only available when "
                 "watch.reporting.identity = authenticated"
             )
         if store.find(username) is not None or (
@@ -292,10 +344,31 @@ def _run_users(args, config: AppConfig) -> int:
             display_name=display,
             email=email,
             is_admin=args.admin,
+            actor=actor,
         )
         print(f"added {user.username}")
         return 0
     if command == "passwd":
+        if authenticated and args.admin_user is not None:
+            actor = admin_login(args.admin_user)
+        elif authenticated:
+            user = store.find(args.username)
+            if user is None:
+                raise CVEBeaconError("user not found")
+            current = read_password(
+                f"Current password for {audit_name(user.username)}: "
+            )
+            proof = store.authenticate(user.username, current)
+            if proof is None:
+                raise CVEBeaconError("invalid username or password")
+            actor = proof.user.username
+        else:
+            if getattr(args, "admin_user", None) is not None:
+                raise CVEBeaconError(
+                    "--admin-user is only available when "
+                    "watch.reporting.identity = authenticated"
+                )
+            actor = None
         user = store.find(args.username)
         if user is None:
             raise CVEBeaconError("user not found")
@@ -303,19 +376,22 @@ def _run_users(args, config: AppConfig) -> int:
             f"New password for {user.username} (12–1024 characters): ",
             forbidden=(user.username, user.email),
         )
-        store.set_password(user.username, password)
+        store.set_password(user.username, password, actor=actor)
         print(f"password changed for {user.username}")
         return 0
     if command == "disable":
-        user = store.disable(args.username)
+        actor = require_admin()
+        user = store.disable(args.username, actor=actor)
         print(f"disabled {user.username}")
         return 0
     if command == "enable":
-        user = store.enable(args.username)
+        actor = require_admin()
+        user = store.enable(args.username, actor=actor)
         print(f"enabled {user.username}")
         return 0
     if command == "unlock":
-        user = store.unlock(args.username)
+        actor = require_admin()
+        user = store.unlock(args.username, actor=actor)
         print(f"unlocked {user.username}")
         return 0
     raise CVEBeaconError("unsupported users command")
@@ -981,10 +1057,13 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
 
 def _reject_password_arguments(arguments: list[str]) -> None:
     for value in arguments:
+        token = value.split("=", 1)[0]
         if (
-            value in {"--pass", "-p", "-pass"}
-            or value.startswith("--pass")
-            or value.startswith("-pass")
+            token in {"--pass", "--pwd", "--pw", "-p", "-pass", "-pwd", "-pw"}
+            or token.startswith("--pass")
+            or token.startswith("--pwd")
+            or token.startswith("--pw")
+            or token.startswith("-p")
         ):
             raise CVEBeaconError(
                 "password input is not accepted on the command line; "

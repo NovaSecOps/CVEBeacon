@@ -16,7 +16,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..errors import SourceError, StateError
-from .chain import chain_hash, chain_matches, row_id
+from .chain import (
+    chain_hash,
+    chain_matches,
+    decode_text,
+    decoded_row,
+    row_id,
+)
 from .identity import ReportIdentity
 from .records import (
     EPSS_BANDS,
@@ -487,6 +493,10 @@ class WatchStore:
                 "INSERT INTO watch_meta(key,value) VALUES ('schema_version',?)",
                 (str(SCHEMA_VERSION),),
             )
+            db.execute(
+                "INSERT INTO watch_meta(key,value) VALUES "
+                "('report_legacy_max_id','0')"
+            )
             return
         version = rows[0]["value"]
         if version not in {"1", "2", "3", "4", "5", "6", "7"}:
@@ -593,15 +603,21 @@ class WatchStore:
     def _migrate_report_identity(db: sqlite3.Connection) -> None:
         """Add identity/chain columns without ever rewriting a stored chain.
 
-        A genuine table from before the identity release has no ``chain``
-        column. Its existing rows are marked ``chain_version=0`` and remain
-        unchained; the chain starts with the first row written after the
-        upgrade. A table that already has chain values is never re-chained,
-        even when its metadata claims to be older.
+        The legacy boundary is recorded once in ``watch_meta``. A genuine
+        pre-identity table has no ``chain`` column; its rows become
+        ``chain_version=0`` and the boundary is their maximum id. A table that
+        already has a chain column is identity-era: it gains
+        ``chain_version=1`` and missing or empty hashes are damage, never a
+        legacy exemption. If a boundary exists but the chain column does not,
+        the migration refuses rather than recreating legacy history.
         """
         columns = {
             row["name"] for row in db.execute("PRAGMA table_info(watch_report)")
         }
+        boundary_row = db.execute(
+            "SELECT value FROM watch_meta WHERE key='report_legacy_max_id'"
+        ).fetchone()
+        boundary = None if boundary_row is None else boundary_row["value"]
         had_chain = "chain" in columns
         for name, definition in (
             ("user_id", "INTEGER"),
@@ -613,34 +629,43 @@ class WatchStore:
             if name not in columns:
                 db.execute(f"ALTER TABLE watch_report ADD COLUMN {name} {definition}")
         if not had_chain:
-            if "chain" not in columns:
-                db.execute("ALTER TABLE watch_report ADD COLUMN chain TEXT")
-            if "chain_version" not in columns:
-                db.execute(
-                    "ALTER TABLE watch_report ADD COLUMN "
-                    "chain_version INTEGER NOT NULL DEFAULT 0"
+            if boundary is not None:
+                raise StateError(
+                    "report legacy boundary exists but the chain column is "
+                    "missing; refusing to recreate legacy history"
                 )
-            return
-        rows = db.execute(
-            "SELECT id,chain FROM watch_report ORDER BY id"
-        ).fetchall()
-        if "chain_version" in columns:
-            return
-        values = [row["chain"] for row in rows]
-        chained = [value for value in values if isinstance(value, str) and value]
-        if values and len(chained) == len(values):
-            default = 1
-        elif not values or not chained:
-            default = 0
-        else:
-            raise StateError(
-                "watch_report has mixed chained and unchained rows; refusing to "
-                "guess their history"
+            db.execute("ALTER TABLE watch_report ADD COLUMN chain TEXT")
+            db.execute(
+                "ALTER TABLE watch_report ADD COLUMN "
+                "chain_version INTEGER NOT NULL DEFAULT 0"
             )
-        db.execute(
-            "ALTER TABLE watch_report ADD COLUMN "
-            f"chain_version INTEGER NOT NULL DEFAULT {default}"
-        )
+            maximum = db.execute(
+                "SELECT COALESCE(MAX(id),0) FROM watch_report"
+            ).fetchone()[0]
+            db.execute(
+                "INSERT INTO watch_meta(key,value) VALUES "
+                "('report_legacy_max_id',?)",
+                (str(int(maximum)),),
+            )
+            return
+        if "chain_version" not in columns:
+            db.execute(
+                "ALTER TABLE watch_report ADD COLUMN "
+                "chain_version INTEGER NOT NULL DEFAULT 1"
+            )
+        if boundary is None:
+            legacy = db.execute(
+                "SELECT COUNT(*) FROM watch_report WHERE chain_version=0"
+            ).fetchone()[0]
+            if legacy:
+                raise StateError(
+                    "report legacy rows have no recorded boundary; refusing to "
+                    "guess their history"
+                )
+            db.execute(
+                "INSERT INTO watch_meta(key,value) VALUES "
+                "('report_legacy_max_id','0')"
+            )
 
     def metadata(self) -> dict[str, str]:
         self.initialize()
@@ -1780,31 +1805,77 @@ class WatchStore:
         if version != str(SCHEMA_VERSION):
             self.initialize(create=False)
         with closing(self._connect_readonly()) as db:
+            meta = {
+                row["key"]: row["value"]
+                for row in db.execute("SELECT key,value FROM watch_meta")
+            }
+            boundary = meta.get("report_legacy_max_id")
+            if boundary is None:
+                raise StateError("report legacy boundary is missing")
+            try:
+                boundary_id = int(boundary)
+            except (TypeError, ValueError) as exc:
+                raise StateError(
+                    "report legacy boundary is invalid"
+                ) from exc
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(watch_report)")
+            }
+            required = {
+                "id", "cve_id", "action", "by", "note", "at", "user_id",
+                "username", "identity_mode", "os_account", "host", "chain",
+                "chain_version",
+            }
+            if not required <= columns:
+                raise StateError("watch_report is missing required columns")
+            db.text_factory = decode_text
             rows = db.execute(
                 "SELECT * FROM watch_report ORDER BY id"
             ).fetchall()
-        return self._verify_report_rows(rows)
+        return self._verify_report_rows(rows, boundary_id)
 
     @staticmethod
-    def _verify_report_rows(rows: Sequence[Mapping[str, object]]) -> int | None:
+    def _verify_report_rows(
+        rows: Sequence[Mapping[str, object]], legacy_max_id: int
+    ) -> int | None:
         previous = ""
         seen_chained = False
         for row in rows:
+            original = row
             try:
+                decoded = decoded_row(original)
+                if decoded is None:
+                    return row_id(original)
+                row = decoded
                 version = row["chain_version"]
                 if version == 0:
-                    if seen_chained or row["chain"] not in (None, ""):
+                    if (
+                        seen_chained
+                        or row["id"] > legacy_max_id
+                        or row["chain"] not in (None, "")
+                        or any(
+                            row[field] is not None
+                            for field in (
+                                "user_id",
+                                "username",
+                                "identity_mode",
+                                "os_account",
+                                "host",
+                            )
+                        )
+                    ):
                         return row_id(row)
                     continue
-                if version != 1:
+                if version != 1 or row["id"] <= legacy_max_id:
                     return row_id(row)
                 seen_chained = True
                 values = {field: row[field] for field in REPORT_CHAIN_FIELDS}
                 expected = chain_hash(previous, values)
-            except (KeyError, TypeError, ValueError, UnicodeError, OverflowError):
-                return row_id(row)
+            except (KeyError, IndexError, TypeError, ValueError, UnicodeError, OverflowError):
+                return row_id(original)
             if not chain_matches(expected, row["chain"]):
-                return row_id(row)
+                return row_id(original)
             previous = expected
         return None
 

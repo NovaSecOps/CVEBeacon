@@ -8,6 +8,7 @@ persistence methods behind it.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..errors import ConfigurationError
@@ -121,10 +122,20 @@ class ReportService:
             email=proof.user.email,
         )
 
-    def _recheck(self, identity: ReportIdentity) -> Callable[[], None]:
+    @contextmanager
+    def _identity_guard(self, identity: ReportIdentity):
+        """Hold the user-database write lock across the report write.
+
+        Lock order is always user database then watch database. The same
+        connection is used for the recheck inside the watch transaction.
+        """
         if identity.mode == "open":
-            return lambda: None
-        return lambda: self.users.require_current(identity)
+            yield None
+            return
+        self.users.initialize()
+        with self.users.transaction() as db:
+            self.users.require_current_in(db, identity)
+            yield db
 
     def report_cve(
         self,
@@ -144,14 +155,20 @@ class ReportService:
             password=password,
             password_prompt=password_prompt,
         )
-        return self.store._report_cve(
-            cve_id,
-            identity=identity,
-            recheck=self._recheck(identity),
-            note=note,
-            force=force,
-            notify_channels=notify_channels,
-        )
+        with self._identity_guard(identity) as db:
+            recheck = (
+                (lambda: None)
+                if db is None
+                else (lambda: self.users.require_current_in(db, identity))
+            )
+            return self.store._report_cve(
+                cve_id,
+                identity=identity,
+                recheck=recheck,
+                note=note,
+                force=force,
+                notify_channels=notify_channels,
+            )
 
     def unreport_cve(
         self,
@@ -170,10 +187,16 @@ class ReportService:
             password=password,
             password_prompt=password_prompt,
         )
-        return self.store._unreport_cve(
-            cve_id,
-            identity=identity,
-            recheck=self._recheck(identity),
-            note=note,
-            notify_channels=notify_channels,
-        )
+        with self._identity_guard(identity) as db:
+            recheck = (
+                (lambda: None)
+                if db is None
+                else (lambda: self.users.require_current_in(db, identity))
+            )
+            return self.store._unreport_cve(
+                cve_id,
+                identity=identity,
+                recheck=recheck,
+                note=note,
+                notify_channels=notify_channels,
+            )
