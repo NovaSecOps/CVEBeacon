@@ -19,6 +19,7 @@ from .errors import SchedulingError
 WINDOWS_TASK = "CVEBeacon Monitor"
 CRON_BEGIN = "# BEGIN CVEBEACON MANAGED"
 CRON_END = "# END CVEBEACON MANAGED"
+CRON_SEPARATOR = "# CVEBEACON SEPARATOR ADDED"
 SCHEDULE_COMMANDS = ("scan", "watch", "both")
 TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
@@ -322,20 +323,30 @@ def _describe_cron_block(block: str) -> str | None:
     return "\n".join(lines)
 
 
+def _crontab_text(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="surrogateescape")
+    return value or ""
+
+
 def _read_crontab(run=subprocess.run) -> str:
-    result = run(["crontab", "-l"], capture_output=True, text=True, check=False)
-    if result.returncode == 1 and not result.stdout and result.stderr.strip().casefold().startswith("no crontab for "):
+    result = run(["crontab", "-l"], capture_output=True, check=False)
+    stdout = _crontab_text(getattr(result, "stdout", ""))
+    stderr = _crontab_text(getattr(result, "stderr", ""))
+    if result.returncode == 1 and not stdout and stderr.strip().casefold().startswith("no crontab for "):
         return ""
     if result.returncode != 0:
-        raise SchedulingError(f"cannot read user crontab: {result.stderr.strip()}")
-    return result.stdout
+        raise SchedulingError(f"cannot read user crontab: {stderr.strip()}")
+    return stdout
 
 
 def _without_managed_block(text: str) -> str:
     lines = text.split("\n")
     output: list[str] = []
     in_block, found = False, False
-    for line in lines:
+    separator_added = False
+    block_end = -1
+    for index, line in enumerate(lines):
         marker = line[:-1] if line.endswith("\r") else line
         if marker == CRON_BEGIN:
             if in_block or found:
@@ -346,12 +357,24 @@ def _without_managed_block(text: str) -> str:
             if not in_block:
                 raise SchedulingError("managed cron end marker has no beginning")
             in_block = False
+            block_end = index
             continue
-        if not in_block:
-            output.append(line)
+        if in_block:
+            if marker == CRON_SEPARATOR:
+                separator_added = True
+            continue
+        output.append(line)
     if in_block:
         raise SchedulingError("managed cron block is missing its end marker")
-    return "\n".join(output)
+    result = "\n".join(output)
+    if (
+        separator_added
+        and block_end >= 0
+        and all(item == "" for item in lines[block_end + 1 :])
+        and result.endswith("\n")
+    ):
+        result = result[:-1]
+    return result
 
 
 def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
@@ -380,11 +403,17 @@ def install(plan: SchedulePlan, *, run=subprocess.run) -> None:
         existing = _read_crontab(run)
         clean = _without_managed_block(existing)
         separator = "\n" if clean and not clean.endswith("\n") else ""
+        marker = f"{CRON_SEPARATOR}\n" if separator else ""
         lines = "\n".join(_cron_lines(plan))
-        value = f"{clean}{separator}{CRON_BEGIN}\n{lines}\n{CRON_END}\n"
-        result = run(["crontab", "-"], input=value, capture_output=True, text=True, check=False)
+        value = f"{clean}{separator}{CRON_BEGIN}\n{marker}{lines}\n{CRON_END}\n"
+        payload = value.encode("utf-8", errors="surrogateescape")
+        result = run(
+            ["crontab", "-"], input=payload, capture_output=True, check=False
+        )
     if result.returncode != 0:
-        raise SchedulingError(f"schedule installation failed: {result.stderr.strip()}")
+        raise SchedulingError(
+            f"schedule installation failed: {_crontab_text(result.stderr).strip()}"
+        )
 
 
 def _host_system(system: str) -> str:
@@ -440,6 +469,10 @@ def remove(*, system: str = "auto", run=subprocess.run) -> bool:
     existing = _read_crontab(run)
     if CRON_BEGIN not in existing: return False
     clean = _without_managed_block(existing)
-    result = run(["crontab", "-"], input=clean, capture_output=True, text=True, check=False)
-    if result.returncode != 0: raise SchedulingError(f"schedule removal failed: {result.stderr.strip()}")
+    payload = clean.encode("utf-8", errors="surrogateescape")
+    result = run(["crontab", "-"], input=payload, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise SchedulingError(
+            f"schedule removal failed: {_crontab_text(result.stderr).strip()}"
+        )
     return True

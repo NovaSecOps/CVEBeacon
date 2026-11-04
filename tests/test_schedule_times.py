@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -22,6 +23,7 @@ from cvebeacon.scheduling import (
     install,
     make_plan,
     parse_times,
+    remove,
     status,
 )
 
@@ -84,7 +86,7 @@ def test_linux_install_keeps_unrelated_entries_and_one_owned_block(tmp_path):
 
     plan = linux_plan(tmp_path, command="both")
     install(plan, run=fake_run)
-    value = writes[0]
+    value = writes[0].decode("utf-8")
     assert value.startswith("15 2 * * * backup\n")
     assert value.count(CRON_BEGIN) == 1
     assert value.count(CRON_END) == 1
@@ -496,4 +498,43 @@ def test_install_keeps_an_entry_without_a_final_newline(tmp_path):
         return Result()
 
     install(linux_plan(tmp_path), run=fake_run)
-    assert writes[0].startswith("15 2 * * * backup   \n" + CRON_BEGIN)
+    assert writes[0].decode("utf-8").startswith("15 2 * * * backup   \n" + CRON_BEGIN)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX cron")
+def test_real_crontab_round_trip_preserves_bytes(tmp_path, monkeypatch):
+    store = tmp_path / "crontab"
+    original = b"MAILTO=me  \r\n0 1 * * * a\rb  \n# caf\xe9  \r\nlast"
+    store.write_bytes(original)
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    script = binaries / "crontab"
+    script.write_text(
+        "#!/bin/sh\n"
+        f"store={shlex.quote(str(store))}\n"
+        'if [ "$1" = "-l" ]; then\n'
+        '  if [ -f "$store" ]; then\n'
+        '    cat "$store"\n'
+        "  else\n"
+        '    echo "no crontab for test" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        'elif [ "$1" = "-" ]; then\n'
+        '  cat > "$store"\n'
+        "else\n"
+        "  exit 2\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv(
+        "PATH", f"{binaries}{os.pathsep}{os.environ.get('PATH', '')}"
+    )
+    plan = linux_plan(tmp_path)
+    install(plan)
+    installed = store.read_bytes()
+    assert CRON_BEGIN.encode() in installed
+    assert b"0 1 * * * a\rb  " in installed
+    assert b"# caf\xe9  \r\n" in installed
+    assert remove(system="linux") is True
+    assert store.read_bytes() == original

@@ -74,8 +74,9 @@ listed once. Removal requires confirmation unless `--yes` is used. It never
 performs wildcard deletion. On Linux, only text between
 `# BEGIN CVEBEACON MANAGED` and `# END CVEBEACON MANAGED` is replaced or
 removed; unrelated crontab entries are preserved byte for byte, including
-trailing whitespace and carriage returns inside an entry. A separating newline
-is added when the entry before the managed block has none.
+trailing whitespace, carriage returns and non-UTF-8 bytes. A separating newline
+is added when the entry before the managed block has none, and removal restores
+the original final newline state.
 
 `--platform auto` is the default. An explicit `windows` or `linux` override is rejected for live changes on an incompatible host, but can be used with `--dry-run` to inspect the generated proposal.
 
