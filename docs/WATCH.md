@@ -920,13 +920,12 @@ per 30 seconds; with a key, fifty.
 `initial = "full"` is the expensive path. From 1999 to the present there are
 about 85 NVD windows. A busy window can need many pages, so expect roughly 400
 or more NVD requests and roughly 4,200 EUVD requests; both counts are planning
-floors, not measurements. The pacing-based minimum charges NVD requests at
-`sources.minimum_request_interval` and EUVD requests at the fixed one-second
-EUVD pace: at least 2 hours at the default NVD interval before extra NVD pages,
-retries, and throttling. Budget several hours of continuous work, a large
-download, and many small database commits. EPSS is one current file per sync,
-not one per historical day. Run full history deliberately, preferably with an
-NVD API key.
+floors, not measurements. The pacing-based minimum uses the configured NVD
+interval for NVD requests and the fixed one-second EUVD pace for EUVD requests:
+at least 2 hours at the default NVD interval before extra NVD pages, retries,
+and throttling. Budget several hours of continuous work, a large download, and
+many small database commits. EPSS is one current file per sync, not one per
+historical day. Run full history deliberately, preferably with an NVD API key.
 
 ## Source attribution
 
