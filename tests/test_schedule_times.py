@@ -687,6 +687,34 @@ def test_windows_status_resolves_a_sid_account():
     assert "(" not in unresolved.split("Account: ", 1)[1]
 
 
+def test_windows_status_sid_resolver_failure_falls_back():
+    sid = "S-1-5-21-1111111111-2222222222-3333333333-1003"
+    text = (
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        f"<Principals><Principal><UserId>{sid}</UserId>"
+        "<LogonType>Password</LogonType></Principal></Principals>"
+        "<Actions><Exec><Command>cvebeacon</Command><Arguments>scan</Arguments>"
+        "</Exec></Actions></Task>"
+    )
+
+    def explode(_sid):
+        raise AttributeError("LocalFree is not here")
+
+    resolved = _describe_windows_xml(text, sid_resolver=explode)
+    assert f"Account: {sid}" in resolved
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs Windows advapi32")
+def test_lookup_account_sid_resolves_the_current_user():
+    output = subprocess.run(
+        ["whoami", "/user"], capture_output=True, text=True, check=True
+    ).stdout
+    sid = output.strip().split()[-1]
+    assert sid.startswith("S-1-")
+    resolved = _lookup_account_sid(sid)
+    assert resolved and "\\" in resolved
+
+
 def test_windows_status_leaves_a_named_account_alone():
     text = (
         '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
