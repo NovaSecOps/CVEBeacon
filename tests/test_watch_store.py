@@ -728,6 +728,21 @@ def test_backlog_window_falls_back_to_the_initialization_time(tmp_path):
     assert store.events()[0].initial is True
 
 
+def test_baseline_backlog_uses_initialized_at_over_window_start(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    store.record_baseline(
+        nvd_cursor=NOW.isoformat(),
+        initialized_at=NOW.isoformat(),
+        initial_window_start="2026-01-01",
+    )
+    store.upsert_nvd([record(published="2026-06-01T00:00:00.000")])
+    configured = parse_rules(
+        [{"name": "old", "condition": {"cvss_min": 1}, "channels": ["c"]}]
+    )[0]
+    store.evaluate_touched((configured,), catalogs=("nvd",))
+    assert store.events()[0].initial is True
+
+
 def test_products_and_names_are_capped_at_the_new_limits(tmp_path):
     products = tuple(Product(f"v{index:04d}", f"p{index:04d}") for index in range(1100))
     value = record(products=products)

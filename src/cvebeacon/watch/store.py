@@ -976,10 +976,13 @@ class WatchStore:
             row["key"]: row["value"]
             for row in db.execute(
                 "SELECT key,value FROM watch_meta "
-                "WHERE key IN ('initial_window_start','initialized_at')"
+                "WHERE key IN ('initial_window_start','initialized_at','initial_mode')"
             )
         }
-        value = rows.get("initial_window_start") or rows.get("initialized_at")
+        if rows.get("initial_mode") == "baseline":
+            value = rows.get("initialized_at") or rows.get("initial_window_start")
+        else:
+            value = rows.get("initial_window_start") or rows.get("initialized_at")
         if not value:
             return None
         try:
