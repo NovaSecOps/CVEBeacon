@@ -1,8 +1,8 @@
-"""Message catalog for watch alerts, digests, notices and subjects.
+"""Catalog for delivered watch alert, digest, notice and test messages.
 
-Every user-visible message string lives here. The plain-text and HTML
-renderers both read this catalog, so a language is translated once. Values
-are named placeholders passed through ``str.format_map``.
+The plain-text and HTML renderers both read these entries, so a language is
+translated once. CLI output and the stable generic-webhook JSON stay English
+by design. Values are named placeholders passed through ``str.format_map``.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ SUPPORTED_LANGUAGES = ("en", "pt-PT")
 CATALOGS: dict[str, dict[str, str]] = {
     "en": {
         "unknown": "unknown",
+        "unknown_date": "unknown",
         "date_line": "Published {published} · first seen {first_seen}",
         "reported_line": "Reported to clients by {by} at {at}",
         "cvss_score": "CVSS {score} ({provider})",
@@ -29,6 +30,11 @@ CATALOGS: dict[str, dict[str, str]] = {
         "exploitation_active": "active",
         "exploitation_poc": "poc",
         "exploitation_none": "none",
+        "severity_none": "none",
+        "severity_low": "low",
+        "severity_medium": "medium",
+        "severity_high": "high",
+        "severity_critical": "critical",
         "due": "Due {date}",
         "rule_line": "Rule: {rules} · {links}",
         "rule_label": "Rule",
@@ -68,8 +74,8 @@ CATALOGS: dict[str, dict[str, str]] = {
         "count_nvd_score_added_other": "{count} NVD scored",
         "count_rejected_one": "{count} rejected",
         "count_rejected_other": "{count} rejected",
-        "count_events_one": "{count} event",
-        "count_events_other": "{count} events",
+        "count_events_one": "{count} event(s)",
+        "count_events_other": "{count} event(s)",
         "item_match_one": "match",
         "item_match_other": "matches",
         "item_kev_added_one": "KEV added",
@@ -84,7 +90,6 @@ CATALOGS: dict[str, dict[str, str]] = {
         "item_nvd_score_added_other": "NVD scored",
         "item_rejected_one": "rejected",
         "item_rejected_other": "rejected",
-        "rule_count_one": "{count} rule",
         "rule_count_other": "{count} rules",
         "cve_word_one": "CVE",
         "cve_word_other": "CVEs",
@@ -93,6 +98,10 @@ CATALOGS: dict[str, dict[str, str]] = {
         "since_suffix": " since {since}",
         "per_rule_line": "{rule}: {counts}",
         "subject_initial": (
+            "CVEBeacon initial summary: {cves} {cve_word} across {rules} "
+            "{rule_word}{since}"
+        ),
+        "subject_initial_one": (
             "CVEBeacon initial summary: {cves} {cve_word} across {rules} "
             "{rule_word}{since}"
         ),
@@ -120,10 +129,11 @@ CATALOGS: dict[str, dict[str, str]] = {
     },
     "pt-PT": {
         "unknown": "desconhecido",
-        "date_line": "Publicado {published} · Visto pela primeira vez {first_seen}",
+        "unknown_date": "data desconhecida",
+        "date_line": "Publicado {published} · visto pela primeira vez {first_seen}",
         "reported_line": "Comunicado aos clientes por {by} em {at}",
         "cvss_score": "CVSS {score} ({provider})",
-        "cvss_not_scored": "CVSS não classificada",
+        "cvss_not_scored": "Sem pontuação CVSS",
         "nvd_pending": "NVD pendente",
         "epss_field": "EPSS {score}",
         "kev_field": "KEV: {kev}",
@@ -132,7 +142,12 @@ CATALOGS: dict[str, dict[str, str]] = {
         "exploitation_active": "ativa",
         "exploitation_poc": "PoC",
         "exploitation_none": "nenhuma",
-        "due": "Prazo {date}",
+        "severity_none": "nenhuma",
+        "severity_low": "baixa",
+        "severity_medium": "média",
+        "severity_high": "alta",
+        "severity_critical": "crítica",
+        "due": "Prazo: {date}",
         "rule_line": "Regra: {rules} · {links}",
         "rule_label": "Regra",
         "link_nvd": "NVD",
@@ -145,49 +160,48 @@ CATALOGS: dict[str, dict[str, str]] = {
         "provider_euvd": "EUVD",
         "provider_other": "Outro",
         "label_match": "[NOVO]",
-        "label_kev_added": "[KEV ADICIONADO: {catalog}]",
+        "label_kev_added": "[ADICIONADO AO KEV: {catalog}]",
         "label_exploited": "[EXPLORADA ATIVAMENTE]",
         "label_severity_up": "[GRAVIDADE AUMENTOU {previous}->{current}]",
         "label_severity_up_plain": "[GRAVIDADE AUMENTOU]",
         "label_epss_up": "[EPSS AUMENTOU {previous}->{current}]",
         "label_epss_up_plain": "[EPSS AUMENTOU]",
-        "label_nvd_scored": "[NVD CLASSIFICADO {score}]",
-        "label_nvd_scored_plain": "[NVD CLASSIFICADO]",
+        "label_nvd_scored": "[PONTUAÇÃO NVD ADICIONADA {score}]",
+        "label_nvd_scored_plain": "[PONTUAÇÃO NVD ADICIONADA]",
         "label_rejected": "[REJEITADO]",
-        "label_reported": "[REPORTADO]",
-        "label_unreported": "[NÃO REPORTADO]",
+        "label_reported": "[COMUNICADO]",
+        "label_unreported": "[NÃO COMUNICADO]",
         "label_unknown": "[{kind}]",
         "count_match_one": "{count} novo",
         "count_match_other": "{count} novos",
-        "count_kev_added_one": "{count} KEV adicionado",
-        "count_kev_added_other": "{count} KEV adicionados",
+        "count_kev_added_one": "{count} adicionado ao KEV",
+        "count_kev_added_other": "{count} adicionados ao KEV",
         "count_exploitation_active_one": "{count} explorada ativamente",
         "count_exploitation_active_other": "{count} exploradas ativamente",
         "count_severity_increase_one": "{count} aumento de gravidade",
         "count_severity_increase_other": "{count} aumentos de gravidade",
         "count_epss_increase_one": "{count} aumento de EPSS",
         "count_epss_increase_other": "{count} aumentos de EPSS",
-        "count_nvd_score_added_one": "{count} NVD classificado",
-        "count_nvd_score_added_other": "{count} NVD classificados",
+        "count_nvd_score_added_one": "{count} pontuação NVD adicionada",
+        "count_nvd_score_added_other": "{count} pontuações NVD adicionadas",
         "count_rejected_one": "{count} rejeitado",
         "count_rejected_other": "{count} rejeitados",
         "count_events_one": "{count} evento",
         "count_events_other": "{count} eventos",
         "item_match_one": "correspondência",
         "item_match_other": "correspondências",
-        "item_kev_added_one": "KEV adicionado",
-        "item_kev_added_other": "KEV adicionados",
+        "item_kev_added_one": "adicionado ao KEV",
+        "item_kev_added_other": "adicionados ao KEV",
         "item_exploitation_active_one": "explorada ativamente",
         "item_exploitation_active_other": "exploradas ativamente",
         "item_severity_increase_one": "aumento de gravidade",
         "item_severity_increase_other": "aumentos de gravidade",
         "item_epss_increase_one": "aumento de EPSS",
         "item_epss_increase_other": "aumentos de EPSS",
-        "item_nvd_score_added_one": "NVD classificado",
-        "item_nvd_score_added_other": "NVD classificados",
+        "item_nvd_score_added_one": "pontuação NVD adicionada",
+        "item_nvd_score_added_other": "pontuações NVD adicionadas",
         "item_rejected_one": "rejeitado",
         "item_rejected_other": "rejeitados",
-        "rule_count_one": "{count} regra",
         "rule_count_other": "{count} regras",
         "cve_word_one": "CVE",
         "cve_word_other": "CVEs",
@@ -196,8 +210,12 @@ CATALOGS: dict[str, dict[str, str]] = {
         "since_suffix": " desde {since}",
         "per_rule_line": "{rule}: {counts}",
         "subject_initial": (
-            "Resumo inicial do CVEBeacon: {cves} {cve_word} em {rules} "
-            "{rule_word}{since}"
+            "Resumo inicial do CVEBeacon: {cves} {cve_word} repartidos por "
+            "{rules} {rule_word}{since}"
+        ),
+        "subject_initial_one": (
+            "Resumo inicial do CVEBeacon: {cves} {cve_word} repartido por "
+            "{rules} {rule_word}{since}"
         ),
         "subject_run": "CVEBeacon: {counts} ({rules})",
         "subject_event": "CVEBeacon: {label} {cve}",

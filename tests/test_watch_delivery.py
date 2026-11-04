@@ -33,7 +33,7 @@ from cvebeacon.watch.delivery import (
     format_channel_line,
     send_test,
 )
-from cvebeacon.watch.messages import OutgoingMessage
+from cvebeacon.watch.messages import MESSAGE_TOO_LARGE, MessageTooLarge, OutgoingMessage
 from cvebeacon.watch.records import CVSSEntry, KEVFields, WatchRecord
 from cvebeacon.watch.store import WatchStore
 
@@ -2890,7 +2890,7 @@ def test_smtp_pt_pt_alert_uses_the_channel_language(tmp_path, monkeypatch):
     assert "1 novo" in message["Subject"]
     parts = message.get_payload()
     assert "[NOVO] CVE-2026-0001" in parts[0].get_content()
-    assert "Publicado desconhecido · Visto pela primeira vez" in parts[0].get_content()
+    assert "Publicado data desconhecida · visto pela primeira vez" in parts[0].get_content()
     assert "Exploração: nenhuma" in parts[1].get_content()
 
 
@@ -2991,3 +2991,28 @@ channels = ["hook"]
     assert body["message"] == (
         "Mensagem de teste do CVEBeacon — nenhuma ação necessária"
     )
+
+
+def test_oversized_initial_digest_is_a_controlled_failure(tmp_path, monkeypatch):
+    import cvebeacon.watch.delivery as delivery_module
+
+    config = make_config(
+        tmp_path,
+        channels=smtp_channel(1),
+        rules=smtp_rule(),
+    )
+    store = seed(config, initial=True)
+    real_build = delivery_module.build_messages
+
+    def failing_build(*args, **kwargs):
+        if kwargs.get("initial") is not None:
+            raise MessageTooLarge(MESSAGE_TOO_LARGE)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(delivery_module, "build_messages", failing_build)
+    report = deliver(config, store, lambda request: httpx.Response(500))
+    summary = report.channels[0]
+    assert summary.failed == 1
+    assert summary.ambiguous == 0
+    assert summary.error == MESSAGE_TOO_LARGE
+    assert rows(store) == [("mail", "failed", 1, MESSAGE_TOO_LARGE)]

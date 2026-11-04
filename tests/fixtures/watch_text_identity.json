@@ -1,0 +1,546 @@
+{
+  "cases": {
+    "normal": {
+      "smtp": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "CVEBeacon: 1 new (critical-or-likely)",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: 1 new (critical-or-likely)",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "graph": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "CVEBeacon: 1 new (critical-or-likely)",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: 1 new (critical-or-likely)",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "teams": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "**CVEBeacon: 1 new (critical-or-likely)**\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "content": "**CVEBeacon: 1 new (critical-or-likely)**\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "slack": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "*CVEBeacon: 1 new (critical-or-likely)*\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · <https://nvd.nist.gov/vuln/detail/CVE-2026-1234|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-1234|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · <https://nvd.nist.gov/vuln/detail/CVE-2026-1234|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-1234|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>",
+          "content": "*CVEBeacon: 1 new (critical-or-likely)*\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · <https://nvd.nist.gov/vuln/detail/CVE-2026-1234|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-1234|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "discord": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "**CVEBeacon: 1 new (critical-or-likely)**\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "content": "**CVEBeacon: 1 new (critical-or-likely)**\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "telegram": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "CVEBeacon: 1 new (critical-or-likely)\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: 1 new (critical-or-likely)\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "matrix": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "CVEBeacon: 1 new (critical-or-likely)\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: 1 new (critical-or-likely)\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "ntfy": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "gotify": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "webhook": [
+        {
+          "subject": "CVEBeacon: 1 new (critical-or-likely)",
+          "text": "CVEBeacon: 1 new (critical-or-likely)",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: 1 new (critical-or-likely)",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ]
+    },
+    "normal_event": {
+      "smtp": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "CVEBeacon: [NEW] CVE-2026-1234",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: [NEW] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "graph": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "CVEBeacon: [NEW] CVE-2026-1234",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: [NEW] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "teams": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "**CVEBeacon: [NEW] CVE-2026-1234**\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "content": "**CVEBeacon: [NEW] CVE-2026-1234**\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "slack": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "*CVEBeacon: [NEW] CVE-2026-1234*\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · <https://nvd.nist.gov/vuln/detail/CVE-2026-1234|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-1234|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · <https://nvd.nist.gov/vuln/detail/CVE-2026-1234|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-1234|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>",
+          "content": "*CVEBeacon: [NEW] CVE-2026-1234*\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · <https://nvd.nist.gov/vuln/detail/CVE-2026-1234|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-1234|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "discord": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "**CVEBeacon: [NEW] CVE-2026-1234**\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "content": "**CVEBeacon: [NEW] CVE-2026-1234**\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-1234) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-1234) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "telegram": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "CVEBeacon: [NEW] CVE-2026-1234\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: [NEW] CVE-2026-1234\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "matrix": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "CVEBeacon: [NEW] CVE-2026-1234\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: [NEW] CVE-2026-1234\n\n[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "ntfy": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "gotify": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "webhook": [
+        {
+          "subject": "CVEBeacon: [NEW] CVE-2026-1234",
+          "text": "CVEBeacon: [NEW] CVE-2026-1234",
+          "body": "[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234 · https://www.cve.org/CVERecord?id=CVE-2026-1234 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+          "content": "CVEBeacon: [NEW] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ]
+    },
+    "notices": {
+      "smtp": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "graph": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "teams": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "slack": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "*CVEBeacon: [REPORTED] CVE-2026-1234*\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "*CVEBeacon: [REPORTED] CVE-2026-1234*\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "*CVEBeacon: [UNREPORTED] CVE-2026-1234*\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "*CVEBeacon: [UNREPORTED] CVE-2026-1234*\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "discord": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "telegram": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "matrix": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "ntfy": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "gotify": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "webhook": [
+        {
+          "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "CVEBeacon: [REPORTED] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        },
+        {
+          "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
+          "initial": false,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ]
+    },
+    "digest": {
+      "smtp": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "graph": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "teams": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "**CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27**\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc\\_rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0002) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0002) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc\\_rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0002) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0002) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "**CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27**\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc\\_rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0002) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0002) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "slack": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "*CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27*\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0001|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0001|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0001|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0001|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0002|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0002|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0001|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0001|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0001|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0001|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0002|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0002|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "*CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27*\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0001|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0001|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0001|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0001|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · <https://nvd.nist.gov/vuln/detail/CVE-2026-0002|NVD> · <https://www.cve.org/CVERecord?id=CVE-2026-0002|CVE.org> · <https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234|EUVD> · <https://www.cisa.gov/known-exploited-vulnerabilities-catalog|KEV catalog>\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "discord": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "**CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27**\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc\\_rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0002) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0002) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc\\_rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0002) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0002) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "**CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27**\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0001) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0001) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc\\_rule · [NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-0002) · [CVE.org](https://www.cve.org/CVERecord?id=CVE-2026-0002) · [EUVD](https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234) · [KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "telegram": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "matrix": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27\n\nSOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "ntfy": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "gotify": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ],
+      "webhook": [
+        {
+          "subject": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "text": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "body": "SOC  rule: 1 match, 1 KEV added\nsoc_rule: 1 match\n\n[KEV ADDED: CISA] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Due 2026-11-20 · Apply the vendor update.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0001 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: SOC rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0001 · https://www.cve.org/CVERecord?id=CVE-2026-0001 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n[NEW] CVE-2026-0002 · CVSS 9.8 (CNA: acme.example), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: none\n  Published 2026-10-30 · first seen 2026-11-04\n  Acme Widget before 4.2.1 allows remote code execution.\n  Rule: soc_rule · https://nvd.nist.gov/vuln/detail/CVE-2026-0002 · https://www.cve.org/CVERecord?id=CVE-2026-0002 · https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-1234 · https://www.cisa.gov/known-exploited-vulnerabilities-catalog\n\nRun `cvebeacon watch events --rule \"SOC rule\"` to list all.",
+          "content": "CVEBeacon initial summary: 2 CVEs across 2 rules since 2026-10-27",
+          "initial": true,
+          "part_index": 0,
+          "part_count": 1
+        }
+      ]
+    }
+  },
+  "test_message": {
+    "subject": "CVEBeacon test message",
+    "body": "CVEBeacon test message — no action needed"
+  }
+}

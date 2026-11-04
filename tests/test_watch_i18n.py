@@ -16,11 +16,15 @@ from cvebeacon.watch.catalog import (
 from cvebeacon.watch.messages import (
     CHANNEL_LIMITS,
     DeliveryEvent,
+    InitialDigest,
+    MessageTooLarge,
+    _email_content_fits,
     build_messages,
+    webhook_payload,
 )
 from cvebeacon.watch.records import CVSSEntry, ReportedMark, WatchView
 
-ALL_CHANNELS = (
+MESSAGE_CHANNELS = (
     "smtp",
     "graph",
     "teams",
@@ -30,7 +34,6 @@ ALL_CHANNELS = (
     "matrix",
     "ntfy",
     "gotify",
-    "webhook",
 )
 URL_PREFIXES = (
     "https://nvd.nist.gov/vuln/detail/",
@@ -144,20 +147,31 @@ def test_language_names_are_case_insensitive():
     assert canonical_language("pt-pt") == "pt-PT"
 
 
-def test_pt_pt_renders_every_channel_family():
-    for channel in ALL_CHANNELS:
+def test_pt_pt_renders_every_message_channel_family():
+    for channel in MESSAGE_CHANNELS:
         message = message_for(event(), channel)
         body = (
             message.body
-            if channel in {"smtp", "graph", "webhook"}
+            if channel in {"smtp", "graph"}
             else message.text
         )
         assert "[NOVO]" in body, channel
         assert "Publicado 2026-10-30" in body, channel
-        assert "Visto pela primeira vez 2026-11-04" in body, channel
+        assert "visto pela primeira vez 2026-11-04" in body, channel
         assert "Exploração: nenhuma" in body, channel
         assert "Regra: critical-or-likely" in body, channel
         assert "https://nvd.nist.gov/vuln/detail/CVE-2026-1234" in body, channel
+
+
+def test_webhook_alert_payload_stays_language_independent():
+    item = event()
+    payload = webhook_payload((item,), {item.rule: item.rule})
+    entry = payload["events"][0]
+    assert entry["cve_id"] == "CVE-2026-1234"
+    assert entry["kind"] == "match"
+    assert entry["rule"] == "critical-or-likely"
+    assert "NOVO" not in repr(payload)
+    assert "Resumo" not in repr(payload)
 
 
 def test_pt_pt_alert_header_and_reported_line():
@@ -200,10 +214,10 @@ def test_pt_pt_digest_uses_a_summary_and_per_rule_sections():
         format="html",
     )[0]
     assert message.subject == (
-        "Resumo inicial do CVEBeacon: 3 CVEs em 2 regras desde 2026-10-27"
+        "Resumo inicial do CVEBeacon: 3 CVEs repartidos por 2 regras desde 2026-10-27"
     )
     assert "alpha: 2 correspondências" in message.body
-    assert "beta: 1 KEV adicionado" in message.body
+    assert "beta: 1 adicionado ao KEV" in message.body
     assert "[NOVO] CVE-2026-0001" in message.body
     assert "Publicado 2026-10-30" in message.body
     assert "Execute `cvebeacon watch events --rule alpha`" in message.body
@@ -218,9 +232,9 @@ def test_pt_pt_notice_message_and_subject():
         details={"by": "alice", "note": "Enviado no ticket OPS-42"},
     )
     message = message_for(notice, "slack", format="text")
-    assert message.subject == "CVEBeacon: [REPORTADO] CVE-2026-1234"
+    assert message.subject == "CVEBeacon: [COMUNICADO] CVE-2026-1234"
     assert (
-        "[REPORTADO] CVE-2026-1234 comunicado aos clientes por alice "
+        "[COMUNICADO] CVE-2026-1234 comunicado aos clientes por alice "
         "em 2026-11-03 12:00 UTC"
     ) in message.text
     assert "Enviado no ticket OPS-42" in message.text
@@ -229,7 +243,7 @@ def test_pt_pt_notice_message_and_subject():
 def test_pt_pt_unreported_notice():
     notice = event("unreported", details={"by": "alice"})
     message = message_for(notice, "slack", format="text")
-    assert message.subject == "CVEBeacon: [NÃO REPORTADO] CVE-2026-1234"
+    assert message.subject == "CVEBeacon: [NÃO COMUNICADO] CVE-2026-1234"
     assert (
         "comunicação aos clientes retirada por alice em "
         "2026-11-03 12:00 UTC"
@@ -359,6 +373,8 @@ def test_digest_html_has_a_compact_table_with_the_same_facts():
     )[0]
     assert "CVEBeacon initial summary: 2 CVEs across 1 rule" in message.subject
     assert "<table" in message.html
+    assert '<th scope="col"' in message.html
+    assert '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse' not in message.html
     visible = visible_html(message.html)
     for fact in (
         "CVE-2026-0001",
@@ -380,7 +396,7 @@ def test_html_is_ignored_for_chat_channels():
     assert message.html == ""
 
 
-def test_email_size_limit_counts_the_html_part(monkeypatch):
+def test_email_size_limit_counts_the_sent_body(monkeypatch):
     monkeypatch.setitem(CHANNEL_LIMITS, "smtp", 20_000)
     events = tuple(
         event(
@@ -402,7 +418,263 @@ def test_email_size_limit_counts_the_html_part(monkeypatch):
         names={"critical-or-likely": "critical-or-likely"},
         format="html",
     )[0]
-    assert len(message.body) <= 20_000
-    assert len(message.html) <= 20_000
+    assert len(message.body) + len(message.html) <= 20_000
     assert message.body.count("[NEW]") == message.html.count("[NEW]")
     assert "and " in message.body
+
+
+def test_graph_size_limit_counts_only_the_html_body():
+    body = "x" * 15_000
+    markup = "y" * 5_000
+    assert _email_content_fits(
+        body,
+        markup,
+        channel_type="graph",
+        limit=10_000,
+    )
+    assert not _email_content_fits(
+        body,
+        markup,
+        channel_type="smtp",
+        limit=10_000,
+    )
+    assert not _email_content_fits(
+        "x" * 15_000,
+        "y" * 25_000,
+        channel_type="graph",
+        limit=20_000,
+    )
+
+
+@pytest.mark.parametrize("channel", ("smtp", "graph"))
+def test_oversized_fixed_digest_summary_is_rejected(channel):
+    counts = tuple(
+        (f"rule-{index:04d}-" + "x" * 50, "match", 1)
+        for index in range(7_000)
+    )
+    digest = InitialDigest(
+        (event("match", initial=True),),
+        counts,
+        1,
+        7_000,
+    )
+    with pytest.raises(MessageTooLarge):
+        build_messages(
+            (),
+            channel_type=channel,
+            grouping="run",
+            max_items=20,
+            names={},
+            initial=digest,
+            format="html",
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "kwargs", "expected", "english"),
+    (
+        ("match", {}, "[NOVO]", "[NEW]"),
+        (
+            "kev_added",
+            {
+                "reasons": ("kev cisa false -> true",),
+                "current": view(cisa_kev_added="2026-11-03"),
+            },
+            "[ADICIONADO AO KEV: CISA]",
+            "[KEV ADDED",
+        ),
+        (
+            "exploitation_active",
+            {
+                "reasons": ("exploitation poc -> active (cisa-adp)",),
+                "current": view(ssvc_exploitation="active"),
+            },
+            "[EXPLORADA ATIVAMENTE]",
+            "[ACTIVELY EXPLOITED]",
+        ),
+        (
+            "severity_increase",
+            {
+                "reasons": ("severity high -> critical",),
+            },
+            "[GRAVIDADE AUMENTOU alta->crítica]",
+            "[SEVERITY UP",
+        ),
+        (
+            "epss_increase",
+            {
+                "reasons": ("epss <0.1 -> <0.5",),
+                "details": {"previous_epss": 0.08},
+                "current": view(epss=0.61),
+            },
+            "[EPSS AUMENTOU 0.08->0.61]",
+            "[EPSS UP",
+        ),
+        (
+            "nvd_score_added",
+            {
+                "reasons": ("nvd score absent -> present",),
+                "current": view(
+                    cvss=(
+                        CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.1),
+                    )
+                ),
+            },
+            "[PONTUAÇÃO NVD ADICIONADA 9.1]",
+            "[NVD SCORED",
+        ),
+        (
+            "rejected",
+            {
+                "reasons": ("status published -> rejected",),
+                "current": view(status="rejected"),
+            },
+            "[REJEITADO]",
+            "[REJECTED]",
+        ),
+    ),
+)
+def test_pt_pt_every_event_kind_is_translated(kind, kwargs, expected, english):
+    item = event(kind, **kwargs)
+    for fmt in ("text", "html"):
+        message = message_for(item, "smtp", format=fmt)
+        visible = (
+            message.body if fmt == "text" else visible_html(message.html)
+        )
+        assert expected in visible
+        assert english not in visible
+    subject = build_messages(
+        (item,),
+        channel_type="smtp",
+        grouping="event",
+        max_items=20,
+        names={item.rule: item.rule},
+        language="pt-PT",
+        format="text",
+    )[0].subject
+    assert expected in subject
+    assert english not in subject
+
+
+def test_pt_pt_missing_date_uses_agreement_for_a_date():
+    message = message_for(
+        event(current=view(published=None)), "smtp", format="text"
+    )
+    assert "Publicado data desconhecida" in message.body
+    assert "Publicado desconhecido" not in message.body
+
+
+def test_pt_pt_typography_for_dates_and_due_dates():
+    item = event(
+        "kev_added",
+        reasons=("kev cisa false -> true",),
+        current=view(
+            cisa_kev_added="2026-11-03",
+            cisa_kev_due="2026-11-20",
+            cisa_required_action="Apply the update.",
+        ),
+    )
+    message = message_for(item, "smtp", format="text")
+    assert "Publicado 2026-10-30 · visto pela primeira vez" in message.body
+    assert "Prazo: 2026-11-20" in message.body
+    assert "Prazo 2026-11-20" not in message.body
+
+
+def test_pt_pt_singular_initial_summary():
+    item = event("match", cve_id="CVE-2026-0001", initial=True, rule="only")
+    message = build_messages(
+        (item,),
+        channel_type="smtp",
+        grouping="run",
+        max_items=20,
+        names={"only": "only"},
+        since="2026-10-27",
+        language="pt-PT",
+        format="text",
+    )[0]
+    assert message.subject == (
+        "Resumo inicial do CVEBeacon: 1 CVE repartido por 1 regra "
+        "desde 2026-10-27"
+    )
+
+
+def test_pt_pt_unscored_cvss_wording():
+    message = message_for(
+        event(current=view(cvss=())), "smtp", format="text"
+    )
+    assert "Sem pontuação CVSS" in message.body
+    assert "não classificada" not in message.body
+
+
+def test_html_escapes_rule_due_action_and_cna_source():
+    item = event(
+        "kev_added",
+        reasons=("kev cisa false -> true",),
+        current=view(
+            source_identifier="security@<script>.example",
+            cvss=(
+                CVSSEntry(
+                    "cna", "security@<script>.example", "3.1", 9.8
+                ),
+            ),
+            cisa_kev_added="2026-11-03",
+            cisa_kev_due='2026-11-20<script>alert("due")</script>',
+            cisa_required_action='"><img src=x onerror="alert(1)">',
+        ),
+    )
+    message = build_messages(
+        (item,),
+        channel_type="smtp",
+        grouping="run",
+        max_items=20,
+        names={item.rule: '<b onclick="x">rule</b>'},
+        language="en",
+        format="html",
+    )[0]
+    lowered = message.html.lower()
+    for raw in ("<script", "<img", "<b onclick", "onerror=\"alert(1)\""):
+        assert raw not in lowered
+    assert "&lt;script&gt;" in message.html
+    assert "&lt;img" in message.html
+    assert "&lt;b onclick=&quot;x&quot;&gt;rule&lt;/b&gt;" in message.html
+    assert "CNA: &lt;script&gt;.example" in message.html
+
+
+def test_digest_html_escapes_rule_due_action_and_cna_source():
+    item = event(
+        "kev_added",
+        cve_id="CVE-2026-0001",
+        event_id=1,
+        initial=True,
+        rule="hostile rule",
+        reasons=("kev cisa false -> true",),
+        current=view(
+            "CVE-2026-0001",
+            source_identifier="security@<script>.example",
+            cvss=(
+                CVSSEntry(
+                    "cna", "security@<script>.example", "3.1", 9.8
+                ),
+            ),
+            cisa_kev_added="2026-11-03",
+            cisa_kev_due='2026-11-20<script>alert("due")</script>',
+            cisa_required_action='"><img src=x onerror="alert(1)">',
+        ),
+    )
+    message = build_messages(
+        (item,),
+        channel_type="smtp",
+        grouping="run",
+        max_items=20,
+        names={"hostile rule": '<b onclick="x">hostile rule</b>'},
+        since="2026-10-27",
+        language="en",
+        format="html",
+    )[0]
+    lowered = message.html.lower()
+    for raw in ("<script", "<img", "<b onclick"):
+        assert raw not in lowered
+    assert "&lt;script&gt;" in message.html
+    assert "&lt;img" in message.html
+    assert "&lt;b onclick=&quot;x&quot;&gt;hostile rule&lt;/b&gt;" in message.html
+    assert "CNA: &lt;script&gt;.example" in message.html

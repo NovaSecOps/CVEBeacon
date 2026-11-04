@@ -46,7 +46,12 @@ CHANNEL_LIMITS = {
     "webhook": 32_768,
 }
 EMAIL_CHANNELS = ("smtp", "graph")
+MESSAGE_TOO_LARGE = "message exceeds the channel size limit"
 _WHITESPACE = re.compile(r"\s+")
+
+
+class MessageTooLarge(Exception):
+    """The fixed part of a message cannot fit the channel size limit."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +88,7 @@ def _date_text(value: Any, catalog: Mapping[str, str]) -> str:
     """Return a UTC date as ``YYYY-MM-DD``, or the unknown label when absent."""
     text = _clean(value)
     if not text:
-        return catalog["unknown"]
+        return catalog["unknown_date"]
     try:
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is not None:
@@ -94,7 +99,7 @@ def _date_text(value: Any, catalog: Mapping[str, str]) -> str:
     try:
         return datetime.strptime(text[:10], "%Y-%m-%d").date().isoformat()
     except ValueError:
-        return catalog["unknown"]
+        return catalog["unknown_date"]
 
 
 def date_phrase(
@@ -250,6 +255,13 @@ def _reason_transition(reasons: Sequence[str], prefix: str) -> tuple[str, str] |
     return None
 
 
+def _severity_text(value: str, catalog: Mapping[str, str]) -> str:
+    key = f"severity_{value}"
+    if key in catalog:
+        return catalog[key]
+    return value
+
+
 def _kind_label(
     event: DeliveryEvent, style: str, catalog: Mapping[str, str]
 ) -> str:
@@ -274,8 +286,8 @@ def _kind_label(
             return translate(
                 catalog,
                 "label_severity_up",
-                previous=transition[0],
-                current=transition[1],
+                previous=_severity_text(transition[0], catalog),
+                current=_severity_text(transition[1], catalog),
             )
         return catalog["label_severity_up_plain"]
     if kind == "epss_increase":
@@ -763,7 +775,7 @@ def _html_digest_fragment(
         "html_column_first_seen",
     )
     header = "".join(
-        f'<th style="{_HTML_TH}">{_h(catalog[key])}</th>'
+        f'<th scope="col" style="{_HTML_TH}">{_h(catalog[key])}</th>'
         for key in columns
     )
     rows: list[str] = []
@@ -809,7 +821,7 @@ def _html_digest_fragment(
             + "</tr>"
         )
     parts.append(
-        '<table role="presentation" width="100%" cellpadding="0" '
+        '<table width="100%" cellpadding="0" '
         'cellspacing="0" border="0" '
         'style="border-collapse:collapse;width:100%;font-size:12px;">'
         f"<tr>{header}</tr>{''.join(rows)}</table>"
@@ -826,6 +838,28 @@ def _html_digest_fragment(
     return "\n".join(parts)
 
 
+def _email_content_fits(
+    body: str,
+    markup: str,
+    *,
+    channel_type: str,
+    limit: int,
+    byte_limit: bool = False,
+) -> bool:
+    """Return whether the content this email channel sends fits the limit.
+
+    SMTP carries both alternatives in one message, so the decoded sizes are
+    counted together. Graph sends only one body; with HTML that body is the
+    HTML document, so only the document is counted. A text-only message keeps
+    the earlier behavior and is not size-predicated here.
+    """
+    if not markup:
+        return True
+    if channel_type == "graph":
+        return _size(markup, byte_limit) <= limit
+    return _size(body, byte_limit) + _size(markup, byte_limit) <= limit
+
+
 def _event_body_and_html(
     events: Sequence[DeliveryEvent],
     *,
@@ -834,6 +868,7 @@ def _event_body_and_html(
     catalog: Mapping[str, str],
     language: str,
     subject: str,
+    channel_type: str,
     limit: int,
     max_items: int | None = None,
     byte_limit: bool = False,
@@ -861,10 +896,18 @@ def _event_body_and_html(
                 _html_run_fragment(facts, omitted, catalog),
             )
         fits = len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS
-        if with_html and (len(body) > limit or len(markup) > limit):
+        if with_html and not _email_content_fits(
+            body,
+            markup,
+            channel_type=channel_type,
+            limit=limit,
+            byte_limit=byte_limit,
+        ):
             fits = False
-        if fits or not shown:
+        if fits:
             return body, markup
+        if not shown:
+            raise MessageTooLarge(MESSAGE_TOO_LARGE)
         if current is None:
             current = len(shown) - 1
         else:
@@ -923,6 +966,7 @@ def _initial_body_and_html(
     catalog: Mapping[str, str],
     language: str,
     subject: str,
+    channel_type: str,
     limit: int,
     max_items: int,
     byte_limit: bool = False,
@@ -955,8 +999,8 @@ def _initial_body_and_html(
             translate(
                 catalog,
                 "per_rule_line",
-                rule=_dynamic(rule, style, 80),
-                counts=_dynamic(counts_text, style),
+                rule=_display_name_for(rule, names),
+                counts=counts_text,
             )
             for rule, counts_text in rule_pairs
         ]
@@ -986,10 +1030,18 @@ def _initial_body_and_html(
                 ),
             )
         fits = len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS
-        if with_html and (len(body) > limit or len(markup) > limit):
+        if with_html and not _email_content_fits(
+            body,
+            markup,
+            channel_type=channel_type,
+            limit=limit,
+            byte_limit=byte_limit,
+        ):
             fits = False
-        if fits or not shown:
+        if fits:
             return body, markup
+        if not shown:
+            raise MessageTooLarge(MESSAGE_TOO_LARGE)
         current = max(0, len(shown) - 1)
 
 
@@ -1016,7 +1068,7 @@ def _initial_subject(
     )
     return translate(
         catalog,
-        "subject_initial",
+        "subject_initial_one" if cves == 1 else "subject_initial",
         cves=cves,
         cve_word=cve_word,
         rules=rules,
@@ -1131,7 +1183,8 @@ def build_messages(
     ``format`` only adds an HTML alternative for the email channels; every
     other provider keeps its single text body. ``language`` selects the
     message catalog, and the text and HTML renderers always use the same
-    facts.
+    facts. ``MessageTooLarge`` is raised when the fixed summary cannot fit
+    the channel size limit even with no event rows left.
     """
     catalog = catalog_for(language)
     style = style_for(channel_type)
@@ -1177,6 +1230,7 @@ def build_messages(
             catalog=catalog,
             language=language,
             subject=subject,
+            channel_type=channel_type,
             limit=body_limit,
             max_items=max_items,
             byte_limit=byte_limit,
@@ -1258,6 +1312,7 @@ def build_messages(
             catalog=catalog,
             language=language,
             subject=subject,
+            channel_type=channel_type,
             limit=body_limit,
             max_items=None if grouping == "event" else max_items,
             byte_limit=byte_limit,

@@ -382,12 +382,19 @@ def _common(table: Mapping[str, Any], label: str, channel_type: str) -> dict[str
     )
     if channel_type == "telegram" and interval < 3.0:
         _fail(f"{label} min_interval_seconds", "must be at least 3 for Telegram")
-    language = _string(table, "language", label, maximum=20)
-    if language is not None:
+    language: str | None = None
+    if "language" in table:
+        language = _string(table, "language", label, maximum=20)
+        if language is None:
+            _fail(f"{label} language", "must not be empty")
         language = canonical_language(language, label=f"{label} language")
-    message_format = (
-        _string(table, "format", label, maximum=20) or "text"
-    ).casefold()
+    if "format" in table:
+        message_format = _string(table, "format", label, maximum=20)
+        if message_format is None:
+            _fail(f"{label} format", "must not be empty")
+    else:
+        message_format = "text"
+    message_format = message_format.casefold()
     if message_format not in MESSAGE_FORMATS:
         _fail(f"{label} format", "must be text or html")
     return {

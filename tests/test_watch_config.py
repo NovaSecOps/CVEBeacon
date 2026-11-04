@@ -452,3 +452,33 @@ to = ["soc@example.org"]
 format = "markdown"
 """,
         )
+
+
+@pytest.mark.parametrize("value", ('""', '"   "'))
+def test_channel_format_rejects_explicitly_empty_values(tmp_path, value):
+    with pytest.raises(ConfigurationError, match="format must not be empty"):
+        write(
+            tmp_path,
+            f"""
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.org"
+from = "alerts@example.org"
+to = ["soc@example.org"]
+format = {value}
+""",
+        )
+
+
+@pytest.mark.parametrize("value", ('""', '"   "'))
+def test_channel_language_rejects_explicitly_empty_values(tmp_path, value):
+    with pytest.raises(ConfigurationError, match="language must not be empty"):
+        write(
+            tmp_path,
+            f"""
+[watch.channels.chat]
+type = "slack"
+webhook_url_env = "CVEBEACON_TEST_SLACK_WEBHOOK"
+language = {value}
+""",
+        )
