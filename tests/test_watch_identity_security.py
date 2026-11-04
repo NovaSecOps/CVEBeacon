@@ -1,0 +1,656 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import stat
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+from watch_support import NOW, write_config
+
+from cvebeacon import cli
+from cvebeacon.errors import CVEBeaconError, ConfigurationError, StateError
+from cvebeacon.passwords import DUMMY_HASH
+from cvebeacon.watch.identity import ReportIdentity
+from cvebeacon.watch.records import WatchRecord
+from cvebeacon.watch.reporting import ReportService
+from cvebeacon.watch.store import WatchStore
+from cvebeacon.watch.users import AuthenticatedUser, User, UserStore
+
+PASSWORD = "correct horse battery staple"
+IDENTIFIER = "CVE-2026-0001"
+
+
+def config_with(tmp_path, mode: str = "open"):
+    return write_config(
+        tmp_path,
+        channels="",
+        extra=f'\n[watch.reporting]\nidentity = "{mode}"\n',
+    )
+
+
+def seed(config) -> WatchStore:
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    store.upsert_nvd(
+        [
+            WatchRecord(
+                IDENTIFIER,
+                "published",
+                description="Acme Widget allows remote code execution.",
+            )
+        ],
+        catalogs=config.watch.sources,
+    )
+    return store
+
+
+def service(config, store) -> ReportService:
+    return ReportService(
+        store, config.watch.users_database, config.watch.reporting_identity
+    )
+
+
+def open_service(store) -> ReportService:
+    return ReportService(store, None, "open")
+
+
+def test_authenticated_mode_needs_a_real_login(tmp_path):
+    config = config_with(tmp_path, "authenticated")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice")
+    actor = service(config, store)
+
+    with pytest.raises(CVEBeaconError, match="invalid username or password"):
+        actor.report_cve(IDENTIFIER, user="alice", password=PASSWORD)
+    assert store.reported_entries() == ()
+    with pytest.raises(CVEBeaconError, match="invalid username or password"):
+        actor.unreport_cve(IDENTIFIER, user="alice", password=PASSWORD)
+    assert store.reported_entries() == ()
+
+
+def test_authenticated_login_type_is_not_a_roster_lookup(tmp_path):
+    config = config_with(tmp_path, "authenticated")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", password=PASSWORD)
+
+    roster = users.find("alice")
+    assert isinstance(roster, User)
+    assert not isinstance(roster, AuthenticatedUser)
+    proof = users.authenticate("alice", PASSWORD)
+    assert isinstance(proof, AuthenticatedUser)
+    assert proof.user.id == roster.id
+    assert proof.login_id > 0
+
+
+def test_service_has_no_caller_selected_mode_and_no_downgrade(tmp_path):
+    config = config_with(tmp_path, "authenticated")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", password=PASSWORD)
+    users.add("bob")
+    actor = service(config, store)
+    before = store.reported_entries()
+
+    with pytest.raises(TypeError):
+        ReportService(store, config.watch.users_database)
+    for call in (
+        lambda: actor.report_cve(IDENTIFIER, by="alice"),
+        lambda: actor.report_cve(IDENTIFIER),
+        lambda: actor.report_cve(IDENTIFIER, by="alice", user="alice", password=PASSWORD),
+        lambda: actor.unreport_cve(IDENTIFIER, by="alice"),
+        lambda: actor.unreport_cve(IDENTIFIER),
+    ):
+        with pytest.raises(CVEBeaconError):
+            call()
+    assert store.reported_entries() == before
+
+
+def test_open_and_registered_modes_refuse_authentication_arguments(tmp_path):
+    config = config_with(tmp_path, "open")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", password=PASSWORD)
+    users.add("bob")
+
+    with pytest.raises(CVEBeaconError, match="only available"):
+        open_service(store).report_cve(
+            IDENTIFIER, by="alice", user="alice", password=PASSWORD
+        )
+    registered = service(config_with(tmp_path, "registered"), store)
+    with pytest.raises(CVEBeaconError, match="only available"):
+        registered.report_cve(IDENTIFIER, by="alice", user="alice")
+
+
+def test_registered_service_uses_the_roster_without_a_password(tmp_path):
+    config = config_with(tmp_path, "registered")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", display_name="Alice Smith")
+    users.add("bob", display_name="Bob Jones")
+    actor = service(config, store)
+
+    outcome = actor.report_cve(IDENTIFIER, by="alice")
+    assert outcome.entry is not None
+    assert (outcome.entry.by, outcome.entry.username) == ("Alice Smith", "alice")
+    assert outcome.entry.identity_mode == "registered"
+    assert actor.unreport_cve(IDENTIFIER, by="bob").changed is True
+
+
+def test_fabricated_and_stale_identities_are_rejected_inside_the_write(tmp_path):
+    config = config_with(tmp_path, "registered")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", password=PASSWORD, display_name="Alice Smith")
+    alice = users.find("alice")
+
+    forged = User(
+        9999,
+        "ghost",
+        "Ghost",
+        None,
+        False,
+        False,
+        NOW.isoformat(),
+        NOW.isoformat(),
+        None,
+        0,
+        None,
+    )
+    ghost = ReportIdentity("registered", "Ghost", user=forged)
+    with pytest.raises(ConfigurationError, match="no longer exists"):
+        store._report_cve(
+            IDENTIFIER,
+            identity=ghost,
+            recheck=lambda: users.require_current(ghost),
+        )
+    assert store.reported_entries() == ()
+
+    identity = ReportIdentity("registered", "Alice Smith", user=alice)
+    users.disable("alice")
+    with pytest.raises(ConfigurationError, match="disabled"):
+        store._report_cve(
+            IDENTIFIER,
+            identity=identity,
+            recheck=lambda: users.require_current(identity),
+        )
+    assert store.reported_entries() == ()
+
+
+def test_authenticated_proof_must_come_from_a_login_row(tmp_path):
+    config = config_with(tmp_path, "authenticated")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", password=PASSWORD, display_name="Alice Smith")
+    roster = users.find("alice")
+    fake = AuthenticatedUser(roster, 9999)
+    identity = ReportIdentity(
+        "authenticated",
+        "Alice Smith",
+        user=roster,
+        authenticated=fake,
+    )
+    with pytest.raises(ConfigurationError, match="successful login"):
+        store._report_cve(
+            IDENTIFIER,
+            identity=identity,
+            recheck=lambda: users.require_current(identity),
+        )
+    assert store.reported_entries() == ()
+
+    proof = users.authenticate("alice", PASSWORD)
+    identity = ReportIdentity(
+        "authenticated",
+        "Alice Smith",
+        user=proof.user,
+        authenticated=proof,
+    )
+    users.disable("alice")
+    with pytest.raises(ConfigurationError, match="disabled"):
+        store._report_cve(
+            IDENTIFIER,
+            identity=identity,
+            recheck=lambda: users.require_current(identity),
+        )
+    assert store.reported_entries() == ()
+
+
+def test_migration_never_rechains_a_downgraded_edited_row(tmp_path):
+    config = config_with(tmp_path)
+    store = seed(config)
+    for name in ("first", "second", "third"):
+        open_service(store).report_cve(IDENTIFIER, by=name, force=True)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET by='Mallory' WHERE id=1")
+        before = db.execute("SELECT chain FROM watch_report ORDER BY id").fetchall()
+    assert store.verify_reports() == 1
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_meta SET value='5' WHERE key='schema_version'")
+    reopened = WatchStore(store.path, clock=lambda: NOW)
+    reopened.initialize()
+    with sqlite3.connect(store.path) as db:
+        after = db.execute("SELECT chain FROM watch_report ORDER BY id").fetchall()
+        by = db.execute("SELECT by FROM watch_report WHERE id=1").fetchone()[0]
+    assert after == before
+    assert by == "Mallory"
+    assert reopened.metadata()["schema_version"] == "7"
+    assert reopened.verify_reports() == 1
+
+
+def test_migration_never_rechains_a_downgraded_deleted_row(tmp_path):
+    config = config_with(tmp_path)
+    store = seed(config)
+    for name in ("first", "second", "third"):
+        open_service(store).report_cve(IDENTIFIER, by=name, force=True)
+    with sqlite3.connect(store.path) as db:
+        db.execute("DELETE FROM watch_report WHERE id=2")
+        db.execute("UPDATE watch_meta SET value='5' WHERE key='schema_version'")
+    reopened = WatchStore(store.path, clock=lambda: NOW)
+    reopened.initialize()
+    assert reopened.verify_reports() == 3
+
+
+def test_downgraded_pre_fix_v6_rows_are_not_rechained(tmp_path):
+    config = config_with(tmp_path)
+    store = seed(config)
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET by='Mallory' WHERE id=1")
+        db.execute("ALTER TABLE watch_report DROP COLUMN chain_version")
+        db.execute("UPDATE watch_meta SET value='6' WHERE key='schema_version'")
+    reopened = WatchStore(store.path, clock=lambda: NOW)
+    reopened.initialize()
+    assert reopened.metadata()["schema_version"] == "7"
+    assert reopened.verify_reports() == 1
+
+
+def test_verify_does_not_create_a_missing_watch_store_or_table(tmp_path):
+    watch = WatchStore(tmp_path / "missing-watch.db")
+    with pytest.raises(StateError, match="not found"):
+        watch.verify_reports()
+    assert not watch.path.exists()
+
+    path = tmp_path / "watch.db"
+    store = WatchStore(path, clock=lambda: NOW)
+    store.initialize()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE watch_report")
+    with pytest.raises(StateError, match="missing"):
+        store.verify_reports()
+    with sqlite3.connect(path) as db:
+        table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='watch_report'"
+        ).fetchone()
+    assert table is None
+
+
+def test_verify_does_not_create_a_missing_user_store_or_table(tmp_path):
+    users = UserStore(tmp_path / "missing-users.db", clock=lambda: NOW)
+    with pytest.raises(StateError, match="not found"):
+        users.verify_audit()
+    assert not users.path.exists()
+
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE cb_user_audit")
+    with pytest.raises(StateError, match="missing"):
+        store.verify_audit()
+    with sqlite3.connect(path) as db:
+        table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='cb_user_audit'"
+        ).fetchone()
+    assert table is None
+
+
+def test_verify_accepts_an_existing_empty_trail(tmp_path):
+    watch = WatchStore(tmp_path / "watch.db")
+    watch.initialize()
+    assert watch.verify_reports() is None
+    assert watch.report_chain_counts() == (0, 0)
+
+    users = UserStore(tmp_path / "users.db")
+    users.initialize()
+    assert users.verify_audit() is None
+
+
+def test_malformed_report_row_types_are_reported_as_broken(tmp_path, capsys):
+    config = config_with(tmp_path)
+    store = seed(config)
+    open_service(store).report_cve(IDENTIFIER, by="first")
+    open_service(store).report_cve(IDENTIFIER, by="second", force=True)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET user_id='not-an-integer' WHERE id=1")
+    assert store.verify_reports() == 1
+    assert cli.main(
+        ["--config", str(config.config_path), "watch", "reported", "--verify"]
+    ) == 2
+    assert "broken at row 1" in capsys.readouterr().err
+
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_report SET note=CAST('blob' AS BLOB) WHERE id=1")
+    assert store.verify_reports() == 1
+
+
+def test_malformed_user_audit_row_types_are_reported_as_broken(tmp_path):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.add("alice", password=PASSWORD)
+    store.disable("alice")
+    assert store.verify_audit() is None
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE cb_user_audit SET action=CAST('blob' AS BLOB) WHERE id=1")
+    assert store.verify_audit() == 1
+
+
+def test_unicode_emails_have_one_case_insensitive_lookup_key(tmp_path):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.add("alice", email="É@example.com")
+    with pytest.raises(ConfigurationError, match="already registered"):
+        store.add("bob", email="é@example.com")
+    assert store.resolve_enabled("é@EXAMPLE.COM").username == "alice"
+    assert store.resolve_enabled("É@example.com").username == "alice"
+
+    store.add("carol", email="carol@example.com")
+    with pytest.raises(ConfigurationError, match="already registered"):
+        store.add("CAROL@EXAMPLE.COM")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file model")
+def test_users_database_rejects_a_symlink_target(tmp_path):
+    target = tmp_path / "target.db"
+    target.write_bytes(b"")
+    link = tmp_path / "users.db"
+    link.symlink_to(target)
+    with pytest.raises(StateError):
+        UserStore(link, clock=lambda: NOW).users()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file model")
+def test_users_database_rejects_a_permissive_preexisting_file(tmp_path):
+    path = tmp_path / "users.db"
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    os.close(descriptor)
+    os.chmod(path, 0o644)
+    with pytest.raises(StateError, match="group or other"):
+        UserStore(path, clock=lambda: NOW).users()
+    assert stat.S_IMODE(path.stat().st_mode) & 0o077
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file model")
+def test_users_database_rejects_a_group_writable_parent(tmp_path):
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o777)
+    try:
+        with pytest.raises(StateError, match="directory"):
+            UserStore(parent / "users.db", clock=lambda: NOW).initialize()
+    finally:
+        parent.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file model")
+def test_users_database_detects_replacement_between_check_and_open(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    import cvebeacon.watch.users as users_module
+    import sqlite3 as sqlite_module
+
+    real_connect = sqlite_module.connect
+
+    def swapping_connect(database, *args, **kwargs):
+        path.unlink()
+        path.write_bytes(b"")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(users_module.sqlite3, "connect", swapping_connect)
+    with pytest.raises(StateError, match="replaced"):
+        store.users()
+
+
+def test_password_validation_precedes_confirmation(monkeypatch, capsys):
+    from cvebeacon.passwords import read_new_password
+
+    values = iter(["short", "different"])
+    monkeypatch.setattr(
+        "cvebeacon.passwords.getpass.getpass", lambda _: next(values)
+    )
+    with pytest.raises(ConfigurationError, match="12–1024"):
+        read_new_password("Password: ")
+
+    values = iter(["short", "different"])
+    monkeypatch.setattr(
+        "cvebeacon.passwords.getpass.getpass", lambda _: next(values)
+    )
+    assert cli.main(["dashboard", "hash-password"]) == 2
+    assert "12–1024" in capsys.readouterr().err
+
+
+def test_password_option_never_echoes_the_attempted_value(capsys):
+    secret = "synthetic-argparse-secret"
+    cases = [
+        ["users", "add", "alice", "--password", secret],
+        ["users", "add", "alice", "--pass", secret],
+        [
+            "--config",
+            "absent.toml",
+            "watch",
+            "report",
+            IDENTIFIER,
+            "--user",
+            "alice",
+            "--password",
+            secret,
+        ],
+        ["dashboard", "hash-password", "--password", secret],
+    ]
+    for argv in cases:
+        assert cli.main(argv) == 2
+        error = capsys.readouterr().err
+        assert secret not in error
+        assert "command line" in error
+
+
+def test_surrogate_passwords_fail_validation_cleanly(tmp_path):
+    from cvebeacon.passwords import validate_password
+
+    with pytest.raises(ConfigurationError, match="UTF-8|valid"):
+        validate_password("x" * 11 + "\ud800")
+    with pytest.raises(ConfigurationError, match="UTF-8|valid"):
+        UserStore(tmp_path / "users.db", clock=lambda: NOW).add(
+            "alice", password="x" * 11 + "\ud800"
+        )
+
+
+def test_dummy_hash_covers_passwordless_and_locked_accounts(
+    tmp_path, monkeypatch
+):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.add("alice")
+    store.add("bob", password=PASSWORD)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "cvebeacon.watch.users.verify_password",
+        lambda encoded, password: calls.append(encoded) or False,
+    )
+    assert store.authenticate("alice", PASSWORD) is None
+    assert calls == [DUMMY_HASH]
+    for _ in range(5):
+        store.authenticate("bob", "wrong password value")
+    calls.clear()
+    assert store.authenticate("bob", PASSWORD) is None
+    assert calls == [DUMMY_HASH]
+
+
+def test_successful_login_is_audited(tmp_path):
+    store = UserStore(tmp_path / "users.db", clock=lambda: NOW)
+    store.add("alice", password=PASSWORD)
+    proof = store.authenticate("alice", PASSWORD)
+    assert proof is not None
+    entries = store.audit_entries()
+    assert any(
+        entry.id == proof.login_id
+        and entry.action == "login"
+        and entry.username == "alice"
+        for entry in entries
+    )
+
+
+def test_lockout_uses_the_wall_clock_and_backward_jumps_keep_it_locked(tmp_path):
+    now = [NOW]
+    store = UserStore(tmp_path / "users.db", clock=lambda: now[0])
+    store.add("alice", password=PASSWORD)
+    for _ in range(5):
+        store.authenticate("alice", "wrong password value")
+    now[0] = NOW - timedelta(hours=1)
+    assert store.authenticate("alice", PASSWORD) is None
+    now[0] = NOW + timedelta(minutes=16)
+    assert store.authenticate("alice", PASSWORD) is not None
+
+
+def test_security_documentation_is_explicit():
+    docs = Path(__file__).resolve().parents[1] / "docs"
+    watch = (docs / "WATCH.md").read_text(encoding="utf-8")
+    deploy = (docs / "DEPLOY.md").read_text(encoding="utf-8")
+    assert "umask 077" in deploy
+    assert "install -m 600" in deploy or "chmod 600" in deploy
+    assert "users-backup.db" in deploy
+    assert "icacls" in deploy
+    assert "ProgramData" in deploy
+    assert "#windows-data-directory-acls" in watch
+    assert "unkeyed" in watch.casefold()
+    assert "not a signature" in watch.casefold() or "not authentication" in watch.casefold()
+    assert "user-admin audit log only" in watch.casefold()
+    assert "wall-clock" in watch.casefold()
+    assert "host clock" in watch.casefold()
+
+
+OLD_USER_SCHEMA = (
+    """CREATE TABLE cb_user (
+        id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name TEXT,
+        email TEXT COLLATE NOCASE,
+        password_hash TEXT,
+        is_admin INTEGER NOT NULL DEFAULT 0,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        password_changed_at TEXT,
+        failed_logins INTEGER NOT NULL DEFAULT 0,
+        locked_until TEXT
+    )""",
+    "CREATE UNIQUE INDEX cb_user_email ON cb_user(email) WHERE email IS NOT NULL",
+    """CREATE TABLE cb_user_audit (
+        id INTEGER PRIMARY KEY, action TEXT NOT NULL, username TEXT NOT NULL,
+        at TEXT NOT NULL, os_account TEXT, host TEXT, chain TEXT NOT NULL)""",
+)
+
+
+def old_user_database(path, email: str, other_email: str | None = None):
+    with sqlite3.connect(path) as db:
+        for statement in OLD_USER_SCHEMA:
+            db.execute(statement)
+        now = NOW.isoformat()
+        db.execute(
+            "INSERT INTO cb_user(username,email,created_at,updated_at) "
+            "VALUES ('alice',?,?,?)",
+            (email, now, now),
+        )
+        if other_email is not None:
+            db.execute(
+                "INSERT INTO cb_user(username,email,created_at,updated_at) "
+                "VALUES ('bob',?,?,?)",
+                (other_email, now, now),
+            )
+    os.chmod(path, 0o600)
+
+
+def test_old_account_emails_gain_a_unicode_lookup_key(tmp_path):
+    path = tmp_path / "users.db"
+    old_user_database(path, "É@example.com")
+    store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
+    assert store.resolve_enabled("é@example.com").username == "alice"
+
+
+def test_old_account_email_collisions_fail_closed(tmp_path):
+    path = tmp_path / "users.db"
+    old_user_database(path, "É@example.com", "é@example.com")
+    with pytest.raises(StateError, match="collide"):
+        UserStore(path, clock=lambda: NOW).initialize()
+
+
+def test_no_password_is_rejected_in_authenticated_mode(tmp_path, capsys):
+    config = config_with(tmp_path, "authenticated")
+    assert cli.main(
+        ["--config", str(config.config_path), "users", "add", "alice", "--no-password"]
+    ) == 2
+    assert "--no-password" in capsys.readouterr().err
+
+
+def test_account_backup_recipe_stays_owner_only_under_a_permissive_umask(tmp_path):
+    import shutil
+    import subprocess
+
+    if not shutil.which("sqlite3") or not shutil.which("install"):
+        pytest.skip("sqlite3 and install are not available")
+    source = tmp_path / "cvebeacon-users.db"
+    destination = tmp_path / "users-backup.db"
+    subprocess.run(
+        [
+            "sqlite3",
+            str(source),
+            "CREATE TABLE cb_user(username TEXT); INSERT INTO cb_user VALUES ('alice');",
+        ],
+        check=True,
+    )
+    os.chmod(source, 0o600)
+    subprocess.run(
+        [
+            "sh",
+            "-c",
+            (
+                f"umask 022; install -m 600 /dev/null '{destination}'; "
+                f"umask 077; sqlite3 '{source}' '.backup {destination}'"
+            ),
+        ],
+        check=True,
+    )
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+def test_stale_identity_is_rejected_for_unreport_too(tmp_path):
+    config = config_with(tmp_path, "registered")
+    store = seed(config)
+    users = UserStore(config.watch.users_database, clock=lambda: NOW)
+    users.add("alice", display_name="Alice Smith")
+    open_service(store).report_cve(IDENTIFIER, by="setup")
+    alice = users.find("alice")
+    identity = ReportIdentity("registered", "Alice Smith", user=alice)
+    users.disable("alice")
+    with pytest.raises(ConfigurationError, match="disabled"):
+        store._unreport_cve(
+            IDENTIFIER,
+            identity=identity,
+            recheck=lambda: users.require_current(identity),
+        )
+    assert len(store.reported_entries()) == 1
+
+
+def test_cli_users_verify_reports_a_malformed_row_without_a_traceback(
+    tmp_path, capsys
+):
+    config = config_with(tmp_path, "registered")
+    store = UserStore(config.watch.users_database, clock=lambda: NOW)
+    store.add("alice")
+    store.disable("alice")
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE cb_user_audit SET action=CAST('blob' AS BLOB) WHERE id=1")
+    assert cli.main(["--config", str(config.config_path), "users", "verify"]) == 2
+    assert "broken at row 1" in capsys.readouterr().err
