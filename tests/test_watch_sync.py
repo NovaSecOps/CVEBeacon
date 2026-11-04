@@ -1028,6 +1028,28 @@ def test_eu_kev_backs_off_after_euvd_success(tmp_path):
     assert summary.throttle_wait == 60
 
 
+def test_eu_kev_only_403_fails_without_prior_host_success(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "eu_kev"), initial="backfill")
+    sleeps: list[float] = []
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    def denied(request):
+        return httpx.Response(403)
+
+    report = run(
+        config,
+        handler_for(nvd=nvd_request, eu=denied),
+        sleep=sleeps.append,
+    )
+    assert report.failures == ("eu_kev",)
+    assert sleeps == []
+    summary = next(item for item in report.summaries if item.source == "eu_kev")
+    assert summary.requests == 1
+    assert summary.throttled == 0
+
+
 def test_cancellation_during_backoff_keeps_committed_chunks(tmp_path):
     config = write_config(
         tmp_path, sources=("nvd", "euvd"), initial="backfill", backfill_days=60

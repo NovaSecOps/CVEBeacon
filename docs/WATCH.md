@@ -758,6 +758,10 @@ is exhausted the source fails as usual and every completed chunk stays
 committed. A 403 on a run's first EUVD request still fails immediately, because
 a rejected query is a more likely cause than throttling.
 
+The EU KEV dump shares this state: it is retried only after a successful EUVD
+request in the same run. A sync with only `eu_kev`, or one where EUVD never
+succeeds, still fails the dump's first 403 immediately.
+
 A page that repeats an EUVD id restarts the chunk through the same bounded
 retry path, and the distinct item count must equal the pinned total before the
 chunk commits. A failed chunk leaves the cursor at the previous chunk.
@@ -855,9 +859,10 @@ sync on the same day reads the same EUVD day again.
 - If an optional source fails, the NVD data is committed, the failing source is
   named, and the command exits 4. Its cursor does not advance past the last
   successful chunk. A failed EPSS download keeps the previous table.
-- EUVD and EU KEV throttling is retried within the same run, for up to 10
-  minutes of waits. A run that exhausts that budget fails the source, keeps the
-  last committed EUVD chunk and the previous KEV rows, and exits 4.
+- EUVD throttling, and the EU KEV dump after a successful EUVD request in the
+  same run, is retried within the run, for up to 10 minutes of waits. A run
+  that exhausts that budget fails the source, keeps the last committed EUVD
+  chunk and the previous KEV rows, and exits 4.
 - Committed source changes also remain in `watch_touched`, so a later failure or
   interruption does not lose an evaluation obligation. The initial window stays
   open until every enabled source has finished a sync without a failure and an
