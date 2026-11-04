@@ -1924,3 +1924,135 @@ channels = ["soc-email"]
         complete=not second.failures,
     )
     assert "initial_evaluated_at" in store.metadata()
+
+
+@pytest.mark.parametrize("mode", ["backfill", "full"])
+@pytest.mark.parametrize("failure", ["euvd", "cisa_kev", "epss", "interrupt"])
+def test_evaluate_all_requires_a_failure_free_initial_sync(
+    tmp_path, mode, failure
+):
+    optional = "euvd" if failure == "interrupt" else failure
+    config = write_config(
+        tmp_path,
+        sources=("nvd", optional),
+        initial=mode,
+        extra="""
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["soc-email"]
+""",
+    )
+    if mode == "full":
+        # Only the final NVD window remains; the EUVD history is still pending.
+        store = WatchStore(config.watch.database, clock=lambda: NOW)
+        store.set_metadata(
+            {
+                "initial_mode": "full",
+                "initial_window_start": FULL_HISTORY_START.date().isoformat(),
+                "nvd_cursor": (NOW - timedelta(days=1)).isoformat(),
+                "euvd_cursor": FULL_HISTORY_START.date().isoformat(),
+            }
+        )
+
+    def interrupted(request):
+        raise KeyboardInterrupt()
+
+    def failed(request):
+        return httpx.Response(500)
+
+    handler = handler_for(
+        nvd=lambda request: httpx.Response(200, json=nvd_page([nvd_cve()])),
+        euvd=interrupted if failure == "interrupt" else failed,
+        cisa=failed,
+        epss=failed,
+    )
+    with mock_client(handler) as http:
+        if failure == "interrupt":
+            with pytest.raises(KeyboardInterrupt):
+                sync_watch(config, http, clock=lambda: NOW)
+        else:
+            report = sync_watch(config, http, clock=lambda: NOW)
+            assert report.failures == (failure,)
+
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    assert "initialized_at" in store.metadata()
+    assert "initial_sync_completed_at" not in store.metadata()
+    result = store.evaluate_all(
+        config.watch.rules, catalogs=config.watch.sources, initial=True
+    )
+    assert "initial_evaluated_at" not in store.metadata()
+    assert result.initial_sync_pending is True
+
+
+@pytest.mark.parametrize("source", ["euvd", "cisa_kev"])
+def test_recovered_initial_source_keeps_matches_initial(tmp_path, source):
+    condition = '{ vendor = ["acme"] }' if source == "euvd" else '{ kev = "any" }'
+    config = write_config(
+        tmp_path,
+        sources=("nvd", source),
+        initial="backfill",
+        extra=f"""
+[[watch.rules]]
+name = "source-match"
+condition = {condition}
+channels = ["soc-email"]
+""",
+    )
+    failed = [True]
+
+    def euvd_request(request):
+        if failed[0]:
+            return httpx.Response(500)
+        return httpx.Response(
+            200,
+            json={
+                "total": 1,
+                "items": [
+                    euvd_item(
+                        enisaIdVendor=[{"vendor": {"name": "acme"}}]
+                    )
+                ],
+            },
+        )
+
+    def cisa_request(request):
+        if failed[0]:
+            return httpx.Response(500)
+        return httpx.Response(
+            200, json={"count": 1, "vulnerabilities": [cisa_item()]}
+        )
+
+    handler = handler_for(
+        nvd=lambda request: httpx.Response(200, json=nvd_page([nvd_cve()])),
+        euvd=euvd_request,
+        cisa=cisa_request,
+    )
+    with mock_client(handler) as http:
+        first = sync_watch(config, http, clock=lambda: NOW)
+    assert first.failures == (source,)
+    assert first.initial_evaluation is True
+
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    store.evaluate_all(
+        config.watch.rules, catalogs=config.watch.sources, initial=True
+    )
+    assert not store.events()
+    assert "initial_sync_completed_at" not in store.metadata()
+
+    failed[0] = False
+    with mock_client(handler) as http:
+        second = sync_watch(config, http, clock=lambda: NOW + timedelta(hours=1))
+    assert not second.failures
+    assert second.initial_evaluation is True
+    assert "initial_sync_completed_at" in store.metadata()
+    store.evaluate_touched(
+        config.watch.rules,
+        catalogs=config.watch.sources,
+        initial=second.initial_evaluation,
+        complete=not second.failures,
+    )
+    events = store.events()
+    assert [(event.cve_id, event.kind, event.initial) for event in events] == [
+        ("CVE-2026-0001", "match", True)
+    ]

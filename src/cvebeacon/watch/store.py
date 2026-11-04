@@ -1280,10 +1280,11 @@ class WatchStore:
     ) -> EvaluationResult:
         """Evaluate every stored CVE, in batches, without consuming the queue.
 
-        When a ``backfill`` or ``full`` database has finished its initial sync
-        and still owes the initial evaluation, this pass closes initialization
-        the same way ``watch run`` does: it records ``initial_evaluated_at`` and
-        clears the touch queue in one transaction. While the initial sync is
+        When a ``backfill`` or ``full`` database has finished a failure-free
+        initial sync and still owes the initial evaluation, this pass closes
+        initialization the same way ``watch run`` does: it records
+        ``initial_evaluated_at`` and clears the touch queue in one transaction
+        after the whole pass succeeds. While the initial sync is unproven or
         incomplete, initialization stays open and the queue is kept.
         """
         if limit < 1:
@@ -1295,7 +1296,9 @@ class WatchStore:
             and metadata.get("initial_mode") in ("backfill", "full")
             and "initial_evaluated_at" not in metadata
         )
-        close_initial = initial_pending and "initialized_at" in metadata
+        close_initial = (
+            initial_pending and "initial_sync_completed_at" in metadata
+        )
         evaluated = 0
         created: dict[str, int] = {}
         last = ""

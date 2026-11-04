@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import httpx
 from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
 
 from cvebeacon import cli
+from cvebeacon.watch import store as watch_store, sync as watch_sync
 from cvebeacon.watch.records import CVSSEntry, WatchRecord
 from cvebeacon.watch.rules import parse_rules
 from cvebeacon.watch.store import WatchStore
@@ -174,10 +175,21 @@ condition = { cvss_min = 9 }
 channels = ["slack"]
 """,
     )
-    published = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
-        "%Y-%m-%dT%H:%M:%S.000"
-    )
-    changes = [nvd_cve("CVE-2026-0001", published=published)]
+    clock = [NOW]
+    real_sync = watch_sync.sync_watch
+
+    def fixed_sync(config, http, **kwargs):
+        return real_sync(config, http, clock=lambda: clock[0], **kwargs)
+
+    def fixed_store(path, **kwargs):
+        return WatchStore(path, clock=lambda: clock[0])
+
+    monkeypatch.setattr(watch_sync, "sync_watch", fixed_sync)
+    monkeypatch.setattr(watch_store, "WatchStore", fixed_store)
+
+    changes = [
+        nvd_cve("CVE-2026-0001", published="2026-11-01T00:00:00.000"),
+    ]
     seen = []
 
     def handler(request):
@@ -197,13 +209,20 @@ channels = ["slack"]
 
     store = WatchStore(config.watch.database)
     metadata = store.metadata()
-    assert "initialized_at" in metadata
-    assert "initial_evaluated_at" in metadata
+    assert metadata["initial_sync_completed_at"] == NOW.isoformat()
+    assert metadata["initial_evaluated_at"] == NOW.isoformat()
     assert store.pending_evaluations(10) == ()
     assert len(seen) == 1
     assert "CVEBeacon initial summary: 1 CVE across 1 rule" in seen[0]
 
-    changes.append(nvd_cve("CVE-2026-0002", published=published))
+    changes.append(
+        nvd_cve(
+            "CVE-2026-0002",
+            published="2026-11-03T13:00:00.000",
+            lastModified="2026-11-03T13:00:00.000",
+        )
+    )
+    clock[0] = NOW + timedelta(hours=1)
     assert cli.main(["--config", str(config.config_path), "watch", "run"]) == 0
 
     assert len(seen) == 2
