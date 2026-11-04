@@ -398,9 +398,15 @@ def assert_baseline(database: Path) -> None:
 
 def database_owner(database: Path) -> str:
     script = f"(Get-Acl -LiteralPath '{database}').Owner"
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() != "PSMODULEPATH"
+    }
     return checked(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
         timeout=60,
+        env=environment,
     ).stdout.strip()
 
 
