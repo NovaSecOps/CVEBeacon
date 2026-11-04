@@ -26,6 +26,16 @@ The build scripts copy the Apache-2.0 `LICENSE` and project attribution `NOTICE`
 
 Windows outputs are `dist/cvebeacon/cvebeacon.exe` and `dist/cvebeacon.exe`. Linux uses `dist/onedir/cvebeacon/cvebeacon` and `dist/cvebeacon` to avoid a directory/file name collision. The Windows script accepts `-OutputDirectory` and `-WorkDirectory` for isolated builds and stops on build or smoke-test failure.
 
+## Release artifacts
+
+The local build commands above remain the primary path. When a release is
+published, its GitHub release also carries the core wheel and source
+distribution built by `python -m build`, and the Windows archive named
+`cvebeacon-windows-x64.zip`. Anyone can rebuild the same artifacts from the
+tagged source with the commands on this page; the checksums in the release
+cover only the uploaded files. Container images, when published, are described
+in the [container guide](CONTAINERS.md).
+
 Native CI exercises CPython 3.11–3.14 on Windows Server 2025 and Ubuntu 24.04. Both package formats are built with Python 3.13 and smoke-tested outside the checkout on each platform. Use a current patched interpreter for distribution builds; older Python compatibility jobs are not recommendations to deploy their hosted installer versions. The one-file executable is the recommended portable format; the one-folder bundle is useful for troubleshooting. Workflow artifacts contain both formats and are retained for 14 days. They are validation builds, not formal releases.
 
 Templates and stylesheets are bundled into the same executable. Start the dashboard with `cvebeacon.exe serve` on Windows or `./cvebeacon serve` on Linux; see [dashboard usage](DASHBOARD.md). The package jobs exercise server startup, static assets, manual queries, reports, and preservation of monitoring state.

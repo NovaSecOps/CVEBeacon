@@ -2,7 +2,9 @@
 
 The core image runs the same CLI as a source installation. It contains no
 optional companion, host collectors, Kubernetes clients, cron or supervisor.
-No image publication is part of the reference build. See the
+The reference build below is local and does not publish anything. When a
+release is published, the core image is also available from
+`ghcr.io/novasecops/cvebeacon`; build and test locally first. See the
 [deployment guide](DEPLOY.md) for a complete Linux VM and Docker walkthrough.
 
 ```console
