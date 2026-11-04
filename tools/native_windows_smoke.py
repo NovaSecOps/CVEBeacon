@@ -689,6 +689,7 @@ def smoke() -> None:
             ],
             timeout=120,
             env=env,
+            encoding="utf-8",
             input=password + "\n",
         )
         assert (
@@ -754,6 +755,7 @@ def smoke() -> None:
             ],
             timeout=120,
             env=env,
+            encoding="utf-8",
             input=password + "\n",
         )
         xml = query_xml()
