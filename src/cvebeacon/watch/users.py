@@ -342,6 +342,7 @@ class UserStore:
         _creation_locked: bool = False,
         _was_missing: bool = False,
     ) -> sqlite3.Connection:
+        descriptor = None
         try:
             parent = self.path.parent
             if create:
@@ -382,32 +383,31 @@ class UserStore:
                     raise StateError(
                         "CVEBeacon user database not found"
                     ) from exc
-                try:
-                    details = os.fstat(descriptor)
-                    if not stat.S_ISREG(details.st_mode):
-                        raise StateError(
-                            "CVEBeacon user database must be a regular file"
-                        )
-                    if details.st_uid != os.geteuid():
-                        raise StateError(
-                            "CVEBeacon user database must be owned by this "
-                            "account"
-                        )
-                    if created:
-                        os.fchmod(descriptor, 0o600)
-                    elif stat.S_IMODE(details.st_mode) & 0o077:
-                        raise StateError(
-                            "CVEBeacon user database must not be group or "
-                            "other accessible"
-                        )
-                    expected = (
-                        details.st_dev,
-                        details.st_ino,
-                        details.st_size,
-                        details.st_mtime_ns,
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode):
+                    raise StateError(
+                        "CVEBeacon user database must be a regular file"
                     )
-                finally:
-                    os.close(descriptor)
+                if details.st_uid != os.geteuid():
+                    raise StateError(
+                        "CVEBeacon user database must be owned by this "
+                        "account"
+                    )
+                if created:
+                    os.fchmod(descriptor, 0o600)
+                elif stat.S_IMODE(details.st_mode) & 0o077:
+                    raise StateError(
+                        "CVEBeacon user database must not be group or "
+                        "other accessible"
+                    )
+                expected = (
+                    details.st_dev,
+                    details.st_ino,
+                    details.st_size,
+                    details.st_mtime_ns,
+                )
+                # Pin the validated inode until SQLite and the post-open
+                # identity checks finish, so an unlinked inode cannot be reused.
                 connection = sqlite3.connect(
                     f"{path.as_uri()}?mode={'rwc' if create else 'ro'}",
                     uri=True,
@@ -465,6 +465,9 @@ class UserStore:
             raise StateError(
                 f"cannot open CVEBeacon user database {self.path}: {exc}"
             ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def _verify_store_content(
         self,

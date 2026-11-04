@@ -1311,6 +1311,73 @@ def test_concurrent_write_while_opening_an_existing_database_is_not_replacement(
     assert store.users() == ()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file identity")
+def test_same_store_id_replacement_cannot_recycle_the_validated_inode(
+    tmp_path, monkeypatch
+):
+    import shutil
+    from types import SimpleNamespace
+
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
+    original = path.stat()
+    copy = tmp_path / "copy.db"
+    shutil.copyfile(path, copy)
+    copy.chmod(0o600)
+    changed = UserStore(copy, clock=lambda: NOW)
+    changed.add("replacement")
+    assert changed._store_id == store._store_id
+
+    real_open, real_stat = os.open, os.stat
+    real_connect = sqlite3.connect
+    validated = []
+    recycled = []
+    swapped = []
+
+    def recording_open(candidate, *args, **kwargs):
+        descriptor = real_open(candidate, *args, **kwargs)
+        if Path(candidate) == path:
+            validated.append(descriptor)
+        return descriptor
+
+    def swapping_connect(database, *args, **kwargs):
+        if swapped:
+            return real_connect(database, *args, **kwargs)
+        swapped.append(True)
+        try:
+            os.fstat(validated[-1])
+        except OSError:
+            recycled.append(True)
+        path.unlink()
+        shutil.copyfile(copy, path)
+        path.chmod(0o600)
+        return real_connect(database, *args, **kwargs)
+
+    def recycling_stat(candidate, *args, **kwargs):
+        current = real_stat(candidate, *args, **kwargs)
+        if Path(candidate) == path and recycled:
+            recycled.pop()
+            # The OS may reuse an unlinked inode only after its last open
+            # descriptor closes. Model that reuse while keeping real metadata.
+            return SimpleNamespace(
+                st_dev=original.st_dev,
+                st_ino=original.st_ino,
+                st_mode=current.st_mode,
+                st_size=current.st_size,
+                st_mtime_ns=current.st_mtime_ns,
+            )
+        return current
+
+    monkeypatch.setattr("cvebeacon.watch.users.os.open", recording_open)
+    monkeypatch.setattr("cvebeacon.watch.users.os.stat", recycling_stat)
+    monkeypatch.setattr("cvebeacon.watch.users.sqlite3.connect", swapping_connect)
+    with pytest.raises(
+        StateError, match="^CVEBeacon user database was replaced while opening$"
+    ):
+        store.users()
+
+
 def test_foreign_read_only_ancestor_is_not_trusted(tmp_path, monkeypatch):
     if os.name != "posix":
         pytest.skip("POSIX ownership model")
