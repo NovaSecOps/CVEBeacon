@@ -220,6 +220,8 @@ header_value_file = "{secret.name}"
     assert reference.peek() == "s3cret"
     assert reference.resolve() == "s3cret"
 
+    if os.name != "posix":
+        return  # POSIX permission bits are not enforced on Windows; administrators use ACLs.
     os.chmod(secret, 0o644)
     with pytest.raises(ConfigurationError, match="group or other"):
         write(
