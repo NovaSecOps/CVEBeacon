@@ -143,7 +143,16 @@ Back up the watch database with SQLite's online backup (use the path
 
 ```console
 sudo -u cvebeacon sqlite3 /var/lib/cvebeacon/cvebeacon-watch.db ".backup '/var/lib/cvebeacon/watch-backup.db'"
+sudo -u cvebeacon sh -c 'umask 077; install -m 600 /dev/null /var/lib/cvebeacon/users-backup.db; sqlite3 /var/lib/cvebeacon/cvebeacon-users.db ".backup /var/lib/cvebeacon/users-backup.db"'
+sudo -u cvebeacon chmod 600 /var/lib/cvebeacon/users-backup.db
 ```
+
+The account file holds password hashes and is created `0600` on POSIX. Account
+backups need the same confidentiality as the live file: the `install -m 600`
+step resets an existing destination before SQLite copies credential data into
+it, and `chmod 600` is the final check. Verify with
+`stat -c '%a %n' /var/lib/cvebeacon/users-backup.db` (expect `600`). Keep both
+files inside the protected data directory.
 
 If you copy the database, `-wal` and `-shm` files instead, do so only while
 nothing runs. Then upgrade and restore the scheduler you removed:
@@ -154,6 +163,30 @@ sudo -u cvebeacon /opt/cvebeacon/.venv/bin/python -m pip install /opt/cvebeacon
 cb schedule install --times 07:00,19:00 --command watch --yes
 # or: sudo systemctl start cvebeacon.timer
 ```
+
+### Windows data-directory ACLs
+
+The native Windows deployment keeps the configuration, state, watch database,
+account file and backups under `%PROGRAMDATA%\CVEBeacon`. Grant only the account
+that runs CVEBeacon and local administrators; remove inherited access from
+ordinary users.
+
+```powershell
+$data = Join-Path $env:ProgramData "CVEBeacon"
+New-Item -ItemType Directory -Path $data -Force | Out-Null
+icacls $data /inheritance:r
+icacls $data /grant:r "CVEBeaconSvc:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F"
+icacls $data /remove:g "BUILTIN\Users" "NT AUTHORITY\Authenticated Users"
+icacls $data
+```
+
+Replace `CVEBeaconSvc` with the actual service account (for example
+`NT AUTHORITY\LocalService`). The final `icacls` command must show only that
+account and administrators. Put the account file and account backups in this
+directory; their protection is the directory ACL, because Windows does not use
+the POSIX `0600` mode. See also
+[watch identity](WATCH.md#identity-modes-and-accounts) and the
+[scheduler guide](SCHEDULING.md).
 
 ## B. Docker
 

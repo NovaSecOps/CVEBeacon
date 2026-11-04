@@ -6,11 +6,11 @@ import re
 import secrets
 from threading import Lock
 import time
-import warnings
 
-from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.security import check_password_hash
 
-from .errors import ConfigurationError, CVEBeaconError
+from .errors import ConfigurationError
+from .passwords import hash_password_value, read_new_password
 
 
 def password_hash(config):
@@ -25,19 +25,12 @@ def password_hash(config):
 
 
 def hash_password():
-    # getpass otherwise falls back to an echoing stream on some terminals.
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", getpass.GetPassWarning)
-            password = getpass.getpass("Dashboard password (12–1024 characters): ")
-            confirmation = getpass.getpass("Confirm password: ")
-    except (getpass.GetPassWarning, EOFError) as exc:
-        raise CVEBeaconError("a terminal with hidden password input is required") from exc
-    if not 12 <= len(password) <= 1024 or password.isspace():
-        raise CVEBeaconError("password must contain 12–1024 characters and not be all whitespace")
-    if not secrets.compare_digest(password.encode("utf-8"), confirmation.encode("utf-8")):
-        raise CVEBeaconError("password confirmation does not match")
-    return generate_password_hash(password, method="scrypt:32768:8:1")
+    # The shared helper converts the hidden-input warning into an error, so a
+    # terminal without a usable hidden prompt never echoes the value.
+    password = read_new_password(
+        "Dashboard password (12–1024 characters): ", getpass_module=getpass
+    )
+    return hash_password_value(password)
 
 
 class DashboardAuth:

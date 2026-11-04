@@ -45,6 +45,11 @@ backfill_days = 7
 overlap_minutes = 15
 # language = "en"               # en (default) or pt-PT
 
+# Client-report identity: open (default), registered, or authenticated.
+# See docs/WATCH.md for the users commands and password handling.
+# [watch.reporting]
+# identity = "open"
+
 # Optional alert rules. Every channel named here must be configured below.
 # [[watch.rules]]
 # name = "critical-or-likely"

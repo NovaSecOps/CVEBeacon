@@ -13,6 +13,7 @@ from typing import Any
 from .errors import ConfigurationError
 from .watch.catalog import DEFAULT_LANGUAGE, canonical_language
 from .watch.channels import ChannelConfig, parse_channels, validate_rule_channels
+from .watch.reported import IDENTITY_MODES
 from .watch.rules import Rule, parse_rules, validate_rule_sources
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
@@ -29,6 +30,7 @@ WATCH_SETTINGS = {
     "language",
     "rules",
     "channels",
+    "reporting",
 }
 
 
@@ -117,6 +119,11 @@ class WatchConfig:
     language: str = DEFAULT_LANGUAGE
     rules: tuple[Rule, ...] = ()
     channels: tuple[ChannelConfig, ...] = ()
+    reporting_identity: str = "open"
+
+    @property
+    def users_database(self) -> Path:
+        return self.database.parent / "cvebeacon-users.db"
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +239,19 @@ def load_config(path: str | Path) -> AppConfig:
     validate_rule_sources(watch_rules, watch_sources)
     watch_channels = parse_channels(watch_data.get("channels"), base=base)
     validate_rule_channels(watch_rules, watch_channels)
+    reporting_data = watch_data.get("reporting", {})
+    if not isinstance(reporting_data, dict):
+        raise ConfigurationError("watch.reporting must be a table")
+    unknown_reporting = sorted(set(reporting_data) - {"identity"})
+    if unknown_reporting:
+        raise ConfigurationError(
+            "unknown watch.reporting setting: " + ", ".join(unknown_reporting)
+        )
+    reporting_identity = str(reporting_data.get("identity", "open")).strip().casefold()
+    if reporting_identity not in IDENTITY_MODES:
+        raise ConfigurationError(
+            "watch.reporting.identity must be open, registered, or authenticated"
+        )
 
     inv = _table(data, "inventory")
     inventory_config: InventoryConfig | None = None
@@ -426,5 +446,6 @@ def load_config(path: str | Path) -> AppConfig:
             language=watch_language,
             rules=watch_rules,
             channels=watch_channels,
+            reporting_identity=reporting_identity,
         ),
     )
