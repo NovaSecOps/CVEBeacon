@@ -14,6 +14,7 @@ from cvebeacon.scheduling import (
     CRON_END,
     WINDOWS_TASK,
     _cron_lines,
+    _describe_windows_xml,
     _windows_xml,
     default_command,
     describe,
@@ -372,3 +373,17 @@ def test_cli_schedule_rejects_watch_without_watch_mode(tmp_path, capsys):
         == 2
     )
     assert "watch mode is disabled" in capsys.readouterr().err
+
+
+def test_windows_interval_status_shows_the_repetition(tmp_path):
+    plan = make_plan(
+        tmp_path / "config.toml",
+        4,
+        command="both",
+        system="windows",
+        executable=tmp_path / "cvebeacon.exe",
+        allow_incompatible=True,
+    )
+    text = _describe_windows_xml(_windows_xml(plan).decode("utf-16"))
+    assert "Interval: every 4 hours" in text
+    assert text.count("--config") == 2

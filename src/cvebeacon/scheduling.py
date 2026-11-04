@@ -258,6 +258,12 @@ def _describe_windows_xml(text: str) -> str | None:
     times: list[str] = []
     interval: int | None = None
     for trigger in root.iter(_tag("CalendarTrigger")):
+        repetition = trigger.find(_tag("Repetition"))
+        value = repetition.findtext(_tag("Interval")) if repetition is not None else None
+        match = re.fullmatch(r"PT(\d+)H", value or "")
+        if match:
+            interval = int(match.group(1))
+            continue
         boundary = trigger.findtext(_tag("StartBoundary")) or ""
         if len(boundary) >= 16:
             times.append(boundary[11:16])
