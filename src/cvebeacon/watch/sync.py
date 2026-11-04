@@ -459,7 +459,8 @@ def sync_watch(
 
 def watch_status(watch: WatchConfig) -> str:
     _require_enabled(watch)
-    status = WatchStore(watch.database).status(catalogs=watch.sources)
+    store = WatchStore(watch.database)
+    status = store.status(catalogs=watch.sources)
     meta = status["meta"]
     lines = [
         f"database: {status['database']}",
@@ -476,4 +477,11 @@ def watch_status(watch: WatchConfig) -> str:
         f"with EPSS: {status['epss_rows']}",
         f"lookups pending/backing off: {status['lookups']}",
     ]
+    for row in store.delivery_status(channel.name for channel in watch.channels):
+        lines.append(
+            f"channel {row.channel}: pending {row.pending}, "
+            f"failed {row.failed} ({row.given_up} given up), "
+            f"ambiguous {row.ambiguous}, sending {row.sending}, last success "
+            f"{row.last_success or 'never'}"
+        )
     return "\n".join(lines)

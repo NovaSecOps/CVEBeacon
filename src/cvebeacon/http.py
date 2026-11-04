@@ -7,6 +7,7 @@ import logging
 import math
 import time
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +17,15 @@ from .config import HttpConfig
 from .errors import SourceError
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+@dataclass(frozen=True, slots=True)
+class HttpResult:
+    """One bounded HTTP response, with a body that is never logged."""
+
+    status_code: int
+    headers: Mapping[str, str]
+    body: bytes
 
 
 class HttpClient:
@@ -225,3 +235,68 @@ class HttpClient:
 
     def post_json(self, url: str, **kwargs: Any) -> Any:
         return self.request_json("POST", url, **kwargs)
+
+    def request_once(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        params: Mapping[str, Any] | None = None,
+        data: Mapping[str, Any] | None = None,
+        json: Any = None,
+        content: bytes | str | None = None,
+        timeout: float | None = None,
+        body_limit: int = 65536,
+    ) -> HttpResult:
+        """Send one request without retries and without following redirects.
+
+        Delivery code classifies transport failures itself: a connect failure
+        is definitely unsent, while a read failure may follow an accepted
+        request. The response body is bounded, is never included in an error,
+        and is read only until the per-send wall-clock deadline.
+        """
+        if body_limit < 0:
+            raise ValueError("body limit must not be negative")
+        self.requests += 1
+        started = self._monotonic()
+        request_headers = dict(headers or {})
+        # Count wire bytes rather than an expanded compressed body.
+        request_headers["Accept-Encoding"] = "identity"
+        request = self._client.build_request(
+            method,
+            url,
+            headers=request_headers,
+            params=params,
+            data=data,
+            json=json,
+            content=content,
+            timeout=timeout,
+        )
+        response = self._client.send(request, follow_redirects=False, stream=True)
+        try:
+            status_code = response.status_code
+            body = bytearray()
+            try:
+                # A test transport may hand back an already-read response;
+                # real sends stay on the raw stream so ``body_limit`` counts
+                # wire bytes rather than decoded content.
+                chunks = (
+                    response.iter_bytes()
+                    if response.is_stream_consumed
+                    else response.iter_raw()
+                )
+                for chunk in chunks:
+                    if timeout is not None and self._monotonic() - started > timeout:
+                        break
+                    remaining = body_limit - len(body)
+                    if remaining <= 0:
+                        break
+                    body.extend(chunk[:remaining])
+            except (httpx.TimeoutException, httpx.TransportError):
+                # The status line arrived, so the request was accepted even if
+                # the optional response body was not read completely.
+                pass
+            return HttpResult(status_code, dict(response.headers), bytes(body))
+        finally:
+            response.close()

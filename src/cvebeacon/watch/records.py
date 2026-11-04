@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 
@@ -260,6 +260,37 @@ class WatchView:
             "euvd_exploited_since": self.euvd_exploited_since,
         }
         return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryEvent:
+    """One stored event with the derived CVE view used for a message."""
+
+    event_id: int
+    rule: str
+    cve_id: str
+    kind: str
+    reasons: tuple[str, ...]
+    initial: bool
+    created_at: str
+    view: WatchView
+    details: Mapping[str, Any] = field(default_factory=dict)
+    status: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class InitialDigest:
+    """The SQL counts and rendered sample for one initial digest.
+
+    ``counts`` holds ``(rule, kind, event count)`` over every selected initial
+    row, while ``events`` holds only the sampled rows with a full view.
+    """
+
+    events: tuple[DeliveryEvent, ...] = ()
+    counts: tuple[tuple[str, str, int], ...] = ()
+    cves: int = 0
+    total: int = 0
+    ambiguous: int = 0
 
 
 def _names(values: Iterable[str], limit: int = 500) -> tuple[str, ...]:

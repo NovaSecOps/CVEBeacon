@@ -74,8 +74,23 @@ def _parser() -> argparse.ArgumentParser:
     watch_sub = watch.add_subparsers(dest="watch_command", required=True)
     watch_sync = watch_sub.add_parser("sync", help="refresh the watch database from public sources")
     watch_sync.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
-    watch_run = watch_sub.add_parser("run", help="refresh the watch database and evaluate watch rules")
+    watch_run = watch_sub.add_parser("run", help="refresh the watch database, evaluate rules and deliver alerts")
     watch_run.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
+    watch_notify = watch_sub.add_parser("notify", help="deliver pending watch alerts")
+    watch_notify.add_argument("--channel", help="only deliver through this channel")
+    watch_notify.add_argument(
+        "--retry-ambiguous",
+        action="store_true",
+        help="also resend deliveries whose outcome is unknown",
+    )
+    watch_notify.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="also retry failed deliveries and reset their attempt count",
+    )
+    notify_sub = watch_notify.add_subparsers(dest="notify_command")
+    notify_test = notify_sub.add_parser("test", help="send one labelled test message")
+    notify_test.add_argument("channel")
     watch_sub.add_parser("status", help="show watch database cursors and counts")
     watch_events = watch_sub.add_parser("events", help="list stored watch alert events")
     watch_events.add_argument("--limit", type=int, default=50)
@@ -159,6 +174,7 @@ def _require_watch(config: AppConfig) -> None:
 
 
 def _run_watch(args, config: AppConfig) -> int:
+    from .watch.delivery import deliver_pending, send_test
     from .watch.rules import describe_condition
     from .watch.store import WatchStore
     from .watch.sync import sync_watch, watch_status
@@ -175,6 +191,28 @@ def _run_watch(args, config: AppConfig) -> int:
         return 0
     _require_watch(config)
     store = WatchStore(config.watch.database)
+    if args.watch_command == "notify":
+        with HttpClient(config.http) as http:
+            if getattr(args, "notify_command", None) == "test":
+                outcome = send_test(config, http, args.channel)
+                if outcome.ok:
+                    print(f"{outcome.channel} ({outcome.type}): test message sent")
+                    return 0
+                print(
+                    f"{outcome.channel} ({outcome.type}): test message failed"
+                    + (f"; {outcome.error}" if outcome.error else "")
+                )
+                return 3
+            delivery = deliver_pending(
+                config,
+                store,
+                http,
+                channel_names=[args.channel] if args.channel else None,
+                retry_ambiguous=args.retry_ambiguous,
+                retry_failed=args.retry_failed,
+            )
+        _print_delivery(delivery, only_selected=bool(args.channel))
+        return 3 if delivery.failed else 0
     if args.watch_command == "events":
         display = {rule.name.casefold(): rule.name for rule in config.watch.rules}
         for row in store.events(limit=args.limit, rule=args.rule, pending=args.pending):
@@ -198,21 +236,52 @@ def _run_watch(args, config: AppConfig) -> int:
         _print_evaluation(result)
         return 0
     with HttpClient(config.http) as http:
-        report = sync_watch(config, http, assume_yes=args.yes)
-    if report.cancelled:
-        print("cancelled")
-        return 1
-    _print_sync_report(report)
-    if args.watch_command == "sync":
-        return 4 if report.failures else 0
-    result = store.evaluate_touched(
-        config.watch.rules,
-        catalogs=config.watch.sources,
-        initial=report.initial_evaluation,
-        complete=not report.failures,
-    )
-    _print_evaluation(result)
+        if args.watch_command == "sync":
+            report = sync_watch(config, http, assume_yes=args.yes)
+            if report.cancelled:
+                print("cancelled")
+                return 1
+            _print_sync_report(report)
+            return 4 if report.failures else 0
+        try:
+            report = sync_watch(config, http, assume_yes=args.yes)
+            if report.cancelled:
+                print("cancelled")
+                return 1
+            _print_sync_report(report)
+            result = store.evaluate_touched(
+                config.watch.rules,
+                catalogs=config.watch.sources,
+                initial=report.initial_evaluation,
+                complete=not report.failures,
+            )
+            _print_evaluation(result)
+        except SourceError as exc:
+            # A failed source must not hold back alerts that are already queued.
+            print(f"error: {exc}", file=sys.stderr)
+            delivery = deliver_pending(config, store, http)
+            _print_delivery(delivery)
+            return 3 if delivery.failed else 2
+        delivery = deliver_pending(config, store, http)
+    _print_delivery(delivery)
+    if delivery.failed:
+        return 3
     return 4 if report.failures else 0
+
+
+def _print_delivery(report, *, only_selected: bool = False) -> None:
+    from .watch.delivery import format_channel_line
+
+    if report.recovered:
+        print(
+            f"recovery: {report.recovered} sending delivery row(s) marked ambiguous"
+        )
+    for summary in report.channels:
+        if summary.skipped:
+            if only_selected:
+                print(f"{summary.channel} ({summary.type}): disabled")
+            continue
+        print(format_channel_line(summary))
 
 
 def _inventory_config(config: AppConfig) -> InventoryConfig:

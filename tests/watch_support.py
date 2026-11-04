@@ -11,6 +11,18 @@ from cvebeacon.http import HttpClient
 
 NOW = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
 
+DEFAULT_CHANNELS = """
+[watch.channels.soc-email]
+type = "webhook"
+enabled = false
+url = "https://example.invalid/cvebeacon"
+
+[watch.channels.teams]
+type = "teams"
+enabled = false
+webhook_url_env = "CVEBEACON_TEST_TEAMS_WEBHOOK"
+"""
+
 
 def write_config(
     tmp_path: Path,
@@ -22,6 +34,7 @@ def write_config(
     overlap_minutes: int = 15,
     extra: str = "",
     inventory: bool = True,
+    channels: str = DEFAULT_CHANNELS,
 ) -> AppConfig:
     names = ", ".join(f'"{name}"' for name in sources)
     path = tmp_path / "config.toml"
@@ -46,6 +59,7 @@ sources = [{names}]
 initial = "{initial}"
 backfill_days = {backfill_days}
 overlap_minutes = {overlap_minutes}
+{channels}
 {extra}
 """,
         encoding="utf-8",
