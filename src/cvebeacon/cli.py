@@ -1145,6 +1145,8 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
 
 def _reject_password_arguments(arguments: list[str]) -> None:
     for value in arguments:
+        if value == "--password-stdin":
+            continue
         token = value.split("=", 1)[0]
         if (
             token in {"--pass", "--pwd", "--pw", "-p", "-pass", "-pwd", "-pw"}

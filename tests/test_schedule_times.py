@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from cvebeacon import cli
-from cvebeacon.errors import SchedulingError
+from cvebeacon.errors import CVEBeaconError, SchedulingError
 from cvebeacon.scheduling import (
     CRON_BEGIN,
     CRON_END,
@@ -962,6 +962,30 @@ def test_windows_status_treats_interactive_token_or_password_as_logged_off():
         "</Exec></Actions></Task>"
     )
     assert "Runs while logged off: yes" in _describe_windows_xml(text)
+
+
+def test_password_stdin_flag_is_allowed_by_the_prescan():
+    cli._reject_password_arguments(["--password-stdin"])
+    cli._reject_password_arguments(
+        ["--config", "x.toml", "schedule", "install", "--password-stdin"]
+    )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--password-stdin=secret",
+        "--password-stdinx",
+        "--password",
+        "--pass",
+        "--pwd=secret",
+        "--pw-stdin",
+        "-psecret",
+    ],
+)
+def test_password_value_spellings_are_rejected_by_the_prescan(flag):
+    with pytest.raises(CVEBeaconError, match="command line"):
+        cli._reject_password_arguments([flag])
 
 
 def test_cli_schedule_run_logged_out_reads_password(tmp_path, monkeypatch, capsys):
