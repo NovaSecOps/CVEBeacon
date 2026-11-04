@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
@@ -152,6 +153,104 @@ def test_watch_sync_leaves_evaluation_for_watch_run(tmp_path, monkeypatch, capsy
     assert cli.main(["--config", str(config.config_path), "watch", "run"]) == 0
     output = capsys.readouterr().out
     assert "events: 2 new (match 2)" in output
+
+
+def test_watch_evaluate_all_closes_a_completed_initial_backfill(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "SLACK_URL", "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
+    )
+    config = write_config(
+        tmp_path,
+        initial="backfill",
+        channels="""
+[watch.channels.slack]
+type = "slack"
+webhook_url_env = "SLACK_URL"
+""",
+        extra="""
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["slack"]
+""",
+    )
+    published = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000"
+    )
+    changes = [nvd_cve("CVE-2026-0001", published=published)]
+    seen = []
+
+    def handler(request):
+        if "hooks.slack.com" in str(request.url):
+            seen.append(json.loads(request.content)["text"])
+            return httpx.Response(200, content=b"ok")
+        return httpx.Response(200, json=nvd_page(changes))
+
+    monkeypatch.setattr(cli, "HttpClient", lambda http_config: mock_client(handler))
+    commands = (
+        ["watch", "sync"],
+        ["watch", "evaluate", "--all", "--yes"],
+        ["watch", "notify"],
+    )
+    for command in commands:
+        assert cli.main(["--config", str(config.config_path), *command]) == 0
+
+    store = WatchStore(config.watch.database)
+    metadata = store.metadata()
+    assert "initialized_at" in metadata
+    assert "initial_evaluated_at" in metadata
+    assert store.pending_evaluations(10) == ()
+    assert len(seen) == 1
+    assert "CVEBeacon initial summary: 1 CVE across 1 rule" in seen[0]
+
+    changes.append(nvd_cve("CVE-2026-0002", published=published))
+    assert cli.main(["--config", str(config.config_path), "watch", "run"]) == 0
+
+    assert len(seen) == 2
+    assert "initial summary" not in seen[1]
+    assert "CVE-2026-0002" in seen[1]
+    events = [(event.cve_id, event.initial) for event in store.events()]
+    assert events == [("CVE-2026-0002", False), ("CVE-2026-0001", True)]
+
+
+def test_watch_evaluate_all_keeps_an_interrupted_initial_sync_open(tmp_path, monkeypatch, capsys):
+    config = write_config(
+        tmp_path,
+        initial="full",
+        extra="""
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9 }
+channels = ["soc-email"]
+""",
+    )
+    requests = {"nvd": 0}
+
+    def handler(request):
+        requests["nvd"] += 1
+        if requests["nvd"] == 1:
+            return httpx.Response(200, json=nvd_page([nvd_cve()]))
+        return httpx.Response(500)
+
+    monkeypatch.setattr(cli, "HttpClient", lambda http_config: mock_client(handler))
+    assert cli.main(["--config", str(config.config_path), "watch", "sync", "--yes"]) == 2
+
+    store = WatchStore(config.watch.database)
+    metadata = store.metadata()
+    assert metadata["initial_mode"] == "full"
+    assert "initialized_at" not in metadata
+    capsys.readouterr()
+
+    assert (
+        cli.main(
+            ["--config", str(config.config_path), "watch", "evaluate", "--all", "--yes"]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "initialization stays open until the initial sync completes" in output
+    assert "initial_evaluated_at" not in store.metadata()
+    assert store.pending_evaluations(10) == ("CVE-2026-0001",)
 
 
 def test_watch_evaluate_all_eof_is_cancelled(tmp_path, monkeypatch, capsys):

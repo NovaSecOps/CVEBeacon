@@ -243,6 +243,7 @@ class EvaluationResult:
     evaluated: int = 0
     events: int = 0
     by_kind: tuple[tuple[str, int], ...] = ()
+    initial_sync_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1208,7 +1209,10 @@ class WatchStore:
 
     @staticmethod
     def _evaluation_result(
-        evaluated: int, created: dict[str, int]
+        evaluated: int,
+        created: dict[str, int],
+        *,
+        initial_sync_pending: bool = False,
     ) -> EvaluationResult:
         by_kind = tuple(
             (kind, created[kind]) for kind in EVENT_KINDS if created.get(kind)
@@ -1217,6 +1221,7 @@ class WatchStore:
             evaluated=evaluated,
             events=sum(created.values()),
             by_kind=by_kind,
+            initial_sync_pending=initial_sync_pending,
         )
 
     def evaluate_touched(
@@ -1273,10 +1278,24 @@ class WatchStore:
         initial: bool = True,
         limit: int = EVALUATION_BATCH,
     ) -> EvaluationResult:
-        """Evaluate every stored CVE, in batches, without consuming the queue."""
+        """Evaluate every stored CVE, in batches, without consuming the queue.
+
+        When a ``backfill`` or ``full`` database has finished its initial sync
+        and still owes the initial evaluation, this pass closes initialization
+        the same way ``watch run`` does: it records ``initial_evaluated_at`` and
+        clears the touch queue in one transaction. While the initial sync is
+        incomplete, initialization stays open and the queue is kept.
+        """
         if limit < 1:
             raise StateError("watch evaluation batch size must be positive")
         self.initialize()
+        metadata = self.metadata()
+        initial_pending = (
+            initial
+            and metadata.get("initial_mode") in ("backfill", "full")
+            and "initial_evaluated_at" not in metadata
+        )
+        close_initial = initial_pending and "initialized_at" in metadata
         evaluated = 0
         created: dict[str, int] = {}
         last = ""
@@ -1298,7 +1317,17 @@ class WatchStore:
                     created[kind] = created.get(kind, 0) + count
                 evaluated += len(identifiers)
                 last = identifiers[-1]
-        return self._evaluation_result(evaluated, created)
+        if close_initial:
+            with self.transaction() as db:
+                db.execute("DELETE FROM watch_touched")
+                self._set_meta(
+                    db, {"initial_evaluated_at": _timestamp(self._clock)}
+                )
+        return self._evaluation_result(
+            evaluated,
+            created,
+            initial_sync_pending=initial_pending and not close_initial,
+        )
 
     def events(
         self,

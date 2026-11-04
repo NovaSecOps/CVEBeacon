@@ -595,12 +595,15 @@ rule sets `old_cves = "alert"`.
 An evaluation during the first sync of a database in `backfill` or `full` mode
 marks its `match` events `initial = 1`. `cvebeacon watch evaluate --all` marks
 only the `match` events it creates as initial; escalations keep `initial = 0`.
-It requires `--yes` or a confirmation. `initial_evaluated_at` is set only after
-an initial evaluation whose sync had no source failures, so a later clean sync
-can finish an interrupted initial window. Initial events are intended for one
-summary digest rather than individual alerts. A baseline first sync stores
-no history, so it produces no events. Later syncs evaluate only the CVEs
-touched by that sync.
+It always does this, including after initialization is closed, so re-evaluating
+after a rule change produces a summary digest instead of individual alerts. It
+requires `--yes` or a confirmation. Once the initial sync has completed,
+`evaluate --all` also records `initial_evaluated_at` and clears the touch queue
+it evaluated, closing initialization. Before that, for example after an
+interrupted full history, initialization stays open and the command says so.
+Initial events are intended for one summary digest rather than individual
+alerts. A baseline first sync stores no history, so it produces no events.
+Later syncs evaluate only the CVEs touched by that sync.
 
 ## Vendor and product data
 
@@ -794,11 +797,11 @@ The first sync chooses what history to build:
 
 `initialized_at` is set only when an initial run reaches its last window. A
 resumed initial run continues from the stored cursor and does not ask for
-confirmation again. `initial_evaluated_at` is set only after the initial
-evaluation completes during a sync with no source failures; until then, later
-runs keep `initial = 1` for matches and backlog matches. `initial_window_start`
-is the boundary used by the `old_cves` policy in baseline, backfill, and full
-mode.
+confirmation again. `initial_evaluated_at` is set after an initial evaluation
+completes during a clean sync, or by `watch evaluate --all` once `initialized_at`
+is set; until then, later runs keep `initial = 1` for matches and backlog
+matches. `initial_window_start` is the boundary used by the `old_cves` policy
+in baseline, backfill, and full mode.
 
 After the first sync, `nvd_cursor` advances to the end of the window that was
 read. Later runs start `overlap_minutes` before that cursor and end at the
