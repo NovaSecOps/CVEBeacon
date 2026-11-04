@@ -19,6 +19,7 @@ from cvebeacon.scheduling import (
     _cron_lines,
     _current_windows_account,
     _describe_windows_xml,
+    _lookup_account_sid,
     _windows_access_denied,
     _windows_xml,
     _without_managed_block,
@@ -666,6 +667,42 @@ def test_windows_access_denied_detects_signed_and_unsigned_text():
     assert _windows_access_denied("-2147024891", 1)
     assert _windows_access_denied("2147942405", 1)
     assert _windows_access_denied("0X80070005", 1)
+
+
+def test_windows_status_resolves_a_sid_account():
+    sid = "S-1-5-21-1111111111-2222222222-3333333333-1003"
+    text = (
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        f"<Principals><Principal><UserId>{sid}</UserId>"
+        "<LogonType>Password</LogonType></Principal></Principals>"
+        "<Actions><Exec><Command>cvebeacon</Command><Arguments>scan</Arguments>"
+        "</Exec></Actions></Task>"
+    )
+    resolved = _describe_windows_xml(
+        text, sid_resolver=lambda _sid: r"HOST\cvb-smoke"
+    )
+    assert f"Account: HOST\\cvb-smoke ({sid})" in resolved
+    unresolved = _describe_windows_xml(text, sid_resolver=lambda _sid: None)
+    assert f"Account: {sid}" in unresolved
+    assert "(" not in unresolved.split("Account: ", 1)[1]
+
+
+def test_windows_status_leaves_a_named_account_alone():
+    text = (
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        "<Principals><Principal><UserId>HOST\\svc</UserId>"
+        "<LogonType>Password</LogonType></Principal></Principals>"
+        "<Actions><Exec><Command>cvebeacon</Command><Arguments>scan</Arguments>"
+        "</Exec></Actions></Task>"
+    )
+    text = _describe_windows_xml(text, sid_resolver=lambda _sid: "SHOULD NOT APPEAR")
+    assert "Account: HOST\\svc" in text
+    assert "SHOULD NOT APPEAR" not in text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs a non-Windows host")
+def test_sid_lookup_is_unavailable_off_windows():
+    assert _lookup_account_sid("S-1-5-21-1-2-3-1003") is None
 
 
 def test_windows_status_treats_interactive_token_or_password_as_logged_off():
