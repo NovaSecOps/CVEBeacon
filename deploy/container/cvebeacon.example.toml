@@ -18,3 +18,25 @@ enabled = false
 
 [notifications.email]
 enabled = false
+
+# Watch mode keeps CVE history and delivers alerts. See docs/WATCH.md.
+# The Compose watch and run profiles load ./cvebeacon.env (mode 0600) when it
+# exists; put channel secrets and NVD_API_KEY there.
+# With no database setting, the watch database is cvebeacon-watch.db beside the
+# [state] database, so in this container it is written to /state.
+[watch]
+enabled = false
+sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
+initial = "baseline"
+
+[[watch.rules]]
+name = "critical"
+condition = { cvss_min = 9.0 }
+channels = ["soc-webhook"]
+
+[watch.channels.soc-webhook]
+type = "webhook"
+enabled = false
+url = "https://example.invalid/cvebeacon"
+header_name = "X-CVEBeacon-Secret"
+header_value_env = "CVEBEACON_HOOK_SECRET"
