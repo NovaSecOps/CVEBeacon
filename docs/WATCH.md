@@ -156,7 +156,8 @@ application permission such as `Mail.Send` for the sender mailbox. `cc` and
 `bcc` recipients are sent as Graph `ccRecipients` and `bccRecipients`.
 `format = "html"` sends the same HTML document as `contentType: "HTML"`; the
 plain-text body is still generated from the same facts and is what
-`format = "text"` sends.
+`format = "text"` sends. Graph cannot send both parts; with `format = "html"`
+only the HTML body is sent.
 
 ### Teams
 
@@ -236,7 +237,8 @@ guesses the name can read the alerts. Use a unique topic, a token, or a
 self-hosted ntfy server for private alerts.
 
 The body is plain text and does not repeat the title; the title is sent in the
-`Title` header. Subjects use ASCII, so the header needs no RFC 2047 encoding.
+`Title` header. That header is ASCII-only: accented characters in a pt-PT
+subject are replaced with `?`, while the body keeps the full text.
 
 ### Gotify
 
@@ -478,8 +480,10 @@ events each. Each document is one delivery attempt for exactly its rows.
 Provider limits are respected by splitting at line boundaries into numbered
 parts: Telegram 4,096 characters, Discord 2,000, Slack 3,800, Matrix 30,000,
 Teams about 25 KB of card text, and ntfy 4,096. The Matrix, Teams and ntfy limits
-are counted in UTF-8 bytes. Email bodies are capped at 1,000,000 characters
-(the HTML part is counted too) and still apply `max_items`.
+are counted in UTF-8 bytes. When an HTML part is sent, the decoded plain-text
+body and the HTML document are kept under 1,000,000 characters together for
+SMTP, and the HTML body alone for Graph; `format = "text"` keeps the earlier
+text-only behavior. Email still applies `max_items`.
 
 Links: the NVD detail page is always present, the CVE.org record is always
 present, the EUVD detail page appears when an EUVD id exists, and the CISA KEV
@@ -489,9 +493,10 @@ catalog link appears when the CVE is in KEV.
 
 `format = "html"` is available on `smtp` and `graph` channels and defaults to
 `"text"`, so existing configurations are unchanged. The key is rejected on
-other channel types. The HTML part is generated from the same message model as
-the plain-text part, not from a second content path, and both carry the same
-facts. An alert shows a header line per CVE with
+other channel types. Use `html` for mailboxes read by people; `text` is the
+compatibility default. The HTML part is generated from the same message model
+as the plain-text part, not from a second content path, and both carry the
+same facts. An alert shows a header line per CVE with
 its label and CVSS, the EPSS, KEV, and exploitation fields, the publication and
 first-seen line, the reported line when present, the description, the matching
 rules, and the links. A digest shows a heading, a section per rule with its
@@ -509,18 +514,21 @@ mode and in Outlook.
 Every dynamic value is HTML-escaped, and links use only the fixed NVD, CVE.org,
 EUVD, and CISA KEV URL builders with percent-quoted identifiers. A CVE
 description, rule name, reporter, or note therefore renders as inert text even
-when it contains HTML or Markdown. The email channels keep a 1,000,000-character
-limit for the plain-text body and apply it to the HTML part too, so a message is
-shortened rather than sent over the limit.
+when it contains HTML or Markdown. The size unit is decoded characters:
+SMTP counts its plain-text and HTML parts together against 1,000,000, while
+Graph counts only the HTML body it actually sends. A message is shortened
+rather than sent over the limit; a fixed summary that cannot fit is a
+controlled delivery failure. Text-only mail keeps the earlier behavior.
 
 `[watch] language` selects the message catalog. Supported languages are `"en"`
 and `"pt-PT"`; the default is `"en"`. Any channel can set its own `language`,
-so a Portuguese client channel and an English SOC channel can coexist. CVE
-identifiers, CVSS, EPSS, KEV, SSVC, provider names, rule names, and URLs are
-never translated, and dates stay ISO `YYYY-MM-DD` or `HH:MM UTC`. CLI output
-(`watch events`, `watch status`, and error messages) stays English in this
-phase; only delivered messages, notices, subjects, and test messages use the
-catalog.
+so a Portuguese client channel and an English SOC channel can coexist. The
+generic webhook's stable JSON document stays English and is independent of the
+catalog; only its test `message` is localised. CVE identifiers, CVSS, EPSS,
+KEV, SSVC, provider names, rule names, and URLs are never translated, and
+dates stay ISO `YYYY-MM-DD` or `HH:MM UTC`. CLI output (`watch events`,
+`watch status`, and error messages) stays English in this phase; only
+delivered messages, notices, subjects, and test messages use the catalog.
 
 To add a language, copy the `en` dictionary in `src/cvebeacon/watch/catalog.py`,
 translate its values, and add the language name to `SUPPORTED_LANGUAGES`. Keep
