@@ -762,6 +762,16 @@ The EU KEV dump shares this state: it is retried only after a successful EUVD
 request in the same run. A sync with only `eu_kev`, or one where EUVD never
 succeeds, still fails the dump's first 403 immediately.
 
+Pages are accumulated until the chunk's pinned total is complete. A 403 that
+recurs at the same page therefore blocks that sub-chunk on every run: the
+current run and the next both restart it from its first page, and the budget
+only helps a temporary throttle. Progress inside an incomplete chunk is not
+retained. A page cursor or per-page commits would be a separate change.
+
+This backoff belongs to watch sync. Scan and package-query EUVD lookups use a
+separate, unpaced search adapter; they do not use this budget and report a
+failed EUVD source for that asset instead.
+
 A page that repeats an EUVD id restarts the chunk through the same bounded
 retry path, and the distinct item count must equal the pinned total before the
 chunk commits. A failed chunk leaves the cursor at the previous chunk.
