@@ -163,6 +163,24 @@ def test_many_targets_fit_fixed_argv_and_share_total_deadline(tmp_path, monkeypa
     assert calls == [119.0, 50.0]
 
 
+def test_subprocess_timeout_never_exceeds_configured_job_timeout(tmp_path, monkeypatch):
+    candidate = job(timeout=120)
+    monkeypatch.setattr(nmap, "executable", lambda name: "/trusted/nmap")
+    monkeypatch.setattr(nmap, "_data_directory", lambda binary: Path("/trusted/nmap-data"))
+    monkeypatch.setattr(nmap, "parse_xml", lambda output, **bounds: dict(observations=[], observed_targets=list(bounds["targets"]), backend_version="synthetic", coverage="complete"))
+    # A monotonic reading one ULP below 512.0 makes the floating-point
+    # remaining-time subtraction exceed the configured timeout by a few ULPs.
+    clock = iter((512.0, 511.99999999999994))
+    monkeypatch.setattr(nmap.time, "monotonic", lambda: next(clock))
+    timeouts = []
+    def fake_run(command, **settings):
+        timeouts.append(settings["timeout"])
+        return 0, b"synthetic"
+    monkeypatch.setattr(nmap, "run", fake_run)
+    assert nmap.run_discovery(candidate, scratch=tmp_path)["coverage"] == "complete"
+    assert timeouts == [candidate["timeout"]]
+
+
 @pytest.mark.parametrize("kind", ["file", "directory"])
 def test_existing_real_user_fallback_fails_without_reading_contents(tmp_path, monkeypatch, kind):
     fallback = tmp_path / "synthetic-config-fallback"

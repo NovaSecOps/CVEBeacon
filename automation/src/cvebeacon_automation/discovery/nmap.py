@@ -386,7 +386,7 @@ def run_discovery(job: dict, *, scratch: Path) -> dict:
         # Fixed target batches also fit the shared process helper's argv bound.
         for offset in range(0, len(targets), 32):
             batch = targets[offset:offset + 32]
-            remaining = deadline - time.monotonic()
+            remaining = min(job["timeout"], deadline - time.monotonic())
             if remaining < 1:
                 raise AutomationError("process_timeout")
             command = [binary, "--unprivileged", "-n", "-Pn", "-sT", "-sV", "--version-light", "--open",
