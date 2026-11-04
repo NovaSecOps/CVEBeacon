@@ -419,7 +419,9 @@ def test_users_database_detects_replacement_between_check_and_open(
 
     def swapping_connect(database, *args, **kwargs):
         path.unlink()
-        path.write_bytes(b"")
+        # Owner-only like the original, so only the replacement is detected
+        # regardless of the process umask.
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
         return real_connect(database, *args, **kwargs)
 
     monkeypatch.setattr(users_module.sqlite3, "connect", swapping_connect)
