@@ -418,6 +418,10 @@ def _run_all(config: AppConfig, *, yes: bool = False) -> int:
         return 3
     if 4 in parts:
         return 4
+    if 1 in parts:
+        return 1
+    if any(code != 0 for code in parts):
+        return 2
     return 0
 
 

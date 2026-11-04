@@ -60,7 +60,15 @@ It is one cron line or one Windows task action, never shell chaining.
 - `2` when either part failed;
 - otherwise `3` when any notification or delivery failed;
 - otherwise `4` for coverage warnings or degraded sources;
+- otherwise `1` when either part was cancelled;
 - otherwise `0`.
+
+Any other unexpected part code is also reported as `2` when no `2`, `3` or
+`4` result takes precedence. A cancelled part is reported as `1` only when no
+part failed or warned. In particular, a scheduled `run` exits `1` when the
+first `full` history sync needs an interactive confirmation and stdin is not a
+terminal. Configure `baseline` or `backfill` for unattended first runs, or run
+`watch sync --yes` once before the first scheduled run.
 
 Inspect or remove the owned schedule:
 

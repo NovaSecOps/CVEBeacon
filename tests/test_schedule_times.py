@@ -392,7 +392,20 @@ def test_cli_schedule_rejects_watch_without_watch_mode(tmp_path, capsys):
 
 @pytest.mark.parametrize(
     "scan_code,watch_code,expected",
-    [(0, 0, 0), (4, 0, 4), (0, 3, 3), (2, 0, 2), (3, 2, 2), (3, 4, 3)],
+    [
+        (0, 0, 0),
+        (4, 0, 4),
+        (0, 3, 3),
+        (2, 0, 2),
+        (3, 2, 2),
+        (3, 4, 3),
+        (0, 1, 1),
+        (1, 0, 1),
+        (1, 2, 2),
+        (1, 3, 3),
+        (1, 4, 4),
+        (0, 9, 2),
+    ],
 )
 def test_cli_run_combines_exit_codes(
     tmp_path, monkeypatch, scan_code, watch_code, expected

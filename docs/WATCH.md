@@ -788,7 +788,9 @@ The first sync chooses what history to build:
 - `full`: reads NVD history from 1999-01-01 and EUVD history from 1999-01-01.
   Before starting it prints an estimate of the NVD windows, request counts, and
   the one EPSS file per day, then requires `--yes` or an interactive
-  confirmation. When stdin is closed, the prompt counts as "no".
+  confirmation. When stdin is not a terminal, it prints a one-line instruction
+  and cancels instead of waiting; run `watch sync --yes` once before the first
+  scheduled run.
 
 `initialized_at` is set only when an initial run reaches its last window. A
 resumed initial run continues from the stored cursor and does not ask for
