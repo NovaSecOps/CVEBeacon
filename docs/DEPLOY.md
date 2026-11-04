@@ -1,7 +1,8 @@
 # Deployment
 
-One Linux VM, either from a source checkout or with Docker. Details are in the
-[setup guide](SETUP.md), [watch mode](WATCH.md), and [scheduling](SCHEDULING.md).
+One Linux VM or one Windows host, installed from a source checkout or with
+Docker. Details are in the [setup guide](SETUP.md), [watch mode](WATCH.md), and
+[scheduling](SCHEDULING.md).
 
 ## A. Linux VM, native install
 
@@ -304,6 +305,116 @@ sudo systemctl list-timers cvebeacon-container.timer
 
 `watch status` should report `/state/cvebeacon-watch.db`; exit codes match the native install.
 
-## C. Resource notes
+## C. Windows (native)
+
+Windows 11 or Windows Server 2019 or newer, with Python 3.11 or newer from
+python.org or `winget install Python.Python.3.12` (check `py -3.12 --version`),
+Git for Windows, and outbound HTTPS to the [network requirements](NETWORK_REQUIREMENTS.md)
+hosts. Use a dedicated local or domain account such as `svc-cvebeacon`; keep the
+checkout and virtual environment in `C:\CVEBeacon\app`, and configuration,
+state and secrets in `C:\CVEBeacon\data`.
+
+### Prepare the account and directories
+
+In an elevated PowerShell, create the account if needed and both directories; replace `CVEHOST` with the computer or domain name:
+
+```powershell
+New-LocalUser svc-cvebeacon -Password (Read-Host -AsSecureString "Password") -PasswordNeverExpires
+New-Item -ItemType Directory -Force C:\CVEBeacon\app, C:\CVEBeacon\data | Out-Null
+icacls C:\CVEBeacon\app /grant "CVEHOST\svc-cvebeacon:(OI)(CI)M"
+icacls C:\CVEBeacon\data /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F" "CVEHOST\svc-cvebeacon:(OI)(CI)F"
+```
+
+`/inheritance:r` drops inherited permissions, and `(OI)(CI)` applies the grants
+to new files and subdirectories, including `data\secrets`. On non-English
+Windows, use the localized names or equivalent SIDs.
+
+### Install
+
+Sign in as the service account, or run `runas /user:CVEHOST\svc-cvebeacon powershell`:
+
+```powershell
+git clone https://github.com/NovaSecOps/CVEBeacon.git C:\CVEBeacon\app
+py -3.12 -m venv C:\CVEBeacon\app\.venv
+C:\CVEBeacon\app\.venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2"
+C:\CVEBeacon\app\.venv\Scripts\python.exe -m pip install C:\CVEBeacon\app
+C:\CVEBeacon\app\.venv\Scripts\cvebeacon.exe setup --config C:\CVEBeacon\data\cvebeacon.toml
+```
+
+The wizard writes `data\cvebeacon.toml` and secret files under `data\secrets`,
+and prints an NTFS reminder; the POSIX mode check does not apply. Leave the
+schedule question for later. Load the command as a function:
+
+```powershell
+function cb { & C:\CVEBeacon\app\.venv\Scripts\cvebeacon.exe --config C:\CVEBeacon\data\cvebeacon.toml @args }
+```
+
+Secrets can instead be environment variables named by the configuration: run
+`[Environment]::SetEnvironmentVariable('NVD_API_KEY', '<value>', 'User')` as the
+service account, or use `setx`. A scheduled task reads that account's persisted
+environment when it starts.
+
+### First day
+
+Same as A: set `initial` and, for `backfill`, `backfill_days`, then `cb watch run`.
+A baseline stores silently; `cb watch status` shows the database path, cursors,
+counts and pending deliveries, and `cb watch notify test soc-email` checks a channel.
+
+### Schedule it
+
+From an elevated PowerShell running as the service account (or via `runas`):
+
+```powershell
+cb schedule install --times 07:00,19:00 --command watch --run-logged-out --yes
+cb schedule status
+```
+
+`--run-logged-out` uses S4U: the task runs whether the account is signed in or
+not without a stored password, and keeps least privilege. HTTPS works;
+Windows-authenticated shares do not. Creation normally needs elevation; a denied
+`schtasks` prints a one-line hint. Check Task Scheduler, then run it now:
+
+```powershell
+schtasks /Run /TN "CVEBeacon Monitor"
+schtasks /Query /TN "CVEBeacon Monitor" /V /FO LIST
+```
+
+Read `Last Result` with the [exit codes](DEVELOPMENT.md#exit-codes). A scheduled
+`watch run` needs an unattended first run: use `baseline` or `backfill`, or run
+`cb watch sync --yes` once first.
+
+### Upgrade
+
+As the service account, disable the task, wait for a running job, back up the
+watch database, upgrade, and re-enable:
+
+```powershell
+schtasks /Change /TN "CVEBeacon Monitor" /DISABLE
+$Backup = "C:\CVEBeacon\data\backup-$(Get-Date -Format yyyyMMdd-HHmm)"
+New-Item -ItemType Directory $Backup | Out-Null; Copy-Item C:\CVEBeacon\data\cvebeacon-watch.db* $Backup
+git -C C:\CVEBeacon\app pull --ff-only
+C:\CVEBeacon\app\.venv\Scripts\python.exe -m pip install C:\CVEBeacon\app
+schtasks /Change /TN "CVEBeacon Monitor" /ENABLE
+```
+
+`watch status` reports the database path when it is not the default; copy `-wal` and `-shm` only while the task is disabled.
+
+### Docker Desktop or WSL 2 on Windows
+
+Docker Desktop with the WSL 2 backend runs the Linux image and Section B's
+compose file as-is: use `C:\CVEBeacon\docker` in place of `/srv/cvebeacon`,
+build `cvebeacon:local` from the checkout as in B, and let Task Scheduler call
+`docker compose -f C:\CVEBeacon\docker\compose.yml --profile watch run -T --rm
+watch` instead of cron or systemd. Docker Desktop has licensing terms for larger
+companies and is not supported on Windows Server; a server needs WSL 2 with
+nested virtualization or a Linux VM.
+
+On WSL 2, follow Section A inside the distribution; scheduling inside WSL needs
+systemd in `/etc/wsl.conf`. A Windows task can instead call `wsl.exe -d <distro>
+-u cvebeacon -- /opt/cvebeacon/.venv/bin/cvebeacon --config
+/var/lib/cvebeacon/cvebeacon.toml run`, and that account must be able to start
+the distribution. On Windows Server, native Windows is the simplest path.
+
+## D. Resource notes
 
 System requirements are still being measured; see [validation](VALIDATION.md) and the [README](../README.md).
