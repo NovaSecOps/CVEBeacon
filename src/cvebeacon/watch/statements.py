@@ -607,7 +607,7 @@ def _check_members(infos: Sequence[zipfile.ZipInfo]) -> None:
                 "statement template contains a member larger than "
                 f"{MAX_MEMBER_BYTES} bytes"
             )
-        if info.compress_size > info.file_size + 1024:
+        if info.compress_size > info.file_size * 2 + 1024:
             raise CVEBeaconError(
                 "statement template contains an invalid member size"
             )
@@ -673,7 +673,8 @@ def render_docx(template: bytes, fields: Mapping[str, str]) -> bytes:
         processed: dict[str, str] = {}
         scanned_total = 0
         for info in infos:
-            if not (info.filename.endswith(".xml") or info.filename.endswith(".rels")):
+            suffix = info.filename.casefold()
+            if not (suffix.endswith(".xml") or suffix.endswith(".rels")):
                 continue
             data = _read_member(source, info)
             scanned_total += len(data)
