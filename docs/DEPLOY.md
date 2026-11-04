@@ -371,33 +371,23 @@ counts and pending deliveries, and `cb watch notify test soc-email` checks a cha
 
 ### Schedule it
 
-Pick one registration flow. Both must show
-`Runs as: CVEHOST\svc-cvebeacon (S4U, while logged off)` before `--yes`. S4U
-stores no password: HTTPS works, Windows-authenticated shares do not.
-CVEBeacon registers the S4U task through the Task Scheduler COM API, retrying
-with the XML principal and then passwordless `schtasks /RU ... /NP`; it never
-prompts for or stores a password. Removal and status still use `schtasks`.
-
-**The service account registers its own task.** In the service account's shell
-(`runas /user:CVEHOST\svc-cvebeacon powershell`), define `cb` there, then:
+The task must be registered by the account that runs it. Windows does not allow
+an administrator to register a passwordless S4U task for another account; doing
+so would require storing that account's password. Sign in as the service account
+(`runas /user:CVEHOST\svc-cvebeacon powershell`), define `cb` there, and check
+that the plan shows `Runs as: CVEHOST\svc-cvebeacon (S4U, while logged off)`
+before `--yes`:
 
 ```powershell
 cb schedule install --times '07:00,19:00' --command watch --run-logged-out --yes
 cb schedule status
 ```
 
-**An administrator registers for the service account.** From an elevated
-administrator shell (define `cb` there too), name the account explicitly:
-
-```powershell
-cb schedule install --times '07:00,19:00' --command watch --run-logged-out --account CVEHOST\svc-cvebeacon --yes
-cb schedule status
-```
-
-The creator or an administrator can later change or remove the task; if an
-administrator created it, rerun `schedule remove` from that same context. Check
-Task Scheduler: General shows `CVEHOST\svc-cvebeacon` and "Run whether user is
-logged on or not"; Triggers shows 07:00 and 19:00. Then test it immediately:
+The service account created the task and can change or remove it; members of
+Administrators can manage any task, but they cannot register this passwordless
+task for the service account without its password. Check Task Scheduler: General
+shows `CVEHOST\svc-cvebeacon` and "Run whether user is logged on or not";
+Triggers shows 07:00 and 19:00. Then test it immediately:
 
 ```powershell
 schtasks /Run /TN "CVEBeacon Monitor"
@@ -411,11 +401,10 @@ A scheduled `watch run` needs an unattended first run: use `baseline` or
 
 ### Upgrade
 
-Run the first and last commands as the task owner (an administrator for an
-`--account` task, or the service account for a self-registered task). Wait for
-a running job to finish. Run the backup, pull and pip commands as the service
-account that owns `C:\CVEBeacon\app`; do not run Git maintenance for that
-checkout as an administrator.
+Run the first and last commands as the service account that owns the task. Wait
+for a running job to finish. Run the backup, pull and pip commands as the same
+service account; do not run Git maintenance for its checkout as an
+administrator.
 
 ```powershell
 # Task owner
