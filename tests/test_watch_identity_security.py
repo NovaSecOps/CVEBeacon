@@ -1250,6 +1250,67 @@ def test_concurrent_bootstrap_creates_only_one_administrator(tmp_path):
     assert sum(user.is_admin for user in store.users()) == 1
 
 
+def test_concurrent_creation_between_check_and_open_is_revalidated(
+    tmp_path, monkeypatch
+):
+    import shutil
+
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    other = UserStore(tmp_path / "concurrent-users.db", clock=lambda: NOW)
+    other.add("alice", password=PASSWORD)
+    import cvebeacon.watch.users as users_module
+    import sqlite3 as sqlite_module
+
+    real_connect = sqlite_module.connect
+    injected = []
+
+    def creating_connect(database, *args, **kwargs):
+        if not injected:
+            injected.append(True)
+            if not path.exists():
+                os.close(
+                    os.open(
+                        path,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                )
+            # The second first-time opener finished creating the account file
+            # after this opener checked for it but before SQLite opened it.
+            shutil.copyfile(other.path, path)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(users_module.sqlite3, "connect", creating_connect)
+    store.initialize()
+    assert store.users()[0].username == "alice"
+
+
+def test_concurrent_write_while_opening_an_existing_database_is_not_replacement(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "users.db"
+    store = UserStore(path, clock=lambda: NOW)
+    store.initialize()
+    import cvebeacon.watch.users as users_module
+    import sqlite3 as sqlite_module
+
+    real_connect = sqlite_module.connect
+    injected = []
+
+    def writing_connect(database, *args, **kwargs):
+        if not injected:
+            injected.append(True)
+            with real_connect(path) as other:
+                other.execute(
+                    "INSERT INTO cb_user_meta(key,value) VALUES ('race','1')"
+                )
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(users_module.sqlite3, "connect", writing_connect)
+    assert store.users() == ()
+
+
 def test_foreign_read_only_ancestor_is_not_trusted(tmp_path, monkeypatch):
     if os.name != "posix":
         pytest.skip("POSIX ownership model")

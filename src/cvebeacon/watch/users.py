@@ -260,19 +260,109 @@ class UserStore:
             current = parent
         return tuple(identities)
 
-    def _connect(self, *, create: bool = True) -> sqlite3.Connection:
+    @staticmethod
+    def _path_state(path: Path) -> tuple[bool, bool]:
+        """Return whether the path exists and whether it is still empty.
+
+        A final symlink counts as existing; the open path rejects it later.
+        """
+        try:
+            details = os.lstat(path)
+        except FileNotFoundError:
+            return False, False
+        return True, details.st_size == 0
+
+    @contextmanager
+    def _creation_lock(self, path: Path) -> Iterator[None]:
+        """Serialize the first open that may create the account file.
+
+        The lock file lives beside the database in the same protected
+        directory. An advisory lock is released when the process exits, so a
+        crash cannot leave a permanent lock. A creator that does not cooperate
+        with the lock is still checked by the content verification below.
+        """
+        lock_path = path.with_name(path.name + ".lock")
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except OSError as exc:
+            raise StateError(
+                f"cannot open CVEBeacon user database lock {lock_path}: {exc}"
+            ) from exc
+        acquired = False
+        try:
+            try:
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode):
+                    raise StateError(
+                        "CVEBeacon user database lock must be a regular file"
+                    )
+                if os.name == "posix":
+                    if details.st_uid != os.geteuid():
+                        raise StateError(
+                            "CVEBeacon user database lock must be owned by "
+                            "this account"
+                        )
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                else:
+                    import msvcrt
+
+                    if not details.st_size:
+                        os.write(descriptor, b"0")
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            except OSError as exc:
+                raise StateError(
+                    f"cannot lock CVEBeacon user database {path}: {exc}"
+                ) from exc
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                if os.name == "posix":
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                else:
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            os.close(descriptor)
+
+    def _connect(
+        self,
+        *,
+        create: bool = True,
+        _creation_locked: bool = False,
+        _was_missing: bool = False,
+    ) -> sqlite3.Connection:
         try:
             parent = self.path.parent
             if create:
                 ensure_private_directory(parent)
             resolved_parent = parent.resolve()
             path = resolved_parent / self.path.name
-            connection = None
+            present, empty = self._path_state(path)
+            directory_chain = None
             if os.name == "posix":
                 directory_chain = self._trusted_directory_chain(
                     resolved_parent
                 )
-                parent_identity = directory_chain[0]
+            if create and not _creation_locked and (not present or empty):
+                with self._creation_lock(path):
+                    return self._connect(
+                        create=create,
+                        _creation_locked=True,
+                        _was_missing=not present or empty,
+                    )
+            connection = None
+            if os.name == "posix":
                 flags = (
                     os.O_RDWR if create else os.O_RDONLY
                 ) | getattr(os, "O_NOFOLLOW", 0)
@@ -330,22 +420,29 @@ class UserStore:
                     raise StateError(
                         "CVEBeacon user database was replaced while opening"
                     ) from exc
+                metadata_changed = (
+                    current.st_size,
+                    getattr(current, "st_mtime_ns", 0),
+                ) != expected[2:]
                 if (
                     not stat.S_ISREG(current.st_mode)
-                    or (
-                        current.st_dev,
-                        current.st_ino,
-                        current.st_size,
-                        getattr(current, "st_mtime_ns", 0),
-                    )
-                    != expected
+                    or (current.st_dev, current.st_ino) != expected[:2]
                     or self._trusted_directory_chain(resolved_parent)
                     != directory_chain
+                    or (
+                        metadata_changed
+                        and not _was_missing
+                        and self._store_id is None
+                    )
                 ):
                     connection.close()
                     raise StateError(
                         "CVEBeacon user database was replaced while opening"
                     )
+                # A size or timestamp change is either the creator still
+                # initializing the file or a concurrent account write. The
+                # read-only content check below proves it is still the same
+                # store before the change is accepted.
             else:
                 created = create and not path.exists()
                 if not create and not path.exists():
@@ -445,7 +542,41 @@ class UserStore:
             connection.close()
 
     def initialize(self, *, create: bool = True) -> None:
-        with closing(self._connect(create=create)) as db:
+        if create:
+            try:
+                parent = self.path.parent
+                ensure_private_directory(parent)
+                resolved_parent = parent.resolve()
+                if os.name == "posix":
+                    self._trusted_directory_chain(resolved_parent)
+                path = resolved_parent / self.path.name
+                present, empty = self._path_state(path)
+            except OSError as exc:
+                raise StateError(
+                    f"cannot open CVEBeacon user database {self.path}: {exc}"
+                ) from exc
+            if not present or empty or self._store_id is None:
+                with self._creation_lock(path):
+                    self._initialize(
+                        create=create,
+                        creation_locked=True,
+                        was_missing=not present or empty,
+                    )
+                return
+        self._initialize(
+            create=create, creation_locked=False, was_missing=False
+        )
+
+    def _initialize(
+        self, *, create: bool, creation_locked: bool, was_missing: bool
+    ) -> None:
+        with closing(
+            self._connect(
+                create=create,
+                _creation_locked=creation_locked,
+                _was_missing=was_missing,
+            )
+        ) as db:
             for statement in _SCHEMA:
                 db.execute(statement)
             self._migrate_email_keys(db)
