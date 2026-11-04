@@ -548,7 +548,9 @@ def test_security_documentation_is_explicit():
     assert "service account" in watch.casefold()
     assert "planned dashboard" in watch.casefold()
     assert "must be owned by" in watch.casefold()
-    assert "cvebeacon account (or root)" in watch.casefold()
+    assert "cvebeacon account or root" in watch.casefold()
+    assert "sticky-bit protected" in watch.casefold()
+    assert "read-only" in watch.casefold()
     assert "highest legacy row id" in watch.casefold()
     assert "total rewrite" in watch.casefold()
     assert "not covered by either chain" in watch.casefold()
@@ -915,12 +917,23 @@ def test_invalid_utf8_report_text_is_a_controlled_broken_row(tmp_path, capsys):
     open_service(store).report_cve(IDENTIFIER, by="first")
     open_service(store).report_cve(IDENTIFIER, by="second", force=True)
     with sqlite3.connect(store.path) as db:
-        db.execute("UPDATE watch_report SET by=CAST(X'80' AS TEXT) WHERE id=1")
+        db.execute("UPDATE watch_report SET by=CAST(X'80' AS TEXT)")
     assert store.verify_reports() == 1
     assert cli.main(
         ["--config", str(config.config_path), "watch", "reported", "--verify"]
     ) == 2
     assert "broken at row 1" in capsys.readouterr().err
+    with pytest.raises(StateError, match="invalid"):
+        store.reported_entries()
+    listing = ["--config", str(config.config_path), "watch", "reported"]
+    for extra in (
+        (),
+        ("--all",),
+        ("--all", "--format", "csv"),
+        ("--all", "--format", "json"),
+    ):
+        assert cli.main([*listing, *extra]) == 2
+        assert "invalid" in capsys.readouterr().err
 
 
 def test_invalid_utf8_user_audit_text_is_a_controlled_broken_row(tmp_path):
@@ -1230,3 +1243,48 @@ def test_concurrent_bootstrap_creates_only_one_administrator(tmp_path):
         results = list(pool.map(bootstrap, (1, 2)))
     assert sorted(results) == [False, True]
     assert sum(user.is_admin for user in store.users()) == 1
+
+
+def test_foreign_read_only_ancestor_is_not_trusted(tmp_path, monkeypatch):
+    if os.name != "posix":
+        pytest.skip("POSIX ownership model")
+    child = tmp_path / "foreign"
+    child.mkdir()
+    child.chmod(0o555)
+    real_euid = os.geteuid()
+    monkeypatch.setattr(
+        "cvebeacon.watch.users.os.geteuid", lambda: real_euid + 1
+    )
+    try:
+        with pytest.raises(StateError) as caught:
+            UserStore._trusted_directory_chain(child)
+        assert str(child) in str(caught.value)
+        assert "sticky-bit" in str(caught.value)
+    finally:
+        child.chmod(0o700)
+
+
+def test_credential_version_revokes_proofs_without_clock_order(tmp_path):
+    now = [NOW]
+    store = UserStore(tmp_path / "users.db", clock=lambda: now[0])
+    store.add("alice", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
+    store.add("bob", password=PASSWORD)
+    self_proof = store.authenticate("bob", PASSWORD)
+    admin = store.authenticate("alice", PASSWORD)
+
+    now[0] = NOW - timedelta(seconds=5)
+    reset = PASSWORD + " reset"
+    store.set_password("bob", reset, authorization=admin)
+    with pytest.raises(ConfigurationError, match="credential change"):
+        store.set_password(
+            "bob", PASSWORD + " stale", authorization=self_proof
+        )
+
+    self_proof = store.authenticate("bob", reset)
+    now[0] = NOW - timedelta(seconds=10)
+    store.disable("bob", authorization=admin)
+    store.enable("bob", authorization=admin)
+    with pytest.raises(ConfigurationError, match="credential change"):
+        store.set_password(
+            "bob", PASSWORD + " stale2", authorization=self_proof
+        )

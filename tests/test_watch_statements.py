@@ -24,6 +24,7 @@ from watch_support import NOW, write_config
 from cvebeacon import cli
 from cvebeacon.errors import CVEBeaconError
 from cvebeacon.watch import statements
+from cvebeacon.watch.reporting import ReportService
 from cvebeacon.watch.records import (
     CVSSEntry,
     EUVDUpdate,
@@ -1670,13 +1671,14 @@ def test_statement_uses_current_report_mark_after_rebase(tmp_path, capsys):
     arguments = ['--config', str(config.config_path), 'watch', 'statement', 'CVE-2026-0001', '--out', str(out), '--force']
     assert cli.main(arguments) == 0
     assert 'Reported to clients: not reported' in out.read_text()
-    mark = store.report_cve('CVE-2026-0001', by='operator@example.invalid').entry
+    reporter = ReportService(store, None, 'open')
+    mark = reporter.report_cve('CVE-2026-0001', by='operator@example.invalid').entry
     assert cli.main(arguments) == 0
     text = out.read_text()
     assert 'Reported to clients: yes' in text
     assert 'Reported by: operator@example.invalid' in text
     assert f'Reported at: {mark.at}' in text
-    store.unreport_cve('CVE-2026-0001', by='operator@example.invalid')
+    reporter.unreport_cve('CVE-2026-0001', by='operator@example.invalid')
     assert cli.main(arguments) == 0
     text = out.read_text()
     assert 'Reported to clients: not reported' in text
