@@ -962,6 +962,146 @@ def test_reported_all_shows_notice_delivery_states(tmp_path, capsys):
     assert "notices: hook failed" in capsys.readouterr().out
 
 
+def set_delivery_state(
+    store: WatchStore,
+    event_id: int,
+    status: str,
+    attempts: int,
+    *,
+    error: str | None = None,
+) -> None:
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE watch_delivery SET status=?, attempts=?, last_error=?, "
+            "updated_at=? WHERE event_id=?",
+            (status, attempts, error, NOW.isoformat(), event_id),
+        )
+
+
+def test_combined_retry_flags_keep_notice_audit_order(tmp_path):
+    config = write_config(tmp_path, channels=CHANNELS)
+    store = seed(config)
+    first = store.report_cve(
+        "CVE-2026-0001", by="first", notify_channels=("hook",)
+    )
+    second = store.unreport_cve(
+        "CVE-2026-0001", by="second", notify_channels=("hook",)
+    )
+    third = store.report_cve(
+        "CVE-2026-0001", by="third", notify_channels=("hook",)
+    )
+    assert first.event_id is not None
+    assert second.event_id is not None
+    assert third.event_id is not None
+    set_delivery_state(store, first.event_id, "failed", 10, error="gave up")
+    set_delivery_state(store, second.event_id, "ambiguous", 1, error="timeout")
+    requests: list[httpx.Request] = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    report = deliver(
+        config, store, handler, retry_failed=True, retry_ambiguous=True
+    )
+    assert report.failed is False
+    events = posted_events(requests)
+    assert [event["kind"] for event in events] == [
+        "reported",
+        "unreported",
+        "reported",
+    ]
+    assert [event["notice"]["by"] for event in events] == [
+        "first",
+        "second",
+        "third",
+    ]
+    assert sorted(rows(store)) == [
+        ("hook", "sent", 0),
+        ("hook", "sent", 0),
+        ("hook", "sent", 1),
+    ]
+
+
+def test_cli_combined_retry_flags_keep_notice_order(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, channels=CHANNELS)
+    store = seed(config)
+    first = store.report_cve(
+        "CVE-2026-0001", by="first", notify_channels=("hook",)
+    )
+    second = store.unreport_cve(
+        "CVE-2026-0001", by="second", notify_channels=("hook",)
+    )
+    third = store.report_cve(
+        "CVE-2026-0001", by="third", notify_channels=("hook",)
+    )
+    assert first.event_id is not None
+    assert second.event_id is not None
+    assert third.event_id is not None
+    set_delivery_state(store, first.event_id, "failed", 10, error="gave up")
+    set_delivery_state(store, second.event_id, "ambiguous", 1, error="timeout")
+    requests: list[httpx.Request] = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(cli, "HttpClient", lambda http_config: mock_client(handler))
+    assert cli.main(
+        [
+            "--config",
+            str(config.config_path),
+            "watch",
+            "notify",
+            "--retry-failed",
+            "--retry-ambiguous",
+        ]
+    ) == 0
+    assert "hook (webhook): 3 messages, 3 events sent" in capsys.readouterr().out
+    assert [event["kind"] for event in posted_events(requests)] == [
+        "reported",
+        "unreported",
+        "reported",
+    ]
+
+
+def test_selected_successor_waits_for_an_ambiguous_predecessor(tmp_path):
+    config = write_config(tmp_path, channels=CHANNELS)
+    store = seed(config)
+    first = store.report_cve(
+        "CVE-2026-0001", by="first", notify_channels=("hook",)
+    )
+    second = store.unreport_cve(
+        "CVE-2026-0001", by="second", notify_channels=("hook",)
+    )
+    assert first.event_id is not None
+    assert second.event_id is not None
+    set_delivery_state(store, first.event_id, "ambiguous", 1, error="timeout")
+    requests: list[httpx.Request] = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    report = deliver(
+        config,
+        store,
+        handler,
+        event_ids=(second.event_id,),
+        retry_ambiguous=True,
+    )
+    assert requests == []
+    assert (report.channels[0].messages, report.channels[0].events) == (0, 0)
+    with sqlite3.connect(store.path) as db:
+        statuses = dict(
+            db.execute("SELECT event_id,status FROM watch_delivery")
+        )
+    assert statuses[first.event_id] == "ambiguous"
+    assert statuses[second.event_id] == "pending"
+
+
 def test_channels_without_notify_reported_get_nothing(tmp_path):
     config = write_config(tmp_path, channels=CHANNELS)
     channels = {channel.name: channel for channel in config.watch.channels}
