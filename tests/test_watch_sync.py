@@ -141,20 +141,6 @@ class EUVDFake:
         )
 
 
-def euvd_progress_ranked(config) -> tuple[date, int, int]:
-    """Report monotonic EUVD progress across scan, verify and continuation."""
-    meta = metadata(config)
-    cursor = date.fromisoformat(meta["euvd_cursor"])
-    resume = meta.get("euvd_page_cursor")
-    if resume:
-        payload = json.loads(resume)
-        phase = payload.get("phase", "scan")
-        return cursor, 0 if phase == "scan" else 1, payload["page"]
-    if meta.get("euvd_next_window"):
-        return cursor, 2, 0
-    return cursor, 3, 0
-
-
 def euvd_split_progress(config) -> tuple[date, date, int, int, int]:
     """Order saved first-child, page, verification and continuation work."""
     meta = metadata(config)
@@ -1087,7 +1073,7 @@ def test_euvd_large_window_makes_progress_across_throttled_runs(tmp_path):
     def nvd_request(request):
         return httpx.Response(200, json=nvd_page([]))
 
-    previous: tuple[date, int, int] | None = None
+    previous: tuple[date, date, int, int, int] | None = None
     report = None
     failed_runs = 0
     for run_number in range(20):
@@ -1098,7 +1084,7 @@ def test_euvd_large_window_makes_progress_across_throttled_runs(tmp_path):
             now=NOW + timedelta(minutes=run_number),
             sleep=lambda _: None,
         )
-        current = euvd_progress_ranked(config)
+        current = euvd_split_progress(config)
         assert report.failures in ((), ("euvd",))
         if not report.failures:
             break
@@ -1106,7 +1092,7 @@ def test_euvd_large_window_makes_progress_across_throttled_runs(tmp_path):
             assert current > previous, (run_number, previous, current)
         else:
             # A usable throttled run must have committed a page or a successor.
-            assert current[1] < 3, current
+            assert current[2] >= 0, current
         failed_runs += 1
         previous = current
     else:
@@ -1133,7 +1119,7 @@ def test_euvd_single_large_day_makes_progress_across_throttled_runs(tmp_path):
     def nvd_request(request):
         return httpx.Response(200, json=nvd_page([]))
 
-    previous: tuple[date, int, int] | None = None
+    previous: tuple[date, date, int, int, int] | None = None
     report = None
     failed_runs = 0
     for run_number in range(20):
@@ -1144,7 +1130,7 @@ def test_euvd_single_large_day_makes_progress_across_throttled_runs(tmp_path):
             now=NOW + timedelta(minutes=run_number),
             sleep=lambda _: None,
         )
-        current = euvd_progress_ranked(config)
+        current = euvd_split_progress(config)
         assert report.failures in ((), ("euvd",))
         if not report.failures:
             break
@@ -1152,7 +1138,7 @@ def test_euvd_single_large_day_makes_progress_across_throttled_runs(tmp_path):
             assert current > previous, (run_number, previous, current)
         else:
             # A usable throttled run must have committed a page or a successor.
-            assert current[1] < 3, current
+            assert current[2] >= 0, current
         failed_runs += 1
         previous = current
     else:
@@ -1162,6 +1148,83 @@ def test_euvd_single_large_day_makes_progress_across_throttled_runs(tmp_path):
     assert metadata(config)["euvd_cursor"] == "2026-11-03"
     status = WatchStore(config.watch.database).status(catalogs=("nvd", "euvd"))
     assert status["euvd_items"] == 25_000
+
+
+def test_euvd_progress_ranks_a_started_successor_after_the_saved_one(tmp_path):
+    config = write_config(tmp_path, sources=("nvd", "euvd"))
+    store = WatchStore(config.watch.database)
+    store.set_metadata(
+        {
+            "nvd_cursor": NOW.isoformat(),
+            "euvd_cursor": "2026-11-02",
+            "initialized_at": NOW.isoformat(),
+        }
+    )
+    items = [
+        euvd_item(
+            f"EUVD-a-{index}",
+            cve=f"CVE-2026-{index:05d}",
+            dateUpdated="2026-11-02T00:00:00",
+        )
+        for index in range(100)
+    ]
+    items.extend(
+        euvd_item(
+            f"EUVD-b-{index}",
+            cve=f"CVE-2027-{index:05d}",
+            dateUpdated="2026-11-03T00:00:00",
+        )
+        for index in range(12_000)
+    )
+    fake = EUVDFake(items, limit=2)
+
+    def nvd_request(request):
+        return httpx.Response(200, json=nvd_page([]))
+
+    previous: tuple[date, date, int, int, int] | None = None
+    saw_saved_successor = False
+    saw_started_successor = False
+    report = None
+    failed_runs = 0
+    for run_number in range(400):
+        fake.start_run()
+        report = run(
+            config,
+            handler_for(nvd=nvd_request, euvd=fake),
+            now=NOW + timedelta(minutes=run_number),
+            sleep=lambda _: None,
+        )
+        current = euvd_split_progress(config)
+        if previous is not None:
+            assert current > previous, (run_number, previous, current)
+        else:
+            # A saved successor is usable progress, not finished work.
+            assert current[2] >= 0, current
+        previous = current
+
+        meta = metadata(config)
+        page_cursor = meta.get("euvd_page_cursor")
+        pending = meta.get("euvd_next_window")
+        if page_cursor:
+            if json.loads(page_cursor)["start"] == "2026-11-03":
+                saw_started_successor = True
+        elif pending and json.loads(pending) == {
+            "start": "2026-11-03",
+            "end": "2026-11-03",
+        }:
+            saw_saved_successor = True
+        if not report.failures:
+            break
+        failed_runs += 1
+    else:
+        pytest.fail("a saved EUVD successor did not converge")
+    assert failed_runs > 1
+    assert saw_saved_successor
+    assert saw_started_successor
+    assert report is not None and not report.failures
+    assert metadata(config)["euvd_cursor"] == "2026-11-03"
+    assert metadata(config)["euvd_page_cursor"] == ""
+    assert len(stored_euvd_ids(config)) == 12_100
 
 
 def test_euvd_reorder_across_resume_keeps_an_older_page_item(tmp_path):
@@ -1297,7 +1360,7 @@ def test_euvd_busy_day_at_the_cap_still_reaches_the_next_day(tmp_path):
     def nvd_request(request):
         return httpx.Response(200, json=nvd_page([]))
 
-    previous: tuple[date, int, int] | None = None
+    previous: tuple[date, date, int, int, int] | None = None
     failed_runs = 0
     report = None
     saw_exact_cap_state = False
@@ -1309,14 +1372,14 @@ def test_euvd_busy_day_at_the_cap_still_reaches_the_next_day(tmp_path):
             now=NOW + timedelta(minutes=run_number),
             sleep=lambda _: None,
         )
-        current = euvd_progress_ranked(config)
+        current = euvd_split_progress(config)
         if not report.failures:
             break
         if previous is not None:
             assert current > previous, (run_number, previous, current)
         else:
             # A usable throttled run must have committed a page or a successor.
-            assert current[1] < 3, current
+            assert current[2] >= 0, current
         failed_runs += 1
         previous = current
 
@@ -1888,6 +1951,29 @@ def test_watch_status_shows_euvd_page_progress(tmp_path, capsys):
         "euvd cursor: 2024-08-01 "
         "(scanning 2024-08-02..2024-08-31, page 38 of 241)"
     ) in output
+
+    store.set_metadata(
+        {
+            "euvd_page_cursor": json.dumps(
+                {
+                    "start": "2024-08-05",
+                    "end": "2024-09-03",
+                    "page": 0,
+                    "total": 0,
+                    "size": feeds.EUVD_PAGE_SIZE,
+                    "phase": "scan",
+                    "verify": 0,
+                }
+            )
+        }
+    )
+    assert cli.main(["--config", str(config.config_path), "watch", "status"]) == 0
+    output = capsys.readouterr().out
+    assert (
+        "euvd cursor: 2024-08-01 "
+        "(scanning 2024-08-05..2024-09-03, page 1 (total not yet known))"
+    ) in output
+    assert "page 1 of 1" not in output
 
     store.set_metadata(
         {
