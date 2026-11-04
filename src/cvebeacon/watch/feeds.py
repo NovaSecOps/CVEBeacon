@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 
-from ..http import HttpClient
+from ..http import HttpClient, Throttle
 from ..errors import SourceError
 from ..sources.common import as_float, cve_id, source_payload
 from ..sources.euvd import SEARCH_URL
@@ -578,7 +578,13 @@ def _euvd_vendors(item: dict[str, Any]) -> tuple[Product, ...]:
 
 
 @source_payload("euvd")
-def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
+def fetch_euvd(
+    http: HttpClient,
+    *,
+    start: date,
+    end: date,
+    throttle: Throttle | None = None,
+) -> EUVDFeed:
     """Fetch one bounded EUVD chunk with a pinned result total.
 
     Same-day queries report a total below the items they return, so the end is
@@ -602,6 +608,7 @@ def fetch_euvd(http: HttpClient, *, start: date, end: date) -> EUVDFeed:
                 source="euvd",
                 params={**params, "page": page, "size": EUVD_PAGE_SIZE},
                 minimum_interval=EUVD_MIN_INTERVAL,
+                throttle=throttle,
             )
             if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
                 raise SourceError("euvd", "source returned an invalid search envelope")
@@ -687,10 +694,12 @@ def eu_fields(items: dict[str, Any]) -> dict[str, KEVFields]:
     }
 
 
-def fetch_kev(http: HttpClient, *, eu: bool = False) -> dict[str, KEVFields]:
+def fetch_kev(
+    http: HttpClient, *, eu: bool = False, throttle: Throttle | None = None
+) -> dict[str, KEVFields]:
     source = KEVSource(http)
     if eu:
-        return eu_fields(source.eu())
+        return eu_fields(source.eu(throttle=throttle))
     return cisa_fields(source.cisa())
 
 

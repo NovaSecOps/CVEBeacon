@@ -5,7 +5,7 @@ import pytest
 
 from cvebeacon.config import HttpConfig
 from cvebeacon.errors import SourceError
-from cvebeacon.http import HttpClient
+from cvebeacon.http import HttpClient, Throttle
 from cvebeacon.sources.cve_list import CVEListSource, record_url
 from cvebeacon.sources.epss import EPSSSource, batches
 from cvebeacon.sources.euvd import EUVDSource
@@ -41,6 +41,63 @@ def test_http_retries_timeout_and_temporary_server_failure(first):
     client = HttpClient(HttpConfig(retries=1), client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda _: None)
     assert client.get_json("https://example.test", source="test") == {"ok": True}
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("path", ["json", "stream"])
+@pytest.mark.parametrize("header", [None, "not-a-date"])
+def test_http_retry_fallback_is_capped(path, header):
+    sleeps = []
+    headers = {} if header is None else {"Retry-After": header}
+
+    def handler(request):
+        return httpx.Response(503, headers=headers)
+
+    client = HttpClient(
+        HttpConfig(retries=3, backoff_seconds=300),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=sleeps.append,
+    )
+    with pytest.raises(SourceError):
+        if path == "json":
+            client.get_json("https://example.test", source="test")
+        else:
+            list(
+                client.stream_bytes(
+                    "https://example.test", source="test", byte_cap=1024
+                )
+            )
+    assert sleeps == [120.0, 120.0, 120.0]
+
+
+@pytest.mark.parametrize("failure", [400, "connect"])
+def test_mixed_throttle_failure_counts_every_request(failure):
+    sleeps = []
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(200, json={"ok": True})
+        if len(calls) == 2:
+            return httpx.Response(403)
+        if failure == "connect":
+            raise httpx.ConnectError("boom", request=request)
+        return httpx.Response(failure)
+
+    client = HttpClient(
+        HttpConfig(retries=0),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=sleeps.append,
+    )
+    throttle = Throttle(sleep=sleeps.append)
+    assert client.get_json(
+        "https://example.test", source="test", throttle=throttle
+    ) == {"ok": True}
+    with pytest.raises(SourceError) as caught:
+        client.get_json("https://example.test", source="test", throttle=throttle)
+    assert len(calls) == 3
+    assert caught.value.requests == 2
+    assert sleeps == [60.0]
 
 
 def test_cve_record_bucket_and_rejected_evidence():

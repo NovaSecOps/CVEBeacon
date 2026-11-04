@@ -17,6 +17,46 @@ from .config import HttpConfig
 from .errors import SourceError
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+THROTTLE_STATUS = {403, 429}
+
+
+@dataclass(slots=True)
+class Throttle:
+    """Bounded backoff shared by requests to one upstream host per run.
+
+    The first successful response marks the host as reachable. Later HTTP 403
+    or 429 responses then count as throttling instead of a permanent rejection.
+    Waits are bounded per retry and in total, and the caller's ``sleep`` keeps
+    the wait interruptible.
+    """
+
+    sleep: Callable[[float], None] = time.sleep
+    delays: tuple[float, ...] = (60.0, 120.0, 240.0)
+    maximum_delay: float = 240.0
+    budget_seconds: float = 600.0
+    maximum_retries: int = 20
+    succeeded: bool = False
+    count: int = 0
+    waited: float = 0.0
+
+    def wait(self, retry_after: float | None = None) -> bool:
+        """Wait when the budget allows another retry, and report whether to retry."""
+        if self.count >= self.maximum_retries:
+            return False
+        remaining = self.budget_seconds - self.waited
+        if remaining <= 0:
+            return False
+        if retry_after is None:
+            delay = self.delays[min(self.count, len(self.delays) - 1)]
+            delay = min(max(delay, 0.0), self.maximum_delay, remaining)
+        else:
+            delay = min(max(retry_after, 0.0), self.maximum_delay)
+            if delay > remaining:
+                return False
+        self.sleep(delay)
+        self.count += 1
+        self.waited += delay
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,21 +119,36 @@ class HttpClient:
         self._last_request[key] = self._monotonic()
 
     @staticmethod
+    def _retry_after_value(value: str | None, ceiling: float = 120.0) -> float | None:
+        """Parse a usable Retry-After, or return None for a missing or invalid one."""
+        if not value:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except (TypeError, ValueError, OverflowError):
+            number = None
+        if number is not None:
+            if not math.isfinite(number):
+                return None
+            return min(max(number, 0.0), ceiling)
+        try:
+            parsed = email.utils.parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return min(
+            max((parsed - datetime.now(timezone.utc)).total_seconds(), 0.0),
+            ceiling,
+        )
+
+    @staticmethod
     def _retry_after(value: str | None, fallback: float, ceiling: float = 120.0) -> float:
-        if value:
-            try:
-                number = float(value)
-                if math.isfinite(number):
-                    return min(max(number, 0), ceiling)
-            except ValueError:
-                try:
-                    parsed = email.utils.parsedate_to_datetime(value)
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=timezone.utc)
-                    return min(max((parsed - datetime.now(timezone.utc)).total_seconds(), 0), ceiling)
-                except (TypeError, ValueError, OverflowError):
-                    pass
-        return min(fallback, ceiling)
+        parsed = HttpClient._retry_after_value(value, ceiling)
+        return min(fallback, ceiling) if parsed is None else parsed
 
     def request_json(
         self,
@@ -109,10 +164,13 @@ class HttpClient:
         expected: tuple[int, ...] = (200,),
         max_retries: int | None = None,
         decode_json: bool = True,
+        throttle: Throttle | None = None,
     ) -> Any:
         last_error: Exception | None = None
         retry_count = self.config.retries if max_retries is None else max_retries
-        for attempt in range(retry_count + 1):
+        requests_before = self.requests
+        attempt = 0
+        while True:
             self.requests += 1
             self._pace(source, minimum_interval)
             try:
@@ -125,31 +183,57 @@ class HttpClient:
                 if attempt >= retry_count:
                     break
                 self._sleep(min(self.config.backoff_seconds * (2**attempt), 120))
+                attempt += 1
                 continue
             if response.status_code in expected:
                 if not decode_json:
+                    if throttle is not None:
+                        throttle.succeeded = True
                     return None
                 if response.status_code == 204 or not response.content:
+                    if throttle is not None:
+                        throttle.succeeded = True
                     return None
                 try:
-                    return response.json()
+                    payload = response.json()
                 except ValueError as exc:
                     raise SourceError(source, "source returned invalid JSON") from exc
+                if throttle is not None:
+                    throttle.succeeded = True
+                return payload
+            if (
+                throttle is not None
+                and response.status_code in THROTTLE_STATUS
+                and throttle.succeeded
+            ):
+                retry_after = self._retry_after_value(
+                    response.headers.get("Retry-After"),
+                    throttle.maximum_delay,
+                )
+                if throttle.wait(retry_after):
+                    continue
+                raise SourceError(
+                    source,
+                    f"HTTP {response.status_code}",
+                    status_code=response.status_code,
+                    requests=self.requests - requests_before,
+                )
             if response.status_code not in RETRYABLE_STATUS or attempt >= retry_count:
                 # Upstream headers/reason phrases can echo secret URLs or tokens.
                 raise SourceError(
                     source,
                     f"HTTP {response.status_code}",
                     status_code=response.status_code,
-                    requests=attempt + 1,
+                    requests=self.requests - requests_before,
                 )
             delay = self.config.backoff_seconds * (2**attempt)
             self._sleep(self._retry_after(response.headers.get("Retry-After"), delay))
+            attempt += 1
         failure_type = type(last_error).__name__ if last_error else "transport failure"
         raise SourceError(
             source,
             f"request failed after bounded retries ({failure_type})",
-            requests=retry_count + 1,
+            requests=self.requests - requests_before,
         )
 
     def stream_bytes(

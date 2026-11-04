@@ -158,6 +158,11 @@ def _print_sync_report(report) -> None:
             line += f", {summary.ignored} score(s) ignored"
         if summary.lookup_failures:
             line += f", {summary.lookup_failures} lookup(s) failed"
+        if summary.throttled:
+            line += (
+                f", throttled {summary.throttled}x, waited "
+                f"{summary.throttle_wait:.0f}s"
+            )
         if summary.error:
             line += f"; failed: {summary.error}"
         print(line)
