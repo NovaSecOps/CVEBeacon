@@ -54,6 +54,9 @@ class OutgoingMessage:
     text: str
     body: str
     initial: bool = False
+    content: str = ""
+    part_index: int = 0
+    part_count: int = 1
 
 
 def style_for(channel_type: str) -> str:
@@ -61,7 +64,7 @@ def style_for(channel_type: str) -> str:
         return STYLE_SLACK
     if channel_type == "discord":
         return STYLE_DISCORD
-    if channel_type in {"teams", "matrix"}:
+    if channel_type == "teams":
         return STYLE_MARKDOWN
     return STYLE_PLAIN
 
@@ -77,9 +80,12 @@ def _escape_slack(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _escape_markdown(value: str) -> str:
+    return re.sub(r"([\\*_`~|>\[\]])", r"\\\1", value)
+
+
 def _escape_discord(value: str) -> str:
-    value = re.sub(r"([\\*_`~|>\[\]])", r"\\\1", value)
-    return value.replace("@", "\\@")
+    return _escape_markdown(value).replace("@", "\\@")
 
 
 def _dynamic(value: Any, style: str, limit: int | None = None) -> str:
@@ -88,6 +94,8 @@ def _dynamic(value: Any, style: str, limit: int | None = None) -> str:
         return _escape_slack(text)
     if style == STYLE_DISCORD:
         return _escape_discord(text)
+    if style == STYLE_MARKDOWN:
+        return _escape_markdown(text)
     return text
 
 
@@ -158,7 +166,7 @@ def _cvss_field(view: WatchView, style: str = STYLE_PLAIN) -> str:
         parts.append(f"CVSS {entry.score:g} ({label})")
     if not parts:
         return "CVSS not scored"
-    if "nvd" not in best:
+    if "nvd" not in best and view.status != "rejected":
         parts.append("NVD pending")
     return ", ".join(parts)
 
@@ -209,15 +217,15 @@ def _kind_label(event: DeliveryEvent, style: str) -> str:
     if kind == "severity_increase":
         transition = _reason_transition(event.reasons, "severity")
         if transition is not None:
-            return f"[SEVERITY UP {transition[0]}→{transition[1]}]"
+            return f"[SEVERITY UP {transition[0]}->{transition[1]}]"
         return "[SEVERITY UP]"
     if kind == "epss_increase":
         previous = event.details.get("previous_epss")
         if isinstance(previous, (int, float)) and event.view.epss is not None:
-            return f"[EPSS UP {float(previous):.2f}→{event.view.epss:.2f}]"
+            return f"[EPSS UP {float(previous):.2f}->{event.view.epss:.2f}]"
         transition = _reason_transition(event.reasons, "epss")
         if transition is not None:
-            return f"[EPSS UP {transition[0]}→{transition[1]}]"
+            return f"[EPSS UP {transition[0]}->{transition[1]}]"
         return "[EPSS UP]"
     if kind == "nvd_score_added":
         nvd = _best_by_provider(event.view.cvss).get("nvd")
@@ -244,7 +252,21 @@ def _links(event: DeliveryEvent, style: str) -> str:
     return " · ".join(values)
 
 
-def _event_lines(event: DeliveryEvent, style: str, rule_name: str) -> list[str]:
+def _group_events(
+    events: Iterable[DeliveryEvent], style: str
+) -> list[list[DeliveryEvent]]:
+    """Merge events that render the same CVE line under the same label."""
+    grouped: dict[tuple[str, str], list[DeliveryEvent]] = {}
+    for event in events:
+        key = (event.cve_id, _kind_label(event, style))
+        grouped.setdefault(key, []).append(event)
+    return list(grouped.values())
+
+
+def _event_lines(
+    group: Sequence[DeliveryEvent], style: str, names: Mapping[str, str]
+) -> list[str]:
+    event = group[0]
     label = _kind_label(event, style)
     line = (
         f"{label} {event.cve_id} · {_cvss_field(event.view, style)} · "
@@ -265,8 +287,9 @@ def _event_lines(event: DeliveryEvent, style: str, rule_name: str) -> list[str]:
             )
         if extras:
             lines.append("  " + " · ".join(extras))
-    rule = _dynamic(rule_name, style, 80)
-    lines.append(f"  Rule: {rule} · {_links(event, style)}")
+    rule_names = sorted({_display_name(item, names) for item in group})
+    rules = ", ".join(_dynamic(name, style, 80) for name in rule_names)
+    lines.append(f"  Rule: {rules} · {_links(event, style)}")
     return lines
 
 
@@ -294,8 +317,8 @@ def sort_events(events: Iterable[DeliveryEvent]) -> tuple[DeliveryEvent, ...]:
     return tuple(sorted(events, key=key))
 
 
-def _counts_phrase(events: Sequence[DeliveryEvent]) -> str:
-    counts = Counter(event.kind for event in events)
+def _counts_phrase(groups: Sequence[Sequence[DeliveryEvent]]) -> str:
+    counts = Counter(group[0].kind for group in groups)
     parts: list[str] = []
     for kind in EVENT_KINDS:
         count = counts.get(kind, 0)
@@ -306,7 +329,7 @@ def _counts_phrase(events: Sequence[DeliveryEvent]) -> str:
             parts.append(f"{count} new")
         else:
             parts.append(f"{count} {name}")
-    return ", ".join(parts) or f"{len(events)} event(s)"
+    return ", ".join(parts) or f"{len(groups)} event(s)"
 
 
 def _rule_label(events: Sequence[DeliveryEvent], names: Mapping[str, str]) -> str:
@@ -322,7 +345,8 @@ def _display_name(event: DeliveryEvent, names: Mapping[str, str]) -> str:
 
 
 def _run_subject(events: Sequence[DeliveryEvent], names: Mapping[str, str]) -> str:
-    return f"CVEBeacon: {_counts_phrase(events)} ({_rule_label(events, names)})"
+    groups = _group_events(sort_events(events), STYLE_PLAIN)
+    return f"CVEBeacon: {_counts_phrase(groups)} ({_rule_label(events, names)})"
 
 
 def _event_subject(event: DeliveryEvent, names: Mapping[str, str]) -> str:
@@ -330,15 +354,36 @@ def _event_subject(event: DeliveryEvent, names: Mapping[str, str]) -> str:
     return f"CVEBeacon: [{label}] {event.cve_id}"
 
 
-def split_message(text: str, limit: int) -> tuple[str, ...]:
+def _size(value: str, byte_limit: bool) -> int:
+    return len(value.encode("utf-8")) if byte_limit else len(value)
+
+
+def _head(value: str, size_limit: int, byte_limit: bool) -> str:
+    if not byte_limit:
+        return value[:size_limit]
+    used = 0
+    output: list[str] = []
+    for character in value:
+        width = len(character.encode("utf-8"))
+        if used + width > size_limit:
+            break
+        output.append(character)
+        used += width
+    return "".join(output)
+
+
+def split_message(
+    text: str, limit: int, *, byte_limit: bool = False
+) -> tuple[str, ...]:
     """Split at line boundaries, numbering parts when there is more than one."""
     if limit < 16:
         raise ValueError("message limit is too small")
-    if len(text) <= limit:
+    if _size(text, byte_limit) <= limit:
         return (text,)
     # Reserve the widest part label, ``[10/10] ``, so every numbered part
     # still fits the provider limit.
     usable = limit - 8
+    ellipsis = _size("…", byte_limit)
     lines = text.splitlines() or [""]
     chunks: list[str] = []
     current: list[str] = []
@@ -346,18 +391,21 @@ def split_message(text: str, limit: int) -> tuple[str, ...]:
     for line in lines:
         # A single line must fit; cut it only if the formatter ever makes one
         # longer than the provider limit.
-        while len(line) > usable:
+        while _size(line, byte_limit) > usable:
             if current:
                 chunks.append("\n".join(current))
                 current, used = [], 0
-            chunks.append(line[: usable - 1] + "…")
-            line = line[usable - 1 :]
-        extra = len(line) + (1 if current else 0)
+            head = _head(line, usable - ellipsis, byte_limit)
+            if not head:
+                head = line[:1]
+            chunks.append(head + "…")
+            line = line[len(head) :]
+        extra = _size(line, byte_limit) + (1 if current else 0)
         if current and used + extra > usable:
             chunks.append("\n".join(current))
             current, used = [], 0
         current.append(line)
-        used += len(line) + (1 if len(current) > 1 else 0)
+        used += _size(line, byte_limit) + (1 if len(current) > 1 else 0)
     if current:
         chunks.append("\n".join(current))
     if len(chunks) == 1:
@@ -367,16 +415,20 @@ def split_message(text: str, limit: int) -> tuple[str, ...]:
     )
 
 
-def _compose(
+def _partials(
     subject: str,
     body: str,
     *,
     style: str,
     chat: bool,
-) -> tuple[str, str]:
+    limit: int,
+    byte_limit: bool,
+    title_in_body: bool,
+) -> tuple[str, ...]:
     if not chat:
-        return subject, body
-    return f"{_title(subject, style)}\n\n{body}".strip(), body
+        return (subject,)
+    text = f"{_title(subject, style)}\n\n{body}".strip() if title_in_body else body
+    return split_message(text, limit, byte_limit=byte_limit)
 
 
 def _event_body(
@@ -386,18 +438,22 @@ def _event_body(
     names: Mapping[str, str],
     limit: int,
     max_items: int | None = None,
+    byte_limit: bool = False,
 ) -> str:
-    listed = list(events)
+    listed = _group_events(sort_events(events), style)
     while True:
         shown = listed if max_items is None else listed[:max_items]
         lines: list[str] = []
-        for event in shown:
-            lines.extend(_event_lines(event, style, _display_name(event, names)))
+        for group in shown:
+            lines.extend(_event_lines(group, style, names))
         omitted = len(listed) - len(shown)
         if omitted:
-            lines.append(f"and {omitted} more")
+            lines.append(
+                f"and {omitted} more. "
+                "Run `cvebeacon watch events` to list all."
+            )
         body = "\n".join(lines)
-        if len(split_message(body, limit)) <= MAX_PARTS:
+        if len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS:
             return body
         if not shown:
             return body
@@ -415,10 +471,12 @@ def _initial_body(
     limit: int,
     max_items: int,
     since: str | None,
+    byte_limit: bool = False,
 ) -> str:
     ordered = sort_events(events)
+    groups = _group_events(ordered, style)
     while True:
-        shown = ordered[:max_items]
+        shown = groups[:max_items]
         counts: dict[str, Counter[str]] = {}
         for event in ordered:
             counts.setdefault(event.rule, Counter())[event.kind] += 1
@@ -431,19 +489,28 @@ def _initial_body(
             ]
             lines.append(f"{_display_name_for(rule, names)}: " + ", ".join(parts))
         lines.append("")
-        for event in shown:
-            lines.extend(_event_lines(event, style, _display_name(event, names)))
-        if len(ordered) > len(shown):
-            lines.append(f"and {len(ordered) - len(shown)} more")
+        for group in shown:
+            lines.extend(_event_lines(group, style, names))
+        omitted = len(groups) - len(shown)
+        if omitted:
+            lines.append(
+                f"and {omitted} more. "
+                "Run `cvebeacon watch events` to list all."
+            )
         rule_names = sorted({_display_name(event, names) for event in ordered})
-        example = rule_names[0] if len(rule_names) == 1 else "X"
         lines.append("")
-        lines.append(
-            f"Run `cvebeacon watch events --rule {_dynamic(example, style, 80)}` "
-            "to list all."
-        )
+        if rule_names:
+            example = _dynamic(rule_names[0], style, 80)
+            lines.append(
+                f"Run `cvebeacon watch events --rule {example}` to list all."
+            )
+        else:
+            lines.append("Run `cvebeacon watch events` to list all.")
         body = "\n".join(lines)
-        if len(split_message(body, limit)) <= MAX_PARTS or not shown:
+        if (
+            len(split_message(body, limit, byte_limit=byte_limit)) <= MAX_PARTS
+            or not shown
+        ):
             return body
         max_items = max(0, len(shown) - 1)
 
@@ -458,9 +525,11 @@ def _initial_subject(
     matches = sum(event.kind == "match" for event in events)
     rules = len({event.rule for event in events})
     suffix = f" since {since}" if since else ""
+    match_word = "match" if matches == 1 else "matches"
+    rule_word = "rule" if rules == 1 else "rules"
     return (
-        f"CVEBeacon initial summary: {matches} matches across {rules} "
-        f"rules{suffix}"
+        f"CVEBeacon initial summary: {matches} {match_word} across {rules} "
+        f"{rule_word}{suffix}"
     )
 
 
@@ -476,7 +545,9 @@ def build_messages(
     """Build the messages one channel should send for the selected events."""
     style = style_for(channel_type)
     limit = CHANNEL_LIMITS.get(channel_type, 32_768)
+    byte_limit = channel_type in {"ntfy", "matrix", "teams"}
     chat = channel_type not in {"smtp", "graph", "webhook"}
+    title_in_body = chat and channel_type not in {"ntfy", "gotify"}
     body_limit = limit - 300 if chat else limit
     ordered = sort_events(events)
     initial = tuple(event for event in ordered if event.initial)
@@ -491,10 +562,18 @@ def build_messages(
             limit=body_limit,
             max_items=max_items,
             since=since,
+            byte_limit=byte_limit,
         )
-        text, body = _compose(subject, body, style=style, chat=chat)
-        parts = split_message(text, limit) if chat else (text,)
-        for part in parts[:MAX_PARTS]:
+        parts = _partials(
+            subject,
+            body,
+            style=style,
+            chat=chat,
+            limit=limit,
+            byte_limit=byte_limit,
+            title_in_body=title_in_body,
+        )
+        for index, part in enumerate(parts[:MAX_PARTS]):
             output.append(
                 OutgoingMessage(
                     tuple(event.event_id for event in initial),
@@ -502,6 +581,9 @@ def build_messages(
                     part,
                     body,
                     initial=True,
+                    content=part,
+                    part_index=index,
+                    part_count=len(parts),
                 )
             )
     if grouping == "event":
@@ -522,16 +604,27 @@ def build_messages(
             names=names,
             limit=body_limit,
             max_items=None if grouping == "event" else max_items,
+            byte_limit=byte_limit,
         )
-        text, body = _compose(subject, body, style=style, chat=chat)
-        parts = split_message(text, limit) if chat else (text,)
-        for part in parts[:MAX_PARTS]:
+        parts = _partials(
+            subject,
+            body,
+            style=style,
+            chat=chat,
+            limit=limit,
+            byte_limit=byte_limit,
+            title_in_body=title_in_body,
+        )
+        for index, part in enumerate(parts[:MAX_PARTS]):
             output.append(
                 OutgoingMessage(
                     tuple(event.event_id for event in group),
                     subject,
                     part,
                     body,
+                    content=part,
+                    part_index=index,
+                    part_count=len(parts),
                 )
             )
     return tuple(output)
@@ -604,6 +697,7 @@ def webhook_payload(
                             if view.euvd_id
                             else None
                         ),
+                        "kev": KEV_URL,
                     },
                 },
             }

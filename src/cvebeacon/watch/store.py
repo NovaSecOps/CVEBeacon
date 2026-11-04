@@ -38,7 +38,7 @@ from .rules import (
     rule_hash,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -49,6 +49,24 @@ DELIVERY_RETRY_BASE_SECONDS = 300
 DELIVERY_RETRY_CAP_SECONDS = 6 * 3600
 DELIVERY_MAX_ATTEMPTS = 10
 DELIVERY_SELECT_LIMIT = 1000
+DELIVERY_RECOVERY_SECONDS = 600
+DELIVERY_AMBIGUOUS_RETRY_SECONDS = 3600
+DELIVERY_RETRY_FLOOR = "1970-01-01T00:00:00+00:00"
+
+# Previous statuses from which each target is allowed. ``sent`` is final and an
+# ``ambiguous`` row may only become ``sent`` or stay ``ambiguous``. A claim goes
+# to ``sending`` through ``claim_delivery`` rather than ``mark_delivery``.
+DELIVERY_PREDECESSORS = {
+    "pending": ("sending", "failed"),
+    "sending": ("pending", "failed"),
+    "sent": ("pending", "sending", "failed", "ambiguous"),
+    "failed": ("pending", "sending", "failed"),
+    "ambiguous": ("pending", "sending", "failed", "ambiguous"),
+}
+
+
+class _ClaimConflict(Exception):
+    """Another run already owns at least one row in this claim."""
 
 _NVD_CONTENT_COLUMNS = (
     "published",
@@ -169,6 +187,7 @@ _SCHEMA = (
         status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','ambiguous')),
         attempts INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
+        first_attempt_at TEXT,
         updated_at TEXT NOT NULL,
         PRIMARY KEY(event_id, channel)
     )""",
@@ -231,6 +250,7 @@ class DeliveryStatusRow:
     pending: int = 0
     sending: int = 0
     failed: int = 0
+    given_up: int = 0
     ambiguous: int = 0
     last_success: str | None = None
 
@@ -385,9 +405,9 @@ class WatchStore:
             )
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3"}:
+        if version not in {"1", "2", "3", "4"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -432,6 +452,19 @@ class WatchStore:
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
             )
+        elif version == "3":
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(watch_delivery)")
+            }
+            if "first_attempt_at" not in columns:
+                db.execute(
+                    "ALTER TABLE watch_delivery ADD COLUMN first_attempt_at TEXT"
+                )
+            db.execute(
+                "UPDATE watch_meta SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
 
     @staticmethod
     def _migrate_event_details(db: sqlite3.Connection) -> None:
@@ -456,13 +489,14 @@ class WatchStore:
             "('pending','sending','sent','failed','ambiguous')),"
             "attempts INTEGER NOT NULL DEFAULT 0,"
             "last_error TEXT,"
+            "first_attempt_at TEXT,"
             "updated_at TEXT NOT NULL,"
             "PRIMARY KEY(event_id, channel))"
         )
         db.execute(
             "INSERT OR IGNORE INTO watch_delivery_v3"
-            "(event_id,channel,status,attempts,last_error,updated_at) "
-            "SELECT event_id,channel,status,attempts,last_error,updated_at "
+            "(event_id,channel,status,attempts,last_error,first_attempt_at,updated_at) "
+            "SELECT event_id,channel,status,attempts,last_error,NULL,updated_at "
             "FROM watch_delivery"
         )
         db.execute("DROP TABLE watch_delivery")
@@ -1328,16 +1362,25 @@ class WatchStore:
             )
         )
 
-    def recover_sending(self) -> int:
-        """Treat deliveries left in ``sending`` by a crash as ambiguous."""
+    def recover_sending(
+        self, *, older_than_seconds: float = DELIVERY_RECOVERY_SECONDS
+    ) -> int:
+        """Treat deliveries left in ``sending`` by a crash as ambiguous.
+
+        A newer ``sending`` row belongs to a live run and is left alone.
+        """
         self.initialize()
-        now = _timestamp(self._clock)
+        current = _clock_value(self._clock)
+        cutoff = (
+            current - timedelta(seconds=max(0.0, older_than_seconds))
+        ).isoformat()
         with self.transaction() as db:
             cursor = db.execute(
-                "UPDATE watch_delivery SET status='ambiguous', updated_at=?, "
-                "last_error='interrupted before confirmation' "
-                "WHERE status='sending'",
-                (now,),
+                "UPDATE watch_delivery SET status='ambiguous', "
+                "first_attempt_at=COALESCE(first_attempt_at, updated_at), "
+                "updated_at=?, last_error='interrupted before confirmation' "
+                "WHERE status='sending' AND updated_at < ?",
+                (_timestamp(self._clock), cutoff),
             )
             return cursor.rowcount
 
@@ -1348,32 +1391,52 @@ class WatchStore:
         catalogs: Sequence[str] = (),
         now: datetime | None = None,
         include_ambiguous: bool = False,
+        ambiguous_after: datetime | None = None,
         limit: int = DELIVERY_SELECT_LIMIT,
     ) -> tuple[DeliveryEvent, ...]:
-        """Return the deliveries one channel may send now, oldest first."""
+        """Return the deliveries one channel may send now, oldest first.
+
+        Initial rows are never capped: the counts of the initial digest must
+        cover the whole backlog. Non-initial rows keep the ``limit``.
+        """
         if limit < 1:
             raise StateError("delivery batch size must be positive")
         self.initialize()
         current = _clock_value(lambda: now) if now is not None else _clock_value(self._clock)
+        after = ambiguous_after.isoformat() if ambiguous_after is not None else None
+        base = (
+            "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,e.details_json,"
+            "e.initial,e.created_at,d.status,d.attempts,d.updated_at,d.first_attempt_at "
+            "FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id "
+            "WHERE d.channel=? AND e.initial=? AND ("
+            "d.status='pending' OR "
+            "(d.status='failed' AND d.attempts < ?) OR "
+            "(d.status='ambiguous' AND ? AND (? IS NULL OR d.first_attempt_at >= ?))) "
+            "ORDER BY e.created_at, e.id"
+        )
         with closing(self._connect()) as db:
-            rows = db.execute(
-                "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,e.details_json,"
-                "e.initial,e.created_at,d.status,d.attempts,d.updated_at "
-                "FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id "
-                "WHERE d.channel=? AND ("
-                "d.status='pending' OR "
-                "(d.status='failed' AND d.attempts < ?) OR "
-                "(d.status='ambiguous' AND ?)) "
-                "ORDER BY e.created_at, e.id LIMIT ?",
-                (
-                    channel,
-                    DELIVERY_MAX_ATTEMPTS,
-                    1 if include_ambiguous else 0,
-                    limit,
-                ),
-            ).fetchall()
+            found = list(
+                db.execute(
+                    base, (channel, 1, DELIVERY_MAX_ATTEMPTS, 1 if include_ambiguous else 0, after, after)
+                ).fetchall()
+            )
+            found.extend(
+                db.execute(
+                    base + " LIMIT ?",
+                    (
+                        channel,
+                        0,
+                        DELIVERY_MAX_ATTEMPTS,
+                        1 if include_ambiguous else 0,
+                        after,
+                        after,
+                        limit,
+                    ),
+                ).fetchall()
+            )
+            found.sort(key=lambda row: (row["created_at"], row["id"]))
             output: list[DeliveryEvent] = []
-            for row in rows:
+            for row in found:
                 if row["status"] == "failed":
                     updated = self._parse_timestamp(row["updated_at"])
                     delay = self.delivery_retry_delay(int(row["attempts"]))
@@ -1409,6 +1472,58 @@ class WatchStore:
                 )
         return tuple(output)
 
+    def claim_delivery(
+        self,
+        event_ids: Iterable[int],
+        channel: str,
+        *,
+        statuses: Sequence[str] = ("pending", "failed", "ambiguous"),
+    ) -> bool:
+        """Atomically move this run's rows to ``sending``.
+
+        The update is conditional on the current status, so two runs that
+        selected the same rows cannot both send them. A partial claim is
+        rolled back and reported as a loss.
+        """
+        identifiers = sorted({int(value) for value in event_ids})
+        if not identifiers:
+            return False
+        allowed = tuple(
+            status
+            for status in statuses
+            if status in {"pending", "failed", "ambiguous"}
+        )
+        if not allowed:
+            raise StateError("a delivery claim needs a retryable status")
+        now = _timestamp(self._clock)
+        placeholders = ",".join("?" for _ in identifiers)
+        allowed_placeholders = ",".join("?" for _ in allowed)
+        try:
+            with self.transaction() as db:
+                cursor = db.execute(
+                    "UPDATE watch_delivery SET status='sending', "
+                    "first_attempt_at=COALESCE(first_attempt_at, ?), updated_at=? "
+                    f"WHERE channel=? AND event_id IN ({placeholders}) "
+                    f"AND status IN ({allowed_placeholders})",
+                    (now, now, channel, *identifiers, *allowed),
+                )
+                if cursor.rowcount != len(identifiers):
+                    raise _ClaimConflict
+        except _ClaimConflict:
+            return False
+        return True
+
+    def reset_failed(self, channel: str) -> int:
+        """Make every failed row eligible for an explicit retry."""
+        self.initialize()
+        with self.transaction() as db:
+            cursor = db.execute(
+                "UPDATE watch_delivery SET attempts=0, first_attempt_at=NULL, "
+                "updated_at=? WHERE channel=? AND status='failed'",
+                (DELIVERY_RETRY_FLOOR, channel),
+            )
+            return cursor.rowcount
+
     def mark_delivery(
         self,
         event_ids: Iterable[int],
@@ -1416,30 +1531,74 @@ class WatchStore:
         status: str,
         *,
         error: str | None = None,
+        attempts_limit: int | None = None,
     ) -> int:
-        """Move delivery rows through the state machine in one transaction."""
-        if status not in {"pending", "sending", "sent", "failed", "ambiguous"}:
+        """Move delivery rows through the state machine in one transaction.
+
+        ``sent`` is final. An ``ambiguous`` row may only become ``sent`` or
+        stay ``ambiguous`` (plus the internal claim to ``sending``), so a stale
+        or retried attempt can never downgrade it to ``failed``.
+        """
+        if status not in DELIVERY_PREDECESSORS:
             raise StateError(f"unknown delivery status {status!r}")
         identifiers = sorted({int(value) for value in event_ids})
         if not identifiers:
             return 0
         now = _timestamp(self._clock)
         retryable = status in {"failed", "ambiguous"}
+        allowed = DELIVERY_PREDECESSORS[status]
+        allowed_placeholders = ",".join("?" for _ in allowed)
+        changed = 0
         with self.transaction() as db:
             for identifier in identifiers:
                 if retryable:
-                    db.execute(
-                        "UPDATE watch_delivery SET status=?, attempts=attempts+1, "
-                        "last_error=?, updated_at=? WHERE event_id=? AND channel=?",
-                        (status, (error or "")[:500], now, identifier, channel),
-                    )
+                    if attempts_limit is not None:
+                        cursor = db.execute(
+                            "UPDATE watch_delivery SET status=?, "
+                            "attempts=CASE WHEN attempts + 1 >= ? THEN ? "
+                            "ELSE attempts + 1 END, last_error=?, updated_at=?, "
+                            "first_attempt_at=COALESCE(first_attempt_at, ?) "
+                            "WHERE event_id=? AND channel=? "
+                            f"AND status IN ({allowed_placeholders})",
+                            (
+                                status,
+                                attempts_limit,
+                                DELIVERY_MAX_ATTEMPTS,
+                                (error or "")[:500],
+                                now,
+                                now,
+                                identifier,
+                                channel,
+                                *allowed,
+                            ),
+                        )
+                    else:
+                        cursor = db.execute(
+                            "UPDATE watch_delivery SET status=?, "
+                            "attempts=attempts+1, last_error=?, updated_at=?, "
+                            "first_attempt_at=COALESCE(first_attempt_at, ?) "
+                            "WHERE event_id=? AND channel=? "
+                            f"AND status IN ({allowed_placeholders})",
+                            (
+                                status,
+                                (error or "")[:500],
+                                now,
+                                now,
+                                identifier,
+                                channel,
+                                *allowed,
+                            ),
+                        )
                 else:
-                    db.execute(
+                    cursor = db.execute(
                         "UPDATE watch_delivery SET status=?, last_error=NULL, "
-                        "updated_at=? WHERE event_id=? AND channel=?",
-                        (status, now, identifier, channel),
+                        "updated_at=?, first_attempt_at=COALESCE(first_attempt_at, ?) "
+                        "WHERE event_id=? AND channel=? "
+                        f"AND status IN ({allowed_placeholders})",
+                        (status, now, now, identifier, channel, *allowed),
                     )
-        return len(identifiers)
+                changed += cursor.rowcount
+        return changed
 
     def delivery_status(
         self, channels: Iterable[str] = ()
@@ -1449,8 +1608,11 @@ class WatchStore:
         with closing(self._connect()) as db:
             rows = db.execute(
                 "SELECT channel,status,COUNT(*) AS count,"
-                "MAX(CASE WHEN status='sent' THEN updated_at END) AS last_success "
-                "FROM watch_delivery GROUP BY channel,status"
+                "MAX(CASE WHEN status='sent' THEN updated_at END) AS last_success,"
+                "SUM(CASE WHEN status='failed' AND attempts >= ? THEN 1 ELSE 0 END) "
+                "AS given_up "
+                "FROM watch_delivery GROUP BY channel,status",
+                (DELIVERY_MAX_ATTEMPTS,),
             ).fetchall()
         values: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -1460,12 +1622,15 @@ class WatchStore:
                     "pending": 0,
                     "sending": 0,
                     "failed": 0,
+                    "given_up": 0,
                     "ambiguous": 0,
                     "last_success": None,
                 },
             )
             if row["status"] in {"pending", "sending", "failed", "ambiguous"}:
                 entry[row["status"]] = int(row["count"])
+            if row["status"] == "failed" and row["given_up"]:
+                entry["given_up"] = int(row["given_up"])
             if row["last_success"] and (
                 entry["last_success"] is None
                 or row["last_success"] > entry["last_success"]
@@ -1478,6 +1643,7 @@ class WatchStore:
                     "pending": 0,
                     "sending": 0,
                     "failed": 0,
+                    "given_up": 0,
                     "ambiguous": 0,
                     "last_success": None,
                 },

@@ -8,7 +8,7 @@ import smtplib
 import ssl
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -19,7 +19,7 @@ import httpx
 from ..config import AppConfig
 from ..errors import ConfigurationError
 from ..http import HttpClient, HttpResult
-from .channels import ChannelConfig, channel_map
+from .channels import ChannelConfig, channel_map, validate_webhook_url
 from .messages import (
     OutgoingMessage,
     build_messages,
@@ -27,10 +27,15 @@ from .messages import (
     webhook_payload,
 )
 from .records import DeliveryEvent
-from .store import WatchStore
+from .store import (
+    DELIVERY_AMBIGUOUS_RETRY_SECONDS,
+    DeliveryStatusRow,
+    WatchStore,
+)
 
 DELIVERY_BUDGET_SECONDS = 60.0
 MAX_MESSAGES_PER_CHANNEL = 10
+AUTH_MAX_ATTEMPTS = 3
 TEST_MESSAGE = "CVEBeacon test message — no action needed"
 
 
@@ -38,11 +43,20 @@ class DeliveryFailure(Exception):
     """A channel did not accept a message.
 
     ``ambiguous`` means the request or SMTP DATA may have reached the provider.
+    ``attempts_limit`` stops automatic retries earlier than the default cap,
+    which keeps repeated authentication failures from locking an account.
     """
 
-    def __init__(self, category: str, *, ambiguous: bool = False) -> None:
+    def __init__(
+        self,
+        category: str,
+        *,
+        ambiguous: bool = False,
+        attempts_limit: int | None = None,
+    ) -> None:
         self.category = category
         self.ambiguous = ambiguous
+        self.attempts_limit = attempts_limit
         super().__init__(category)
 
 
@@ -162,6 +176,13 @@ def _send_webhook_channel(
     channel: ChannelConfig, message: OutgoingMessage, http: HttpClient, timeout: float
 ) -> None:
     url = _secret(channel, "webhook_url")
+    try:
+        # The secret may have been set after configuration was loaded.
+        validate_webhook_url(
+            url, channel.type, f"watch channel {channel.name!r} webhook_url"
+        )
+    except ConfigurationError as exc:
+        raise DeliveryFailure(str(exc)) from None
     if channel.type == "teams":
         body = {
             "type": "message",
@@ -198,6 +219,7 @@ def _send_webhook_channel(
                 "content": message.text,
                 "allowed_mentions": {"parse": []},
                 "tts": False,
+                "flags": 4,
             },
             timeout=timeout,
         )
@@ -225,7 +247,13 @@ def _send_telegram(
     if result.status_code != 200:
         raise DeliveryFailure(f"Telegram rejected the message: HTTP {result.status_code}")
     body = _json_body(result)
-    if not isinstance(body, dict) or body.get("ok") is not True:
+    if not isinstance(body, dict) or not isinstance(body.get("ok"), bool):
+        # The provider answered with its success status, so the message may
+        # have arrived even though the confirmation cannot be read.
+        raise DeliveryFailure(
+            "Telegram confirmation was unreadable", ambiguous=True
+        )
+    if body["ok"] is not True:
         raise DeliveryFailure("Telegram rejected the message")
 
 
@@ -264,7 +292,8 @@ def _send_matrix(
             "cvebeacon:"
             + channel.name
             + ":"
-            + ",".join(str(value) for value in message.event_ids)
+            + ",".join(str(value) for value in sorted(message.event_ids))
+            + f":{message.part_index}/{message.part_count}"
         ).encode("utf-8")
     ).hexdigest()[:32]
     send_url = (
@@ -287,7 +316,8 @@ def _send_matrix(
         raise DeliveryFailure(f"Matrix rejected the message: HTTP {result.status_code}")
     body = _json_body(result)
     if not isinstance(body, dict) or not isinstance(body.get("event_id"), str):
-        raise DeliveryFailure("Matrix rejected the message")
+        # A 200 without an event id may still have created the event.
+        raise DeliveryFailure("Matrix confirmation was unreadable", ambiguous=True)
 
 
 def _send_ntfy(
@@ -309,7 +339,7 @@ def _send_ntfy(
         "POST",
         url,
         headers=headers,
-        content=message.text.encode("utf-8"),
+        content=message.content.encode("utf-8"),
         timeout=timeout,
     )
     _accepted(result, (200,), "ntfy rejected the message")
@@ -326,7 +356,7 @@ def _send_gotify(
         headers={"X-Gotify-Key": token},
         json_body={
             "title": message.subject,
-            "message": message.text,
+            "message": message.content,
             "priority": channel.options["priority"],
         },
         timeout=timeout,
@@ -367,10 +397,12 @@ def _email_message(
     cc = channel.options.get("cc") or ()
     if cc:
         email["Cc"] = ", ".join(cc)
-    email["Date"] = formatdate(localtime=False)
+    email["Date"] = formatdate(localtime=False, usegmt=True)
+    email["Auto-Submitted"] = "auto-generated"
     domain = str(channel.options["sender"]).rsplit("@", 1)[-1]
     email["Message-ID"] = make_msgid(domain=domain or None)
-    email.set_content(message.body)
+    # A 7-bit safe body works with relays that do not offer 8BITMIME.
+    email.set_content(message.body, cte="quoted-printable")
     return email
 
 
@@ -390,6 +422,8 @@ def _send_smtp(
     security = str(channel.options["security"])
     try:
         client = _smtp_client(channel, timeout)
+    except ssl.SSLCertVerificationError:
+        raise DeliveryFailure("SMTP certificate verification failed") from None
     except (OSError, ssl.SSLError, smtplib.SMTPException):
         raise DeliveryFailure("SMTP connection failed") from None
     try:
@@ -403,11 +437,24 @@ def _send_smtp(
                 password = _secret(channel, "password")
                 client.login(str(username), password)
         except smtplib.SMTPAuthenticationError:
-            raise DeliveryFailure("SMTP authentication failed") from None
+            raise DeliveryFailure(
+                "SMTP authentication failed", attempts_limit=AUTH_MAX_ATTEMPTS
+            ) from None
+        except ssl.SSLCertVerificationError:
+            raise DeliveryFailure("SMTP certificate verification failed") from None
         except (OSError, ssl.SSLError, smtplib.SMTPException):
             raise DeliveryFailure("SMTP session failed") from None
+        recipients = [
+            *channel.options["to"],
+            *(channel.options.get("cc") or ()),
+            *(channel.options.get("bcc") or ()),
+        ]
         try:
-            refused = client.send_message(_email_message(channel, message))
+            refused = client.send_message(
+                _email_message(channel, message), to_addrs=recipients
+            )
+        except ssl.SSLCertVerificationError:
+            raise DeliveryFailure("SMTP certificate verification failed") from None
         except (
             smtplib.SMTPRecipientsRefused,
             smtplib.SMTPSenderRefused,
@@ -447,6 +494,11 @@ def _graph_token(channel: ChannelConfig, http: HttpClient, timeout: float) -> st
         },
         timeout=timeout,
     )
+    if result.status_code in (401, 403):
+        raise DeliveryFailure(
+            f"Graph authentication failed: HTTP {result.status_code}",
+            attempts_limit=AUTH_MAX_ATTEMPTS,
+        )
     if result.status_code != 200:
         raise DeliveryFailure(f"Graph token request failed: HTTP {result.status_code}")
     body = _json_body(result)
@@ -463,7 +515,9 @@ def _send_graph(
         token = _graph_token(channel, http, timeout)
     except DeliveryFailure as exc:
         # No mail has been sent yet, even if the token request was interrupted.
-        raise DeliveryFailure(exc.category) from None
+        raise DeliveryFailure(
+            exc.category, attempts_limit=exc.attempts_limit
+        ) from None
     recipients = [
         {"emailAddress": {"address": address}}
         for address in channel.options["to"]
@@ -478,6 +532,11 @@ def _send_graph(
         message_body["ccRecipients"] = [
             {"emailAddress": {"address": address}} for address in cc
         ]
+    bcc = channel.options.get("bcc") or ()
+    if bcc:
+        message_body["bccRecipients"] = [
+            {"emailAddress": {"address": address}} for address in bcc
+        ]
     sender = quote(str(channel.options["sender"]), safe="")
     result = _http_call(
         http,
@@ -487,6 +546,11 @@ def _send_graph(
         json_body={"message": message_body, "saveToSentItems": False},
         timeout=timeout,
     )
+    if result.status_code in (401, 403):
+        raise DeliveryFailure(
+            f"Graph authentication failed: HTTP {result.status_code}",
+            attempts_limit=AUTH_MAX_ATTEMPTS,
+        )
     _accepted(result, (202,), "Graph mail rejected the message")
 
 
@@ -534,6 +598,14 @@ def _event_index(events: Sequence[DeliveryEvent]) -> dict[int, DeliveryEvent]:
     return {event.event_id: event for event in events}
 
 
+def _channel_status(store: WatchStore, name: str) -> DeliveryStatusRow:
+    rows = store.delivery_status([name])
+    for row in rows:
+        if row.channel == name:
+            return row
+    raise ConfigurationError(f"unknown watch channel {name!r}")
+
+
 def _channel_messages(
     channel: ChannelConfig,
     events: Sequence[DeliveryEvent],
@@ -558,6 +630,7 @@ def deliver_pending(
     *,
     channel_names: Iterable[str] | None = None,
     retry_ambiguous: bool = False,
+    retry_failed: bool = False,
     clock: Callable[[], datetime] = _utc_now,
     monotonic: Callable[[], float] | None = None,
     sleep: Callable[[float], None] | None = None,
@@ -597,16 +670,33 @@ def deliver_pending(
                 ChannelSummary(channel.name, channel.type, skipped=True)
             )
             continue
+        if retry_failed:
+            store.reset_failed(channel.name)
         now = clock()
         include_ambiguous = retry_ambiguous or channel.type == "matrix"
+        ambiguous_after = None
+        if channel.type == "matrix" and not retry_ambiguous:
+            # The homeserver remembers a transaction id for a limited time, so
+            # an automatic retry is safe only for a recent attempt.
+            ambiguous_after = now - timedelta(
+                seconds=DELIVERY_AMBIGUOUS_RETRY_SECONDS
+            )
         events = store.delivery_events(
             channel.name,
             catalogs=config.watch.sources,
             now=now,
             include_ambiguous=include_ambiguous,
+            ambiguous_after=ambiguous_after,
         )
+        current_status = _channel_status(store, channel.name)
         if not events:
-            summaries.append(ChannelSummary(channel.name, channel.type))
+            summaries.append(
+                ChannelSummary(
+                    channel.name,
+                    channel.type,
+                    ambiguous_total=current_status.ambiguous,
+                )
+            )
             continue
         batches: list[tuple[DeliveryEvent, ...]] = []
         if include_ambiguous:
@@ -629,8 +719,13 @@ def deliver_pending(
         error: str | None = None
         pace_needed = False
         stop_channel = False
+        interval = channel.min_interval_seconds
         for batch in batches:
             index = _event_index(batch)
+            claim_statuses = (
+                ("ambiguous",) if batch and batch[0].status == "ambiguous"
+                else ("pending", "failed")
+            )
             for group in _group_messages(
                 _channel_messages(channel, batch, names=names, since=since)
             ):
@@ -641,21 +736,28 @@ def deliver_pending(
                     break
                 if monotonic() >= deadline:
                     break
-                interval = channel.min_interval_seconds
                 if pace_needed and interval > 0:
                     remaining = deadline - monotonic()
                     if interval > remaining:
+                        stop_channel = True
                         break
                     sleep(interval)
+                    if monotonic() >= deadline:
+                        stop_channel = True
+                        break
                 event_ids = group[0].event_ids
                 covered = [index[value] for value in event_ids if value in index]
                 if not covered:
                     continue
-                store.mark_delivery(event_ids, channel.name, "sending")
+                if not store.claim_delivery(
+                    event_ids, channel.name, statuses=claim_statuses
+                ):
+                    # Another run owns these rows.
+                    continue
                 delivered = 0
                 failure: DeliveryFailure | None = None
                 for message in group:
-                    if pace_needed and interval > 0:
+                    if delivered and pace_needed and interval > 0:
                         remaining = deadline - monotonic()
                         if interval > remaining:
                             failure = DeliveryFailure(
@@ -675,7 +777,11 @@ def deliver_pending(
                     except DeliveryFailure as exc:
                         failure = exc
                         if delivered:
-                            failure = DeliveryFailure(exc.category, ambiguous=True)
+                            failure = DeliveryFailure(
+                                exc.category,
+                                ambiguous=True,
+                                attempts_limit=exc.attempts_limit,
+                            )
                         break
                     except ConfigurationError as exc:
                         failure = DeliveryFailure(str(exc))
@@ -690,14 +796,27 @@ def deliver_pending(
                     messages_sent += 1
                     pace_needed = True
                 if failure is not None:
-                    if failure.ambiguous or delivered:
+                    # A row that was ambiguous before this attempt may already
+                    # have been delivered; a later failure cannot clear that.
+                    was_ambiguous = any(
+                        event.status == "ambiguous" for event in covered
+                    )
+                    if failure.ambiguous or delivered or was_ambiguous:
                         store.mark_delivery(
-                            event_ids, channel.name, "ambiguous", error=failure.category
+                            event_ids,
+                            channel.name,
+                            "ambiguous",
+                            error=failure.category,
+                            attempts_limit=failure.attempts_limit,
                         )
                         ambiguous += len(event_ids)
                     else:
                         store.mark_delivery(
-                            event_ids, channel.name, "failed", error=failure.category
+                            event_ids,
+                            channel.name,
+                            "failed",
+                            error=failure.category,
+                            attempts_limit=failure.attempts_limit,
                         )
                         failed += len(event_ids)
                     error = failure.category
@@ -705,6 +824,7 @@ def deliver_pending(
                     break
                 store.mark_delivery(event_ids, channel.name, "sent")
                 events_sent += len(event_ids)
+        final_status = _channel_status(store, channel.name)
         summaries.append(
             ChannelSummary(
                 channel.name,
@@ -713,7 +833,7 @@ def deliver_pending(
                 events=events_sent,
                 failed=failed,
                 ambiguous=ambiguous,
-                ambiguous_total=store.delivery_status([channel.name])[0].ambiguous,
+                ambiguous_total=final_status.ambiguous,
                 error=error,
             )
         )
@@ -740,6 +860,7 @@ def send_test(
         "CVEBeacon test message",
         TEST_MESSAGE,
         TEST_MESSAGE,
+        content=TEST_MESSAGE,
     )
     try:
         if channel.type == "webhook":
