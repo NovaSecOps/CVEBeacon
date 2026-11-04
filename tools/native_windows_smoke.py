@@ -74,6 +74,7 @@ def query_xml() -> str:
         ["schtasks", "/Query", "/TN", TASK, "/XML"],
         capture_output=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     assert result.returncode == 0, decode(result.stderr)
     return decode(result.stdout)
@@ -85,12 +86,14 @@ def delete_task() -> None:
         ["schtasks", "/End", "/TN", TASK],
         capture_output=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     for _ in range(10):
         result = subprocess.run(
             ["schtasks", "/Delete", "/F", "/TN", TASK],
             capture_output=True,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             break
@@ -99,6 +102,7 @@ def delete_task() -> None:
         ["schtasks", "/Query", "/TN", TASK],
         capture_output=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     if remaining.returncode == 0:
         print(f"WARN: task {TASK!r} is still registered after cleanup", flush=True)
@@ -327,12 +331,18 @@ def grant_batch_logon(account: str) -> None:
 def stop_registered_task() -> None:
     """Stop the exact owned task and wait for it before touching its database."""
     query = subprocess.run(
-        ["schtasks", "/Query", "/TN", TASK], capture_output=True, check=False
+        ["schtasks", "/Query", "/TN", TASK],
+        capture_output=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
     )
     if query.returncode != 0:
         return
     subprocess.run(
-        ["schtasks", "/End", "/TN", TASK], capture_output=True, check=False
+        ["schtasks", "/End", "/TN", TASK],
+        capture_output=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
     )
     for _ in range(10):
         try:
@@ -407,7 +417,10 @@ def smoke() -> None:
     env["no_proxy"] = env["NO_PROXY"]
     try:
         existing = subprocess.run(
-            ["schtasks", "/Query", "/TN", TASK], capture_output=True, check=False
+            ["schtasks", "/Query", "/TN", TASK],
+            capture_output=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
         )
         assert existing.returncode != 0, (
             f"refusing to overwrite an existing task named {TASK!r}"
@@ -488,7 +501,11 @@ def smoke() -> None:
         assert "<LogonType>InteractiveToken</LogonType>" in xml, xml
         reset_database(data)
         _, _, before = task_state()
-        checked(["schtasks", "/Run", "/TN", TASK], timeout=60)
+        checked(
+            ["schtasks", "/Run", "/TN", TASK],
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
         code = wait_for_task(before)
         assert code == "0", f"the scheduled watch run reported {code}"
         assert database.exists(), "the scheduled run did not write the database"
@@ -562,7 +579,11 @@ def smoke() -> None:
         if batch_ready:
             reset_database(data)
             _, _, before = task_state()
-            checked(["schtasks", "/Run", "/TN", TASK], timeout=60)
+            checked(
+                ["schtasks", "/Run", "/TN", TASK],
+                timeout=60,
+                stdin=subprocess.DEVNULL,
+            )
             code = wait_for_task(before)
             if code == "0":
                 assert database.exists(), "the S4U run did not write the database"
