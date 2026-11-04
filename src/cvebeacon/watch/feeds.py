@@ -533,12 +533,19 @@ def _euvd_cvss(item: dict[str, Any]) -> tuple[CVSSEntry | None, bool]:
     return CVSSEntry("euvd", "euvd", version, score, _text(item.get("baseScoreVector"))), False
 
 
+EUVD_PLACEHOLDER_NAMES = frozenset({"n/a", "-"})
+
+
 def _euvd_name(value: Any) -> str | None:
     if isinstance(value, str):
-        return _text(value)
-    if isinstance(value, dict):
-        return _text(value.get("name"))
-    return None
+        name = _text(value)
+    elif isinstance(value, dict):
+        name = _text(value.get("name"))
+    else:
+        return None
+    if name is None or name.casefold() in EUVD_PLACEHOLDER_NAMES:
+        return None
+    return name
 
 
 def _euvd_vendors(item: dict[str, Any]) -> tuple[Product, ...]:

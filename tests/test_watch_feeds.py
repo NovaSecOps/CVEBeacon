@@ -271,6 +271,22 @@ def test_euvd_names_never_stringify_a_non_name_object():
     assert Product("Acme", "Widget") in names
 
 
+def test_euvd_placeholder_names_are_not_vendors_or_products():
+    item = {
+        "enisaIdVendor": [
+            {"vendor": {"name": "N/A"}},
+            {"vendor": {"name": " - "}},
+            {"vendor": {"name": "Acme"}},
+        ],
+        "enisaIdProduct": [
+            {"product": {"name": "n/a", "vendor": {"name": "Acme"}}},
+            {"product": {"name": "Widget"}},
+        ],
+    }
+    names = feeds._euvd_vendors(item)
+    assert [(name.vendor, name.product) for name in names] == [("", "Widget"), ("Acme", "")]
+
+
 def test_nvd_paging_validation_rejects_bad_metadata():
     payloads = [
         {"unexpected": []},
