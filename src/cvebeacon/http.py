@@ -43,12 +43,16 @@ class Throttle:
         """Wait when the budget allows another retry, and report whether to retry."""
         if self.count >= self.maximum_retries:
             return False
-        delay = retry_after
-        if delay is None:
-            delay = self.delays[min(self.count, len(self.delays) - 1)]
-        delay = min(max(delay, 0.0), self.maximum_delay)
-        if self.waited + delay > self.budget_seconds:
+        remaining = self.budget_seconds - self.waited
+        if remaining <= 0:
             return False
+        if retry_after is None:
+            delay = self.delays[min(self.count, len(self.delays) - 1)]
+            delay = min(max(delay, 0.0), self.maximum_delay, remaining)
+        else:
+            delay = min(max(retry_after, 0.0), self.maximum_delay)
+            if delay > remaining:
+                return False
         self.sleep(delay)
         self.count += 1
         self.waited += delay

@@ -948,12 +948,12 @@ def test_euvd_gives_up_after_the_throttle_budget_and_resumes(tmp_path):
         sleep=sleeps.append,
     )
     assert first.failures == ("euvd",)
-    assert sleeps == [60.0, 120.0, 240.0]
+    assert sleeps == [60.0, 120.0, 240.0, 180.0]
     assert metadata(config)["euvd_cursor"] == "2026-10-03"
     summary = next(item for item in first.summaries if item.source == "euvd")
-    assert summary.requests == 5
-    assert summary.throttled == 3
-    assert summary.throttle_wait == 420
+    assert summary.requests == 6
+    assert summary.throttled == 4
+    assert summary.throttle_wait == 600
 
     dates: list[str] = []
 
