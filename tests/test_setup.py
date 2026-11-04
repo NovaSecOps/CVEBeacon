@@ -402,3 +402,25 @@ def test_cli_setup_accepts_config_after_the_subcommand(tmp_path, monkeypatch):
     path = tmp_path / "cvebeacon.toml"
     assert cli.main(["setup", "--config", str(path)]) == 0
     assert load_config(path).watch.enabled is True
+
+
+def test_multiple_channels_default_to_all_for_each_rule(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    channel = ["", "10", "", "", "y", "", "10", "", "", "n"]
+    assert run_watch(tmp_path, monkeypatch, channel=channel) == 0
+    config = load_config(tmp_path / "cvebeacon.toml")
+    assert [item.name for item in config.watch.channels] == ["alerts", "alerts-2"]
+    assert config.watch.rules[0].channels == ("alerts", "alerts-2")
+
+
+def test_nvd_key_can_use_an_environment_variable(tmp_path, monkeypatch):
+    write_inventory(tmp_path)
+    answers = watch_answers()
+    answers[6] = "env"
+    answers.insert(7, "MY_NVD_KEY")
+    feed(monkeypatch, answers)
+    assert run_setup(tmp_path / "cvebeacon.toml", now=NOW) == 0
+    text = (tmp_path / "cvebeacon.toml").read_text(encoding="utf-8")
+    assert 'nvd_api_key_env = "MY_NVD_KEY"' in text
+    config = load_config(tmp_path / "cvebeacon.toml")
+    assert config.sources.nvd_api_key_env == "MY_NVD_KEY"
