@@ -415,8 +415,9 @@ def sid_to_string(sid: bytes) -> str | None:
         ctypes.POINTER(wintypes.LPWSTR),
     ]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
-    advapi32.LocalFree.argtypes = [wintypes.LPVOID]
-    advapi32.LocalFree.restype = wintypes.LPVOID
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LocalFree.argtypes = [wintypes.LPVOID]
+    kernel32.LocalFree.restype = wintypes.LPVOID
     buffer = ctypes.create_string_buffer(sid)
     text = wintypes.LPWSTR()
     if not advapi32.ConvertSidToStringSidW(
@@ -426,7 +427,7 @@ def sid_to_string(sid: bytes) -> str | None:
     try:
         return text.value
     finally:
-        advapi32.LocalFree(text)
+        kernel32.LocalFree(text)
 
 
 def cleanup_account(batch_sid: bytes | None) -> bool:
