@@ -194,6 +194,8 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigurationError(f"cannot read configuration {config_path}: {exc}") from exc
 
     base = config_path.parent
+    state = _table(data, "state")
+    state_database = _resolve(base, state.get("database", ".cvebeacon/state.db"))
     watch_data = _table(data, "watch")
     unknown_watch = sorted(set(watch_data) - WATCH_SETTINGS)
     if unknown_watch:
@@ -213,9 +215,13 @@ def load_config(path: str | Path) -> AppConfig:
     watch_initial = str(watch_data.get("initial", "baseline")).strip().casefold()
     if watch_initial not in WATCH_INITIAL_MODES:
         raise ConfigurationError("watch.initial must be baseline, backfill, or full")
-    watch_database = watch_data.get("database", "cvebeacon-watch.db")
-    if not isinstance(watch_database, str) or not watch_database.strip():
+    raw_watch_database = watch_data.get("database")
+    if raw_watch_database is None:
+        watch_database = (state_database.parent / "cvebeacon-watch.db").resolve()
+    elif not isinstance(raw_watch_database, str) or not raw_watch_database.strip():
         raise ConfigurationError("watch.database must be a nonempty path")
+    else:
+        watch_database = _resolve(base, raw_watch_database.strip())
     watch_rules = parse_rules(watch_data.get("rules"))
     validate_rule_sources(watch_rules, watch_sources)
     watch_channels = parse_channels(watch_data.get("channels"), base=base)
@@ -258,7 +264,6 @@ def load_config(path: str | Path) -> AppConfig:
     elif not watch_enabled:
         raise ConfigurationError("inventory.path is required")
 
-    state = _table(data, "state")
     output = _table(data, "output")
     http_data = _table(data, "http")
     source_data = _table(data, "sources")
@@ -349,7 +354,7 @@ def load_config(path: str | Path) -> AppConfig:
     return AppConfig(
         config_path=config_path,
         inventory=inventory_config,
-        database_path=_resolve(base, state.get("database", ".cvebeacon/state.db")),
+        database_path=state_database,
         output_dir=_resolve(base, output.get("directory", "reports")),
         http=HttpConfig(
             connect_timeout=_positive_number(
@@ -403,7 +408,7 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         watch=WatchConfig(
             enabled=watch_enabled,
-            database=_resolve(base, watch_database.strip()),
+            database=watch_database,
             sources=watch_sources,
             initial=watch_initial,
             backfill_days=_bounded_int(
