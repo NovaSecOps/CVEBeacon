@@ -2,7 +2,8 @@
 
 The core image runs the same CLI as a source installation. It contains no
 optional companion, host collectors, Kubernetes clients, cron or supervisor.
-No image publication is part of the reference build.
+No image publication is part of the reference build. See the
+[deployment guide](DEPLOY.md) for a complete Linux VM walkthrough.
 
 ```console
 docker build --target core --tag cvebeacon:local .
