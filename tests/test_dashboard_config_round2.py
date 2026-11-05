@@ -317,18 +317,22 @@ def _create_backup(config, client):
 
 
 def test_invalid_current_file_can_be_recovered_through_a_backup(accounts):
-    config, _, app, client = accounts
+    config, users, app, client = accounts
     original = load_config(config.config_path)
     _create_backup(config, client)
     editor = app.extensions["dashboard_config"]
     backup = editor.backups()[0]
     config.config_path.write_text(
-        config.config_path.read_text(encoding="utf-8")
-        + '\n[http]\nretries = -1\n',
+        config.config_path.read_text(encoding="utf-8").replace(
+            '"retries" = 4', '"retries" = -1'),
         encoding="utf-8",
     )
     assert client.get("/config/backups").status_code == 200
     assert client.get("/config/http").status_code == 400
+    # A delegated editor without manage_secrets may still restore a parseable
+    # but loader-invalid file after the access confirmation.
+    set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
+    login(client)
     page = client.get("/config/backups")
     data = form(page.text)
     data["backup"] = backup

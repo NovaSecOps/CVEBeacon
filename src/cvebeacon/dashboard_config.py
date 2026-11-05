@@ -864,8 +864,9 @@ class Editor:
         if mine >= MAX_PENDING_PER_SESSION:
             raise ConfigurationError("Too many pending previews for this session; try again later")
         invalid_current = current_document is None or current_config is None
+        unparseable = current_document is None
         checks_config = current_config or self.config
-        if invalid_current and section == "rollback" and "manage_secrets" not in g.permissions:
+        if unparseable and section == "rollback" and "manage_secrets" not in g.permissions:
             abort(403)
         if ((secret_change(current_document or {}, document))
                 and "manage_secrets" not in g.permissions):
@@ -961,13 +962,14 @@ class Editor:
                     current_config = None
             checks_config = current_config or self.config
             invalid_current = old is None or current_config is None
+            unparseable = old is None
             # Permission checks precede any read of a new reference target.
             with users.transaction() as db:
                 probe = None
                 for needed in {"view", *permission}:
                     probe = users.require_permission_in(db, g.entry.proof, needed)
                 early_permissions = users.permissions_in(db, probe)
-            if ((invalid_current and section == "rollback"
+            if ((unparseable and section == "rollback"
                     and "manage_secrets" not in early_permissions)):
                 abort(403)
             if (secret_change(old or {}, pending.document)
@@ -1018,7 +1020,7 @@ class Editor:
                     actor = users.require_permission_in(db, g.entry.proof, needed)
                 if read_regular(self.path)[2] != version:
                     abort(409, "Configuration changed; reload the form")
-                if ((invalid_current and section == "rollback"
+                if ((unparseable and section == "rollback"
                         and "manage_secrets" not in users.permissions_in(db, actor))):
                     abort(403)
                 if (secret_change(old or {}, pending.document)
