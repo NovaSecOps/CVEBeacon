@@ -466,8 +466,12 @@ class Editor:
         if not pending:
             return
         live = self._live_reference_paths()
+        active = {path for identifier2, pending2 in self.pending.items()
+                  if identifier2 != identifier for path in pending2.staged}
         for path in pending.staged:
             if path.name.startswith((SECRET_PREFIX, STAGE_PREFIX)):
+                if path in active:
+                    continue
                 if path.name.startswith(SECRET_PREFIX) and live is not None and path.resolve() in live:
                     # A committed configuration or retained backup still names it.
                     continue

@@ -114,6 +114,8 @@ def test_manage_secrets_is_a_documented_permission(accounts):
     admin = users.authenticate("admin", PASSWORD)
     with users.transaction() as db:
         assert "manage_secrets" in users.permissions_in(db, admin.user)
+    root = Path(__file__).resolve().parents[1]
+    assert "`manage_secrets`" in (root / "docs" / "DASHBOARD.md").read_text(encoding="utf-8")
 
 
 def test_secret_references_render_read_only_without_manage_secrets(accounts):
@@ -576,3 +578,36 @@ def test_commit_rechecks_running_config_for_lockout(accounts):
     )
     assert confirm(client, response).status_code == 400
     assert config.config_path.read_bytes() == before
+
+
+def test_symlink_alias_to_account_store_is_rejected(accounts, tmp_path):
+    config, _, _, client = accounts
+    alias = tmp_path / "state-alias.db"
+    alias.symlink_to(config.watch.users_database)
+    login(client, "admin")
+    before = config.config_path.read_bytes()
+    response = preview(client, "system", g0_database=str(alias))
+    assert response.status_code == 400
+    assert config.config_path.read_bytes() == before
+
+
+def test_staged_secret_is_adopted_across_pending_previews(accounts):
+    from cvebeacon.dashboard_config import Pending
+
+    config, _, app, client = accounts
+    editor = app.extensions["dashboard_config"]
+    login(client, "admin")
+    response = preview(client, "sources", g0_nvd_api_key_file_new="Synthetic value")
+    assert response.status_code == 200, response.text
+    pending = editor.pending[form(response.text, "confirm")["preview"]]
+    staged = pending.staged[0]
+    adopted = Pending("other-session", "sources", "version", {}, time.monotonic() + 60,
+                      (staged,), (), False)
+    editor.pending["other-preview"] = adopted
+    pending.expires = 0
+    editor.cleanup()
+    assert staged.exists()
+    config.config_path.write_text(with_file(config, staged), encoding="utf-8")
+    adopted.expires = 0
+    editor.cleanup()
+    assert staged.exists()
