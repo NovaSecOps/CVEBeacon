@@ -15,6 +15,147 @@ SQLite or decides vulnerability applicability.
 See [SBOM import](SBOM.md) and [local host collectors](HOST_COLLECTORS.md) for
 supported inputs, permissions and conservative identity rules.
 
+## Web technology detection
+
+`cvebeacon-ext web detect` observes explicitly authorised web assets with one
+ordinary `GET` per asset. It records only direct evidence in the response:
+`Server` and `X-Powered-By`-style headers, cookie names, generator metadata,
+script/link URLs and specific HTML markers. Results are inventory hints for
+review, not proof that a product is present, unpatched or exploitable. There is
+no active probing, crawling, subresource fetching, JavaScript execution,
+authentication or exploitation.
+
+### What it sends
+
+- One `GET` to the configured path, plus at most two redirects that are
+  re-checked at every hop.
+- `User-Agent: CVEBeacon-web-detect/<version>`, `Accept:
+  text/html,application/xhtml+xml`, `Accept-Language: en`, `Cache-Control:
+  no-cache`, `Accept-Encoding: gzip, deflate` and `Connection: close`.
+- No client cookies, authentication headers, request body, `Range`, `POST`,
+  link following, subresource requests or path guessing.
+- TLS verification is always on with a minimum of TLS 1.2. An optional
+  per-client CA bundle is trusted in addition to the system store; there is no
+  insecure switch.
+
+### Authorisation and the allowlist
+
+The allowlist is a bounded JSON file. An entry is refused before any request if
+`authorized_by` or `authorized_at` is missing, if `expires_at` has passed, or if
+the fields are malformed. Unknown fields are refused so a misspelled safety
+option cannot silently fall back to a less safe default.
+
+```json
+{
+  "client": "acme",
+  "ca_bundle": "acme-ca.pem",
+  "assets": [
+    {
+      "hostname": "www.example.com",
+      "scheme": "https",
+      "port": 443,
+      "path": "/",
+      "authorized_by": "Acme Security <security@example.com>",
+      "authorized_at": "2026-11-01T00:00:00Z",
+      "expires_at": "2027-11-01T00:00:00Z",
+      "allow_redirects": true,
+      "max_redirects": 2,
+      "allow_private_address": false
+    }
+  ]
+}
+```
+
+- Use exactly one of `hostname` or `url` per asset. `scheme` defaults to
+  `https`, `port` to 443/80, and `path` to `/`. A URL must be absolute and must
+  not contain credentials, a query or a fragment.
+- `authorized_by` and `authorized_at` are required. `expires_at` is optional.
+  Timestamps are ISO 8601 UTC values. A future `authorized_at` is refused.
+- `allow_redirects` defaults to true and `max_redirects` to 2 (the hard maximum
+  is 2). A redirect must stay on an endpoint present in the same allowlist,
+  stay on the same registrable domain, and must not downgrade HTTPS to HTTP.
+- Private, loopback, link-local, metadata, multicast, reserved, unspecified,
+  IPv4-mapped/compatible IPv6 and NAT64 answers are refused by default. Set
+  `allow_private_address: true` on a specific entry to attest an internal site;
+  loopback still needs that explicit flag. This is intended for controlled
+  internal services, not as a general scanner switch.
+- `ca_bundle` is optional and relative paths are resolved against the
+  allowlist file. It must be a regular file.
+
+Preview the request count without resolving or sending anything:
+
+```console
+cvebeacon-ext web detect --client acme --assets acme-assets.json \
+  --output acme-web.json --source-id acme-web --plan
+```
+
+Then run the observation:
+
+```console
+cvebeacon-ext web detect --client acme --assets acme-assets.json \
+  --output acme-web.json --source-id acme-web
+```
+
+### Network and resource limits
+
+- Resolve first, reject the asset if any answer is non-global (unless
+  `allow_private_address` is set), then connect to the validated IP while
+  keeping the original Host header and TLS SNI. Every redirect is resolved and
+  validated again.
+- Connect timeout 5 seconds, read timeout 10 seconds and 20 seconds total per
+  asset. Response headers are capped at 64 KiB and the decompressed body at
+  2 MiB; gzip and deflate streams are decoded incrementally with the same cap.
+- At most 4 assets run concurrently, with one request per host per second. A
+  run is capped at 1,000 assets and 15 minutes.
+- `429` and `503` stop that host for the rest of the run and record
+  `Retry-After`. `401`, `403` and `404` are never retried. Connection errors
+  are retried at most twice with bounded backoff.
+- Bodies, cookies and `Set-Cookie` values are never written to output or
+  review files. Error details contain status categories, not response content.
+
+### Output and feeding the core inventory
+
+The command writes the usual `cvebeacon.inventory.v1` snapshot, manifest and
+`<snapshot>.review.json`. Every inventory row carries the `client` label, and
+one snapshot is produced per client run. Asset and system IDs are stable,
+client-scoped hashes rather than raw hostnames. CDN and edge technologies have
+`category = "edge"` and are never attributed to the origin server.
+
+Unknown versions are never written as `unknown` or inferred. When a validated
+CPE carries the product identity, the row keeps an empty version and a
+`version-unknown` review entry; without a CPE the observation stays in the
+review file only, because the core product identity needs a version. Conflicting
+versions for one product become a `version-conflict` review entry and no row.
+Direct evidence only is used: WordPress does not imply MySQL or PHP.
+
+Version gaps and other review-only findings still publish a `partial` snapshot
+with the corresponding omissions, so the dashboard can show the product and
+ask for manual review. A run that hit a fetch failure is different: without
+`--allow-partial` the command writes the review file and fails, leaving any
+previous snapshot unchanged. With `--allow-partial` it publishes a `partial`
+snapshot whose `omissions` list the failures and review reasons. A run with no
+rows, including a run where every asset failed, never publishes an empty
+success. Treat `needs_review`, `coverage_unknown`, blocked and stale assets as
+unknown, not as clean.
+
+Validate or merge the result with the normal extension commands, then point the
+core inventory at it. The core remains the applicability authority:
+
+```console
+cvebeacon-ext validate acme-web.json
+cvebeacon-ext merge acme-web.json other-client-web.json \
+  --output inventory.json --source-id central
+```
+
+```toml
+[inventory]
+path = "inventory.json"
+```
+
+`cvebeacon --config cvebeacon.toml scan` records the `client` label with each
+scanned asset and preserves it in reports and findings. Use a stable
+`source-id` such as `<client>-web`, not a hostname or credential.
+
 Core deployments can also use the separate [container reference](CONTAINERS.md).
 For automated deployment, see [Kubernetes](KUBERNETES.md) and the
 [central home-lab workflow](HOME_LAB.md).
