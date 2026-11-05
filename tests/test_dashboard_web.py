@@ -356,3 +356,33 @@ def test_url_entries_display_and_save_equivalent_target(web, url, scheme, port, 
     assert "url" not in updated
     assert (updated["hostname"], updated["scheme"], updated["port"], updated["path"]) == (
         "example.invalid", scheme, port, path_value)
+
+
+@pytest.mark.parametrize("route,action", [("save", "add"), ("run", "web-detect")])
+def test_invalid_client_labels_return_bad_request(web, route, action):
+    client = web[3]
+    response = client.post("/web-assets/" + route,
+                           data={"csrf": csrf(client), "client": "x" * 200, "action": action})
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("section,field,value", [
+    ("products", "versions", None), ("products", "evidence_types", None),
+    ("reviews", "versions", None), ("products", "hostname", {"body": "SECRET_BODY"}),
+    ("run", "request_count", ["SECRET_BODY"]),
+])
+def test_corrupt_review_fields_are_rejected_before_rendering(web, section, field, value):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    detail = {"client": "Acme", "products": [], "reviews": []}
+    detail[section] = {field: value} if section == "run" else [{field: value}]
+    save_allowlist(Path(str(output) + ".review.json"), detail)
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert "review the local files" in page.text
+    assert "SECRET_BODY" not in page.text
+
+
+def test_invalid_client_label_on_view_is_bad_request(web):
+    assert web[3].get("/web-assets", query_string={"client": "x" * 200}).status_code == 400

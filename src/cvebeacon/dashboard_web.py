@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import math
 from urllib.parse import urlsplit
 
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
@@ -19,7 +20,10 @@ from .web_inventory import decode_json, read_bytes, read_web_snapshot
 
 
 def _host(entry):
-    return entry.get("hostname") or urlsplit(entry.get("url", "")).hostname or ""
+    try:
+        return entry.get("hostname") or urlsplit(entry.get("url", "")).hostname or ""
+    except (ValueError, TypeError, AttributeError):
+        return ""
 
 
 def _editable_entry(entry):
@@ -33,6 +37,41 @@ def _editable_entry(entry):
         except (ValueError, TypeError, AttributeError):
             pass  # Keep recovery controls available for malformed local entries.
     return result
+
+
+
+def _review_metadata(detail, client):
+    if not isinstance(detail, dict) or detail.get("client") != client:
+        raise ValueError("invalid review")
+    products, reviews, run = detail.get("products", []), detail.get("reviews", []), detail.get("run")
+    if (not isinstance(products, list) or not isinstance(reviews, list)
+            or any(not isinstance(item, dict) for item in products + reviews)
+            or (run is not None and not isinstance(run, dict))):
+        raise ValueError("invalid review metadata")
+    def text(value):
+        return isinstance(value, str) and len(value) <= 8192
+    for item in products + reviews:
+        for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence", "reason"):
+            if field in item and not text(item[field]):
+                raise ValueError("invalid review text")
+        for field in ("versions", "evidence_types"):
+            if field in item and (not isinstance(item[field], list)
+                                  or any(not text(value) for value in item[field])):
+                raise ValueError("invalid review list")
+        for field in ("status", "retry_after"):
+            if field in item and (type(item[field]) is not int or item[field] < 0):
+                raise ValueError("invalid review number")
+    if run is not None:
+        for field in ("started_at", "ended_at", "status"):
+            if field in run and not text(run[field]):
+                raise ValueError("invalid run text")
+        if "request_count" in run and (type(run["request_count"]) is not int or run["request_count"] < 0):
+            raise ValueError("invalid run request count")
+        if "duration_seconds" in run and (type(run["duration_seconds"]) not in (int, float)
+                or (type(run["duration_seconds"]) is float and not math.isfinite(run["duration_seconds"]))
+                or run["duration_seconds"] < 0):
+            raise ValueError("invalid run duration")
+    return products, reviews, run
 
 
 
@@ -70,16 +109,7 @@ def create_web_blueprint(config):
                 review_path = output.with_name(output.name + ".review.json")
                 if review_path.exists() or review_path.is_symlink():
                     detail = decode_json(read_bytes(review_path))
-                    if not isinstance(detail, dict) or detail.get("client") != client:
-                        raise ValueError("invalid review")
-                    # Render only explicit metadata fields, never arbitrary response fields.
-                    products = detail.get("products", [])
-                    reviews = detail.get("reviews", [])
-                    run = detail.get("run")
-                    if (not isinstance(products, list) or not isinstance(reviews, list)
-                            or any(not isinstance(item, dict) for item in products + reviews)
-                            or (run is not None and not isinstance(run, dict))):
-                        raise ValueError("invalid review metadata")
+                    products, reviews, run = _review_metadata(detail, client)
                     truncated = len(products) > 1000 or len(reviews) > 1000
                     products, reviews = products[:1000], reviews[:1000]
                 last_job = next((job for job in manager().store.recent(200)
@@ -97,13 +127,20 @@ def create_web_blueprint(config):
     @blueprint.get("")
     @requires("view")
     def index():
-        return render(_text(request.args, "client", limit=256))
+        label = _text(request.args, "client", limit=256)
+        try:
+            return render(client_label(label) if label else "")
+        except ConfigurationError:
+            abort(400)
 
     @blueprint.post("/save")
     @requires("manage_web_assets")
     def save():
         require_accounts()
-        client = client_label(_text(request.form, "client", required=True))
+        try:
+            client = client_label(_text(request.form, "client", required=True))
+        except ConfigurationError:
+            abort(400)
         action = _text(request.form, "action", required=True)
         if action not in {"add", "change", "remove", "remove-all"}:
             abort(400)
@@ -201,7 +238,10 @@ def create_web_blueprint(config):
     @requires("run")
     def run_job():
         require_accounts()
-        client = client_label(_text(request.form, "client", required=True))
+        try:
+            client = client_label(_text(request.form, "client", required=True))
+        except ConfigurationError:
+            abort(400)
         action = _text(request.form, "action", required=True)
         if action not in {"web-detect", "web-plan"}:
             abort(400)
