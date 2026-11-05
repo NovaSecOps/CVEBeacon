@@ -276,6 +276,30 @@ def test_cancel_sends_interrupt_and_cleanup_runs(ops, tmp_path):
     assert "cleanup" in client.get(f"/operations/jobs/{job.id}").text.lower()
 
 
+def test_queued_job_can_be_cancelled_before_it_starts(tmp_path):
+    config = make_config(tmp_path)
+    users = new_accounts(config)
+    app = dashboard.create_app(config)
+    manager = app.extensions["dashboard_jobs"]
+    first = manager.submit(
+        "watch-notify",
+        started_by="admin",
+        argv=fake_job("import time; time.sleep(5)"),
+    )
+    assert manager.wait(first.id, statuses=frozenset({"running"}))
+    second = manager.submit(
+        "watch-notify",
+        started_by="admin",
+        argv=fake_job("print('must not run')"),
+    )
+    assert manager.store.get(second.id).status == "queued"
+    assert manager.cancel(second.id)
+    assert manager.store.get(second.id).status == "cancelled"
+    assert manager.cancel(first.id)
+    assert manager.wait(first.id).status == "cancelled"
+    assert not Path(second.log_path).exists()
+
+
 def test_log_storage_and_tail_are_bounded(ops):
     _, _, app, client = ops
     login(client)
