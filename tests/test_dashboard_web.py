@@ -443,6 +443,8 @@ def test_single_removal_warns_until_next_detection(web, monkeypatch):
     ("products", "versions", None), ("products", "evidence_types", None),
     ("reviews", "versions", None), ("products", "hostname", {"body": "SECRET_BODY"}),
     ("run", "request_count", ["SECRET_BODY"]),
+    ("products", "hostname", "\ud800"), ("reviews", "versions", ["\udfff"]),
+    ("run", "status", "\ud800"),
 ])
 def test_corrupt_review_fields_are_rejected_before_rendering(web, section, field, value):
     config, _, _, client = web
@@ -450,7 +452,7 @@ def test_corrupt_review_fields_are_rejected_before_rendering(web, section, field
     _, output = paths(config, "Acme")
     detail = {"client": "Acme", "products": [], "reviews": []}
     detail[section] = {field: value} if section == "run" else [{field: value}]
-    save_allowlist(Path(str(output) + ".review.json"), detail)
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
     page = client.get("/web-assets?client=Acme")
     assert page.status_code == 200
     assert "review the local files" in page.text
@@ -534,3 +536,18 @@ def test_last_single_removal_keeps_bulk_result_removal_available(web):
     assert "Remove all assets" in page.text
     assert save(client, action="remove-all", confirm="yes").status_code == 303
     assert not output.exists()
+
+
+@pytest.mark.parametrize("entry", [{"url": "http://\ud800/"}, {"hostname": "\udfff"}])
+def test_surrogate_allowlist_entries_keep_bulk_recovery_available(web, entry):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, _ = paths(config, "Acme")
+    document, _ = read_allowlist(path, "Acme")
+    document["assets"].append(entry)
+    web_assets.replace_bytes(path, json.dumps(document).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200 and "Remove all assets" in page.text
+    assert save(client, action="remove-all", confirm="yes").status_code == 303
+    assert read_allowlist(path, "Acme")[0]["assets"] == []
+    assert not users.verify_audit()

@@ -21,12 +21,19 @@ from .web_inventory import decode_json, read_bytes, read_web_snapshot
 
 def _host(entry):
     try:
-        return entry.get("hostname") or urlsplit(entry.get("url", "")).hostname or ""
+        host = entry.get("hostname") or urlsplit(entry.get("url", "")).hostname or ""
+        host.encode("utf-8")
+        return host
     except (ValueError, TypeError, AttributeError):
         return ""
 
 
 def _editable_entry(entry):
+    try:
+        json.dumps(entry, ensure_ascii=False).encode("utf-8")
+    except UnicodeError:
+        # Reject corrupt display values without disabling removal/recovery.
+        return {"hostname": "Invalid saved asset; remove it or review the local file"}
     result = dict(entry)
     if "url" in entry:
         try:
@@ -48,7 +55,8 @@ def _review_metadata(detail, client):
             or (run is not None and not isinstance(run, dict))):
         raise ValueError("invalid review metadata")
     def text(value):
-        return isinstance(value, str) and len(value) <= 8192
+        return (isinstance(value, str) and len(value) <= 8192
+                and not any(0xD800 <= ord(char) <= 0xDFFF for char in value))
     for item in products + reviews:
         for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence", "reason"):
             if field in item and not text(item[field]):
