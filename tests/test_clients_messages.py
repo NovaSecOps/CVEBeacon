@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_module
+import json
 import re
 from typing import Any
 
@@ -89,6 +90,12 @@ def text_for(item: DeliveryEvent, channel: str, **kwargs: Any) -> str:
 def test_every_channel_shows_the_affected_clients_line(
     channel, language, expected
 ):
+    if channel == "slack":
+        expected = (
+            "Affected clients: `Acme`, `Globex (review)`, `Initech`"
+            if language == "en"
+            else "Clientes afetados: `Acme`, `Globex (revisão)`, `Initech`"
+        )
     text = text_for(event(), channel, language=language, clients=IMPACTS)
     assert expected in text
 
@@ -109,7 +116,7 @@ def test_initial_digest_shows_the_affected_clients_line():
     item = event(initial=True)
     message = render(item, "slack", clients=IMPACTS, since="2026-10-27")[0]
     assert message.initial is True
-    assert "Affected clients: Acme, Globex (review), Initech" in message.text
+    assert "Affected clients: `Acme`, `Globex (review)`, `Initech`" in message.text
 
 
 def test_html_email_shows_the_affected_clients_line():
@@ -162,19 +169,63 @@ def test_slack_and_discord_escape_client_names():
         "CVE-2026-1234": (ClientImpact("<Acme & Co>", 1, "affected"),)
     }
     slack = text_for(event(), "slack", clients=impacts)
-    assert "&lt;Acme &amp; Co&gt;" in slack
+    assert "`&lt;Acme &amp; Co&gt;`" in slack
     discord = text_for(event(), "discord", clients=impacts)
     assert "<Acme & Co\\>" in discord
 
 
+def test_teams_and_html_escape_client_names():
+    impacts = {
+        "CVE-2026-1234": (ClientImpact("<Acme & Co>", 1, "affected"),)
+    }
+    teams = text_for(event(), "teams", clients=impacts)
+    assert "&lt;Acme &amp; Co&gt;" in teams
+    assert "<Acme & Co>" not in teams
+    message = render(event(), "smtp", format="html", clients=impacts)[0]
+    visible = re.sub(r"<[^>]+>", " ", message.html)
+    assert "&lt;Acme &amp; Co&gt;" in visible
+    assert "<Acme & Co>" not in visible
+
+
+def test_slack_backtick_cannot_open_a_code_span():
+    impacts = {
+        "CVE-2026-1234": (ClientImpact("Acme` *Group*", 1, "affected"),)
+    }
+    slack = text_for(event(), "slack", clients=impacts)
+    assert "`Acme\u02cb *Group*`" in slack
+    assert "*Group*" in slack
+
+
 def test_webhook_document_lists_affected_clients():
-    payload = webhook_payload((event(),), {"critical-or-likely": "critical-or-likely"}, IMPACTS)
+    payload = webhook_payload(
+        (event(),),
+        {"critical-or-likely": "critical-or-likely"},
+        IMPACTS,
+    )
     assert payload["version"] == 2
     assert payload["events"][0]["affected_clients"] == [
         {"name": "Acme", "assets": 2, "status": "affected"},
         {"name": "Globex", "assets": 1, "status": "needs_review"},
         {"name": "Initech", "assets": 1, "status": "affected"},
     ]
+
+
+def test_webhook_client_list_is_bounded_with_a_count():
+    impacts = {
+        "CVE-2026-1234": tuple(
+            ClientImpact(f"Client {index:03d}", 1, "affected")
+            for index in range(1000)
+        )
+    }
+    payload = webhook_payload(
+        (event(),),
+        {"critical-or-likely": "critical-or-likely"},
+        impacts,
+    )
+    entry = payload["events"][0]
+    assert len(entry["affected_clients"]) == 50
+    assert entry["affected_clients_omitted"] == 950
+    assert len(json.dumps(entry).encode("utf-8")) < 32_768
 
 
 def test_webhook_document_without_clients_is_unchanged():

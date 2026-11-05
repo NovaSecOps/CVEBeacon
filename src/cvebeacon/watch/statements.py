@@ -21,12 +21,17 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from string import Template
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 from xml.parsers import expat
 from xml.sax.saxutils import escape
 
-from ..clients import ClientImpact, format_client_names
+from ..clients import (
+    ClientImpact,
+    ClientImpacts,
+    format_client_names,
+    markdown_escape_client,
+)
 from ..errors import CVEBeaconError
 from .messages import CVE_URL, EUVD_URL, NVD_URL, PROVIDER_ORDER
 from .records import CVSS_PROVIDERS, CVSSEntry, ReportedMark, WatchView
@@ -187,7 +192,8 @@ def _reported_marks(mark: ReportedMark | None) -> tuple[str, str, str]:
 def build_fields(
     view: WatchView, *, first_seen: str | None, generated_at: datetime,
     reported_mark: ReportedMark | None = None,
-    client_impacts: Sequence[ClientImpact] = (),
+    client_impacts: ClientImpacts | Sequence[ClientImpact] = (),
+    client_escape: Callable[[str], str] | None = None,
 ) -> dict[str, str]:
     """Derive every statement field from one stored watch view."""
     highest = highest_cvss(view, CVSS_PROVIDERS)
@@ -238,7 +244,7 @@ def build_fields(
         "cwes": ", ".join(view.cwes) or MISSING,
         "affected_products": _products(view) or MISSING,
         "affected_clients": format_client_names(
-            client_impacts, language="en"
+            client_impacts, language="en", escape=client_escape
         )
         or MISSING,
         "references": "\n".join(reference.url for reference in view.references)
@@ -1010,12 +1016,17 @@ def write_statement(
     out: str | Path,
     force: bool = False,
     now: datetime | None = None,
-    client_impacts: Sequence[ClientImpact] = (),
+    client_impacts: ClientImpacts | Sequence[ClientImpact] = (),
 ) -> Path:
     """Render one stored CVE into ``out`` and return the written path."""
     template_path = Path(template).expanduser() if template else None
     kind = template_kind(template_path) if template_path else "text"
     output = _output_path(Path(out).expanduser(), kind)
+    client_escape = (
+        markdown_escape_client
+        if kind == "text" and output.suffix.casefold() == ".md"
+        else None
+    )
     view = store.view(cve_id, catalogs=catalogs)
     if view is None:
         raise CVEBeaconError(
@@ -1027,6 +1038,7 @@ def write_statement(
         reported_mark=store.reported_marks((view.cve_id,)).get(view.cve_id),
         generated_at=now or datetime.now(timezone.utc),
         client_impacts=client_impacts,
+        client_escape=client_escape,
     )
     if template_path is None:
         result = render_text(default_template_text(), fields).encode("utf-8")

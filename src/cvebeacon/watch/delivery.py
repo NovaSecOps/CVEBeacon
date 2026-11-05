@@ -17,7 +17,7 @@ from urllib.parse import quote
 import httpx
 
 from ..config import AppConfig
-from ..clients import ClientImpact, affected_clients
+from ..clients import ClientImpacts, affected_clients
 from ..errors import ConfigurationError
 from ..http import HttpClient, HttpResult
 from .channels import ChannelConfig, channel_map, validate_webhook_url
@@ -386,7 +386,7 @@ def _send_webhook(
     http: HttpClient,
     timeout: float,
     names: Mapping[str, str],
-    clients: Mapping[str, Sequence[ClientImpact]] | None = None,
+    clients: Mapping[str, ClientImpacts] | None = None,
 ) -> None:
     headers: dict[str, str] = {}
     header_name = channel.options.get("header_name")
@@ -659,7 +659,7 @@ def _send(
     timeout: float,
     names: Mapping[str, str],
     *,
-    clients: Mapping[str, Sequence[ClientImpact]] | None = None,
+    clients: Mapping[str, ClientImpacts] | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] | None = None,
 ) -> None:
@@ -720,7 +720,7 @@ def _channel_messages(
     names: Mapping[str, str],
     since: str | None,
     language: str,
-    clients: Mapping[str, Sequence[ClientImpact]] | None = None,
+    clients: Mapping[str, ClientImpacts] | None = None,
 ) -> tuple[OutgoingMessage, ...]:
     return build_messages(
         events,
@@ -807,7 +807,7 @@ def deliver_pending(
             covered: Sequence[DeliveryEvent],
             sent: int,
             pace: bool,
-            client_impacts: Mapping[str, Sequence[ClientImpact]] | None = None,
+            client_impacts: Mapping[str, ClientImpacts] | None = None,
         ) -> tuple[int, int, DeliveryFailure | None, bool, bool]:
             delivered = 0
             failure: DeliveryFailure | None = None

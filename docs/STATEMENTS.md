@@ -106,7 +106,9 @@ Unknown-name diagnostics list every unique unknown name up to 128 names and
 | `reported_at` | Full timestamp of the current report mark, for example `2026-11-04T14:00:00+00:00`; `not reported` without a mark. |
 
 Values come from the same stored view used by alert messages and the current
-local report mark. The command does not query NVD, EUVD, KEV, or EPSS.
+local report mark. The command does not query NVD, EUVD, KEV, or EPSS. Client
+labels in Markdown output are escaped as literal text; `.txt` output and Word
+values keep the original spelling, with Word applying XML escaping.
 
 ## Word templates
 
