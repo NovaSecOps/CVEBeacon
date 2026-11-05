@@ -556,3 +556,15 @@ def test_unreadable_backup_retains_an_uncommitted_staged_file(accounts, monkeypa
     monkeypatch.setattr(dc, "read_regular", unreadable_backup)
     editor.cleanup()
     assert staged.exists()
+
+
+def test_new_nvd_file_secret_is_blocked_by_implicit_environment(accounts, monkeypatch):
+    config, _, _, client = accounts
+    monkeypatch.setenv("NVD_API_KEY", "synthetic environment takes precedence")
+    config.config_path.write_text(MINIMAL, encoding="utf-8")
+    login(client, "admin")
+    response = preview(client, "sources", g0_nvd_api_key_file_new="synthetic new file value")
+    assert response.status_code == 400
+    assert "NVD_API_KEY" in response.text
+    secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+    assert not secret_dir.exists() or not list(secret_dir.iterdir())
