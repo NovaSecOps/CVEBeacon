@@ -26,8 +26,11 @@ def test_lock_metadata_survives_unavailable_account_lookup(tmp_path, monkeypatch
         raise ImportError("No module named 'pwd'")
     monkeypatch.setattr(locking.getpass, "getuser", unavailable)
     path = tmp_path / "run.lock"
-    with RunLock(path, command="scan"):
-        metadata = json.loads(path.read_bytes()[1:])
+    with RunLock(path, command="scan") as lock:
+        # Windows reserves byte zero for the active range lock. Read metadata
+        # through the held descriptor, starting beyond that byte.
+        os.lseek(lock._descriptor, 1, os.SEEK_SET)
+        metadata = json.loads(os.read(lock._descriptor, 4096))
         assert metadata["account"] == "unknown" and metadata["command"] == "scan"
 
 

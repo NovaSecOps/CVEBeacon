@@ -89,7 +89,8 @@ def test_windows_publication_reports_reader_held_past_bound(tmp_path):
 @pytest.mark.parametrize("release", [True, False])
 def test_windows_publications_retry_permission_errors(tmp_path, monkeypatch, publication, release):
     from cvebeacon import publication as publication_io
-    from cvebeacon_extensions.contract import _atomic
+    if publication != "allowlist":
+        _atomic = pytest.importorskip("cvebeacon_extensions.contract")._atomic
     target = tmp_path / ("web.json" + {"allowlist": "", "snapshot": "", "manifest": ".manifest.json",
                                      "review": ".review.json"}[publication])
     save_allowlist(target, {"value": "old"})
