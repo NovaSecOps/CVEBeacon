@@ -500,6 +500,25 @@ def test_dispatch_sends_affected_clients_to_automation_channels(
     assert "Affected clients: Acme" in body
 
 
+@pytest.mark.parametrize("status", (Applicability.AFFECTED, Applicability.NEEDS_REVIEW))
+def test_maximum_client_name_keeps_status_through_render_and_dispatch(tmp_path, secrets, status):
+    cfg = config(tmp_path, ("discord",))
+    path = tmp_path / "core.db"
+    name = "x" * 120
+    asset = Asset("a1", "Acme", "Widget", "1", client=name)
+    item = Finding(asset, Vulnerability("CVE-2026-1234"), status, "high", "test")
+    StateStore(path).record_scan([QueryResult(asset, (item,), ())])
+    suffix = " (review)" if status == Applicability.NEEDS_REVIEW else ""
+    expected = "Affected clients: " + name + suffix
+    with core_reader(path) as db:
+        row = event_batch(db)[0]
+        impacts = affected_clients_on_connection(db, (row["cve_id"],))[row["cve_id"]]
+        assert render_event(row, impacts)[1].endswith(expected)
+    wire = Wire()
+    assert dispatch(cfg, path, wire, Clock())["attempted"] == 1
+    assert expected in wire.calls[-1][3].decode("utf-8")
+
+
 def test_matrix_token_change_before_first_attempt_is_safe(tmp_path, secrets, monkeypatch):
     cfg, filename, clock = config(tmp_path, ("matrix",)), core(tmp_path), Clock()
     target = bind(validate_channels(cfg.notifications, tmp_path)[0])

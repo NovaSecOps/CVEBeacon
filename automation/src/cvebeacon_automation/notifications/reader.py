@@ -8,7 +8,8 @@ import unicodedata
 import uuid
 
 from cvebeacon_extensions.contract import decode_json
-from cvebeacon.clients import format_affected_clients
+from cvebeacon.clients import ClientImpact, ClientImpacts, format_affected_clients
+from cvebeacon.identity import MAX_CLIENT_LENGTH
 from ..common import AutomationError, digest, regular
 from ._sqlite import BoundedConnection
 
@@ -82,11 +83,12 @@ def render_event(row, client_impacts=None) -> tuple[str, str]:
                 + "Advisory: " + _label(row["cve_id"]) + "\n"
                 + "Event: " + row["event_type"] + "\nApplicability: " + applicability + "\nCVSS: " + cvss
                 + "\nKEV: CISA=" + flag(vulnerability.get("cisa_kev")) + "; EU=" + flag(vulnerability.get("eu_kev")))
-        clients = format_affected_clients(
-            client_impacts or (),
-            limit=10,
-            escape=lambda value: _label(value, 120),
+        safe_clients = ClientImpacts(
+            tuple(ClientImpact(_label(item.name, MAX_CLIENT_LENGTH), item.assets, item.status)
+                  for item in (client_impacts or ())),
+            getattr(client_impacts, "omitted", 0),
         )
+        clients = format_affected_clients(safe_clients, limit=10)
         if clients:
             text += "\n" + clients
         return digest((run + ":" + str(row["event_id"])).encode("ascii")), text

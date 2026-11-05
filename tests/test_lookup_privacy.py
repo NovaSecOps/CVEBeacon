@@ -1,10 +1,18 @@
 import httpx
+from pathlib import Path
 
 from cvebeacon.config import HttpConfig
 from cvebeacon.http import HttpClient
 from cvebeacon.models import Asset
 from cvebeacon.sources.nvd import NVDSource, CPE_URL
 from cvebeacon.sources.euvd import EUVDSource
+
+
+def test_network_privacy_summary_discloses_client_labels():
+    root = Path(__file__).resolve().parents[1]
+    paragraphs = (root / "docs/NETWORK_REQUIREMENTS.md").read_text().split("\n\n")
+    notification = next(text for text in paragraphs if text.startswith("When explicitly enabled, notifications"))
+    assert "client labels" in notification
 
 
 def test_generic_public_requests_exclude_operational_metadata():

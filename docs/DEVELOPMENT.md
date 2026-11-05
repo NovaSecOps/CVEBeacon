@@ -31,7 +31,7 @@ its own health and integration ledgers. See [architecture](ARCHITECTURE.md),
 - Missing, failed, disabled, ambiguous, or contradictory evidence never becomes
   `not_affected` and never produces a clean exit. It stays `needs_review` or
   `coverage_unknown`, with the limitation visible in reports and source status.
-- Internal asset IDs, categories, system IDs, hostnames, and local paths never
+- Internal asset IDs, client labels, categories, system IDs, hostnames, and local paths never
   enter public source queries. Only public component identity terms are sent.
 - Inputs are bounded and failures are closed. Errors must not echo secrets,
   tokens, credentials, full webhook URLs, or upstream response text.
