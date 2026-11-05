@@ -45,6 +45,7 @@ TERMINATE_GRACE_SECONDS = 2.0
 MAX_HISTORY = MAX_JOBS
 MAX_LOG_BYTES = 128 * 1024
 MAX_LOG_TAIL = 16 * 1024
+WINDOWS_INTERRUPT_EXIT = 0xC000013A
 
 RUN_OPERATIONS = (
     "scan",
@@ -84,7 +85,19 @@ EXIT_MEANINGS = {
     75: "Another run was in progress",
     130: "Cancelled by an interrupt",
     143: "Terminated after cleanup",
+    WINDOWS_INTERRUPT_EXIT: "Cancelled by an interrupt",
 }
+
+
+def normalize_exit_code(code: int | None) -> tuple[int | None, bool]:
+    """Map an unhandled Windows break to the shared interrupt result.
+
+    Returning true means the child was stopped by the default CTRL_BREAK
+    action and did not run a cleanup handler.
+    """
+    if code == WINDOWS_INTERRUPT_EXIT:
+        return 130, True
+    return code, False
 
 
 def exit_meaning(code: int | None) -> str:
@@ -400,7 +413,12 @@ class JobStore:
 
 
 class _JobLog:
-    """Capture through one checked descriptor, with bounded tail rotation."""
+    """Capture through one checked descriptor, with bounded tail rotation.
+
+    Rotation rewrites the open file in place. Renaming or replacing a log that
+    is still open is refused on Windows, and an in-place rewrite keeps capture
+    bound to the descriptor checked at open time.
+    """
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -848,7 +866,8 @@ class JobManager:
                     output_done = True
                     continue
                 log.write(chunk)
-            code = process.wait()
+            code, unclean_interrupt = normalize_exit_code(process.wait())
+            forced = forced or unclean_interrupt
         finally:
             # Capture/store failures must not detach a child that still owns
             # monitoring state. Stop and reap before the worker clears it.

@@ -66,6 +66,8 @@ def test_shutdown_bookkeeping_failure_still_reaps_child(tmp_path, monkeypatch, e
             pathlib.Path(sys.argv[1]).write_text('cleaned')
             raise SystemExit(130)
         signal.signal(signal.SIGINT, stop)
+        if hasattr(signal, 'SIGBREAK'):
+            signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
         time.sleep(30)
     ''', marker))
@@ -233,6 +235,8 @@ def test_active_cancellation_storage_failure_still_runs_child_cleanup(tmp_path, 
             pathlib.Path(sys.argv[1]).write_text('cleaned')
             raise SystemExit(130)
         signal.signal(signal.SIGINT, stop)
+        if hasattr(signal, 'SIGBREAK'):
+            signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
         time.sleep(30)
     ''', marker))

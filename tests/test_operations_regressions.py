@@ -189,6 +189,8 @@ def test_capture_failure_reaps_child_before_marking_failed(tmp_path, monkeypatch
             pathlib.Path(sys.argv[1]).write_text('cleaned')
             raise SystemExit(130)
         signal.signal(signal.SIGINT, stop)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
         time.sleep(30)
     """, marker))
@@ -262,6 +264,12 @@ def test_password_diagnostics_never_normalize_or_truncate_secrets(tmp_path, monk
     assert " ".join(secret.split())[:40] not in response.text
 
 
+def test_windows_break_exit_is_reported_as_a_forced_cancellation():
+    assert jobs.normalize_exit_code(0xC000013A) == (130, True)
+    assert jobs.normalize_exit_code(130) == (130, False)
+    assert jobs.exit_meaning(0xC000013A) == "Cancelled by an interrupt"
+
+
 def test_cancel_escalates_and_reaps_an_uncooperative_child(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     monkeypatch.setattr(jobs, "CANCEL_GRACE_SECONDS", 0.15, raising=False)
@@ -269,6 +277,8 @@ def test_cancel_escalates_and_reaps_an_uncooperative_child(tmp_path, monkeypatch
     job = manager.submit("notify-test", started_by="admin", argv=fake_job("""
         import signal, time
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
         print('ready', flush=True)
         time.sleep(30)
     """))
@@ -296,6 +306,8 @@ def test_shutdown_runs_cleanup_and_reaps_child(tmp_path):
             pathlib.Path(sys.argv[1]).write_text('cleaned')
             raise SystemExit(130)
         signal.signal(signal.SIGINT, stop)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
         time.sleep(30)
     """, marker))
