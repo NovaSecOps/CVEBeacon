@@ -142,8 +142,8 @@ header_value_env = "HOOK_TOKEN"
     before = config.config_path.read_bytes()
     assert preview(client, "channels", g0_allow_insecure="true").status_code == 403
     assert config.config_path.read_bytes() == before
-    # An ordinary field on the same secret-bearing channel stays editable.
-    assert preview(client, "channels", g0_max_items="7").status_code == 200
+    # Any edit of a credential-bearing channel requires manage_secrets.
+    assert preview(client, "channels", g0_max_items="7").status_code == 403
 
     login(client, "admin")
     response = preview(client, "channels", g0_allow_insecure="true")
@@ -220,6 +220,186 @@ def test_operational_paths_reject_config_lock_secret_and_inventory(accounts):
         assert config.config_path.read_bytes() == before
 
 
+def test_credential_channel_repoint_needs_manage_secrets(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(channel_config('''
+[watch.channels.alpha]
+type = "smtp"
+host = "alpha.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_env = "PASS_A"
+
+[watch.channels.beta]
+type = "smtp"
+host = "beta.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_env = "PASS_B"
+'''), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    before = config.config_path.read_bytes()
+    assert preview(client, "channels", g1_password_env="PASS_A").status_code == 403
+    assert preview(client, "channels", g0_password_env="PASS_B",
+                   g1_password_env="PASS_A").status_code == 403
+    assert config.config_path.read_bytes() == before
+
+
+def test_credential_channel_file_repoint_needs_manage_secrets(accounts):
+    config, users, _, client = accounts
+    first = make_secret(config.config_path.parent / "first-password", "first synthetic")
+    second = make_secret(config.config_path.parent / "second-password", "second synthetic")
+    config.config_path.write_text(channel_config(_smtp(reference="password_file")), encoding="utf-8")
+    config.config_path.write_text(
+        config.config_path.read_text(encoding="utf-8").replace(
+            'password_file = "password_file"', f'password_file = "{first.name}"'),
+        encoding="utf-8")
+    config.config_path.write_text(
+        config.config_path.read_text(encoding="utf-8") +
+        f'\n[watch.channels.other]\ntype = "smtp"\nhost = "other.example.invalid"\n'
+        f'from = "sender@example.invalid"\nto = ["soc@example.invalid"]\n'
+        f'password_file = "{second.name}"\n', encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    page = client.get("/config/channels")
+    assert page.status_code == 200
+    assert "This channel carries a credential" in page.text
+    assert 'name="g0_password_file_new"' not in page.text
+    before = config.config_path.read_bytes()
+    assert preview(client, "channels", g1_password_file=first.name).status_code == 403
+    assert config.config_path.read_bytes() == before
+
+
+def test_rollback_to_a_repointed_channel_needs_manage_secrets(accounts):
+    config, users, app, client = accounts
+    config.config_path.write_text(channel_config('''
+[watch.channels.alpha]
+type = "smtp"
+host = "alpha.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_env = "PASS_A"
+
+[watch.channels.beta]
+type = "smtp"
+host = "beta.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_env = "PASS_B"
+'''), encoding="utf-8")
+    login(client, "admin")
+    assert confirm(client, preview(client, g0_retries="4")).status_code == 303
+    login(client, "admin")
+    original = config.config_path.read_text(encoding="utf-8")
+    config.config_path.write_text(original.replace('"password_env" = "PASS_A"', '"password_env" = "TEMP_A"')
+                                  .replace('"password_env" = "PASS_B"', '"password_env" = "PASS_A"')
+                                  .replace('"password_env" = "TEMP_A"', '"password_env" = "PASS_B"'),
+                                  encoding="utf-8")
+    set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
+    login(client)
+    page = client.get("/config/backups")
+    assert page.status_code == 200
+    data = form(page.text)
+    data["backup"] = sorted(app.extensions["dashboard_config"].backups())[0]
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 403
+
+
+def test_webhook_url_rotation_requires_manage_secrets(accounts):
+    config, users, _, client = accounts
+    url = make_secret(config.config_path.parent / "url-secret",
+                      "https://example.invalid/hook")
+    header = make_secret(config.config_path.parent / "header-secret", "synthetic header")
+    config.config_path.write_text(channel_config(f'''
+[watch.channels.hook]
+type = "webhook"
+url_file = "{url.name}"
+header_name = "X-Token"
+header_value_file = "{header.name}"
+'''), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    before = config.config_path.read_bytes()
+    response = preview(client, "channels", g0_url_file_new="https://attacker.example.invalid/hook")
+    assert response.status_code in {400, 403}
+    assert "manage_secrets" in response.text or response.status_code == 403
+    assert url.read_text(encoding="utf-8").startswith("https://example.invalid/")
+    assert header.read_text(encoding="utf-8") == "synthetic header"
+    assert config.config_path.read_bytes() == before
+
+
+def test_inventory_input_cannot_alias_protected_storage(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "channel-password", "synthetic password")
+    config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
+    set_role(users, "inventory-editor", {"view", "edit_inventory"})
+    login(client)
+    jobs = config.database_path.parent / "dashboard-jobs" / "dashboard-jobs.db"
+    for target in (secret, config.watch.users_database,
+                   config.database_path, jobs, config.config_path):
+        before = config.config_path.read_bytes()
+        response = preview(client, "inventory", g0_path=str(target))
+        assert response.status_code == 400, (target, response.text)
+        assert config.config_path.read_bytes() == before
+
+
+def test_missing_live_file_can_be_restored_from_a_backup(accounts):
+    config, users, app, client = accounts
+    original = load_config(config.config_path)
+    _create_backup(config, client)
+    backup = app.extensions["dashboard_config"].backups()[0]
+    config.config_path.unlink()
+    assert client.get("/config/backups").status_code == 200
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+    assert "Current configuration is invalid or missing" in response.text
+    confirm_data = form(response.text, "confirm")
+    confirm_data["lockout"] = "yes"
+    assert client.post("/config/backups", data=confirm_data).status_code == 303
+    assert config.config_path.exists()
+    assert load_config(config.config_path).http.retries == original.http.retries
+
+
+@pytest.mark.parametrize("damage", [
+    '\n[unknown]\nvalue = "SyntheticUnknownSecret"\n',
+    '\n[watch.channels.bad]\ntype = "ntfy"\ntopic = "alerts"\nunknown = "SyntheticUnknownSecret"\n',
+])
+def test_invalid_live_file_rollback_hides_unvalidated_values(accounts, damage):
+    config, users, app, client = accounts
+    original = load_config(config.config_path)
+    _create_backup(config, client)
+    backup = app.extensions["dashboard_config"].backups()[0]
+    config.config_path.write_text(config.config_path.read_text(encoding="utf-8") + damage,
+                                  encoding="utf-8")
+    set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+    assert "Current configuration is invalid or missing" in response.text
+    assert "SyntheticUnknownSecret" not in response.text
+    confirm_data = form(response.text, "confirm")
+    confirm_data["lockout"] = "yes"
+    assert client.post("/config/backups", data=confirm_data).status_code == 303
+    assert load_config(config.config_path).http.retries == original.http.retries
+
+
+def test_configuration_writer_lock_is_created_lazily(accounts):
+    config, _, _, client = accounts
+    lock = config.config_path.with_name(".config-" + config.config_path.name + ".lock")
+    assert not lock.exists()
+    login(client, "admin")
+    assert not lock.exists()
+    assert client.get("/config/").status_code == 200
+    assert lock.exists()
+
+
 def test_operational_paths_reject_dashboard_jobs_storage(accounts):
     config, users, _, client = accounts
     jobs = config.database_path.parent / "dashboard-jobs"
@@ -279,7 +459,7 @@ webhook_url_file = "{secret.name}"
 type = "teams"
 webhook_url_file = "{secret.name}"
 '''), encoding="utf-8")
-    set_role(users, "channel-editor", {"view", "edit_channels"})
+    set_role(users, "channel-editor", {"view", "edit_channels", "manage_secrets"})
     login(client)
     before = config.config_path.read_bytes()
     response = preview(client, "channels",
@@ -474,22 +654,33 @@ topic = "alerts"
     assert confirm(client, response, "channels").status_code == 303
 
 
-def test_rename_and_delete_with_a_secret_reference_need_only_edit_channels(accounts):
+def test_credential_channel_rename_needs_manage_but_delete_does_not(accounts):
     config, users, _, client = accounts
     secret = make_secret(config.config_path.parent / "password", "synthetic password")
     config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
     set_role(users, "channel-editor", {"view", "edit_channels"})
     login(client)
     response = preview(client, "channels", g0_name="renamed")
-    assert response.status_code == 200, response.text
-    assert confirm(client, response, "channels").status_code == 303
-    assert [channel.name for channel in load_config(config.config_path).watch.channels] == ["renamed"]
+    assert response.status_code == 403
+    assert "manage_secrets" in response.text or response.status_code == 403
 
-    login(client)
     response = preview(client, "channels", remove0="yes")
     assert response.status_code == 200, response.text
     assert confirm(client, response, "channels").status_code == 303
     assert load_config(config.config_path).watch.channels == ()
+
+
+def test_no_secret_channel_rename_still_needs_only_edit_channels(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(channel_config(
+        '[watch.channels.alerts]\ntype = "ntfy"\nserver = "https://ntfy.example.invalid"\ntopic = "alerts"\n'
+    ), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    response = preview(client, "channels", g0_name="renamed")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "channels").status_code == 303
+    assert [channel.name for channel in load_config(config.config_path).watch.channels] == ["renamed"]
 
 
 def test_legacy_direct_webhook_converts_to_a_reference(accounts, monkeypatch):

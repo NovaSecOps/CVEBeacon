@@ -599,7 +599,7 @@ def test_revoked_actor_never_writes_a_live_secret(accounts, monkeypatch, revocat
     monkeypatch.delenv("NVD_API_KEY", raising=False)
     secret = make_secret(config.config_path.parent / "existing-key", "original synthetic value")
     config.config_path.write_text(with_file(config, secret), encoding="utf-8")
-    set_role(users, "source-editor", {"view", "edit_sources"})
+    set_role(users, "source-editor", {"view", "edit_sources", "manage_secrets"})
     admin = users.authenticate("admin", PASSWORD)
     login(client)
     response = preview(client, "sources", g0_nvd_api_key_file_new="revoked synthetic value")

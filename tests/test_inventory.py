@@ -81,6 +81,20 @@ def test_malformed_inputs_fail_safely(tmp_path, name, content):
         load_inventory(InventoryConfig(path=path))
 
 
+@pytest.mark.parametrize("name,content", [
+    ("inventory.yaml", 'asset_id: "SyntheticSecret\n'),
+    ("inventory.json", '{"asset_id": "SyntheticSecret",'),
+])
+def test_structured_parser_errors_do_not_echo_source_content(tmp_path, name, content):
+    path = tmp_path / name
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(InventoryValidationError) as raised:
+        load_inventory(InventoryConfig(path=path))
+    message = str(raised.value)
+    assert "SyntheticSecret" not in message
+    assert "line" in message.lower()
+
+
 @pytest.mark.parametrize("kind", ["csv", "json", "yaml"])
 def test_inspect_structured_formats(tmp_path, kind):
     path = tmp_path / f"inventory.{kind}"

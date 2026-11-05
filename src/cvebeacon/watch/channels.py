@@ -92,18 +92,6 @@ TYPE_KEYS = {
 }
 SMTP_SECURITY = ("starttls", "tls", "none")
 MESSAGE_FORMATS = ("text", "html")
-# Fields that decide where, or how securely, a stored credential is sent.
-# A channel that carries a secret reference may change these only with
-# manage_secrets: otherwise an editor could redirect the credential.
-CREDENTIAL_DESTINATIONS = {
-    "smtp": ("host", "port", "security", "allow_insecure"),
-    "matrix": ("homeserver", "allow_insecure"),
-    "ntfy": ("server", "allow_insecure"),
-    "gotify": ("server", "allow_insecure"),
-    # A generic webhook URL is itself a credential when it is a direct value.
-    # For a header credential, the URL decides where that secret is sent.
-    "webhook": ("url", "allow_insecure"),
-}
 CREDENTIAL_FIELDS = {
     channel_type: frozenset(key for key in keys if key.endswith(("_env", "_file")))
     for channel_type, keys in TYPE_KEYS.items()

@@ -246,7 +246,7 @@ logout, even if its role has no permissions.
 | `edit_http` | Edit HTTP client settings |
 | `edit_system` | Edit state database and report output paths |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
-| `manage_secrets` | Change secret references, create new file secrets and change where a stored channel credential is sent; replacing an existing file secret's contents is also allowed with the section's edit permission |
+| `manage_secrets` | Change or replace any credential-bearing channel, add or change secret references, and stage new file-secret contents |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
 
@@ -385,8 +385,8 @@ only the known canonical or optional inventory fields, so an unknown column is
 never rendered or preserved. Channel types are matched case-insensitively after surrounding whitespace,
 as the loader does; the submitted spelling is preserved. Existing generic webhook
 endpoint values are legacy direct values: they are hidden and retained only
-when that same channel keeps the exact value. New or converted channels must
-supply `url_env` or `url_file`.
+while the same direct value remains, including through a rename. New or
+converted channels must supply `url_env` or `url_file`.
 
 **Validate and preview** builds TOML in a temporary file beside the configuration.
 The diff contains only the selected section and its editable fields; nested
@@ -406,8 +406,10 @@ immediately before replacement. External editors do not participate in that
 lock: avoid simultaneous filesystem edits. A configuration-file writer lock
 covers target capture, live secret writes, transaction exit and compensation;
 release and descriptor-close failures are sanitized maintenance so a completed
-save is not reported as failed. Requests are bounded by the dashboard's
-8192-byte form limit, and a section form accepts at most 100 rows per save;
+save is not reported as failed. The writer lock and orphan cleanup are created
+on the first configuration request, not by dashboard startup.
+Requests are bounded by the dashboard's
+8192-byte form limit, and a section form accepts at most 101 rows per save;
 split larger edits into smaller saves where possible. Pending previews hold
 full documents, so a session's pending count is also a memory bound.
 
@@ -438,7 +440,10 @@ running commands retain their configuration until restarted. A reload reuses the
 process's single dashboard job manager: queued and running jobs keep their
 worker and store, future jobs use the reloaded settings, and `serve` shuts the
 same manager down when the process exits. Moving the state database, and with it
-the private job storage directory, is refused while a job is queued or running.
+the private job storage directory, is refused while a job or pending job audit
+is active. The transition is reserved under the manager before the account
+transaction and the live file replacement, so a refused move leaves no save
+audit entry or new backup. Existing job history is not moved to a new store.
 Run the disposable loopback acceptance check with
 `python tools/dashboard_config_smoke.py`; it creates no schedules and sends no
 notifications.
@@ -450,10 +455,11 @@ account-store administrator check. Operational watch, state and output paths
 must not alias the configuration file or its writer lock, the account, watch or
 state databases, any of their `-wal`, `-shm`, `-journal` or `.lock` sidecars,
 the private `dashboard-jobs` directory with its database and logs, both operation
-run-lock files, the backup or secret directories, every referenced `*_file`
-secret, or the inventory input. Equality, same-file identity and any path beneath a protected
-file as an ancestor are rejected, as are watch, state and output paths that
-alias each other. Resolved paths, symbolic links and existing hard links are
+run-lock files, the backup or secret directories, and every referenced `*_file`
+secret. The inventory input must not equal, share an inode with, or resolve into
+any of those protected files or directories. Equality, same-file identity and
+any path beneath a protected file as an ancestor are rejected, as are watch,
+state and output paths that alias each other. Resolved paths, symbolic links and existing hard links are
 checked. A path collision is rejected with guidance.
 
 All dashboard setting changes require an additional access confirmation.
@@ -475,47 +481,46 @@ generic webhook URLs are credentials: the first three use `webhook_url_env` or
 `webhook_url_file`, and a generic webhook uses `url_env` or `url_file`. URL
 values are hidden in forms, diffs and audit records. Existing generic webhook
 `url` values remain supported for existing configurations, are hidden and
-retained only when unchanged, and are not used for new channels. An existing
+retained while the same direct value remains, including through a rename, and
+are not used for new direct values. An existing
 direct value can be converted to `url_env` or `url_file` with
 `manage_secrets`; the conversion removes the direct value from the next saved
 file. The resolved URL is revalidated with the channel's HTTPS or explicit
 `allow_insecure` setting immediately before every delivery or test send.
 
-A channel that carries any secret reference has credential-destination fields
-that decide where, or how securely, the credential is sent. Changing SMTP
-`host`, `port`, `security` or `allow_insecure`; Matrix `homeserver` or
-`allow_insecure`; ntfy or Gotify `server` or `allow_insecure`; or a generic
-webhook `url` or `allow_insecure` while it has a header credential requires
-`manage_secrets`. These controls are read-only without that permission, and
-the server compares the current and submitted documents at preview and again in
-the write transaction. A channel without a secret keeps those fields editable
-with its section permission. A new channel that reuses an existing credential
-also needs `manage_secrets` unless it is a pure rename.
+A channel that has, or would have, any secret reference is credential-bearing:
+an `*_env` or `*_file` reference, a URL reference, or a header secret. A direct
+legacy webhook `url` is also a credential. Any edit of such a channel requires
+`manage_secrets`: changing any field, adding, changing or removing a reference,
+renaming it, or staging new contents for one of its secret files. Without that
+permission the channel renders read-only with a short explanation. An editor
+with `edit_channels` may create, edit and rename channels that carry no
+credential at all, delete any channel, and change which channels a rule routes
+to with `edit_rules`. The server compares current, running and candidate
+channels one-to-one before any target read and again inside the write
+transaction, so a crafted form cannot bypass the UI.
 
-Existing references cannot be added, changed or repointed without
-`manage_secrets`: they render read-only and the server rechecks the rule before
-validating or reading a new reference target and again inside the write
-transaction. An editor without that permission may still replace the **contents**
-of an existing `*_file` reference. The submitted value is staged, validated by
-the shared loader, then written to the same owner-only file atomically; the
-reference itself does not change. Conflicting new contents for one physical
-file are rejected; identical writes are coalesced. Renaming or deleting a
-channel is not itself a reference change, because references are compared by
-value and field rather than by the channel key. Renaming a channel and rotating
-its secret file must still be saved separately: a rename with new file
-contents is refused with guidance. Writable secret files must
+Secret references and file-secret contents are read-only without
+`manage_secrets`, including source, notification and dashboard references. With
+that permission, added or changed references render editable and a submitted
+file value is staged, validated by the shared loader, then written to the same
+owner-only file atomically when the reference is unchanged. Conflicting new
+contents for one physical file are rejected; identical writes are coalesced.
+Renaming a channel and rotating its secret file must be saved separately: a
+rename with new file contents is refused with guidance. Writable secret files must
 resolve inside the current protected data directory and must not be symbolic
 links or extra hard links. They use the same protected set as operational-path
 checks: the configuration file and writer lock, every current, running and
 candidate account, watch and state database with its `-wal`, `-shm`, `-journal`
 and `.lock` sidecars, the private `dashboard-jobs` directory with its database
-and logs, both operation run-lock files, backups, secret directories, every
-referenced `*_file`, and the inventory input. Files inside the protected `dashboard-secrets`
+and logs, both operation run-lock files, backups, secret directories, and every
+referenced `*_file`. The inventory input is checked against the same set.
+Files inside the protected `dashboard-secrets`
 directory remain writable when they are the referenced secret, including when a
 report output directory contains that secret directory. Readable external
 references remain usable by the loader but are never written through this
-interface. Creating a new file reference or changing an environment or file
-reference requires `manage_secrets`, which administrators always have. A
+interface. Adding or changing a secret reference, or staging file contents,
+requires `manage_secrets`, which administrators always have. A
 supplied destination path is never overwritten: a new file secret is created
 with a random name in `dashboard-secrets` beside the account database, inside
 the protected data directory. No secret value is placed in TOML or a
@@ -542,18 +547,23 @@ ignored by the repository's `.gitignore`; keep runtime data directories outside
 the worktree where possible.
 
 **Backups and rollback** requires `view` and every configuration edit permission,
-because a backup can change every section. Changing a secret reference through
-rollback also requires `manage_secrets`. Choose a backup, validate it, review
-the diff and confirm. Rollback uses the same validation, concurrency checks,
-access confirmation, audit, atomic replacement, backup and reload path as saving.
-The backups list and rollback remain available when the live file fails the
-loader: the page reads the raw bytes and version signature, and validates only
-the chosen backup. Rollback in that state requires the access confirmation, and
-an unparseable current file also requires `manage_secrets`; sections cannot be
-edited from an invalid live file, so restore a backup first. Rollback does not
-restore secret-file contents; it preserves files referenced by retained backups.
-Configuration permissions allow changing operational paths and notification
-destinations; grant them only to accounts trusted to control those settings.
+because a backup can change every section. Rolling back credential changes also
+requires `manage_secrets`. Choose a backup, validate it, review the diff and
+confirm. Rollback uses the same validation, concurrency checks, access
+confirmation, audit, atomic replacement, backup and reload path as saving.
+The backups list remains available when the live file fails the loader or is
+missing. The page reads the raw bytes and version signature, validates only the
+chosen backup, and shows a static "current configuration is invalid or missing"
+notice instead of diffing unvalidated live values. Rollback requires the access
+confirmation; a missing or unparseable live file also requires
+`manage_secrets`, while a parseable file that fails the editor schema can be
+restored with the configuration edit permissions. Sections cannot be edited
+from an invalid live file, so restore a backup first. Rollback does not restore
+secret-file contents; it preserves files referenced by retained backups.
+Inventory parser diagnostics report only the line number and parser kind, never
+source lines. Configuration permissions allow changing operational paths and
+notification destinations; grant them only to accounts trusted to control those
+settings.
 
 ## Package identities and advisory views
 

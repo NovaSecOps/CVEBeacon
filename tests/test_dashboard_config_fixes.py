@@ -200,11 +200,20 @@ def test_manage_secrets_revocation_is_rechecked_inside_commit(accounts, monkeypa
     assert config.config_path.read_bytes() == before
 
 
-def test_existing_file_secret_contents_replaced_without_reference_change(accounts):
+def test_existing_file_secret_contents_require_manage_secrets(accounts):
     config, users, _, client = accounts
     secret = make_secret(config.config_path.parent / "nvd-key.txt", "old Synthetic value")
     config.config_path.write_text(with_file(config, secret), encoding="utf-8")
     set_role(users, "source-editor", {"view", "edit_sources"})
+    login(client)
+    before = config.config_path.read_bytes()
+    response = preview(client, "sources", g0_nvd_api_key_file_new="new Synthetic value")
+    assert response.status_code == 400
+    assert "manage_secrets" in response.text
+    assert secret.read_text(encoding="utf-8") == "old Synthetic value"
+    assert config.config_path.read_bytes() == before
+
+    set_role(users, "source-manager", {"view", "edit_sources", "manage_secrets"})
     login(client)
     response = preview(client, "sources", g0_nvd_api_key_file_new="new Synthetic value")
     assert response.status_code == 200, response.text
