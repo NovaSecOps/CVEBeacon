@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import logging
 import signal
 import sqlite3
 import subprocess
@@ -30,6 +31,9 @@ from .locking import OperationLock, RunInProgress
 from .private_storage import private_directory, private_file, validate_file
 from .launching import command_prefix, child_environment
 from .watch.users import _pin_database
+
+LOG = logging.getLogger(__name__)
+WORKER_RETRY_MAX_SECONDS = 5.0
 
 JOB_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
 ACTIVE_STATUSES = frozenset({"queued", "running"})
@@ -266,8 +270,11 @@ class JobStore:
             pass
 
     def _rows(self, sql: str, values: Iterable = ()) -> list[sqlite3.Row]:
-        with closing(self._connect()) as db:
-            return list(db.execute(sql, tuple(values)).fetchall())
+        try:
+            with closing(self._connect()) as db:
+                return list(db.execute(sql, tuple(values)).fetchall())
+        except (OSError, sqlite3.Error) as exc:
+            raise StateError("cannot read dashboard job history") from exc
 
     def get(self, job_id: int) -> Job | None:
         rows = self._rows("SELECT * FROM dashboard_job WHERE id=?", (job_id,))
@@ -555,7 +562,7 @@ class JobManager:
 
     def start_thread(self) -> None:
         with self._condition:
-            if self._thread is not None:
+            if self._stopping or (self._thread is not None and self._thread.is_alive()):
                 return
             self._thread = threading.Thread(
                 target=self._loop,
@@ -603,31 +610,40 @@ class JobManager:
         return job
 
     def cancel(self, job_id: int, *, actor: str | None = None) -> bool:
-        with self._condition:
-            job = self.store.get(job_id)
-            if job is None or not job.active:
-                return False
-            self.users.record_action(
-                "job_cancel_requested", username=job.started_by,
-                actor=actor or job.started_by, detail=f"{job.id}:{job.operation}",
-            )
-            if self.store.cancel_queued(job_id, actor or job.started_by):
-                if job_id in self._queue:
-                    self._queue.remove(job_id)
-                self._audit_finished(self.store.get(job_id), "job_cancelled")
+        try:
+            with self._condition:
+                job = self.store.get(job_id)
+                if job is None or not job.active:
+                    return False
+                self.users.record_action(
+                    "job_cancel_requested", username=job.started_by,
+                    actor=actor or job.started_by, detail=f"{job.id}:{job.operation}",
+                )
+                if self.store.cancel_queued(job_id, actor or job.started_by):
+                    if job_id in self._queue:
+                        self._queue.remove(job_id)
+                    self._audit_finished(self.store.get(job_id), "job_cancelled")
+                    self._condition.notify_all()
+                    return True
+                self.store.request_cancel(job_id, actor or job.started_by)
+                process = self._process
+                if self._running == job_id and process is not None and process.poll() is None:
+                    if self._cancel_deadline is None:
+                        self._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+                        try:
+                            self._interrupt(process)
+                        except OSError:
+                            pass
                 self._condition.notify_all()
                 return True
-            self.store.request_cancel(job_id, actor or job.started_by)
-            process = self._process
-            if self._running == job_id and process is not None and process.poll() is None:
-                if self._cancel_deadline is None:
-                    self._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
-                    try:
-                        self._interrupt(process)
-                    except OSError:
-                        pass
-            self._condition.notify_all()
-            return True
+        except Exception:
+            # An unavailable cancellation row must not prevent supervision of
+            # an already running child. Preserve the error for the requester.
+            with self._condition:
+                process = self._process if self._running == job_id else None
+            if process is not None:
+                self._stop_process(process)
+            raise
 
     @staticmethod
     def _interrupt(process: subprocess.Popen) -> None:
@@ -658,48 +674,70 @@ class JobManager:
                 self._condition.wait(min(0.05, remaining))
 
     def _loop(self) -> None:
+        try:
+            self._work_loop()
+        finally:
+            with self._condition:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+                    atexit.unregister(self.shutdown)
+                    self._condition.notify_all()
+
+    def _work_loop(self) -> None:
+        backoff = 0.5
         while True:
             with self._condition:
                 if not self._queue and not self._stopping:
-                    self._condition.wait(0.5)
-                if self._stopping and not self._queue:
+                    self._condition.wait(backoff)
+                if self._stopping:
                     return
-                job_id = self._queue.pop(0) if self._queue else None
-            self.retry_audits()
-            if job_id is None:
+            try:
+                audited = self.retry_audits()
                 with self._condition:
-                    if not self._queue and not self.store.pending_audits() and not self.store.pending_actions():
-                        self._thread = None
-                        atexit.unregister(self.shutdown)
+                    if not self._queue:
+                        if not self.store.pending_audits() and not self.store.pending_actions():
+                            self._thread = None
+                            atexit.unregister(self.shutdown)
+                            return
+                        backoff = 0.5 if audited else min(backoff * 2, WORKER_RETRY_MAX_SECONDS)
+                        continue
+                    if self._stopping:
                         return
+                    # Keep the identifier queued until its initial read succeeds.
+                    job_id = self._queue[0]
+                    job = self.store.get(job_id)
+                    self._queue.pop(0)
+                backoff = 0.5
+            except Exception:
+                LOG.warning("Dashboard job storage is unavailable; retrying.")
+                with self._condition:
+                    if not self._stopping:
+                        self._condition.wait(backoff)
+                backoff = min(backoff * 2, WORKER_RETRY_MAX_SECONDS)
                 continue
             try:
-                job = self.store.get(job_id)
                 if job is None or job.status != "queued":
                     continue
                 if job.cancel_requested:
                     self.store.finish(
-                        job_id,
-                        "cancelled",
-                        exit_code=None,
+                        job_id, "cancelled", exit_code=None,
                         message="Cancelled before the command started.",
                     )
                     self._audit_finished(self.store.get(job_id), "job_cancelled")
                     continue
                 self._run_job(job)
             except Exception:
+                LOG.warning("The dashboard could not complete a job; retaining its stored outcome.")
                 try:
                     job = self.store.get(job_id)
                     if job is not None and job.status in ACTIVE_STATUSES:
                         self.store.finish(
-                            job_id,
-                            "failed",
-                            exit_code=None,
+                            job_id, "failed", exit_code=None,
                             message="The dashboard could not run this job.",
                         )
                         self._audit_finished(self.store.get(job_id), "job_failed")
                 except Exception:
-                    pass
+                    LOG.warning("Job outcome storage is unavailable; restart recovery is required.")
             finally:
                 with self._condition:
                     self._running = None
@@ -765,18 +803,20 @@ class JobManager:
         try:
             if os.name == "nt" and not _windows_console_available():
                 raise ConfigurationError("background jobs require a Windows console for cooperative cancellation")
-            process = subprocess.Popen(
-                argv,
-                cwd=sys.prefix,
-                env=child_environment(self.config),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=0,
-                start_new_session=os.name != "nt",
-                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
-            )
             with self._condition:
+                if self._stopping:
+                    return  # The queued row is retained for restart recovery.
+                process = subprocess.Popen(
+                    argv,
+                    cwd=sys.prefix,
+                    env=child_environment(self.config),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
+                    start_new_session=os.name != "nt",
+                    creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
+                )
                 self._process = process
             reader = threading.Thread(target=capture, daemon=True)
             reader.start()
@@ -871,39 +911,59 @@ class JobManager:
         return True
 
     def shutdown(self) -> None:
-        """Stop admission, cancel queued work and reap the active child."""
+        """Reap children even when queued cancellation cannot be persisted.
+
+        Rows whose cancellation fails remain durable; the next dashboard
+        startup marks them interrupted rather than executing them again.
+        """
         with self._condition:
             self._stopping = True
-            for job_id in self._queue:
-                self.store.cancel_queued(job_id)
+            queued = self._queue[:]
             self._queue.clear()
             self._condition.notify_all()
             thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=CANCEL_GRACE_SECONDS + TERMINATE_GRACE_SECONDS + 2)
-        with self._condition:
-            process = self._process
-        if process is not None and process.poll() is None:
-            self._stop_process(process)
-        self.retry_audits()
+        try:
+            for job_id in queued:
+                try:
+                    self.store.cancel_queued(job_id)
+                except Exception:
+                    LOG.warning("Queued cancellation could not be stored; restart recovery is required.")
+        finally:
+            # No bookkeeping or worker read is allowed to bypass supervision.
+            with self._condition:
+                process = self._process
+                if process is not None and process.poll() is None:
+                    if self._cancel_deadline is None:
+                        self._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+                        try:
+                            self._interrupt(process)
+                        except OSError:
+                            pass
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=CANCEL_GRACE_SECONDS + TERMINATE_GRACE_SECONDS + 2)
+            if process is not None and process.poll() is None:
+                self._stop_process(process, interrupt=False)
+            self.retry_audits()
 
-    def _audit_finished(self, job: Job | None, action: str) -> None:
+    def _audit_finished(self, job: Job | None, action: str) -> bool:
         if job is None:
-            return
+            return True
         with self._audit_lock:
             try:
                 current = self.store.get(job.id)
                 if current is None or current.audit_pending != action:
-                    return
+                    return True
                 self.users.record_action(
                     action, username=job.started_by,
                     actor=(current.cancelled_by or job.started_by) if action == "job_cancelled" else job.started_by,
                     detail=f"{job.id}:{job.operation}",
                 )
                 self.store.clear_audit(job.id)
+                return True
             except Exception:
                 # State and pending action are durable; retain the row/log.
-                return
+                LOG.warning("A job outcome audit could not be recorded; retrying.")
+                return False
 
     def audit_action(self, action: str, actor: str, detail: str | None = None) -> None:
         try:
@@ -914,15 +974,25 @@ class JobManager:
         finally:
             self.start_thread()
 
-    def retry_audits(self) -> None:
+    def retry_audits(self) -> bool:
+        complete = True
         with self._audit_lock:
             try:
-                for row in self.store.pending_actions():
+                actions = self.store.pending_actions()
+                audits = self.store.pending_audits()
+            except Exception:
+                LOG.warning("Pending operation audits could not be read; retrying.")
+                return False
+            for row in actions:
+                try:
                     self.users.record_action(
                         row["action"], username=row["actor"], actor=row["actor"], detail=row["detail"]
                     )
                     self.store.clear_action(row["id"])
-                for job, action in self.store.pending_audits():
-                    self._audit_finished(job, action)
-            except CVEBeaconError:
-                return
+                except Exception:
+                    LOG.warning("An operation audit could not be recorded; retrying.")
+                    complete = False
+            for job, action in audits:
+                if not self._audit_finished(job, action):
+                    complete = False
+        return complete

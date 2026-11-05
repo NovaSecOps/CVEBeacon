@@ -1467,14 +1467,17 @@ class UserStore:
         stamp = _timestamp(self._clock())
         if not self.path.is_file():
             raise StateError("CVEBeacon user database not found")
-        with closing(self._connect(create=False, _writable=True)) as db, db:
-            self._append_audit(
-                db,
-                action,
-                audit_name(username),
-                stamp,
-                actor=audit_name(actor) if actor else None,
-            )
+        try:
+            with closing(self._connect(create=False, _writable=True)) as db, db:
+                self._append_audit(
+                    db,
+                    action,
+                    audit_name(username),
+                    stamp,
+                    actor=audit_name(actor) if actor else None,
+                )
+        except (OSError, sqlite3.Error) as exc:
+            raise StateError("cannot record the operation audit") from exc
 
     def require_self_in(
         self, db: sqlite3.Connection, proof: AuthenticatedUser, username: object
