@@ -237,20 +237,20 @@ logout, even if its role has no permissions.
 | `retry` | Retry failed or ambiguous deliveries as background jobs |
 | `test_channel` | Send a labelled channel test message |
 | `edit_rules` | Edit rules |
-| `edit_channels` | Edit credential-free notification channels; credential-bearing channels and secret files require `manage_secrets` for any change, though any channel may be deleted |
+| `edit_channels` | Edit credential-free notification channels; credential-bearing channels require `manage_secrets` for any change, `*_file` paths are administrator-only, and any channel may be deleted |
 | `edit_sources` | Edit source settings |
 | `edit_watch` | Edit watch settings |
 | `edit_reporting` | Edit reporting settings |
-| `edit_dashboard` | Edit dashboard settings |
+| `edit_dashboard` | View dashboard sign-in and session settings; changes are administrator-only |
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
-| `edit_system` | Edit state database and report output paths |
+| `edit_system` | View state database and report output paths; changes are administrator-only |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
-| `manage_secrets` | Change any credential-bearing channel, add/change/remove secret references, and stage file-secret contents |
+| `manage_secrets` | Change any credential-bearing channel, add/change/remove environment references, and stage file-secret contents; `*_file` paths are administrator-only |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
 
-Only administrators may change a filesystem path setting: the state database, watch database, output directory, inventory path, or any `*_file` reference. Delegated editors see those controls read-only, and the server rejects a changed path at preview and again inside the write transaction. Administrators remain subject to the protected-path checks.
+Only administrators may change a filesystem path setting: the state database, watch database, output directory, inventory path, or any `*_file` reference. They are also the only accounts that may change the whole `[dashboard]` sign-in and session section, because it controls access for everyone. Delegated editors see those controls read-only, and the server rejects changes at preview and again inside the write transaction. Administrators remain subject to the protected-path checks.
 
 Each operation route declares its own permission: running jobs needs `run`, retry jobs need `retry`, channel tests need `test_channel`, schedule changes need `manage_schedule`, and job pages need `view`. A role without `view` cannot open the operations page even if it can call an action route directly. Opening query/report forms requires `run`; submissions require both `run` and `view` because they return findings or exports.
 Role changes and administrative account actions are recorded in the existing
@@ -368,9 +368,9 @@ container layout.
 | Legacy Teams and email notifications | `edit_channels` |
 | Watch reporting identity | `edit_reporting` |
 | Inventory and exact product mappings | `edit_inventory` |
-| Dashboard sessions and cookies | `edit_dashboard` |
+| Dashboard sessions and cookies | `edit_dashboard` (view; changes administrator-only) |
 | HTTP client | `edit_http` |
-| State database and report output paths | `edit_system` |
+| State database and report output paths | `edit_system` (view; changes administrator-only) |
 
 Blank fields omit a setting and use the configuration loader's default. String
 fields accept plain text; arrays, column mappings and nested rule conditions
@@ -457,8 +457,10 @@ account-store administrator check. Operational watch, state and output paths
 must not alias the configuration file or its writer lock, the account, watch or
 state databases, any of their `-wal`, `-shm`, `-journal` or `.lock` sidecars,
 the private `dashboard-jobs` directory with its database and logs, both operation
-run-lock files, the backup or secret directories, and every referenced `*_file`
-secret, including references retained in backups after a channel is deleted.
+run-lock files, the backup or secret directories, every file inside the private
+`dashboard-secrets` directory (whether or not it is still referenced), and every
+currently referenced `*_file`. Files outside that directory are the
+administrator's responsibility because only administrators can change paths.
 Candidate sidecars, job directories, databases, logs and run locks must not
 overlap existing protected files or directories. The inventory input must not
 equal, share an inode with, or resolve into
@@ -509,9 +511,10 @@ Secret references and file-secret contents are read-only without
 `manage_secrets`, including source, notification and dashboard references;
 removing a reference also requires it. File-reference paths are additionally
 administrator-only. With
-that permission, added or changed references render editable and a submitted
-file value is staged, validated by the shared loader, then written to the same
-owner-only file atomically when the reference is unchanged. Conflicting new
+that permission, added or changed environment references render editable;
+`*_file` paths stay administrator-only. A submitted file value is staged,
+validated by the shared loader, then written to the same owner-only file
+atomically when the reference is unchanged. Conflicting new
 contents for one physical file are rejected; identical writes are coalesced.
 Renaming a channel and rotating its secret file must be saved separately: a
 rename with new file contents is refused with guidance. Writable secret files must
@@ -526,8 +529,9 @@ Files inside the protected `dashboard-secrets`
 directory remain writable when they are the referenced secret, including when a
 report output directory contains that secret directory. Readable external
 references remain usable by the loader but are never written through this
-interface. Adding or changing a secret reference, or staging file contents,
-requires `manage_secrets`, which administrators always have. A
+interface. Adding or changing an environment reference, or staging file
+contents, requires `manage_secrets`; changing a `*_file` path requires an
+administrator. A
 supplied destination path is never overwritten: a new file secret is created
 with a random name in `dashboard-secrets` beside the account database, inside
 the protected data directory. No secret value is placed in TOML or a
@@ -555,23 +559,27 @@ ignored by the repository's `.gitignore`; keep runtime data directories outside
 the worktree where possible.
 
 **Backups and rollback** requires `view` and every configuration edit permission,
-because a backup can change every section. Rolling back credential changes also
-requires `manage_secrets`. Choose a backup, validate it, review the diff and
-confirm. Rollback uses the same validation, concurrency checks, access
+because a backup can change every section. Rolling back an edit to a
+credential-bearing channel also requires `manage_secrets`; a backup that simply
+omits the channel is a deletion. Restoring path settings that differ from the
+running configuration requires an administrator. Choose a backup, validate it,
+review the diff and confirm. Rollback uses the same validation, concurrency checks, access
 confirmation, audit, atomic replacement, backup and reload path as saving.
 The backups list remains available when the live file fails the loader or is
 missing. The page reads the raw bytes and version signature, validates only the
 chosen backup, and shows a static "current configuration is invalid or missing"
 notice instead of diffing unvalidated live values. Rollback requires the access
 confirmation; a missing, unparseable or malformed-shape live file also requires
-`manage_secrets`, while a parseable file that fails only field validation can
-be restored with the configuration edit permissions. Sections cannot be edited
+`manage_secrets`. A parseable file that fails only field validation can be
+restored with the configuration edit permissions. A backup whose path settings
+differ from the running configuration requires an administrator. Sections cannot be edited
 from an invalid live file, so restore a backup first. Rollback does not restore
 secret-file contents; it preserves files referenced by retained backups.
 Inventory parser diagnostics report only the line number and parser kind, never
-source lines. Configuration permissions allow changing operational paths and
-notification destinations; grant them only to accounts trusted to control those
-settings.
+source lines. Configuration permissions allow changing notification
+destinations; path settings and the dashboard sign-in section are
+administrator-only. Grant edit permissions only to accounts trusted to control
+those settings.
 
 ## Package identities and advisory views
 

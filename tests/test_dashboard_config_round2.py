@@ -501,6 +501,102 @@ topic = "alerts"
     assert response.status_code == 200, response.text
 
 
+def test_dashboard_settings_require_administrator(accounts):
+    config, users, _, client = accounts
+    set_role(users, "dashboard-editor", {"view", "edit_dashboard"})
+    login(client)
+    page = client.get("/config/dashboard")
+    assert page.status_code == 200
+    assert 'name="g0_secure_cookie"' in page.text
+    assert "administrator-only" in page.text
+    response = preview(client, "dashboard", g0_secure_cookie="true")
+    assert response.status_code == 403
+
+    login(client, "admin")
+    response = preview(client, "dashboard", g0_secure_cookie="true")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "dashboard", lockout="yes").status_code == 303
+
+
+def test_same_directory_database_renames_are_not_storage_moves(accounts):
+    config, users, _, client = accounts
+    login(client, "admin")
+    for section, field, value in (("system", "g0_database", "state2.db"),
+                                  ("watch", "g0_database", "watch2.db")):
+        response = preview(client, section, **{field: value})
+        assert response.status_code == 200, (section, response.text)
+        assert confirm(client, response, section, lockout="yes").status_code == 303
+        login(client, "admin")
+
+
+def test_manage_secrets_can_rename_a_file_reference_channel(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "password", "synthetic password")
+    config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
+    set_role(users, "channel-manager", {"view", "edit_channels", "manage_secrets"})
+    login(client)
+    response = preview(client, "channels", g0_name="renamed")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "channels").status_code == 303
+    assert [channel.name for channel in load_config(config.config_path).watch.channels] == ["renamed"]
+
+
+@pytest.mark.parametrize("damage", ["missing", "unparseable", "minimal"])
+def test_delegated_manage_can_restore_missing_or_unparseable_live_file(accounts, damage):
+    config, users, app, client = accounts
+    original = load_config(config.config_path)
+    _create_backup(config, client)
+    backup = app.extensions["dashboard_config"].backups()[0]
+    if damage == "missing":
+        config.config_path.unlink()
+    elif damage == "unparseable":
+        config.config_path.write_text("[http\n", encoding="utf-8")
+    else:
+        config.config_path.write_text('watch = "broken"\n', encoding="utf-8")
+    set_role(users, "all-manager", set(dc.SECTIONS.values()) | {"view", "manage_secrets"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+    confirm_data = form(response.text, "confirm")
+    confirm_data["lockout"] = "yes"
+    assert client.post("/config/backups", data=confirm_data).status_code == 303
+    assert load_config(config.config_path).http.retries == original.http.retries
+
+
+def test_admin_file_secret_help_mentions_content_replacement(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "nvd-key", "synthetic key")
+    config.config_path.write_text(with_file(config, secret), encoding="utf-8")
+    login(client, "admin")
+    page = client.get("/config/sources")
+    assert page.status_code == 200
+    assert "Replace the contents of the existing owner-only file" in page.text
+    assert "A new owner-only file is staged" not in page.text
+
+
+def test_external_deleted_channel_secret_is_administrator_responsibility(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "channel-password",
+                         "asset_id,vendor,product,version\na,Acme,Widget,1\n")
+    config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    response = preview(client, "channels", remove0="yes")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "channels").status_code == 303
+
+    set_role(users, "inventory-editor", {"view", "edit_inventory"})
+    login(client)
+    assert preview(client, "inventory", g0_path=str(secret)).status_code == 403
+
+    login(client, "admin")
+    response = preview(client, "inventory", g0_path=str(secret))
+    assert response.status_code == 200, response.text
+
+
 def test_path_fields_require_an_administrator(accounts, tmp_path):
     config, users, _, client = accounts
     set_role(users, "path-editor", {"view", *dc.SECTIONS.values(), "manage_secrets"})
@@ -540,11 +636,13 @@ def test_candidate_derived_storage_cannot_overlap_a_secret(accounts, relative):
     assert config.config_path.read_bytes() == before
 
 
-def test_deleting_a_credential_channel_keeps_its_backup_reference_protected(accounts):
+def test_deleting_a_credential_channel_keeps_its_secret_directory_file_protected(accounts):
     config, users, _, client = accounts
-    secret = make_secret(config.config_path.parent / "channel-password",
+    secret_directory = config.watch.users_database.parent / "dashboard-secrets"
+    secret_directory.mkdir(mode=0o700, exist_ok=True)
+    secret = make_secret(secret_directory / "channel-password",
                          "asset_id,vendor,product,version\na,Acme,Widget,1\n")
-    config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
+    config.config_path.write_text(channel_config(_smtp(reference=str(secret))), encoding="utf-8")
     set_role(users, "channel-editor", {"view", "edit_channels"})
     login(client)
     response = preview(client, "channels", remove0="yes")
@@ -696,6 +794,7 @@ def test_invalid_current_file_can_be_recovered_through_a_backup(accounts):
         encoding="utf-8",
     )
     assert client.get("/config/backups").status_code == 200
+    assert "Current configuration is invalid or missing" in client.get("/config/backups").text
     assert client.get("/config/http").status_code == 400
     # A delegated editor without manage_secrets may still restore a parseable
     # but loader-invalid file after the access confirmation.

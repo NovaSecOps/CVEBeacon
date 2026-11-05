@@ -547,46 +547,25 @@ def _operation_storage_paths(config):
     return files, {job_directory}
 
 
-def _backup_reference_paths(backup_dir, base):
-    """Secret files named by retained backups, even after their channel is gone."""
-    if base is None or not backup_dir.is_dir() or backup_dir.is_symlink():
-        return set()
-    result = set()
-    try:
-        names = list(backup_dir.iterdir())
-    except OSError:
-        return set()
-    for entry in names:
-        if not _backup_name(entry.name):
-            continue
-        try:
-            raw = read_regular(entry, private=True)[0]
-            document = tomllib.loads(raw.decode("utf-8"))
-        except (OSError, ValueError, UnicodeError, CVEBeaconError):
-            continue
-        for path, value in secret_references(document).items():
-            if not path[-1].endswith("_file") or not isinstance(value, str) or not value:
-                continue
-            try:
-                result.add(resolve_reference(value, base))
-            except (OSError, RuntimeError, ValueError):
-                continue
-    return result
-
-
 def _candidate_derived_paths(updated, configs):
     """Candidate sidecars, job storage and run locks for changed storage roots."""
     state_changed = not any(_same_path(updated.database_path.resolve(),
                                        config.database_path.resolve())
                             for config in configs)
+    state_parent_changed = not any(
+        _same_path(updated.database_path.resolve().parent,
+                   config.database_path.resolve().parent)
+        for config in configs)
     watch_changed = not any(_same_path(updated.watch.database.resolve(),
                                        config.watch.database.resolve())
                             for config in configs)
+    watch_parent_changed = not any(
+        _same_path(updated.watch.database.resolve().parent,
+                   config.watch.database.resolve().parent)
+        for config in configs)
     files = set()
     directories = set()
-    if state_changed:
-        files.update(path.resolve() for path in _database_paths(updated.database_path)
-                     if path != updated.database_path)
+    if state_parent_changed:
         files.add(Path(updated.database_path).resolve().parent / LOCK_NAME)
         job_directory = (Path(updated.database_path).parent / "dashboard-jobs").resolve()
         directories.add(job_directory)
@@ -595,9 +574,13 @@ def _candidate_derived_paths(updated, configs):
             files.update(path.resolve() for path in job_directory.glob("job-*.log"))
         except OSError:
             pass
+    if state_changed:
+        files.update(path.resolve() for path in _database_paths(updated.database_path)
+                     if path != updated.database_path)
     if watch_changed:
         files.update(path.resolve() for path in _database_paths(updated.watch.database)
                      if path != updated.watch.database)
+    if watch_parent_changed:
         files.update(path.resolve() for path in _database_paths(updated.watch.users_database))
         files.add(Path(updated.watch.database).resolve().parent / LOCK_NAME)
     return files, directories
@@ -618,12 +601,18 @@ def _protected_paths(configs, backup_dir, documents=(), *, base=None, reference_
         files.update(path.resolve() for path in _database_paths(config.watch.users_database))
         if config.inventory is not None:
             files.add(config.inventory.path.resolve())
-        directories.add(_secret_directory(config).resolve())
+        secret_directory = _secret_directory(config).resolve()
+        directories.add(secret_directory)
+        try:
+            if secret_directory.is_dir() and not secret_directory.is_symlink():
+                references.update(path.resolve() for path in secret_directory.iterdir()
+                                  if path.is_file() and not path.is_symlink())
+        except OSError:
+            pass
         operation_files, operation_directories = _operation_storage_paths(config)
         files.update(operation_files)
         directories.update(operation_directories)
     references.update(_config_reference_paths(configs))
-    references.update(_backup_reference_paths(backup_dir, base))
     for document in documents:
         for path, value in secret_references(document).items():
             if not path[-1].endswith("_file") or not value:
@@ -955,7 +944,16 @@ class Editor:
         checks_config = current_config or self.config
         if unparseable and section == "rollback" and "manage_secrets" not in g.permissions:
             abort(403)
-        if path_settings_changed(current_document or {}, document) and not g.user.is_admin:
+        if section == "rollback":
+            path_changed = (_path_settings(document, base=self.path.parent)
+                            != running_path_settings(self.config))
+        else:
+            path_changed = path_settings_changed(
+                current_document or {}, document, base=self.path.parent)
+        if path_changed and not g.user.is_admin:
+            abort(403)
+        if (dashboard_settings_changed(current_document or {}, document)
+                and not g.user.is_admin):
             abort(403)
         if (credential_change(current_document or {}, document, self.config)
                 and "manage_secrets" not in g.permissions):
@@ -1063,7 +1061,16 @@ class Editor:
             if ((unparseable and section == "rollback"
                     and "manage_secrets" not in early_permissions)):
                 abort(403)
-            if path_settings_changed(old or {}, pending.document) and not probe.is_admin:
+            if section == "rollback":
+                path_changed = (_path_settings(pending.document, base=self.path.parent)
+                                != running_path_settings(self.config))
+            else:
+                path_changed = path_settings_changed(
+                    old or {}, pending.document, base=self.path.parent)
+            if path_changed and not probe.is_admin:
+                abort(403)
+            if (dashboard_settings_changed(old or {}, pending.document)
+                    and not probe.is_admin):
                 abort(403)
             if pending.replacements and "manage_secrets" not in early_permissions:
                 abort(403)
@@ -1120,7 +1127,16 @@ class Editor:
                 if ((unparseable and section == "rollback"
                         and "manage_secrets" not in users.permissions_in(db, actor))):
                     abort(403)
-                if path_settings_changed(old or {}, pending.document) and not actor.is_admin:
+                if section == "rollback":
+                    path_changed = (_path_settings(pending.document, base=self.path.parent)
+                                    != running_path_settings(self.config))
+                else:
+                    path_changed = path_settings_changed(
+                        old or {}, pending.document, base=self.path.parent)
+                if path_changed and not actor.is_admin:
+                    abort(403)
+                if (dashboard_settings_changed(old or {}, pending.document)
+                        and not actor.is_admin):
                     abort(403)
                 if pending.replacements and "manage_secrets" not in users.permissions_in(db, actor):
                     abort(403)
@@ -1374,34 +1390,106 @@ def credential_change(current_document, candidate, running_config):
     return credential_escape(current_document, candidate, running_config)
 
 
+def dashboard_settings_changed(current_document, candidate):
+    current = current_document.get("dashboard") if isinstance(current_document, dict) else {}
+    updated = candidate.get("dashboard") if isinstance(candidate, dict) else {}
+    if not isinstance(current, dict):
+        current = {}
+    if not isinstance(updated, dict):
+        updated = {}
+    return current != updated
+
+
 PATH_FIELDS = (("state", "database"), ("output", "directory"),
                ("watch", "database"), ("inventory", "path"))
+PATH_DEFAULTS = {("state", "database"): ".cvebeacon/state.db",
+                 ("output", "directory"): "reports",
+                 ("watch", "database"): "cvebeacon-watch.db"}
 
 
-def _path_settings(document, *, ignore_channel_refs=()):
+def _resolved_path(value, base):
+    if not base:
+        return value
+    try:
+        return str(resolve_reference(value, base))
+    except (OSError, RuntimeError, ValueError):
+        return value
+
+
+def _path_settings(document, *, ignore_channel_refs=(), renames=None, base=None):
     values = {}
+    renames = renames or {}
     for path in PATH_FIELDS:
         item = document_get(document, path)
         if isinstance(item, str) and item:
-            values[path] = item
+            values[path] = _resolved_path(item, base)
+        elif path in PATH_DEFAULTS:
+            values[path] = _resolved_path(PATH_DEFAULTS[path], base)
     for path, item in secret_references(document).items():
         if not path[-1].endswith("_file") or not isinstance(item, str) or not item:
             continue
-        if (len(path) >= 3 and path[0] == "watch" and path[1] == "channels"
-                and path[2] in ignore_channel_refs):
-            continue
-        values[path] = item
+        if len(path) >= 3 and path[0] == "watch" and path[1] == "channels":
+            if path[2] in ignore_channel_refs:
+                continue
+            if path[2] in renames:
+                path = (*path[:2], renames[path[2]], *path[3:])
+        values[path] = _resolved_path(item, base)
     return values
 
 
-def path_settings_changed(current_document, candidate):
+def _channel_file_refs(row):
+    kind = _channel_kind(row)
+    if kind not in CREDENTIAL_FIELDS:
+        return {}
+    return {key: row[key] for key in CREDENTIAL_FIELDS[kind]
+            if key.endswith("_file") and isinstance(row.get(key), str) and row[key]}
+
+
+def _channel_renames(current_document, candidate):
     current = _channel_rows(current_document)
     candidate_channels = _channel_rows(candidate)
-    # Deleting a channel is always allowed; do not treat its disappearing
-    # credential-file field as a path change.
     deleted = set(current) - set(candidate_channels)
-    return (_path_settings(current_document or {}, ignore_channel_refs=deleted)
-            != _path_settings(candidate))
+    pairs = {}
+    used = set()
+    for name, row in candidate_channels.items():
+        if name in current or not isinstance(row, dict):
+            continue
+        for old in sorted(deleted - used):
+            old_row = current.get(old)
+            if (isinstance(old_row, dict)
+                    and _channel_kind(old_row) == _channel_kind(row)
+                    and _channel_file_refs(old_row) == _channel_file_refs(row)):
+                pairs[old] = name
+                used.add(old)
+                break
+    return pairs, deleted - used
+
+
+def path_settings_changed(current_document, candidate, *, base=None):
+    renames, deleted = _channel_renames(current_document or {}, candidate)
+    return (_path_settings(current_document or {}, ignore_channel_refs=deleted,
+                           renames=renames, base=base)
+            != _path_settings(candidate, base=base))
+
+
+def running_path_settings(config, *, base=None):
+    values = {
+        ("state", "database"): str(config.database_path),
+        ("output", "directory"): str(config.output_dir),
+        ("watch", "database"): str(config.watch.database),
+    }
+    if config.inventory is not None:
+        values[("inventory", "path")] = str(config.inventory.path)
+    if config.sources.nvd_api_key_file is not None:
+        values[("sources", "nvd_api_key_file")] = str(config.sources.nvd_api_key_file)
+    for channel in config.watch.channels:
+        for key in CREDENTIAL_FIELDS.get(channel.type, ()):
+            if not key.endswith("_file"):
+                continue
+            reference = channel.secret(key[:-5])
+            if reference is not None and reference.file is not None:
+                values[("watch", "channels", channel.name, key)] = str(reference.file)
+    return values
 
 
 
@@ -1573,6 +1661,7 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
     for index, (label, schema, data, prefix) in enumerate(groups):
         credential_bearing = section == "channels" and channel_has_credentials(data)
         readonly_channel = credential_bearing and not can_manage
+        readonly_dashboard = section == "dashboard" and not can_admin
         controls = []
         for key in schema:
             item = data.get(key)
@@ -1590,7 +1679,8 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
             path_value = key in {"database", "directory", "path"} or key.endswith("_file")
             controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
                              "kind": _kind(key), "secret": key.endswith("_file"),
-                             "readonly": readonly_channel or direct_url or
+                             "existing": bool(item),
+                             "readonly": readonly_channel or readonly_dashboard or direct_url or
                              (reference and not can_manage) or
                              (path_value and not can_admin),
                              "allow_new_secret": (
@@ -1600,7 +1690,9 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                        "readonly_reason": (
                            "This channel carries a credential or secret reference. "
                            "Editing or replacing it requires manage_secrets; you may delete it."
-                           if readonly_channel else None)})
+                           if readonly_channel else
+                           ("Dashboard sign-in and session settings are administrator-only."
+                            if readonly_dashboard else None))})
     return output
 
 
@@ -1889,7 +1981,14 @@ def register_config(app, config, *, host):
                 else:
                     diff = ""
             else:
-                current_invalid = document is None
+                if document is None:
+                    current_invalid = True
+                else:
+                    try:
+                        editor.read()
+                        current_invalid = False
+                    except ConfigurationError:
+                        current_invalid = True
             return render_template("config_backups.html", backups=editor.backups(), version=version,
                                    preview=preview, diff=diff, lockout=lockout,
                                    current_invalid=current_invalid,
