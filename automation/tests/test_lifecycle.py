@@ -52,3 +52,14 @@ def test_unexpected_transport_networking_is_blocked_and_context_restored(tmp_pat
     assert not (tmp_path / "core.db").exists(), "failed acquisition must stop before Core writes"
     assert not (tmp_path / "summary.json").exists(), "an interrupted fixture must not claim a passed demo"
     assert socket.create_connection is original_network
+
+
+def test_lifecycle_scanner_supports_web_snapshots(tmp_path, monkeypatch):
+    from dataclasses import replace
+    load_core = demo.load_core
+    def enabled(path):
+        core = load_core(path)
+        return replace(core, inventory=replace(core.inventory, web_snapshots=True))
+    monkeypatch.setattr(demo, "load_core", enabled)
+    result = demo.run_demo(tmp_path / "web-enabled")
+    assert result["phases"]["initial"]["core_exit"] == 4

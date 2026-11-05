@@ -243,3 +243,21 @@ def test_explicit_container_coverage_policy_preserves_health(tmp_path, monkeypat
     assert status(config.state_dir)["core_exit"] == 4
     assert status(config.state_dir)["status"] == "coverage_warning"
     assert "coverage warning" in capsys.readouterr().err
+
+
+def test_pipeline_validates_candidate_then_core_loads_web_snapshots(tmp_path):
+    from cvebeacon.config import load_config as load_core
+    config, _ = setup(tmp_path)
+    config.core_config.write_text(config.core_config.read_text().replace(
+        '[inventory]\n', '[inventory]\nweb_snapshots=true\n'))
+    core = load_core(config.core_config)
+    directory = core.database_path.parent / "web-inventory"
+    directory.mkdir(mode=0o700)
+    write_snapshot(directory / "web.json", [dict(asset_id="web-client", vendor="nginx", product="nginx",
+                   version="1.26.2", client="Web Client")], source_id="web-client", collector="web-detect")
+    assert run_pipeline(config) == 4
+    assert status(config.state_dir)["core_exit"] == 4
+    assert len(read_snapshot(config.inventory_path).records) == 1
+    with sqlite3.connect(core.database_path) as db:
+        payloads = [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM scan_assets")]
+    assert any(row["asset"]["client"] == "Web Client" for row in payloads)
