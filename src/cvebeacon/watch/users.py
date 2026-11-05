@@ -7,6 +7,7 @@ public CVE history does not delete the people who use CVEBeacon.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -31,6 +32,7 @@ from ..passwords import (
 from .chain import chain_hash, decode_text, verify_chain
 from .directories import ensure_private_directory
 from .reported import checked_text, host_name, os_account
+from .permissions import DEFAULT_ROLES, PERMISSIONS
 
 if TYPE_CHECKING:
     from .identity import ReportIdentity
@@ -78,6 +80,14 @@ _SCHEMA = (
         os_account TEXT,
         host TEXT,
         chain TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS cb_role (
+        name TEXT PRIMARY KEY,
+        permissions TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS cb_user_role (
+        user_id INTEGER PRIMARY KEY,
+        role TEXT NOT NULL
     )""",
 )
 
@@ -647,8 +657,20 @@ class UserStore:
             self._migrate_email_keys(db)
             self._migrate_audit_actor(db)
             self._migrate_credential_version(db)
+            self._migrate_roles(db)
             self._ensure_store_id(db)
             db.commit()
+
+    @staticmethod
+    def _migrate_roles(db: sqlite3.Connection) -> None:
+        # Seed once, so deleting an editable default does not resurrect it.
+        if db.execute("SELECT 1 FROM cb_user_meta WHERE key='roles_initialized'").fetchone():
+            return
+        for name, permissions in DEFAULT_ROLES.items():
+            db.execute("INSERT OR IGNORE INTO cb_role VALUES (?,?)",
+                       (name, json.dumps(sorted(permissions))))
+        db.execute("INSERT INTO cb_user_role SELECT id,'viewer' FROM cb_user")
+        db.execute("INSERT INTO cb_user_meta VALUES ('roles_initialized','1')")
 
     @staticmethod
     def _migrate_email_keys(db: sqlite3.Connection) -> None:
@@ -828,6 +850,8 @@ class UserStore:
         email: object | None = None,
         is_admin: bool = False,
         authorization: AuthenticatedUser | BootstrapAuthorization | None = None,
+        role: str = "viewer",
+        empty_store_only: bool = False,
     ) -> User:
         name = validate_username(username)
         shown = validate_display_name(display_name)
@@ -845,6 +869,8 @@ class UserStore:
         if address is not None:
             checks.append((address, email_lookup_key(address)))
         with self.transaction() as db:
+            if empty_store_only and db.execute("SELECT 1 FROM cb_user LIMIT 1").fetchone():
+                raise ConfigurationError("dashboard bootstrap requires an empty account store")
             if isinstance(authorization, BootstrapAuthorization):
                 existing_admin = db.execute(
                     "SELECT 1 FROM cb_user WHERE is_admin=1 LIMIT 1"
@@ -855,10 +881,12 @@ class UserStore:
                     )
                 actor = "(bootstrap)"
             elif authorization is not None:
-                current = self.require_admin_in(db, authorization)
+                current = self.require_permission_in(db, authorization, "manage_users")
                 actor = current.username
             else:
                 actor = None
+            if not is_admin:
+                self._require_role_in(db, role)
             existing_usernames = {
                 email_lookup_key(str(row["username"]))
                 for row in db.execute("SELECT username FROM cb_user")
@@ -900,6 +928,7 @@ class UserStore:
                     "username or email is already registered"
                 ) from exc
             user_id = int(cursor.lastrowid)
+            db.execute("INSERT INTO cb_user_role VALUES (?,?)", (user_id, role))
             self._append_audit(db, "add", name, now, actor=actor)
             row = db.execute(
                 f"SELECT {_USER_COLUMNS} FROM cb_user WHERE id=?", (user_id,)
@@ -928,8 +957,8 @@ class UserStore:
                 )
             if authorization is not None:
                 current = self._validate_proof_in(db, authorization)
-                if current.id != user.id and not current.is_admin:
-                    raise ConfigurationError("administrator login required")
+                if current.id != user.id:
+                    self.require_permission_in(db, authorization, "manage_users")
                 actor = current.username
             else:
                 actor = None
@@ -991,11 +1020,13 @@ class UserStore:
                     "bootstrap is only valid for the first administrator"
                 )
             if authorization is not None:
-                current = self.require_admin_in(db, authorization)
+                current = self.require_permission_in(db, authorization, "manage_users")
                 actor = current.username
             else:
                 actor = None
             now = _timestamp(self._clock())
+            if value and user.is_admin and not user.disabled:
+                self._protect_last_admin_in(db, user.id)
             db.execute(
                 "UPDATE cb_user SET disabled=?,updated_at=?,"
                 "credential_version=credential_version+1 WHERE id=?",
@@ -1027,7 +1058,7 @@ class UserStore:
                     "bootstrap is only valid for the first administrator"
                 )
             if authorization is not None:
-                current = self.require_admin_in(db, authorization)
+                current = self.require_permission_in(db, authorization, "manage_users")
                 actor = current.username
             else:
                 actor = None
@@ -1210,6 +1241,118 @@ class UserStore:
         if not current.is_admin:
             raise ConfigurationError("administrator login required")
         return current
+
+    def role_in(self, db: sqlite3.Connection, user: User) -> str:
+        if user.is_admin:
+            return "admin"
+        row = db.execute("SELECT role FROM cb_user_role WHERE user_id=?", (user.id,)).fetchone()
+        return str(row[0]) if row else ""
+
+    def permissions_in(self, db: sqlite3.Connection, user: User) -> frozenset[str]:
+        if user.is_admin:
+            return PERMISSIONS
+        row = db.execute("SELECT permissions FROM cb_role WHERE name=?", (self.role_in(db, user),)).fetchone()
+        if row is None:
+            return frozenset()
+        try:
+            values = json.loads(row[0])
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                return frozenset()
+            return frozenset(values) & PERMISSIONS
+        except (TypeError, ValueError):
+            return frozenset()
+
+    def require_permission_in(self, db, proof, permission) -> User:
+        current = self._validate_proof_in(db, proof)
+        if permission not in PERMISSIONS or permission not in self.permissions_in(db, current):
+            raise ConfigurationError("permission required")
+        return current
+
+    def dashboard_identity(self, proof: AuthenticatedUser) -> tuple[User, frozenset[str]]:
+        with self.transaction() as db:
+            user = self._validate_proof_in(db, proof)
+            return user, self.permissions_in(db, user)
+
+    @staticmethod
+    def _require_role_in(db, role):
+        if role == "admin" or db.execute("SELECT 1 FROM cb_role WHERE name=?", (role,)).fetchone() is None:
+            raise ConfigurationError("unknown role")
+
+    @staticmethod
+    def _protect_last_admin_in(db, user_id):
+        if db.execute("SELECT 1 FROM cb_user WHERE is_admin=1 AND disabled=0 AND id<>? LIMIT 1", (user_id,)).fetchone() is None:
+            raise ConfigurationError("cannot remove the last enabled administrator")
+
+    def roles(self) -> dict[str, frozenset[str]]:
+        self.initialize()
+        with closing(self._connect()) as db:
+            result = {str(row[0]): frozenset(json.loads(row[1])) for row in db.execute("SELECT name,permissions FROM cb_role ORDER BY name")}
+        return {"admin": PERMISSIONS, **result}
+
+    def user_roles(self) -> dict[int, str]:
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(f"SELECT {_USER_COLUMNS} FROM cb_user").fetchall()
+            return {int(row["id"]): self.role_in(db, self._user(row)) for row in rows}
+
+    def save_role(self, name, permissions, *, authorization: AuthenticatedUser) -> None:
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) or name == "admin":
+            raise ConfigurationError("role name must use 1–32 lowercase letters, digits, underscores or hyphens; admin is reserved")
+        permissions = frozenset(permissions)
+        if not permissions <= PERMISSIONS:
+            raise ConfigurationError("unknown permission")
+        self.initialize()
+        with self.transaction() as db:
+            actor = self.require_permission_in(db, authorization, "manage_users")
+            db.execute("INSERT INTO cb_role VALUES (?,?) ON CONFLICT(name) DO UPDATE SET permissions=excluded.permissions",
+                       (name, json.dumps(sorted(permissions))))
+            self._append_audit(db, "role_save:" + name + ":" + ",".join(sorted(permissions)), actor.username,
+                               _timestamp(self._clock()), actor=actor.username)
+
+    def delete_role(self, name, *, authorization: AuthenticatedUser) -> None:
+        self.initialize()
+        with self.transaction() as db:
+            actor = self.require_permission_in(db, authorization, "manage_users")
+            self._require_role_in(db, name)
+            if db.execute("SELECT 1 FROM cb_user_role r JOIN cb_user u ON u.id=r.user_id WHERE r.role=? AND u.is_admin=0", (name,)).fetchone():
+                raise ConfigurationError("reassign users before deleting their role")
+            db.execute("DELETE FROM cb_role WHERE name=?", (name,))
+            self._append_audit(db, "role_delete:" + name, actor.username, _timestamp(self._clock()), actor=actor.username)
+
+    def edit_user(self, username, *, role, disabled, display_name=None, email=None, authorization: AuthenticatedUser) -> None:
+        shown, address = validate_display_name(display_name), validate_email(email)
+        self.initialize()
+        with self.transaction() as db:
+            actor = self.require_permission_in(db, authorization, "manage_users")
+            row = self._find_username(db, username)
+            if row is None:
+                raise ConfigurationError("user not found")
+            user = self._user(row)
+            if role != "admin":
+                self._require_role_in(db, role)
+            if user.is_admin and not user.disabled and (role != "admin" or disabled):
+                self._protect_last_admin_in(db, user.id)
+            key = email_lookup_key(address) if address else None
+            if key and any(email_lookup_key(str(r[0])) == key for r in db.execute("SELECT username FROM cb_user WHERE id<>?", (user.id,))):
+                raise ConfigurationError("username or email is already registered")
+            try:
+                db.execute("UPDATE cb_user SET display_name=?,email=?,email_key=?,is_admin=?,disabled=?,updated_at=?,"
+                           "credential_version=credential_version+1 WHERE id=?",
+                           (shown, address, key, int(role == "admin"), int(disabled), _timestamp(self._clock()), user.id))
+            except sqlite3.IntegrityError as exc:
+                raise ConfigurationError("username or email is already registered") from exc
+            db.execute("INSERT INTO cb_user_role VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET role=excluded.role", (user.id, role))
+            self._append_audit(db, "user_edit:" + role + (":disabled" if disabled else ":enabled"), user.username,
+                               _timestamp(self._clock()), actor=actor.username)
+
+    def record_logout(self, proof: AuthenticatedUser, *, all_sessions=False) -> None:
+        with self.transaction() as db:
+            user = self._validate_proof_in(db, proof)
+            if all_sessions:
+                # Also invalidates sessions in other server processes.
+                db.execute("UPDATE cb_user SET credential_version=credential_version+1 WHERE id=?", (user.id,))
+            self._append_audit(db, "logout_all" if all_sessions else "logout", user.username,
+                               _timestamp(self._clock()), actor=user.username)
 
     def require_self_in(
         self, db: sqlite3.Connection, proof: AuthenticatedUser, username: object

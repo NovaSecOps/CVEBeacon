@@ -350,8 +350,8 @@ write methods are private.
 
 ```console
 cvebeacon --config cvebeacon.toml watch report CVE-2026-1234
-cvebeacon --config cvebeacon.toml watch report CVE-2026-1234 --by alice --note "Sent in ticket OPS-42"
-cvebeacon --config cvebeacon.toml watch unreport CVE-2026-1234 --by alice --note "Sent in error"
+cvebeacon --config cvebeacon.toml watch report CVE-2026-1234 --by account_user --note "Sent in ticket OPS-42"
+cvebeacon --config cvebeacon.toml watch unreport CVE-2026-1234 --by account_user --note "Sent in error"
 cvebeacon --config cvebeacon.toml watch reported
 cvebeacon --config cvebeacon.toml watch reported --all
 ```
@@ -391,7 +391,7 @@ person:
 
 In `registered` mode `--by` accepts a username or email address,
 case-insensitively, and must match an enabled account. In `authenticated` mode
-the command is `watch report CVE-2026-1234 --user alice`; `--by` is refused and
+the command is `watch report CVE-2026-1234 --user account_user`; `--by` is refused and
 the login name is the username, never the email address. An unknown user, a
 disabled user, and a wrong password all print the same error and exit 2 without
 adding a report row.
@@ -400,16 +400,16 @@ In open mode `--by` is free text of at most 100 characters and must be
 single-line UTF-8 without control characters. It defaults to the OS login name,
 or `unknown` when that name is unavailable or unsafe.
 
-Accounts are managed from the server command line; access to the account file
-is the administrator boundary:
+Accounts can be managed from the dashboard or the server command line. For
+CLI administration, access to the account file is the administrator boundary:
 
 ```console
-cvebeacon --config cvebeacon.toml users add alice --name "Alice Smith" --email alice@example.com
-cvebeacon --config cvebeacon.toml users add bob --no-password
-cvebeacon --config cvebeacon.toml users passwd alice
-cvebeacon --config cvebeacon.toml users disable alice
-cvebeacon --config cvebeacon.toml users enable alice
-cvebeacon --config cvebeacon.toml users unlock alice
+cvebeacon --config cvebeacon.toml users add account_user --name "Example account" --email account@example.test
+cvebeacon --config cvebeacon.toml users add other_user --no-password
+cvebeacon --config cvebeacon.toml users passwd account_user
+cvebeacon --config cvebeacon.toml users disable account_user
+cvebeacon --config cvebeacon.toml users enable account_user
+cvebeacon --config cvebeacon.toml users unlock account_user
 cvebeacon --config cvebeacon.toml users list
 cvebeacon --config cvebeacon.toml users verify
 ```
@@ -423,14 +423,15 @@ change their own password with `users passwd USERNAME` and their current
 password; resetting another user's password, disabling, enabling or unlocking
 an account requires `--admin-user` and an administrator account. In `open` and
 `registered` modes, these commands keep the direct behavior and `--admin` is a
-stored label rather than an enforced privilege.
+stored label rather than an enforced CLI privilege. Dashboard permissions
+always apply, regardless of the reporting identity setting.
 
 ```console
-cvebeacon --config cvebeacon.toml users add alice --admin
-cvebeacon --config cvebeacon.toml users add bob --admin-user alice
-cvebeacon --config cvebeacon.toml users passwd bob
-cvebeacon --config cvebeacon.toml users passwd bob --admin-user alice
-cvebeacon --config cvebeacon.toml users disable bob --admin-user alice
+cvebeacon --config cvebeacon.toml users add admin_user --admin
+cvebeacon --config cvebeacon.toml users add other_user --admin-user admin_user
+cvebeacon --config cvebeacon.toml users passwd other_user
+cvebeacon --config cvebeacon.toml users passwd other_user --admin-user admin_user
+cvebeacon --config cvebeacon.toml users disable other_user --admin-user admin_user
 ```
 
 The CLI runs as the CVEBeacon service account. Anyone who can use that shell can
@@ -439,7 +440,7 @@ report to whoever knows the password (or could reset it under the administrator
 rules); it guards against mistakes and casual misattribution, not against
 co-administrators or someone with the service account. Person-level separation
 needs a front end that people use instead of a service-account shell, such as
-the planned dashboard. The report and user-admin audit chains make edits to
+the [dashboard](DASHBOARD.md). The report and user-admin audit chains make edits to
 those logs detectable unless the person also recomputes them; `cb_user` account
 rows and the configuration file are not covered by either chain. An action with
 an empty actor after bootstrap in authenticated mode means it was performed
@@ -453,7 +454,8 @@ outside the administrator gate.
   password cannot log in until `users passwd` sets one; `authenticated` mode
   rejects it.
 - There is no delete command because the audit trail refers to accounts. Use
-  `disable`; the account and its history remain.
+  `disable`; the account and its history remain. The last enabled administrator
+  cannot be disabled or demoted; create a replacement administrator first.
 - `users list` never displays password material. `users verify` recomputes the
   user-admin audit chain and exits 2 at the first broken row. It covers the
   user-admin audit log only; direct edits to `cb_user` (password hash, disabled
@@ -498,7 +500,9 @@ databases without a store id receive one once. Back up both files together, and 
 backups at `0600` as well. On
 Windows, place both in the
 [ACL-protected data directory](DEPLOY.md#windows-data-directory-acls). The same
-account store and verify function are intended for a future dashboard login.
+account store and verification function also serve dashboard login. Dashboard
+roles are stored in this database; the existing admin flag retains its meaning.
+See [dashboard accounts and permissions](DASHBOARD.md#accounts-and-bootstrap).
 
 ### Report audit trail
 
@@ -557,9 +561,9 @@ notify_reported = true
 ```
 
 The message is
-`[REPORTED] CVE-2026-1234 reported to clients by Alice Smith (alice) <alice@example.com> at 2026-11-04 12:00 UTC`,
+`[REPORTED] CVE-2026-1234 reported to clients by Example account (account_user) <account@example.test> at 2026-11-04 12:00 UTC`,
 with the optional note as a second line, or
-`[UNREPORTED] CVE-2026-1234 report withdrawn by Alice Smith (alice) at 2026-11-04 12:00 UTC`.
+`[UNREPORTED] CVE-2026-1234 report withdrawn by Example account (account_user) at 2026-11-04 12:00 UTC`.
 The username appears when it differs from the display name, and the email
 address when the account has one. In open mode the free-text name is used
 unchanged. Channels without the setting receive nothing.

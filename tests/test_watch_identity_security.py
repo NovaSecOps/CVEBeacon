@@ -549,7 +549,8 @@ def test_security_documentation_is_explicit():
     assert "--admin-user" in watch
     assert "bootstrap" in watch.casefold()
     assert "service account" in watch.casefold()
-    assert "planned dashboard" in watch.casefold()
+    assert "[dashboard](dashboard.md)" in watch.casefold()
+    assert "person-level separation" in watch.casefold()
     assert "must be owned by" in watch.casefold()
     assert "cvebeacon account or root" in watch.casefold()
     assert "sticky-bit" in watch.casefold()
@@ -1131,6 +1132,8 @@ def test_admin_and_self_authorization_are_rechecked_inside_mutations(tmp_path):
     store = UserStore(tmp_path / "users.db", clock=lambda: now[0])
     store.add("alice", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
     store.add("bob", password=PASSWORD)
+    # Keep an enabled administrator while testing revocation of another one.
+    store.add("replacement", password=PASSWORD, is_admin=True)
     admin = store.authenticate("alice", PASSWORD)
     self_proof = store.authenticate("bob", PASSWORD)
 
