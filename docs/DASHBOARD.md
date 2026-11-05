@@ -546,17 +546,16 @@ A new file value is rejected when its paired `*_env` reference is also set,
 because the environment value would take precedence at run time. This includes
 the NVD default `NVD_API_KEY` when that variable has a value, even if the form
 field is blank. An explicit paired environment reference is rejected for file
-rotation until it is cleared. Staged files expire with their preview after ten
-minutes. Cleanup runs on configuration requests; startup no longer writes the
-writer lock or runs cleanup. Old unreferenced files are removed on a later
-configuration request. Previews that reference another preview's generated file adopt it and
-renew its deletion lease, including across separate application instances. A
-staged file is removed only when no current configuration, retained backup or
-live preview references it; if reference discovery cannot complete, cleanup
-retains generated files rather than risk deleting a live secret. Invalid
-submissions remove their staged files. Reserved `.dashboard-secret-` and `.dashboard-staged-` names left
-in the protected data directory by a crash are removed after their lease
-expires; no other data-directory files are touched. Generated names use
+rotation until it is cleared. `.dashboard-staged-` temporaries expire with their
+preview after ten minutes and are removed on a later configuration request.
+Committed `.dashboard-secret-` files are never deleted automatically, whether or
+not they are still referenced, and remain inside the protected secret directory.
+Cleanup runs on configuration requests; startup no longer writes the writer lock
+or runs cleanup. Previews may reference another preview's generated file,
+including across separate application instances. Invalid submissions remove
+their own staging temporaries. Abandoned `.dashboard-staged-` names are removed
+after their lease expires; no `.dashboard-secret-` or other data-directory files
+are auto-deleted. Generated names use
 `.dashboard-secret-` and `.dashboard-staged-`; configuration backups use
 `.CONFIG_FILENAME.backups`, validation temporaries use `.config-`, and the
 configuration writer lock uses `.config-CONFIG_FILENAME.lock`. These paths are
@@ -574,10 +573,12 @@ The backups list remains available when the live file fails the loader or is
 missing. The page reads the raw bytes and version signature, validates only the
 chosen backup, and shows a static "current configuration is invalid or missing"
 notice instead of diffing unvalidated live values. Rollback requires the access
-confirmation; a missing, unparseable or malformed-shape live file also requires
-`manage_secrets`. A parseable file that fails only field validation can be
-restored with the configuration edit permissions. A backup whose path or dashboard settings
-differ from the running configuration requires an administrator. Sections cannot be edited
+confirmation. A missing or unparseable live file also requires
+`manage_secrets`. A parseable file that fails validation is compared with the
+running configuration and can be restored with the configuration edit
+permissions unless the backup changes credentials; a backup whose path or
+dashboard settings differ from the running configuration requires an
+administrator. Sections cannot be edited
 from an invalid live file, so restore a backup first. Rollback does not restore
 secret-file contents; it preserves files referenced by retained backups.
 Inventory parser diagnostics report only the line number and parser kind, never

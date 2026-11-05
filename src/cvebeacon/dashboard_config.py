@@ -490,20 +490,11 @@ def environment_precedence(name):
     return bool(value and value.strip())
 
 
-def generated_file_paths(document, base, config):
-    """References that name editor-generated secret files in the data directory."""
-    directory = _secret_directory(config).resolve()
-    result = set()
-    for path, value in secret_references(document).items():
-        if not path[-1].endswith("_file") or not isinstance(value, str) or not value:
-            continue
-        raw = Path(value).expanduser()
-        if not raw.is_absolute():
-            raw = base / raw
-        resolved = raw.resolve()
-        if resolved.name.startswith(SECRET_PREFIX) and _inside(resolved, directory):
-            result.add(resolved)
-    return result
+def generated_file_paths(config, current_config):
+    """Effective references to editor-generated secret files."""
+    directory = _secret_directory(current_config).resolve()
+    return {path.resolve() for path in effective_paths(config).values()
+            if path.name.startswith(SECRET_PREFIX) and _inside(path.resolve(), directory)}
 
 
 def _database_paths(path):
@@ -767,8 +758,8 @@ class Editor:
         token = _VALIDATING.set(True)
         try:
             config = replace(load_config(temporary), config_path=self.path)
-            if config.inventory is None:
-                raise ConfigurationError("The dashboard requires inventory.path")
+            if config.inventory is None and not config.watch.enabled:
+                raise ConfigurationError("The dashboard requires inventory.path or watch.enabled")
             return config, content
         except ConfigurationError as error:
             raise ConfigurationError(safe_error(error, document, temporary)) from None
@@ -778,42 +769,7 @@ class Editor:
             _VALIDATING.reset(token)
             temporary.unlink(missing_ok=True)
 
-    def _live_reference_paths(self):
-        """Return paths named by the current file and every retained backup."""
-        live = set()
-        documents = []
-        try:
-            content = read_regular(self.path)[0]
-            documents.append((self.path.parent, tomllib.loads(content.decode("utf-8"))))
-        except (OSError, ValueError, UnicodeError, CVEBeaconError):
-            return None
-        if self.backup_dir.exists():
-            if self.backup_dir.is_symlink() or not self.backup_dir.is_dir():
-                return None
-            for name in self.backup_dir.iterdir():
-                if not _backup_name(name.name):
-                    continue
-                try:
-                    raw = read_regular(name, private=True)[0]
-                    documents.append((self.path.parent, tomllib.loads(raw.decode("utf-8"))))
-                except (OSError, ValueError, UnicodeError, CVEBeaconError):
-                    return None
-        for base, document in documents:
-            for path in secret_references(document).values():
-                if isinstance(path, str) and path:
-                    try:
-                        live.add(resolve_reference(path, base))
-                    except (OSError, RuntimeError, ValueError):
-                        return None
-        return live
-
     def _cleanup_orphans(self):
-        live = self._live_reference_paths()
-        if live is None:
-            logging.getLogger("cvebeacon").warning(
-                "Staged secret cleanup deferred: reference discovery is incomplete"
-            )
-            return
         active = {path for pending in self.pending.values()
                   for path in (*pending.staged, *pending.references)}
         now = clock.time()
@@ -831,9 +787,9 @@ class Editor:
                         and stat.S_IMODE(directory.stat().st_mode) & 0o077):
                     continue
                 for path in directory.iterdir():
-                    if not path.name.startswith((SECRET_PREFIX, STAGE_PREFIX)):
+                    if not path.name.startswith(STAGE_PREFIX):
                         continue
-                    if path in live or path in active:
+                    if path in active:
                         continue
                     try:
                         age = now - path.lstat().st_mtime
@@ -855,33 +811,11 @@ class Editor:
         pending = self.pending.pop(identifier, None)
         if not pending:
             return
-        live = self._live_reference_paths()
-        if live is None:
-            logging.getLogger("cvebeacon").warning(
-                "Staged secret cleanup deferred: reference discovery is incomplete"
-            )
         active = {path for identifier2, pending2 in self.pending.items()
                   if identifier2 != identifier
                   for path in (*pending2.staged, *pending2.references)}
         for path in pending.staged:
-            if path.name.startswith((SECRET_PREFIX, STAGE_PREFIX)):
-                if path in active:
-                    continue
-                if path.name.startswith(SECRET_PREFIX):
-                    if live is None:
-                        # An unreadable current file or backup may still name it.
-                        continue
-                    if path.resolve() in live:
-                        # A committed configuration or retained backup still names it.
-                        continue
-                    try:
-                        # Another application may have renewed this file as a lease.
-                        if path.stat().st_mtime > pending.created:
-                            continue
-                    except OSError:
-                        continue
-                path.unlink(missing_ok=True)
-            else:
+            if path.name.startswith(STAGE_PREFIX) and path not in active:
                 path.unlink(missing_ok=True)
 
     def _check_direct_urls(self, current, candidate, *, rollback):
@@ -935,6 +869,13 @@ class Editor:
         checks_config = current_config or self.config
         if unparseable and section == "rollback" and "manage_secrets" not in g.permissions:
             abort(403)
+        file_changed, env_changed = raw_reference_changes(
+            current_document, document, self.config, self.path.parent,
+            current_valid=current_config is not None)
+        if file_changed and not g.user.is_admin:
+            abort(403)
+        if env_changed and "manage_secrets" not in g.permissions:
+            abort(403)
         if replacements:
             candidate_config = self.validate(document)[0]
             validation_document = replacement_document(
@@ -982,7 +923,7 @@ class Editor:
                 users = UserStore(updated.watch.users_database)
                 if not users.dashboard_accounts() or not users.has_admin():
                     raise ConfigurationError("The destination account database needs an enabled administrator")
-        references = generated_file_paths(document, self.path.parent, checks_config)
+        references = generated_file_paths(authority_config, checks_config)
         owned = {replacement.staged for replacement in replacements}
         for path in references - owned:
             try:
@@ -1054,6 +995,13 @@ class Editor:
                     and "manage_secrets" not in early_permissions)):
                 abort(403)
             if pending.replacements and "manage_secrets" not in early_permissions:
+                abort(403)
+            file_changed, env_changed = raw_reference_changes(
+                old, pending.document, self.config, self.path.parent,
+                current_valid=current_config is not None)
+            if file_changed and not probe.is_admin:
+                abort(403)
+            if env_changed and "manage_secrets" not in early_permissions:
                 abort(403)
             updated, content = self.validate(pending.document)
             if ((path_authority_changed(updated, checks_config, self.config)
@@ -1345,6 +1293,175 @@ def credential_authority_changed(candidate, baseline, running):
     return False
 
 
+def _raw_channel_info(document, base):
+    if not isinstance(document, dict):
+        return None
+    watch = document.get("watch")
+    if watch is not None and not isinstance(watch, dict):
+        return None
+    channels = (watch or {}).get("channels") if isinstance(watch, dict) else None
+    if channels is None:
+        return {}
+    if not isinstance(channels, dict):
+        return None
+    result = {}
+    for name, row in channels.items():
+        if not isinstance(row, dict):
+            return None
+        kind = _channel_kind(row)
+        files = {}
+        for key, value in row.items():
+            if not isinstance(key, str) or not key.endswith("_file"):
+                continue
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                return None
+            if value.strip():
+                try:
+                    files[key] = str(resolve_reference(value.strip(), base))
+                except (OSError, RuntimeError, ValueError):
+                    return None
+        result[name] = (kind, files)
+    return result
+
+
+def _config_channel_info(config):
+    result = {}
+    for channel in config.watch.channels:
+        files = {key: str(reference.file)
+                 for key in CREDENTIAL_FIELDS.get(channel.type, ())
+                 if key.endswith("_file")
+                 for reference in (channel.secret(key[:-5]),)
+                 if reference is not None and reference.file is not None}
+        result[channel.name] = (channel.type, files)
+    return result
+
+
+def _channel_info_renames(candidate_info, baseline_info):
+    if candidate_info is None or baseline_info is None:
+        return {}
+    candidate_names = set(candidate_info)
+    deleted = set(baseline_info) - candidate_names
+    pairs = {}
+    used = set()
+    for name in candidate_names - set(baseline_info):
+        kind, files = candidate_info[name]
+        for old in sorted(deleted - used):
+            if baseline_info[old] == (kind, files):
+                pairs[name] = old
+                used.add(old)
+                break
+    return pairs
+
+
+DEFAULT_REFERENCES = {
+    ("sources", "nvd_api_key_env"): defaults(SourceConfig)["nvd_api_key_env"],
+    ("dashboard", "password_hash_env"): defaults(DashboardConfig)["password_hash_env"],
+    ("notifications", "teams", "webhook_env"): defaults(TeamsConfig)["webhook_env"],
+    ("notifications", "email", "tenant_id_env"): defaults(EmailConfig)["tenant_id_env"],
+    ("notifications", "email", "client_id_env"): defaults(EmailConfig)["client_id_env"],
+    ("notifications", "email", "client_secret_env"): defaults(EmailConfig)["client_secret_env"],
+}
+
+
+def _raw_reference_map(document, base):
+    if not isinstance(document, dict):
+        return None
+    for table in ("sources", "notifications", "dashboard", "watch"):
+        if table in document and not isinstance(document[table], dict):
+            return None
+    notifications = document.get("notifications")
+    if isinstance(notifications, dict):
+        for key in ("teams", "email"):
+            if key in notifications and not isinstance(notifications[key], dict):
+                return None
+    values = dict(DEFAULT_REFERENCES)
+    for path, value in secret_references(document).items():
+        text = value.strip()
+        if path[-1].endswith("_file"):
+            if not text:
+                continue
+            try:
+                values[path] = str(resolve_reference(text, base))
+            except (OSError, RuntimeError, ValueError):
+                return None
+        else:
+            values[path] = text
+    return values
+
+
+def _config_reference_map(config):
+    values = dict(DEFAULT_REFERENCES)
+    values[("sources", "nvd_api_key_env")] = config.sources.nvd_api_key_env
+    values[("dashboard", "password_hash_env")] = config.dashboard.password_hash_env
+    values[("notifications", "teams", "webhook_env")] = config.teams.webhook_env
+    values[("notifications", "email", "tenant_id_env")] = config.email.tenant_id_env
+    values[("notifications", "email", "client_id_env")] = config.email.client_id_env
+    values[("notifications", "email", "client_secret_env")] = config.email.client_secret_env
+    if config.sources.nvd_api_key_file is not None:
+        values[("sources", "nvd_api_key_file")] = str(config.sources.nvd_api_key_file)
+    for channel in config.watch.channels:
+        for key in CREDENTIAL_FIELDS.get(channel.type, ()):
+            if not key.endswith("_file"):
+                continue
+            reference = channel.secret(key[:-5])
+            if reference is None:
+                continue
+            if reference.env is not None:
+                values[("watch", "channels", channel.name, key[:-5] + "_env")] = reference.env
+            if reference.file is not None:
+                values[("watch", "channels", channel.name, key)] = str(reference.file)
+    return values
+
+
+def _mapped_reference_key(path, renames):
+    if (len(path) >= 4 and path[0] == "watch" and path[1] == "channels"
+            and path[2] in renames):
+        return (*path[:2], renames[path[2]], *path[3:])
+    return path
+
+
+def raw_reference_changes(current_document, candidate, running_config, base, *, current_valid=True):
+    """Cheap pre-validation check for changed environment and file references."""
+    candidate_map = _raw_reference_map(candidate, base)
+    if candidate_map is None:
+        return True, True
+    baselines = []
+    current_map = (_raw_reference_map(current_document, base)
+                   if current_valid and current_document is not None else None)
+    candidate_info = _raw_channel_info(candidate, base)
+    if current_map is not None:
+        baselines.append((current_map, _channel_info_renames(
+            candidate_info, _raw_channel_info(current_document, base))))
+    running_map = _config_reference_map(running_config)
+    baselines.append((running_map, _channel_info_renames(
+        candidate_info, _config_channel_info(running_config))))
+    candidate_channels = set(candidate_info or {})
+    file_changed = env_changed = False
+    for baseline_map, renames in baselines:
+        translated = {_mapped_reference_key(key, renames): value
+                      for key, value in candidate_map.items()}
+        for key, value in translated.items():
+            if baseline_map.get(key) == value:
+                continue
+            if key[-1].endswith("_file"):
+                file_changed = True
+            else:
+                env_changed = True
+        for key in baseline_map:
+            if key in translated:
+                continue
+            if (len(key) >= 3 and key[0] == "watch" and key[1] == "channels"
+                    and key[2] not in candidate_channels):
+                continue
+            if key[-1].endswith("_file"):
+                file_changed = True
+            else:
+                env_changed = True
+    return file_changed, env_changed
+
+
 def effective_paths(config):
     """The loader's resolved filesystem identities for an AppConfig."""
     values = {
@@ -1408,6 +1525,7 @@ def path_authority_changed(candidate, baseline, running):
     running_paths = effective_paths(running)
     baseline_renames = _channel_renames(candidate, baseline)
     running_renames = _channel_renames(candidate, running)
+    candidate_channel_names = {channel.name for channel in candidate.watch.channels}
     for identity, path in candidate_paths.items():
         baseline_identity = _mapped_identity(identity, baseline_renames)
         if baseline_paths.get(baseline_identity) != path:
@@ -1415,6 +1533,22 @@ def path_authority_changed(candidate, baseline, running):
         running_identity = _mapped_identity(identity, running_renames)
         if running_paths.get(running_identity) != path:
             return True
+    baseline_present = {_mapped_identity(identity, baseline_renames)
+                        for identity in candidate_paths}
+    running_present = {_mapped_identity(identity, running_renames)
+                       for identity in candidate_paths}
+    for identity in baseline_paths:
+        if identity in baseline_present:
+            continue
+        if identity[0] == "channel" and identity[1] not in candidate_channel_names:
+            continue
+        return True
+    for identity in running_paths:
+        if identity in running_present:
+            continue
+        if identity[0] == "channel" and identity[1] not in candidate_channel_names:
+            continue
+        return True
     return False
 
 

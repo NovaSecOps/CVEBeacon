@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import re
+import time
 import tomllib
 
 import pytest
@@ -1263,3 +1264,94 @@ def test_stale_live_destination_change_needs_manage_secrets(accounts):
     login(client)
     response = preview(client, "http", g0_retries="4")
     assert response.status_code == 403
+
+
+def test_watch_only_configuration_editor_saves_and_rolls_back(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(
+        BASE.replace('[inventory]\npath = "inventory.csv"\n\n', '')
+        + '\n[watch]\nenabled = true\nsources = ["nvd"]\n',
+        encoding="utf-8",
+    )
+    app = dashboard.create_app(load_config(config.config_path))
+    client = app.test_client()
+    login(client, "admin")
+    response = preview(client, "http", g0_retries="4")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response).status_code == 303
+    login(client, "admin")
+    assert load_config(config.config_path).inventory is None
+    page = client.get("/config/backups")
+    assert page.status_code == 200
+    data = form(page.text)
+    data["backup"] = sorted(app.extensions["dashboard_config"].backups())[0]
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "backups").status_code == 303
+
+
+def test_new_reference_target_is_not_read_before_authorization(accounts, monkeypatch):
+    config, users, _, client = accounts
+    old = make_secret(config.config_path.parent / "old-url",
+                      "https://hooks.slack.com/services/OLD/OLD/OLD")
+    target = make_secret(config.config_path.parent / "new-url", "invalid private text")
+    config.config_path.write_text(channel_config(f'''
+[watch.channels.slack]
+type = "slack"
+webhook_url_file = "{old.name}"
+'''), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    real_read = Path.read_text
+
+    def guarded(path, *args, **kwargs):
+        if path == target:
+            raise AssertionError("new reference target was read before authorization")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded)
+    response = preview(client, "channels", g0_webhook_url_file=str(target))
+    assert response.status_code == 403
+
+
+def test_path_identity_removal_requires_administrator(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "password", "synthetic password")
+    config.config_path.write_text(channel_config(_smtp(reference=str(secret))),
+                                  encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "channel-manager", {"view", "edit_channels", "manage_secrets"})
+    login(client)
+    before = config.config_path.read_bytes()
+    response = preview(client, "channels", g0_password_file="")
+    assert response.status_code == 403
+    assert config.config_path.read_bytes() == before
+
+    set_role(users, "inventory-manager", {"view", "edit_inventory"})
+    config.config_path.write_text(
+        BASE.replace('[output]\ndirectory = "reports"',
+                     '[output]\ndirectory = "reports"\n\n[watch]\nenabled = true'),
+        encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    login(client)
+    response = preview(client, "inventory", g0_path="")
+    assert response.status_code == 403
+
+
+def test_committed_generated_secret_is_never_auto_deleted(accounts):
+    config, users, _, client = accounts
+    secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+    secret_dir.mkdir(mode=0o700, exist_ok=True)
+    generated = make_secret(secret_dir / ".dashboard-secret-live",
+                            "https://hooks.slack.com/services/LIVE/LIVE/LIVE")
+    old = time.time() - dc.PREVIEW_SECONDS - 30
+    os.utime(generated, (old, old))
+    config.config_path.write_text(channel_config(
+        f'[watch.channels.slack]\ntype = "slack"\nwebhook_url_file = "dashboard-secrets/{generated.name} "\n'
+    ), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    login(client, "admin")
+    assert client.get("/config/").status_code == 200
+    assert generated.exists()
+    assert load_config(config.config_path).watch.channels

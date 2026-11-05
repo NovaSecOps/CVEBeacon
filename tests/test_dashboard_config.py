@@ -331,7 +331,7 @@ def test_invalid_preview_and_expiration_remove_staged_secrets(accounts):
     path = pending.staged[0]
     pending.expires = 0
     editor.cleanup()
-    assert not path.exists()
+    assert path.exists()
 
 
 @pytest.mark.parametrize("link", ["config", "backup-dir", "secret-dir", "hardlink"])

@@ -230,7 +230,7 @@ def test_expired_pending_references_are_eventually_removed(accounts):
     old = time.time() - dc.PREVIEW_SECONDS - 30
     os.utime(staged, (old, old))
     editor.cleanup()
-    assert not staged.exists()
+    assert staged.exists()
 
 
 @pytest.mark.parametrize("key", ["url_env", "url_file"])
@@ -889,7 +889,6 @@ def test_malformed_retained_backup_does_not_crash_cleanup(accounts):
                          "synthetic orphan")
     old = time.time() - dc.PREVIEW_SECONDS - 30
     os.utime(staged, (old, old))
-    assert editor._live_reference_paths() is None
     editor.cleanup()
     assert staged.exists()
     assert create_app(load_config(config.config_path)).extensions["dashboard_config"] is not None
@@ -899,7 +898,7 @@ def test_reserved_secret_temporaries_in_data_root_are_cleaned(accounts):
     config, _, app, _ = accounts
     editor = app.extensions["dashboard_config"]
     os.chmod(config.config_path.parent, 0o700)
-    orphan = make_secret(config.config_path.parent / (dc.SECRET_PREFIX + "orphan-root"),
+    orphan = make_secret(config.config_path.parent / (dc.STAGE_PREFIX + "orphan-root"),
                          "synthetic orphan")
     old = time.time() - dc.PREVIEW_SECONDS - 30
     os.utime(orphan, (old, old))

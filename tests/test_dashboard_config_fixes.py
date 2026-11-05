@@ -439,7 +439,7 @@ def test_abandoned_staging_is_removed_but_live_references_kept(accounts):
     editor = app.extensions["dashboard_config"]
     secret_dir = config.watch.users_database.parent / "dashboard-secrets"
     secret_dir.mkdir(mode=0o700, exist_ok=True)
-    orphan = secret_dir / (editor_module.SECRET_PREFIX + "orphan")
+    orphan = secret_dir / (editor_module.STAGE_PREFIX + "orphan")
     make_secret(orphan, "orphan Synthetic value")
     old = time.time() - editor_module.PREVIEW_SECONDS - 30
     os.utime(orphan, (old, old))
@@ -562,8 +562,6 @@ def test_cleanup_preserves_a_backup_only_reference(accounts):
     backup = editor.backup_dir / ("20260101T000000000000Z-" + "a" * 16 + ".toml")
     backup.write_text(with_file(config, staged), encoding="utf-8")
     os.chmod(backup, 0o600)
-    live = editor._live_reference_paths()
-    assert live is not None and staged.resolve() in live
     editor.cleanup()
     assert staged.exists()
 
