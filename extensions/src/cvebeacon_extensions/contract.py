@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import tempfile
 
@@ -141,7 +142,14 @@ def manifest_path(path: Path) -> Path:
 def _atomic(path: Path, data: bytes):
     if path.exists() or path.is_symlink():
         _regular(path)
-    descriptor, temporary = tempfile.mkstemp(prefix=".cvebeacon-", dir=path.parent)
+    if os.name == "nt":
+        from cvebeacon.private_storage import private_file
+        # Apply a protected owner-only DACL at creation, before writing data.
+        # A mkstemp file inherits its parent's ACL on Windows.
+        temporary = path.parent / (".cvebeacon-" + secrets.token_hex(16))
+        descriptor = private_file(temporary, create=True, exclusive=True)
+    else:
+        descriptor, temporary = tempfile.mkstemp(prefix=".cvebeacon-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
