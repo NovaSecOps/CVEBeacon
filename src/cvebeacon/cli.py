@@ -419,7 +419,9 @@ def _event_line(row, rule_name: str | None = None, reported=None, clients=None) 
         line += f"  {reasons}"
     line += f"  {date_phrase(row.published, row.first_seen)}"
     affected = format_affected_clients(
-        (clients or {}).get(row.cve_id.upper(), ()), language="en"
+        (clients or {}).get(row.cve_id.strip().upper(), ()),
+        language="en",
+        limit=10,
     )
     if affected:
         line += f"  {affected}"

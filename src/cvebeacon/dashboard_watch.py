@@ -33,7 +33,9 @@ from flask import (
 from .config import AppConfig
 from .clients import (
     affected_clients,
-    client_summaries,
+    client_cves,
+    client_names,
+    client_page,
     latest_successful_scan,
 )
 from .dashboard import _text, requires
@@ -332,24 +334,15 @@ def events():
             cve = normalize_cve_id(filters["cve"])
         except ConfigurationError:
             abort(400)
-    _, summaries = client_summaries(config.database_path)
-    client_names = {item.name.casefold(): item.name for item in summaries}
+    available_clients = client_names(config.database_path)
+    client_lookup = {name.casefold(): name for name in available_clients}
     client_cves_filter: tuple[str, ...] | None = None
     if filters["client"]:
-        chosen = next(
-            (
-                item
-                for item in summaries
-                if item.name.casefold() == filters["client"].casefold()
-            ),
-            None,
-        )
+        chosen = client_lookup.get(filters["client"].casefold())
         if chosen is None:
             abort(400)
-        filters["client"] = chosen.name
-        client_cves_filter = tuple(
-            finding.cve_id for finding in chosen.findings
-        )
+        filters["client"] = chosen
+        client_cves_filter = client_cves(config.database_path, chosen)
     pending = (
         None
         if filters["pending"] == "no"
@@ -389,7 +382,7 @@ def events():
         filters=filters,
         kinds=EVENT_KINDS,
         rule_names=[rule.name for rule in config.watch.rules],
-        client_names=sorted(client_names.values(), key=lambda value: (value.casefold(), value)),
+        client_names=available_clients,
         page=page,
         has_previous=page > 1,
         has_next=has_next,
@@ -400,11 +393,21 @@ def events():
 @requires("view")
 def clients():
     config, _ = _state()
-    scan, summaries = client_summaries(config.database_path)
+    page = _page_number()
+    limit = 50
+    scan, summaries, total = client_page(
+        config.database_path,
+        limit=limit,
+        offset=(page - 1) * limit,
+    )
     return render_template(
         "watch_clients.html",
         scan=scan,
         clients=summaries,
+        page=page,
+        has_previous=page > 1,
+        has_next=page * limit < total,
+        total=total,
     )
 
 

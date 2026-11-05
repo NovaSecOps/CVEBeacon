@@ -1,7 +1,10 @@
 """Explicit component identities, without guessing registry/CPE equivalence."""
 
+from __future__ import annotations
+
 from dataclasses import replace
 import re
+import unicodedata
 from urllib.parse import quote, unquote, urlsplit
 
 from packaging.utils import canonicalize_name
@@ -82,15 +85,30 @@ def name_key(ecosystem: str, value: str) -> str:
 MAX_CLIENT_LENGTH = 120
 
 
+def validate_client_name(value: object) -> str:
+    """Validate a client label at ingestion and stored-value boundaries."""
+    if not isinstance(value, str):
+        raise ValueError("client must be text")
+    if len(value) > MAX_CLIENT_LENGTH:
+        raise ValueError(
+            f"client must be at most {MAX_CLIENT_LENGTH} characters"
+        )
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf"}
+        for character in value
+    ):
+        raise ValueError(
+            "client must be text without control or format characters"
+        )
+    return value
+
+
 def normalize_asset(asset: Asset) -> Asset:
     for name in asset.__dataclass_fields__:
         value = getattr(asset, name)
         if not isinstance(value, str) or any(ord(char) < 32 for char in value):
             raise ValueError(f"{name} must be text without control characters")
-    if len(asset.client) > MAX_CLIENT_LENGTH:
-        raise ValueError(
-            f"client must be at most {MAX_CLIENT_LENGTH} characters"
-        )
+    validate_client_name(asset.client)
     if not asset.asset_id:
         raise ValueError("blank required field: asset_id")
     if asset.purl:

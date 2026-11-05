@@ -137,4 +137,64 @@ def test_statement_download_contains_affected_clients(tmp_path):
         content_type="multipart/form-data",
     )
     assert response.status_code == 200
-    assert b"Clients: Acme, Globex (review)" in response.data
+    assert b"Clients: Acme, Globex \\(review\\)" in response.data
+
+
+def test_clients_page_uses_cve_aliases_for_links_and_filters(tmp_path):
+    config, _, _, _, client = seeded(tmp_path)
+    state = StateStore(config.database_path)
+    asset = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    advisory = Vulnerability(
+        advisory_id="ghsa-aaaa-bbbb-cccc",
+        aliases=("cve-2026-0001",),
+    )
+    state.record_scan(
+        [
+            QueryResult(
+                asset,
+                (
+                    Finding(
+                        asset,
+                        advisory,
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            )
+        ]
+    )
+    login(client, "reader")
+    page = client.get("/watch/clients")
+    assert page.status_code == 200
+    assert "CVE-2026-0001" in page.text
+    assert "GHSA-" not in page.text
+    assert 'href="/watch/cve/CVE-2026-0001"' in page.text
+    events = client.get("/watch/events", query_string={"client": "Acme"})
+    assert events.status_code == 200
+    assert "CVE-2026-0001" in events.text
+
+
+def test_large_client_does_not_break_the_clients_page_or_events_filter(tmp_path):
+    config, _, _, _, client = seeded(tmp_path)
+    state = StateStore(config.database_path)
+    asset = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    findings = tuple(
+        Finding(
+            asset,
+            Vulnerability(f"CVE-2026-{index:05d}"),
+            Applicability.AFFECTED,
+            "high",
+            "test",
+        )
+        for index in range(5001)
+    )
+    state.record_scan([QueryResult(asset, findings, ())])
+    login(client, "reader")
+    clients_page = client.get("/watch/clients")
+    assert clients_page.status_code == 200
+    assert "and 4901 more" in clients_page.text
+    events = client.get("/watch/events", query_string={"client": "Acme"})
+    assert events.status_code == 200
+    assert "No matching events" in events.text

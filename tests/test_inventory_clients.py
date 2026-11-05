@@ -43,14 +43,28 @@ def test_client_name_is_nfkc_normalized(tmp_path):
     assert load_inventory(config(path))[0].client == "Acme"
 
 
-def test_client_name_rejects_control_characters(tmp_path):
+@pytest.mark.parametrize(
+    "value",
+    (
+        "Acme\x01Corp",
+        "Acme\x7fCorp",
+        "Acme\x85Corp",
+        "Acme\u202eCorp",
+        "Acme\u200bCorp",
+        "Acme\ufeffCorp",
+    ),
+)
+def test_client_name_rejects_control_and_format_characters(tmp_path, value):
     path = tmp_path / "inventory.csv"
     path.write_text(
         "Asset,Maker,Name,Release,Client\n"
-        "srv-1,Acme,Widget,1.2.3,Acme\x01Corp\n",
+        f"srv-1,Acme,Widget,1.2.3,{value}\n",
         encoding="utf-8",
     )
-    with pytest.raises(InventoryValidationError, match="client must be text without control characters"):
+    with pytest.raises(
+        InventoryValidationError,
+        match="control or format characters|without control characters",
+    ):
         load_inventory(config(path))
 
 

@@ -1606,12 +1606,14 @@ class WatchStore:
             selected_cves = tuple(sorted({str(value) for value in cve_ids if value}))
             if not selected_cves:
                 return ()
-            if len(selected_cves) > 5000:
+            if len(selected_cves) > 100_000:
                 raise StateError("too many event CVEs selected")
             clauses.append(
-                "e.cve_id IN (" + ",".join("?" for _ in selected_cves) + ")"
+                "e.cve_id IN (SELECT value FROM json_each(?))"
             )
-            parameters.extend(selected_cves)
+            parameters.append(
+                json.dumps(list(selected_cves), separators=(",", ":"))
+            )
         if since is not None:
             clauses.append("e.created_at >= ?")
             parameters.append(since.isoformat())
