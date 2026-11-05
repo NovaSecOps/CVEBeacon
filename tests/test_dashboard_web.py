@@ -327,3 +327,32 @@ def test_shared_state_parent_keeps_web_subdirectories_private(web):
     assert config.database_path.parent.stat().st_mode & 0o777 == 0o755
     for directory in web_assets.directories(config):
         assert directory.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("url,scheme,port,path_value", [
+    ("https://example.invalid/app", "https", 443, "/app"),
+    ("http://example.invalid:8080/a%20b", "http", 8080, "/a%20b"),
+])
+def test_url_entries_display_and_save_equivalent_target(web, url, scheme, port, path_value):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    path, _ = paths(config, "Acme")
+    document, _ = read_allowlist(path, "Acme")
+    entry = document["assets"][0]
+    for key in ("hostname", "scheme", "port", "path"):
+        entry.pop(key)
+    entry["url"] = url
+    save_allowlist(path, document)
+    page = client.get("/web-assets?client=Acme")
+    assert f'example.invalid · {scheme}:{port}{path_value}' in page.text
+    form = page.text.split('<summary>Change asset</summary>', 1)[1].split('</form>', 1)[0]
+    # Submit the actual rendered controls, so a wrong default cannot pass unnoticed.
+    fields = dict(re.findall(r'name="([^"]+)"[^>]*value="([^"]*)"', form))
+    fields["scheme"] = re.search(r'<option selected>([^<]+)</option>', form)[1]
+    fields.update(attest="yes", max_redirects="2")
+    response = client.post("/web-assets/save", data=fields)
+    assert response.status_code == 303, response.text
+    updated = read_allowlist(path, "Acme")[0]["assets"][0]
+    assert "url" not in updated
+    assert (updated["hostname"], updated["scheme"], updated["port"], updated["path"]) == (
+        "example.invalid", scheme, port, path_value)

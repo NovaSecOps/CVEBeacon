@@ -22,6 +22,20 @@ def _host(entry):
     return entry.get("hostname") or urlsplit(entry.get("url", "")).hostname or ""
 
 
+def _editable_entry(entry):
+    result = dict(entry)
+    if "url" in entry:
+        try:
+            parsed = urlsplit(entry["url"])
+            result.update(hostname=parsed.hostname or "", scheme=parsed.scheme,
+                          port=parsed.port or (443 if parsed.scheme == "https" else 80),
+                          path=parsed.path or "/")
+        except (ValueError, TypeError, AttributeError):
+            pass  # Keep recovery controls available for malformed local entries.
+    return result
+
+
+
 def create_web_blueprint(config):
     blueprint = Blueprint("web", __name__, url_prefix="/web-assets")
 
@@ -47,6 +61,7 @@ def create_web_blueprint(config):
                 path, output = paths(config, client)
                 document, version = read_allowlist(path, client)
                 client = document["client"]
+                document = {**document, "assets": [_editable_entry(row) for row in document["assets"]]}
                 if output.exists() or output.is_symlink():
                     try:
                         _, snapshot = read_web_snapshot(output)
