@@ -1,0 +1,2 @@
+# Golden snapshots are compared byte for byte; keep their line endings.
+extensions/tests/fixtures/web/*.json -text
