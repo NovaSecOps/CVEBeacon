@@ -2,13 +2,16 @@
 
 import os
 from pathlib import Path
+import threading
 import time
 
 import pytest
 
 from cvebeacon import dashboard_config as dc
 from cvebeacon.config import load_config
+from cvebeacon.dashboard import create_app
 from cvebeacon.errors import ConfigurationError
+from cvebeacon.watch.delivery import DeliveryFailure
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
 from test_dashboard import setup  # noqa: F401 - registers the shared fixture
 from test_dashboard_accounts import PASSWORD, accounts as account_fixture, login
@@ -268,9 +271,10 @@ def test_generic_url_reference_rechecks_transport_at_use(accounts, monkeypatch):
         return type("Result", (), {"status_code": 200})()
 
     monkeypatch.setattr(delivery, "_http_call", fake_transport)
-    failure = delivery._send_webhook(channel, (), object(), 5, {})
+    with pytest.raises(DeliveryFailure):
+        delivery._send_webhook(channel, (), object(), 5, {})
     outcome = delivery.send_test(loaded, object(), "hook")
-    assert failure is not None and not outcome.ok
+    assert not outcome.ok
     assert not calls
 
 
@@ -291,7 +295,7 @@ def test_generic_url_http_opt_in_is_rechecked_at_use(accounts, monkeypatch):
         return type("Result", (), {"status_code": 200})()
 
     monkeypatch.setattr(delivery, "_http_call", fake_transport)
-    assert delivery._send_webhook(loaded.watch.channels[0], (), object(), 5, {}) is None
+    delivery._send_webhook(loaded.watch.channels[0], (), object(), 5, {})
     assert calls == ["http://example.invalid/allowed"]
 
 
@@ -416,7 +420,8 @@ def test_runtime_rejects_invalid_generic_urls(accounts, monkeypatch, url):
     calls = []
     monkeypatch.setattr(delivery, "_http_call",
                         lambda *args, **kwargs: calls.append(args[2]) or type("Result", (), {"status_code": 200})())
-    assert delivery._send_webhook(loaded.watch.channels[0], (), object(), 5, {}) is not None
+    with pytest.raises(DeliveryFailure):
+        delivery._send_webhook(loaded.watch.channels[0], (), object(), 5, {})
     assert not calls
 
 
@@ -525,12 +530,17 @@ to = ["soc@example.invalid"]
     )
     login(client, "admin")
     page = client.get("/config/channels")
-    data = form(page.text)
+    base = form(page.text)
+    before = config.config_path.read_bytes()
+    data = {key: base[key] for key in ("csrf", "version", "action", "row_count")}
     data.update(row_count="1", g0_name="mail", g0_type="webhook",
-                g0_url="https://example.invalid/new-inline-secret")
+                g0_url="https://example.invalid/new-inline-secret",
+                g0_url_env="", g0_url_file="", g0_header_name="")
     response = client.post("/config/channels", data=data)
     assert response.status_code == 400
+    assert "Inline generic webhook URLs" in response.text
     assert "new-inline-secret" not in config.config_path.read_text(encoding="utf-8")
+    assert config.config_path.read_bytes() == before
 
 
 def test_unreadable_backup_retains_an_uncommitted_staged_file(accounts, monkeypatch):
@@ -568,3 +578,328 @@ def test_new_nvd_file_secret_is_blocked_by_implicit_environment(accounts, monkey
     assert "NVD_API_KEY" in response.text
     secret_dir = config.watch.users_database.parent / "dashboard-secrets"
     assert not secret_dir.exists() or not list(secret_dir.iterdir())
+
+
+def _smtp_pair(reference):
+    return BASE + "\n" + "\n".join(
+        f'''[watch.channels.{name}]
+type = "smtp"
+host = "smtp.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_file = "{reference}"
+'''
+        for name in ("first", "second")
+    )
+
+
+@pytest.mark.parametrize("revocation", ["disable", "password", "permission"])
+def test_revoked_actor_never_writes_a_live_secret(accounts, monkeypatch, revocation):
+    config, users, app, client = accounts
+    monkeypatch.delenv("NVD_API_KEY", raising=False)
+    secret = make_secret(config.config_path.parent / "existing-key", "original synthetic value")
+    config.config_path.write_text(with_file(config, secret), encoding="utf-8")
+    set_role(users, "source-editor", {"view", "edit_sources"})
+    admin = users.authenticate("admin", PASSWORD)
+    login(client)
+    response = preview(client, "sources", g0_nvd_api_key_file_new="revoked synthetic value")
+    editor = app.extensions["dashboard_config"]
+    real_commit = editor.commit
+    real_replace = dc.os.replace
+    writes = []
+
+    def revoke_then_commit(*args, **kwargs):
+        if revocation == "disable":
+            users.disable("reader", authorization=admin)
+        elif revocation == "password":
+            users.set_password("reader", "new synthetic password 123456", authorization=admin)
+        else:
+            users.save_role("source-editor", {"view"}, authorization=admin)
+        return real_commit(*args, **kwargs)
+
+    def capture_replace(source, destination):
+        real_replace(source, destination)
+        if Path(destination) == secret:
+            writes.append(load_config(config.config_path).nvd_api_key())
+
+    monkeypatch.setattr(editor, "commit", revoke_then_commit)
+    monkeypatch.setattr(dc.os, "replace", capture_replace)
+    saved = confirm(client, response, "sources")
+    assert saved.status_code in {400, 403}
+    assert secret.read_text(encoding="utf-8") == "original synthetic value"
+    assert writes == []
+
+
+def test_failed_writer_does_not_restore_over_another_successful_rotation(accounts, monkeypatch):
+    config, _, app_a, client_a = accounts
+    monkeypatch.delenv("NVD_API_KEY", raising=False)
+    secret = make_secret(config.config_path.parent / "existing-key", "original synthetic value")
+    config.config_path.write_text(with_file(config, secret), encoding="utf-8")
+    app_b = create_app(load_config(config.config_path))
+    client_b = app_b.test_client()
+    login(client_a, "admin")
+    login(client_b, "admin")
+    preview_a = preview(client_a, "sources", g0_nvd_api_key_file_new="writer A synthetic value")
+    preview_b = preview(client_b, "sources", g0_nvd_api_key_file_new="writer B synthetic value")
+    ready = threading.Event()
+    resume = threading.Event()
+    done_b = threading.Event()
+    real_sync = dc.sync_directory
+    result_a = []
+    result_b = []
+    errors = []
+
+    def pause_a_after_its_replacement(directory):
+        if threading.current_thread().name == "writer-a" and directory == secret.parent and not ready.is_set():
+            ready.set()
+            if not resume.wait(15):
+                raise AssertionError("synthetic writer interleaving timed out")
+        real_sync(directory)
+
+    def run_a():
+        try:
+            result_a.append(confirm(client_a, preview_a, "sources").status_code)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_b():
+        try:
+            result_b.append(confirm(client_b, preview_b, "sources").status_code)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done_b.set()
+
+    monkeypatch.setattr(dc, "sync_directory", pause_a_after_its_replacement)
+    worker = threading.Thread(target=run_a, name="writer-a")
+    other = threading.Thread(target=run_b, name="writer-b")
+    worker.start()
+    try:
+        assert ready.wait(10), "first writer did not reach the secret replacement"
+        other.start()
+        completed_while_a_paused = done_b.wait(2)
+    finally:
+        resume.set()
+        worker.join(15)
+        if other.ident is not None:
+            other.join(15)
+    assert not worker.is_alive() and not other.is_alive() and not errors, errors
+    assert sorted([*result_a, *result_b]) == [303, 409]
+    winner = "writer A synthetic value" if result_a == [303] else "writer B synthetic value"
+    assert secret.read_text(encoding="utf-8") == winner
+    assert completed_while_a_paused is False
+
+
+def test_conflicting_rotations_of_one_physical_file_are_rejected(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "shared-password", "original synthetic value")
+    config.config_path.write_text(_smtp_pair(secret.name), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    response = preview(client, "channels", g0_password_file_new="first synthetic password",
+                       g1_password_file_new="second synthetic password")
+    assert response.status_code == 400
+    assert secret.read_text(encoding="utf-8") == "original synthetic value"
+
+
+def test_shared_consumer_constraints_are_checked_before_any_live_write(accounts, monkeypatch):
+    config, users, _, client = accounts
+    old = "https://hooks.slack.com/services/TEST/TEST/TEST"
+    secret = make_secret(config.config_path.parent / "shared-url", old)
+    config.config_path.write_text(BASE + f'''
+[watch.channels.slack]
+type = "slack"
+webhook_url_file = "{secret.name}"
+
+[watch.channels.teams]
+type = "teams"
+webhook_url_file = "{secret.name}"
+''', encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    response = preview(client, "channels", g1_webhook_url_file_new="https://example.invalid/teams-only")
+    assert response.status_code == 400
+    assert secret.read_text(encoding="utf-8") == old
+
+
+def test_failed_cross_app_lease_renewal_rejects_preview(accounts, monkeypatch):
+    config, _, app_a, client_a = accounts
+    monkeypatch.delenv("NVD_API_KEY", raising=False)
+    login(client_a, "admin")
+    first_response = preview(client_a, "sources", g0_nvd_api_key_env="",
+                             g0_nvd_api_key_file_new="synthetic staged value")
+    editor_a = app_a.extensions["dashboard_config"]
+    pending_a = editor_a.pending[form(first_response.text, "confirm")["preview"]]
+    staged = pending_a.staged[0]
+    app_b = create_app(config)
+    client_b = app_b.test_client()
+    login(client_b, "admin")
+    real_utime = dc.os.utime
+
+    def fail_lease_once(path, *args, **kwargs):
+        if Path(path) == staged:
+            raise OSError("synthetic generated-file lease renewal failure")
+        return real_utime(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dc.os, "utime", fail_lease_once)
+        second_response = preview(client_b, "sources", g0_nvd_api_key_env="",
+                                  g0_nvd_api_key_file=str(staged))
+    assert second_response.status_code == 400
+
+
+def test_loader_whitespace_channel_type_remains_editable(accounts, monkeypatch):
+    config, _, _, client = accounts
+    monkeypatch.setenv("SYNTHETIC_URL", "https://example.invalid/hook")
+    config.config_path.write_text(
+        BASE + '\n[watch.channels.hook]\ntype = " \tWEBHOOK "\nurl_env = "SYNTHETIC_URL"\n',
+        encoding="utf-8",
+    )
+    assert load_config(config.config_path).watch.channels[0].type == "webhook"
+    login(client, "admin")
+    assert client.get("/config/channels").status_code == 200
+
+
+def test_rename_and_rotate_existing_channel_is_a_guided_error(accounts):
+    config, _, _, client = accounts
+    secret = make_secret(config.config_path.parent / "password", "original synthetic value")
+    config.config_path.write_text(_smtp_pair(secret.name), encoding="utf-8")
+    login(client, "admin")
+    response = preview(client, "channels", g0_name="renamed",
+                       g0_password_file_new="renamed synthetic value")
+    assert response.status_code == 400
+    assert "separate saves" in response.text
+
+
+def _operational_config(config, database_line, channel_file):
+    config.config_path.write_text(
+        BASE.replace('[state]\ndatabase = "state.db"', database_line)
+        + f'''
+[watch]
+enabled = true
+sources = ["nvd"]
+
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_file = "{channel_file}"
+''',
+        encoding="utf-8",
+    )
+
+
+def test_secret_rotation_rejects_state_database_target(accounts):
+    config, _, _, client = accounts
+    target = make_secret(config.config_path.parent / "operational.db", "operational state")
+    _operational_config(config, '[state]\ndatabase = "operational.db"', target.name)
+    login(client, "admin")
+    response = preview(client, "channels", g0_password_file_new="replacement")
+    assert response.status_code == 400
+    assert target.read_text(encoding="utf-8") == "operational state"
+
+
+def test_secret_rotation_rejects_watch_database_target(accounts):
+    config, _, _, client = accounts
+    target = make_secret(config.config_path.parent / "operational-watch.db", "operational watch")
+    _operational_config(
+        config,
+        '[state]\ndatabase = "state.db"',
+        target.name,
+    )
+    config.config_path.write_text(
+        config.config_path.read_text(encoding="utf-8").replace(
+            '[watch]\nenabled = true',
+            '[watch]\nenabled = true\ndatabase = "operational-watch.db"',
+        ),
+        encoding="utf-8",
+    )
+    login(client, "admin")
+    response = preview(client, "channels", g0_password_file_new="replacement")
+    assert response.status_code == 400
+    assert target.read_text(encoding="utf-8") == "operational watch"
+
+
+def test_secret_rotation_rejects_inventory_and_account_sidecar_targets(accounts):
+    config, _, _, client = accounts
+    inventory = config.inventory.path
+    inventory.chmod(0o600)
+    _operational_config(config, '[state]\ndatabase = "state.db"', inventory.name)
+    login(client, "admin")
+    response = preview(client, "channels", g0_password_file_new="replacement")
+    assert response.status_code == 400
+
+    sidecar = make_secret(
+        Path(str(config.watch.users_database) + ".lock"),
+        "operational sidecar",
+    )
+    _operational_config(config, '[state]\ndatabase = "state.db"', str(sidecar))
+    login(client, "admin")
+    response = preview(client, "channels", g0_password_file_new="replacement")
+    assert response.status_code == 400
+    assert sidecar.read_text(encoding="utf-8") == "operational sidecar"
+
+
+def test_secret_target_rejects_output_directory_itself(accounts):
+    config, _, app, _ = accounts
+    editor = app.extensions["dashboard_config"]
+    with pytest.raises(ConfigurationError):
+        dc.secret_target(str(config.output_dir), config.config_path.parent,
+                         [config], editor.backup_dir)
+
+
+def test_generated_secret_files_remain_rotatable(accounts):
+    config, _, app, client = accounts
+    secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+    secret_dir.mkdir(mode=0o700, exist_ok=True)
+    target = make_secret(secret_dir / (dc.SECRET_PREFIX + "generated"), "original generated")
+    config.config_path.write_text(
+        BASE + f'''
+[watch]
+enabled = true
+sources = ["nvd"]
+
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_file = "{target}"
+''',
+        encoding="utf-8",
+    )
+    login(client, "admin")
+    response = preview(client, "channels", g0_password_file_new="replacement generated")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "channels").status_code == 303
+    assert target.read_text(encoding="utf-8") == "replacement generated"
+
+
+def test_malformed_retained_backup_does_not_crash_cleanup(accounts):
+    config, _, app, _ = accounts
+    editor = app.extensions["dashboard_config"]
+    editor.backup_dir.mkdir(mode=0o700, exist_ok=True)
+    backup = editor.backup_dir / ("20260101T000000000000Z-" + "c" * 16 + ".toml")
+    backup.write_text('[sources]\nnvd_api_key_file = "\\u0000"\n', encoding="utf-8")
+    os.chmod(backup, 0o600)
+    staged = make_secret(config.watch.users_database.parent / (dc.SECRET_PREFIX + "orphan"),
+                         "synthetic orphan")
+    old = time.time() - dc.PREVIEW_SECONDS - 30
+    os.utime(staged, (old, old))
+    assert editor._live_reference_paths() is None
+    editor.cleanup()
+    assert staged.exists()
+    assert create_app(load_config(config.config_path)).extensions["dashboard_config"] is not None
+
+
+def test_reserved_secret_temporaries_in_data_root_are_cleaned(accounts):
+    config, _, app, _ = accounts
+    editor = app.extensions["dashboard_config"]
+    os.chmod(config.config_path.parent, 0o700)
+    orphan = make_secret(config.config_path.parent / (dc.SECRET_PREFIX + "orphan-root"),
+                         "synthetic orphan")
+    old = time.time() - dc.PREVIEW_SECONDS - 30
+    os.utime(orphan, (old, old))
+    editor.cleanup()
+    assert not orphan.exists()

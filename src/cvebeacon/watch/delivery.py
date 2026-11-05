@@ -444,11 +444,8 @@ def _send_webhook(
     timeout: float,
     names: Mapping[str, str],
     clients: Mapping[str, ClientImpacts] | None = None,
-) -> DeliveryFailure | None:
-    try:
-        url = _webhook_url(channel)
-    except DeliveryFailure as exc:
-        return exc
+) -> None:
+    url = _webhook_url(channel)
     body = _webhook_body(events, names, clients)
     headers: dict[str, str] = {"Content-Type": "application/json"}
     header_name = channel.options.get("header_name")
@@ -464,7 +461,6 @@ def _send_webhook(
     )
     if not 200 <= result.status_code < 300:
         raise DeliveryFailure(f"webhook rejected the message: HTTP {result.status_code}")
-    return None
 
 
 def _email_message(
@@ -737,9 +733,7 @@ def _send(
     elif channel.type == "gotify":
         _send_gotify(channel, message, http, timeout)
     elif channel.type == "webhook":
-        failure = _send_webhook(channel, events, http, timeout, names, clients)
-        if failure is not None:
-            raise failure
+        _send_webhook(channel, events, http, timeout, names, clients)
     elif channel.type == "graph":
         _send_graph(channel, message, http, timeout)
     elif channel.type == "smtp":
@@ -972,7 +966,7 @@ def deliver_pending(
                     timeout = max(0.5, min(channel.timeout_seconds, remaining))
                     failure: DeliveryFailure | None = None
                     try:
-                        failure = _send_webhook(
+                        _send_webhook(
                             channel,
                             chunk,
                             http,

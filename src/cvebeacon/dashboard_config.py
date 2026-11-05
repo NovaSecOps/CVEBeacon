@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import MISSING, dataclass, field, fields, replace
@@ -38,6 +39,69 @@ SECRET_PREFIX = ".dashboard-secret-"
 STAGE_PREFIX = ".dashboard-staged-"
 _VALIDATING = ContextVar("config_validation", default=False)
 _RELOADING = ContextVar("config_reload", default=None)
+_CONFIG_LOCKS = {}
+_CONFIG_LOCKS_GUARD = threading.Lock()
+
+
+def _config_thread_lock(path):
+    key = str(path.resolve())
+    with _CONFIG_LOCKS_GUARD:
+        return _CONFIG_LOCKS.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _config_writer_lock(path):
+    """Serialize configuration writers in this process and across processes."""
+    thread_lock = _config_thread_lock(path)
+    thread_lock.acquire()
+    descriptor = None
+    acquired = False
+    try:
+        lock_path = path.with_name(".config-" + path.name + ".lock")
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(lock_path, flags | os.O_CREAT, 0o600)
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                raise ConfigurationError("Configuration writer lock is unsafe")
+            if os.name == "posix":
+                if details.st_uid != os.geteuid():
+                    raise ConfigurationError("Configuration writer lock is unsafe")
+                if stat.S_IMODE(details.st_mode) & 0o077:
+                    raise ConfigurationError("Configuration writer lock must be private")
+            try:
+                config_details = path.stat(follow_symlinks=False)
+            except OSError:
+                config_details = None
+            if config_details is not None and (
+                    config_details.st_dev, config_details.st_ino
+            ) == (details.st_dev, details.st_ino):
+                raise ConfigurationError("Configuration writer lock must not be the configuration file")
+            if os.name == "posix":
+                import fcntl
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            else:
+                import msvcrt
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            acquired = True
+        except ConfigurationError:
+            raise
+        except OSError as exc:
+            raise ConfigurationError("Cannot acquire the configuration writer lock") from exc
+        yield
+    finally:
+        if acquired:
+            if os.name == "posix":
+                import fcntl
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            else:
+                import msvcrt
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        if descriptor is not None:
+            os.close(descriptor)
+        thread_lock.release()
 
 
 class _ValidationLogFilter(logging.Filter):
@@ -184,7 +248,7 @@ def check_document(document):
             raise ConfigurationError("Unrecognized configuration row fields")
     for row in get_table(document, "watch.channels").values():
         kind = row.get("type") if isinstance(row, dict) else None
-        folded = kind.casefold() if isinstance(kind, str) else None
+        folded = kind.strip().casefold() if isinstance(kind, str) else None
         if not isinstance(row, dict) or folded not in TYPE_KEYS:
             raise ConfigurationError("Unknown channel type")
         if set(row) - COMMON_KEYS - TYPE_KEYS[folded]:
@@ -347,9 +411,19 @@ def document_set(document, path, value):
     result[path[-1]] = value
 
 
-def replacement_document(document, replacements):
-    """Point replacement references at their staged bytes for loader validation."""
+def replacement_document(document, replacements, base):
+    """Point every consumer of a replaced target at its staged bytes."""
     result = deepcopy(document)
+    staged = {replacement.target: str(replacement.staged) for replacement in replacements}
+    for path, value in secret_references(result).items():
+        if not path[-1].endswith("_file") or not isinstance(value, str) or not value:
+            continue
+        try:
+            target = resolve_reference(value, base)
+        except (OSError, RuntimeError):
+            continue
+        if target in staged:
+            document_set(result, path, staged[target])
     for replacement in replacements:
         document_set(result, replacement.reference, str(replacement.staged))
     return result
@@ -398,22 +472,55 @@ def generated_file_paths(document, base, config):
     return result
 
 
-def secret_target(reference, base, config, backup_dir):
+def _database_paths(path):
+    return {
+        path,
+        path.with_name(path.name + "-wal"),
+        path.with_name(path.name + "-shm"),
+        path.with_name(path.name + "-journal"),
+        Path(str(path) + ".lock"),
+    }
+
+
+def _protected_target_paths(configs, backup_dir):
+    protected = set()
+    protected.add(backup_dir)
+    for config in configs:
+        protected.add(config.config_path)
+        protected.add(config.output_dir)
+        protected.add(_secret_directory(config))
+        protected.add(config.config_path.with_name(".config-" + config.config_path.name + ".lock"))
+        protected.update(_database_paths(config.watch.database))
+        protected.update(_database_paths(config.database_path))
+        protected.update(_database_paths(config.watch.users_database))
+        if config.inventory is not None:
+            protected.add(config.inventory.path)
+    return protected
+
+
+def secret_target(reference, base, configs, backup_dir):
     """Resolve a writable existing secret file inside the current data directory."""
+    if not isinstance(configs, (tuple, list)):
+        configs = [configs]
     raw = Path(reference).expanduser()
     if not raw.is_absolute():
         raw = base / raw
     if raw.is_symlink():
         raise ConfigurationError("Secret file reference must not be a symbolic link")
-    target = raw.resolve()
-    data_directory = config.watch.users_database.parent.resolve()
+    try:
+        target = raw.resolve()
+    except (OSError, RuntimeError, ValueError):
+        raise ConfigurationError("Secret file reference is not a valid path") from None
+    data_directory = configs[0].watch.users_database.parent.resolve()
     if target == data_directory or not _inside(target, data_directory):
         raise ConfigurationError(
             "Secret file content rotation must stay inside the protected data directory"
         )
-    protected = {config.config_path.resolve(), config.watch.users_database.resolve()}
+    protected = _protected_target_paths(configs, backup_dir)
     if any(_same_path(target, item) for item in protected):
-        raise ConfigurationError("Secret file reference must not alias the configuration or account store")
+        raise ConfigurationError(
+            "Secret file reference must not alias configuration, account, operational or backup data"
+        )
     if _inside(target, backup_dir.resolve()):
         raise ConfigurationError("Secret file reference must not alias a backup store")
     safe_secret_target(target)
@@ -455,7 +562,7 @@ class Editor:
         self.secret_dir = config.watch.users_database.parent / "dashboard-secrets"
         try:
             self.cleanup()
-        except (OSError, CVEBeaconError):
+        except (OSError, CVEBeaconError, ValueError):
             pass
 
     def __call__(self, environ, start_response):
@@ -527,8 +634,8 @@ class Editor:
                 if isinstance(path, str) and path:
                     try:
                         live.add(resolve_reference(path, base))
-                    except (OSError, RuntimeError):
-                        continue
+                    except (OSError, RuntimeError, ValueError):
+                        return None
         return live
 
     def _cleanup_orphans(self):
@@ -541,12 +648,18 @@ class Editor:
         active = {path for pending in self.pending.values()
                   for path in (*pending.staged, *pending.references)}
         now = clock.time()
-        directories = {self.secret_dir, self.config.watch.users_database.parent / "dashboard-secrets"}
+        data_directory = self.config.watch.users_database.parent
+        directories = {
+            self.secret_dir,
+            data_directory / "dashboard-secrets",
+            data_directory,
+        }
         for directory in directories:
             try:
                 if not directory.is_dir() or directory.is_symlink():
                     continue
-                if os.name == "posix" and stat.S_IMODE(directory.stat().st_mode) & 0o077:
+                if (directory != data_directory and os.name == "posix"
+                        and stat.S_IMODE(directory.stat().st_mode) & 0o077):
                     continue
                 for path in directory.iterdir():
                     if not path.name.startswith((SECRET_PREFIX, STAGE_PREFIX)):
@@ -563,10 +676,11 @@ class Editor:
                 continue
 
     def cleanup(self):
-        for identifier, pending in list(self.pending.items()):
-            if pending.expires < clock.monotonic():
-                self.discard(identifier)
-        self._cleanup_orphans()
+        with _config_writer_lock(self.path):
+            for identifier, pending in list(self.pending.items()):
+                if pending.expires < clock.monotonic():
+                    self.discard(identifier)
+            self._cleanup_orphans()
 
     def discard(self, identifier, *, committed=False):
         pending = self.pending.pop(identifier, None)
@@ -630,8 +744,8 @@ class Editor:
         new_value = document_get(candidate, replacement.reference)
         if not isinstance(old_value, str) or not isinstance(new_value, str):
             return False
-        old_target = secret_target(old_value, base, current_config, self.backup_dir)
-        new_target = secret_target(new_value, base, current_config, self.backup_dir)
+        old_target = secret_target(old_value, base, [current_config, self.config], self.backup_dir)
+        new_target = secret_target(new_value, base, [current_config, self.config], self.backup_dir)
         return old_target == new_target == replacement.target
 
     def preview(self, section, document, version, staged=(), replacements=(), *, current_document, current_config):
@@ -639,7 +753,7 @@ class Editor:
         mine = sum(1 for pending in self.pending.values() if pending.owner == g.sid)
         if mine >= MAX_PENDING_PER_SESSION:
             raise ConfigurationError("Too many pending previews for this session; try again later")
-        validation_document = replacement_document(document, replacements)
+        validation_document = replacement_document(document, replacements, self.path.parent)
         updated, _ = self.validate(validation_document)
         if (reference_escape(current_document, document, direct_urls=True)
                 and "manage_secrets" not in g.permissions):
@@ -675,7 +789,9 @@ class Editor:
             try:
                 os.utime(path, None)
             except OSError:
-                continue
+                raise ConfigurationError(
+                    "Cannot renew the shared protection for a staged secret; try the preview again"
+                ) from None
         identifier = secrets.token_hex(32)
         self.pending[identifier] = Pending(g.sid, section, version, document,
                                           clock.monotonic() + PREVIEW_SECONDS, tuple(staged),
@@ -691,6 +807,10 @@ class Editor:
 
     def commit(self, identifier, section, users, permission, confirmed):
         self.cleanup()
+        with _config_writer_lock(self.path):
+            return self._commit_locked(identifier, section, users, permission, confirmed)
+
+    def _commit_locked(self, identifier, section, users, permission, confirmed):
         pending = self.pending.get(identifier)
         if not pending or pending.owner != g.sid or pending.section != section:
             abort(400)
@@ -702,9 +822,8 @@ class Editor:
         replaced = False
         committed = False
         try:
-            # Validate and prepare against a stable snapshot. Replacement
-            # contents are checked through the shared loader before any target
-            # file is touched, then again against the final references.
+            # Validate and prepare against a stable snapshot. Preparation
+            # creates only private temporary files; live targets are untouched.
             old, original, info, version, current_config = self.read()
             if version != pending.version:
                 abort(409, "Configuration changed; reload the form")
@@ -721,23 +840,18 @@ class Editor:
                     )
                 target_info = safe_secret_target(replacement.target)
                 try:
-                    old_bytes = read_regular(replacement.target, private=True)[0]
                     new_bytes = replacement.staged.read_bytes()
                 except OSError:
                     raise ConfigurationError("Staged secret cannot be read") from None
                 if len(new_bytes) > SECRET_FILE_LIMIT:
                     raise ConfigurationError("Secret must contain 1–16384 bytes of text")
-                secret_temp = write_temp(replacement.target.parent, new_bytes, info=target_info,
+                secret_directory = _private_directory(_secret_directory(current_config))
+                secret_temp = write_temp(secret_directory, new_bytes, info=target_info,
                                          prefix=SECRET_PREFIX)
-                prepared.append((replacement, old_bytes, target_info, secret_temp))
-            self.validate(replacement_document(pending.document, pending.replacements))
-            for replacement, old_bytes, target_info, secret_temp in prepared:
-                os.replace(secret_temp, replacement.target)
-                # Record recovery before any further fallible operation.
-                applied.append((replacement.target, old_bytes, target_info))
-                sync_directory(replacement.target.parent)
-            # The published application must see the final references and the
-            # new contents that were just validated.
+                prepared.append((replacement, target_info, secret_temp))
+            self.validate(replacement_document(pending.document, pending.replacements, self.path.parent))
+            # The reloaded application uses final references; SecretRef resolves
+            # file contents dynamically, so preparation does not touch live files.
             updated, content = self.validate(pending.document)
             from .dashboard import create_app
             token = _RELOADING.set(self)
@@ -750,9 +864,9 @@ class Editor:
                 raise ConfigurationError("Configuration changes cannot turn off account authentication")
             if not destination_users.has_admin():
                 raise ConfigurationError("The destination account database needs an enabled administrator")
-            # The account write transaction serializes writers across processes
-            # and rechecks a revoked proof/permission before filesystem side
-            # effects. Secret rollback is still armed if any check fails.
+            # The shared writer guard covers the account transaction, every
+            # permission/credential check, target capture and live writes, the
+            # transaction exit, and compensation below.
             with users.transaction() as db:
                 for needed in {"view", *permission}:
                     actor = users.require_permission_in(db, g.entry.proof, needed)
@@ -777,6 +891,18 @@ class Editor:
                     if not destination.dashboard_accounts() or not destination.has_admin():
                         raise ConfigurationError("The destination account database needs an enabled administrator")
                 check_protected_paths(updated, self.path, self.backup_dir, [current_config, self.config])
+                for replacement, target_info, secret_temp in prepared:
+                    if not self._check_replacement(old, pending.document, replacement, current_config):
+                        raise ConfigurationError("Secret reference changed; create a new preview")
+                    target_info = safe_secret_target(replacement.target)
+                    try:
+                        old_bytes = read_regular(replacement.target, private=True)[0]
+                    except OSError:
+                        raise ConfigurationError("Secret file cannot be read") from None
+                    os.replace(secret_temp, replacement.target)
+                    # Record recovery immediately after the live replacement.
+                    applied.append((replacement.target, old_bytes, target_info))
+                    sync_directory(replacement.target.parent)
                 # Backup and prepare both replacement and recovery bytes before
                 # the final version check and atomic replacement.
                 backup_dir = _private_directory(self.backup_dir)
@@ -822,7 +948,7 @@ class Editor:
             raise
         finally:
             cleanup_paths = [temporary, recovery, backup_temp]
-            cleanup_paths.extend(item[3] for item in prepared)
+            cleanup_paths.extend(item[2] for item in prepared)
             for path in cleanup_paths:
                 if not path:
                     continue
@@ -1003,7 +1129,7 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
         if row_types is None:
             row_types = [row["type"] for _, row in rows] + [new_type]
         for index, kind in enumerate(row_types):
-            folded = kind.casefold() if isinstance(kind, str) else kind
+            folded = kind.strip().casefold() if isinstance(kind, str) else kind
             if folded not in TYPE_KEYS:
                 abort(400)
             name = rows[index][0] if index < len(rows) else ""
@@ -1088,6 +1214,13 @@ def parse_form(editor, section, document, current_config, permissions):
                 continue
             if section == "channels" and not row.get("name"):
                 continue
+            if section == "channels":
+                old_name = data.get("name")
+                new_name = row.get("name")
+                if old_name and new_name and old_name != new_name:
+                    raise ConfigurationError(
+                        "Rename the channel and rotate its secret file in separate saves"
+                    )
             if directory is None:
                 directory = _private_directory(_secret_directory(current_config))
             if not secret.strip() or len(secret.encode("utf-8")) > SECRET_FILE_LIMIT:
@@ -1107,7 +1240,8 @@ def parse_form(editor, section, document, current_config, permissions):
             environment_path = (*prefix, paired_env)
             if (isinstance(current_reference, str) and current_reference
                     and submitted_reference == current_reference):
-                target = secret_target(current_reference, editor.path.parent, current_config, editor.backup_dir)
+                target = secret_target(current_reference, editor.path.parent,
+                                       [current_config, editor.config], editor.backup_dir)
                 staged_path = write_temp(directory, secret.encode("utf-8"), prefix=STAGE_PREFIX)
                 staged.append(staged_path)
                 replacements.append(Replacement(target, staged_path, reference_path, environment_path))
@@ -1119,6 +1253,23 @@ def parse_form(editor, section, document, current_config, permissions):
                 staged_path = write_temp(directory, secret.encode("utf-8"), prefix=SECRET_PREFIX)
                 staged.append(staged_path)
                 row[key] = str(staged_path)
+        coalesced = {}
+        for replacement in replacements:
+            existing = coalesced.get(replacement.target)
+            if existing is None:
+                coalesced[replacement.target] = replacement
+                continue
+            try:
+                same = existing.staged.read_bytes() == replacement.staged.read_bytes()
+            except OSError:
+                raise ConfigurationError("Staged secret cannot be read") from None
+            if not same:
+                raise ConfigurationError(
+                    "Conflicting new contents were supplied for one shared secret file"
+                )
+            replacement.staged.unlink(missing_ok=True)
+            staged.remove(replacement.staged)
+        replacements = list(coalesced.values())
         candidate = deepcopy(document)
         if section in SCHEMAS:
             for (path, _), row in zip(SCHEMAS[section], rows):
