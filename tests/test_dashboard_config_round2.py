@@ -1301,8 +1301,6 @@ type = "slack"
 webhook_url_file = "{old.name}"
 '''), encoding="utf-8")
     client = dashboard.create_app(load_config(config.config_path)).test_client()
-    set_role(users, "channel-editor", {"view", "edit_channels"})
-    login(client)
     real_read = Path.read_text
 
     def guarded(path, *args, **kwargs):
@@ -1311,8 +1309,13 @@ webhook_url_file = "{old.name}"
         return real_read(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", guarded)
-    response = preview(client, "channels", g0_webhook_url_file=str(target))
-    assert response.status_code == 403
+    for role, permissions in (
+            ("channel-editor", {"view", "edit_channels"}),
+            ("channel-manager", {"view", "edit_channels", "manage_secrets"})):
+        set_role(users, role, permissions)
+        login(client)
+        response = preview(client, "channels", g0_webhook_url_file=str(target))
+        assert response.status_code == 403
 
 
 def test_path_identity_removal_requires_administrator(accounts):
@@ -1336,6 +1339,14 @@ def test_path_identity_removal_requires_administrator(accounts):
     client = dashboard.create_app(load_config(config.config_path)).test_client()
     login(client)
     response = preview(client, "inventory", g0_path="")
+    assert response.status_code == 403
+
+    set_role(users, "source-manager", {"view", "edit_sources", "manage_secrets"})
+    source_secret = make_secret(config.config_path.parent / "source-key", "synthetic key")
+    config.config_path.write_text(with_file(config, source_secret), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    login(client)
+    response = preview(client, "sources", g0_nvd_api_key_file="")
     assert response.status_code == 403
 
 
