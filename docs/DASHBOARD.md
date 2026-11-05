@@ -14,7 +14,7 @@ To select a port or deliberately bind to the LAN with password authentication co
 cvebeacon serve --host 0.0.0.0 --port 8787
 ```
 
-The dashboard is optional. Continue running `cvebeacon scan` as a separate short-lived scheduled process. The dashboard does not schedule scans, send notifications, or start background refresh workers.
+The dashboard is optional. Scheduled scans and watches remain separate short-lived processes. An authenticated account with the `run` permission can start the same `cvebeacon` commands as background jobs from the **Operations** page; every data-changing job shares a single-flight lock with the command line and scheduled runs.
 
 ## Views and investigation
 
@@ -25,6 +25,27 @@ The dashboard is optional. Continue running `cvebeacon scan` as a separate short
 - **Manual query:** query a vendor/product/version using the same core operation as the CLI. Results show uncertainty and degraded source status. Queries can take several minutes and do not change scheduled alert state.
 - **Reports:** query the current inventory and download an XLSX or JSON report using the existing reporting functions. Exports do not commit monitoring state. Check the report's coverage and source-health fields even when the download succeeds.
 - **Sources:** view cached observations from the latest recorded scan, including check result, retrieval time and available source timestamp. Opening this page does not contact the sources.
+- **Operations:** start `scan`, `watch sync`, `watch evaluate --all`, `watch notify`, `watch run` or the combined `run` as a background job, retry failed or ambiguous deliveries, and send a labelled channel test. Each job has a status, timestamps, exit code and meaning, the account that started it, a bounded log tail, cancellation and an audit entry.
+
+## Operations and background jobs
+
+Operations run as short-lived children of the same `cvebeacon` executable with the same configuration and exit codes. The dashboard request returns immediately; the job page shows `queued`, `running`, `succeeded`, `failed` or `cancelled`, together with the queue and start times, end time, exit code and its documented meaning. A running or queued job page refreshes with a meta refresh, and only a bounded tail of the log is shown.
+
+**Single flight.** Data-changing operations take one shared lock file, `cvebeacon-run.lock`, in the directory that holds the state database. The command line takes the same lock for `scan`, `run`, `watch sync`, `watch evaluate`, `watch run` and delivery runs (`watch notify`, including both retry variants). A channel test is not locked because it does not change delivery state. If the lock is held, the CLI prints `another run is in progress` and exits `2`; the dashboard refuses the new job with the holder's account, host and start time when available. The operating system releases the lock when a process exits, so a crash does not block later runs permanently.
+
+**Cancel.** Cancelling a running job sends the documented interrupt: `SIGINT` to the command's process group on Linux, or `Ctrl+Break` on Windows. The command performs its own cleanup, records scan completion or rolls back its transaction, and only then does the job become `cancelled`. A queued job can be cancelled before it starts.
+
+**History.** The last 200 jobs are kept in `dashboard-jobs.db` beside the state database, with logs in the `dashboard-jobs/` directory. Both are created with owner-only permissions. Older rows and their logs are removed automatically. Every job start and outcome is appended to the existing chained account audit trail. A dashboard restart marks jobs that were still queued or running as failed, because the tracking process no longer exists.
+
+**Full history.** When `[watch] initial = "full"` would make the next sync download the complete history, the UI requires an explicit confirmation before it passes the CLI's `--yes`. The confirmation is separate from the normal run form and is shown with the expected scale of the download.
+
+## Native schedule
+
+The **Schedule** page requires `manage_schedule`. It shows `schedule status`, and can install or remove the same native Windows task or managed Linux crontab block as `cvebeacon schedule install` and `cvebeacon schedule remove`. The form accepts an interval or fixed local times, the `scan`, `watch` or `both` command, and the Windows `--run-logged-out` option.
+
+On Windows, logged-out registration requires the service account password. The dashboard accepts it in a password field, passes it only to the existing installer in memory, and never writes, logs or displays it. The operating system's task service stores it only according to the same rules as the CLI.
+
+If installing from the dashboard is unsafe for the current host, the page refuses the action and shows the exact equivalent command for the intended account. This happens on unsupported platforms and when the dashboard itself runs as root on POSIX, because a schedule installed there would run as root. Always use the command-line fallback when the dashboard service account is not the account that should own monitoring work.
 
 ### Watch views
 
@@ -180,12 +201,12 @@ logout, even if its role has no permissions.
 
 | Permission | Capability |
 | --- | --- |
-| `view` | Observation pages, findings, watch pages, the current reported list, query results and exports |
+| `view` | Observation pages, findings, watch pages, the current reported list, query results, exports, operations and job history |
 | `report` | Mark or unmark a CVE as reported from the CLI or dashboard |
 | `statement` | Generate statements from the CLI or dashboard |
-| `run` | Operation forms; submit manual queries and inventory report exports with `view`; reserved sync, evaluation and notification operations |
-| `retry` | Retry failed or ambiguous deliveries |
-| `test_channel` | Send channel tests |
+| `run` | Start scan, sync, evaluation, notification and combined run jobs; submit manual queries and inventory report exports with `view` |
+| `retry` | Retry failed or ambiguous deliveries as background jobs |
+| `test_channel` | Send a labelled channel test message |
 | `edit_rules` | Edit rules |
 | `edit_channels` | Edit notification channels |
 | `edit_sources` | Edit source settings |
@@ -194,14 +215,11 @@ logout, even if its role has no permissions.
 | `edit_dashboard` | Edit dashboard settings |
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
-| `manage_schedule` | Manage scheduling |
+| `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
 
-Some capabilities reserve authorization for later dashboard operations; granting
-them does not add an operation that the current dashboard does not implement.
-Opening query/report forms requires `run`; submissions require both `run` and
-`view` because they return findings or exports.
+Each operation route declares its own permission: running jobs needs `run`, retry jobs need `retry`, channel tests need `test_channel`, schedule changes need `manage_schedule`, and job pages need `view`. A role without `view` cannot open the operations page even if it can call an action route directly. Opening query/report forms requires `run`; submissions require both `run` and `view` because they return findings or exports.
 Role changes and administrative account actions are recorded in the existing
 chained user audit trail. Verification detects changes within that trail, not
 direct edits to `cb_user`, `cb_role` or `cb_user_role`, or removal of its final
@@ -281,9 +299,11 @@ Forms use CSRF protection, output is escaped, errors omit sensitive details, and
 
 The monitoring SQLite database stores observations and dashboard scan metadata.
 Accounts and roles live separately in `cvebeacon-users.db` beside the watch
-database. Before an upgrade, stop the scanner/dashboard and back up both data
-stores. Schema upgrades preserve existing observations and delivery records;
-an older application requires its corresponding pre-upgrade backups.
+database. The operations job table (`dashboard-jobs.db`) and its `dashboard-jobs/`
+log directory sit beside the state database and are owner-only. Before an
+upgrade, stop the scanner/dashboard and back up all three data stores. Schema
+upgrades preserve existing observations and delivery records; an older
+application requires its corresponding pre-upgrade backups.
 
 ## Package identities and advisory views
 

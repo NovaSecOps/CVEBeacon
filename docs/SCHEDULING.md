@@ -93,6 +93,17 @@ first `full` history sync needs an interactive confirmation and stdin is not a
 terminal. Configure `baseline` or `backfill` for unattended first runs, or run
 `watch sync --yes` once before the first scheduled run.
 
+## Single-flight lock
+
+`scan`, `run`, `watch sync`, `watch evaluate`, `watch run` and delivery runs
+(`watch notify`, including the retry variants) take one shared lock file,
+`cvebeacon-run.lock`, in the directory that holds the state database. The
+dashboard's background jobs take the same lock. A second run fails immediately
+with `another run is in progress` and exit code `2`; it does not wait and never
+changes state concurrently. Channel tests do not take the lock because they do
+not change delivery state. The operating system releases the lock when a
+process exits, including after a crash.
+
 Inspect or remove the owned schedule:
 
 ```console
@@ -118,4 +129,4 @@ For manual administration, create an equivalent task or cron entry that runs
 an account with read access to the inventory and configuration, write access to
 the state/output directories, and access to required environment variables.
 
-Linux user cron requires an installed, running cron service. It uses the host's local clock and does not recover runs missed while the host is off; daylight-saving transitions can skip or repeat executions. Its environment is usually smaller than an interactive shell, so provision notification credentials for the scheduled account. Percent characters and line breaks in schedule paths are rejected. Avoid concurrent scanner invocations against the same state database. Windows task credentials and execution while logged out must be verified for the intended account through Task Scheduler; CVEBeacon passes the password to Task Scheduler and does not retain it.
+Linux user cron requires an installed, running cron service. It uses the host's local clock and does not recover runs missed while the host is off; daylight-saving transitions can skip or repeat executions. Its environment is usually smaller than an interactive shell, so provision notification credentials for the scheduled account. Percent characters and line breaks in schedule paths are rejected. Do not create a second scheduler that bypasses the shared single-flight lock. Windows task credentials and execution while logged out must be verified for the intended account through Task Scheduler; CVEBeacon passes the password to Task Scheduler and does not retain it.
