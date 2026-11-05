@@ -45,7 +45,6 @@ def client_key(client):
 
 def directories(config):
     data = config.database_path.parent
-    private_directory(data, owner_only=True)
     assets, inventory = data / "web-assets", data / "web-inventory"
     for directory in (assets, inventory):
         private_directory(directory, owner_only=True)

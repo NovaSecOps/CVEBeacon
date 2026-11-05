@@ -79,9 +79,10 @@ Detection scheduling is future work.
 
 Allowlist files live in `<data>/web-assets/<client-key>.json`, where `<data>` is
 the state database's parent directory and the key is a SHA-256 digest of the
-case-folded client label. Files are replaced atomically, and the data directory
-and allowlists must be owner-only (0700/0600 on POSIX, protected owner ACLs on
-Windows), without symlinks. Adds, changes and removals enter the chained audit
+case-folded client label. Files are replaced atomically. The `web-assets/` and `web-inventory/`
+directories and their files must be owner-only (0700/0600 on POSIX, protected
+owner ACLs on Windows), without symlinks. Existing shared state-directory
+parents are supported. Adds, changes and removals enter the chained audit
 with the actor, client and hostname. Stale forms are refused. Snapshots,
 manifests and review metadata live in `<data>/web-inventory/`.
 

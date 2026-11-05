@@ -315,3 +315,15 @@ def test_client_labels_are_values_never_companion_flags(accounts, client_name):
         companion = web_assets.companion_command(client_name, assets, output, plan=parsed.plan)
         parsed_companion = parser().parse_args(companion[companion.index("web"):])
         assert parsed_companion.client == client_name and parsed_companion.plan == parsed.plan
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shared parent permissions")
+def test_shared_state_parent_keeps_web_subdirectories_private(web):
+    config, _, _, client = web
+    config.database_path.parent.chmod(0o755)
+    page = client.get("/web-assets?client=Acme")
+    assert 'name="hostname"' in page.text
+    assert save(client).status_code == 303
+    assert config.database_path.parent.stat().st_mode & 0o777 == 0o755
+    for directory in web_assets.directories(config):
+        assert directory.stat().st_mode & 0o777 == 0o700
