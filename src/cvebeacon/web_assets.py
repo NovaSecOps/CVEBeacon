@@ -89,8 +89,10 @@ def temporary_json(directory, document):
 
 def companion_command(client, assets, output, *, plan=False):
     require_companion()
+    label = client_label(client)
+    client_arguments = ["--client=" + label] if label.startswith("-") else ["--client", label]
     return [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
-            "--client", client_label(client), "--assets", str(assets), "--output", str(output),
+            *client_arguments, "--assets", str(assets), "--output", str(output),
             "--source-id", "web-" + client_key(client), "--allow-partial", *(["--plan"] if plan else [])]
 
 

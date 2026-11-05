@@ -70,7 +70,8 @@ def create_web_blueprint(config):
                 last_job = next((job for job in manager().store.recent(200)
                                  if job.operation in {"web-detect", "web-plan"}
                                  and "web-detect" in job.argv
-                                 and job.argv[job.argv.index("web-detect") + 1:][:1] == (client,)), None)
+                                 and (job.argv[job.argv.index("web-detect") + 1:][:1] == (client,)
+                                      or (client.startswith("-") and job.argv[-2:] == ("--", client)))), None)
         except (CVEBeaconError, ValueError, OSError, TypeError, KeyError):
             error = error or "Web asset storage could not be read; review the local files"
         return render_template("web_assets.html", clients=sorted(clients, key=str.casefold), client=client,

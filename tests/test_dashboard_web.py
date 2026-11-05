@@ -299,3 +299,19 @@ def test_missing_companion_notice_and_refusal_without_extensions(accounts, monke
         response = client.post("/web-assets/run", data={"csrf": csrf(client), "client": "Acme", "action": action})
         assert response.status_code == 400 and "optional Extensions package" in response.text
     app.extensions["dashboard_jobs"].shutdown()
+
+
+@pytest.mark.parametrize("client_name", ["--help", "--plan"])
+def test_client_labels_are_values_never_companion_flags(accounts, client_name):
+    from cvebeacon.cli import _parser
+    parser = pytest.importorskip("cvebeacon_extensions.cli").parser
+    config = accounts[0]
+    for action in ("web-plan", "web-detect"):
+        command = build_command(config, action, client=client_name)
+        arguments = command[command.index("--config"):]
+        parsed = _parser().parse_args(arguments)
+        assert parsed.client == client_name and parsed.plan == (action == "web-plan")
+        assets, output = paths(config, client_name)
+        companion = web_assets.companion_command(client_name, assets, output, plan=parsed.plan)
+        parsed_companion = parser().parse_args(companion[companion.index("web"):])
+        assert parsed_companion.client == client_name and parsed_companion.plan == parsed.plan

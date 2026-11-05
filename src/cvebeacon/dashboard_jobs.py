@@ -511,7 +511,11 @@ def build_command(
     if operation in {"web-detect", "web-plan"}:
         from .web_assets import client_label, require_companion
         require_companion()
-        return [*base, "web-detect", client_label(client), *(["--plan"] if operation == "web-plan" else [])]
+        label = client_label(client)
+        plan = ["--plan"] if operation == "web-plan" else []
+        if label.startswith("-"):
+            return [*base, "web-detect", *plan, "--", label]
+        return [*base, "web-detect", label, *plan]
     if operation == "scan":
         return [*base, "scan"]
     if operation == "watch-sync":
