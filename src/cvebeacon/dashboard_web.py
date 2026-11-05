@@ -227,8 +227,15 @@ def create_web_blueprint(config):
                             output.with_name(output.name + ".review.json"), marker]
             elif action == "remove":
                 targets.append(marker)
-            originals = {target: read_bytes(target) if target.exists() or target.is_symlink() else None
-                         for target in targets}
+            originals = {}
+            for target in targets:
+                try:
+                    originals[target] = read_bytes(target) if target.exists() or target.is_symlink() else None
+                except (CVEBeaconError, ValueError, OSError):
+                    if action != "remove-all" or target == path:
+                        raise
+                    # Bad results must not block recovery. Retire them without
+                    # keeping an unsafe/unbounded copy to restore on rollback.
             writing = False
             try:
                 # Account writers cannot revoke the proof or authority between

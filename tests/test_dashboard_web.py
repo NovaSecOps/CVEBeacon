@@ -551,3 +551,63 @@ def test_surrogate_allowlist_entries_keep_bulk_recovery_available(web, entry):
     assert save(client, action="remove-all", confirm="yes").status_code == 303
     assert read_allowlist(path, "Acme")[0]["assets"] == []
     assert not users.verify_audit()
+
+
+@pytest.mark.parametrize("fault", ["oversized", "unreadable", "linked"])
+def test_remove_all_retires_unreadable_results(web, monkeypatch, fault):
+    from cvebeacon import dashboard_web
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    outside = output.parent / "outside"
+    if fault == "oversized":
+        with output.open("r+b") as handle:
+            handle.truncate(33 * 1024 * 1024)
+    elif fault == "linked":
+        if os.name != "posix":
+            pytest.skip("symbolic link creation requires privileges on Windows")
+        output.rename(outside)
+        output.symlink_to(outside)
+    else:
+        read = dashboard_web.read_bytes
+        def unreadable(target):
+            if target == output:
+                raise PermissionError("unreadable result")
+            return read(target)
+        monkeypatch.setattr(dashboard_web, "read_bytes", unreadable)
+    response = save(client, action="remove-all", confirm="yes")
+    assert response.status_code == 303, response.text
+    assert read_allowlist(path, "Acme")[0]["assets"] == []
+    assert not any(file.exists() or file.is_symlink() for file in (
+        output, Path(str(output) + ".manifest.json"), Path(str(output) + ".review.json")))
+    if fault == "linked":
+        assert outside.read_bytes()
+    assert any(entry.action.startswith("web_snapshot_remove:") for entry in users.audit_entries())
+    assert not users.verify_audit()
+
+
+def test_bulk_removal_rollback_restores_only_readable_results(web, monkeypatch):
+    from contextlib import contextmanager
+    from cvebeacon.errors import StateError
+    config, users, app, client = web
+    assert save(client).status_code == 303
+    path, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    with output.open("r+b") as handle:
+        handle.truncate(33 * 1024 * 1024)
+    readable = (path, Path(str(output) + ".manifest.json"), Path(str(output) + ".review.json"))
+    before = {file: file.read_bytes() for file in readable}
+    audit_before = users.audit_entries()
+    active_users = app.extensions["dashboard_users"]
+    transaction = active_users.transaction
+    @contextmanager
+    def failed_transaction():
+        with transaction() as db:
+            yield db
+            raise StateError("synthetic transaction failure")
+    monkeypatch.setattr(active_users, "transaction", failed_transaction)
+    assert save(client, action="remove-all", confirm="yes").status_code == 400
+    assert {file: file.read_bytes() for file in readable} == before
+    assert not output.exists()
+    assert users.audit_entries() == audit_before
