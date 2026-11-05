@@ -83,9 +83,9 @@ EXIT_MEANINGS = {
     4: "Completed with uncertain coverage or degraded sources",
     5: "Completed with degraded optional operations",
     75: "Another run was in progress",
-    130: "Cancelled by an interrupt",
+    130: "Interrupted (exit 130)",
     143: "Terminated after cleanup",
-    WINDOWS_INTERRUPT_EXIT: "Cancelled by an interrupt",
+    WINDOWS_INTERRUPT_EXIT: "Interrupted (exit 130)",
 }
 
 

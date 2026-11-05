@@ -84,7 +84,9 @@ def test_relaxed_file_validation_accepts_a_private_mode(tmp_path):
 def test_job_history_still_requires_a_private_file(tmp_path):
     from cvebeacon.dashboard_jobs import JobStore
     directory = tmp_path / "dashboard-jobs"
-    directory.mkdir()
+    # A private directory, so the file check itself is what refuses.
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o700)
     path = directory / "dashboard-jobs.db"
     path.write_bytes(b"")
     path.chmod(0o666)

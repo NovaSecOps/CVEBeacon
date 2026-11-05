@@ -107,7 +107,9 @@ def test_queue_is_bounded_before_audit_and_creation(tmp_path, monkeypatch):
 @pytest.mark.parametrize("target_exists", [False, True])
 def test_job_database_symlink_is_never_followed(tmp_path, target_exists):
     directory = tmp_path / "dashboard-jobs"
-    directory.mkdir()
+    # A private directory, so the file check itself is what refuses.
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o700)
     target = tmp_path / "target"
     if target_exists:
         target.write_bytes(b"keep")
@@ -287,10 +289,10 @@ def test_password_diagnostics_never_normalize_or_truncate_secrets(tmp_path, monk
     assert " ".join(secret.split())[:40] not in response.text
 
 
-def test_windows_break_exit_is_reported_as_a_forced_cancellation():
+def test_windows_break_exit_is_normalized_to_an_unclean_interrupt():
     assert jobs.normalize_exit_code(0xC000013A) == (130, True)
     assert jobs.normalize_exit_code(130) == (130, False)
-    assert jobs.exit_meaning(0xC000013A) == "Cancelled by an interrupt"
+    assert jobs.exit_meaning(0xC000013A) == "Interrupted (exit 130)"
 
 
 def test_worker_labels_unrequested_break_as_external_interrupt(tmp_path, monkeypatch):
