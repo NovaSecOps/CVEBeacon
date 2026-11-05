@@ -266,7 +266,19 @@ def validate_records(records: Iterable[Mapping[str, Any]]) -> list[Asset]:
     return _validate_rows(((f"record {index}", row) for index, row in enumerate(records)), {})
 
 
-def load_inventory(config: InventoryConfig) -> list[Asset]:
+def load_inventory(config: InventoryConfig, *, snapshot_directory: Path | None = None) -> list[Asset]:
+    assets = _load_file_inventory(config) if config.path is not None else []
+    if config.web_snapshots:
+        if snapshot_directory is None:
+            raise InventoryValidationError([ValidationIssue("web snapshots require the data directory")])
+        from .web_inventory import append_snapshots
+        assets = append_snapshots(assets, snapshot_directory)
+    if not assets:
+        raise InventoryValidationError([ValidationIssue("inventory contains no valid records")])
+    return assets
+
+
+def _load_file_inventory(config: InventoryConfig) -> list[Asset]:
     kind = detect_format(config.path, config.format)
     if kind == "xlsx":
         rows = _xlsx_rows(config)

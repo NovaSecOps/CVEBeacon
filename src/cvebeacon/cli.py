@@ -76,6 +76,9 @@ def _parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor", help="validate configuration, inventory, and local state access")
     doctor.add_argument("--live", action="store_true", help="also test enabled public source connectivity")
     commands.add_parser("source-status", help="show source health from the most recent scan")
+    web = commands.add_parser("web-detect", help="observe a saved client web allowlist")
+    web.add_argument("client")
+    web.add_argument("--plan", action="store_true", help="show requests without sending them")
     serve = commands.add_parser("serve", help="serve the monitoring dashboard")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
@@ -816,6 +819,13 @@ def _inventory_config(config: AppConfig) -> InventoryConfig:
     return config.inventory
 
 
+def _load_inventory(config: AppConfig, inventory: InventoryConfig | None = None) -> list[Asset]:
+    selected = inventory if inventory is not None else _inventory_config(config)
+    if selected.web_snapshots:
+        return load_inventory(selected, snapshot_directory=config.database_path.parent / "web-inventory")
+    return load_inventory(selected)
+
+
 def _inventory_for(config: AppConfig, path: str | None) -> InventoryConfig:
     if not path:
         return _inventory_config(config)
@@ -945,7 +955,7 @@ def _run_all(config: AppConfig, *, yes: bool = False) -> int:
 
 def _lock_required(args: argparse.Namespace) -> bool:
     """Commands that change monitoring, delivery or report state."""
-    if args.command in {"scan", "run"}:
+    if args.command in {"scan", "run", "web-detect"}:
         return True
     if args.command != "watch":
         return False
@@ -996,6 +1006,9 @@ def run(args: argparse.Namespace) -> int:
             )
             return 2
     try:
+        if args.command == "web-detect":
+            from .web_assets import run_detection
+            return run_detection(config, args.client, plan=args.plan)
         if args.command == "users":
             return _run_users(args, config)
         if args.command == "watch":
@@ -1076,15 +1089,17 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
     if args.command == "inventory":
         inventory_config = _inventory_for(config, args.path)
         if args.inventory_command == "inspect":
+            if inventory_config.path is None:
+                raise CVEBeaconError("inventory inspect requires a file path; use inventory validate for web snapshots")
             print(json.dumps(inspect_inventory(inventory_config.path, header_row=inventory_config.header_row, encoding=inventory_config.encoding, delimiter=inventory_config.delimiter), indent=2))
         else:
-            assets = load_inventory(inventory_config); print(f"valid: {len(assets)} asset(s)")
+            assets = _load_inventory(config, inventory_config); print(f"valid: {len(assets)} asset(s)")
             if args.identities:
                 for asset in assets:
                     print(f"{asset.asset_id}: {asset.identity_path}" + (" (conflicting identities require review)" if identity_conflict(asset) else ""))
         return 0
     if args.command == "asset":
-        asset = next((item for item in load_inventory(_inventory_config(config)) if item.asset_id.casefold() == args.asset_id.casefold()), None)
+        asset = next((item for item in _load_inventory(config) if item.asset_id.casefold() == args.asset_id.casefold()), None)
         if not asset: raise CVEBeaconError(f"asset not found: {args.asset_id}")
         result = _run_query(config, [asset])
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
@@ -1098,7 +1113,7 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
     if args.command in {"scan", "export"}:
         inventory_config = _inventory_config(config)
-        assets = load_inventory(inventory_config)
+        assets = _load_inventory(config, inventory_config)
         results = _run_query(config, assets, known_findings=store.latest_findings()) if args.command == "scan" else _run_query(config, assets)
         if args.command == "scan":
             channels = configured_channels(config)
@@ -1140,7 +1155,7 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         return 0
     if args.command == "doctor":
         inventory_config = _inventory_config(config)
-        assets = load_inventory(inventory_config); store.initialize()
+        assets = _load_inventory(config, inventory_config); store.initialize()
         checks = {"configuration": "ok", "inventory": f"ok ({len(assets)} assets)", "state": "ok", "teams_secret": "not required" if not config.teams.enabled else ("set" if config.secret(config.teams.webhook_env) else "missing"), "email_secrets": "not required" if not config.email.enabled else ("set" if all(config.secret(x) for x in (config.email.tenant_id_env, config.email.client_id_env, config.email.client_secret_env)) else "missing")}
         if args.live:
             checks["live_sources"] = _live_source_checks(config)

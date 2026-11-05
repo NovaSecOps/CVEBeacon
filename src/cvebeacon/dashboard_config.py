@@ -212,7 +212,7 @@ SECTIONS = {
 }
 RULE_FIELDS = defaults(Rule)
 MAPPING_FIELDS = dict.fromkeys(("vendor", "product", "cpe"))
-BOOLEAN_FIELDS = {"enabled", "secure_cookie", "allow_insecure", "notify_reported"}
+BOOLEAN_FIELDS = {"web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported"}
 NUMBER_FIELDS = {"port", "max_items", "priority", "min_interval_seconds", "timeout_seconds",
                  "connect_timeout", "read_timeout", "retries", "backoff_seconds", "header_row",
                  "minimum_request_interval", "backfill_days", "overlap_minutes",
@@ -538,7 +538,8 @@ def _operation_storage_paths(config):
         pass
     files.add(Path(config.database_path).resolve().parent / LOCK_NAME)
     files.add(run_lock_path(config).resolve())
-    return files, {job_directory}
+    return files, {job_directory, config.database_path.parent / "web-assets",
+                   config.database_path.parent / "web-inventory"}
 
 
 def _candidate_derived_paths(updated, configs):
@@ -560,6 +561,8 @@ def _candidate_derived_paths(updated, configs):
     files = set()
     directories = set()
     if state_parent_changed:
+        directories.update({updated.database_path.parent / "web-assets",
+                            updated.database_path.parent / "web-inventory"})
         files.add(Path(updated.database_path).resolve().parent / LOCK_NAME)
         job_directory = (Path(updated.database_path).parent / "dashboard-jobs").resolve()
         directories.add(job_directory)
@@ -593,7 +596,7 @@ def _protected_paths(configs, backup_dir, documents=(), *, base=None, reference_
         files.update(path.resolve() for path in _database_paths(config.watch.database))
         files.update(path.resolve() for path in _database_paths(config.database_path))
         files.update(path.resolve() for path in _database_paths(config.watch.users_database))
-        if config.inventory is not None:
+        if config.inventory is not None and config.inventory.path is not None:
             files.add(config.inventory.path.resolve())
         secret_directory = _secret_directory(config).resolve()
         directories.add(secret_directory)
@@ -1552,7 +1555,7 @@ def effective_paths(config):
         ("users",): config.watch.users_database,
         ("output",): config.output_dir,
     }
-    if config.inventory is not None:
+    if config.inventory is not None and config.inventory.path is not None:
         values[("inventory",)] = config.inventory.path
     if config.sources.nvd_api_key_file is not None:
         values[("source", "nvd_api_key_file")] = config.sources.nvd_api_key_file
@@ -1729,11 +1732,11 @@ def check_protected_paths(updated, config_path, backup_dir, configs, documents=(
     state_unchanged = {config.database_path.resolve() for config in configs}
     output_unchanged = {config.output_dir.resolve() for config in configs}
     inventory_unchanged = {config.inventory.path.resolve() for config in configs
-                           if config.inventory is not None}
+                           if config.inventory is not None and config.inventory.path is not None}
     operations = [("watch.database", updated.watch.database, watch_unchanged),
                   ("state.database", updated.database_path, state_unchanged),
                   ("output.directory", updated.output_dir, output_unchanged)]
-    if updated.inventory is not None:
+    if updated.inventory is not None and updated.inventory.path is not None:
         operations.append(("inventory.path", updated.inventory.path, inventory_unchanged))
     for label, path, unchanged in operations:
         if aliases_protected_file(path, unchanged):

@@ -264,7 +264,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
         now = datetime.now(timezone.utc)
         if config.inventory is not None:
             try:
-                assets = {asset.asset_id: asset for asset in load_inventory(config.inventory)}
+                assets = {asset.asset_id: asset for asset in load_inventory(config.inventory, snapshot_directory=config.database_path.parent / "web-inventory")}
                 data["inventory_error"] = False
             except CVEBeaconError:
                 assets = {}
@@ -437,7 +437,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
         if kind not in {"json", "xlsx"}:
             abort(400)
         from .cli import _run_query
-        results = _run_query(config, load_inventory(config.inventory))
+        results = _run_query(config, load_inventory(config.inventory, snapshot_directory=config.database_path.parent / "web-inventory"))
         with tempfile.TemporaryDirectory(prefix="cvebeacon-report-") as directory:
             path = Path(directory) / f"report.{kind}"
             (write_xlsx if kind == "xlsx" else write_json)(results, path)
@@ -594,6 +594,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
     app.register_blueprint(create_operations_blueprint(config, job_manager=jobs))
     from .dashboard_config import register_config
     register_config(app, config, host=host)
+    from .dashboard_web import create_web_blueprint
+    app.register_blueprint(create_web_blueprint(config))
     return app
 
 

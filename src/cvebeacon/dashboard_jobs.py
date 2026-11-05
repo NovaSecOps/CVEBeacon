@@ -61,6 +61,8 @@ WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:-1]) | frozenset(RETRY_OPERATIONS)
 
 OPERATION_LABELS = {
     "scan": "Scan inventory",
+    "web-detect": "Detect client web technologies",
+    "web-plan": "Show planned web requests",
     "watch-sync": "Synchronise watch data",
     "watch-evaluate": "Evaluate every stored CVE",
     "watch-notify": "Deliver pending alerts",
@@ -485,6 +487,7 @@ def build_command(
     *,
     confirmed: bool = False,
     channel: str | None = None,
+    client: str | None = None,
 ) -> list[str]:
     """Build the CLI child command without a shell or any secret value."""
     if operation not in OPERATION_LABELS:
@@ -505,6 +508,10 @@ def build_command(
         "--config",
         str(config.config_path),
     ]
+    if operation in {"web-detect", "web-plan"}:
+        from .web_assets import client_label, require_companion
+        require_companion()
+        return [*base, "web-detect", client_label(client), *(["--plan"] if operation == "web-plan" else [])]
     if operation == "scan":
         return [*base, "scan"]
     if operation == "watch-sync":
