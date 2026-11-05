@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% block title %}Schedule · CVEBeacon{% endblock %}
+{% block head %}<script src="{{ url_for('static', filename='schedule.js') }}" defer></script>{% endblock %}
 {% block content %}<h1>Native schedule</h1>
 {% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
 <p>Platform: {{ platform_name }}. The schedule runs a separate <code>cvebeacon</code> command, not the dashboard process. Installation and removal are recorded in the account audit trail.</p>
@@ -17,8 +18,8 @@
 <label>Times <input name="times" placeholder="07:00,19:00" maxlength="200"></label>
 <label>Command <select name="command">{% if has_inventory %}<option value="scan">scan</option>{% endif %}{% if watch_enabled %}<option value="watch" {% if not has_inventory %}selected{% endif %}>watch</option>{% endif %}{% if has_inventory and watch_enabled %}<option value="both" {% if default_command == 'both' %}selected{% endif %}>both</option>{% endif %}</select></label>
 <label>Run logged out (Windows only) <input type="checkbox" name="run_logged_out" value="yes"></label>
-<label>Windows account <input name="account" maxlength="256" autocomplete="off"></label>
-<label>Account password (Windows logged-out only; never stored) <input type="password" name="password" maxlength="1024" autocomplete="off"></label>
+<label>Windows account <input name="account" maxlength="256" autocomplete="off" disabled></label>
+<label>Account password (Windows logged-out only; never stored) <input type="password" name="password" maxlength="1024" autocomplete="off" disabled></label>
 <button type="submit">Install schedule</button>
 </form>
 <p class="muted">Fixed times use the host's local clock. On Linux intervals must divide 24 hours. A Windows logged-out task stores the password with the operating system's task service; the dashboard passes it only to the existing installer and does not keep or log it.</p>

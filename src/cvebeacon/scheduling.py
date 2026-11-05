@@ -680,6 +680,8 @@ def install(
 ) -> None:
     if plan.system == "windows":
         if plan.run_logged_out:
+            if password and any(ord(ch) < 32 for ch in password):
+                raise SchedulingError("account password cannot contain control characters")
             if not password:
                 raise SchedulingError(
                     "--run-logged-out requires the account password"
@@ -715,11 +717,17 @@ def install(
                     timeout=120,
                     env=windows_powershell_environment(),
                 )
+                if result.returncode != 0:
+                    raw = _crontab_text(getattr(result, "stderr", "")) or _crontab_text(getattr(result, "stdout", ""))
+                    # Scrub before category matching, case folding or truncation.
+                    raw = raw.replace(password, "[redacted]")
+                    hint = _windows_registration_hint(raw, result.returncode, plan)
+                    message = "schedule installation failed; password-bearing diagnostics [redacted]"
+                    raise SchedulingError(message + ("; " + hint if hint else ""))
             except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
-                detail = " ".join(str(exc).split())[:600]
                 raise SchedulingError(
-                    f"schedule installation failed: {detail}"
-                ) from exc
+                    "schedule installation failed; password-bearing diagnostics [redacted]"
+                ) from None
             finally:
                 password = None
                 if directory is not None:

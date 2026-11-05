@@ -9,6 +9,8 @@ quickly when a scheduled or interactive run is already active.
 from __future__ import annotations
 
 import os
+import atexit
+import queue
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +18,6 @@ from pathlib import Path
 import json
 import signal
 import sqlite3
-import stat
 import subprocess
 import sys
 import threading
@@ -26,13 +27,17 @@ from typing import Callable, Iterable
 from .config import AppConfig
 from .errors import CVEBeaconError, ConfigurationError, StateError
 from .locking import RunInProgress, RunLock, run_lock_path
-from .watch.directories import ensure_private_directory
-from .watch.store import WatchStore
+from .private_storage import private_directory, private_file, validate_file
+from .launching import command_prefix, child_environment
+from .watch.users import _pin_database
 
 JOB_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
 ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 MAX_JOBS = 200
+MAX_PENDING_JOBS = 20
+CANCEL_GRACE_SECONDS = 3.0
+TERMINATE_GRACE_SECONDS = 2.0
 MAX_HISTORY = MAX_JOBS
 MAX_LOG_BYTES = 128 * 1024
 MAX_LOG_TAIL = 16 * 1024
@@ -47,7 +52,7 @@ RUN_OPERATIONS = (
 )
 RETRY_OPERATIONS = ("watch-retry-failed", "watch-retry-ambiguous")
 FULL_HISTORY_OPERATIONS = frozenset({"watch-sync", "watch-run", "run"})
-WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:]) | frozenset(RETRY_OPERATIONS)
+WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:-1]) | frozenset(RETRY_OPERATIONS)
 
 OPERATION_LABELS = {
     "scan": "Scan inventory",
@@ -104,6 +109,8 @@ class Job:
     log_path: str
     message: str | None
     argv: tuple[str, ...] = ()
+    audit_pending: str | None = None
+    cancelled_by: str | None = None
 
     @property
     def label(self) -> str:
@@ -122,38 +129,32 @@ class JobStore:
     """A small owner-only SQLite file for the last ``MAX_JOBS`` jobs."""
 
     def __init__(self, path: Path):
-        self.path = Path(path)
+        self.path = Path(path).absolute()
         self.log_directory = self.path.parent / "dashboard-jobs"
 
     def _connect(self) -> sqlite3.Connection:
         try:
-            ensure_private_directory(self.path.parent)
-            if not self.path.exists():
-                try:
-                    descriptor = os.open(
-                        self.path,
-                        os.O_CREAT
-                        | os.O_EXCL
-                        | os.O_RDWR
-                        | getattr(os, "O_NOFOLLOW", 0)
-                        | getattr(os, "O_BINARY", 0),
-                        0o600,
-                    )
-                except FileExistsError:
-                    pass
-                else:
+            private_directory(self.path.parent)
+            if os.name == "posix":
+                # Process-lifetime pins avoid closing raw descriptors while
+                # another SQLite connection holds POSIX record locks.
+                descriptor, created = _pin_database(self.path, create=True)
+                if created:
+                    os.fchmod(descriptor, 0o600)
+                validate_file(descriptor, self.path)
+            else:
+                descriptor = private_file(self.path, create=True)
+            expected = os.fstat(descriptor)
+            try:
+                connection = sqlite3.connect(self.path, timeout=30)
+                actual = self.path.lstat()
+                if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                    connection.close()
+                    raise StateError("dashboard job history was replaced while opening")
+                validate_file(descriptor, self.path)
+            finally:
+                if os.name == "nt":
                     os.close(descriptor)
-            elif os.name == "posix":
-                details = os.stat(self.path, follow_symlinks=False)
-                if not stat.S_ISREG(details.st_mode):
-                    raise StateError("dashboard job history must be a regular file")
-                if details.st_uid != os.geteuid():
-                    raise StateError(
-                        "dashboard job history must be owned by this account"
-                    )
-                if stat.S_IMODE(details.st_mode) & 0o077:
-                    os.chmod(self.path, 0o600)
-            connection = sqlite3.connect(self.path, timeout=30)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA temp_store = MEMORY")
             connection.execute(
@@ -169,7 +170,15 @@ class JobStore:
                 "cancel_requested INTEGER NOT NULL DEFAULT 0,"
                 "log_path TEXT NOT NULL,"
                 "argv TEXT NOT NULL,"
-                "message TEXT)"
+                "message TEXT, audit_pending TEXT, cancelled_by TEXT)"
+            )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(dashboard_job)")}
+            for column in ("audit_pending", "cancelled_by"):
+                if column not in columns:
+                    connection.execute(f"ALTER TABLE dashboard_job ADD COLUMN {column} TEXT")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS dashboard_action ("
+                "id INTEGER PRIMARY KEY, action TEXT NOT NULL, actor TEXT NOT NULL, detail TEXT)"
             )
             connection.commit()
             return connection
@@ -197,6 +206,8 @@ class JobStore:
             str(row["log_path"]),
             row["message"],
             argv,
+            row["audit_pending"],
+            row["cancelled_by"],
         )
 
     def initialize(self) -> None:
@@ -204,7 +215,7 @@ class JobStore:
             pass
 
     def create(self, operation: str, started_by: str, argv: list[str]) -> Job:
-        ensure_private_directory(self.log_directory)
+        private_directory(self.log_directory, owner_only=True)
         with closing(self._connect()) as db, db:
             cursor = db.execute(
                 "INSERT INTO dashboard_job("
@@ -226,8 +237,10 @@ class JobStore:
                 (str(log_path), job_id),
             )
             db.execute(
-                "DELETE FROM dashboard_job WHERE id NOT IN "
-                "(SELECT id FROM dashboard_job ORDER BY id DESC LIMIT ?)",
+                "DELETE FROM dashboard_job WHERE status IN ('succeeded','failed','cancelled') "
+                "AND audit_pending IS NULL AND id NOT IN "
+                "(SELECT id FROM dashboard_job WHERE status IN ('succeeded','failed','cancelled') "
+                "ORDER BY id DESC LIMIT ?)",
                 (MAX_JOBS,),
             )
             row = db.execute(
@@ -284,7 +297,7 @@ class JobStore:
         with closing(self._connect()) as db, db:
             cursor = db.execute(
                 "UPDATE dashboard_job SET status='failed',ended_at=?,"
-                "message=? WHERE status IN ('queued','running')",
+                "message=?,audit_pending='job_failed' WHERE status IN ('queued','running')",
                 (
                     _utc_now(),
                     "The dashboard stopped before this job finished.",
@@ -301,12 +314,13 @@ class JobStore:
             )
             return cursor.rowcount == 1
 
-    def cancel_queued(self, job_id: int) -> bool:
+    def cancel_queued(self, job_id: int, actor: str | None = None) -> bool:
         with closing(self._connect()) as db, db:
             cursor = db.execute(
-                "UPDATE dashboard_job SET cancel_requested=1,status='cancelled',"
-                "ended_at=?,message=? WHERE id=? AND status='queued'",
+                "UPDATE dashboard_job SET cancel_requested=1,status='cancelled',cancelled_by=?,"
+                "ended_at=?,message=?,audit_pending='job_cancelled' WHERE id=? AND status='queued'",
                 (
+                    actor,
                     _utc_now(),
                     "Cancelled before the command started.",
                     job_id,
@@ -314,11 +328,11 @@ class JobStore:
             )
             return cursor.rowcount == 1
 
-    def request_cancel(self, job_id: int) -> None:
+    def request_cancel(self, job_id: int, actor: str | None = None) -> None:
         with closing(self._connect()) as db, db:
             db.execute(
-                "UPDATE dashboard_job SET cancel_requested=1 WHERE id=?",
-                (job_id,),
+                "UPDATE dashboard_job SET cancel_requested=1,cancelled_by=? WHERE id=?",
+                (actor, job_id),
             )
 
     def finish(
@@ -334,8 +348,8 @@ class JobStore:
         with closing(self._connect()) as db, db:
             db.execute(
                 "UPDATE dashboard_job SET status=?,ended_at=?,exit_code=?,"
-                "message=? WHERE id=?",
-                (status, _utc_now(), exit_code, message, job_id),
+                "message=?,audit_pending=? WHERE id=?",
+                (status, _utc_now(), exit_code, message, "job_" + status, job_id),
             )
 
     def log_tail(self, job: Job, limit: int = MAX_LOG_TAIL) -> str:
@@ -343,46 +357,69 @@ class JobStore:
             raise ValueError("invalid log tail limit")
         try:
             path = Path(job.log_path)
-            size = path.stat().st_size
-            with path.open("rb") as handle:
+            if path != self.log_directory / f"job-{job.id}.log":
+                return ""
+            private_directory(self.log_directory, owner_only=True)
+            descriptor = private_file(path, readonly=True)
+            with os.fdopen(descriptor, "rb") as handle:
+                size = os.fstat(handle.fileno()).st_size
                 if size > limit:
                     handle.seek(size - limit)
                 return handle.read(limit).decode("utf-8", "replace")
-        except OSError:
+        except (OSError, StateError):
             return ""
+
+    def pending_audits(self) -> list[tuple[Job, str]]:
+        return [(self._job(row), row["audit_pending"]) for row in self._rows(
+            "SELECT * FROM dashboard_job WHERE audit_pending IS NOT NULL")]
+
+    def clear_audit(self, job_id: int) -> None:
+        with closing(self._connect()) as db, db:
+            db.execute("UPDATE dashboard_job SET audit_pending=NULL WHERE id=?", (job_id,))
+
+    def queue_action(self, action: str, actor: str, detail: str | None) -> int:
+        with closing(self._connect()) as db, db:
+            return int(db.execute(
+                "INSERT INTO dashboard_action(action,actor,detail) VALUES (?,?,?)",
+                (action, actor, detail),
+            ).lastrowid)
+
+    def pending_actions(self):
+        return self._rows("SELECT * FROM dashboard_action ORDER BY id")
+
+    def clear_action(self, action_id: int) -> None:
+        with closing(self._connect()) as db, db:
+            db.execute("DELETE FROM dashboard_action WHERE id=?", (action_id,))
 
 
 class _JobLog:
-    """Append output while keeping one job's log within a fixed bound."""
+    """Capture through one checked descriptor, with bounded tail rotation."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        ensure_private_directory(self.path.parent)
-        self._handle = self.path.open("ab", buffering=0)
-        if os.name == "posix":
-            try:
-                os.chmod(self.path, 0o600)
-            except OSError:
-                pass
-        self._size = self.path.stat().st_size
+        private_directory(self.path.parent, owner_only=True)
+        descriptor = private_file(self.path, create=True, exclusive=True)
+        self._handle = os.fdopen(descriptor, "w+b", buffering=0)
+        self._size = 0
 
     def write(self, chunk: bytes) -> None:
         if not chunk:
             return
+        chunk = chunk[-MAX_LOG_BYTES:]
+        if self._size + len(chunk) > MAX_LOG_BYTES:
+            keep = MAX_LOG_BYTES - len(chunk)
+            self._handle.seek(max(0, self._size - keep))
+            tail = self._handle.read(keep)
+            self._handle.seek(0)
+            self._handle.write(tail)
+            self._handle.truncate(len(tail))
+            self._size = len(tail)
+        self._handle.seek(self._size)
         self._handle.write(chunk)
         self._size += len(chunk)
-        if self._size > MAX_LOG_BYTES:
-            self._handle.close()
-            data = self.path.read_bytes()
-            self.path.write_bytes(data[-MAX_LOG_BYTES:])
-            self._size = min(len(data), MAX_LOG_BYTES)
-            self._handle = self.path.open("ab", buffering=0)
 
     def close(self) -> None:
-        try:
-            self._handle.close()
-        except OSError:
-            pass
+        self._handle.close()
 
 
 def channel_names(config: AppConfig) -> tuple[str, ...]:
@@ -397,8 +434,13 @@ def full_history_confirmation_required(config: AppConfig) -> bool:
     metadata: dict[str, str] = {}
     if database.is_file():
         try:
-            metadata = WatchStore(database).metadata()
-        except CVEBeaconError:
+            if any(Path(str(database) + suffix).exists() for suffix in ("-wal", "-journal")):
+                return True
+            with closing(sqlite3.connect(
+                f"{database.resolve().as_uri()}?mode=ro&immutable=1", uri=True, timeout=0.1
+            )) as db:
+                metadata = dict(db.execute("SELECT key,value FROM watch_meta"))
+        except (sqlite3.Error, OSError, ValueError):
             # A corrupt or unreadable store cannot be inspected safely; make
             # the operator confirm rather than silently passing --yes.
             return True
@@ -430,9 +472,7 @@ def build_command(
             "nothing to run; add an [inventory] path or set [watch] enabled = true"
         )
     base = [
-        sys.executable,
-        "-m",
-        "cvebeacon",
+        *command_prefix(),
         "--config",
         str(config.config_path),
     ]
@@ -467,6 +507,15 @@ def build_command(
     return args
 
 
+def _windows_console_available() -> bool:
+    import ctypes
+    return bool(ctypes.windll.kernel32.GetConsoleCP())
+
+
+class JobQueueFull(CVEBeaconError):
+    """The bounded set of pending jobs is full."""
+
+
 class JobManager:
     """Serialize dashboard jobs and keep their persistent state current."""
 
@@ -495,6 +544,14 @@ class JobManager:
         self._thread: threading.Thread | None = None
         self._process: subprocess.Popen | None = None
         self._running: int | None = None
+        self._audit_lock = threading.RLock()
+        self._stopping = False
+        self._cancel_deadline: float | None = None
+        try:
+            if self.store.pending_audits() or self.store.pending_actions():
+                self.start_thread()
+        except CVEBeaconError:
+            pass
 
     def start_thread(self) -> None:
         with self._condition:
@@ -506,6 +563,7 @@ class JobManager:
                 daemon=True,
             )
             self._thread.start()
+            atexit.register(self.shutdown)
 
     def submit(
         self,
@@ -523,52 +581,55 @@ class JobManager:
             ).probe()
             if holder is not None:
                 raise RunInProgress(holder)
-        job = self.store.create(operation, started_by, argv)
-        try:
-            if audit:
-                self.users.record_action(
-                    "job_started", username=started_by, actor=started_by
-                )
-        except Exception:
-            self.store.finish(
-                job.id,
-                "failed",
-                exit_code=None,
-                message="The job audit entry could not be recorded.",
-            )
-            raise
         with self._condition:
+            if self._stopping:
+                raise ConfigurationError("the dashboard is stopping")
+            if len(self.store.active()) >= MAX_PENDING_JOBS:
+                raise JobQueueFull("the job queue is full; wait for a job to finish")
+            job = self.store.create(operation, started_by, argv)
+            try:
+                if audit:
+                    self.users.record_action(
+                        "job_started", username=started_by, actor=started_by,
+                        detail=f"{job.id}:{job.operation}",
+                    )
+            except Exception:
+                self.store.finish(
+                    job.id, "failed", exit_code=None,
+                    message="The job audit entry could not be recorded.",
+                )
+                raise
             self._queue.append(job.id)
             self._condition.notify_all()
         self.start_thread()
         return job
 
-    def cancel(self, job_id: int) -> bool:
-        job = self.store.get(job_id)
-        if job is None:
-            return False
-        if job.status == "queued":
-            if self.store.cancel_queued(job_id):
-                self._audit_finished(self.store.get(job_id), "job_cancelled")
-                with self._condition:
-                    self._condition.notify_all()
-                return True
-            job = self.store.get(job_id)
-            if job is None:
-                return False
-        if job.status != "running":
-            return False
-        self.store.request_cancel(job_id)
+    def cancel(self, job_id: int, *, actor: str | None = None) -> bool:
         with self._condition:
+            job = self.store.get(job_id)
+            if job is None or not job.active:
+                return False
+            self.users.record_action(
+                "job_cancel_requested", username=job.started_by,
+                actor=actor or job.started_by, detail=f"{job.id}:{job.operation}",
+            )
+            if self.store.cancel_queued(job_id, actor or job.started_by):
+                if job_id in self._queue:
+                    self._queue.remove(job_id)
+                self._audit_finished(self.store.get(job_id), "job_cancelled")
+                self._condition.notify_all()
+                return True
+            self.store.request_cancel(job_id, actor or job.started_by)
             process = self._process
-            running = self._running == job_id
-        if running and process is not None and process.poll() is None:
-            try:
-                self._interrupt(process)
-            except OSError:
-                # The process may have exited between the check and the send.
-                pass
-        return True
+            if self._running == job_id and process is not None and process.poll() is None:
+                if self._cancel_deadline is None:
+                    self._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+                    try:
+                        self._interrupt(process)
+                    except OSError:
+                        pass
+            self._condition.notify_all()
+            return True
 
     @staticmethod
     def _interrupt(process: subprocess.Popen) -> None:
@@ -601,9 +662,19 @@ class JobManager:
     def _loop(self) -> None:
         while True:
             with self._condition:
-                while not self._queue:
-                    self._condition.wait()
-                job_id = self._queue.pop(0)
+                if not self._queue and not self._stopping:
+                    self._condition.wait(0.5)
+                if self._stopping and not self._queue:
+                    return
+                job_id = self._queue.pop(0) if self._queue else None
+            self.retry_audits()
+            if job_id is None:
+                with self._condition:
+                    if not self._queue and not self.store.pending_audits() and not self.store.pending_actions():
+                        self._thread = None
+                        atexit.unregister(self.shutdown)
+                        return
+                continue
             try:
                 job = self.store.get(job_id)
                 if job is None or job.status != "queued":
@@ -635,6 +706,7 @@ class JobManager:
                 with self._condition:
                     self._running = None
                     self._process = None
+                    self._cancel_deadline = None
                     self._condition.notify_all()
 
     def _run_job(self, job: Job) -> None:
@@ -668,46 +740,98 @@ class JobManager:
             self._running = job.id
         log = _JobLog(job.log_path)
         process = None
+        reader = None
+        forced = False
         code: int | None = None
+        chunks = queue.Queue(maxsize=16)
+        reader_stop = threading.Event()
+
+        def capture():
+            try:
+                while not reader_stop.is_set():
+                    chunk = process.stdout.read(4096)
+                    while not reader_stop.is_set():
+                        try:
+                            chunks.put(chunk, timeout=0.1)
+                            break
+                        except queue.Full:
+                            pass
+                    if not chunk:
+                        return
+            except Exception as exc:
+                while not reader_stop.is_set():
+                    try:
+                        chunks.put(exc, timeout=0.1)
+                        break
+                    except queue.Full:
+                        pass
+
         try:
+            if os.name == "nt" and not _windows_console_available():
+                raise ConfigurationError("background jobs require a Windows console for cooperative cancellation")
             process = subprocess.Popen(
                 argv,
-                cwd=str(Path(self.config.config_path).parent),
+                cwd=sys.prefix,
+                env=child_environment(self.config),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=0,
                 start_new_session=os.name != "nt",
-                creationflags=(
-                    subprocess.CREATE_NEW_PROCESS_GROUP
-                    if os.name == "nt"
-                    else 0
-                ),
+                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
             )
             with self._condition:
                 self._process = process
-            current = self.store.get(job.id)
-            if current is not None and current.cancel_requested:
-                self._interrupt(process)
-            assert process.stdout is not None
+            reader = threading.Thread(target=capture, daemon=True)
+            reader.start()
+            output_done = False
             while True:
-                chunk = process.stdout.read(4096)
+                current = self.store.get(job.id)
+                with self._condition:
+                    if (self._stopping or (current and current.cancel_requested)) and self._cancel_deadline is None:
+                        self._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+                        try:
+                            self._interrupt(process)
+                        except OSError:
+                            pass
+                    deadline = self._cancel_deadline
+                if deadline is not None and time.monotonic() >= deadline and process.poll() is None:
+                    forced = self._stop_process(process, interrupt=False)
+                if output_done:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                    continue
+                try:
+                    chunk = chunks.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if isinstance(chunk, Exception):
+                    raise chunk
                 if not chunk:
-                    break
+                    output_done = True
+                    continue
                 log.write(chunk)
             code = process.wait()
         finally:
-            log.close()
+            # Capture/store failures must not detach a child that still owns
+            # monitoring state. Stop and reap before the worker clears it.
+            if process is not None and process.poll() is None:
+                forced = self._stop_process(process) or forced
+            reader_stop.set()
             if process is not None and process.stdout is not None:
-                try:
-                    process.stdout.close()
-                except OSError:
-                    pass
+                process.stdout.close()
+            if reader is not None:
+                reader.join(timeout=1)
+            log.close()
         current = self.store.get(job.id)
         requested = bool(current and current.cancel_requested)
         if requested or code == 130:
             status = "cancelled"
-            message = "Cancelled by request; the command ran its own cleanup."
+            message = (
+                "Cancellation required forced termination; cleanup is not confirmed."
+                if forced else "Cancelled by interrupt; the command had an opportunity to run cleanup."
+            )
         elif code == 0:
             status = "succeeded"
             message = None
@@ -724,14 +848,85 @@ class JobManager:
             }[status],
         )
 
+    @classmethod
+    def _stop_process(cls, process, *, interrupt=True) -> bool:
+        if process.poll() is not None:
+            process.wait()
+            return False
+        if interrupt:
+            try:
+                cls._interrupt(process)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=CANCEL_GRACE_SECONDS)
+                return False
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return True
+
+    def shutdown(self) -> None:
+        """Stop admission, cancel queued work and reap the active child."""
+        with self._condition:
+            self._stopping = True
+            for job_id in self._queue:
+                self.store.cancel_queued(job_id)
+            self._queue.clear()
+            self._condition.notify_all()
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=CANCEL_GRACE_SECONDS + TERMINATE_GRACE_SECONDS + 2)
+        with self._condition:
+            process = self._process
+        if process is not None and process.poll() is None:
+            self._stop_process(process)
+        self.retry_audits()
+
     def _audit_finished(self, job: Job | None, action: str) -> None:
         if job is None:
             return
+        with self._audit_lock:
+            try:
+                current = self.store.get(job.id)
+                if current is None or current.audit_pending != action:
+                    return
+                self.users.record_action(
+                    action, username=job.started_by,
+                    actor=(current.cancelled_by or job.started_by) if action == "job_cancelled" else job.started_by,
+                    detail=f"{job.id}:{job.operation}",
+                )
+                self.store.clear_audit(job.id)
+            except Exception:
+                # State and pending action are durable; retain the row/log.
+                return
+
+    def audit_action(self, action: str, actor: str, detail: str | None = None) -> None:
         try:
-            self.users.record_action(
-                action, username=job.started_by, actor=job.started_by
-            )
-        except Exception:
-            # Job state is already durable; a vanished account store must not
-            # turn a completed job into a failed one.
-            pass
+            with self._audit_lock:
+                action_id = self.store.queue_action(action, actor, detail)
+                self.users.record_action(action, username=actor, actor=actor, detail=detail)
+                self.store.clear_action(action_id)
+        finally:
+            self.start_thread()
+
+    def retry_audits(self) -> None:
+        with self._audit_lock:
+            try:
+                for row in self.store.pending_actions():
+                    self.users.record_action(
+                        row["action"], username=row["actor"], actor=row["actor"], detail=row["detail"]
+                    )
+                    self.store.clear_action(row["id"])
+                for job, action in self.store.pending_audits():
+                    self._audit_finished(job, action)
+            except CVEBeaconError:
+                return

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
+import json
 import shlex
 import subprocess
-import sys
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
 
 from . import scheduling
@@ -17,10 +17,12 @@ from .dashboard_jobs import (
     RETRY_OPERATIONS,
     RUN_OPERATIONS,
     JobManager,
+    JobQueueFull,
     full_history_confirmation_required,
 )
 from .errors import CVEBeaconError, ConfigurationError
 from .locking import RunInProgress
+from .launching import command_prefix
 
 
 def requires(permission):
@@ -42,17 +44,13 @@ def _text(values, name: str, *, required=False, limit=256) -> str:
 
 def _password(values, name: str) -> str:
     items = values.getlist(name)
-    if len(items) != 1 or len(items[0]) > 1024:
+    if len(items) != 1 or len(items[0]) > 1024 or any(ord(ch) < 32 for ch in items[0]):
         abort(400)
     return items[0]
 
 
 def _manager() -> JobManager:
     return current_app.extensions["dashboard_jobs"]
-
-
-def _users():
-    return current_app.extensions["dashboard_users"]
 
 
 def _accounts() -> bool:
@@ -72,8 +70,8 @@ def _actor() -> str:
     return g.user.username
 
 
-def _record(action: str) -> None:
-    _users().record_action(action, username=_actor(), actor=_actor())
+def _record(action: str, detail: str | None = None) -> None:
+    _manager().audit_action(action, _actor(), detail)
 
 
 def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
@@ -120,9 +118,7 @@ def _fallback_install_command(
         inventory=config.inventory is not None, watch=config.watch.enabled
     )
     parts = [
-        sys.executable,
-        "-m",
-        "cvebeacon",
+        *command_prefix(),
         "--config",
         str(config.config_path),
         "schedule",
@@ -276,7 +272,7 @@ def create_blueprint(config: AppConfig) -> Blueprint:
             job = _manager().submit(
                 operation, started_by=_actor(), argv=argv
             )
-        except RunInProgress as exc:
+        except (RunInProgress, JobQueueFull) as exc:
             return _render_operations(config, error=str(exc), status=409)
         except ConfigurationError as exc:
             return _render_operations(config, error=str(exc), status=400)
@@ -294,7 +290,7 @@ def create_blueprint(config: AppConfig) -> Blueprint:
             job = _manager().submit(
                 operation, started_by=_actor(), argv=argv
             )
-        except RunInProgress as exc:
+        except (RunInProgress, JobQueueFull) as exc:
             return _render_operations(config, error=str(exc), status=409)
         except ConfigurationError as exc:
             return _render_operations(config, error=str(exc), status=400)
@@ -317,7 +313,7 @@ def create_blueprint(config: AppConfig) -> Blueprint:
             job = _manager().submit(
                 "notify-test", started_by=_actor(), argv=argv
             )
-        except RunInProgress as exc:
+        except (RunInProgress, JobQueueFull) as exc:
             return _render_operations(config, error=str(exc), status=409)
         except ConfigurationError as exc:
             return _render_operations(config, error=str(exc), status=400)
@@ -329,7 +325,7 @@ def create_blueprint(config: AppConfig) -> Blueprint:
         require_accounts()
         if not 1 <= job_id <= 2**63 - 1:
             abort(404)
-        if not _manager().cancel(job_id):
+        if not _manager().cancel(job_id, actor=_actor()):
             abort(404)
         return redirect(url_for("operations.job_detail", job_id=job_id), code=303)
 
@@ -364,7 +360,7 @@ def create_blueprint(config: AppConfig) -> Blueprint:
                 config, error="this configuration has no inventory; choose watch", status=400
             )
         run_logged_out = _text(request.form, "run_logged_out") == "yes"
-        account = _text(request.form, "account", limit=256)
+        account = _text(request.form, "account", limit=256) if run_logged_out else ""
         password = _password(request.form, "password") if run_logged_out else None
         times_value = ""
         every_value = 4
@@ -406,23 +402,25 @@ def create_blueprint(config: AppConfig) -> Blueprint:
                     run_logged_out=run_logged_out,
                     account=account or None,
                 )
+            detail = json.dumps({
+                "command": command, "times": ",".join(plan.times) or None,
+                "every": plan.every_hours,
+                "logged_out": plan.run_logged_out, "account": plan.user_id or None,
+            }, ensure_ascii=False, separators=(",", ":"))
+            if plan.run_logged_out and not password:
+                raise ConfigurationError("the Windows account password is required for a logged-out schedule")
+            _record("schedule_install_requested", detail)
             if plan.run_logged_out:
-                if not password:
-                    raise ConfigurationError(
-                        "the Windows account password is required for a "
-                        "logged-out schedule"
-                    )
                 scheduling.install(plan, password=password, run=_runner())
             else:
                 scheduling.install(plan, run=_runner())
-            try:
-                _record("schedule_installed")
-            except CVEBeaconError:
-                pass
+            _record("schedule_installed", detail)
         except (CVEBeaconError, OSError) as exc:
-            detail = str(exc)
-            if password:
-                detail = detail.replace(password, "[redacted]")
+            detail = (
+                "Schedule installation or its audit failed; password-bearing diagnostics [redacted]. "
+                "Check schedule status before retrying."
+                if run_logged_out else str(exc)
+            )
             return _render_schedule(
                 config, error=detail, status=400, fallback_command=fallback
             )
@@ -437,11 +435,9 @@ def create_blueprint(config: AppConfig) -> Blueprint:
         if _text(request.form, "confirm", required=True, limit=16) != "remove":
             abort(400)
         try:
+            _record("schedule_remove_requested")
             removed = scheduling.remove(run=_runner())
-            try:
-                _record("schedule_removed" if removed else "schedule_remove_skipped")
-            except CVEBeaconError:
-                pass
+            _record("schedule_removed" if removed else "schedule_remove_skipped")
         except (CVEBeaconError, OSError) as exc:
             return _render_schedule(config, error=str(exc), status=400)
         return redirect(url_for("operations.schedule"), code=303)

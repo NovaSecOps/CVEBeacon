@@ -1444,7 +1444,8 @@ class UserStore:
                                _timestamp(self._clock()), actor=user.username)
 
     def record_action(
-        self, action: str, *, username: str, actor: str | None = None
+        self, action: str, *, username: str, actor: str | None = None,
+        detail: str | None = None
     ) -> None:
         """Append one internal dashboard action to the chained audit log.
 
@@ -1459,6 +1460,10 @@ class UserStore:
             raise ConfigurationError("invalid audit action")
         if not isinstance(username, str) or not username:
             raise ConfigurationError("invalid audit account")
+        if detail is not None:
+            if not isinstance(detail, str) or len(detail) > 1024 or any(ord(ch) < 32 for ch in detail):
+                raise ConfigurationError("invalid audit detail")
+            action = action + ":" + detail
         stamp = _timestamp(self._clock())
         if not self.path.is_file():
             raise StateError("CVEBeacon user database not found")

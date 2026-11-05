@@ -217,7 +217,8 @@ def test_job_succeeds_records_log_and_audit(ops):
     assert "Deliver pending alerts" in history.text
     assert "succeeded" in history.text
     actions = [entry.action for entry in users.audit_entries()]
-    assert "job_started" in actions and "job_succeeded" in actions
+    assert f"job_started:{job.id}:{job.operation}" in actions
+    wait_for(lambda: f"job_succeeded:{job.id}:{job.operation}" in [entry.action for entry in users.audit_entries()])
     assert users.verify_audit() is None
 
 
@@ -414,7 +415,8 @@ def test_schedule_page_installs_and_removes_with_fake_runners(ops):
     ).status_code == 303
     assert state["text"] == ""
     actions = [entry.action for entry in app.extensions["dashboard_users"].audit_entries()]
-    assert "schedule_installed" in actions and "schedule_removed" in actions
+    assert any(action.startswith('schedule_installed:{"command":"watch","times":"07:00,19:00"') for action in actions)
+    assert "schedule_removed" in actions
 
 
 def test_schedule_interval_install(ops):
@@ -532,8 +534,12 @@ def test_schedule_install_is_blocked_when_it_would_use_root(tmp_path, monkeypatc
 def test_job_history_store_retains_only_the_latest_jobs(tmp_path):
     store = JobStore(tmp_path / "jobs.db")
     first = store.create("scan", "admin", ["scan"])
+    store.finish(first.id, "succeeded", exit_code=0)
+    store.clear_audit(first.id)
     for _ in range(205):
-        store.create("scan", "admin", ["scan"])
+        job = store.create("scan", "admin", ["scan"])
+        store.finish(job.id, "succeeded", exit_code=0)
+        store.clear_audit(job.id)
     jobs = store.recent(50)
     assert len(jobs) == 50
     assert store.get(first.id) is None
