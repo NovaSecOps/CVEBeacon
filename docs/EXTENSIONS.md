@@ -84,8 +84,9 @@ option cannot silently fall back to a less safe default.
   refused by default, even when the embedded address is public. Set
   `allow_private_address: true` on a specific entry to attest an internal site;
   loopback and the mapped/compatible forms still need that explicit flag. NAT64
-  remains refused even with the flag. A 6to4 answer (`2002::/16`) is accepted
-  only when its embedded IPv4 address is globally routable; that decision is
+  remains refused even with the flag. By default a 6to4 answer (`2002::/16`) is
+  accepted only when its embedded IPv4 address is globally routable (the
+  per-entry attestation relaxes this like any other private answer); that decision is
   made explicitly and does not depend on how the `ipaddress` release classifies
   6to4 space. This is intended for controlled internal services, not as a
   general scanner switch.
@@ -113,7 +114,9 @@ cvebeacon-ext web detect --client acme --assets acme-assets.json \
   `allow_private_address` is set), then connect to the validated IP while
   keeping the original Host header and TLS SNI. Every redirect is resolved and
   validated again. DNS resolution runs in a bounded pool of at most four daemon
-  workers.
+  workers. A lookup that times out is abandoned, not killed: a resolver that
+  never returns keeps its worker thread until it does, so long-lived processes
+  that call the detector repeatedly may accumulate such threads.
 - Connect timeout 5 seconds, read timeout 10 seconds and 20 seconds total per
   asset, covering resolution, connect, header parsing and every body read. The
   5-second connection limit covers both the TCP connection and the TLS

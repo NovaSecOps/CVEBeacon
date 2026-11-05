@@ -59,7 +59,11 @@ class Detection:
 
 
 _VERSION_BODY = r"\d+(?:\.\d+){0,3}"
-_VERSION_QUALIFIER = r"[0-9A-Za-z][0-9A-Za-z._-]*"
+# Dot, hyphen or underscore separated identifiers. A separator followed by a
+# file-name token (".min.js", "-slim.css") ends the qualifier, so a URL's file
+# suffix never becomes part of the version.
+_FILE_TOKEN = r"(?:min|slim|bundle|umd|esm|js|mjs|css|map)(?![0-9A-Za-z])"
+_VERSION_QUALIFIER = rf"[0-9A-Za-z]+(?:[._-](?!{_FILE_TOKEN})[0-9A-Za-z]+)*"
 _VERSION_SUFFIX = (
     rf"(?:[-+]{_VERSION_QUALIFIER}"
     r"|\.(?:alpha|beta|rc|cr|preview|snapshot)\d*"

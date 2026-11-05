@@ -355,6 +355,10 @@ def test_five_component_server_version_is_unknown_not_truncated():
      "18.2.0-beta"),
     ("nginx", {"header": ("server", "nginx/1.25.3-rc1")}, "1.25.3-rc1"),
     ("wildfly", {"header": ("server", "WildFly/26.1.2.Beta1")}, "26.1.2.Beta1"),
+    ("jquery", {"url": "https://cdn.example/js/jquery-3.7.1-rc1.min.js"}, "3.7.1-rc1"),
+    ("jquery", {"url": "https://cdn.example/js/jquery-3.7.1-rc.2.js"}, "3.7.1-rc.2"),
+    ("react", {"url": "https://cdn.example/react@18.2.0-beta.min.js"}, "18.2.0-beta"),
+    ("bootstrap", {"url": "https://cdn.example/css/bootstrap-5.3.2-beta.min.css"}, "5.3.2-beta"),
 ])
 def test_prerelease_version_suffixes_are_preserved(key, fixture, expected):
     page = fixture_page(fixture)
