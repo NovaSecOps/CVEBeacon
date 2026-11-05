@@ -1,0 +1,12 @@
+{
+  "collector": "web-detect",
+  "collector_version": "0.1.0",
+  "contract": "cvebeacon.inventory.v1",
+  "generated_at": "2026-11-05T12:00:00+00:00",
+  "observed_at": "2026-11-05T12:00:00+00:00",
+  "omissions": [],
+  "record_count": 5,
+  "sha256": "f57e7aee96394265c386d1b31952034026387c3bba126a4774b97251b6756328",
+  "source_id": "acme-web",
+  "status": "success"
+}
