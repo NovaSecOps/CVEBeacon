@@ -369,5 +369,3 @@ def test_installer_discards_password_bearing_diagnostics_before_rendering(tmp_pa
         scheduling.install(plan, password="two  spaces", run=lambda *a, **kw: _Result(returncode=1, stderr=output))
     assert output[:40] not in str(error.value)
     assert "[redacted]" in str(error.value)
-
-
