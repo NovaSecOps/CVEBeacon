@@ -27,7 +27,7 @@ Asset IDs, system IDs, categories, owners, comments, hostnames and local paths a
 
 Only enabled features contact their corresponding endpoints. The NVD API key and all Microsoft credentials are optional and are read from environment variables. The Teams webhook URL contains a secret and should be handled like a credential.
 
-When explicitly enabled, notifications send finding summaries, asset IDs, category/system labels and advisory IDs to the configured Teams/email recipient. They are disabled by default and are independent of public vulnerability lookups.
+When explicitly enabled, notifications send finding summaries, asset IDs, category/system labels, client labels and advisory IDs to configured recipients and providers. They are disabled by default and are independent of public vulnerability lookups. Client labels remain internal and are never sent to public vulnerability sources.
 
 Corporate proxies and TLS inspection can affect certificate validation or outbound access. Configure proxy behavior through the standard environment supported by the HTTP client (`HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`) and install the organization’s trusted CA according to local policy. Do not disable TLS verification.
 

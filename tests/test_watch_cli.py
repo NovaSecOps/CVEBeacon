@@ -8,6 +8,14 @@ import httpx
 from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
 
 from cvebeacon import cli
+from cvebeacon.models import (
+    Applicability,
+    Asset,
+    Finding,
+    QueryResult,
+    Vulnerability,
+)
+from cvebeacon.state import StateStore
 from cvebeacon.watch import store as watch_store, sync as watch_sync
 from cvebeacon.watch.records import CVSSEntry, WatchRecord
 from cvebeacon.watch.rules import parse_rules
@@ -107,6 +115,49 @@ def test_watch_events_lists_concise_lines_and_filters(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "critical-or-likely" not in output
     assert output.count("kev-watch") == 1
+
+
+def test_watch_events_shows_affected_clients(tmp_path, capsys):
+    config = write_config(tmp_path, sources=("nvd", "epss"), extra=RULES)
+    store = WatchStore(config.watch.database, clock=lambda: NOW)
+    store.upsert_nvd([record()])
+    store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources)
+    state = StateStore(config.database_path)
+    acme = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    globex = Asset("a2", "Acme", "Widget", "2", client="Globex")
+    state.record_scan(
+        [
+            QueryResult(
+                acme,
+                (
+                    Finding(
+                        acme,
+                        Vulnerability("CVE-2026-0001"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+            QueryResult(
+                globex,
+                (
+                    Finding(
+                        globex,
+                        Vulnerability("CVE-2026-0001"),
+                        Applicability.NEEDS_REVIEW,
+                        "limited",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+        ]
+    )
+    assert cli.main(["--config", str(config.config_path), "watch", "events"]) == 0
+    output = capsys.readouterr().out
+    assert "Affected clients: Acme, Globex (review)" in output
 
 
 def test_watch_events_pending_filter(tmp_path, capsys):

@@ -688,8 +688,8 @@ compatibility default. The HTML part is generated from the same message model
 as the plain-text part, not from a second content path, and both carry the
 same facts. An alert shows a header line per CVE with
 its label and CVSS, the EPSS, KEV, and exploitation fields, the publication and
-first-seen line, the reported line when present, the description, the matching
-rules, and the links. A digest shows a heading, a section per rule with its
+first-seen line, the affected-clients line when clients match, the reported
+line when present, the description, the matching rules, and the links. A digest shows a heading, a section per rule with its
 counts, and a compact table with the CVE, severity, EPSS, KEV, exploitation,
 published, and first-seen columns. A screenshot of an HTML alert would show one
 light card with a bold header such as
@@ -741,6 +741,10 @@ The generic webhook receives a stable JSON document:
       "reasons": ["cvss 9.8 v3.1 (cna)"],
       "initial": false,
       "created_at": "2026-11-03T12:00:00+00:00",
+      "affected_clients": [
+        {"name": "Acme", "assets": 2, "status": "affected"},
+        {"name": "Globex", "assets": 1, "status": "needs_review"}
+      ],
       "view": {
         "published": "2026-10-30T14:00:00.000",
         "first_seen": "2026-11-04T09:15:00+00:00",
@@ -780,11 +784,34 @@ and has an empty `events` list. A report or unreport notice event has `kind`
 and cannot be a configured rule), and a `notice` object with `action` (`report`
 or `unreport`), `by`, and `note`, plus `username` and `email` when present.
 
+An event carries `affected_clients` when the latest successful inventory scan
+records an affected or needs-review finding on a client's asset. Each item has
+`name`, `assets` (the number of matching assets), and `status` (`affected` or
+`needs_review`). Each event lists at most 50 clients. Before sending a normal or
+initial webhook, client details are reduced across the document until its
+serialized UTF-8 body fits 32,768 bytes. When names are left out,
+`affected_clients_omitted` gives their count, even if all details are omitted.
+The reduction only removes client details; a document that is larger than
+the limit even without them is sent unchanged, client details included, as
+documents were sent before client correlation existed. The field
+and the count are absent when no client is affected, so documents without
+clients are byte-identical to earlier version-2 output. Notice events can carry
+the same field. Clients come only from local state and are never sent to public
+sources.
+
+Client correlation opens the live inventory database with SQLite `mode=ro` and
+reads one transaction. SQLite may need writable directory access to create WAL
+sidecars, even for this read-only connection. If the database cannot be read
+(including a read-only directory without usable sidecars), the clients line is
+omitted. Use a consistent writer-prepared backup when read-only storage is needed;
+live databases are never opened as immutable snapshots.
+
 ### Privacy
 
 Messages go to the providers you configure: Slack, Discord, Telegram, Teams,
 Microsoft 365, Gmail, ntfy.sh, and so on. Each provider sees the CVE identifiers,
-scores, descriptions, and rule names in the alerts. Self-host ntfy, Gotify, or
+scores, descriptions, rule names, and client labels in the alerts. Client labels
+are never sent to public vulnerability sources. Self-host ntfy, Gotify, or
 Matrix, or use your own SMTP server, to keep alerts private.
 
 ## Rules

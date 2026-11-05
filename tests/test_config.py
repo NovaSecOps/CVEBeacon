@@ -30,6 +30,18 @@ def test_relative_paths_resolve_from_configuration(tmp_path):
     assert config.database_path == (tmp_path / "state/state.db").resolve()
 
 
+def test_inventory_client_column_is_accepted(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE.replace(
+            'version = "version"', 'version = "version"\nclient = "Client"'
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    assert config.inventory.columns["client"] == "Client"
+
+
 def test_container_example_loads_with_and_without_watch(tmp_path):
     example = Path(__file__).parents[1] / "deploy/container/cvebeacon.example.toml"
     config = load_config(example)

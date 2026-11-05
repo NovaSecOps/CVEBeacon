@@ -8,6 +8,8 @@ import unicodedata
 import uuid
 
 from cvebeacon_extensions.contract import decode_json
+from cvebeacon.clients import ClientImpact, ClientImpacts, format_affected_clients
+from cvebeacon.identity import MAX_CLIENT_LENGTH
 from ..common import AutomationError, digest, regular
 from ._sqlite import BoundedConnection
 
@@ -57,7 +59,7 @@ def _label(value, maximum=160):
     return text[:maximum] or "unknown"
 
 
-def render_event(row) -> tuple[str, str]:
+def render_event(row, client_impacts=None) -> tuple[str, str]:
     try:
         run = str(uuid.UUID(row["run_id"]))
         if run != row["run_id"] or type(row["event_id"]) is not int or row["event_id"] <= 0:
@@ -81,6 +83,14 @@ def render_event(row) -> tuple[str, str]:
                 + "Advisory: " + _label(row["cve_id"]) + "\n"
                 + "Event: " + row["event_type"] + "\nApplicability: " + applicability + "\nCVSS: " + cvss
                 + "\nKEV: CISA=" + flag(vulnerability.get("cisa_kev")) + "; EU=" + flag(vulnerability.get("eu_kev")))
+        safe_clients = ClientImpacts(
+            tuple(ClientImpact(_label(item.name, MAX_CLIENT_LENGTH), item.assets, item.status)
+                  for item in (client_impacts or ())),
+            getattr(client_impacts, "omitted", 0),
+        )
+        clients = format_affected_clients(safe_clients, limit=10)
+        if clients:
+            text += "\n" + clients
         return digest((run + ":" + str(row["event_id"])).encode("ascii")), text
     except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
         raise AutomationError("invalid_core_event") from None

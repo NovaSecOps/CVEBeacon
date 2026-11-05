@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .config import AppConfig, InventoryConfig, load_config
+from .clients import affected_clients, format_affected_clients
 from .engine import QueryEngine
 from .errors import CVEBeaconError, SourceError
 from .http import HttpClient
@@ -406,7 +407,7 @@ def _run_users(args, config: AppConfig) -> int:
     raise CVEBeaconError("unsupported users command")
 
 
-def _event_line(row, rule_name: str | None = None, reported=None) -> str:
+def _event_line(row, rule_name: str | None = None, reported=None, clients=None) -> str:
     from .watch.messages import date_phrase
 
     try:
@@ -420,6 +421,13 @@ def _event_line(row, rule_name: str | None = None, reported=None) -> str:
     if reasons:
         line += f"  {reasons}"
     line += f"  {date_phrase(row.published, row.first_seen)}"
+    affected = format_affected_clients(
+        (clients or {}).get(row.cve_id.strip().upper(), ()),
+        language="en",
+        limit=10,
+    )
+    if affected:
+        line += f"  {affected}"
     if reported is not None:
         from .watch.reported import format_reported
 
@@ -654,6 +662,9 @@ def _run_watch(args, config: AppConfig) -> int:
                 template=args.template,
                 out=args.out,
                 force=args.force,
+                client_impacts=affected_clients(
+                    config.database_path, (args.cve_id,)
+                ).get(args.cve_id.upper(), ()),
             )
         )
         return 0
@@ -683,12 +694,16 @@ def _run_watch(args, config: AppConfig) -> int:
         display = {rule.name.casefold(): rule.name for rule in config.watch.rules}
         rows = store.events(limit=args.limit, rule=args.rule, pending=args.pending)
         marks = store.reported_marks(row.cve_id for row in rows)
+        row_clients = affected_clients(
+            config.database_path, (row.cve_id for row in rows)
+        )
         for row in rows:
             print(
                 _event_line(
                     row,
                     display.get(row.rule.casefold(), row.rule),
                     marks.get(row.cve_id),
+                    row_clients,
                 )
             )
         return 0

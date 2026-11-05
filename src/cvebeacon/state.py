@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterator, Sequence
 
 from .errors import StateError
+from .identity import validate_client_name
 from .models import Finding, QueryResult, HealthStatus
 from .watch.directories import ensure_private_directory
 
@@ -173,6 +174,27 @@ class StateStore:
                     primary_id TEXT NOT NULL,
                     PRIMARY KEY(asset_id, alias)
                 );
+                CREATE TABLE IF NOT EXISTS scan_asset_clients (
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    asset_id TEXT NOT NULL,
+                    client TEXT NOT NULL,
+                    client_key TEXT NOT NULL,
+                    PRIMARY KEY(run_id, asset_id)
+                );
+                CREATE TABLE IF NOT EXISTS scan_findings (
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    asset_id TEXT NOT NULL,
+                    identifier TEXT NOT NULL,
+                    advisory_id TEXT NOT NULL,
+                    applicability TEXT NOT NULL,
+                    PRIMARY KEY(run_id, asset_id, identifier)
+                );
+                CREATE INDEX IF NOT EXISTS runs_successful ON runs(status, completed_at);
+                CREATE INDEX IF NOT EXISTS advisory_aliases_alias ON advisory_aliases(alias, asset_id);
+                CREATE INDEX IF NOT EXISTS advisory_aliases_primary ON advisory_aliases(asset_id, primary_id, alias);
+                CREATE INDEX IF NOT EXISTS scan_findings_lookup ON scan_findings(run_id, identifier, asset_id, applicability);
+                CREATE INDEX IF NOT EXISTS scan_findings_asset ON scan_findings(run_id, asset_id, applicability, identifier);
+                CREATE INDEX IF NOT EXISTS scan_findings_advisory ON scan_findings(run_id, advisory_id, asset_id);
                 """
             )
             rows = db.execute("SELECT version FROM schema_info").fetchall()
@@ -185,6 +207,31 @@ class StateStore:
                 db.execute("UPDATE schema_info SET version=?", (SCHEMA_VERSION,))
             elif row["version"] != SCHEMA_VERSION:
                 raise StateError(f"unsupported state schema version {row['version']}")
+            columns = {
+                item[1]
+                for item in db.execute("PRAGMA table_info(scan_asset_clients)")
+            }
+            if "client_key" not in columns:
+                db.execute(
+                    "ALTER TABLE scan_asset_clients "
+                    "ADD COLUMN client_key TEXT NOT NULL DEFAULT ''"
+                )
+                for item in db.execute(
+                    "SELECT run_id,asset_id,client FROM scan_asset_clients"
+                ).fetchall():
+                    db.execute(
+                        "UPDATE scan_asset_clients SET client_key=? "
+                        "WHERE run_id=? AND asset_id=?",
+                        (
+                            str(item["client"]).casefold(),
+                            item["run_id"],
+                            item["asset_id"],
+                        ),
+                    )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS scan_asset_clients_client "
+                "ON scan_asset_clients(run_id, client_key, asset_id)"
+            )
 
     def record_scan(self, results: Sequence[QueryResult], *, channels: Sequence[str] = (), attempt_id: str | None = None) -> tuple[str, list[int]]:
         self.initialize()
@@ -200,11 +247,24 @@ class StateStore:
                     (run_id, started, completed, "failed" if any(result.coverage is not None or any(health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for health in result.source_health) for result in results) else "completed", len(results), len(findings), sum(result.coverage is not None for result in results)),
                 )
                 for result in results:
+                    try:
+                        validate_client_name(result.asset.client)
+                    except ValueError as exc:
+                        raise StateError(str(exc)) from None
                     db.execute("INSERT INTO scan_assets VALUES (?,?,?)", (
                         run_id, result.asset.asset_id, json.dumps({"asset": asdict(result.asset),
                             "coverage": result.coverage.value if result.coverage else None,
                             "coverage_reason": result.coverage_reason}, ensure_ascii=False),
                     ))
+                    db.execute(
+                        "INSERT INTO scan_asset_clients(run_id,asset_id,client,client_key) VALUES (?,?,?,?)",
+                        (
+                            run_id,
+                            result.asset.asset_id,
+                            result.asset.client,
+                            result.asset.client.casefold(),
+                        ),
+                    )
                     for health in result.source_health:
                         db.execute(
                             "INSERT INTO source_health VALUES (?,?,?,?,?,?,?)",
@@ -232,6 +292,43 @@ class StateStore:
                             raise StateError("unreconciled advisory alias collision in scan")
                         observed.add(identity)
                         finding = replace(finding, vulnerability=replace(finding.vulnerability, advisory_id=primary))
+                        primary_id = primary.strip().upper()
+                        # Freeze the known alias closure with this run. Delivery
+                        # must not depend on later changes to the alias ledger.
+                        seeds = ",".join("(?)" for _ in candidates)
+                        known = db.execute(
+                            "WITH RECURSIVE names(identifier) AS ("
+                            f" VALUES {seeds}"
+                            " UNION SELECT aa.alias FROM advisory_aliases aa JOIN names n"
+                            " ON aa.primary_id=n.identifier WHERE aa.asset_id=?"
+                            " UNION SELECT aa.primary_id FROM advisory_aliases aa JOIN names n"
+                            " ON aa.alias=n.identifier WHERE aa.asset_id=?"
+                            ") SELECT identifier FROM names",
+                            (*candidates, finding.asset.asset_id, finding.asset.asset_id),
+                        )
+                        snapshot_identifiers = set(finding.vulnerability.identifiers)
+                        snapshot_identifiers.update(row[0] for row in known)
+                        for identifier in sorted(snapshot_identifiers):
+                            value = identifier.strip().upper()
+                            if not value:
+                                continue
+                            db.execute(
+                                "INSERT INTO scan_findings(run_id,asset_id,identifier,advisory_id,applicability)"
+                                " VALUES (?,?,?,?,?) ON CONFLICT(run_id,asset_id,identifier)"
+                                " DO UPDATE SET advisory_id=excluded.advisory_id,"
+                                " applicability=excluded.applicability"
+                                " WHERE CASE excluded.applicability WHEN 'affected' THEN 2"
+                                " WHEN 'needs_review' THEN 1 ELSE 0 END >"
+                                " CASE scan_findings.applicability WHEN 'affected' THEN 2"
+                                " WHEN 'needs_review' THEN 1 ELSE 0 END",
+                                (
+                                    run_id,
+                                    finding.asset.asset_id,
+                                    value,
+                                    primary_id,
+                                    finding.applicability.value,
+                                ),
+                            )
                         payload = json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=False)
                         fingerprint = material_fingerprint(finding)
                         failed_sources = {health.source for health in result.source_health if health.status != HealthStatus.OK}

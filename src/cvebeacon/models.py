@@ -39,6 +39,7 @@ class Asset:
     cpe: str = ""
     repository: str = ""
     commit: str = ""
+    client: str = ""
 
     @property
     def identity_path(self) -> str:

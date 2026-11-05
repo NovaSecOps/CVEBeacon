@@ -94,6 +94,7 @@ Unknown-name diagnostics list every unique unknown name up to 128 names and
 | `ssvc_exploitation` | Stored CISA-ADP SSVC exploitation value: `none`, `poc`, or `active`. |
 | `cwes` | Comma-separated CWE identifiers, for example `CWE-79, CWE-89`. |
 | `affected_products` | One line per product. When the stored view has exactly one vendor, each line is prefixed with that vendor, for example `acme widget`. With several vendors only product names are listed; with no products the vendor names are listed. |
+| `affected_clients` | Comma-separated clients affected by the CVE in the latest successful inventory scan, for example `Acme, Globex (review)`. Needs-review findings carry `(review)`. Uses `not available` when no successful scan or affected client exists. |
 | `references` | Reference URLs, one per line, for example `https://example.invalid/advisory`. |
 | `nvd_url` | `https://nvd.nist.gov/vuln/detail/<cve_id>`. |
 | `cve_org_url` | `https://www.cve.org/CVERecord?id=<cve_id>`. |
@@ -105,7 +106,9 @@ Unknown-name diagnostics list every unique unknown name up to 128 names and
 | `reported_at` | Full timestamp of the current report mark, for example `2026-11-04T14:00:00+00:00`; `not reported` without a mark. |
 
 Values come from the same stored view used by alert messages and the current
-local report mark. The command does not query NVD, EUVD, KEV, or EPSS.
+local report mark. The command does not query NVD, EUVD, KEV, or EPSS. Client
+labels in Markdown output are escaped as literal text; `.txt` output and Word
+values keep the original spelling, with Word applying XML escaping.
 
 ## Word templates
 

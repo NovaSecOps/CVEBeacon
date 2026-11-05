@@ -9,6 +9,8 @@ asset_id = "asset_id"
 vendor = "vendor"
 product = "product"
 version = "version"
+# Optional: map the client label when the source has one.
+# client = "client"
 
 [state]
 database = ".cvebeacon/state.db"

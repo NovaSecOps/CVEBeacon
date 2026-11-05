@@ -1,7 +1,7 @@
 {% extends 'base.html' %}{% from 'watch_macros.html' import day %}
 {% block title %}Watch events · CVEBeacon{% endblock %}
 {% macro page_url(number) -%}
-{{ url_for('watch.events', page=number, rule=filters.rule, kind=filters.kind, initial=filters.initial, since=filters.since, until=filters.until, cve=filters.cve, pending=filters.pending) }}
+{{ url_for('watch.events', page=number, rule=filters.rule, kind=filters.kind, initial=filters.initial, since=filters.since, until=filters.until, cve=filters.cve, pending=filters.pending, client=filters.client) }}
 {%- endmacro %}
 {% block content %}
 <h1>Watch events</h1>
@@ -12,11 +12,14 @@
   <label>Kind<select name="kind"><option value="">Any</option>{% for kind in kinds %}<option value="{{ kind }}" {% if filters.kind == kind %}selected{% endif %}>{{ kind }}</option>{% endfor %}</select></label>
   <label>Initial<select name="initial"><option value="">Any</option><option value="yes" {% if filters.initial == 'yes' %}selected{% endif %}>Yes</option><option value="no" {% if filters.initial == 'no' %}selected{% endif %}>No</option></select></label>
   <label>Pending delivery<select name="pending"><option value="">Any</option><option value="yes" {% if filters.pending == 'yes' %}selected{% endif %}>Yes</option><option value="no" {% if filters.pending == 'no' %}selected{% endif %}>No</option></select></label>
+  <label>Client<select name="client"><option value="">Any</option>{% for name in client_names %}<option value="{{ name }}" {% if filters.client == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
   <label>From date<input type="date" name="since" value="{{ filters.since }}"></label>
   <label>To date<input type="date" name="until" value="{{ filters.until }}"></label>
   <label>CVE<input name="cve" value="{{ filters.cve }}" maxlength="32" placeholder="CVE-2026-1234"></label>
   <button>Filter</button>
 </form>
+{% if clients_incomplete %}<p>Client choices are incomplete. Use the <a href="{{ url_for('watch.clients') }}">Clients page</a> to select other clients.</p>{% endif %}
+{% if results_incomplete %}<p role="status">Results incomplete: this client's CVE list exceeds the filter limit. Filter by an exact CVE to check its membership directly.</p>{% endif %}
 <p><a href="{{ url_for('watch.events') }}">Clear filters</a> · Page {{ page }}{% if has_previous %} · <a href="{{ page_url(page - 1) }}">Newer events</a>{% endif %}{% if has_next %} · <a href="{{ page_url(page + 1) }}">Older events</a>{% endif %}</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Time</th><th>Rule</th><th>CVE</th><th>Kind</th><th>Initial</th><th>Published</th><th>First seen</th><th>Reported</th></tr></thead>
