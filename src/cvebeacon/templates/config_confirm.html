@@ -1,0 +1,5 @@
+<h2>Review changes</h2><pre>{{ diff }}</pre>
+<p>Credential values are never displayed. Webhook endpoint values are redacted. Saving removes comments and original formatting, keeps a backup, reloads the dashboard and ends all sessions.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="confirm"><input type="hidden" name="preview" value="{{ preview }}">
+{% if lockout %}<p><strong>These changes affect access or session settings.</strong> Check that you can log in to the destination account store and that the cookie settings match your transport.</p><label><input type="checkbox" name="lockout" value="yes" required> I confirm the access changes and can log in again.</label>{% endif %}
+<button type="submit">Confirm and save</button></form>

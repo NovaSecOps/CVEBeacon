@@ -592,7 +592,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
 
     from .dashboard_ops import create_blueprint as create_operations_blueprint
     app.register_blueprint(create_operations_blueprint(config))
-
+    from .dashboard_config import register_config
+    register_config(app, config, host=host)
     return app
 
 

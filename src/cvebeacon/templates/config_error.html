@@ -1,0 +1,2 @@
+{% extends "base.html" %}{% block title %}Configuration error · CVEBeacon{% endblock %}
+{% block content %}<h1>Configuration was not saved</h1><p>{{ error }}</p><p>Reload the section to correct the values and create a new preview.</p><a href="{{ url_for('config_editor.index') }}">Configuration sections</a>{% endblock %}

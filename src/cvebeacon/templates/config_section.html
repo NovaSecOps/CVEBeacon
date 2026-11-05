@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block title %}{{ section }} configuration · CVEBeacon{% endblock %}
+{% block content %}<h1>{{ section }} configuration</h1><p><a href="{{ url_for('config_editor.index') }}">All configuration sections</a></p>
+{% if preview %}{% include "config_confirm.html" %}{% else %}
+<p>Blank fields use the loader's defaults. Strings are plain text. Arrays and condition tables use TOML values, for example <code>["soc"]</code> or <code>{ cvss_min = 9.0 }</code>. All settings are validated by the configuration loader before confirmation.</p>
+<p>Comments and formatting are lost on save. A timestamped backup is kept. Saving reloads the dashboard and ends all sessions.</p>
+{% if section == 'rules' %}<p>Condition fields: {{ leaves|join(', ') }}; combine with any, all or not. Triggers (events): {{ events|join(', ') }}. Name the configured channels in the channels array. The final blank row adds a rule.</p>{% endif %}
+{% if section == 'channels' %}<form method="get"><label>New channel type <select name="new_type">{% for kind in channel_types %}<option>{{ kind }}</option>{% endfor %}</select></label><button>Choose type for blank row</button></form><p>Choosing a type reloads the form. Each channel lists its known fields. Leave the last row's name blank to skip it.</p>{% endif %}
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="preview"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="row_count" value="{{ groups|length }}">
+{% for group in groups %}{% set index = loop.index0 %}<fieldset><legend>{{ group.label }}</legend>
+{% if section in ['rules','channels','product-mappings'] %}<label><input type="checkbox" name="remove{{ index }}" value="yes"> Remove this row</label>{% endif %}
+{% for field in group.controls %}<p><label>{{ field.key }}{% if field.kind == 'boolean' %}<select name="{{ field.id }}"><option value="" {% if field.value == '' %}selected{% endif %}>Default</option><option value="true" {% if field.value == 'true' %}selected{% endif %}>true</option><option value="false" {% if field.value == 'false' %}selected{% endif %}>false</option></select>
+{% elif field.kind == 'toml' %}<textarea name="{{ field.id }}" rows="3" cols="60">{{ field.value }}</textarea>
+{% else %}<input name="{{ field.id }}" value="{{ field.value }}" {% if field.key == 'url' %}type="password" autocomplete="off" placeholder="Leave blank to keep existing endpoint"{% endif %}>{% endif %}</label>
+{% if field.default %}<small>Default: {{ field.default }}</small>{% endif %}
+{% if field.secret %}<label>New secret value (optional)<input type="password" autocomplete="new-password" name="{{ field.id }}_new"></label><small>A new owner-only file is staged in the protected data directory. Its generated reference replaces this field. The value is never shown again. Abandoned previews expire after ten minutes.</small>{% endif %}</p>{% endfor %}
+</fieldset>{% endfor %}<button type="submit">Validate and preview</button></form>{% endif %}
+{% endblock %}

@@ -244,6 +244,7 @@ logout, even if its role has no permissions.
 | `edit_dashboard` | Edit dashboard settings |
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
+| `edit_system` | Edit state database and report output paths |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
@@ -324,7 +325,7 @@ Built-in password authentication does **not** protect passwords or session cooki
 
 Loopback bindings validate the requested host. Wildcard bindings accept numeric IP host headers and `localhost`, protecting against arbitrary hostname rebinding. For a reverse proxy, forward a numeric backend `Host` header and preserve the application at the URL root. Forwarded host, address and scheme headers are not trusted. A specific hostname binding accepts that hostname. Outbound TLS verification remains enabled. Password configuration affects only the dashboard; core monitoring continues to work without credentials.
 
-Forms use CSRF protection, output is escaped, errors omit sensitive details, and downloads cannot select filesystem paths. Configuration and credential values are not rendered. Report/query operations are synchronous; avoid submitting repeated requests while an investigation is running.
+Forms use CSRF protection, output is escaped, errors omit sensitive details, and downloads cannot select filesystem paths. Credential values are not rendered. Report/query operations are synchronous; avoid submitting repeated requests while an investigation is running.
 
 The monitoring SQLite database stores observations and dashboard scan metadata.
 Accounts and roles live separately in `cvebeacon-users.db` beside the watch
@@ -336,6 +337,102 @@ by trusted accounts. Before an
 upgrade, stop the scanner/dashboard and back up all three data stores. Schema
 upgrades preserve existing observations and delivery records; an older
 application requires its corresponding pre-upgrade backups.
+
+## Configuration editor
+
+After account login, open **Configuration**. Each section requires both `view`
+and its edit permission for viewing, previewing and saving. Shared-password and
+anonymous sessions cannot use the editor. A viewer without edit permissions
+can see the section index, but cannot read configuration values.
+
+| Section | Required edit permission |
+| --- | --- |
+| Watch settings | `edit_watch` |
+| Sources | `edit_sources` |
+| Rules: conditions, event triggers and channel assignments | `edit_rules` |
+| Watch notification channels, with fields for the selected type | `edit_channels` |
+| Legacy Teams and email notifications | `edit_channels` |
+| Watch reporting identity | `edit_reporting` |
+| Inventory and exact product mappings | `edit_inventory` |
+| Dashboard sessions and cookies | `edit_dashboard` |
+| HTTP client | `edit_http` |
+| State database and report output paths | `edit_system` |
+
+Blank fields omit a setting and use the configuration loader's default. String
+fields accept plain text; arrays, column mappings and nested rule conditions
+accept TOML values. For example, use `["soc-email"]` for channels and
+`{ any = [{ cvss_min = 9.0 }, { epss_min = 0.5 }] }` for a condition.
+The final blank row adds a rule, mapping or channel. Choose the new channel type
+before making other changes; choosing it reloads the form. Removal checkboxes
+remove existing rows. Every submitted document is validated by `load_config`,
+including channel references and source requirements. Invalid submissions show
+the loader's guidance with submitted values redacted and leave the file intact.
+Unrecognized configuration fields must be reviewed outside the editor before
+editing; they are never silently copied or discarded.
+
+**Validate and preview** builds TOML in a temporary file beside the configuration.
+Review the diff, then **Confirm and save**. Previews expire after ten minutes,
+belong to the current session and section, and can be used once. If the original
+file changed since the form loaded or preview was created, the save is refused;
+reload the form. The editor serializes its writers using the account database
+transaction and checks the file again immediately before replacement. External
+editors do not participate in that lock: avoid simultaneous filesystem edits.
+Requests are bounded by the dashboard's 8192-byte form limit; split large edits
+into smaller saves where possible.
+
+Saving removes hand-written **comments and formatting**. Before replacement,
+the original bytes are kept in an owner-only sibling directory named
+`.CONFIG_FILENAME.backups`. The last ten timestamped backups are retained.
+The new configuration is written atomically with `os.replace`, preserving the
+original owner and mode. Configuration files must be regular files with no
+extra hard links, owned by the service account and not group or other writable
+on POSIX. Parent directories must pass the account store's ownership checks.
+New backup and secret directories are owner-only. On Windows, apply the same
+service-account-only ACL protections described in the account guide; POSIX
+mode bits do not establish Windows ACL isolation.
+
+The account audit records the actor, time, section and changed-line count, never
+configuration values. Permission and credential revocation are rechecked in
+the write transaction. The complete replacement application is prepared before
+the live file changes. Validation, replacement preparation and handled write or
+audit failures leave the existing application and configuration in place.
+Successful saves reload the dashboard and end **all dashboard sessions**; log
+in again. Requests already running finish with their original configuration.
+Other running commands retain their configuration until restarted.
+Run the disposable loopback acceptance check with
+`python tools/dashboard_config_smoke.py`; it creates no schedules and sends no
+notifications.
+
+All dashboard setting changes require an additional access confirmation.
+Changing the effective account database path (the sibling of the watch
+database, including changes induced by the state database default) also requires
+an administrator and an existing destination store with an enabled administrator.
+The editor cannot turn off account authentication. It does not move databases.
+Host and port remain `serve --host` and `--port` options; they are not TOML
+settings. Moving stores requires making the protected destination available
+before choosing it. Keep a working administrator login for that destination.
+
+Secrets remain `*_env` or `*_file` references. Environment variables can be named
+but cannot be set. Existing secret contents are never returned, including in
+validation errors, diffs or audit entries. Generic webhook endpoint values are
+also hidden: leave their input blank to retain the endpoint. For any secret-file
+field, an optional password input writes a **new**, randomly named 0600 file in
+`dashboard-secrets` beside the account database, inside the protected data
+directory. Its reference replaces the field; a supplied destination path is
+never overwritten. No secret value is placed in TOML or a confirmation form.
+The file is staged for validation before confirmation. Invalid submissions
+remove staged files; expired previews remove them on the next editor request.
+A process restart can leave unreferenced staged files. Existing files and files
+referenced by configuration backups are retained; rollback does not restore or
+delete secret contents.
+
+**Backups and rollback** requires `view` and every configuration edit permission,
+because a backup can change every section. Choose a backup, validate it, review
+the diff and confirm. Rollback uses the same validation, concurrency checks,
+access confirmation, audit, atomic replacement, backup and reload path as saving.
+Invalid or unavailable secret references prevent rollback. Configuration
+permissions allow changing operational paths and notification destinations;
+grant them only to accounts trusted to control those settings.
 
 ## Package identities and advisory views
 

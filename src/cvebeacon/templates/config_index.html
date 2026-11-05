@@ -1,0 +1,7 @@
+{% extends "base.html" %}{% block title %}Configuration · CVEBeacon{% endblock %}
+{% block content %}<h1>Configuration</h1>
+<p>Choose a section. Viewing and editing require its edit permission and view permission.</p>
+<ul>{% for section, permission in sections.items() %}{% if permission in permissions %}<li><a href="{{ url_for('config_editor.' + section) }}">{{ section }}</a></li>{% endif %}{% endfor %}</ul>
+<p><a href="{{ url_for('config_editor.backups') }}">Backups and rollback</a> require every configuration edit permission.</p>
+<p>Every save requires a validated diff preview. Comments and formatting from hand-edited files are lost; the original file is backed up. The last ten backups are retained. Saving reloads the dashboard and ends existing sessions. Other running commands keep their configuration until restarted.</p>
+{% endblock %}
