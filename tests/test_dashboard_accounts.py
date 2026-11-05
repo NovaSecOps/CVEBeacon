@@ -557,3 +557,15 @@ def test_zero_enabled_admin_store_is_detected(accounts, caplog):
     dashboard.create_app(config)
     assert "no enabled administrator" in caplog.text
     assert "users add NAME --admin" in caplog.text
+
+
+def test_security_recovery_and_permission_boundaries_are_documented():
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "DASHBOARD.md").read_text()
+    watch = (Path(__file__).resolve().parents[1] / "docs" / "WATCH.md").read_text()
+    assert "full administrative trust" not in guide
+    assert "256 anonymous" in guide and "16 per account" in guide
+    assert "no enabled administrator" in guide
+    assert "creation-lock file" in guide and "shared-password login" in guide
+    assert "10,000" in guide and "login_failures_suppressed" in guide
+    for document in (guide, watch):
+        assert "cb_role" in document and "cb_user_role" in document

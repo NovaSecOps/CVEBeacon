@@ -417,8 +417,11 @@ cvebeacon --config cvebeacon.toml users verify
 In `authenticated` mode, account administration needs an administrator login:
 `--admin-user NAME` plus a hidden password prompt, verified through the same
 account store. The action is audited with the administrator as its actor. The
-first `users add --admin` is the bootstrap exception when no administrator
-account exists; it is audited as `(bootstrap)` and requires a password. A user may
+first `users add --admin` is the bootstrap exception when no enabled
+administrator exists; this also recovers older stores whose administrators are
+all disabled, using a new username from the service-account shell. Disabled
+administrators stay disabled. The check is transactional; it is audited as
+`(bootstrap)` and requires a password. A user may
 change their own password with `users passwd USERNAME` and their current
 password; resetting another user's password, disabling, enabling or unlocking
 an account requires `--admin-user` and an administrator account. In `open` and
@@ -442,8 +445,8 @@ co-administrators or someone with the service account. Person-level separation
 needs a front end that people use instead of a service-account shell, such as
 the [dashboard](DASHBOARD.md). The report and user-admin audit chains make edits to
 those logs detectable unless the person also recomputes them; `cb_user` account
-rows and the configuration file are not covered by either chain. An action with
-an empty actor after bootstrap in authenticated mode means it was performed
+rows, `cb_role` definitions, `cb_user_role` assignments and the configuration file
+are not covered by either chain. An action with an empty actor after bootstrap in authenticated mode means it was performed
 outside the administrator gate.
 
 - A username is 1–64 characters from letters, digits, dot, underscore, at sign,
@@ -459,7 +462,8 @@ outside the administrator gate.
 - `users list` never displays password material. `users verify` recomputes the
   user-admin audit chain and exits 2 at the first broken row. It covers the
   user-admin audit log only; direct edits to `cb_user` (password hash, disabled
-  flag, role, email) are not part of that chain. Treat file access as
+  flag, email), `cb_role` and `cb_user_role` are not part of that chain. Treat file
+  access as
   administrator access and compare against a trusted backup if account-row
   tampering matters.
 
