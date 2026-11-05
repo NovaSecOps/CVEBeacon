@@ -346,6 +346,7 @@ def test_schedule_outcome_audit_failure_is_visible_and_retried(tmp_path, monkeyp
     app = dashboard.create_app(config)
     client = app.test_client()
     login(client)
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     runner, calls = fake_scheduler({"text": "# unrelated\n"})
     app.extensions["dashboard_schedule_runner"] = runner
     monkeypatch.setattr(dashboard_ops, "_running_as_root", lambda: False)

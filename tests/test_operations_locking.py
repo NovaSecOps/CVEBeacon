@@ -218,7 +218,7 @@ def test_windows_break_handler_uses_keyboard_interrupt_cleanup(monkeypatch):
 def test_cli_progress_is_line_buffered_for_frozen_interpreters(tmp_path, monkeypatch):
     from io import BytesIO, TextIOWrapper
     output = BytesIO()
-    stream = TextIOWrapper(output, encoding="utf-8")
+    stream = TextIOWrapper(output, encoding="utf-8", newline="\n")
     monkeypatch.setattr(sys, "stdout", stream)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(cli, "run", lambda args: print("progress") or 0)
