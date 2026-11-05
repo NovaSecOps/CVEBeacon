@@ -1,0 +1,18 @@
+{% extends 'base.html' %}{% from 'watch_macros.html' import value, stamp %}
+{% block title %}Reported to clients · CVEBeacon{% endblock %}
+{% block content %}
+<h1>Reported to clients</h1>
+<p>These are the CVEs whose latest report mark is active. The full append-only trail, including withdrawals, is available as CSV or JSON to accounts with the <code>view_audit</code> permission.</p>
+{% if can_export %}<p><a href="{{ url_for('watch.export_reported', format='csv') }}">Download CSV</a> · <a href="{{ url_for('watch.export_reported', format='json') }}">Download JSON</a></p>{% endif %}
+<p>Page {{ page }}{% if has_previous %} · <a href="{{ url_for('watch.reported', page=page - 1) }}">Previous</a>{% endif %}{% if has_next %} · <a href="{{ url_for('watch.reported', page=page + 1) }}">Next</a>{% endif %}</p>
+<div class="table-wrap"><table>
+<thead><tr><th>CVE</th><th>Reported by</th><th>Identity mode</th><th>Reported at</th><th>Note</th></tr></thead>
+<tbody>{% for row in rows %}<tr>
+  <td><a href="{{ url_for('watch.cve', cve_id=row.cve_id) }}">{{ row.cve_id }}</a></td>
+  <td>{{ watch_identity(row.by, row.username) }}</td>
+  <td>{{ value(row.identity_mode, 'legacy') }}</td>
+  <td>{{ stamp(row.at) }}</td>
+  <td>{{ value(row.note, '') }}</td>
+</tr>{% else %}<tr><td colspan="5">No CVE is currently reported to clients.</td></tr>{% endfor %}</tbody>
+</table></div>
+{% endblock %}

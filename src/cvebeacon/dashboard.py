@@ -101,6 +101,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         TRUSTED_HOSTS=None if wildcard else list({host, "localhost", "127.0.0.1", "[::1]"}),
     )
     store = StateStore(config.database_path)
+    from .dashboard_watch import register_watch
+    register_watch(app, config)
 
     @app.before_request
     def protect_request():
@@ -589,7 +591,7 @@ def serve(config: AppConfig, *, host="127.0.0.1", port=8787, allow_unauthenticat
     from waitress import create_server
     app = create_app(config, host=host)
     try:
-        server = create_server(app, host=host, port=port, threads=4, expose_tracebacks=False, max_request_body_size=8192)
+        server = create_server(app, host=host, port=port, threads=4, expose_tracebacks=False, max_request_body_size=app.config["MAX_CONTENT_LENGTH"] or 8192)
     except OSError as exc:
         raise CVEBeaconError("dashboard could not bind the requested address and port") from exc
     address = f"[{host}]" if ":" in host else host

@@ -1,0 +1,47 @@
+{% extends 'base.html' %}{% from 'watch_macros.html' import value, day, stamp %}
+{% block title %}Watch overview · CVEBeacon{% endblock %}
+{% block content %}
+<h1>Watch overview</h1>
+{% if not watch_enabled %}<p class="warning" role="alert">Watch mode is disabled in the configuration. Stored data is shown as it is; new syncs will not run.</p>{% endif %}
+{% if failures %}<p class="warning" role="alert">The last sync failed for: {{ failures }}.</p>{% endif %}
+<div class="metrics">
+  <section><strong>{{ status.rows }}</strong><span>Watched CVEs</span></section>
+  <section><strong>{{ status.any_watched }}</strong><span>Watched CVEs in KEV (CISA {{ status.cisa_watched }}, EU {{ status.eu_watched }})</span></section>
+  <section><strong>{{ status.active_ssvc }}</strong><span>With active SSVC exploitation</span></section>
+  <section><strong>{{ status.reported }}</strong><span>Reported to clients</span></section>
+</div>
+
+<h2>Database</h2>
+<dl>
+  <dt>Path</dt><dd class="break">{{ status.database }}</dd>
+  <dt>Schema version</dt><dd>{{ value(meta.get('schema_version'), 'unknown') }}</dd>
+  <dt>NVD cursor</dt><dd>{{ value(meta.get('nvd_cursor'), 'not set') }}</dd>
+  <dt>EUVD cursor</dt><dd>{{ value(meta.get('euvd_cursor'), 'not set') }}{% if euvd_progress %} · {{ euvd_progress }}{% endif %}</dd>
+  <dt>EPSS score date</dt><dd>{{ value(status.epss_date, 'not set') }} ({{ status.epss_rows }} stored score{{ '' if status.epss_rows == 1 else 's' }})</dd>
+  <dt>KEV catalog entries</dt><dd>CISA {{ status.cisa_kev }}, EU {{ status.eu_kev }} ({{ status.any_kev }} distinct CVE{{ '' if status.any_kev == 1 else 's' }})</dd>
+  <dt>EUVD items</dt><dd>{{ status.euvd_items }}</dd>
+  <dt>Lookups pending or backing off</dt><dd>{{ status.lookups }}</dd>
+</dl>
+
+<h2>Last sync by source</h2>
+<p class="muted">{% if last_sync_at %}Last sync started {{ last_sync_at }}.{% else %}No sync summary has been recorded yet.{% endif %}</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Source</th><th>Last sync</th><th>Requests</th><th>Records</th><th>New</th><th>Changed</th><th>Result</th></tr></thead>
+<tbody>{% for row in sources %}<tr><td>{{ row.source }}</td><td>{{ stamp(row.at) }}</td><td>{{ value(row.requests) }}</td><td>{{ value(row.records) }}</td><td>{{ value(row.new) }}</td><td>{{ value(row.changed) }}</td><td>{% if row.error %}<span class="warning">{{ row.error }}</span>{% else %}ok{% endif %}</td></tr>{% else %}<tr><td colspan="7">No sources are configured.</td></tr>{% endfor %}</tbody>
+</table></div>
+
+<h2>Channel delivery health</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Channel</th><th>Pending</th><th>Sending</th><th>Failed</th><th>Given up</th><th>Ambiguous</th><th>Last success</th></tr></thead>
+<tbody>{% for row in deliveries %}<tr><td>{{ row.channel }}</td><td>{{ row.pending }}</td><td>{{ row.sending }}</td><td>{{ row.failed }}</td><td>{{ row.given_up }}</td><td>{{ row.ambiguous }}</td><td>{{ stamp(row.last_success) }}</td></tr>{% else %}<tr><td colspan="7">No channels are configured and no deliveries are recorded.</td></tr>{% endfor %}</tbody>
+</table></div>
+
+<h2>Initial mode</h2>
+<dl>
+  <dt>Mode</dt><dd>{{ initial.mode }}</dd>
+  <dt>Initial window start</dt><dd>{{ value(initial.window_start, 'not set') }}</dd>
+  <dt>Initialized at</dt><dd>{{ stamp(initial.initialized_at) }}</dd>
+  <dt>Initial sync completed</dt><dd>{{ stamp(initial.sync_completed_at) }}{% if initial.sync_pending %} <span class="badge needs_review">pending</span>{% endif %}</dd>
+  <dt>Initial evaluation completed</dt><dd>{{ stamp(initial.evaluated_at) }}{% if initial.evaluation_pending %} <span class="badge needs_review">pending</span>{% endif %}</dd>
+</dl>
+{% endblock %}
