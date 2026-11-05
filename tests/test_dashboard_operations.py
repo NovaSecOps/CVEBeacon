@@ -259,7 +259,7 @@ def test_cancel_sends_interrupt_and_cleanup_runs(ops, tmp_path):
             if hasattr(signal, "SIGBREAK"):
                 signal.signal(signal.SIGBREAK, stop)
             print("ready", flush=True)
-            time.sleep(30)
+            [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
             """,
             marker,
         )

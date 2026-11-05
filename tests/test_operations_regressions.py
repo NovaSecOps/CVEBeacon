@@ -192,7 +192,7 @@ def test_capture_failure_reaps_child_before_marking_failed(tmp_path, monkeypatch
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
-        time.sleep(30)
+        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
     """, marker))
     try:
         assert manager.wait(job.id).status == "failed"
@@ -280,7 +280,7 @@ def test_cancel_escalates_and_reaps_an_uncooperative_child(tmp_path, monkeypatch
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, signal.SIG_IGN)
         print('ready', flush=True)
-        time.sleep(30)
+        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
     """))
     process = None
     try:
@@ -309,7 +309,7 @@ def test_shutdown_runs_cleanup_and_reaps_child(tmp_path):
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
-        time.sleep(30)
+        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
     """, marker))
     wait_for(lambda: "ready" in manager.store.log_tail(manager.store.get(job.id)))
     process = manager._process

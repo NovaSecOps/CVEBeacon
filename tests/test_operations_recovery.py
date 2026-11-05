@@ -69,7 +69,7 @@ def test_shutdown_bookkeeping_failure_still_reaps_child(tmp_path, monkeypatch, e
         if hasattr(signal, 'SIGBREAK'):
             signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
-        time.sleep(30)
+        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
     ''', marker))
     wait_for(lambda: 'ready' in manager.store.log_tail(manager.store.get(job.id)))
     process = manager._process
@@ -137,7 +137,7 @@ def test_actual_exit_hook_reaps_child_when_store_and_worker_are_unavailable(tmp_
             raise SystemExit(130)
         signal.signal(signal.SIGINT, stop)
         print('ready', flush=True)
-        time.sleep(30)
+        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
     ''', marker)
     script = textwrap.dedent(f'''
         import threading, time
@@ -161,7 +161,7 @@ def test_actual_exit_hook_reaps_child_when_store_and_worker_are_unavailable(tmp_
         def unavailable(job_id):
             if threading.current_thread() is manager._thread:
                 blocked.set()
-                time.sleep(30)
+                [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
             return original(job_id)
         manager.store.get = unavailable
         def fail(*args, **kwargs):
@@ -238,7 +238,7 @@ def test_active_cancellation_storage_failure_still_runs_child_cleanup(tmp_path, 
         if hasattr(signal, 'SIGBREAK'):
             signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
-        time.sleep(30)
+        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
     ''', marker))
     wait_for(lambda: 'ready' in manager.store.log_tail(manager.store.get(job.id)))
     process = manager._process
