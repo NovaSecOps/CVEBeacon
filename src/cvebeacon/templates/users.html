@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block title %}Users · CVEBeacon{% endblock %}
+{% block content %}<h1>Users</h1>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+<table><thead><tr><th>Username</th><th>Display name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>
+{% for user in users %}<tr><td><a href="{{ url_for('user_edit', username=user.username) }}">{{ user.username }}</a></td><td>{{ user.display_name or '' }}</td><td>{{ user.email or '' }}</td><td>{{ user_roles.get(user.id, '') }}</td><td>{{ 'Disabled' if user.disabled else 'Enabled' }}{% if user.locked_until %} (lock recorded until {{ user.locked_until }}){% endif %}</td></tr>{% endfor %}
+</tbody></table><h2>Add user</h2><p>Set a strong password and share it privately with the account holder. They can change it in My account.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Username <input name="username" required maxlength="64" autocomplete="off"></label>
+<label>Display name <input name="display_name" maxlength="100"></label><label>Email <input type="email" name="email" maxlength="254"></label>
+<label>Password <input type="password" name="password" required minlength="12" maxlength="1024" autocomplete="new-password"></label>
+<label>Role <select name="role" required>{% if 'viewer' not in roles %}<option value="" selected>Choose a role</option>{% endif %}{% for name in roles %}<option value="{{ name }}" {% if name == 'viewer' %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label><button type="submit">Add user</button></form>
+{% endblock %}

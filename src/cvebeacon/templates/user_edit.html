@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}Edit user · CVEBeacon{% endblock %}
+{% block content %}<h1>Edit {{ target.username }}</h1>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="save">
+<label>Display name <input name="display_name" maxlength="100" value="{{ target.display_name or '' }}"></label>
+<label>Email <input type="email" name="email" maxlength="254" value="{{ target.email or '' }}"></label>
+<label>Role <select name="role">{% for name in roles %}<option value="{{ name }}" {% if name == role %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<label><input type="checkbox" name="disabled" value="yes" {% if target.disabled %}checked{% endif %}>Disabled</label><button type="submit">Save user</button></form>
+<h2>Reset password</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="password"><label>New password <input type="password" name="password" minlength="12" maxlength="1024" required autocomplete="new-password"></label><button type="submit">Reset password</button></form>
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="unlock"><button type="submit">Unlock account</button></form>
+{% endblock %}

@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block title %}My account · CVEBeacon{% endblock %}
+{% block content %}<h1>My account: {{ current_user.identity }}</h1>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+<h2>Change password</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="password">
+<label>Current password <input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label>
+<label>New password <input type="password" name="password" required minlength="12" maxlength="1024" autocomplete="new-password"></label><button type="submit">Change password and log out</button></form>
+<h2>Sessions in this server process</h2><table><thead><tr><th>Age (seconds)</th><th>Idle (seconds)</th></tr></thead><tbody>{% for age, idle in sessions %}<tr><td>{{ age }}</td><td>{{ idle }}</td></tr>{% endfor %}</tbody></table>
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="logout_all"><button type="submit">Log out of all sessions</button></form>
+{% endblock %}

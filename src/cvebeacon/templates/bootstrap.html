@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block title %}Create administrator · CVEBeacon{% endblock %}
+{% block content %}
+<h1>Create the first administrator</h1>
+<p role="alert">Only use this page from a trusted local computer. The first person to complete this form controls the dashboard. Do not expose an empty account store through a proxy.</p>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Username <input name="username" required maxlength="64" autocomplete="username"></label>
+<label>Password <input type="password" name="password" required minlength="12" maxlength="1024" autocomplete="new-password"></label>
+<button type="submit">Create administrator</button></form>
+{% endblock %}

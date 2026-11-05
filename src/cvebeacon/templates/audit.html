@@ -1,0 +1,6 @@
+{% extends 'base.html' %}
+{% block title %}Account audit · CVEBeacon{% endblock %}
+{% block content %}<h1>Account audit</h1>
+{% if broken is none %}<p>Chain verified.</p>{% else %}<p role="alert">Chain verification failed at row {{ broken }}.</p>{% endif %}
+<table><thead><tr><th>Time</th><th>Action</th><th>Account</th><th>Actor</th></tr></thead><tbody>{% for entry in entries %}<tr><td>{{ entry.at }}</td><td>{{ entry.action }}</td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>{% endfor %}</tbody></table>
+{% endblock %}

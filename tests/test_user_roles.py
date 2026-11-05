@@ -88,4 +88,3 @@ def test_migration_assigns_viewer_and_does_not_resurrect_roles(users):
     proof = migrated.authenticate("admin", PASSWORD)
     migrated.delete_role("operator", authorization=proof)
     assert "operator" not in UserStore(users.path).roles()
-

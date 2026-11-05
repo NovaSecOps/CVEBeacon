@@ -6,6 +6,7 @@ import re
 import secrets
 from threading import Lock
 import time
+from dataclasses import dataclass
 
 from werkzeug.security import check_password_hash
 
@@ -85,3 +86,64 @@ class DashboardAuth:
     def logout(self, identifier):
         with self.lock:
             self.sessions.pop(identifier, None)
+
+
+@dataclass
+class AccountSession:
+    proof: object
+    csrf: str
+    created: float
+    touched: float
+
+
+class AccountSessions:
+    """Bounded, single-process sessions. The browser holds only an opaque id."""
+
+    def __init__(self, lifetime, idle, *, clock=None):
+        self.lifetime, self.idle = lifetime, idle
+        self.clock = clock or time.monotonic
+        self.sessions = OrderedDict()
+        self.lock = Lock()
+        self.max_sessions = 256
+
+    def _prune(self, now):
+        for key, value in list(self.sessions.items()):
+            if now - value.created >= self.lifetime or now - value.touched >= self.idle:
+                self.sessions.pop(key, None)
+
+    def issue(self, proof=None):
+        with self.lock:
+            now = self.clock()
+            self._prune(now)
+            while len(self.sessions) >= self.max_sessions:
+                self.sessions.popitem(last=False)
+            identifier = secrets.token_hex(32)
+            value = AccountSession(proof, secrets.token_hex(32), now, now)
+            self.sessions[identifier] = value
+            return identifier, value
+
+    def get(self, identifier):
+        with self.lock:
+            self._prune(self.clock())
+            value = self.sessions.get(identifier)
+            if value:
+                value.touched = self.clock()
+            return value
+
+    def logout(self, identifier):
+        with self.lock:
+            self.sessions.pop(identifier, None)
+
+    def own(self, proof):
+        with self.lock:
+            self._prune(self.clock())
+            # Never render bearer identifiers or CSRF values.
+            return [(entry.created, entry.touched) for entry in self.sessions.values()
+                    if entry.proof and entry.proof.id == proof.id
+                    and entry.proof.credential_version == proof.credential_version]
+
+    def logout_all(self, user_id):
+        with self.lock:
+            for key, value in list(self.sessions.items()):
+                if value.proof and value.proof.id == user_id:
+                    self.sessions.pop(key, None)
