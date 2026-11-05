@@ -84,9 +84,11 @@ option cannot silently fall back to a less safe default.
   refused by default, even when the embedded address is public. Set
   `allow_private_address: true` on a specific entry to attest an internal site;
   loopback and the mapped/compatible forms still need that explicit flag. NAT64
-  remains refused even with the flag. 6to4 answers are accepted only when both
-  the IPv6 address and its embedded IPv4 address are globally routable. This is
-  intended for controlled internal services, not as a general scanner switch.
+  remains refused even with the flag. A 6to4 answer (`2002::/16`) is accepted
+  only when its embedded IPv4 address is globally routable; that decision is
+  made explicitly and does not depend on how the `ipaddress` release classifies
+  6to4 space. This is intended for controlled internal services, not as a
+  general scanner switch.
 - `ca_bundle` is optional and relative paths are resolved against the
   allowlist file. It must be a regular file, not a symlink. Its certificates are
   trusted in addition to the system roots.
@@ -110,9 +112,12 @@ cvebeacon-ext web detect --client acme --assets acme-assets.json \
 - Resolve first, reject the asset if any answer is non-global (unless
   `allow_private_address` is set), then connect to the validated IP while
   keeping the original Host header and TLS SNI. Every redirect is resolved and
-  validated again. DNS resolution runs in a bounded worker.
+  validated again. DNS resolution runs in a bounded pool of at most four daemon
+  workers.
 - Connect timeout 5 seconds, read timeout 10 seconds and 20 seconds total per
-  asset, covering resolution, connect, header parsing and every body read.
+  asset, covering resolution, connect, header parsing and every body read. The
+  5-second connection limit covers both the TCP connection and the TLS
+  handshake.
   Response headers (including the status line) are capped at 64 KiB before they
   are parsed, and the decompressed body at 2 MiB. Gzip and deflate streams must
   be complete; concatenated gzip members are decoded under one cumulative cap
@@ -135,12 +140,15 @@ stable, client-scoped hashes rather than raw hostnames. CDN and edge
 technologies have `category = "edge"` and are never attributed to the origin
 server.
 
-Unknown versions are never written as `unknown` or inferred. When a validated
-CPE carries the product identity, the row keeps an empty version and a
-`version-unknown` review entry; without a CPE the observation stays in the
-review file only, because the core product identity needs a version. Conflicting
-versions for one product become a `version-conflict` review entry and no row.
-Direct evidence only is used: WordPress does not imply MySQL or PHP.
+Unknown versions are never written as `unknown` or inferred. Hyphenated
+pre-release suffixes are preserved, as are recognised dotted qualifiers such as
+`.Beta1` and `.RC1`; build metadata such as `.Final` and `.v20210629` is not
+treated as part of the version. When a validated CPE carries the product
+identity, the row keeps an empty version and a `version-unknown` review entry;
+without a CPE the observation stays in the review file only, because the core
+product identity needs a version. Conflicting versions for one product become a
+`version-conflict` review entry and no row. Direct evidence only is used:
+WordPress does not imply MySQL or PHP.
 
 Version gaps and other review-only findings still publish a `partial` snapshot
 with the corresponding omissions, so the dashboard can show the product and
@@ -158,11 +166,12 @@ core inventory at it. The core remains the applicability authority:
 ```console
 cvebeacon-ext validate acme-web.json --allow-partial
 cvebeacon-ext merge acme-web.json other-client-web.json \
-  --output inventory.json --source-id central
+  --output inventory.json --source-id central --allow-partial
 ```
 
-Add `--allow-partial` to `validate` whenever the snapshot is partial (for
-example after a version-unknown review or an accepted fetch failure).
+Add `--allow-partial` to both `validate` and `merge` whenever an input snapshot
+is partial (for example after a version-unknown review or an accepted fetch
+failure).
 
 ```toml
 [inventory]

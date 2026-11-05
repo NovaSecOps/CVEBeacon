@@ -58,9 +58,21 @@ class Detection:
     versions: tuple[str, ...]
 
 
-_VERSION = re.compile(r"\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?")
+_VERSION_BODY = r"\d+(?:\.\d+){0,3}"
+_VERSION_QUALIFIER = r"[0-9A-Za-z][0-9A-Za-z._-]*"
+_VERSION_SUFFIX = (
+    rf"(?:[-+]{_VERSION_QUALIFIER}"
+    r"|\.(?:alpha|beta|rc|cr|preview|snapshot)\d*"
+    r"|\.m\d+)?"
+)
+_VERSION = re.compile(_VERSION_BODY + _VERSION_SUFFIX, re.IGNORECASE)
 _REJECTED_VERSIONS = {"", "*", "-", "unknown", "latest", "n/a", "na", "all", "none"}
 _PREFIX = re.compile(r"^(?:v(?=\d)|[A-Za-z][A-Za-z._!-]*(?: [A-Za-z][A-Za-z._!-]*)*[ /](?=\d))")
+
+
+def _versioned(pattern: str) -> str:
+    """Allow a pre-release or build suffix wherever a version is matched."""
+    return pattern.replace(_VERSION_BODY, _VERSION_BODY + _VERSION_SUFFIX)
 
 
 def normalize_version(value: object) -> str:
@@ -110,6 +122,9 @@ def _rule(key, vendor, product, category, kind, pattern, *, subject="", version=
         raise ValueError(f"header rule {key} has no header name")
     if confidence not in {"high", "medium", "low"}:
         raise ValueError(f"unknown confidence: {confidence}")
+    pattern = _versioned(pattern)
+    if version:
+        version = _versioned(version)
     # Compile at import time so a malformed reviewed rule fails closed.
     re.compile(pattern, re.IGNORECASE)
     if version:

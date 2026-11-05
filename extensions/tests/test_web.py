@@ -29,6 +29,7 @@ from cvebeacon_extensions.web import (
     Fetcher,
     StdlibTransport,
     _ConnectionFailure,
+    _DeadlineReader,
     _FetchFailure,
     _Response,
     _TlsFailure,
@@ -325,6 +326,8 @@ def test_detection_is_direct_evidence_only():
     ("WordPress 6.4.2", "6.4.2"),
     ("v2.0.1", "2.0.1"),
     ("1.2.3-beta1", "1.2.3-beta1"),
+    ("26.1.2.Beta1", "26.1.2.Beta1"),
+    ("1.2.3.RC1", "1.2.3.RC1"),
     ("*", ""),
     ("-", ""),
     ("unknown", ""),
@@ -345,6 +348,24 @@ def test_five_component_server_version_is_unknown_not_truncated():
     page = fixture_page({"header": ("server", "WebLogic Server 12.2.1.3.0")})
     found = matching(detect(page), next(rule for rule in RULES if rule.key == "weblogic"))
     assert found and found[0].versions == ()
+
+
+@pytest.mark.parametrize("key,fixture,expected", [
+    ("react", {"url": "https://cdn.example/react@18.2.0-beta/umd/react.production.min.js"},
+     "18.2.0-beta"),
+    ("nginx", {"header": ("server", "nginx/1.25.3-rc1")}, "1.25.3-rc1"),
+    ("wildfly", {"header": ("server", "WildFly/26.1.2.Beta1")}, "26.1.2.Beta1"),
+])
+def test_prerelease_version_suffixes_are_preserved(key, fixture, expected):
+    page = fixture_page(fixture)
+    found = matching(detect(page), next(rule for rule in RULES if rule.key == key))
+    assert found and found[0].versions == (expected,)
+
+
+def test_dotted_build_metadata_is_not_a_version_suffix():
+    page = fixture_page({"header": ("server", "WildFly/26.1.2.Final")})
+    found = matching(detect(page), next(rule for rule in RULES if rule.key == "wildfly"))
+    assert found and found[0].versions == ("26.1.2",)
 
 
 def test_prefix_compatible_versions_prefer_the_most_specific(tmp_path):
@@ -527,6 +548,26 @@ def test_real_tls_without_the_client_ca_is_a_tls_error(tmp_path, monkeypatch):
                                     deadline=time.monotonic() + 10, user_agent="test")
 
 
+def test_tls_handshake_is_bounded_by_the_connect_timeout(monkeypatch):
+    from cvebeacon_extensions import web
+
+    release = threading.Event()
+
+    def responder(sock, request):
+        release.wait(2)
+
+    monkeypatch.setattr(web, "CONNECT_TIMEOUT", 0.1)
+    with local_server(monkeypatch, responder) as server:
+        started = time.monotonic()
+        try:
+            with pytest.raises(_TimeoutFailure):
+                StdlibTransport().fetch(local_endpoint(server, scheme="https"), "127.0.0.1",
+                                        ca_bundle=None,
+                                        deadline=time.monotonic() + 0.7, user_agent="test")
+        finally:
+            release.set()
+        elapsed = time.monotonic() - started
+    assert elapsed < 0.35
 
 
 @pytest.mark.parametrize("hostname", ["2130706433", "0x7f000001", "127.1", "0177.0.0.1"])
@@ -559,7 +600,6 @@ def test_numeric_loopback_spellings_are_blocked_without_attestation(tmp_path, ho
     "::127.0.0.1",
     "::ffff:8.8.8.8",
     "::8.8.8.8",
-    "2002:0808:0808::1",
     "64:ff9b::7f00:1",
     "2002:7f00:1::",
     "fd00::1",
@@ -575,6 +615,15 @@ def test_ssrf_matrix_blocks_every_non_global_answer(tmp_path, address):
                    allow_partial=True, resolver=Resolver({"example.com": [address]}),
                    transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
     assert transport.calls == []
+
+
+def test_public_6to4_answer_is_decided_by_its_embedded_address(tmp_path):
+    assert _is_global_address("2002:0808:0808::1") is True
+    manifest, output, resolver, transport = run(
+        tmp_path, [asset()], [response(headers={"server": "nginx/1.25.3"})],
+        mapping={"example.com": ["2002:0808:0808::1"]})
+    assert manifest["status"] == "success"
+    assert transport.calls[0][1] == "2002:0808:0808::1"
 
 
 def test_ssrf_matrix_blocks_before_transport(tmp_path):
@@ -757,6 +806,26 @@ def test_header_and_body_limits_and_gzip_bomb():
         read_body(io.BytesIO(bomb), "gzip")
 
 
+def test_read_to_eof_stops_at_the_remaining_wire_budget():
+    class FiniteSocket:
+        def __init__(self):
+            self.reads = 0
+
+        def settimeout(self, timeout):
+            pass
+
+        def recv(self, size):
+            self.reads += 1
+            return b"x" * 1024 if self.reads <= 8192 else b""
+
+    sock = FiniteSocket()
+    reader = _DeadlineReader(sock, deadline=1_000_000.0, clock=lambda: 0.0,
+                             limit=2048, message="too large")
+    with pytest.raises(_TooLargeFailure):
+        reader.read(-1)
+    assert sock.reads <= 3
+
+
 def test_slow_response_maps_to_timeout():
     ticks = iter([0.0, 1.0, 100.0])
     class Reader:
@@ -782,6 +851,75 @@ def test_slow_dns_resolution_is_bounded_by_the_asset_deadline(tmp_path, monkeypa
     with pytest.raises(_TimeoutFailure):
         fetcher.fetch(allowlist.assets[0], allowlist)
     assert time.monotonic() - started < 0.35
+
+
+def test_timed_out_resolutions_leave_at_most_max_workers(tmp_path, monkeypatch):
+    from cvebeacon_extensions import web
+
+    release = threading.Event()
+
+    class WedgedResolver:
+        def resolve(self, hostname, port):
+            release.wait(5)
+            return (PUBLIC,)
+
+    path = write_allowlist(tmp_path, [asset()])
+    allowlist = load_allowlist(path, client="acme", now=NOW)
+    monkeypatch.setattr(web, "ASSET_TIMEOUT", 0.01)
+    fetcher = Fetcher(resolver=WedgedResolver(), transport=Transport([]), host_interval=0)
+
+    def resolver_threads():
+        return {thread for thread in threading.enumerate()
+                if thread.name == "cvebeacon-web-resolve" and thread.is_alive()}
+
+    before = resolver_threads()
+    try:
+        for _ in range(20):
+            with pytest.raises(_TimeoutFailure):
+                fetcher.fetch(allowlist.assets[0], allowlist)
+        assert len(fetcher._resolver_pool._threads) <= web.MAX_WORKERS
+        assert len(resolver_threads() - before) <= web.MAX_WORKERS
+    finally:
+        release.set()
+        fetcher.close()
+
+
+def test_resolver_worker_start_failure_is_a_fetch_failure(tmp_path, monkeypatch):
+    real_start = threading.Thread.start
+
+    def fail_start(thread):
+        if thread.name == "cvebeacon-web-resolve":
+            raise RuntimeError("can't start new thread")
+        return real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+    path = write_allowlist(tmp_path, [asset()])
+    allowlist = load_allowlist(path, client="acme", now=NOW)
+    fetcher = Fetcher(resolver=Resolver({"example.com": [PUBLIC]}), transport=Transport([]),
+                      host_interval=0)
+    try:
+        with pytest.raises(_ConnectionFailure):
+            fetcher.fetch(allowlist.assets[0], allowlist)
+    finally:
+        fetcher.close()
+
+
+def test_resolver_submission_failure_is_a_fetch_failure(tmp_path, monkeypatch):
+    path = write_allowlist(tmp_path, [asset()])
+    allowlist = load_allowlist(path, client="acme", now=NOW)
+    fetcher = Fetcher(resolver=Resolver({"example.com": [PUBLIC]}), transport=Transport([]),
+                      host_interval=0)
+
+    def fail_submit(*args, **kwargs):
+        raise RuntimeError("resolver queue is closed")
+
+    monkeypatch.setattr(fetcher._resolver_pool._tasks, "put_nowait", fail_submit)
+    try:
+        with pytest.raises(_ConnectionFailure):
+            fetcher.fetch(allowlist.assets[0], allowlist)
+    finally:
+        monkeypatch.undo()
+        fetcher.close()
 
 
 def test_slow_headers_are_bounded_by_the_deadline(monkeypatch):
@@ -920,6 +1058,32 @@ def test_connection_errors_retry_twice_with_backoff(tmp_path):
     assert len(sleeps) == 2
 
 
+def test_retry_backoff_is_clamped_to_the_asset_deadline(tmp_path):
+    clock = [0.0]
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    class MaximumJitter:
+        def random(self):
+            return 1.0
+
+    path = write_allowlist(tmp_path, [asset()])
+    allowlist = load_allowlist(path, client="acme", now=NOW)
+    fetcher = Fetcher(resolver=Resolver({"example.com": [PUBLIC]}),
+                      transport=Transport([_ConnectionFailure("reset")] * 3),
+                      sleep=sleep, clock=lambda: clock[0], rng=MaximumJitter(),
+                      host_interval=0)
+    try:
+        with pytest.raises(_TimeoutFailure):
+            fetcher.fetch(allowlist.assets[0], allowlist, run_deadline=0.4)
+        assert sleeps == [0.4]
+    finally:
+        fetcher.close()
+
+
 @pytest.mark.parametrize("failure,reason", [
     (_TlsFailure("certificate verify failed"), "tls-error"),
     (_TimeoutFailure("read timed out"), "timeout"),
@@ -974,6 +1138,29 @@ def test_real_transport_counts_chunk_trailers_in_the_wire_budget(monkeypatch):
         with pytest.raises(_TooLargeFailure):
             StdlibTransport().fetch(local_endpoint(server), "127.0.0.1", ca_bundle=None,
                                     deadline=time.monotonic() + 20, user_agent="test")
+
+
+def test_real_transport_rejects_a_negative_chunk_size_early(monkeypatch):
+    state = {"sent": 0}
+
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n-1\r\n")
+        payload = b"x" * 65536
+        try:
+            for _ in range(128):  # 8 MiB, twice the wire limit
+                sock.sendall(payload)
+                state["sent"] += len(payload)
+        except OSError:
+            pass
+
+    with local_server(monkeypatch, responder) as server:
+        started = time.monotonic()
+        with pytest.raises(_ConnectionFailure):
+            StdlibTransport().fetch(local_endpoint(server), "127.0.0.1", ca_bundle=None,
+                                    deadline=time.monotonic() + 10, user_agent="test")
+        elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert state["sent"] < 8 * 1024 * 1024
 
 
 def test_real_transport_rejects_truncated_gzip(monkeypatch):

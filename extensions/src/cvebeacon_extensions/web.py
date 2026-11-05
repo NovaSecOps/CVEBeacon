@@ -7,7 +7,12 @@ source client; it is not exposed to untrusted response bodies.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+    as_completed,
+)
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import email.utils
@@ -15,6 +20,7 @@ import hashlib
 import http.client
 import ipaddress
 from pathlib import Path
+import queue
 import random
 import re
 import socket
@@ -58,6 +64,7 @@ _NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1:
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _PATH = re.compile(r"/[!-~]*")
 _CHARSET = re.compile(r"charset\s*=\s*[\"']?([^;\"'\s]+)", re.IGNORECASE)
+_CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 
 
 class _FetchFailure(Exception):
@@ -406,9 +413,12 @@ def _is_global_address(value: str) -> bool:
             # IPv4-compatible forms, including ::1 and ::, are refused by
             # default for the same reason.
             return False
+        if address.sixtofour is not None:
+            # Some ipaddress releases classify 2002::/16 as private. Decide
+            # the 6to4 policy from the embedded IPv4 address explicitly so it
+            # does not vary with the runtime.
+            return _is_public_unicast(address.sixtofour)
         if not _is_public_unicast(address):
-            return False
-        if address.sixtofour is not None and not _is_public_unicast(address.sixtofour):
             return False
         return True
     return _is_public_unicast(address)
@@ -433,31 +443,71 @@ def _addresses(value: str, port: int) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _resolve_bounded(resolver, hostname: str, port: int, deadline: float,
-                     clock: Callable[[], float]) -> tuple[str, ...]:
-    """Run the resolver in a daemon worker so a wedged lookup cannot hang a run."""
-    remaining = deadline - clock()
-    if remaining <= 0:
-        raise _TimeoutFailure("DNS resolution exceeded the asset time limit")
-    outcome: dict[str, object] = {}
+class _ResolverPool:
+    """Bounded daemon workers shared by one Fetcher's resolver calls."""
 
-    def work() -> None:
+    def __init__(self, workers: int):
+        self._workers = max(1, min(int(workers), MAX_WORKERS))
+        self._tasks: queue.Queue = queue.Queue()
+        self._threads: list[threading.Thread] = []
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def _start_worker(self) -> None:
+        with self._lock:
+            if self._closed:
+                raise _ConnectionFailure("DNS resolver pool is closed")
+            if len(self._threads) >= self._workers:
+                return
+            worker = threading.Thread(target=self._work, name="cvebeacon-web-resolve",
+                                      daemon=True)
+            try:
+                worker.start()
+            except Exception as exc:
+                raise _ConnectionFailure("DNS resolver worker could not start") from exc
+            self._threads.append(worker)
+
+    def _work(self) -> None:
+        while True:
+            task = self._tasks.get()
+            if task is None:
+                return
+            resolver, hostname, port, future = task
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(resolver.resolve(hostname, port))
+            except BaseException as exc:  # propagated in the calling thread
+                future.set_exception(exc)
+
+    def resolve(self, resolver, hostname: str, port: int, deadline: float,
+                clock: Callable[[], float]):
+        if deadline - clock() <= 0:
+            raise _TimeoutFailure("DNS resolution exceeded the asset time limit")
+        self._start_worker()
+        future: Future = Future()
         try:
-            outcome["value"] = resolver.resolve(hostname, port)
-        except BaseException as exc:  # propagated in the calling thread
-            outcome["error"] = exc
+            self._tasks.put_nowait((resolver, hostname, port, future))
+        except Exception as exc:
+            raise _ConnectionFailure("DNS resolution could not be scheduled") from exc
+        try:
+            return future.result(timeout=max(0.0, deadline - clock()))
+        except FutureTimeoutError as exc:
+            raise _TimeoutFailure("DNS resolution exceeded the asset time limit") from exc
 
-    worker = threading.Thread(target=work, name="cvebeacon-web-resolve", daemon=True)
-    worker.start()
-    worker.join(max(0.0, deadline - clock()))
-    if worker.is_alive():
-        raise _TimeoutFailure("DNS resolution exceeded the asset time limit")
-    if "error" in outcome:
-        error = outcome["error"]
-        if isinstance(error, BaseException):
-            raise error
-        raise _ConnectionFailure("DNS resolution failed")
-    value = outcome.get("value", ())
+    def close(self) -> None:
+        with self._lock:
+            threads = list(self._threads)
+            self._threads.clear()
+            self._closed = True
+        for _ in threads:
+            self._tasks.put_nowait(None)
+
+
+def _resolve_bounded(pool: _ResolverPool, resolver, hostname: str, port: int, deadline: float,
+                     clock: Callable[[], float]) -> tuple[str, ...]:
+    """Resolve through the bounded pool so a wedged lookup cannot leak workers."""
+    value = pool.resolve(resolver, hostname, port, deadline, clock)
     return tuple(value) if isinstance(value, (list, tuple)) else ()
 
 
@@ -637,8 +687,10 @@ class _DeadlineReader:
 
     def read(self, size: int = -1) -> bytes:
         if size is None or size < 0:
-            while self._fill():
-                pass
+            # A read-to-EOF must never buffer past the remaining wire budget.
+            while not self._eof and self.count + len(self._buffer) <= self._limit:
+                if not self._fill():
+                    break
             return self._consume(len(self._buffer))
         while len(self._buffer) < size and not self._eof:
             if not self._fill():
@@ -700,17 +752,35 @@ class _BoundHTTPResponse(http.client.HTTPResponse):
         super().begin()
         self.fp.set_limit(WIRE_LIMIT, "response body exceeds the wire limit")
 
+    def _read_next_chunk_size(self) -> int:
+        # int(line, 16) accepts signed values, which would turn the following
+        # read into an unbounded read-to-EOF. Chunk sizes are unsigned hex.
+        line = self.fp.readline(http.client._MAXLINE + 1)
+        if len(line) > http.client._MAXLINE:
+            raise http.client.LineTooLong("chunk size")
+        size = line.split(b";", 1)[0].strip()
+        if not _CHUNK_SIZE.fullmatch(size):
+            self._close_conn()
+            raise ValueError("invalid chunk size")
+        return int(size, 16)
+
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, host: str, port: int, address: str, *, timeout: float):
+    def __init__(self, host: str, port: int, address: str, *, timeout: float,
+                 connect_deadline: float, clock: Callable[[], float]):
         super().__init__(host, port, timeout=timeout)
         self._address = address
+        self._connect_deadline = connect_deadline
+        self._clock = clock
 
     def connect(self) -> None:
+        remaining = self._connect_deadline - self._clock()
+        if remaining <= 0:
+            raise _TimeoutFailure("connection setup exceeded the time limit")
         family = socket.AF_INET6 if ":" in self._address else socket.AF_INET
         sock = socket.socket(family, socket.SOCK_STREAM)
         try:
-            sock.settimeout(self.timeout)
+            sock.settimeout(min(self.timeout, remaining))
             sock.connect((self._address, self.port))
         except BaseException:
             sock.close()
@@ -720,11 +790,13 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
 
 class _PinnedHTTPSConnection(http.client.HTTPConnection):
     def __init__(self, host: str, port: int, address: str, *, context: ssl.SSLContext,
-                 timeout: float, deadline: float, clock: Callable[[], float]):
+                 timeout: float, deadline: float, connect_deadline: float,
+                 clock: Callable[[], float]):
         super().__init__(host, port, timeout=timeout)
         self._address = address
         self._context = context
         self._deadline = deadline
+        self._connect_deadline = connect_deadline
         self._clock = clock
 
     @staticmethod
@@ -734,16 +806,22 @@ class _PinnedHTTPSConnection(http.client.HTTPConnection):
         except OSError:
             pass
 
+    def _setup_remaining(self) -> float:
+        return min(self._deadline, self._connect_deadline) - self._clock()
+
     def connect(self) -> None:
+        remaining = self._setup_remaining()
+        if remaining <= 0:
+            raise _TimeoutFailure("connection setup exceeded the time limit")
         family = socket.AF_INET6 if ":" in self._address else socket.AF_INET
         sock = socket.socket(family, socket.SOCK_STREAM)
         timer = None
         try:
-            sock.settimeout(self.timeout)
+            sock.settimeout(remaining)
             sock.connect((self._address, self.port))
-            remaining = self._deadline - self._clock()
+            remaining = self._setup_remaining()
             if remaining <= 0:
-                raise _TimeoutFailure("asset exceeded the total time limit")
+                raise _TimeoutFailure("connection setup exceeded the time limit")
             sock.settimeout(remaining)
             timer = threading.Timer(remaining, self._expire, args=(sock,))
             timer.daemon = True
@@ -779,10 +857,12 @@ class StdlibTransport:
 
     def fetch(self, endpoint: Endpoint, address: str, *, ca_bundle: Path | None,
               deadline: float, user_agent: str) -> _Response:
-        remaining = deadline - self._clock()
+        now = self._clock()
+        remaining = deadline - now
         if remaining <= 0:
             raise _TimeoutFailure("asset exceeded the total time limit")
         connect_timeout = min(CONNECT_TIMEOUT, remaining)
+        connect_deadline = now + connect_timeout
         if endpoint.scheme == "https":
             try:
                 context = self._context(ca_bundle)
@@ -790,12 +870,18 @@ class StdlibTransport:
                 raise _TlsFailure("TLS trust store could not be loaded") from exc
             connection = _PinnedHTTPSConnection(endpoint.hostname, endpoint.port, address,
                                                 context=context, timeout=connect_timeout,
-                                                deadline=deadline, clock=self._clock)
+                                                deadline=deadline,
+                                                connect_deadline=connect_deadline,
+                                                clock=self._clock)
         else:
             connection = _PinnedHTTPConnection(endpoint.hostname, endpoint.port, address,
-                                               timeout=connect_timeout)
+                                               timeout=connect_timeout,
+                                               connect_deadline=connect_deadline,
+                                               clock=self._clock)
+        setup_complete = False
         try:
             connection.connect()
+            setup_complete = True
             self._timeout(connection.sock, deadline)
             connection.request("GET", endpoint.path, headers={
                 "Host": endpoint.authority,
@@ -823,6 +909,8 @@ class StdlibTransport:
         except ssl.SSLError as exc:
             if self._clock() >= deadline:
                 raise _TimeoutFailure("asset exceeded the total time limit") from exc
+            if not setup_complete and self._clock() >= connect_deadline:
+                raise _TimeoutFailure("connection setup exceeded the time limit") from exc
             raise _TlsFailure("TLS verification or handshake failed") from exc
         except (socket.timeout, TimeoutError) as exc:
             raise _TimeoutFailure("network read timed out") from exc
@@ -831,6 +919,8 @@ class StdlibTransport:
         except (ConnectionError, OSError) as exc:
             if self._clock() >= deadline:
                 raise _TimeoutFailure("asset exceeded the total time limit") from exc
+            if not setup_complete and self._clock() >= connect_deadline:
+                raise _TimeoutFailure("connection setup exceeded the time limit") from exc
             raise _ConnectionFailure("connection failed") from exc
         except http.client.HTTPException as exc:
             raise _ConnectionFailure("invalid HTTP response") from exc
@@ -881,6 +971,7 @@ class Fetcher:
                  clock: Callable[[], float] = time.monotonic, now: Callable[[], datetime] = utc_now,
                  rng: random.Random | None = None, host_interval: float = HOST_INTERVAL):
         self.resolver = resolver or SystemResolver()
+        self._resolver_pool = _ResolverPool(MAX_WORKERS)
         self.transport = transport or StdlibTransport(clock=clock)
         self._sleep = sleep
         self._clock = clock
@@ -889,6 +980,9 @@ class Fetcher:
         self._pacer = _Pacer(sleep=sleep, clock=clock, interval=host_interval)
         self._blocked: dict[str, int | None] = {}
         self._lock = threading.Lock()
+
+    def close(self) -> None:
+        self._resolver_pool.close()
 
     def _blocked_info(self, hostname: str):
         with self._lock:
@@ -922,8 +1016,8 @@ class Fetcher:
         return min(max(int((parsed - datetime.now(timezone.utc)).total_seconds()), 0), 86400)
 
     def _address(self, endpoint: Endpoint, asset: WebAsset, deadline: float) -> str:
-        addresses = _resolve_bounded(self.resolver, endpoint.hostname, endpoint.port, deadline,
-                                     self._clock)
+        addresses = _resolve_bounded(self._resolver_pool, self.resolver, endpoint.hostname,
+                                     endpoint.port, deadline, self._clock)
         if not addresses:
             raise _ConnectionFailure("DNS resolution returned no address")
         accepted = []
@@ -965,8 +1059,9 @@ class Fetcher:
                 if attempt >= MAX_RETRIES or self._clock() >= deadline:
                     raise
                 attempt += 1
-                base = min(0.5 * (2 ** (attempt - 1)), max(0.0, deadline - self._clock()))
+                base = 0.5 * (2 ** (attempt - 1))
                 delay = base * (0.75 + 0.5 * self._rng.random())
+                delay = min(delay, max(0.0, deadline - self._clock()))
                 if delay > 0:
                     self._sleep(delay)
                 continue
@@ -1195,11 +1290,14 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     run_deadline = clock() + RUN_TIMEOUT
     results: list[_AssetResult] = []
     workers = max(1, min(max_workers, MAX_WORKERS, len(allowlist.assets)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_observe, asset, allowlist, fetcher, run_deadline=run_deadline)
-                   for asset in allowlist.assets]
-        for future in as_completed(futures):
-            results.append(future.result())
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_observe, asset, allowlist, fetcher, run_deadline=run_deadline)
+                       for asset in allowlist.assets]
+            for future in as_completed(futures):
+                results.append(future.result())
+    finally:
+        fetcher.close()
     results.sort(key=lambda item: item.asset.endpoint.url)
     rows = [row for result in results for row in result.rows]
     reviews = [review for result in results for review in result.reviews]
