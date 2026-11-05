@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import errno
+import json
 import os
 from pathlib import Path
 import signal
@@ -15,6 +16,19 @@ from cvebeacon import cli
 from cvebeacon.errors import CVEBeaconError
 from cvebeacon.locking import RunLock, run_lock_path
 from test_dashboard_operations import make_config
+
+
+def test_lock_metadata_survives_unavailable_account_lookup(tmp_path, monkeypatch):
+    from cvebeacon import locking
+    def unavailable():
+        # Python 3.12 getpass falls back to importing pwd when the isolated
+        # Windows child has no USERNAME (nor LOGNAME/USER/LNAME).
+        raise ImportError("No module named 'pwd'")
+    monkeypatch.setattr(locking.getpass, "getuser", unavailable)
+    path = tmp_path / "run.lock"
+    with RunLock(path, command="scan"):
+        metadata = json.loads(path.read_bytes()[1:])
+        assert metadata["account"] == "unknown" and metadata["command"] == "scan"
 
 
 def test_shared_watch_database_has_one_lock(tmp_path):

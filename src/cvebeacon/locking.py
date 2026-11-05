@@ -97,7 +97,7 @@ def _contention(exc: OSError) -> bool:
 def _account_name() -> str:
     try:
         return getpass.getuser()
-    except (KeyError, OSError, RuntimeError):
+    except (ImportError, KeyError, OSError, RuntimeError):
         return "unknown"
 
 
