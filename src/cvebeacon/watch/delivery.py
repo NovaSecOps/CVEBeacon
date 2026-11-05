@@ -22,6 +22,7 @@ from ..errors import ConfigurationError
 from ..http import HttpClient, HttpResult
 from .channels import ChannelConfig, channel_map, validate_webhook_url
 from .messages import (
+    CHANNEL_LIMITS,
     EMAIL_CHANNELS,
     MESSAGE_TOO_LARGE,
     WEBHOOK_VERSION,
@@ -380,6 +381,35 @@ def _send_gotify(
     _accepted(result, (200,), "Gotify rejected the message")
 
 
+def _webhook_body(
+    events: Sequence[DeliveryEvent],
+    names: Mapping[str, str],
+    clients: Mapping[str, ClientImpacts] | None,
+) -> bytes:
+    payload = webhook_payload(events, names, clients)
+    while True:
+        body = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        if len(body) <= CHANNEL_LIMITS["webhook"]:
+            return body
+        entries = [entry for entry in payload["events"] if entry.get("affected_clients")]
+        if not entries:
+            raise DeliveryFailure(MESSAGE_TOO_LARGE, attempts_limit=1)
+        # Reduce details across the document in at most six rounds. Counts
+        # survive even if all names must be omitted to fit the request budget.
+        cap = max(len(entry["affected_clients"]) for entry in entries) // 2
+        for entry in entries:
+            details = entry["affected_clients"]
+            omitted = len(details) - min(cap, len(details))
+            if omitted:
+                entry["affected_clients_omitted"] = entry.get("affected_clients_omitted", 0) + omitted
+                if cap:
+                    entry["affected_clients"] = details[:cap]
+                else:
+                    del entry["affected_clients"]
+
+
 def _send_webhook(
     channel: ChannelConfig,
     events: Sequence[DeliveryEvent],
@@ -388,7 +418,8 @@ def _send_webhook(
     names: Mapping[str, str],
     clients: Mapping[str, ClientImpacts] | None = None,
 ) -> None:
-    headers: dict[str, str] = {}
+    body = _webhook_body(events, names, clients)
+    headers: dict[str, str] = {"Content-Type": "application/json"}
     header_name = channel.options.get("header_name")
     if header_name:
         headers[str(header_name)] = _secret(channel, "header_value")
@@ -397,7 +428,7 @@ def _send_webhook(
         "POST",
         str(channel.options["url"]),
         headers=headers,
-        json_body=webhook_payload(events, names, clients),
+        content=body,
         timeout=timeout,
     )
     if not 200 <= result.status_code < 300:

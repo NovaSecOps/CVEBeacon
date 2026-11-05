@@ -2794,7 +2794,9 @@ channels = ["slack"]
     assert statuses["CVE-2026-0002"] == ("ambiguous", 2)
 
 
-def test_initial_webhook_is_sent_in_chunks_of_one_thousand(tmp_path):
+def test_initial_webhook_is_sent_in_chunks_of_one_thousand(tmp_path, monkeypatch):
+    # Isolate the row chunk bound from the independently tested byte budget.
+    monkeypatch.setitem(CHANNEL_LIMITS, "webhook", 4_000_000)
     config = make_config(tmp_path)
     identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 5001))
     store = seed(config, identifiers=identifiers, initial=True)
@@ -2820,6 +2822,54 @@ def test_initial_webhook_is_sent_in_chunks_of_one_thousand(tmp_path):
             ).fetchone()[0]
             == 5000
         )
+
+
+@pytest.mark.parametrize("initial", (False, True))
+@pytest.mark.parametrize("character", ("x", "é"))
+def test_webhook_delivery_shrinks_clients_to_serialized_request_budget(tmp_path, initial, character):
+    config = make_config(tmp_path)
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 6))
+    store = seed(config, identifiers=identifiers, initial=initial)
+    assets = [Asset(f"a{index}", "Acme", "Widget", "1",
+        client=f"{index:04d}" + character * 116) for index in range(50)]
+    StateStore(config.database_path).record_scan([
+        QueryResult(asset, tuple(Finding(asset, Vulnerability(cve),
+            Applicability.AFFECTED, "high", "test") for cve in identifiers), ())
+        for asset in assets
+    ])
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+    report = deliver(config, store, handler)
+    assert not report.failed
+    assert report.channels[0].events == 5 and len(requests) == 1
+    assert requests[0].headers["content-type"] == "application/json"
+    assert len(requests[0].content) <= CHANNEL_LIMITS["webhook"]
+    for event in json.loads(requests[0].content)["events"]:
+        assert len(event.get("affected_clients", [])) + event["affected_clients_omitted"] == 50
+        assert all(item["assets"] == 1 for item in event.get("affected_clients", []))
+    assert all(row[1] == "sent" for row in rows(store))
+
+
+@pytest.mark.parametrize("initial", (False, True))
+def test_webhook_delivery_refuses_oversize_base_document_before_http(tmp_path, initial):
+    config = make_config(tmp_path)
+    store = seed(config, identifiers=tuple(f"CVE-2026-{index:04d}" for index in range(100)), initial=initial)
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+    report = deliver(config, store, handler)
+    assert requests == []
+    assert report.failed and report.channels[0].error == MESSAGE_TOO_LARGE
+    assert report.channels[0].events == 0
+    assert report.channels[0].given_up == 100
+    assert all(row[1:] == ("failed", 10, MESSAGE_TOO_LARGE) for row in rows(store))
+    assert len(rows(store)) == 100
+    # The one-attempt size failure is terminal until an explicit retry.
+    assert deliver(config, store, handler).channels[0].messages == 0
+    assert requests == []
 
 
 def test_initial_failed_rows_wait_for_their_backoff(tmp_path):

@@ -787,8 +787,12 @@ or `unreport`), `by`, and `note`, plus `username` and `email` when present.
 An event carries `affected_clients` when the latest successful inventory scan
 records an affected or needs-review finding on a client's asset. Each item has
 `name`, `assets` (the number of matching assets), and `status` (`affected` or
-`needs_review`). The list is capped to keep one event within the webhook budget;
-when names are left out, `affected_clients_omitted` gives their count. The field
+`needs_review`). Each event lists at most 50 clients. Before sending a normal or
+initial webhook, client details are reduced across the document until its
+serialized UTF-8 body fits 32,768 bytes. When names are left out,
+`affected_clients_omitted` gives their count, even if all details are omitted.
+If the document still cannot fit, delivery fails with the channel size error
+before any request is sent and requires an explicit retry. The field
 and the count are absent when no client is affected, so documents without
 clients are byte-identical to earlier version-2 output. Notice events can carry
 the same field. Clients come only from local state and are never sent to public
