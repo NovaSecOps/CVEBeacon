@@ -49,6 +49,15 @@ def parser():
     evidence = kube.add_mutually_exclusive_group(required=True)
     evidence.add_argument("--sbom-map", type=Path)
     evidence.add_argument("--observations-only", action="store_true")
+    web = commands.add_parser("web", help="observe client-authorised web assets")
+    web_commands = web.add_subparsers(dest="web_command", required=True)
+    detect = web_commands.add_parser("detect", help="fetch allowlisted pages once and record direct evidence")
+    detect.add_argument("--client", required=True)
+    detect.add_argument("--assets", type=Path, required=True)
+    detect.add_argument("--output", type=Path, required=True)
+    detect.add_argument("--source-id", required=True)
+    detect.add_argument("--allow-partial", action="store_true")
+    detect.add_argument("--plan", action="store_true")
     return root
 
 
@@ -67,6 +76,13 @@ def main(argv=None):
             from .sbom import import_sbom
             manifest = import_sbom(args.file, args.output, source_id=args.source_id, format=args.format)
             print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
+        elif args.command == "web":
+            from .web import detect_web
+            manifest = detect_web(args.assets, args.output, client=args.client,
+                                  source_id=args.source_id, allow_partial=args.allow_partial,
+                                  plan=args.plan)
+            if manifest is not None:
+                print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
         elif args.command == "collect":
             if args.host == "kubernetes":
                 from .kubernetes import collect_kubernetes

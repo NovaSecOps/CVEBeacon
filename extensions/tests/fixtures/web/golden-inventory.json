@@ -1,0 +1,72 @@
+[
+  {
+    "asset_id": "web-057a3782d8e6dc4ee74412d1fe753e44",
+    "category": "web-server",
+    "client": "acme",
+    "commit": "",
+    "cpe": "",
+    "ecosystem": "",
+    "product": "nginx",
+    "purl": "",
+    "repository": "",
+    "system_id": "web-315ec70ddd000d2f",
+    "vendor": "nginx",
+    "version": "1.25.3"
+  },
+  {
+    "asset_id": "web-3e469dc8d2ea4bdc4d5e554878e66918",
+    "category": "language",
+    "client": "acme",
+    "commit": "",
+    "cpe": "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*",
+    "ecosystem": "",
+    "product": "php",
+    "purl": "",
+    "repository": "",
+    "system_id": "web-9478b440c54e6bfb",
+    "vendor": "php",
+    "version": "8.2.1"
+  },
+  {
+    "asset_id": "web-78e16555a869e112ae41ee3733008f27",
+    "category": "web-server",
+    "client": "acme",
+    "commit": "",
+    "cpe": "cpe:2.3:a:apache:http_server:*:*:*:*:*:*:*:*",
+    "ecosystem": "",
+    "product": "http_server",
+    "purl": "",
+    "repository": "",
+    "system_id": "web-9478b440c54e6bfb",
+    "vendor": "apache",
+    "version": "2.4.52"
+  },
+  {
+    "asset_id": "web-8de32950dc0ebf1095d91d1902c0ed3e",
+    "category": "cms",
+    "client": "acme",
+    "commit": "",
+    "cpe": "cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*:*",
+    "ecosystem": "",
+    "product": "wordpress",
+    "purl": "",
+    "repository": "",
+    "system_id": "web-315ec70ddd000d2f",
+    "vendor": "wordpress",
+    "version": "6.4.2"
+  },
+  {
+    "asset_id": "web-df6b9bdb9b26418c710be48ccf3c9e1f",
+    "category": "js-library",
+    "client": "acme",
+    "commit": "",
+    "cpe": "cpe:2.3:a:jquery:jquery:*:*:*:*:*:*:*:*",
+    "ecosystem": "",
+    "product": "jquery",
+    "purl": "",
+    "repository": "",
+    "system_id": "web-315ec70ddd000d2f",
+    "vendor": "jquery",
+    "version": "3.7.1"
+  }
+]
