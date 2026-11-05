@@ -511,7 +511,9 @@ renaming it, or staging new contents for one of its secret files. Without that
 permission the channel renders read-only with a short explanation. An editor
 with `edit_channels` may create, edit and rename channels that carry no
 credential at all, delete any channel, and change which channels a rule routes
-to with `edit_rules`. The server compares current, running and candidate
+to with `edit_rules`. A single save that deletes a credential-bearing channel
+and adds a channel of the same type is treated as a credential change and needs
+`manage_secrets`; the same deletion and addition in two separate saves do not. The server compares current, running and candidate
 channels one-to-one before any target read and again inside the write
 transaction, so a crafted form cannot bypass the UI.
 
@@ -550,7 +552,9 @@ because the environment value would take precedence at run time. This includes
 the NVD default `NVD_API_KEY` when that variable has a value, even if the form
 field is blank. An explicit paired environment reference is rejected for file
 rotation until it is cleared. `.dashboard-staged-` temporaries expire with their
-preview after ten minutes and are removed on a later configuration request.
+preview after ten minutes and are removed on a later configuration request,
+unless the current or running configuration or a retained backup references
+them; when that cannot be determined, files are kept.
 Committed `.dashboard-secret-` files are never deleted automatically, whether or
 not they are still referenced, and remain inside the protected secret directory.
 Cleanup runs on configuration requests; startup no longer writes the writer lock
@@ -573,8 +577,9 @@ running configuration requires an administrator. Choose a backup, validate it,
 review the diff and confirm. Rollback uses the same validation, concurrency checks, access
 confirmation, audit, atomic replacement, backup and reload path as saving.
 The backups list remains available when the live file fails the loader or is
-missing. The page reads the raw bytes and version signature, validates only the
-chosen backup, which must validate, and shows a static "current configuration is
+missing. The page reads the raw bytes and version signature; only the chosen
+backup must validate (the live file is inspected only to classify it and to pick
+the comparison baseline), and the page shows a static "current configuration is
 invalid or missing" notice instead of diffing unvalidated live values. Rollback requires the access
 confirmation. A missing or unparseable live file also requires
 `manage_secrets`. A parseable file that fails validation is compared with the

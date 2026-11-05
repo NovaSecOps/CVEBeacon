@@ -1465,3 +1465,42 @@ def test_backup_only_staged_reference_is_not_deleted(accounts):
     os.chmod(backup, 0o600)
     editor.cleanup()
     assert staged.exists()
+
+
+@pytest.mark.parametrize("damage", [
+    b"[http\n\xff\xfe",
+    b"[unknown]\nvalue = 1\n[state]\ndatabase = 5\n",
+])
+def test_undecodable_or_malformed_live_file_keeps_configuration_pages_available(
+        accounts, damage):
+    # Staged-secret discovery must fail closed and quietly: the section page
+    # explains the problem and the backups page stays usable for recovery.
+    config, _, _, client = accounts
+    login(client, "admin")
+    assert client.get("/config/http").status_code == 200
+    config.config_path.write_bytes(damage)
+    assert client.get("/config/http").status_code == 400
+    assert client.get("/config/backups").status_code == 200
+
+
+def test_whitespace_environment_reference_keeps_a_channel_editable(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(channel_config(
+        '[watch.channels.mail]\ntype = "smtp"\nhost = "smtp.example.invalid"\n'
+        'from = "sender@example.invalid"\nto = ["soc@example.invalid"]\n'
+        'password_env = "   "\n'), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    page = client.get("/config/channels")
+    assert page.status_code == 200
+    host = re.search(r'<input[^>]*name="g0_host"[^>]*>', page.text)[0]
+    assert "readonly" not in host
+    data = form(page.text)
+    data["g0_host"] = "smtp2.example.invalid"
+    assert client.post("/config/channels", data=data).status_code == 200
+
+
+def test_whitespace_environment_does_not_block_file_rotation(accounts):
+    assert dc.effective_environment({"a": {"b_env": "   "}}, ("a", "b_env")) is None
+    assert dc.effective_environment_row({"b_env": " X "}, "b_env", ("watch",)) == "X"

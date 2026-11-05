@@ -466,8 +466,8 @@ def replacement_document(document, replacements, config):
 def effective_environment(document, path):
     """Return the environment reference the loaded configuration would use."""
     value = document_get(document, path)
-    if isinstance(value, str) and value:
-        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     if path == ("sources", "nvd_api_key_env"):
         return defaults(SourceConfig)["nvd_api_key_env"]
     return None
@@ -475,8 +475,8 @@ def effective_environment(document, path):
 
 def effective_environment_row(row, key, prefix):
     value = row.get(key)
-    if isinstance(value, str) and value:
-        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     if prefix == ("sources",) and key == "nvd_api_key_env":
         return defaults(SourceConfig)["nvd_api_key_env"]
     return None
@@ -770,13 +770,27 @@ class Editor:
             temporary.unlink(missing_ok=True)
 
     def _live_staged_paths(self):
-        """Effective staged-secret references in current, running and backups."""
+        """Effective staged-secret references in current, running and backups.
+
+        Returns None when discovery is incomplete for any reason, so callers
+        retain files instead of deleting them and requests never fail here.
+        """
+        try:
+            return self._discover_staged_paths()
+        except Exception:  # noqa: BLE001 - discovery must fail closed, quietly
+            return None
+
+    def _discover_staged_paths(self):
         live = set()
         configs = [self.config]
-        if self.path.exists():
+        if self.path.exists() or self.path.is_symlink():
+            # Only a regular, unlinked live file is loaded; anything else
+            # (FIFO, symlink, directory) makes discovery incomplete.
+            if self.path.is_symlink() or not self.path.is_file():
+                return None
             try:
                 configs.append(load_config(self.path))
-            except (OSError, CVEBeaconError):
+            except (OSError, CVEBeaconError, ValueError, TypeError):
                 return None
         for config in configs:
             live.update(path.resolve() for path in effective_paths(config).values())
@@ -1273,12 +1287,13 @@ def channel_has_credentials(row):
     """Whether a raw channel row carries a secret reference or direct URL."""
     if not isinstance(row, dict):
         return False
-    if isinstance(row.get("url"), str) and row.get("url"):
+    if isinstance(row.get("url"), str) and row.get("url").strip():
         return True
     kind = _channel_kind(row)
     if kind not in CREDENTIAL_FIELDS:
         return False
-    return any(isinstance(row.get(key), str) and row.get(key)
+    # Whitespace-only values are absent, as the loader treats them.
+    return any(isinstance(row.get(key), str) and row.get(key).strip()
                for key in CREDENTIAL_FIELDS[kind])
 
 
