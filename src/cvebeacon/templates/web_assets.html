@@ -35,7 +35,7 @@
 {% endif %}</article>
 {% else %}<p>No saved assets.</p>{% endfor %}
 {% if accounts and 'manage_web_assets' in permissions %}
-{% if document.assets %}<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><label><input type="checkbox" name="confirm" value="yes" required>I want to remove every saved asset for this client.</label><button name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></form>{% endif %}
+{% if document.assets or snapshot or removed or run or products or reviews %}<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><label><input type="checkbox" name="confirm" value="yes" required>I want to remove every saved asset and all saved detection results for this client.</label><button name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></form>{% endif %}
 <details><summary>Add authorised asset</summary><form method="post" action="{{ url_for('web.save') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="add">
 {{ asset_fields({}, document) }}<button {% if not available %}disabled{% endif %}>Save with attestation</button></form></details>
@@ -46,6 +46,7 @@
 <button name="action" value="web-detect" {% if not available or not document.assets %}disabled{% endif %}>Detect web technologies</button></form>
 {% endif %}
 <h3>Last run</h3>
+{% if removed %}<p role="status">Results include assets removed since the last run. Run detection again to refresh retained results.</p>{% endif %}
 {% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ last_job.created_at }} · {{ last_job.exit_meaning }}</p>{% endif %}
 {% if run %}<p>Last observation: {{ run.get('started_at', '') }} → {{ run.get('ended_at', '') }} · {{ run.get('status', '') }} · requests: {{ run.get('request_count', '') }} · duration: {{ run.get('duration_seconds', '') }} seconds.</p>{% else %}<p>No observation metadata yet.</p>{% endif %}
 {% if snapshot %}<p>Saved inventory: {{ snapshot.generated_at }} · {{ snapshot.status }} · {{ snapshot.record_count }} products. Enable <code>[inventory] web_snapshots = true</code> in <a href="{{ url_for('config_editor.inventory') }}">inventory configuration</a> to include saved snapshots in normal scans. A failed observation retains the previous inventory.</p>{% endif %}

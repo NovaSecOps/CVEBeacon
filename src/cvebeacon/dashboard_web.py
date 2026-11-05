@@ -39,7 +39,6 @@ def _editable_entry(entry):
     return result
 
 
-
 def _review_metadata(detail, client):
     if not isinstance(detail, dict) or detail.get("client") != client:
         raise ValueError("invalid review")
@@ -74,7 +73,6 @@ def _review_metadata(detail, client):
     return products, reviews, run
 
 
-
 def create_web_blueprint(config):
     blueprint = Blueprint("web", __name__, url_prefix="/web-assets")
 
@@ -84,7 +82,7 @@ def create_web_blueprint(config):
     def render(client="", *, error=None, status=200):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot = [], [], None, None
-        last_job, truncated = None, False
+        last_job, truncated, removed = None, False, False
         available = web_assets.companion_available()
         try:
             assets_dir, _ = directories(config)
@@ -101,6 +99,7 @@ def create_web_blueprint(config):
                 document, version = read_allowlist(path, client)
                 client = document["client"]
                 document = {**document, "assets": [_editable_entry(row) for row in document["assets"]]}
+                removed = output.with_name(output.name + ".removed").exists()
                 if output.exists() or output.is_symlink():
                     try:
                         _, snapshot = read_web_snapshot(output)
@@ -122,7 +121,7 @@ def create_web_blueprint(config):
         return render_template("web_assets.html", clients=sorted(clients, key=str.casefold), client=client,
                                document=document, version=version, products=products, reviews=reviews,
                                run=run, snapshot=snapshot, available=available, notice=COMPANION_NOTICE,
-                               last_job=last_job, truncated=truncated, error=error), status
+                               last_job=last_job, truncated=truncated, removed=removed, error=error), status
 
     @blueprint.get("")
     @requires("view")
@@ -149,7 +148,7 @@ def create_web_blueprint(config):
             return render(client, error=str(RunInProgress(lock.holder)), status=409)
         try:
             extra_changes = []
-            path, _ = paths(config, client)
+            path, output = paths(config, client)
             current, version = read_allowlist(path, client)
             client = current["client"]
             if _text(request.form, "version", required=True) != version:
@@ -214,6 +213,12 @@ def create_web_blueprint(config):
             event = "web_asset_" + ("remove" if action == "remove-all" else action)
             users = current_app.extensions["dashboard_users"]
             targets = [path]
+            marker = output.with_name(output.name + ".removed")
+            if action == "remove-all":
+                targets += [output, output.with_name(output.name + ".manifest.json"),
+                            output.with_name(output.name + ".review.json"), marker]
+            elif action == "remove":
+                targets.append(marker)
             originals = {target: read_bytes(target) if target.exists() or target.is_symlink() else None
                          for target in targets}
             writing = False
@@ -234,8 +239,15 @@ def create_web_blueprint(config):
                     if action == "change" and _host(current["assets"][index]) != host:
                         audit("web_asset_replaced", json.dumps(
                             {"client": client, "host": _host(current["assets"][index])}, ensure_ascii=False))
+                    if action == "remove-all":
+                        audit("web_snapshot_remove", json.dumps({"client": client}, ensure_ascii=False))
                     writing = True
                     save_allowlist(path, candidate)
+                    if action == "remove-all":
+                        for target in targets[1:]:
+                            target.unlink(missing_ok=True)
+                    elif action == "remove":
+                        save_allowlist(marker, {"client": client})
             except BaseException:
                 if writing:
                     for target, data in originals.items():

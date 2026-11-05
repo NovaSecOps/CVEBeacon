@@ -146,5 +146,8 @@ def run_detection(config, client, *, plan=False):
     if not document["assets"]:
         raise ConfigurationError("Save an attested web asset before running detection")
     # The parent CLI holds the shared scan lock throughout the child process.
-    return subprocess.call(companion_command(document["client"], assets, output, plan=plan),
+    code = subprocess.call(companion_command(document["client"], assets, output, plan=plan),
                            stdin=subprocess.DEVNULL, env=child_environment(config))
+    if not plan:
+        output.with_name(output.name + ".removed").unlink(missing_ok=True)
+    return code

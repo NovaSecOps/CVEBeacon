@@ -317,6 +317,45 @@ def test_client_labels_are_values_never_companion_flags(accounts, client_name):
         assert parsed_companion.client == client_name and parsed_companion.plan == parsed.plan
 
 
+@pytest.mark.parametrize("revocation", ["permission", "disabled", "password", "admin"])
+def test_save_rechecks_account_after_validation(web, monkeypatch, revocation):
+    from cvebeacon import dashboard_web
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    proof = users.authenticate("admin", PASSWORD)
+    if revocation == "admin":
+        users.add("second-admin", password=PASSWORD, is_admin=True, authorization=proof)
+        users.save_role("web-editor", {"view", "manage_web_assets"}, authorization=proof)
+    else:
+        grant(users, {"view", "manage_web_assets"})
+        login(client)
+    path, _ = paths(config, "Acme")
+    before = path.read_bytes()
+    validate = dashboard_web.validate_allowlist
+    def revoke(*args):
+        validate(*args)
+        if revocation == "permission":
+            users.save_role("web-editor", {"view"}, authorization=proof)
+        elif revocation == "disabled":
+            users.edit_user("reader", role="web-editor", disabled=True, authorization=proof)
+        elif revocation == "password":
+            users.set_password("reader", PASSWORD + " changed", authorization=proof)
+        else:
+            users.edit_user("admin", role="web-editor", disabled=False,
+                            authorization=users.authenticate("second-admin", PASSWORD))
+    monkeypatch.setattr(dashboard_web, "validate_allowlist", revoke)
+    # Removing an old CA path exercises the administrator-only commit check.
+    if revocation == "admin":
+        document, _ = read_allowlist(path, "Acme")
+        document["ca_bundle"] = "old-ca.pem"
+        save_allowlist(path, document)
+        before = path.read_bytes()
+    response = save(client, action="change", index="0", hostname="changed.invalid")
+    assert response.status_code == 400
+    assert path.read_bytes() == before
+    assert not any('changed.invalid' in entry.action for entry in users.audit_entries())
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shared parent permissions")
 def test_shared_state_parent_keeps_web_subdirectories_private(web):
     config, _, _, client = web
@@ -366,6 +405,40 @@ def test_invalid_client_labels_return_bad_request(web, route, action):
     assert response.status_code == 400
 
 
+@pytest.mark.parametrize("malformed", [False, True])
+def test_remove_all_recovers_malformed_url_and_retires_results(web, malformed):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    document, _ = read_allowlist(path, "Acme")
+    if malformed:
+        document["assets"].append({"url": "http://[::1"})
+    save_allowlist(path, document)
+    assert save(client, action="remove-all", confirm="yes").status_code == 303
+    assert read_allowlist(path, "Acme")[0]["assets"] == []
+    assert not any(path.exists() for path in (output, Path(str(output) + ".manifest.json"),
+                                               Path(str(output) + ".review.json")))
+    assert any(entry.action.startswith("web_snapshot_remove:") for entry in users.audit_entries())
+    assert not users.verify_audit()
+
+
+def test_single_removal_warns_until_next_detection(web, monkeypatch):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    assert save(client, hostname="second.invalid").status_code == 303
+    _, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    assert save(client, action="remove", index="0").status_code == 303
+    warning = "Results include assets removed since the last run"
+    assert warning in client.get("/web-assets?client=Acme").text
+    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 0)
+    assert web_assets.run_detection(config, "Acme", plan=True) == 0
+    assert warning in client.get("/web-assets?client=Acme").text
+    assert web_assets.run_detection(config, "Acme") == 0
+    assert warning not in client.get("/web-assets?client=Acme").text
+
+
 @pytest.mark.parametrize("section,field,value", [
     ("products", "versions", None), ("products", "evidence_types", None),
     ("reviews", "versions", None), ("products", "hostname", {"body": "SECRET_BODY"}),
@@ -384,47 +457,9 @@ def test_corrupt_review_fields_are_rejected_before_rendering(web, section, field
     assert "SECRET_BODY" not in page.text
 
 
+
 def test_invalid_client_label_on_view_is_bad_request(web):
     assert web[3].get("/web-assets", query_string={"client": "x" * 200}).status_code == 400
-
-
-@pytest.mark.parametrize("revocation", ["permission", "disabled", "password", "admin"])
-def test_save_rechecks_account_after_validation(web, monkeypatch, revocation):
-    from cvebeacon import dashboard_web
-    config, users, _, client = web
-    assert save(client).status_code == 303
-    proof = users.authenticate("admin", PASSWORD)
-    if revocation == "admin":
-        users.add("second-admin", password=PASSWORD, is_admin=True, authorization=proof)
-        users.save_role("web-editor", {"view", "manage_web_assets"}, authorization=proof)
-    else:
-        grant(users, {"view", "manage_web_assets"})
-        login(client)
-    path, _ = paths(config, "Acme")
-    before = path.read_bytes()
-    validate = dashboard_web.validate_allowlist
-    def revoke(*args):
-        validate(*args)
-        if revocation == "permission":
-            users.save_role("web-editor", {"view"}, authorization=proof)
-        elif revocation == "disabled":
-            users.edit_user("reader", role="web-editor", disabled=True, authorization=proof)
-        elif revocation == "password":
-            users.set_password("reader", PASSWORD + " changed", authorization=proof)
-        else:
-            users.edit_user("admin", role="web-editor", disabled=False,
-                            authorization=users.authenticate("second-admin", PASSWORD))
-    monkeypatch.setattr(dashboard_web, "validate_allowlist", revoke)
-    # Removing an old CA path exercises the administrator-only commit check.
-    if revocation == "admin":
-        document, _ = read_allowlist(path, "Acme")
-        document["ca_bundle"] = "old-ca.pem"
-        save_allowlist(path, document)
-        before = path.read_bytes()
-    response = save(client, action="change", index="0", hostname="changed.invalid")
-    assert response.status_code == 400
-    assert path.read_bytes() == before
-    assert not any('changed.invalid' in entry.action for entry in users.audit_entries())
 
 
 def test_account_transaction_covers_final_allowlist_write(web, monkeypatch):
@@ -445,6 +480,29 @@ def test_account_transaction_covers_final_allowlist_write(web, monkeypatch):
     assert not users.verify_audit()
 
 
+def test_transaction_failure_restores_allowlist_and_retired_results(web, monkeypatch):
+    from contextlib import contextmanager
+    from cvebeacon.errors import StateError
+    config, users, app, client = web
+    assert save(client).status_code == 303
+    path, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    files = (path, output, Path(str(output) + ".manifest.json"), Path(str(output) + ".review.json"))
+    before = {file: file.read_bytes() for file in files}
+    audit_before = users.audit_entries()
+    active_users = app.extensions["dashboard_users"]
+    transaction = active_users.transaction
+    @contextmanager
+    def failed_transaction():
+        with transaction() as db:
+            yield db
+            raise StateError("synthetic transaction failure")
+    monkeypatch.setattr(active_users, "transaction", failed_transaction)
+    assert save(client, action="remove-all", confirm="yes").status_code == 400
+    assert {file: file.read_bytes() for file in files} == before
+    assert users.audit_entries() == audit_before
+
+
 def test_ca_change_renews_and_audits_every_entry(web):
     config, users, _, client = web
     assert save(client).status_code == 303
@@ -463,3 +521,16 @@ def test_ca_change_renews_and_audits_every_entry(web):
     changes = [entry.action for entry in users.audit_entries() if entry.action.startswith("web_asset_change:")]
     assert any("example.invalid" in entry for entry in changes)
     assert any("second.invalid" in entry for entry in changes)
+
+
+
+def test_last_single_removal_keeps_bulk_result_removal_available(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    assert save(client, action="remove", index="0").status_code == 303
+    page = client.get("/web-assets?client=Acme")
+    assert "Remove all assets" in page.text
+    assert save(client, action="remove-all", confirm="yes").status_code == 303
+    assert not output.exists()

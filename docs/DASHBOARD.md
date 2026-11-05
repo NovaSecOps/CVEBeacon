@@ -111,7 +111,11 @@ accepts partial snapshots with a warning, skips corrupt snapshots with a warning
 and refuses an asset ID collision. An empty web-only inventory fails validation.
 Saved snapshots are retained observations with their original timestamps; they
 are not refreshed automatically or removed by an age limit. Review their age and
-rerun detection as needed. Normal scans preserve the client label in assets and
+rerun detection as needed. Removing one asset retains observations and shows
+"Results include assets removed since the last run" until detection runs again;
+a request plan does not clear that notice. **Remove all assets** also deletes
+the client's saved snapshot, manifest and review metadata, with an audit entry.
+Normal scans preserve the client label in assets and
 in **Affected clients** alert lines.
 
 ## Native schedule
