@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -118,6 +119,8 @@ def read_web_snapshot(path: Path):
     assets = validate_records(rows)
     if len(assets) != len(rows) or any(identity_conflict(asset) for asset in assets):
         raise ValueError("invalid snapshot identity")
+    if any(len(value) > 8192 for asset in assets for value in asdict(asset).values()):
+        raise ValueError("normalized inventory value exceeds text limit")
     if type(manifest["record_count"]) is not int or manifest["record_count"] != len(assets):
         raise ValueError("snapshot record count mismatch")
     return assets, manifest

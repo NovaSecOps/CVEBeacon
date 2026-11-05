@@ -168,3 +168,9 @@ def test_snapshot_json_depth_is_bounded_before_decoding():
     with pytest.raises(ValueError, match="nesting"):
         decode_json(b"[" * 65 + b"0" + b"]" * 65)
     assert decode_json(b'{"quoted":"[\\\"[]", "value":[]}')["value"] == []
+
+
+def test_snapshot_rejects_normalization_expansion(tmp_path):
+    output = snapshot(tmp_path / "web-inventory", asset_id="\ufdfa" * 8192)
+    with pytest.raises(ValueError, match="normalized inventory value exceeds text limit"):
+        read_web_snapshot(output)
