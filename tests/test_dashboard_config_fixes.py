@@ -90,10 +90,22 @@ def make_secret(path: Path, text: str) -> Path:
 
 
 def with_file(config, path: Path) -> str:
-    return BASE.replace(
-        'nvd_api_key_env = "NVD_API_KEY"',
-        f'nvd_api_key_env = "NVD_API_KEY"\nnvd_api_key_file = "{path.name}"',
+    try:
+        reference = path.relative_to(config.config_path.parent).as_posix()
+    except ValueError:
+        reference = str(path)
+    return BASE.replace('nvd_api_key_env = "NVD_API_KEY"\n', "").replace(
+        "[sources]\n",
+        f'[sources]\nnvd_api_key_file = "{reference}"\n',
     )
+
+
+def preview_channels(client, new_type="webhook", **changes):
+    page = client.get("/config/channels", query_string={"new_type": new_type})
+    assert page.status_code == 200, page.text
+    data = form(page.text)
+    data.update(changes)
+    return client.post("/config/channels", data=data)
 
 
 def test_manage_secrets_is_a_documented_permission(accounts):
@@ -101,7 +113,7 @@ def test_manage_secrets_is_a_documented_permission(accounts):
     assert "manage_secrets" in PERMISSIONS
     admin = users.authenticate("admin", PASSWORD)
     with users.transaction() as db:
-        assert "manage_secrets" in users.permissions_in(db, admin)
+        assert "manage_secrets" in users.permissions_in(db, admin.user)
 
 
 def test_secret_references_render_read_only_without_manage_secrets(accounts):
@@ -157,6 +169,7 @@ password_file = "{secret.name}"
     assert config.config_path.read_bytes() == before
 
     set_role(users, "channel-editor", {"view", "edit_channels", "manage_secrets"})
+    login(client)
     response = preview(client, "channels", g0_password_env="OTHER_SECRET")
     assert response.status_code == 200
     assert confirm(client, response, "channels").status_code == 303
@@ -170,8 +183,8 @@ def test_manage_secrets_revocation_is_rechecked_inside_commit(accounts, monkeypa
     users.save_role("channel-editor", {"view", "edit_channels", "manage_secrets"}, authorization=admin)
     users.edit_user("reader", role="channel-editor", disabled=False, authorization=admin)
     login(client)
-    response = preview(client, "channels", g0_name="hook", g0_type="webhook",
-                       g0_url_env="SYNTHETIC_HOOK_URL")
+    response = preview_channels(client, g0_name="hook", g0_type="webhook",
+                                g0_url_env="SYNTHETIC_HOOK_URL")
     before = config.config_path.read_bytes()
     editor = app.extensions["dashboard_config"]
     real_validate = editor.validate
@@ -333,8 +346,9 @@ def test_staging_uses_current_file_data_directory(accounts, tmp_path):
     other_users = UserStore(other / "cvebeacon-users.db")
     other_users.add("admin", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
     config.config_path.write_text(
-        BASE.replace('[state]\ndatabase = "state.db"',
-                     f'[state]\ndatabase = "{other / "state.db"}"').replace(
+        BASE.replace('nvd_api_key_env = "NVD_API_KEY"\n', "").replace(
+            '[state]\ndatabase = "state.db"',
+            f'[state]\ndatabase = "{other / "state.db"}"').replace(
             '[output]\ndirectory = "reports"',
             f'[output]\ndirectory = "reports"\n\n[watch]\nenabled = true\n'
             f'sources = ["nvd"]\ndatabase = "{other / "watch.db"}"'),
@@ -452,9 +466,7 @@ def test_expired_preview_does_not_delete_a_committed_reference(accounts):
     assert response.status_code == 200, response.text
     pending = editor.pending[form(response.text, "confirm")["preview"]]
     pending.staged = (staged,)
-    config.config_path.write_text(
-        with_file(config, staged), encoding="utf-8",
-    )
+    config.config_path.write_text(with_file(config, staged), encoding="utf-8")
     pending.expires = 0
     editor.cleanup()
     assert staged.exists()
@@ -478,8 +490,8 @@ def test_generic_webhook_accepts_url_references_and_hides_values(accounts, monke
     endpoint = "https://example.invalid/private-token/secret-path"
     monkeypatch.setenv("SYNTHETIC_HOOK_URL", endpoint)
     login(client, "admin")
-    response = preview(client, "channels", g0_name="hook", g0_type="webhook",
-                       g0_url="", g0_url_env="SYNTHETIC_HOOK_URL")
+    response = preview_channels(client, g0_name="hook", g0_type="webhook",
+                                g0_url="", g0_url_env="SYNTHETIC_HOOK_URL")
     assert response.status_code == 200, response.text
     assert endpoint not in response.text
     assert confirm(client, response, "channels").status_code == 303
@@ -518,7 +530,49 @@ url = "{endpoint}"
 def test_new_generic_webhook_rejects_a_direct_url(accounts):
     _, _, _, client = accounts
     login(client, "admin")
-    response = preview(client, "channels", g0_name="hook", g0_type="webhook",
-                       g0_url="https://example.invalid/direct-secret")
+    response = preview_channels(client, g0_name="hook", g0_type="webhook",
+                                g0_url="https://example.invalid/direct-secret")
     assert response.status_code == 400
     assert "url_env" in response.text
+
+
+def test_cleanup_preserves_a_backup_only_reference(accounts):
+    config, _, app, client = accounts
+    editor = app.extensions["dashboard_config"]
+    secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+    secret_dir.mkdir(mode=0o700, exist_ok=True)
+    staged = make_secret(secret_dir / (editor_module.SECRET_PREFIX + "backup"), "Synthetic value")
+    old = time.time() - editor_module.PREVIEW_SECONDS - 30
+    os.utime(staged, (old, old))
+    editor.backup_dir.mkdir(mode=0o700, exist_ok=True)
+    backup = editor.backup_dir / ("20260101T000000000000Z-" + "a" * 16 + ".toml")
+    backup.write_text(with_file(config, staged), encoding="utf-8")
+    editor.cleanup()
+    assert staged.exists()
+
+
+def test_pending_limit_is_per_session(accounts, monkeypatch):
+    _, _, app, client = accounts
+    monkeypatch.setattr(editor_module, "MAX_PENDING_PER_SESSION", 1)
+    login(client, "admin")
+    assert preview(client, g0_retries="1").status_code == 200
+    assert preview(client, g0_retries="2").status_code == 400
+    other = app.test_client()
+    login(other, "admin")
+    assert preview(other, g0_retries="3").status_code == 200
+
+
+def test_commit_rechecks_running_config_for_lockout(accounts):
+    from dataclasses import replace
+
+    config, _, app, client = accounts
+    login(client, "admin")
+    response = preview(client, g0_retries="4")
+    before = config.config_path.read_bytes()
+    editor = app.extensions["dashboard_config"]
+    editor.config = replace(
+        editor.config,
+        dashboard=replace(editor.config.dashboard, session_lifetime_seconds=1234),
+    )
+    assert confirm(client, response).status_code == 400
+    assert config.config_path.read_bytes() == before

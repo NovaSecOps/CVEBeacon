@@ -418,6 +418,13 @@ def _webhook_body(
                     del entry["affected_clients"]
 
 
+def _webhook_url(channel: ChannelConfig) -> str:
+    reference = channel.secret("url")
+    if reference is not None:
+        return _secret(channel, "url")
+    return str(channel.options["url"])
+
+
 def _send_webhook(
     channel: ChannelConfig,
     events: Sequence[DeliveryEvent],
@@ -434,7 +441,7 @@ def _send_webhook(
     result = _http_call(
         http,
         "POST",
-        str(channel.options["url"]),
+        _webhook_url(channel),
         headers=headers,
         content=body,
         timeout=timeout,
@@ -1306,7 +1313,7 @@ def send_test(
             result = _http_call(
                 http,
                 "POST",
-                str(channel.options["url"]),
+                _webhook_url(channel),
                 headers=headers,
                 json_body={
                     "version": WEBHOOK_VERSION,

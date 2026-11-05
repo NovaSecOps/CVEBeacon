@@ -83,6 +83,8 @@ TYPE_KEYS = {
     "gotify": {"server", "app_token_env", "app_token_file", "priority"},
     "webhook": {
         "url",
+        "url_env",
+        "url_file",
         "header_name",
         "header_value_env",
         "header_value_file",
@@ -587,8 +589,22 @@ def _parse_gotify(
 def _parse_webhook(
     table: Mapping[str, Any], label: str, base: Path, common: dict[str, Any]
 ) -> dict[str, Any]:
-    url = _string(table, "url", label, required=True, maximum=4000)
-    _https_url(url, f"{label} url", allow_http=bool(common["allow_insecure"]))
+    url = _string(table, "url", label, maximum=4000)
+    url_secret = _secret(
+        table,
+        "url_env",
+        "url_file",
+        f"{label} url",
+        base,
+        required=False,
+    )
+    if url is not None and url_secret is not None:
+        _fail(f"{label} url", "must be given as url or url_env/url_file, not both")
+    if url is None and url_secret is None:
+        _fail(f"{label} url", "requires url, url_env or url_file")
+    target = url if url is not None else url_secret.peek()
+    if target is not None:
+        _https_url(target, f"{label} url", allow_http=bool(common["allow_insecure"]))
     header_name = _string(table, "header_name", label, maximum=100)
     header_value = _secret(
         table,
@@ -607,7 +623,7 @@ def _parse_webhook(
         _fail(f"{label} header_value_env", "requires header_name")
     return {
         **common,
-        "url": url,
+        "url": url if url is not None else url_secret,
         "header_name": header_name,
         "header_value": header_value,
     }

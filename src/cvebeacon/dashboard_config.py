@@ -24,7 +24,7 @@ from flask import Blueprint, abort, g, redirect, render_template, request, url_f
 from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
                      TeamsConfig, WatchConfig, load_config)
-from .errors import ConfigurationError
+from .errors import CVEBeaconError, ConfigurationError
 from .watch.channels import ChannelConfig, COMMON_KEYS, TYPE_KEYS, ENV_NAME_PATTERN, SECRET_FILE_LIMIT
 from .watch.directories import ensure_private_directory
 from .watch.rules import Rule, EVENT_KINDS, LEAF_KEYS
@@ -33,6 +33,9 @@ from .watch.users import UserStore
 MAX_CONFIG = 256 * 1024
 KEEP_BACKUPS = 10
 PREVIEW_SECONDS = 600
+MAX_PENDING_PER_SESSION = 32
+SECRET_PREFIX = ".dashboard-secret-"
+STAGE_PREFIX = ".dashboard-staged-"
 _VALIDATING = ContextVar("config_validation", default=False)
 _RELOADING = ContextVar("config_reload", default=None)
 
@@ -201,7 +204,8 @@ def check_document(document):
 
 def redacted(document):
     if isinstance(document, dict):
-        return {key: ("[redacted]" if key == "url" else redacted(child)) for key, child in document.items()}
+        return {key: ("[redacted]" if key == "url" or key.endswith("_url") else redacted(child))
+                for key, child in document.items()}
     if isinstance(document, list):
         return [redacted(child) for child in document]
     return document
@@ -277,8 +281,8 @@ def read_regular(path, *, private=False):
         os.close(fd)
 
 
-def write_temp(directory, content, *, info=None):
-    fd, name = tempfile.mkstemp(prefix=".config-", dir=directory)
+def write_temp(directory, content, *, info=None, prefix=".config-"):
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=directory)
     path = Path(name)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -306,6 +310,23 @@ def sync_directory(path):
             os.close(descriptor)
 
 
+def project_document(document, section):
+    """Return only the selected section's editable values for its diff."""
+    if section in SCHEMAS:
+        projected = {}
+        for path, schema in SCHEMAS[section]:
+            source = get_table(document, path)
+            set_table(projected, path, {key: source[key] for key in schema if key in source})
+        return projected
+    if section == "rules":
+        return {"watch": {"rules": get_table(document, "watch").get("rules", [])}}
+    if section == "product-mappings":
+        return {"product_mappings": document.get("product_mappings", [])}
+    if section == "channels":
+        return {"watch": {"channels": get_table(document, "watch.channels")}}
+    return document
+
+
 @dataclass
 class Pending:
     owner: str
@@ -314,6 +335,7 @@ class Pending:
     document: dict
     expires: float
     staged: tuple[Path, ...]
+    replacements: tuple[tuple[Path, Path], ...]
     lockout: bool
 
 
@@ -328,6 +350,10 @@ class Editor:
         self.active_app = app
         self.backup_dir = self.path.parent / ("." + self.path.name + ".backups")
         self.secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+        try:
+            self.cleanup()
+        except (OSError, CVEBeaconError):
+            pass
 
     def __call__(self, environ, start_response):
         # Select an immutable generation without serializing unrelated requests
@@ -346,8 +372,9 @@ class Editor:
             raise ConfigurationError("Configuration cannot be decoded") from None
         # Files can be changed outside this process after startup. Refuse to
         # render malformed/unknown fields, including nested condition content.
-        self.validate(document)
-        return document, content, info, version
+        config, _ = self.validate(document)
+        self.secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+        return document, content, info, version, config
 
     def validate(self, document):
         check_document(document)
@@ -372,33 +399,140 @@ class Editor:
             _VALIDATING.reset(token)
             temporary.unlink(missing_ok=True)
 
+    def _live_reference_paths(self):
+        """Return paths named by the current file and every retained backup."""
+        live = set()
+        documents = []
+        try:
+            content = read_regular(self.path)[0]
+            documents.append((self.path.parent, tomllib.loads(content.decode("utf-8"))))
+        except (OSError, ValueError, UnicodeError, CVEBeaconError):
+            return None
+        if self.backup_dir.exists():
+            if self.backup_dir.is_symlink() or not self.backup_dir.is_dir():
+                return None
+            for name in self.backup_dir.iterdir():
+                if not _backup_name(name.name):
+                    continue
+                try:
+                    raw = read_regular(name, private=True)[0]
+                    documents.append((self.path.parent, tomllib.loads(raw.decode("utf-8"))))
+                except (OSError, ValueError, UnicodeError, CVEBeaconError):
+                    return None
+        for base, document in documents:
+            for path in secret_references(document).values():
+                if isinstance(path, str) and path:
+                    try:
+                        live.add(resolve_reference(path, base))
+                    except (OSError, RuntimeError):
+                        continue
+        return live
+
+    def _cleanup_orphans(self):
+        live = self._live_reference_paths()
+        if live is None:
+            return
+        active = {path for pending in self.pending.values() for path in pending.staged}
+        now = clock.time()
+        directories = {self.secret_dir, self.config.watch.users_database.parent / "dashboard-secrets"}
+        for directory in directories:
+            try:
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                if os.name == "posix" and stat.S_IMODE(directory.stat().st_mode) & 0o077:
+                    continue
+                for path in directory.iterdir():
+                    if not path.name.startswith((SECRET_PREFIX, STAGE_PREFIX)):
+                        continue
+                    if path in live or path in active:
+                        continue
+                    try:
+                        age = now - path.lstat().st_mtime
+                    except OSError:
+                        continue
+                    if age > PREVIEW_SECONDS:
+                        path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
     def cleanup(self):
         for identifier, pending in list(self.pending.items()):
             if pending.expires < clock.monotonic():
                 self.discard(identifier)
+        self._cleanup_orphans()
 
     def discard(self, identifier, *, committed=False):
         pending = self.pending.pop(identifier, None)
-        if pending and not committed:
-            for path in pending.staged:
+        if not pending:
+            return
+        live = self._live_reference_paths()
+        for path in pending.staged:
+            if path.name.startswith((SECRET_PREFIX, STAGE_PREFIX)):
+                if path.name.startswith(SECRET_PREFIX) and live is not None and path.resolve() in live:
+                    # A committed configuration or retained backup still names it.
+                    continue
+                path.unlink(missing_ok=True)
+            else:
                 path.unlink(missing_ok=True)
 
-    def preview(self, section, document, version, staged=()):
+    def _check_direct_urls(self, current, candidate, *, rollback):
+        if rollback:
+            return
+        old_channels = get_table(current, "watch.channels")
+        new_channels = get_table(candidate, "watch.channels")
+        for name, row in old_channels.items():
+            if not isinstance(row, dict) or "url" not in row:
+                continue
+            replacement = new_channels.get(name)
+            if isinstance(replacement, dict) and replacement.get("url") != row["url"]:
+                raise ConfigurationError(
+                    "Existing generic webhook endpoints are read-only; use url_env or url_file for a replacement channel"
+                )
+        for name, row in new_channels.items():
+            if isinstance(row, dict) and "url" in row and name not in old_channels:
+                raise ConfigurationError(
+                    "New generic webhook endpoints must use url_env or url_file"
+                )
+
+    def _check_replacement(self, current, candidate, target):
+        base = self.path.parent
+        old_files = {resolve_reference(value, base) for path, value in secret_references(current).items()
+                     if path[-1].endswith("_file") and isinstance(value, str) and value}
+        new_files = {resolve_reference(value, base) for path, value in secret_references(candidate).items()
+                     if path[-1].endswith("_file") and isinstance(value, str) and value}
+        return target in old_files and target in new_files
+
+    def preview(self, section, document, version, staged=(), replacements=(), *, current_document, current_config):
         self.cleanup()
-        if len(self.pending) >= 256:
-            raise ConfigurationError("Too many pending previews; try again later")
+        mine = sum(1 for pending in self.pending.values() if pending.owner == g.sid)
+        if mine >= MAX_PENDING_PER_SESSION:
+            raise ConfigurationError("Too many pending previews for this session; try again later")
         updated, _ = self.validate(document)
+        if (reference_escape(current_document, document, direct_urls=True)
+                and "manage_secrets" not in g.permissions):
+            abort(403)
+        self._check_direct_urls(current_document, document, rollback=section == "rollback")
+        for target, _ in replacements:
+            if not self._check_replacement(current_document, document, target):
+                raise ConfigurationError("Secret reference changed; create a new preview")
+            safe_secret_target(target)
+        check_protected_paths(updated, self.path, self.backup_dir, [current_config, self.config])
         lockout = (updated.dashboard != self.config.dashboard or
-                   updated.watch.users_database != self.config.watch.users_database)
-        if updated.watch.users_database != self.config.watch.users_database:
-            if not g.user.is_admin:
-                abort(403)
-            users = UserStore(updated.watch.users_database)
-            if not users.dashboard_accounts() or not users.has_admin():
-                raise ConfigurationError("The destination account database needs an enabled administrator")
+                   updated.dashboard != current_config.dashboard or
+                   updated.watch.users_database != self.config.watch.users_database or
+                   updated.watch.users_database != current_config.watch.users_database)
+        if lockout:
+            if updated.watch.users_database != self.config.watch.users_database or \
+                    updated.watch.users_database != current_config.watch.users_database:
+                if not g.user.is_admin:
+                    abort(403)
+                users = UserStore(updated.watch.users_database)
+                if not users.dashboard_accounts() or not users.has_admin():
+                    raise ConfigurationError("The destination account database needs an enabled administrator")
         identifier = secrets.token_hex(32)
         self.pending[identifier] = Pending(g.sid, section, version, document,
-                                          clock.monotonic() + PREVIEW_SECONDS, tuple(staged), lockout)
+                                          clock.monotonic() + PREVIEW_SECONDS, tuple(staged),
+                                          tuple(replacements), lockout)
         return identifier, lockout
 
     def backups(self):
@@ -431,15 +565,54 @@ class Editor:
         # rechecks a revoked proof/permission before filesystem side effects.
         original = recovery = temporary = backup = backup_temp = None
         replaced = False
+        replacements = []
+        applied = []
+        # Re-read and validate before opening the account transaction. The
+        # transaction rechecks the file signature so a concurrent external edit
+        # cannot slip between the validated snapshot and the replacement.
+        old, original, info, version, current_config = self.read()
+        if version != pending.version:
+            abort(409, "Configuration changed; reload the form")
         try:
             with users.transaction() as db:
                 for needed in {"view", *permission}:
                     actor = users.require_permission_in(db, g.entry.proof, needed)
-                old, original, info, version = self.read()
-                if version != pending.version:
+                if read_regular(self.path)[2] != version:
                     abort(409, "Configuration changed; reload the form")
-                if updated.watch.users_database != self.config.watch.users_database and not actor.is_admin:
+                if (reference_escape(old, pending.document, direct_urls=True)
+                        and "manage_secrets" not in users.permissions_in(db, actor)):
                     abort(403)
+                self._check_direct_urls(old, pending.document, rollback=section == "rollback")
+                lockout = (pending.lockout or
+                           updated.dashboard != self.config.dashboard or
+                           updated.dashboard != current_config.dashboard or
+                           updated.watch.users_database != self.config.watch.users_database or
+                           updated.watch.users_database != current_config.watch.users_database)
+                if lockout and not confirmed:
+                    raise ConfigurationError("Confirm the access and session changes before saving")
+                if (updated.watch.users_database != self.config.watch.users_database or
+                        updated.watch.users_database != current_config.watch.users_database):
+                    if not actor.is_admin:
+                        abort(403)
+                    destination = UserStore(updated.watch.users_database)
+                    if not destination.dashboard_accounts() or not destination.has_admin():
+                        raise ConfigurationError("The destination account database needs an enabled administrator")
+                check_protected_paths(updated, self.path, self.backup_dir, [current_config, self.config])
+                replacements = []
+                for target, staged_path in pending.replacements:
+                    if not self._check_replacement(old, pending.document, target):
+                        raise ConfigurationError("Secret reference changed; create a new preview")
+                    target_info = safe_secret_target(target)
+                    try:
+                        old_bytes = read_regular(target, private=True)[0]
+                        new_bytes = staged_path.read_bytes()
+                    except OSError:
+                        raise ConfigurationError("Staged secret cannot be read") from None
+                    if len(new_bytes) > SECRET_FILE_LIMIT:
+                        raise ConfigurationError("Secret must contain 1–16384 bytes of text")
+                    secret_temp = write_temp(target.parent, new_bytes, info=target_info,
+                                             prefix=SECRET_PREFIX)
+                    replacements.append((target, old_bytes, target_info, secret_temp))
                 # Backup and prepare both replacement and recovery bytes before
                 # the final version check and atomic replacement.
                 backup_dir = _private_directory(self.backup_dir)
@@ -453,8 +626,17 @@ class Editor:
                     abort(409, "Configuration changed; reload the form")
                 changed = sum(1 for line in difflib.ndiff(dumps(old).splitlines(), dumps(pending.document).splitlines())
                               if line.startswith(("+ ", "- ")))
-                users._append_audit(db, f"config_save:{section}:changed_lines={changed}", actor.username,
-                                    datetime.now(timezone.utc).isoformat(), actor=actor.username)
+                new_references = {value for value in secret_references(pending.document).values()
+                                  if isinstance(value, str)}
+                secret_writes = len(replacements) + sum(
+                    1 for path in pending.staged
+                    if path.name.startswith(SECRET_PREFIX) and str(path) in new_references)
+                users._append_audit(db, f"config_save:{section}:changed_lines={changed}:secrets={secret_writes}",
+                                    actor.username, datetime.now(timezone.utc).isoformat(), actor=actor.username)
+                for target, old_bytes, target_info, secret_temp in replacements:
+                    os.replace(secret_temp, target)
+                    sync_directory(target.parent)
+                    applied.append((target, old_bytes, target_info))
                 os.replace(temporary, self.path)
                 replaced = True
                 sync_directory(self.path.parent)
@@ -462,8 +644,14 @@ class Editor:
             self.target = replacement.wsgi_app
             self.active_app = replacement
             self.secret_dir = updated.watch.users_database.parent / "dashboard-secrets"
-            self.discard(identifier, committed=True)
         except BaseException:
+            for target, old_bytes, target_info in reversed(applied):
+                try:
+                    restore = write_temp(target.parent, old_bytes, info=target_info, prefix=SECRET_PREFIX)
+                    os.replace(restore, target)
+                    sync_directory(target.parent)
+                except OSError:
+                    logging.getLogger("cvebeacon").error("Secret file recovery failed")
             if replaced:
                 os.replace(recovery, self.path)
                 sync_directory(self.path.parent)
@@ -471,7 +659,7 @@ class Editor:
                 backup.unlink(missing_ok=True)
             raise
         finally:
-            for path in (temporary, recovery, backup_temp):
+            for path in (temporary, recovery, backup_temp, *(item[3] for item in replacements)):
                 if path:
                     path.unlink(missing_ok=True)
         # Backup retention is maintenance, not part of the committed change.
@@ -480,11 +668,138 @@ class Editor:
                 (self.backup_dir / name).unlink(missing_ok=True)
         except OSError:
             logging.getLogger("cvebeacon").warning("Configuration saved; backup retention cleanup failed")
+        # Cleanup after the commit cannot undo a successful save.
+        try:
+            self.discard(identifier, committed=True)
+        except OSError:
+            logging.getLogger("cvebeacon").warning("Configuration saved; staged secret cleanup failed")
 
 
 def _backup_name(name):
     import re
     return re.fullmatch(r"[0-9]{8}T[0-9]{12}Z-[0-9a-f]{16}\.toml", name) is not None
+
+
+def _walk(document):
+    if isinstance(document, dict):
+        for key, child in document.items():
+            yield (key,), child
+            for path, value in _walk(child):
+                yield (key, *path), value
+    elif isinstance(document, list):
+        for index, child in enumerate(document):
+            for path, value in _walk(child):
+                yield (index, *path), value
+
+
+def secret_references(document):
+    """Map each *reference* location to its configured value."""
+    return {path: item for path, item in _walk(document)
+            if isinstance(path[-1], str) and path[-1].endswith(("_env", "_file"))}
+
+
+def direct_webhook_urls(document):
+    channels = get_table(document, "watch").get("channels")
+    if not isinstance(channels, dict):
+        return {}
+    result = {}
+    for name, row in channels.items():
+        if isinstance(row, dict) and "url" in row:
+            result[("watch", "channels", name, "url")] = row["url"]
+    return result
+
+
+def reference_escape(document, replacement, *, direct_urls=False):
+    """Whether a candidate changes a secret reference (or a direct URL)."""
+    old = secret_references(document)
+    new = secret_references(replacement)
+    if direct_urls:
+        old.update(direct_webhook_urls(document))
+        new.update(direct_webhook_urls(replacement))
+    return old != new
+
+
+def resolve_reference(value, base):
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return path.resolve()
+
+
+def safe_secret_target(path):
+    """Validate the existing file behind a secret reference before rewriting it."""
+    if path.is_symlink():
+        raise ConfigurationError("Secret file must not be a symbolic link")
+    try:
+        details = path.lstat()
+    except OSError:
+        raise ConfigurationError("Secret file cannot be read") from None
+    if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+        raise ConfigurationError("Secret file must be a regular file with one link")
+    if os.name == "posix":
+        if details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077:
+            raise ConfigurationError("Secret file must be owned by this account and private")
+    try:
+        UserStore._trusted_directory_chain(path.parent)
+    except CVEBeaconError:
+        raise ConfigurationError("Secret file directory is not trusted") from None
+    return details
+
+
+def _same_path(left, right):
+    if left == right:
+        return True
+    try:
+        return left.exists() and right.exists() and left.samefile(right)
+    except OSError:
+        return False
+
+
+def _inside(path, directory):
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def check_protected_paths(updated, config_path, backup_dir, configs):
+    """Reject settings that would place operational data in a protected store."""
+    account_databases = {config.watch.users_database.resolve() for config in configs}
+    account_databases.add(updated.watch.users_database.resolve())
+    protected_files = {config_path.resolve(), *account_databases}
+    protected_dirs = {backup_dir.resolve()}
+    for config in [*configs, updated]:
+        protected_dirs.add((config.watch.users_database.parent / "dashboard-secrets").resolve())
+    existing_files = set(protected_files)
+    for directory in protected_dirs:
+        try:
+            if directory.is_dir() and not directory.is_symlink():
+                existing_files.update(path.resolve() for path in directory.iterdir()
+                                      if path.is_file() and not path.is_symlink())
+        except OSError:
+            continue
+
+    def protected_file(path):
+        return any(_same_path(path, item) for item in existing_files)
+
+    def protected_directory(path):
+        resolved = path.resolve()
+        return any(resolved == directory or _inside(resolved, directory)
+                   for directory in protected_dirs)
+
+    users_database = updated.watch.users_database.resolve()
+    for label, path in (("watch.database", updated.watch.database),
+                        ("state.database", updated.database_path)):
+        resolved = path.resolve()
+        if resolved == users_database or protected_file(resolved):
+            raise ConfigurationError(f"{label} must not alias the configuration or account store")
+    for label, path in (("watch.database", updated.watch.database),
+                        ("state.database", updated.database_path),
+                        ("output.directory", updated.output_dir)):
+        if protected_directory(path):
+            raise ConfigurationError(f"{label} must not alias a backup or secret directory")
+
 
 
 def _kind(key):
@@ -497,7 +812,11 @@ def _kind(key):
     return "string"
 
 
-def groups_for(section, document, *, new_type="smtp", row_types=None, count=None):
+def _secret_directory(config):
+    return config.watch.users_database.parent / "dashboard-secrets"
+
+
+def groups_for(section, document, *, new_type="smtp", row_types=None, count=None, can_manage=False):
     groups = []
     if section in SCHEMAS:
         for path, schema in SCHEMAS[section]:
@@ -525,20 +844,27 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
         controls = []
         for key in schema:
             item = data.get(key)
-            text = "" if item is None or key == "url" else str(item) if _kind(key) == "string" else value(item)
+            reference = key.endswith(("_env", "_file"))
+            direct_url = key == "url"
+            text = "" if item is None or direct_url else str(item) if _kind(key) == "string" else value(item)
             default = schema[key]
             if isinstance(default, tuple):
                 default = list(default)
             hint = ("" if default is None else str(default) if isinstance(default, Path) else value(default))
             if label == "watch" and key == "database":
                 hint = "cvebeacon-watch.db beside the state database"
-            controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint, "kind": _kind(key),
-                             "secret": key.endswith("_file")})
+            if direct_url and item is not None:
+                hint = "Existing endpoint is hidden and retained"
+            controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
+                             "kind": _kind(key), "secret": key.endswith("_file"),
+                             "readonly": direct_url or (reference and not can_manage),
+                             "allow_new_secret": key.endswith("_file") and (can_manage or bool(item))})
         output.append({"label": label, "controls": controls, "data": data})
     return output
 
 
-def parse_form(editor, section, document):
+def parse_form(editor, section, document, current_config, permissions):
+    can_manage = "manage_secrets" in permissions
     try:
         count = int(request.form.get("row_count", "1"))
         if not 1 <= count <= 101:
@@ -546,8 +872,8 @@ def parse_form(editor, section, document):
     except ValueError:
         abort(400)
     row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
-    groups = groups_for(section, document, count=count, row_types=row_types)
-    rows, staged = [], []
+    groups = groups_for(section, document, count=count, row_types=row_types, can_manage=can_manage)
+    rows, staged, replacements, secret_requests = [], [], [], []
     expected = {"csrf", "version", "action", "row_count"}
     try:
         for index, group in enumerate(groups):
@@ -576,15 +902,43 @@ def parse_form(editor, section, document):
                     expected.add(secret_name)
                     secret = request.form.get(secret_name, "")
                     if secret and not remove:
-                        if not secret.strip() or len(secret.encode("utf-8")) > SECRET_FILE_LIMIT:
-                            raise ConfigurationError("Secret must contain 1–16384 bytes of text")
-                        directory = _private_directory(editor.secret_dir)
-                        path = write_temp(directory, secret.encode("utf-8"))
-                        staged.append(path)
-                        row[key] = str(path)
+                        secret_requests.append((index, group["data"], row, key, secret))
             rows.append({} if remove else row)
         if set(request.form) - expected or any(len(request.form.getlist(key)) != 1 for key in request.form):
             abort(400)
+        directory = None
+        for index, data, row, key, secret in secret_requests:
+            if not row:
+                continue
+            if section == "channels" and not row.get("name"):
+                continue
+            if directory is None:
+                directory = _private_directory(_secret_directory(current_config))
+            if not secret.strip() or len(secret.encode("utf-8")) > SECRET_FILE_LIMIT:
+                raise ConfigurationError("Secret must contain 1–16384 bytes of text")
+            paired_env = key[:-5] + "_env"
+            if row.get(paired_env):
+                raise ConfigurationError(
+                    f"Cannot stage a new file secret while {paired_env} is set; "
+                    "clear the environment reference so the file takes effect"
+                )
+            current_reference = data.get(key)
+            submitted_reference = row.get(key)
+            if (isinstance(current_reference, str) and current_reference
+                    and submitted_reference == current_reference):
+                target = resolve_reference(current_reference, editor.path.parent)
+                safe_secret_target(target)
+                staged_path = write_temp(directory, secret.encode("utf-8"), prefix=STAGE_PREFIX)
+                staged.append(staged_path)
+                replacements.append((target, staged_path))
+            else:
+                if not can_manage:
+                    raise ConfigurationError(
+                        "Changing or creating a secret file reference requires manage_secrets"
+                    )
+                staged_path = write_temp(directory, secret.encode("utf-8"), prefix=SECRET_PREFIX)
+                staged.append(staged_path)
+                row[key] = str(staged_path)
         candidate = deepcopy(document)
         if section in SCHEMAS:
             for (path, _), row in zip(SCHEMAS[section], rows):
@@ -603,11 +957,17 @@ def parse_form(editor, section, document):
                         raise ConfigurationError("Duplicate channel name")
                     channels[name] = row
             candidate.setdefault("watch", {})["channels"] = channels
-        return candidate, staged
+        referenced = {value for value in secret_references(candidate).values() if isinstance(value, str)}
+        for path in list(staged):
+            if path.name.startswith(SECRET_PREFIX) and str(path) not in referenced:
+                path.unlink(missing_ok=True)
+                staged.remove(path)
+        return candidate, staged, replacements
     except BaseException:
         for path in staged:
             path.unlink(missing_ok=True)
         raise
+
 
 
 def register_config(app, config, *, host):
@@ -641,7 +1001,7 @@ def register_config(app, config, *, host):
         error, preview, diff, lockout, staged = None, None, None, False, []
         document = None
         try:
-            document, _, _, version = editor.read()
+            document, _, _, version, current_config = editor.read()
             if request.method == "POST":
                 action = request.form.get("action")
                 if action == "confirm":
@@ -652,16 +1012,22 @@ def register_config(app, config, *, host):
                     abort(400)
                 if request.form.get("version") != version:
                     abort(409, "Configuration changed; reload the form")
-                candidate, staged = parse_form(editor, section, document)
-                preview, lockout = editor.preview(section, candidate, version, staged)
+                candidate, staged, replacements = parse_form(editor, section, document, current_config,
+                                                             g.permissions)
+                preview, lockout = editor.preview(
+                    section, candidate, version, staged, replacements,
+                    current_document=document, current_config=current_config,
+                )
                 staged = []
-                diff = "\n".join(difflib.unified_diff(dumps(redacted(document)).splitlines(),
-                                                     dumps(redacted(candidate)).splitlines(),
-                                                     fromfile="current", tofile="proposed", lineterm=""))
+                diff = "\n".join(difflib.unified_diff(
+                    dumps(redacted(project_document(document, section))).splitlines(),
+                    dumps(redacted(project_document(candidate, section))).splitlines(),
+                    fromfile="current", tofile="proposed", lineterm=""))
             new_type = request.args.get("new_type", "smtp")
             return render_template("config_section.html", section=section,
-                                   groups=groups_for(section, document, new_type=new_type), version=version,
-                                   preview=preview, diff=diff, lockout=lockout,
+                                   groups=groups_for(section, document, new_type=new_type,
+                                                     can_manage="manage_secrets" in g.permissions),
+                                   version=version, preview=preview, diff=diff, lockout=lockout,
                                    channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS, leaves=LEAF_KEYS)
         except ConfigurationError as exc:
             error = safe_error(exc, document or {}, editor.path)
@@ -681,7 +1047,7 @@ def register_config(app, config, *, host):
     def backups():
         preview, diff, lockout = None, None, False
         try:
-            document, _, _, version = editor.read()
+            document, _, _, version, current_config = editor.read()
             if request.method == "POST":
                 if request.form.get("action") == "confirm":
                     editor.commit(request.form.get("preview"), "rollback", app.extensions["dashboard_users"],
@@ -697,7 +1063,10 @@ def register_config(app, config, *, host):
                     candidate = tomllib.loads(raw.decode("utf-8"))
                 except (ValueError, UnicodeError):
                     raise ConfigurationError("Backup cannot be decoded") from None
-                preview, lockout = editor.preview("rollback", candidate, version)
+                preview, lockout = editor.preview(
+                    "rollback", candidate, version,
+                    current_document=document, current_config=current_config,
+                )
                 diff = "\n".join(difflib.unified_diff(dumps(redacted(document)).splitlines(),
                                                      dumps(redacted(candidate)).splitlines(),
                                                      fromfile="current", tofile="backup", lineterm=""))

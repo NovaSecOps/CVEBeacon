@@ -1010,7 +1010,10 @@ def _ask_webhook(base: Path, name: str) -> ChannelDraft:
     header = _ask_text(
         "Header name (blank for none)", "", required=False, validator=validate_header
     )
-    draft = ChannelDraft(name, "webhook", {"type": "webhook", "url": url})
+    draft = ChannelDraft(name, "webhook", {"type": "webhook"})
+    draft.secret_fields.append(
+        ("url", SecretChoice(file=_secret_relative(base, name, "url"), value=url))
+    )
     if header:
         draft.values["header_name"] = header
         choice = _ask_secret_choice(

@@ -4,7 +4,7 @@ PERMISSIONS = frozenset({
     "view", "report", "statement", "run", "retry", "test_channel",
     "edit_rules", "edit_channels", "edit_sources", "edit_watch",
     "edit_reporting", "edit_dashboard", "edit_inventory", "edit_http", "edit_system", "manage_schedule",
-    "manage_users", "view_audit",
+    "manage_secrets", "manage_users", "view_audit",
 })
 
 DEFAULT_ROLES = {

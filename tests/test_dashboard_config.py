@@ -294,7 +294,7 @@ def test_file_secret_never_round_trips_and_rule_can_use_channel(accounts, monkey
     monkeypatch.setenv("DB4_SECRET_ENV", "Synthetic environment value !DO-NOT-ECHO!")
     response = preview(client, "channels", g0_name="soc", g0_type="smtp", g0_host="smtp.example.invalid",
                        g0_from="sender@example.invalid", g0_to='["soc@example.invalid"]',
-                       g0_username="alerts", g0_password_env="DB4_SECRET_ENV", g0_password_file_new=secret)
+                       g0_username="alerts", g0_password_file_new=secret)
     assert response.status_code == 200, response.text
     assert secret not in response.text and os.environ["DB4_SECRET_ENV"] not in response.text
     assert "name=\"g0_password_file_new\"" not in response.text
@@ -303,6 +303,7 @@ def test_file_secret_never_round_trips_and_rule_can_use_channel(accounts, monkey
     secret_path = channel.secret("password").file
     assert secret_path.parent == app.extensions["dashboard_config"].secret_dir
     assert secret_path.read_text() == secret
+    assert channel.secret("password").peek() == secret
     if os.name == "posix":
         assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(secret_path.parent.stat().st_mode) == 0o700
@@ -508,13 +509,14 @@ def test_account_database_change_requires_existing_store_and_access_confirmation
     assert app.extensions["dashboard_config"].config.watch.users_database == other_users.path
 
 
-def test_webhook_endpoint_is_redacted_and_blank_retains_it(accounts):
+def test_webhook_endpoint_is_redacted_and_blank_retains_it(accounts, monkeypatch):
     config, users, _, client = accounts
-    login(client, "admin")
     secret_endpoint = "https://example.invalid/private-token/secret-path"
+    monkeypatch.setenv("DB4_WEBHOOK_ENDPOINT", secret_endpoint)
+    login(client, "admin")
     page = client.get("/config/channels?new_type=webhook")
     data = form(page.text)
-    data.update(g0_name="hook", g0_url=secret_endpoint)
+    data.update(g0_name="hook", g0_url_env="DB4_WEBHOOK_ENDPOINT")
     response = client.post("/config/channels", data=data)
     assert response.status_code == 200 and secret_endpoint not in response.text
     assert confirm(client, response, "channels").status_code == 303
@@ -522,7 +524,9 @@ def test_webhook_endpoint_is_redacted_and_blank_retains_it(accounts):
     page = client.get("/config/channels")
     assert secret_endpoint not in page.text
     assert confirm(client, preview(client, "channels"), "channels").status_code == 303
-    assert load_config(config.config_path).watch.channels[0].options["url"] == secret_endpoint
+    channel = load_config(config.config_path).watch.channels[0]
+    assert channel.secret("url").peek() == secret_endpoint
+    assert secret_endpoint not in config.config_path.read_text()
     assert secret_endpoint not in str(users.audit_entries())
 
 

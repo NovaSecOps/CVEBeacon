@@ -78,6 +78,12 @@ def test_watch_setup_writes_a_loadable_commented_config(tmp_path, monkeypatch, c
     assert [(channel.name, channel.type) for channel in config.watch.channels] == [
         ("alerts", "webhook")
     ]
+    assert 'url = "https://example.org/cvebeacon"' not in text
+    assert 'url_file = "secrets/alerts-url"' in text
+    secret = tmp_path / "secrets" / "alerts-url"
+    assert secret.read_text(encoding="utf-8") == "https://example.org/cvebeacon"
+    if os.name == "posix":
+        assert stat.S_IMODE(secret.stat().st_mode) == 0o600
     assert cli.main(["--config", str(path), "watch", "rules", "check"]) == 0
     output = capsys.readouterr().out
     assert "critical: cvss >= 9.0" in output
