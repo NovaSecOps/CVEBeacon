@@ -104,9 +104,11 @@ not take the lock because they do not change delivery state.
 
 Each locked storage location uses a persistent `cvebeacon-run.lock` file in its
 directory. The lock file carries no state, so a shared storage directory and a
-lock file created by another service account remain usable. `run` takes both
-required locks in sorted canonical path order, takes
-a shared-directory lock only once, and releases any partial acquisition if a
+lock file created by another service account remain usable. A new POSIX lock
+file is created under the process umask rather than a forced mode, so in a
+cross-account setup both accounts need write access to the lock file. `run`
+takes both required locks in sorted canonical path order, takes a
+shared-directory lock only once, and releases any partial acquisition if a
 later lock is busy. Inventory-only or watch-only runs take only the applicable
 lock. Configurations sharing either storage location therefore coordinate even
 when their other location differs. The dashboard's background jobs take the

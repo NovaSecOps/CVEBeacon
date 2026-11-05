@@ -45,21 +45,39 @@ def test_lock_refuses_unsafe_files_without_changing_target(tmp_path, unsafe):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and modes")
-def test_lock_accepts_permissive_file_from_another_account(tmp_path, monkeypatch):
+def test_lock_accepts_permissive_existing_file(tmp_path):
     path = tmp_path / "run.lock"
     path.write_bytes(b"holder metadata")
     path.chmod(0o666)
-    real_lstat = Path.lstat
-    def foreign_owner(target, *args, **kwargs):
-        details = real_lstat(target, *args, **kwargs)
-        if target == path:
-            values = list(details)
-            values[4] = os.geteuid() + 1
-            return os.stat_result(values)
-        return details
-    monkeypatch.setattr(Path, "lstat", foreign_owner)
     with RunLock(path, command="scan"):
         pass
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+@pytest.mark.parametrize("umask", [0o022, 0o002])
+def test_new_lock_file_uses_process_umask(tmp_path, umask):
+    path = tmp_path / "run.lock"
+    previous = os.umask(umask)
+    try:
+        with RunLock(path):
+            pass
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o666 & ~umask
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_relaxed_file_validation_accepts_a_private_mode(tmp_path):
+    from cvebeacon.private_storage import private_file, validate_file
+    path = tmp_path / "run.lock"
+    path.write_bytes(b"")
+    path.chmod(0o600)
+    descriptor = private_file(path, owner_only=False)
+    try:
+        details = validate_file(descriptor, path, owner_only=False)
+    finally:
+        os.close(descriptor)
+    assert stat.S_IMODE(details.st_mode) == 0o600
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")

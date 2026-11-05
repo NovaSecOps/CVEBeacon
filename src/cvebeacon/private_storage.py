@@ -87,7 +87,7 @@ def private_file(path: Path, *, create: bool = False, exclusive: bool = False,
             descriptor = os.open(
                 path,
                 flags | (os.O_CREAT | os.O_EXCL if create else 0),
-                0o600,
+                0o600 if owner_only else 0o666,
             )
             created = create
         except FileExistsError:
@@ -96,7 +96,7 @@ def private_file(path: Path, *, create: bool = False, exclusive: bool = False,
             descriptor = os.open(path, flags)
             created = False
     try:
-        if os.name == "posix" and created:
+        if os.name == "posix" and created and owner_only:
             os.fchmod(descriptor, 0o600)
         validate_file(descriptor, path, owner_only=owner_only)
         return descriptor
