@@ -792,7 +792,8 @@ initial webhook, client details are reduced across the document until its
 serialized UTF-8 body fits 32,768 bytes. When names are left out,
 `affected_clients_omitted` gives their count, even if all details are omitted.
 The reduction only removes client details; a document that is larger than
-that without clients is sent unchanged, as before. The field
+the limit even without them is sent unchanged, client details included, as
+documents were sent before client correlation existed. The field
 and the count are absent when no client is affected, so documents without
 clients are byte-identical to earlier version-2 output. Notice events can carry
 the same field. Clients come only from local state and are never sent to public

@@ -386,17 +386,23 @@ def _webhook_body(
     names: Mapping[str, str],
     clients: Mapping[str, ClientImpacts] | None,
 ) -> bytes:
-    payload = webhook_payload(events, names, clients)
-    while True:
-        body = json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    def serialize(document) -> bytes:
+        return json.dumps(
+            document, ensure_ascii=False, separators=(",", ":"), allow_nan=False
         ).encode("utf-8")
+
+    payload = webhook_payload(events, names, clients)
+    if clients and len(serialize(webhook_payload(events, names, None))) > CHANNEL_LIMITS["webhook"]:
+        # The budget governs only client details. When the document is over
+        # it even without them, trimming cannot help: send it unchanged, as
+        # documents were sent before client correlation existed.
+        return serialize(payload)
+    while True:
+        body = serialize(payload)
         if len(body) <= CHANNEL_LIMITS["webhook"]:
             return body
         entries = [entry for entry in payload["events"] if entry.get("affected_clients")]
         if not entries:
-            # The budget governs only client details. A document without
-            # them is sent exactly as before this feature existed.
             return body
         # Reduce details across the document in at most six rounds. Counts
         # survive even if all names must be omitted to fit the request budget.

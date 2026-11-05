@@ -2851,6 +2851,29 @@ def test_webhook_delivery_shrinks_clients_to_serialized_request_budget(tmp_path,
 
 
 @pytest.mark.parametrize("initial", (False, True))
+def test_webhook_keeps_client_details_when_the_base_document_is_over_budget(tmp_path, initial):
+    config = make_config(tmp_path)
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(100))
+    store = seed(config, identifiers=identifiers, initial=initial)
+    asset = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    StateStore(config.database_path).record_scan([
+        QueryResult(asset, tuple(Finding(asset, Vulnerability(cve),
+            Applicability.AFFECTED, "high", "test") for cve in identifiers), ())
+    ])
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+    report = deliver(config, store, handler)
+    assert not report.failed and len(requests) == 1
+    assert len(requests[0].content) > CHANNEL_LIMITS["webhook"]
+    for event in json.loads(requests[0].content)["events"]:
+        assert event["affected_clients"] == [{"name": "Acme", "assets": 1, "status": "affected"}]
+        assert "affected_clients_omitted" not in event
+    assert all(row[1] == "sent" for row in rows(store))
+
+
+@pytest.mark.parametrize("initial", (False, True))
 def test_webhook_budget_never_blocks_a_document_without_clients(tmp_path, initial):
     # Only client details are trimmed to the budget; a large base document is
     # delivered unchanged, as it was before client correlation existed.
