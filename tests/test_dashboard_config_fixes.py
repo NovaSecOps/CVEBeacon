@@ -549,6 +549,9 @@ def test_cleanup_preserves_a_backup_only_reference(accounts):
     editor.backup_dir.mkdir(mode=0o700, exist_ok=True)
     backup = editor.backup_dir / ("20260101T000000000000Z-" + "a" * 16 + ".toml")
     backup.write_text(with_file(config, staged), encoding="utf-8")
+    os.chmod(backup, 0o600)
+    live = editor._live_reference_paths()
+    assert live is not None and staged.resolve() in live
     editor.cleanup()
     assert staged.exists()
 

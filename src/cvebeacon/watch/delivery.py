@@ -421,8 +421,20 @@ def _webhook_body(
 def _webhook_url(channel: ChannelConfig) -> str:
     reference = channel.secret("url")
     if reference is not None:
-        return _secret(channel, "url")
-    return str(channel.options["url"])
+        value = _secret(channel, "url")
+    else:
+        value = str(channel.options["url"])
+    try:
+        # A reference may be populated or changed after the configuration loaded.
+        validate_webhook_url(
+            value,
+            channel.type,
+            f"watch channel {channel.name!r} webhook_url",
+            allow_insecure=bool(channel.options.get("allow_insecure")),
+        )
+    except ConfigurationError as exc:
+        raise DeliveryFailure(str(exc)) from None
+    return value
 
 
 def _send_webhook(
@@ -432,7 +444,11 @@ def _send_webhook(
     timeout: float,
     names: Mapping[str, str],
     clients: Mapping[str, ClientImpacts] | None = None,
-) -> None:
+) -> DeliveryFailure | None:
+    try:
+        url = _webhook_url(channel)
+    except DeliveryFailure as exc:
+        return exc
     body = _webhook_body(events, names, clients)
     headers: dict[str, str] = {"Content-Type": "application/json"}
     header_name = channel.options.get("header_name")
@@ -441,13 +457,14 @@ def _send_webhook(
     result = _http_call(
         http,
         "POST",
-        _webhook_url(channel),
+        url,
         headers=headers,
         content=body,
         timeout=timeout,
     )
     if not 200 <= result.status_code < 300:
         raise DeliveryFailure(f"webhook rejected the message: HTTP {result.status_code}")
+    return None
 
 
 def _email_message(
@@ -720,7 +737,9 @@ def _send(
     elif channel.type == "gotify":
         _send_gotify(channel, message, http, timeout)
     elif channel.type == "webhook":
-        _send_webhook(channel, events, http, timeout, names, clients)
+        failure = _send_webhook(channel, events, http, timeout, names, clients)
+        if failure is not None:
+            raise failure
     elif channel.type == "graph":
         _send_graph(channel, message, http, timeout)
     elif channel.type == "smtp":
@@ -953,7 +972,7 @@ def deliver_pending(
                     timeout = max(0.5, min(channel.timeout_seconds, remaining))
                     failure: DeliveryFailure | None = None
                     try:
-                        _send_webhook(
+                        failure = _send_webhook(
                             channel,
                             chunk,
                             http,

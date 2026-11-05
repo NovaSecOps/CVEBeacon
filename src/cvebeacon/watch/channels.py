@@ -346,8 +346,14 @@ def _https_url(value: str, label: str, *, allow_http: bool = False) -> None:
         _fail(label, "must be an HTTPS URL" if not allow_http else "must be an HTTP or HTTPS URL")
 
 
-def _validate_webhook_host(value: str, channel_type: str, label: str) -> None:
-    _https_url(value, label)
+def _validate_webhook_host(
+    value: str, channel_type: str, label: str, *, allow_insecure: bool = False
+) -> None:
+    _https_url(
+        value,
+        label,
+        allow_http=allow_insecure and channel_type == "webhook",
+    )
     parts = urlsplit(value)
     if channel_type == "slack":
         if parts.hostname != "hooks.slack.com" or not parts.path.startswith("/services/"):
@@ -604,7 +610,9 @@ def _parse_webhook(
         _fail(f"{label} url", "requires url, url_env or url_file")
     target = url if url is not None else url_secret.peek()
     if target is not None:
-        _https_url(target, f"{label} url", allow_http=bool(common["allow_insecure"]))
+        _validate_webhook_host(
+            target, "webhook", f"{label} url", allow_insecure=bool(common["allow_insecure"])
+        )
     header_name = _string(table, "header_name", label, maximum=100)
     header_value = _secret(
         table,
@@ -707,6 +715,8 @@ def channel_map(channels: Iterable[ChannelConfig]) -> dict[str, ChannelConfig]:
     return {channel.name: channel for channel in channels}
 
 
-def validate_webhook_url(value: str, channel_type: str, label: str) -> None:
+def validate_webhook_url(
+    value: str, channel_type: str, label: str, *, allow_insecure: bool = False
+) -> None:
     """Re-check a webhook URL after its secret was resolved at send time."""
-    _validate_webhook_host(value, channel_type, label)
+    _validate_webhook_host(value, channel_type, label, allow_insecure=allow_insecure)
