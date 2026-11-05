@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block title %}Roles · CVEBeacon{% endblock %}
+{% block content %}<h1>Roles and permissions</h1>
+<p>Admin always has all permissions. Only administrators can create, edit or delete roles. A non-admin with manage_users can manage non-admin accounts and assign only roles whose permissions they hold themselves.</p>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+{% for name, selected in roles.items() %}<h2>{{ name }}</h2>
+{% if name == 'admin' %}<p>All permissions; this role cannot be edited or deleted.</p>{% else %}
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="name" value="{{ name }}">
+<table><thead><tr><th>Permission</th><th>Allowed</th></tr></thead><tbody>{% for capability in capabilities %}<tr><td>{{ capability }}</td><td><input type="checkbox" aria-label="{{ name }}: {{ capability }}" name="permission" value="{{ capability }}" {% if capability in selected %}checked{% endif %}></td></tr>{% endfor %}</tbody></table>
+<button name="action" value="save">Save role</button><button name="action" value="delete">Delete role</button></form>{% endif %}{% endfor %}
+<h2>Create role</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="save"><label>Name <input name="name" required maxlength="32" pattern="[a-z][a-z0-9_-]*"></label>
+{% for capability in capabilities %}<label><input type="checkbox" name="permission" value="{{ capability }}">{{ capability }}</label>{% endfor %}<button type="submit">Create role</button></form>
+{% endblock %}

@@ -549,7 +549,8 @@ def test_security_documentation_is_explicit():
     assert "--admin-user" in watch
     assert "bootstrap" in watch.casefold()
     assert "service account" in watch.casefold()
-    assert "planned dashboard" in watch.casefold()
+    assert "[dashboard](dashboard.md)" in watch.casefold()
+    assert "person-level separation" in watch.casefold()
     assert "must be owned by" in watch.casefold()
     assert "cvebeacon account or root" in watch.casefold()
     assert "sticky-bit" in watch.casefold()
@@ -1131,6 +1132,8 @@ def test_admin_and_self_authorization_are_rechecked_inside_mutations(tmp_path):
     store = UserStore(tmp_path / "users.db", clock=lambda: now[0])
     store.add("alice", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
     store.add("bob", password=PASSWORD)
+    # Keep an enabled administrator while testing revocation of another one.
+    store.add("replacement", password=PASSWORD, is_admin=True)
     admin = store.authenticate("alice", PASSWORD)
     self_proof = store.authenticate("bob", PASSWORD)
 
@@ -1705,3 +1708,16 @@ def test_existing_database_without_meta_gains_one_store_id(tmp_path):
         ).fetchone()
     assert row is not None and len(row[0]) == 64
     assert UserStore(path, clock=lambda: NOW).users()[0].username == "alice"
+
+
+def test_authenticated_cli_can_recover_an_upgrade_without_enabled_admin(tmp_path, monkeypatch):
+    config = config_with(tmp_path, "authenticated")
+    users = UserStore(config.watch.users_database)
+    users.add("oldadmin", password=PASSWORD, is_admin=True)
+    with users.transaction() as db:
+        db.execute("UPDATE cb_user SET disabled=1 WHERE is_admin=1")
+    prompt(monkeypatch, PASSWORD, PASSWORD)
+    base = ["--config", str(config.config_path), "users"]
+    assert cli.main([*base, "add", "recovery", "--admin"]) == 0
+    assert users.find("recovery").is_admin
+    assert users.audit_entries()[-1].actor == "(bootstrap)"

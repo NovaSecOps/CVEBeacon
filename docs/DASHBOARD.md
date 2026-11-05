@@ -36,9 +36,165 @@ New scan-attempt metadata covers failures after configuration loads and the stat
 
 ## Network and security
 
-Localhost use requires no login by default. Without authentication, clients that can reach the dashboard can read observations and initiate manual queries or reports. A non-loopback bind without authentication is refused unless you explicitly pass `--allow-unauthenticated-remote`. Use that override only with appropriate external access controls; do not expose an unauthenticated instance to the public internet.
+With no CVEBeacon accounts, localhost use requires no login by default. Without authentication, clients that can reach the dashboard can read observations and initiate manual queries or reports. A non-loopback bind without authentication is refused unless you explicitly pass `--allow-unauthenticated-remote`. Use that override only with appropriate external access controls; do not expose an unauthenticated instance to the public internet.
+
+### Accounts and bootstrap
+
+The dashboard uses the same accounts as `cvebeacon users` and watch reporting,
+regardless of the reporting identity setting. Create the deploying administrator
+with `cvebeacon users add USERNAME --admin` (see [accounts](WATCH.md#identity-modes-and-accounts)).
+Keep a second enabled administrator for recovery. The last enabled administrator
+cannot be disabled or demoted, including through the CLI; concurrent changes
+are checked in the same database transaction. Accounts are disabled rather than
+deleted, preserving identity and audit references.
+
+Alternatively, on a fresh installation visit `/bootstrap` from localhost and
+choose the first administrator's username and password. This works only while
+the account store is completely empty and the directly connected peer is a
+loopback IP address. When a shared password is configured, complete the
+shared-password login before opening bootstrap. It ignores forwarded addresses.
+**The first person to
+complete this form controls the dashboard. Bootstrap on a trusted local
+computer before exposing the service. A local reverse proxy makes remote
+visitors appear local: never expose an empty account store through it.** CLI
+bootstrap remains available when existing non-admin accounts predate dashboard
+setup; the dashboard bootstrap cannot claim such a store.
+
+Once any account exists, every dashboard request uses individual account login.
+The shared dashboard password and old shared-password sessions are refused,
+including when accounts are created while the server is running. A disabled
+account or an account without a password cannot log in. If all pre-existing
+accounts lack passwords, set them using `users passwd` locally. Account-store
+errors fail closed; they do not enable anonymous access. Restart after restoring
+an account-store backup. The persistent sibling creation-lock file
+(`cvebeacon-users.db.lock`, or the configured database name plus `.lock`) also
+records prior initialization. Keep it with the account database and its backups;
+do not remove it to work around an error. If it exists but the database is
+missing, startup fails even with a shared password or the remote-access override.
+Unreadable or invalid stores also fail closed. Stop the dashboard, restore the
+correct account database with service-account ownership and private permissions,
+then restart. A fresh installation has neither file.
+
+An upgraded store with **no enabled administrator** reports that condition in
+the startup logs. Recover from the service-account shell with
+`cvebeacon users add RECOVERY_NAME --admin`, choosing a new username and a strong
+password. This local bootstrap works only while there is no enabled administrator,
+including in authenticated reporting mode; it is checked again in the creation
+transaction. Existing disabled administrators remain disabled. Dashboard bootstrap
+still requires a completely empty store.
+
+Login uses the existing scrypt verification, dummy verification for unknown or
+unusable accounts, generic failure message, and account lockout: five failed
+attempts lock the account for fifteen minutes. Administrators can unlock it.
+Account login also reserves per-origin exponential backoff from 1 to 60 seconds
+before verification, using at most 4096 origins retained for fifteen minutes.
+Only two password verifications can run concurrently in the server; excess
+attempts fail immediately without occupying workers waiting for a hash slot.
+Forwarded addresses are ignored, so clients behind one proxy share its limit.
+Password hashing runs outside the account write transaction; credentials and
+lockout are rechecked atomically afterward. Identity checks use read transactions.
+The first 10,000 failed or locked attempts per store are retained, followed by one
+`login_failures_suppressed` entry. Further failures do not add audit rows; lockout
+still applies and successful logins and administrative actions remain audited.
+Existing audit rows are preserved, including when an older store exceeds this
+limit. Requests rejected before password verification do not add audit entries.
+Passwords accept 12–1024 characters, must contain non-whitespace text, and must
+differ from the username and email. Users can change their own password under
+**My account and sessions** by supplying their current password. Administrators
+set a password when creating or resetting an account and must share it privately
+with its holder. There is no temporary-password or email-delivery workflow.
+
+### Roles and permissions
+
+**Users** requires `manage_users`; **Roles** requires an administrator.
+User management supports adding accounts, editing display name and email,
+setting passwords, enabling/disabling accounts, unlocking, and assigning one
+role per account. The `admin` role follows the
+existing account admin flag, always has every permission, and cannot be edited
+or deleted. Editable defaults are `viewer` (`view`) and `operator` (`view`,
+`report`, `statement`, `run`, `retry`, `test_channel`). Existing non-admin accounts
+receive `viewer` during migration. Administrators can create roles with any
+subset of the fixed permissions, edit defaults, and delete unassigned roles.
+Reassign users before deleting their role. Deleted defaults stay deleted.
+
+Only administrators can grant or revoke admin, modify an administrator's
+profile, enabled state or password, unlock an administrator, or create, edit or
+delete roles. A non-admin with `manage_users` can manage non-admin accounts only
+within their own permissions and assign roles whose permissions are a subset of
+their own. They cannot change their own role. Password resets cannot take over an
+account with broader permissions. These limits are rechecked inside each user-store
+transaction. Every route declares a policy checked on the server. Changing a
+role's permissions takes effect on the next
+request; changing an account's profile, role or enabled status revokes its
+existing sessions. Each account can always access its own account page and
+logout, even if its role has no permissions.
+
+| Permission | Capability |
+| --- | --- |
+| `view` | Observation pages, findings, query results and exports |
+| `report` | Mark or unmark a CVE as reported |
+| `statement` | Generate statements |
+| `run` | Operation forms; submit manual queries and inventory report exports with `view`; reserved sync, evaluation and notification operations |
+| `retry` | Retry failed or ambiguous deliveries |
+| `test_channel` | Send channel tests |
+| `edit_rules` | Edit rules |
+| `edit_channels` | Edit notification channels |
+| `edit_sources` | Edit source settings |
+| `edit_watch` | Edit watch settings |
+| `edit_reporting` | Edit reporting settings |
+| `edit_dashboard` | Edit dashboard settings |
+| `edit_inventory` | Edit inventory settings |
+| `edit_http` | Edit HTTP client settings |
+| `manage_schedule` | Manage scheduling |
+| `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
+| `view_audit` | View account administration, login and logout history, with hash-chain verification status |
+
+Some capabilities reserve authorization for later dashboard operations; granting
+them does not add an operation that the current dashboard does not implement.
+Opening query/report forms requires `run`; submissions require both `run` and
+`view` because they return findings or exports.
+Role changes and administrative account actions are recorded in the existing
+chained user audit trail. Verification detects changes within that trail, not
+direct edits to `cb_user`, `cb_role` or `cb_user_role`, or removal of its final
+rows; protect database files and backups as described in the watch guide.
+
+### Account sessions
+
+Account login places only a fresh random session identifier in the
+`cvebeacon_account` cookie. The server keeps the identity, credential version,
+CSRF token, creation time and last activity in bounded process memory. This
+avoids persistent bearer credentials and additional database writes for each
+session touch. Separate pools hold at most 256 authenticated sessions and
+256 anonymous login forms. Anonymous allocation never evicts an authenticated
+session. Authenticated sessions are limited to 16 per account; another login can
+evict that account's oldest session. When the authenticated pool is full, new
+logins are refused until space becomes available. Other accounts' sessions are
+preserved. Use one server process; independent processes do not share sessions. Restarts invalidate them all.
+
+Cookies are HttpOnly and SameSite=Strict; enable `secure_cookie` with browser-facing
+HTTPS. Account sessions expire absolutely after `session_lifetime_seconds`
+(default 3600) or after `session_idle_seconds` without a request (default 900).
+Both settings accept integers from 60 to 86400. Activity cannot extend the
+absolute deadline. Password changes, enable/disable, profile/role assignment
+changes, and credential-version changes revoke existing sessions. Logout
+immediately revokes the current session. **Log out of all sessions** revokes
+every login using the account's credential version, including other processes.
+The account page lists valid sessions in the current process by age and idle
+time without displaying bearer identifiers. All forms, including login and
+bootstrap, require a session-bound CSRF token; login rotates both identifiers
+and tokens.
+
+```toml
+[dashboard]
+password_hash_env = "CVEBEACON_DASHBOARD_PASSWORD_HASH" # Used only without accounts
+session_lifetime_seconds = 3600
+session_idle_seconds = 900 # Account sessions only
+secure_cookie = false # Set true behind browser-facing HTTPS
+```
 
 ### Optional local password
+
+This compatibility mode applies only while there are no CVEBeacon accounts.
 
 Generate a strong salted scrypt hash with the existing Werkzeug primitives:
 
@@ -46,7 +202,9 @@ Generate a strong salted scrypt hash with the existing Werkzeug primitives:
 cvebeacon dashboard hash-password
 ```
 
-The helper requires a terminal with hidden input, asks for confirmation, and accepts 12–1024 characters. Use a long unique password. It prints only the hash and needs no inventory or configuration. Supply the output through `CVEBEACON_DASHBOARD_PASSWORD_HASH` in the server process environment using your deployment's secret injection. Never place the password or hash in TOML, source control, command arguments, logs, or SQLite. Keep the hash private too. The supported hash format is Werkzeug's `scrypt:32768:8:1`; regenerate unsupported hashes with the helper. An unset variable disables authentication; an empty or invalid value prevents startup.
+The helper requires a terminal with hidden input, asks for confirmation, and accepts 12–1024 characters. Use a long unique password. It prints only the hash and needs no inventory or configuration. Supply the output through `CVEBEACON_DASHBOARD_PASSWORD_HASH` in the server process environment using your deployment's secret injection. Never place the password or hash in TOML, source control, command arguments, logs, or SQLite. Keep the hash private too. The supported hash format is Werkzeug's `scrypt:32768:8:1`; regenerate unsupported hashes with the helper. In this compatibility mode, an unset variable disables shared authentication;
+an empty or invalid value prevents startup. Once accounts exist, this hash is
+ignored, including invalid values.
 
 Optional TOML settings contain no password material:
 
@@ -57,19 +215,26 @@ session_lifetime_seconds = 3600
 secure_cookie = false
 ```
 
-When enabled, all observation, query, report and history routes require login. Only the login page and bundled static assets are public. Login clears earlier session state and rotates the CSRF token. Sessions expire absolutely after one hour by default (configurable from 60 to 86400 seconds), regardless of activity. **Log out** uses a CSRF-protected POST and revokes that session immediately, including copies of its cookie. Cookies use HttpOnly and SameSite=Strict without a persistent remember-me expiry. Restarting the server invalidates all sessions. At most 256 active sessions are kept; a new successful login can evict the oldest.
+When enabled, all observation, query, report and history routes require login. The login page and bundled static assets are public. The
+empty-store, direct-loopback `/bootstrap` exception described under
+[Accounts and bootstrap](#accounts-and-bootstrap) requires shared-password login
+when a shared password is configured. Login clears earlier session state and rotates the CSRF token. Sessions expire absolutely after one hour by default (configurable from 60 to 86400 seconds), regardless of activity. **Log out** uses a CSRF-protected POST and revokes that session immediately, including copies of its cookie. Cookies use HttpOnly and SameSite=Strict without a persistent remember-me expiry. Restarting the server invalidates all sessions. At most 256 active sessions are kept; a new successful login can evict the oldest.
 
 Failed attempts use per-origin exponential delays from 1 to 60 seconds. The bounded process-local table retains at most 4096 origins for 15 minutes after an attempt. When full, a new origin evicts the least recently attempted entry so unrelated clients are not globally locked out. Cookies cannot bypass a retained origin's delay; attacks rotating through more origins than the table holds can defeat per-origin retention. There is no permanent account lockout. This is a small single-process dashboard, not a distributed authentication service; volumetric attacks still require network controls. A reverse proxy's backend address is the origin for throttling, so clients sharing that proxy share a limit.
 
 ### Remote transport and reverse proxy
 
-Built-in password authentication does **not** protect passwords or session cookies from interception over plain HTTP. For remote authenticated use, terminate HTTPS at a trusted reverse proxy or provide an equivalent encrypted transport. Set `secure_cookie = true` when the browser-facing connection is HTTPS. This flag controls browser cookie transport; it does not enable TLS on the dashboard itself. Restrict direct backend access and protect any backend network hop. Password auth does not replace firewall or normal network security controls.
+Built-in password authentication does **not** protect passwords or session cookies from interception over plain HTTP. For remote authenticated use, terminate HTTPS at a trusted reverse proxy or provide an equivalent encrypted transport. Set `secure_cookie = true` when the browser-facing connection is HTTPS. This flag controls browser cookie transport; it does not enable TLS on the dashboard itself. Configure HSTS at the HTTPS proxy. Restrict direct backend access and protect any backend network hop. Password auth does not replace firewall or normal network security controls.
 
 Loopback bindings validate the requested host. Wildcard bindings accept numeric IP host headers and `localhost`, protecting against arbitrary hostname rebinding. For a reverse proxy, forward a numeric backend `Host` header and preserve the application at the URL root. Forwarded host, address and scheme headers are not trusted. A specific hostname binding accepts that hostname. Outbound TLS verification remains enabled. Password configuration affects only the dashboard; core monitoring continues to work without credentials.
 
 Forms use CSRF protection, output is escaped, errors omit sensitive details, and downloads cannot select filesystem paths. Configuration and credential values are not rendered. Report/query operations are synchronous; avoid submitting repeated requests while an investigation is running.
 
-The same SQLite database stores monitoring state and dashboard metadata. Before an upgrade, stop the scanner/dashboard and back up that database. Schema upgrades preserve existing observations and delivery records; an older application requires its corresponding pre-upgrade backup.
+The monitoring SQLite database stores observations and dashboard scan metadata.
+Accounts and roles live separately in `cvebeacon-users.db` beside the watch
+database. Before an upgrade, stop the scanner/dashboard and back up both data
+stores. Schema upgrades preserve existing observations and delivery records;
+an older application requires its corresponding pre-upgrade backups.
 
 ## Package identities and advisory views
 

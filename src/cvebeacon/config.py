@@ -106,6 +106,7 @@ class DashboardConfig:
     password_hash_env: str = "CVEBEACON_DASHBOARD_PASSWORD_HASH"
     session_lifetime_seconds: int = 3600
     secure_cookie: bool = False
+    session_idle_seconds: int = 900
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +295,7 @@ def load_config(path: str | Path) -> AppConfig:
     http_data = _table(data, "http")
     source_data = _table(data, "sources")
     dashboard_data = _table(data, "dashboard")
-    if set(dashboard_data) - {"password_hash_env", "session_lifetime_seconds", "secure_cookie"}:
+    if set(dashboard_data) - {"password_hash_env", "session_lifetime_seconds", "secure_cookie", "session_idle_seconds"}:
         raise ConfigurationError("unknown dashboard setting; supply the password hash only through its environment variable")
     hash_env = dashboard_data.get("password_hash_env", "CVEBEACON_DASHBOARD_PASSWORD_HASH")
     if not isinstance(hash_env, str) or not hash_env.strip():
@@ -302,6 +303,9 @@ def load_config(path: str | Path) -> AppConfig:
     lifetime = dashboard_data.get("session_lifetime_seconds", 3600)
     if isinstance(lifetime, bool) or not isinstance(lifetime, int) or not 60 <= lifetime <= 86400:
         raise ConfigurationError("dashboard.session_lifetime_seconds must be an integer from 60 to 86400")
+    idle = dashboard_data.get("session_idle_seconds", 900)
+    if isinstance(idle, bool) or not isinstance(idle, int) or not 60 <= idle <= 86400:
+        raise ConfigurationError("dashboard.session_idle_seconds must be an integer from 60 to 86400")
     notification_data = _table(data, "notifications")
     teams_data = notification_data.get("teams", {})
     email_data = notification_data.get("email", {})
@@ -411,7 +415,7 @@ def load_config(path: str | Path) -> AppConfig:
             ),
         ),
         product_mappings=tuple(mappings),
-        dashboard=DashboardConfig(hash_env.strip(), lifetime, _boolean(dashboard_data, "secure_cookie", False)),
+        dashboard=DashboardConfig(hash_env.strip(), lifetime, _boolean(dashboard_data, "secure_cookie", False), idle),
         teams=TeamsConfig(
             enabled=teams_enabled,
             webhook_env=str(
