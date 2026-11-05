@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% block title %}Job history · CVEBeacon{% endblock %}
+{% block content %}<h1>Job history</h1>
+<p>This page shows the most recent {{ max_jobs }} jobs. Older job rows and their logs are removed automatically. Each start and outcome is also in the account audit trail.</p>
+<div class="table-wrap"><table><thead><tr><th>ID</th><th>Operation</th><th>Status</th><th>Started by</th><th>Queued</th><th>Started</th><th>Ended</th><th>Exit</th><th>Detail</th></tr></thead><tbody>
+{% for job in jobs %}<tr><td><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">{{ job.id }}</a></td><td>{{ job.label }}</td><td>{{ job.status }}</td><td>{{ job.started_by }}</td><td>{{ job.created_at }}</td><td>{{ job.started_at or '' }}</td><td>{{ job.ended_at or '' }}</td><td>{{ job.exit_code if job.exit_code is not none else '' }}{% if job.exit_code is not none %}<br>{{ job.exit_meaning }}{% endif %}</td><td>{{ job.message or '' }}</td></tr>
+{% else %}<tr><td colspan="9">No jobs have been recorded.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

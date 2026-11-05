@@ -567,6 +567,9 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         sessions = [(int(now - created), int(now - touched)) for created, touched in account_sessions.own(g.entry.proof)]
         return render_template("account.html", sessions=sessions, error=error), 400 if error else 200
 
+    from .dashboard_ops import create_blueprint as create_operations_blueprint
+    app.register_blueprint(create_operations_blueprint(config))
+
     return app
 
 
