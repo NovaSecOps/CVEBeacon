@@ -4,6 +4,17 @@ One Linux VM or one Windows host, installed from a source checkout or with
 Docker. Details are in the [setup guide](SETUP.md), [watch mode](WATCH.md), and
 [scheduling](SCHEDULING.md).
 
+## Storage trust
+
+Every account that can write a state directory is trusted with the SQLite
+databases stored there, including monitoring, watch and account data and their
+`-wal`, `-shm` or journal sidecar files. Database files are created with the
+process umask, not owner-only, so such an account can read or change them. Keep
+state directories writable only by the service account and trusted
+administrators. A shared operation directory is acceptable only when every
+writer is trusted. The dashboard's `dashboard-jobs/` history directory is
+created and checked owner-only regardless of its parent.
+
 ## A. Linux VM, native install
 
 ### Prerequisites
