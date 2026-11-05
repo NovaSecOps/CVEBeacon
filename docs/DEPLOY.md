@@ -258,6 +258,36 @@ inside the account data directory (the directory containing the watch and
 account databases; `/state` in this layout). Use an environment reference or
 place a dashboard-managed secret in that protected data directory instead.
 
+### Dashboard configuration editor
+
+The container example runs the dashboard with a read-only root filesystem and
+mounts `cvebeacon.toml` read-only. That is the hardened default, and the
+configuration editor will show a read-only notice: sections can be inspected,
+but saving and rollback are disabled. Keep this layout unless browser-based
+editing is required.
+
+To enable editing, give only the dashboard service a writable configuration
+**directory** (not a single-file mount, because atomic replacement needs
+directory write access). For example, keep the file at
+`/srv/cvebeacon/config/cvebeacon.toml`, owned by `65532:65532`, and use:
+
+```yaml
+  dashboard:
+    read_only: true
+    volumes:
+      - ./config:/config:rw
+```
+
+Mount the same directory read-only in the watch, report and scheduled services.
+The dashboard still needs its normal writable `/state` and `/reports` mounts.
+The configuration directory, its `.CONFIG_FILENAME.backups` directory and any
+dashboard-managed secret files must be writable by the service account; keep
+them owner-only and outside the checkout. After a save the dashboard reloads
+its own configuration, but other services keep their old configuration until
+restarted. Restart the watch and report services after changing settings they
+consume. See the [dashboard guide](DASHBOARD.md#configuration-editor) for the
+validation, backup and permission behavior.
+
 Load the command once in your shell, again as a function:
 
 ```console

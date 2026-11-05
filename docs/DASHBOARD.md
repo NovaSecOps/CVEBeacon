@@ -246,7 +246,7 @@ logout, even if its role has no permissions.
 | `edit_http` | Edit HTTP client settings |
 | `edit_system` | Edit state database and report output paths |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
-| `manage_secrets` | Change secret references and replace secret-file contents |
+| `manage_secrets` | Change secret references, create new file secrets and change where a stored channel credential is sent; replacing an existing file secret's contents is also allowed with the section's edit permission |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
 
@@ -346,6 +346,17 @@ and its edit permission for viewing, previewing and saving. Shared-password and
 anonymous sessions cannot use the editor. A viewer without edit permissions
 can see the section index, but cannot read configuration values.
 
+The editor needs a configuration directory that the dashboard service can
+write: atomic replacement needs directory write access, not only write access
+to the file. The hardened container example keeps the configuration mount
+read-only. In that mode the editor shows a read-only notice: sections can be
+inspected, but saving and rollback are disabled with an explanation. To enable
+editing, give only the dashboard service a writable configuration directory,
+for example a writable bind mount containing the TOML file; the container root
+filesystem can remain read-only. Keep the watch and report services read-only
+and restart them after a configuration save. See the deployment guide for the
+container layout.
+
 | Section | Required edit permission |
 | --- | --- |
 | Watch settings | `edit_watch` |
@@ -382,18 +393,23 @@ The diff contains only the selected section and its editable fields; nested
 sections with separate permissions are excluded. Review the diff, then
 **Confirm and save**. Replacement file contents are validated through the same
 loader before preview and again before publication; every consumer of a shared
-file is checked with the staged bytes. Previews expire after ten
-minutes, belong to the current session and section, and can be used once. Each
-session has a bounded number of pending previews, so one editor cannot fill the
-shared preview space. If the original file changed since the form loaded or
-preview was created, the save is refused; reload the form. The editor serializes
-its writers using the account database transaction and checks the file again
+file is checked with the staged bytes, even when another consumer names an
+environment variable that would otherwise mask the file at run time. Previews
+expire after ten minutes and belong to the current session and section. A
+successful save consumes the preview; a failed confirmation leaves it usable
+until it expires. Each session has a bounded number of pending previews, so one
+editor cannot fill the shared preview space; one account may hold several
+sessions. If the original file changed since the form loaded or preview was
+created, the save is refused with a reload message. The editor serializes its
+writers using the account database transaction and checks the file again
 immediately before replacement. External editors do not participate in that
 lock: avoid simultaneous filesystem edits. A configuration-file writer lock
 covers target capture, live secret writes, transaction exit and compensation;
 release and descriptor-close failures are sanitized maintenance so a completed
 save is not reported as failed. Requests are bounded by the dashboard's
-8192-byte form limit; split large edits into smaller saves where possible.
+8192-byte form limit, and a section form accepts at most 100 rows per save;
+split larger edits into smaller saves where possible. Pending previews hold
+full documents, so a session's pending count is also a memory bound.
 
 Saving removes hand-written **comments and formatting**. Before replacement,
 the original bytes are kept in an owner-only sibling directory named
@@ -415,22 +431,25 @@ handled write or audit failures leave the existing application and configuration
 in place, including restoring any secret contents already replaced. Post-commit
 temporary cleanup is best-effort maintenance and cannot turn a completed save
 into a failure. Successful saves reload the dashboard and end **all dashboard
-sessions**; log in again. Requests already
-running finish with their original configuration. Other running commands retain
-their configuration until restarted.
+sessions**; log in again. Already-running non-configuration requests finish with
+their original configuration; a configuration request that reaches the old
+application during the swap is refused and can be retried after reloading. Other
+running commands retain their configuration until restarted.
 Run the disposable loopback acceptance check with
 `python tools/dashboard_config_smoke.py`; it creates no schedules and sends no
 notifications.
 
-Access and session comparisons use both the validated current file and the
-running configuration, at preview and again in the write transaction. A stale
+Access and session comparisons use the running configuration and the current
+file where it is valid, at preview and again in the write transaction. A stale
 in-process configuration therefore cannot skip a lockout confirmation or an
 account-store administrator check. Operational watch, state and output paths
-must not alias the configuration file, the account store, the backup directory,
-the secret directory, or files inside those protected stores; the report output
-path is checked against protected files as well as directories. Resolved paths,
-symbolic links and existing hard links are checked. A path collision is rejected
-with guidance.
+must not alias the configuration file or its writer lock, the account, watch or
+state databases, any of their `-wal`, `-shm`, `-journal` or `.lock` sidecars,
+the backup or secret directories, every referenced `*_file` secret, or the
+inventory input. Equality, same-file identity and any path beneath a protected
+file as an ancestor are rejected, as are watch, state and output paths that
+alias each other. Resolved paths, symbolic links and existing hard links are
+checked. A path collision is rejected with guidance.
 
 All dashboard setting changes require an additional access confirmation.
 Changing the effective account database path (the sibling of the watch
@@ -442,37 +461,59 @@ settings. Moving stores requires making the protected destination available
 before choosing it. Keep a working administrator login for that destination.
 
 Secrets remain `*_env` or `*_file` references. Environment variables can be named
-but cannot be set. Existing secret contents are never returned, including in
+but cannot be set. Names accepted by the editor begin with a letter or underscore
+and contain only letters, digits and underscores, up to 128 characters; the core
+loader accepts a wider historical range, so repair such a name outside the editor.
+Existing secret contents are never returned, including in
 validation errors, diffs, audit entries or logs. Slack, Teams, Discord and
 generic webhook URLs are credentials: the first three use `webhook_url_env` or
 `webhook_url_file`, and a generic webhook uses `url_env` or `url_file`. URL
 values are hidden in forms, diffs and audit records. Existing generic webhook
-`url` values remain supported for existing configurations, are shown read-only,
-are retained only when unchanged, and are not used for new or converted
-channels. The resolved URL is revalidated with the channel's HTTPS or explicit
+`url` values remain supported for existing configurations, are hidden and
+retained only when unchanged, and are not used for new channels. An existing
+direct value can be converted to `url_env` or `url_file` with
+`manage_secrets`; the conversion removes the direct value from the next saved
+file. The resolved URL is revalidated with the channel's HTTPS or explicit
 `allow_insecure` setting immediately before every delivery or test send.
 
-Existing references cannot be changed without `manage_secrets`: they render
-read-only and the server rechecks the rule at preview and again inside the write
+A channel that carries any secret reference has credential-destination fields
+that decide where, or how securely, the credential is sent. Changing SMTP
+`host`, `port`, `security` or `allow_insecure`; Matrix `homeserver` or
+`allow_insecure`; ntfy or Gotify `server` or `allow_insecure`; or a generic
+webhook `url` or `allow_insecure` while it has a header credential requires
+`manage_secrets`. These controls are read-only without that permission, and
+the server compares the current and submitted documents at preview and again in
+the write transaction. A channel without a secret keeps those fields editable
+with its section permission. A new channel that reuses an existing credential
+also needs `manage_secrets` unless it is a pure rename.
+
+Existing references cannot be added, changed or repointed without
+`manage_secrets`: they render read-only and the server rechecks the rule before
+validating or reading a new reference target and again inside the write
 transaction. An editor without that permission may still replace the **contents**
 of an existing `*_file` reference. The submitted value is staged, validated by
 the shared loader, then written to the same owner-only file atomically; the
 reference itself does not change. Conflicting new contents for one physical
-file are rejected; identical writes are coalesced. Renaming a channel and
-rotating its secret file must be saved separately. Writable secret files must
+file are rejected; identical writes are coalesced. Renaming or deleting a
+channel is not itself a reference change, because references are compared by
+value and field rather than by the channel key. Renaming a channel and rotating
+its secret file must still be saved separately: a rename with new file
+contents is refused with guidance. Writable secret files must
 resolve inside the current protected data directory and must not be symbolic
-links, extra hard links, or aliases of the configuration, account database or
-its sidecars and lock, the state or watch databases, inventory inputs, the
-report output directory or its files, or backup files and directories. Files
-inside the protected `dashboard-secrets` directory remain writable when they
-are the referenced secret, including when a report output directory contains
-that secret directory. Readable external references remain usable by the loader but are never
-written through this interface. Creating a new file reference or changing an environment
-or file reference requires `manage_secrets`, which administrators always have.
-A supplied destination path is never overwritten: a new file secret is created
+links or extra hard links. They use the same protected set as operational-path
+checks: the configuration file and writer lock, every current, running and
+candidate account, watch and state database with its `-wal`, `-shm`, `-journal`
+and `.lock` sidecars, backups, secret directories, every referenced `*_file`,
+and the inventory input. Files inside the protected `dashboard-secrets`
+directory remain writable when they are the referenced secret, including when a
+report output directory contains that secret directory. Readable external
+references remain usable by the loader but are never written through this
+interface. Creating a new file reference or changing an environment or file
+reference requires `manage_secrets`, which administrators always have. A
+supplied destination path is never overwritten: a new file secret is created
 with a random name in `dashboard-secrets` beside the account database, inside
-the protected data directory. No secret value is placed in TOML or a confirmation
-form.
+the protected data directory. No secret value is placed in TOML or a
+confirmation form.
 
 A new file value is rejected when its paired `*_env` reference is also set,
 because the environment value would take precedence at run time. This includes
@@ -499,7 +540,11 @@ because a backup can change every section. Changing a secret reference through
 rollback also requires `manage_secrets`. Choose a backup, validate it, review
 the diff and confirm. Rollback uses the same validation, concurrency checks,
 access confirmation, audit, atomic replacement, backup and reload path as saving.
-Invalid or unavailable secret references prevent rollback. Rollback does not
+The backups list and rollback remain available when the live file fails the
+loader: the page reads the raw bytes and version signature, and validates only
+the chosen backup. Rollback in that state requires the access confirmation, and
+an unparseable current file also requires `manage_secrets`; sections cannot be
+edited from an invalid live file, so restore a backup first. Rollback does not
 restore secret-file contents; it preserves files referenced by retained backups.
 Configuration permissions allow changing operational paths and notification
 destinations; grant them only to accounts trusted to control those settings.

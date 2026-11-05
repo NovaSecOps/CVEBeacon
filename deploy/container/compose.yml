@@ -81,6 +81,10 @@ services:
       - CVEBEACON_DASHBOARD_PASSWORD_HASH
     ports: ["127.0.0.1:8787:8787"]
     volumes:
+      # The configuration editor needs a writable configuration directory.
+      # The read-only file mount below is the hardened default. To enable
+      # editing, mount a directory instead for this service only:
+      #   - ./config:/config:rw
       - ./cvebeacon.toml:/config/cvebeacon.toml:ro
       - ./inventory:/inventory:ro
       - ./state:/state:rw
