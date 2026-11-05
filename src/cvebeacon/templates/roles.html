@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}Roles · CVEBeacon{% endblock %}
 {% block content %}<h1>Roles and permissions</h1>
-<p>Admin always has all permissions. Treat manage_users as full administrative trust: it permits role assignment and permission changes.</p>
+<p>Admin always has all permissions. Only administrators can create, edit or delete roles. A non-admin with manage_users can manage non-admin accounts and assign only roles whose permissions they hold themselves.</p>
 {% if error %}<p role="alert">{{ error }}</p>{% endif %}
 {% for name, selected in roles.items() %}<h2>{{ name }}</h2>
 {% if name == 'admin' %}<p>All permissions; this role cannot be edited or deleted.</p>{% else %}
