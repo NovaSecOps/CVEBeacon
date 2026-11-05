@@ -247,12 +247,13 @@ def test_explicit_container_coverage_policy_preserves_health(tmp_path, monkeypat
 
 def test_pipeline_validates_candidate_then_core_loads_web_snapshots(tmp_path):
     from cvebeacon.config import load_config as load_core
+    from cvebeacon.private_storage import private_directory
     config, _ = setup(tmp_path)
     config.core_config.write_text(config.core_config.read_text().replace(
         '[inventory]\n', '[inventory]\nweb_snapshots=true\n'))
     core = load_core(config.core_config)
     directory = core.database_path.parent / "web-inventory"
-    directory.mkdir(mode=0o700)
+    private_directory(directory, owner_only=True)
     write_snapshot(directory / "web.json", [dict(asset_id="web-client", vendor="nginx", product="nginx",
                    version="1.26.2", client="Web Client")], source_id="web-client", collector="web-detect")
     assert run_pipeline(config) == 4
