@@ -791,8 +791,8 @@ records an affected or needs-review finding on a client's asset. Each item has
 initial webhook, client details are reduced across the document until its
 serialized UTF-8 body fits 32,768 bytes. When names are left out,
 `affected_clients_omitted` gives their count, even if all details are omitted.
-If the document still cannot fit, delivery fails with the channel size error
-before any request is sent and requires an explicit retry. The field
+The reduction only removes client details; a document that is larger than
+that without clients is sent unchanged, as before. The field
 and the count are absent when no client is affected, so documents without
 clients are byte-identical to earlier version-2 output. Notice events can carry
 the same field. Clients come only from local state and are never sent to public

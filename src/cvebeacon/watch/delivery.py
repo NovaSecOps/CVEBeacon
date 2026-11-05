@@ -395,7 +395,9 @@ def _webhook_body(
             return body
         entries = [entry for entry in payload["events"] if entry.get("affected_clients")]
         if not entries:
-            raise DeliveryFailure(MESSAGE_TOO_LARGE, attempts_limit=1)
+            # The budget governs only client details. A document without
+            # them is sent exactly as before this feature existed.
+            return body
         # Reduce details across the document in at most six rounds. Counts
         # survive even if all names must be omitted to fit the request budget.
         cap = max(len(entry["affected_clients"]) for entry in entries) // 2

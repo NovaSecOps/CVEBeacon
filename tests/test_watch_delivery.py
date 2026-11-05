@@ -2794,9 +2794,7 @@ channels = ["slack"]
     assert statuses["CVE-2026-0002"] == ("ambiguous", 2)
 
 
-def test_initial_webhook_is_sent_in_chunks_of_one_thousand(tmp_path, monkeypatch):
-    # Isolate the row chunk bound from the independently tested byte budget.
-    monkeypatch.setitem(CHANNEL_LIMITS, "webhook", 4_000_000)
+def test_initial_webhook_is_sent_in_chunks_of_one_thousand(tmp_path):
     config = make_config(tmp_path)
     identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 5001))
     store = seed(config, identifiers=identifiers, initial=True)
@@ -2853,7 +2851,9 @@ def test_webhook_delivery_shrinks_clients_to_serialized_request_budget(tmp_path,
 
 
 @pytest.mark.parametrize("initial", (False, True))
-def test_webhook_delivery_refuses_oversize_base_document_before_http(tmp_path, initial):
+def test_webhook_budget_never_blocks_a_document_without_clients(tmp_path, initial):
+    # Only client details are trimmed to the budget; a large base document is
+    # delivered unchanged, as it was before client correlation existed.
     config = make_config(tmp_path)
     store = seed(config, identifiers=tuple(f"CVE-2026-{index:04d}" for index in range(100)), initial=initial)
     requests = []
@@ -2861,15 +2861,11 @@ def test_webhook_delivery_refuses_oversize_base_document_before_http(tmp_path, i
         requests.append(request)
         return httpx.Response(200, json={})
     report = deliver(config, store, handler)
-    assert requests == []
-    assert report.failed and report.channels[0].error == MESSAGE_TOO_LARGE
-    assert report.channels[0].events == 0
-    assert report.channels[0].given_up == 100
-    assert all(row[1:] == ("failed", 10, MESSAGE_TOO_LARGE) for row in rows(store))
-    assert len(rows(store)) == 100
-    # The one-attempt size failure is terminal until an explicit retry.
-    assert deliver(config, store, handler).channels[0].messages == 0
-    assert requests == []
+    assert not report.failed
+    assert len(requests) == 1
+    assert len(requests[0].content) > CHANNEL_LIMITS["webhook"]
+    assert "affected_clients" not in requests[0].content.decode("utf-8")
+    assert all(row[1] == "sent" for row in rows(store))
 
 
 def test_initial_failed_rows_wait_for_their_backoff(tmp_path):
