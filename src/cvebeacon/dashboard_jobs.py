@@ -2,7 +2,7 @@
 
 Dashboard operations run as short-lived children of the same ``cvebeacon``
 command line, using the same configuration and exit codes. The child takes the
-shared run lock itself; the dashboard only probes it first to refuse a job
+required storage locks itself; the dashboard probes them first to refuse a job
 quickly when a scheduled or interactive run is already active.
 """
 
@@ -26,7 +26,7 @@ from typing import Callable, Iterable
 
 from .config import AppConfig
 from .errors import CVEBeaconError, ConfigurationError, StateError
-from .locking import RunInProgress, RunLock, run_lock_path
+from .locking import OperationLock, RunInProgress
 from .private_storage import private_directory, private_file, validate_file
 from .launching import command_prefix, child_environment
 from .watch.users import _pin_database
@@ -576,9 +576,7 @@ class JobManager:
         if operation not in OPERATION_LABELS:
             raise ConfigurationError("unknown operation")
         if operation in DATA_CHANGING:
-            holder = RunLock(
-                run_lock_path(self.config), command=operation
-            ).probe()
+            holder = OperationLock(self.config, operation).probe()
             if holder is not None:
                 raise RunInProgress(holder)
         with self._condition:
@@ -721,9 +719,7 @@ class JobManager:
             self._audit_finished(self.store.get(job.id), "job_failed")
             return
         if job.operation in DATA_CHANGING:
-            holder = RunLock(
-                run_lock_path(self.config), command=job.operation
-            ).probe()
+            holder = OperationLock(self.config, job.operation).probe()
             if holder is not None:
                 self.store.finish(
                     job.id,

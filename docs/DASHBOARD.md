@@ -31,7 +31,18 @@ The dashboard is optional. Scheduled scans and watches remain separate short-liv
 
 Operations run as short-lived children of the same `cvebeacon` executable with the same configuration and exit codes. The dashboard request returns immediately; the job page shows `queued`, `running`, `succeeded`, `failed` or `cancelled`, together with the queue and start times, end time, exit code and its documented meaning. A running or queued job page refreshes with a meta refresh, and only a bounded tail of the log is shown.
 
-**Single flight.** Data-changing operations take one shared lock file, `cvebeacon-run.lock`, beside the canonical watch database (`[watch] database`), including when watch is disabled. Configurations sharing that watch storage therefore share a lock even if their inventory state databases differ. The command line takes the same lock for `scan`, `run`, `watch sync`, `watch evaluate`, `watch run`, `watch report`, `watch unreport` and delivery runs (`watch notify`, including both retry variants). A channel test is not locked because it does not change delivery state. If the lock is held, the CLI prints `another run is in progress` and exits `2`; the dashboard refuses the new job with the holder's account, host and start time when available. The operating system releases the lock when a process exits, so a crash does not block later runs permanently.
+**Single flight.** Data-changing operations take a persistent `cvebeacon-run.lock` beside each canonical storage location they write. Inventory scans lock `[state] database`; watch operations lock `[watch] database`. Combined runs take both required locks in sorted canonical path order, release any partial acquisition on failure, and take a shared-directory lock only once. Inventory-only or watch-only runs take only the applicable lock.
+
+| Command | Storage locked |
+| --- | --- |
+| `scan` | Inventory state |
+| `run` | Inventory state when an inventory is configured; watch storage when watch is enabled |
+| `watch sync`, `watch evaluate`, `watch run` | Watch storage |
+| `watch notify`, including retry variants | Watch storage |
+| `watch report`, `watch unreport`, dashboard report/unreport | Watch storage |
+| `watch notify test` | None; sends a labelled test without changing delivery state |
+
+Configurations sharing either storage location therefore coordinate even when their other location differs. On contention the CLI prints `another run is in progress` and exits `2`; the dashboard returns a conflict with holder details when available. Other lock failures are operational errors. Dashboard probes are advisory; the child takes the authoritative locks. The operating system releases locks on process exit.
 
 **Cancel.** Cancelling a running job sends the documented interrupt: `SIGINT` to the command's process group on Linux, or `Ctrl+Break` on Windows. The CLI handles both interrupts through its cleanup path. Windows jobs require a console and a separate process group; console-less operation is refused. After three seconds without exit, the dashboard terminates the child, waits another two seconds, then kills it if necessary. Forced termination is labelled explicitly because cleanup is not confirmed. Capture failures and orderly dashboard shutdown also stop and reap the child. A queued job can be cancelled before it starts; cancellation records the requesting account separately from the starter.
 

@@ -33,6 +33,7 @@ from flask import (
 from .config import AppConfig
 from .dashboard import _text, requires
 from .errors import CVEBeaconError, ConfigurationError, StateError
+from .locking import RunInProgress, RunLock, run_lock_path
 from .watch.messages import CVE_URL, EUVD_URL, NVD_URL
 from .watch.reported import format_timestamp, identity_label, normalize_cve_id
 from .watch.reporting import ReportService
@@ -364,16 +365,19 @@ def cve(cve_id):
 def report_cve(cve_id):
     config, store = _state()
     identifier = _cve_from_path(cve_id)
-    if store.view(identifier, catalogs=config.watch.sources) is None:
-        abort(404)
-    note = _text(request.form, "note", limit=500)
     try:
-        outcome = _reporting(config, store).report_cve(
-            identifier,
-            note=note,
-            notify_channels=_notify_channels(config),
-            **_identity_arguments(config),
-        )
+        with RunLock(run_lock_path(config), command="watch report"):
+            if store.view(identifier, catalogs=config.watch.sources) is None:
+                abort(404)
+            note = _text(request.form, "note", limit=500)
+            outcome = _reporting(config, store).report_cve(
+                identifier,
+                note=note,
+                notify_channels=_notify_channels(config),
+                **_identity_arguments(config),
+            )
+    except RunInProgress as exc:
+        return _cve_context(identifier, error=str(exc), status=409)
     except ConfigurationError as exc:
         return _cve_context(identifier, error=str(exc), status=400)
     except StateError:
@@ -393,16 +397,19 @@ def report_cve(cve_id):
 def unreport_cve(cve_id):
     config, store = _state()
     identifier = _cve_from_path(cve_id)
-    if store.view(identifier, catalogs=config.watch.sources) is None:
-        abort(404)
-    note = _text(request.form, "note", limit=500)
     try:
-        outcome = _reporting(config, store).unreport_cve(
-            identifier,
-            note=note,
-            notify_channels=_notify_channels(config),
-            **_identity_arguments(config),
-        )
+        with RunLock(run_lock_path(config), command="watch unreport"):
+            if store.view(identifier, catalogs=config.watch.sources) is None:
+                abort(404)
+            note = _text(request.form, "note", limit=500)
+            outcome = _reporting(config, store).unreport_cve(
+                identifier,
+                note=note,
+                notify_channels=_notify_channels(config),
+                **_identity_arguments(config),
+            )
+    except RunInProgress as exc:
+        return _cve_context(identifier, error=str(exc), status=409)
     except ConfigurationError as exc:
         return _cve_context(identifier, error=str(exc), status=400)
     except StateError:

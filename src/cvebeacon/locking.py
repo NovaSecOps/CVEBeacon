@@ -1,13 +1,14 @@
-"""One shared, crash-safe lock for data-changing CVEBeacon operations.
+"""Crash-safe resource locks for data-changing CVEBeacon operations.
 
-The lock coordinates the dashboard's background jobs with scheduled and
-interactive command-line runs. It is a persistent, owner-only file in the
-watch database directory; the operating system releases the lock when a process exits,
+The locks coordinate the dashboard's background jobs with scheduled and
+interactive command-line runs. Persistent, owner-only files live in the
+storage directories; the operating system releases locks when a process exits,
 so a crashed run cannot block later work permanently.
 """
 
 from __future__ import annotations
 
+import errno
 import getpass
 import json
 import os
@@ -35,8 +36,61 @@ class RunInProgress(CVEBeaconError):
 
 
 def run_lock_path(config) -> Path:
-    """Return the single lock path shared by CLI and dashboard in a config."""
+    """Return the watch storage lock shared by CLI and dashboard."""
     return Path(config.watch.database).resolve().parent / LOCK_NAME
+
+
+def operation_lock_paths(config, operation: str) -> tuple[Path, ...]:
+    """Select the stores written by an operation in canonical path order."""
+    paths = set()
+    if operation == "scan" or (operation == "run" and config.inventory is not None):
+        paths.add(Path(config.database_path).resolve().parent / LOCK_NAME)
+    if (operation == "run" and config.watch.enabled) or operation.startswith("watch-"):
+        paths.add(run_lock_path(config))
+    return tuple(sorted(paths))
+
+
+class OperationLock:
+    """Take each required resource once, releasing partial acquisitions."""
+
+    def __init__(self, config, operation: str):
+        self.locks = [
+            RunLock(path, command=operation)
+            for path in operation_lock_paths(config, operation)
+        ]
+        self.holder: str | None = None
+
+    def acquire(self) -> bool:
+        try:
+            for lock in self.locks:
+                if not lock.acquire():
+                    self.holder = lock.holder
+                    self.release()
+                    return False
+            return True
+        except BaseException:
+            self.release()
+            raise
+
+    def release(self) -> None:
+        for lock in reversed(self.locks):
+            lock.release()
+
+    def probe(self) -> str | None:
+        for lock in self.locks:
+            holder = lock.probe()
+            if holder is not None:
+                return holder
+        return None
+
+
+def _contention(exc: OSError) -> bool:
+    if isinstance(exc, BlockingIOError):
+        return True
+    if os.name == "nt":  # ERROR_LOCK_VIOLATION; CRT may expose only EACCES.
+        code = getattr(exc, "winerror", None)
+        return code == 33 if code is not None else exc.errno == errno.EACCES
+    return exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}
 
 
 def _account_name() -> str:
@@ -121,7 +175,9 @@ class RunLock:
         try:
             try:
                 self._lock(descriptor)
-            except OSError:
+            except OSError as exc:
+                if not _contention(exc):
+                    raise CVEBeaconError("cannot acquire the operation lock") from exc
                 self.holder = self._holder(descriptor)
                 os.close(descriptor)
                 return False
@@ -193,7 +249,9 @@ class RunLock:
         try:
             try:
                 self._lock(descriptor)
-            except OSError:
+            except OSError as exc:
+                if not _contention(exc):
+                    raise CVEBeaconError("cannot probe the operation lock") from exc
                 return self._holder(descriptor)
             self._unlock(descriptor)
             return None

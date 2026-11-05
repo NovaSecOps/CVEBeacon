@@ -31,6 +31,6 @@
 <h2>Command-line fallback</h2>
 <p>Use the same command from the account that should own the schedule when the dashboard runs under a different account or service identity. It is exactly equivalent to the form. When <code>--password-stdin</code> appears, the command reads the Windows account password from one line on standard input and does not accept it as an argument.</p>
 <pre>{{ fallback_command }}</pre>
-<p class="muted">The scheduled command is short-lived and takes the same single-flight lock as dashboard jobs. If another run is in progress it exits with an error instead of changing data concurrently.</p>
+<p class="muted">The scheduled command is short-lived and takes the same storage locks as dashboard jobs. If another run holds a required lock it exits with an error instead of changing data concurrently.</p>
 <p><a href="{{ url_for('operations.index') }}">Back to operations</a></p>
 {% endblock %}

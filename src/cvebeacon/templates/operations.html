@@ -4,7 +4,7 @@
 {% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
 {% if not accounts %}<p class="warning" role="alert">Operations require a CVEBeacon account. Create the first administrator with the local <a href="{{ url_for('bootstrap') }}">bootstrap form</a> or <code>cvebeacon users add NAME --admin</code>.</p>{% endif %}
 {% if full_history %}<p class="warning" role="alert">Watch is configured to start with <strong>full history</strong>. The first sync can download years of public records and take hours. It runs only from the confirmed form below, which supplies the same confirmation as the CLI's <code>--yes</code>.</p>{% endif %}
-<p>Operations run as separate <code>cvebeacon</code> processes. Only one data-changing run can hold the shared lock, so a scheduled or command-line run also blocks a new job here. Each job records its start and outcome in the account audit trail.</p>
+<p>Operations run as separate <code>cvebeacon</code> processes. Operations that write the same storage share locks, so a scheduled or command-line run using that storage also blocks a new job here. Each job records its start and outcome in the account audit trail.</p>
 
 {% if accounts %}<h2>Run a job</h2><div class="table-wrap"><table><thead><tr><th>Operation</th><th>Action</th></tr></thead><tbody>
 {% for operation, label in operation_labels.items() %}{% if (operation == 'scan' and has_inventory) or (operation != 'scan' and operation != 'run' and watch_enabled) or (operation == 'run' and (has_inventory or watch_enabled)) %}<tr><td>{{ label }}</td><td>

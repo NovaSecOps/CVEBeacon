@@ -23,7 +23,7 @@ from .errors import CVEBeaconError, SourceError
 from .http import HttpClient
 from .inventory import inspect_inventory, load_inventory
 from .identity import normalize_asset, identity_conflict
-from .locking import RunLock, run_lock_path
+from .locking import OperationLock
 from .models import Asset, HealthStatus
 from .notifications import GraphMailNotifier, TeamsNotifier, alert_items, configured_channels
 from .reporting import write_json, write_xlsx
@@ -971,7 +971,7 @@ def run(args: argparse.Namespace) -> int:
             )
             if part
         )
-        lock = RunLock(run_lock_path(config), command=label)
+        lock = OperationLock(config, label.replace(" ", "-"))
         if not lock.acquire():
             detail = f" ({lock.holder})" if lock.holder else ""
             print(
