@@ -224,7 +224,7 @@ from the checkout after every upgrade.
 sudo install -d -m 0700 -o 65532 -g 65532 /srv/cvebeacon/state /srv/cvebeacon/reports /srv/cvebeacon/secrets
 sudo install -d -m 0755 /srv/cvebeacon/inventory
 sudo cp /opt/cvebeacon/deploy/container/compose.yml /srv/cvebeacon/compose.yml
-sudo cp /opt/cvebeacon/deploy/container/cvebeacon.example.toml /srv/cvebeacon/cvebeacon.toml
+sudo install -o 65532 -g 65532 -m 0644 /opt/cvebeacon/deploy/container/cvebeacon.example.toml /srv/cvebeacon/cvebeacon.toml
 ```
 
 `watch` does not read the inventory, so a watch-only deployment may leave
@@ -261,10 +261,12 @@ place a dashboard-managed secret in that protected data directory instead.
 ### Dashboard configuration editor
 
 The container example runs the dashboard with a read-only root filesystem and
-mounts `cvebeacon.toml` read-only. That is the hardened default, and the
-configuration editor will show a read-only notice: sections can be inspected,
-but saving and rollback are disabled. Keep this layout unless browser-based
-editing is required.
+mounts `cvebeacon.toml` and `secrets/` read-only. That is the hardened default,
+and the configuration editor will show a read-only notice: sections can be
+inspected, but saving and rollback are disabled. Keep this layout unless
+browser-based editing is required. The dashboard service runs as `65532:65532`,
+so the configuration file and secrets are installed with that owner; a
+root-owned readable file cannot be inspected by the editor.
 
 To enable editing, give only the dashboard service a writable configuration
 **directory** (not a single-file mount, because atomic replacement needs

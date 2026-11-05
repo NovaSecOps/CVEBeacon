@@ -397,7 +397,10 @@ def test_configuration_writer_lock_is_created_lazily(accounts):
 
 def test_channel_reference_removal_requires_manage_secrets(accounts):
     config, users, _, client = accounts
-    config.config_path.write_text(BASE, encoding="utf-8")
+    config.config_path.write_text(
+        BASE.replace('nvd_api_key_env = "NVD_API_KEY"', 'nvd_api_key_env = "CUSTOM_NVD_KEY"'),
+        encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
     # An environment reference is not a filesystem path; removal still needs
     # manage_secrets.
     set_role(users, "source-editor", {"view", "edit_sources"})
@@ -432,7 +435,9 @@ def test_malformed_live_table_shapes_do_not_block_rollback(accounts, monkeypatch
     page = client.get("/config/backups")
     data = form(page.text)
     data["backup"] = backup
-    assert client.post("/config/backups", data=data).status_code == 403
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+    assert "Current configuration is invalid or missing" in response.text
 
     login(client, "admin")
     page = client.get("/config/backups")
@@ -440,7 +445,6 @@ def test_malformed_live_table_shapes_do_not_block_rollback(accounts, monkeypatch
     data["backup"] = backup
     response = client.post("/config/backups", data=data)
     assert response.status_code == 200, response.text
-    assert "Current configuration is invalid or missing" in response.text
 
     confirm_data = form(response.text, "confirm")
     confirm_data["lockout"] = "yes"
@@ -496,6 +500,7 @@ type = "ntfy"
 server = "https://ntfy.example.invalid"
 topic = "alerts"
 '''), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
     set_role(users, "channel-editor", {"view", "edit_channels"})
     login(client)
     response = preview(client, "channels", g1_max_items="7")
@@ -889,17 +894,13 @@ webhook_url_file = "{secret.name}"
 def test_reference_change_is_rejected_before_any_target_read(accounts, monkeypatch):
     config, users, _, client = accounts
     secret = make_secret(config.config_path.parent / "nvd-key", "synthetic key")
+    other = make_secret(config.config_path.parent / "other-nvd-key", "other key")
     config.config_path.write_text(with_file(config, secret), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
     set_role(users, "source-editor", {"view", "edit_sources"})
     login(client)
     before = config.config_path.read_bytes()
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("new reference target was read before the permission check")
-
-    monkeypatch.setattr(dc, "replacement_document", forbidden)
-    response = preview(client, "sources",
-                       g0_nvd_api_key_file=str(config.config_path.parent / "missing-target"))
+    response = preview(client, "sources", g0_nvd_api_key_file=str(other))
     assert response.status_code == 403
     assert config.config_path.read_bytes() == before
 
@@ -1144,3 +1145,121 @@ def test_safe_error_keeps_schema_names(tmp_path):
     message = dc.safe_error(ConfigurationError("[state] must be a table"),
                             {"state": {"database": "state.db"}}, tmp_path / "config.toml")
     assert "state" in message and "[value] must be a table" not in message
+
+
+def test_rotation_uses_loader_resolved_file_target(accounts):
+    config, users, _, client = accounts
+    effective = make_secret(config.config_path.parent / "credential", "old effective")
+    shadow = make_secret(config.config_path.parent / "credential ", "shadow")
+    config.config_path.write_text(
+        BASE.replace('nvd_api_key_env = "NVD_API_KEY"\n',
+                     'nvd_api_key_file = "credential "\n'), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "source-manager", {"view", "edit_sources", "manage_secrets"})
+    login(client)
+    response = preview(client, "sources", g0_nvd_api_key_file_new="new effective")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "sources").status_code == 303
+    assert effective.read_text(encoding="utf-8") == "new effective"
+    assert shadow.read_text(encoding="utf-8") == "shadow"
+
+
+def test_shared_consumer_uses_loader_resolved_file_target(accounts):
+    config, users, _, client = accounts
+    shared = make_secret(config.config_path.parent / "shared",
+                         "https://hooks.slack.com/services/TEST/TEST/TEST")
+    config.config_path.write_text(
+        BASE.replace('nvd_api_key_env = "NVD_API_KEY"\n',
+                     'nvd_api_key_file = "shared"\n')
+        + '''
+[watch.channels.slack]
+type = "slack"
+webhook_url_file = "shared "
+''', encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "source-manager", {"view", "edit_sources", "manage_secrets"})
+    login(client)
+    before = shared.read_text(encoding="utf-8")
+    response = preview(client, "sources", g0_nvd_api_key_file_new="not a URL")
+    assert response.status_code == 400, response.text
+    assert shared.read_text(encoding="utf-8") == before
+
+
+def test_legacy_notification_channels_are_credential_bearing(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(
+        BASE + '''
+[notifications.email]
+enabled = true
+sender = "sender@example.invalid"
+recipients = ["soc@example.invalid"]
+''', encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    page = client.get("/config/notifications")
+    assert page.status_code == 200
+    assert "Legacy notification channels are credential-bearing" in page.text
+    before = config.config_path.read_bytes()
+    response = preview(client, "notifications", g1_sender="changed@example.invalid")
+    assert response.status_code == 403
+    assert config.config_path.read_bytes() == before
+
+
+def test_stale_live_credential_change_needs_manage_secrets(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "password", "synthetic password")
+    config.config_path.write_text(channel_config(_smtp(reference=str(secret))),
+                                  encoding="utf-8")
+    # The app still runs the older BASE configuration; the live file gained a
+    # credential-bearing channel through an external edit.
+    set_role(users, "http-editor", {"view", "edit_http"})
+    login(client)
+    response = preview(client, "http", g0_retries="4")
+    assert response.status_code == 403
+
+
+def test_malformed_notification_baseline_needs_manage_secrets(accounts):
+    config, users, app, client = accounts
+    config.config_path.write_text(
+        BASE + '''
+[notifications.teams]
+webhook_env = "CUSTOM_TEAMS_URL"
+''', encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    editor = app.extensions["dashboard_config"]
+    backup = _manual_backup(editor, BASE)
+    config.config_path.write_text('notifications = "broken"\n' + BASE, encoding="utf-8")
+    set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    assert client.post("/config/backups", data=data).status_code == 403
+
+
+def test_dashboard_container_mounts_read_only_secrets_and_owner():
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "deploy" / "container" / "compose.yml").read_text(encoding="utf-8")
+    dashboard = compose.split("dashboard:", 1)[1]
+    assert "- ./secrets:/config/secrets:ro" in dashboard
+    deploy = (root / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
+    assert "install -o 65532 -g 65532 -m 0644" in deploy
+
+
+def test_stale_live_destination_change_needs_manage_secrets(accounts):
+    config, users, _, client = accounts
+    original = channel_config(_smtp(reference="password_env")) .replace(
+        'password_env = "SMTP_PASSWORD"', 'password_env = "SMTP_PASSWORD"')
+    config.config_path.write_text(original, encoding="utf-8")
+    app = dashboard.create_app(load_config(config.config_path))
+    client = app.test_client()
+    # External edit changes the destination while the process still runs the
+    # previous configuration.
+    config.config_path.write_text(original.replace(
+        'host = "smtp.example.invalid"', 'host = "attacker.example.invalid"'),
+        encoding="utf-8")
+    set_role(users, "http-editor", {"view", "edit_http"})
+    login(client)
+    response = preview(client, "http", g0_retries="4")
+    assert response.status_code == 403

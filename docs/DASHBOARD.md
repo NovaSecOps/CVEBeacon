@@ -365,7 +365,7 @@ container layout.
 | Sources | `edit_sources` |
 | Rules: conditions, event triggers and channel assignments | `edit_rules` |
 | Watch notification channels, with fields for the selected type | `edit_channels` |
-| Legacy Teams and email notifications | `edit_channels` |
+| Legacy Teams and email notifications | `edit_channels` (view; changes require `manage_secrets`) |
 | Watch reporting identity | `edit_reporting` |
 | Inventory and exact product mappings | `edit_inventory` |
 | Dashboard sessions and cookies | `edit_dashboard` (view; changes administrator-only) |
@@ -495,7 +495,12 @@ direct value can be converted to `url_env` or `url_file` with
 file. The resolved URL is revalidated with the channel's HTTPS or explicit
 `allow_insecure` setting immediately before every delivery or test send.
 
-A channel that has, or would have, any secret reference is credential-bearing:
+Legacy `[notifications.teams]` and `[notifications.email]` rows are
+credential-bearing channels even when disabled, because they carry default
+environment references. They render read-only without `manage_secrets` and are
+checked at preview and both commit stages.
+
+A watch channel that has, or would have, any secret reference is credential-bearing:
 an `*_env` or `*_file` reference, a URL reference, or a header secret. A direct
 legacy webhook `url` is also a credential. Any edit of such a channel requires
 `manage_secrets`: changing any field, adding, changing or removing a reference,

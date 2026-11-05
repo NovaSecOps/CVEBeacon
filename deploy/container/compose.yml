@@ -13,6 +13,7 @@ services:
     tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
     volumes:
       - ./cvebeacon.toml:/config/cvebeacon.toml:ro
+      - ./secrets:/config/secrets:ro
       - ./inventory:/inventory:ro
       - ./state:/state:rw
       - ./reports:/reports:rw
@@ -86,6 +87,7 @@ services:
       # editing, mount a directory instead for this service only:
       #   - ./config:/config:rw
       - ./cvebeacon.toml:/config/cvebeacon.toml:ro
+      - ./secrets:/config/secrets:ro
       - ./inventory:/inventory:ro
       - ./state:/state:rw
       - ./reports:/reports:rw

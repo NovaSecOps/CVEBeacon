@@ -442,17 +442,14 @@ def document_set(document, path, value):
     result[path[-1]] = value
 
 
-def replacement_document(document, replacements, base):
+def replacement_document(document, replacements, config):
     """Point every consumer of a replaced target at its staged bytes."""
     result = deepcopy(document)
     staged = {replacement.target: str(replacement.staged) for replacement in replacements}
     for path, value in secret_references(result).items():
         if not path[-1].endswith("_file") or not value:
             continue
-        try:
-            target = resolve_reference(value, base)
-        except (OSError, RuntimeError, ValueError):
-            raise ConfigurationError("Secret file reference is not a valid path") from None
+        target = effective_reference_path(config, path)
         if target in staged:
             document_set(result, path, staged[target])
             # The paired environment reference would mask the staged bytes for
@@ -920,17 +917,11 @@ class Editor:
                 "use url_env or url_file for new or changed endpoints"
             )
 
-    def _check_replacement(self, current, candidate, replacement, current_config):
-        base = self.path.parent
-        old_value = document_get(current, replacement.reference)
-        new_value = document_get(candidate, replacement.reference)
-        if not isinstance(old_value, str) or not isinstance(new_value, str):
-            return False
-        old_target = secret_target(old_value, base, [current_config, self.config], self.backup_dir,
-                                   documents=[current, candidate])
-        new_target = secret_target(new_value, base, [current_config, self.config], self.backup_dir,
-                                   documents=[current, candidate])
-        return old_target == new_target == replacement.target
+    def _check_replacement(self, current, candidate, replacement,
+                           current_config, candidate_config):
+        old_target = effective_reference_path(current_config, replacement.reference)
+        new_target = effective_reference_path(candidate_config, replacement.reference)
+        return old_target is not None and old_target == new_target == replacement.target
 
     def preview(self, section, document, version, staged=(), replacements=(), *, current_document, current_config):
         if self.read_only():
@@ -944,20 +935,27 @@ class Editor:
         checks_config = current_config or self.config
         if unparseable and section == "rollback" and "manage_secrets" not in g.permissions:
             abort(403)
-        if (credential_change(current_document or {}, document, self.config)
-                and "manage_secrets" not in g.permissions):
-            abort(403)
-        validation_document = replacement_document(document, replacements, self.path.parent)
+        if replacements:
+            candidate_config = self.validate(document)[0]
+            validation_document = replacement_document(
+                document, replacements, candidate_config)
+        else:
+            candidate_config = None
+            validation_document = document
         updated, _ = self.validate(validation_document)
-        authority_config = updated if not replacements else self.validate(document)[0]
+        authority_config = candidate_config or updated
         if ((path_authority_changed(authority_config, checks_config, self.config)
                 or dashboard_authority_changed(authority_config, checks_config, self.config))
                 and not g.user.is_admin):
             abort(403)
+        if (credential_authority_changed(authority_config, checks_config, self.config)
+                and "manage_secrets" not in g.permissions):
+            abort(403)
         if current_document is not None:
             self._check_direct_urls(current_document, document, rollback=section == "rollback")
         for replacement in replacements:
-            if not self._check_replacement(current_document or {}, document, replacement, checks_config):
+            if not self._check_replacement(current_document or {}, document, replacement,
+                                           checks_config, authority_config):
                 raise ConfigurationError("Secret reference changed; create a new preview")
             explicit_environment = document_get(document, replacement.environment)
             environment = effective_environment(document, replacement.environment)
@@ -1057,16 +1055,17 @@ class Editor:
                 abort(403)
             if pending.replacements and "manage_secrets" not in early_permissions:
                 abort(403)
-            if (credential_change(old or {}, pending.document, self.config)
-                    and "manage_secrets" not in early_permissions):
-                abort(403)
             updated, content = self.validate(pending.document)
             if ((path_authority_changed(updated, checks_config, self.config)
                     or dashboard_authority_changed(updated, checks_config, self.config))
                     and not probe.is_admin):
                 abort(403)
+            if (credential_authority_changed(updated, checks_config, self.config)
+                    and "manage_secrets" not in early_permissions):
+                abort(403)
             for replacement in pending.replacements:
-                if not self._check_replacement(old or {}, pending.document, replacement, checks_config):
+                if not self._check_replacement(old or {}, pending.document, replacement,
+                                               checks_config, updated):
                     raise ConfigurationError("Secret reference changed; create a new preview")
                 explicit_environment = document_get(pending.document, replacement.environment)
                 environment = effective_environment(pending.document, replacement.environment)
@@ -1087,7 +1086,7 @@ class Editor:
                 secret_temp = write_temp(secret_directory, new_bytes, info=target_info,
                                          prefix=SECRET_PREFIX)
                 prepared.append((replacement, target_info, secret_temp))
-            self.validate(replacement_document(pending.document, pending.replacements, self.path.parent))
+            self.validate(replacement_document(pending.document, pending.replacements, updated))
             # The reloaded application uses final references; SecretRef resolves
             # file contents dynamically, so preparation does not touch live files.
             from .dashboard import create_app
@@ -1120,7 +1119,7 @@ class Editor:
                     abort(403)
                 if pending.replacements and "manage_secrets" not in users.permissions_in(db, actor):
                     abort(403)
-                if (credential_change(old or {}, pending.document, self.config)
+                if (credential_authority_changed(updated, checks_config, self.config)
                         and "manage_secrets" not in users.permissions_in(db, actor)):
                     abort(403)
                 if old is not None:
@@ -1144,7 +1143,8 @@ class Editor:
                                       [pending.document] if invalid_current else
                                       [item for item in (old, pending.document) if item is not None])
                 for replacement, target_info, secret_temp in prepared:
-                    if not self._check_replacement(old or {}, pending.document, replacement, checks_config):
+                    if not self._check_replacement(old or {}, pending.document, replacement,
+                                                   checks_config, updated):
                         raise ConfigurationError("Secret reference changed; create a new preview")
                     target_info = safe_secret_target(replacement.target)
                     try:
@@ -1271,28 +1271,6 @@ def secret_references(document):
             and isinstance(item, str)}
 
 
-def _channel_rows(document):
-    if not isinstance(document, dict):
-        return {}
-    watch = document.get("watch")
-    if not isinstance(watch, dict):
-        return {}
-    channels = watch.get("channels")
-    return channels if isinstance(channels, dict) else {}
-
-
-def _channel_baseline_assessable(document):
-    if not isinstance(document, dict):
-        return False
-    if "watch" in document and not isinstance(document["watch"], dict):
-        return False
-    watch = document.get("watch", {})
-    if "channels" in watch and not isinstance(watch["channels"], dict):
-        return False
-    channels = watch.get("channels", {})
-    return all(isinstance(row, dict) for row in channels.values())
-
-
 def _channel_kind(row):
     kind = row.get("type") if isinstance(row, dict) else None
     return kind.strip().casefold() if isinstance(kind, str) else None
@@ -1317,57 +1295,54 @@ def _config_channel_has_credentials(channel):
     return any(isinstance(item, SecretRef) for item in channel.options.values())
 
 
-def _non_channel_references(document):
-    return {path: item for path, item in secret_references(document).items()
-            if not (len(path) >= 2 and path[0] == "watch" and path[1] == "channels")}
+def effective_reference_path(config, reference):
+    """Resolve a raw TOML reference position through the loader's config."""
+    if reference == ("sources", "nvd_api_key_file"):
+        return config.sources.nvd_api_key_file
+    if (len(reference) >= 4 and reference[0] == "watch"
+            and reference[1] == "channels" and reference[-1].endswith("_file")):
+        channel = next((item for item in config.watch.channels
+                        if item.name == reference[2]), None)
+        if channel is None:
+            return None
+        secret = channel.secret(reference[-1][:-5])
+        return secret.file if secret is not None else None
+    return None
 
 
-def _comparable_channel_row(row):
-    return {key: item for key, item in row.items()
-            if not (isinstance(item, str) and item == "")}
+def credential_identities(config):
+    """Loader-resolved credential-bearing rows and their effective references."""
+    identities = {
+        ("source", "nvd_api_key"): (
+            "source", config.sources.nvd_api_key_env,
+            config.sources.nvd_api_key_file,
+        ),
+        ("notifications", "teams"): config.teams,
+        ("notifications", "email"): config.email,
+    }
+    for channel in config.watch.channels:
+        if _config_channel_has_credentials(channel):
+            identities[("channel", channel.name)] = channel
+    return identities
 
 
-def credential_escape(current_document, candidate, running_config):
-    """Whether this save touches a credential-bearing channel.
-
-    Channels are matched one-to-one by name. Adding, editing or renaming a
-    channel with a secret reference (or a direct legacy URL) and removing a
-    reference from an existing channel all require manage_secrets. Deleting a
-    channel is always allowed. References outside channels are compared by full
-    path and value, so removing or changing one also requires the permission.
-    """
-    current = _channel_rows(current_document)
-    candidate_channels = _channel_rows(candidate)
-    running = {channel.name: channel for channel in running_config.watch.channels}
-    if _non_channel_references(current_document or {}) != _non_channel_references(candidate):
-        return True
-    for name, row in candidate_channels.items():
-        if not isinstance(row, dict):
-            continue
-        candidate_has = channel_has_credentials(row)
-        current_row = current.get(name)
-        running_channel = running.get(name)
-        if current_row is None:
-            if candidate_has:
-                return True
-            if running_channel is not None and _config_channel_has_credentials(running_channel):
-                return True
-            continue
-        if (not isinstance(current_row, dict)
-                or _comparable_channel_row(row) == _comparable_channel_row(current_row)):
-            continue
-        if candidate_has or channel_has_credentials(current_row):
+def credential_authority_changed(candidate, baseline, running):
+    """Whether a credential-bearing row differs from either baseline."""
+    candidate_rows = credential_identities(candidate)
+    baseline_rows = credential_identities(baseline)
+    running_rows = credential_identities(running)
+    for identity, value in candidate_rows.items():
+        if identity not in baseline_rows or baseline_rows[identity] != value:
             return True
-        if running_channel is not None and _config_channel_has_credentials(running_channel):
+        if identity not in running_rows or running_rows[identity] != value:
             return True
+    candidate_channels = {channel.name for channel in candidate.watch.channels}
+    for rows in (baseline_rows, running_rows):
+        for identity in rows:
+            if (identity[0] == "channel" and identity not in candidate_rows
+                    and identity[1] in candidate_channels):
+                return True
     return False
-
-
-def credential_change(current_document, candidate, running_config):
-    """Credential check that fails closed when the baseline shape is invalid."""
-    if not _channel_baseline_assessable(current_document):
-        return True
-    return credential_escape(current_document, candidate, running_config)
 
 
 def effective_paths(config):
@@ -1616,6 +1591,7 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
         credential_bearing = section == "channels" and channel_has_credentials(data)
         readonly_channel = credential_bearing and not can_manage
         readonly_dashboard = section == "dashboard" and not can_admin
+        readonly_notifications = section == "notifications" and not can_manage
         controls = []
         for key in schema:
             item = data.get(key)
@@ -1634,7 +1610,8 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
             controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
                              "kind": _kind(key), "secret": key.endswith("_file"),
                              "existing": bool(item),
-                             "readonly": readonly_channel or readonly_dashboard or direct_url or
+                             "readonly": (readonly_channel or readonly_dashboard
+                                          or readonly_notifications or direct_url) or
                              (reference and not can_manage) or
                              (path_value and not can_admin),
                              "allow_new_secret": (
@@ -1646,7 +1623,10 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                            "Editing or replacing it requires manage_secrets; you may delete it."
                            if readonly_channel else
                            ("Dashboard sign-in and session settings are administrator-only."
-                            if readonly_dashboard else None))})
+                            if readonly_dashboard else
+                            ("Legacy notification channels are credential-bearing; "
+                             "changing them requires manage_secrets."
+                             if readonly_notifications else None)))})
     return output
 
 
@@ -1732,7 +1712,10 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             environment_path = (*prefix, paired_env)
             if (isinstance(current_reference, str) and current_reference
                     and submitted_reference == current_reference):
-                target = secret_target(current_reference, editor.path.parent,
+                target = effective_reference_path(current_config, reference_path)
+                if target is None:
+                    raise ConfigurationError("Secret file reference is not a configured file")
+                target = secret_target(str(target), editor.path.parent,
                                        [current_config, editor.config], editor.backup_dir,
                                        documents=[document])
                 staged_path = write_temp(directory, secret.encode("utf-8"), prefix=STAGE_PREFIX)
