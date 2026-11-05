@@ -1150,6 +1150,8 @@ def test_safe_error_keeps_schema_names(tmp_path):
     assert "state" in message and "[value] must be a table" not in message
 
 
+@pytest.mark.skipif(os.name != "posix",
+                    reason="Windows drops trailing spaces from file names")
 def test_rotation_uses_loader_resolved_file_target(accounts):
     config, users, _, client = accounts
     effective = make_secret(config.config_path.parent / "credential", "old effective")

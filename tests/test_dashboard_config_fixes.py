@@ -341,10 +341,10 @@ def test_rollback_compares_against_current_file_and_running_config(accounts, tmp
     other_users.add("admin", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
     config.config_path.write_text(
         BASE.replace('[state]\ndatabase = "state.db"',
-                     f'[state]\ndatabase = "{other / "state.db"}"').replace(
+                     f'[state]\ndatabase = {json.dumps(str(other / "state.db"))}').replace(
             '[output]\ndirectory = "reports"',
             f'[output]\ndirectory = "reports"\n\n[watch]\nenabled = true\n'
-            f'sources = ["nvd"]\ndatabase = "{other / "watch.db"}"'),
+            f'sources = ["nvd"]\ndatabase = {json.dumps(str(other / "watch.db"))}'),
         encoding="utf-8",
     )
     login(client)
@@ -363,10 +363,10 @@ def test_staging_uses_current_file_data_directory(accounts, tmp_path):
     config.config_path.write_text(
         BASE.replace('nvd_api_key_env = "NVD_API_KEY"\n', "").replace(
             '[state]\ndatabase = "state.db"',
-            f'[state]\ndatabase = "{other / "state.db"}"').replace(
+            f'[state]\ndatabase = {json.dumps(str(other / "state.db"))}').replace(
             '[output]\ndirectory = "reports"',
             f'[output]\ndirectory = "reports"\n\n[watch]\nenabled = true\n'
-            f'sources = ["nvd"]\ndatabase = "{other / "watch.db"}"'),
+            f'sources = ["nvd"]\ndatabase = {json.dumps(str(other / "watch.db"))}'),
         encoding="utf-8",
     )
     response = preview(client, "sources", g0_nvd_api_key_file_new="Synthetic staging value")
