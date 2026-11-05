@@ -435,6 +435,12 @@ def test_single_removal_warns_until_next_detection(web, monkeypatch):
     monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 0)
     assert web_assets.run_detection(config, "Acme", plan=True) == 0
     assert warning in client.get("/web-assets?client=Acme").text
+    before = output.read_bytes()
+    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 2)
+    assert web_assets.run_detection(config, "Acme") == 2
+    assert output.read_bytes() == before
+    assert warning in client.get("/web-assets?client=Acme").text
+    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 0)
     assert web_assets.run_detection(config, "Acme") == 0
     assert warning not in client.get("/web-assets?client=Acme").text
 

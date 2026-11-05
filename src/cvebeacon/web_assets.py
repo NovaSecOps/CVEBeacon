@@ -149,6 +149,6 @@ def run_detection(config, client, *, plan=False):
     # The parent CLI holds the shared scan lock throughout the child process.
     code = subprocess.call(companion_command(document["client"], assets, output, plan=plan),
                            stdin=subprocess.DEVNULL, env=child_environment(config))
-    if not plan:
+    if not plan and code == 0:
         output.with_name(output.name + ".removed").unlink(missing_ok=True)
     return code
