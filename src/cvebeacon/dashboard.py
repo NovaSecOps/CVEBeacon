@@ -73,7 +73,7 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
     return current is not None and current.target_key == asset.target_key
 
 
-def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
+def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flask:
     if config.inventory is None and not config.watch.enabled:
         raise CVEBeaconError(
             "the dashboard requires an inventory or watch mode; add [inventory] path or set [watch] enabled = true"
@@ -591,7 +591,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         return render_template("account.html", sessions=sessions, error=error), 400 if error else 200
 
     from .dashboard_ops import create_blueprint as create_operations_blueprint
-    app.register_blueprint(create_operations_blueprint(config))
+    app.register_blueprint(create_operations_blueprint(config, job_manager=jobs))
     from .dashboard_config import register_config
     register_config(app, config, host=host)
     return app

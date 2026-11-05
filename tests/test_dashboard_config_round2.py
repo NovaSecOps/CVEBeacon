@@ -10,6 +10,7 @@ import pytest
 from cvebeacon import dashboard_config as dc
 from cvebeacon.config import load_config
 from cvebeacon.errors import ConfigurationError
+from cvebeacon.locking import LOCK_NAME
 from test_dashboard import setup  # noqa: F401 - registers the shared fixture
 from test_dashboard_accounts import PASSWORD, accounts as account_fixture, login
 from test_dashboard_config_fixes import (
@@ -217,6 +218,38 @@ def test_operational_paths_reject_config_lock_secret_and_inventory(accounts):
         response = preview(client, "system", g0_database=str(target))
         assert response.status_code == 400, (target, response.text)
         assert config.config_path.read_bytes() == before
+
+
+def test_operational_paths_reject_dashboard_jobs_storage(accounts):
+    config, users, _, client = accounts
+    jobs = config.database_path.parent / "dashboard-jobs"
+    protected = [
+        jobs,
+        jobs / "dashboard-jobs.db",
+        jobs / "job-1.log",
+        config.database_path.parent / LOCK_NAME,
+        config.watch.database.parent / LOCK_NAME,
+    ]
+    set_role(users, "path-editor", {"view", "edit_system"})
+    login(client)
+    for target in protected:
+        before = config.config_path.read_bytes()
+        response = preview(client, "system", g0_database=str(target))
+        assert response.status_code == 400, (target, response.text)
+        assert config.config_path.read_bytes() == before
+
+
+def test_secret_rotation_rejects_dashboard_jobs_storage(accounts):
+    config, users, _, client = accounts
+    jobs = config.database_path.parent / "dashboard-jobs"
+    jobs.mkdir(mode=0o700, exist_ok=True)
+    secret = make_secret(jobs / "job-secret", "synthetic job storage")
+    config.config_path.write_text(channel_config(_smtp(reference=str(secret))), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    response = preview(client, "channels", g0_password_file_new="replacement")
+    assert response.status_code == 400
+    assert secret.read_text(encoding="utf-8") == "synthetic job storage"
 
 
 def test_operational_paths_cannot_alias_each_other(accounts):

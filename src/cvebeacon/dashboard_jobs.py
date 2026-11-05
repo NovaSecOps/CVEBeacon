@@ -582,6 +582,27 @@ class JobManager:
         except CVEBeaconError:
             pass
 
+    def reconfigure(self, config: AppConfig, users) -> None:
+        """Point the process-wide manager at a reloaded configuration.
+
+        The manager object, worker thread and active child processes are kept.
+        Moving the job storage directory is refused while work or retries are
+        pending so a running job cannot be split across two stores.
+        """
+        store = JobStore(Path(config.database_path).parent / "dashboard-jobs")
+        with self._condition:
+            if store.path != self.store.path and (
+                self._queue
+                or self._running is not None
+                or (self._thread is not None and self._thread.is_alive())
+            ):
+                raise ConfigurationError(
+                    "Cannot change dashboard job storage while a job is queued or running"
+                )
+            self.config = config
+            self.users = users
+            self.store = store
+
     def start_thread(self) -> None:
         with self._condition:
             if self._stopping or (self._thread is not None and self._thread.is_alive()):

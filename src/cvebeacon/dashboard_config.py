@@ -27,6 +27,7 @@ from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
                      TeamsConfig, WatchConfig, load_config)
 from .errors import CVEBeaconError, ConfigurationError
+from .locking import LOCK_NAME, run_lock_path
 from .watch.channels import (CREDENTIAL_DESTINATIONS, CREDENTIAL_FIELDS, ChannelConfig,
                              COMMON_KEYS, TYPE_KEYS, ENV_NAME_PATTERN, SECRET_FILE_LIMIT)
 from .watch.directories import ensure_private_directory
@@ -532,6 +533,19 @@ def _config_reference_paths(configs):
     return result
 
 
+def _operation_storage_paths(config):
+    """Files and private directory used by dashboard operations."""
+    job_directory = (Path(config.database_path).parent / "dashboard-jobs").resolve()
+    files = {(job_directory / "dashboard-jobs.db").resolve()}
+    try:
+        files.update(path.resolve() for path in job_directory.glob("job-*.log"))
+    except OSError:
+        pass
+    files.add(Path(config.database_path).resolve().parent / LOCK_NAME)
+    files.add(run_lock_path(config).resolve())
+    return files, {job_directory}
+
+
 def _protected_paths(configs, backup_dir, documents=(), *, base=None, reference_target=None):
     """Files and directories that operational or secret writes must not touch."""
     files = set()
@@ -548,6 +562,9 @@ def _protected_paths(configs, backup_dir, documents=(), *, base=None, reference_
         if config.inventory is not None:
             files.add(config.inventory.path.resolve())
         directories.add(_secret_directory(config).resolve())
+        operation_files, operation_directories = _operation_storage_paths(config)
+        files.update(operation_files)
+        directories.update(operation_directories)
     references.update(_config_reference_paths(configs))
     for document in documents:
         for path, value in secret_references(document).items():
@@ -591,9 +608,12 @@ def secret_target(reference, base, configs, backup_dir, *, documents=()):
     backup_root = backup_dir.resolve()
     if target == backup_root or _inside(target, backup_root):
         raise ConfigurationError("Secret file reference must not alias a backup store")
-    if any(target == item for item in protected_dirs):
-        raise ConfigurationError("Secret file reference must not alias a protected directory")
     secret_directories = {_secret_directory(config).resolve() for config in configs}
+    for directory in protected_dirs:
+        if target == directory:
+            raise ConfigurationError("Secret file reference must not alias a protected directory")
+        if _inside(target, directory) and directory not in secret_directories:
+            raise ConfigurationError("Secret file reference must not alias a protected directory")
     if not any(_inside(target, directory) for directory in secret_directories):
         for config in configs:
             if _inside(target, config.output_dir.resolve()):
@@ -633,6 +653,7 @@ class Editor:
         self.pending = {}
         self.target = app.wsgi_app
         self.active_app = app
+        self.jobs = app.extensions.get("dashboard_jobs")
         self.backup_dir = self.path.parent / ("." + self.path.name + ".backups")
         self.secret_dir = config.watch.users_database.parent / "dashboard-secrets"
         try:
@@ -1004,7 +1025,7 @@ class Editor:
             from .dashboard import create_app
             token = _RELOADING.set(self)
             try:
-                replacement_app = create_app(updated, host=self.host)
+                replacement_app = create_app(updated, host=self.host, jobs=self.jobs)
             finally:
                 _RELOADING.reset(token)
             destination_users = replacement_app.extensions["dashboard_users"]
@@ -1082,6 +1103,8 @@ class Editor:
                 os.replace(temporary, self.path)
                 replaced = True
                 sync_directory(self.path.parent)
+            if self.jobs is not None:
+                self.jobs.reconfigure(updated, destination_users)
             committed = True
             self.config = updated
             self.target = replacement_app.wsgi_app
@@ -1316,6 +1339,9 @@ def check_protected_paths(updated, config_path, backup_dir, configs, documents=(
                            _database_paths(updated.watch.users_database))
     if updated.inventory is not None:
         protected_files.add(updated.inventory.path.resolve())
+    operation_files, operation_directories = _operation_storage_paths(updated)
+    protected_files.update(operation_files)
+    protected_dirs.update(operation_directories)
     protected_dirs.add(_secret_directory(updated).resolve())
 
     def aliases_protected_file(path, unchanged):

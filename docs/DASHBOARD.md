@@ -434,7 +434,11 @@ into a failure. Successful saves reload the dashboard and end **all dashboard
 sessions**; log in again. Already-running non-configuration requests finish with
 their original configuration; a configuration request that reaches the old
 application during the swap is refused and can be retried after reloading. Other
-running commands retain their configuration until restarted.
+running commands retain their configuration until restarted. A reload reuses the
+process's single dashboard job manager: queued and running jobs keep their
+worker and store, future jobs use the reloaded settings, and `serve` shuts the
+same manager down when the process exits. Moving the state database, and with it
+the private job storage directory, is refused while a job is queued or running.
 Run the disposable loopback acceptance check with
 `python tools/dashboard_config_smoke.py`; it creates no schedules and sends no
 notifications.
@@ -445,8 +449,9 @@ in-process configuration therefore cannot skip a lockout confirmation or an
 account-store administrator check. Operational watch, state and output paths
 must not alias the configuration file or its writer lock, the account, watch or
 state databases, any of their `-wal`, `-shm`, `-journal` or `.lock` sidecars,
-the backup or secret directories, every referenced `*_file` secret, or the
-inventory input. Equality, same-file identity and any path beneath a protected
+the private `dashboard-jobs` directory with its database and logs, both operation
+run-lock files, the backup or secret directories, every referenced `*_file`
+secret, or the inventory input. Equality, same-file identity and any path beneath a protected
 file as an ancestor are rejected, as are watch, state and output paths that
 alias each other. Resolved paths, symbolic links and existing hard links are
 checked. A path collision is rejected with guidance.
@@ -503,8 +508,9 @@ resolve inside the current protected data directory and must not be symbolic
 links or extra hard links. They use the same protected set as operational-path
 checks: the configuration file and writer lock, every current, running and
 candidate account, watch and state database with its `-wal`, `-shm`, `-journal`
-and `.lock` sidecars, backups, secret directories, every referenced `*_file`,
-and the inventory input. Files inside the protected `dashboard-secrets`
+and `.lock` sidecars, the private `dashboard-jobs` directory with its database
+and logs, both operation run-lock files, backups, secret directories, every
+referenced `*_file`, and the inventory input. Files inside the protected `dashboard-secrets`
 directory remain writable when they are the referenced secret, including when a
 report output directory contains that secret directory. Readable external
 references remain usable by the loader but are never written through this
