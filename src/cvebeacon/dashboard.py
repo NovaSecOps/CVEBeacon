@@ -239,7 +239,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
             else:
                 response.delete_cookie(ACCOUNT_COOKIE, httponly=True, samesite="Strict",
                                        secure=config.dashboard.secure_cookie)
-        response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
@@ -567,6 +567,9 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         sessions = [(int(now - created), int(now - touched)) for created, touched in account_sessions.own(g.entry.proof)]
         return render_template("account.html", sessions=sessions, error=error), 400 if error else 200
 
+    from .dashboard_ops import create_blueprint as create_operations_blueprint
+    app.register_blueprint(create_operations_blueprint(config))
+
     return app
 
 
@@ -600,3 +603,4 @@ def serve(config: AppConfig, *, host="127.0.0.1", port=8787, allow_unauthenticat
         server.run()
     finally:
         server.close()
+        app.extensions["dashboard_jobs"].shutdown()

@@ -85,7 +85,7 @@ def test_every_route_declares_and_enforces_its_permission(accounts, path, endpoi
     users.save_role("empty", set(), authorization=admin)
     users.edit_user("reader", role="empty", disabled=False, authorization=admin)
     login(client)
-    path = path.replace("<username>", "reader").replace("<int:event_id>", "1")
+    path = path.replace("<username>", "reader").replace("<int:event_id>", "1").replace("<int:job_id>", "1")
     if needed & (PERMISSIONS | {"admin"}):
         response = client.open(path, method=method, data={"csrf": csrf(client)})
         assert response.status_code == 403
@@ -101,7 +101,7 @@ def test_all_protected_routes_require_login(accounts, path, endpoint, method):
     permission = app.view_functions[endpoint].dashboard_permissions[method]
     if permission == "public":
         return
-    path = path.replace("<username>", "reader").replace("<int:event_id>", "1")
+    path = path.replace("<username>", "reader").replace("<int:event_id>", "1").replace("<int:job_id>", "1")
     response = client.open(path, method=method)
     assert response.status_code == 303 and response.headers["Location"] == "/login"
 

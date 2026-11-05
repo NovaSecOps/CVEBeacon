@@ -1443,6 +1443,42 @@ class UserStore:
             self._append_audit(db, "logout_all" if all_sessions else "logout", user.username,
                                _timestamp(self._clock()), actor=user.username)
 
+    def record_action(
+        self, action: str, *, username: str, actor: str | None = None,
+        detail: str | None = None
+    ) -> None:
+        """Append one internal dashboard action to the chained audit log.
+
+        Callers use this for operations that outlive a request, such as a
+        background job's completion. Account proofs are checked by the route
+        before the action is queued; the completion entry records the same
+        account name after the session may already have ended.
+        """
+        if not isinstance(action, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", action
+        ):
+            raise ConfigurationError("invalid audit action")
+        if not isinstance(username, str) or not username:
+            raise ConfigurationError("invalid audit account")
+        if detail is not None:
+            if not isinstance(detail, str) or len(detail) > 1024 or any(ord(ch) < 32 for ch in detail):
+                raise ConfigurationError("invalid audit detail")
+            action = action + ":" + detail
+        stamp = _timestamp(self._clock())
+        if not self.path.is_file():
+            raise StateError("CVEBeacon user database not found")
+        try:
+            with closing(self._connect(create=False, _writable=True)) as db, db:
+                self._append_audit(
+                    db,
+                    action,
+                    audit_name(username),
+                    stamp,
+                    actor=audit_name(actor) if actor else None,
+                )
+        except (OSError, sqlite3.Error) as exc:
+            raise StateError("cannot record the operation audit") from exc
+
     def require_self_in(
         self, db: sqlite3.Connection, proof: AuthenticatedUser, username: object
     ) -> User:

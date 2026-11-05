@@ -14,7 +14,7 @@ To select a port or deliberately bind to the LAN with password authentication co
 cvebeacon serve --host 0.0.0.0 --port 8787
 ```
 
-The dashboard is optional. Continue running `cvebeacon scan` as a separate short-lived scheduled process. The dashboard does not schedule scans, send notifications, or start background refresh workers.
+The dashboard is optional. Scheduled scans and watches remain separate short-lived processes. An authenticated account with the `run` permission can start the same `cvebeacon` commands as background jobs from the **Operations** page; every data-changing job shares a single-flight lock with the command line and scheduled runs.
 
 ## Views and investigation
 
@@ -25,6 +25,42 @@ The dashboard is optional. Continue running `cvebeacon scan` as a separate short
 - **Manual query:** query a vendor/product/version using the same core operation as the CLI. Results show uncertainty and degraded source status. Queries can take several minutes and do not change scheduled alert state.
 - **Reports:** query the current inventory and download an XLSX or JSON report using the existing reporting functions. Exports do not commit monitoring state. Check the report's coverage and source-health fields even when the download succeeds.
 - **Sources:** view cached observations from the latest recorded scan, including check result, retrieval time and available source timestamp. Opening this page does not contact the sources.
+- **Operations:** start `scan`, `watch sync`, `watch evaluate --all`, `watch notify`, `watch run` or the combined `run` as a background job, retry failed or ambiguous deliveries, and send a labelled channel test. Each job has a status, timestamps, exit code and meaning, the account that started it, a bounded log tail, cancellation and an audit entry.
+
+## Operations and background jobs
+
+Operations run as short-lived children of the same `cvebeacon` executable with the same configuration and exit codes. The dashboard request returns immediately; the job page shows `queued`, `running`, `succeeded`, `failed` or `cancelled`, together with the queue and start times, end time, exit code and its documented meaning. A running or queued job page refreshes with a meta refresh, and only a bounded tail of the log is shown.
+
+**Single flight.** Data-changing operations take a persistent `cvebeacon-run.lock` beside each canonical storage location they write. Inventory scans lock `[state] database`; watch operations lock `[watch] database`. Combined runs take both required locks in sorted canonical path order, release any partial acquisition on failure, and take a shared-directory lock only once. Inventory-only or watch-only runs take only the applicable lock.
+
+| Command | Storage locked |
+| --- | --- |
+| `scan` | Inventory state |
+| `run` | Inventory state when an inventory is configured; watch storage when watch is enabled |
+| `watch sync`, `watch evaluate`, `watch run` | Watch storage |
+| `watch notify`, including retry variants | Watch storage |
+| `watch report`, `watch unreport`, dashboard report/unreport | Watch storage |
+| `watch notify test` | None; sends a labelled test without changing delivery state |
+
+Configurations sharing either storage location therefore coordinate even when their other location differs. Channel tests are offered only when watch is enabled. On contention the CLI prints `another run is in progress` and exits `2`; the dashboard returns a conflict with holder details when available. Other lock failures are operational errors. Dashboard probes are advisory; the child takes the authoritative locks. The operating system releases locks on process exit.
+
+**Cancel.** Cancelling a running job sends the documented interrupt: `SIGINT` to the command's process group on Linux, or `Ctrl+Break` on Windows. The CLI handles both interrupts through its cleanup path. Windows jobs require a console and a separate process group; console-less operation is refused. After three seconds without exit, the dashboard terminates the child, waits another two seconds, then kills it if necessary. Forced termination is labelled explicitly because cleanup is not confirmed. An interrupt the dashboard did not request, such as an external break or a running-job dashboard shutdown, is reported as an external interrupt rather than a cancellation and its audit entry names no cancelling account. Capture failures and orderly dashboard shutdown also stop and reap the child, including when cancellation bookkeeping fails. Queued rows whose cancellation cannot be saved remain stored for restart recovery. A queued job can be cancelled before it starts; cancellation records the requesting account separately from the starter.
+
+**History.** The last 200 terminal jobs are kept in `dashboard-jobs.db` inside the private `dashboard-jobs/` directory beside the state database, with the job logs in the same directory. Active jobs and logs are never pruned. At most 20 jobs may be queued or running; further submissions receive a conflict response. The directory is created 0700 on POSIX or with a protected owner-only ACL on Windows, and an existing directory that is accessible to other accounts is refused. The database and log files are created owner-only, without following links. Existing linked or non-regular log files are refused. Every job start, cancellation request and outcome is appended to the chained account audit trail with its job identifier and operation. Failed outcome appends stay pending and are retried independently, and their rows and logs remain retained. Transient storage or audit failures are logged and retried with a delay capped at five seconds; later jobs can still run once storage recovers. A dashboard restart marks jobs that were still queued or running as failed, because the tracking process no longer exists.
+
+**Full history.** When `[watch] initial = "full"` would make the next sync download the complete history, the UI requires an explicit confirmation before it passes the CLI's `--yes`. The confirmation is separate from the normal run form and is shown with the expected scale of the download. Viewing this warning uses a read-only metadata snapshot and never initializes or migrates watch storage; a database needing recovery or containing a write-ahead log requires confirmation conservatively.
+
+## Native schedule
+
+The **Schedule** page requires `manage_schedule`. It shows `schedule status`, and can install or remove the same native Windows task or managed Linux crontab block as `cvebeacon schedule install` and `cvebeacon schedule remove`. The form accepts an interval or fixed local times, the `scan`, `watch` or `both` command, and the Windows `--run-logged-out` option.
+
+Schedule changes require an audited intent before installation or removal. An outcome audit failure returns an error and retains the pending audit for retry; check schedule status before repeating the action. Audit history is append-only and grows independently of job retention.
+
+Operation storage accepts existing shared POSIX and Windows parent directories; the path itself and each ancestor must be a directory, not a link or reparse point. New directories use 0700 on POSIX and a protected owner-only ACL on Windows. The `dashboard-jobs/` directory is always private even under a shared parent: on POSIX it must be owned by the service account and have no group or other permission bits, and on Windows it must have a protected owner-only ACL. The run-lock file carries no state and may be owned by another service account, so only its regular-file shape, link count and non-truncating open are checked. A new POSIX lock file is created under the process umask instead of a forced mode, so in a cross-account setup both accounts need write access to the lock file. Job history and log files still require service-account ownership, private permissions and no links; new POSIX files use 0600. Use a single dashboard process per state directory. Every account that can write the state directory is trusted with the SQLite databases in it and their sidecar files; keep it writable only by trusted accounts.
+
+On Windows, logged-out registration requires the service account password. The dashboard accepts it in a password field, passes it only to the existing installer in memory, and never writes, logs or displays it. The operating system's task service stores it only according to the same rules as the CLI.
+
+If installing from the dashboard is unsafe for the current host, the page refuses the action and shows the exact equivalent command for the intended account. This happens on unsupported platforms and when the dashboard itself runs as root on POSIX, because a schedule installed there would run as root. Always use the command-line fallback when the dashboard service account is not the account that should own monitoring work.
 
 ### Watch views
 
@@ -192,12 +228,12 @@ logout, even if its role has no permissions.
 
 | Permission | Capability |
 | --- | --- |
-| `view` | Observation pages, findings, watch pages, the current reported list, query results and exports |
+| `view` | Observation pages, findings, watch pages, the current reported list, query results, exports, operations and job history |
 | `report` | Mark or unmark a CVE as reported from the CLI or dashboard |
 | `statement` | Generate statements from the CLI or dashboard |
-| `run` | Operation forms; submit manual queries and inventory report exports with `view`; reserved sync, evaluation and notification operations |
-| `retry` | Retry failed or ambiguous deliveries |
-| `test_channel` | Send channel tests |
+| `run` | Start scan, sync, evaluation, notification and combined run jobs; submit manual queries and inventory report exports with `view` |
+| `retry` | Retry failed or ambiguous deliveries as background jobs |
+| `test_channel` | Send a labelled channel test message |
 | `edit_rules` | Edit rules |
 | `edit_channels` | Edit notification channels |
 | `edit_sources` | Edit source settings |
@@ -206,14 +242,11 @@ logout, even if its role has no permissions.
 | `edit_dashboard` | Edit dashboard settings |
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
-| `manage_schedule` | Manage scheduling |
+| `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
 
-Some capabilities reserve authorization for later dashboard operations; granting
-them does not add an operation that the current dashboard does not implement.
-Opening query/report forms requires `run`; submissions require both `run` and
-`view` because they return findings or exports.
+Each operation route declares its own permission: running jobs needs `run`, retry jobs need `retry`, channel tests need `test_channel`, schedule changes need `manage_schedule`, and job pages need `view`. A role without `view` cannot open the operations page even if it can call an action route directly. Opening query/report forms requires `run`; submissions require both `run` and `view` because they return findings or exports.
 Role changes and administrative account actions are recorded in the existing
 chained user audit trail. Verification detects changes within that trail, not
 direct edits to `cb_user`, `cb_role` or `cb_user_role`, or removal of its final
@@ -293,9 +326,14 @@ Forms use CSRF protection, output is escaped, errors omit sensitive details, and
 
 The monitoring SQLite database stores observations and dashboard scan metadata.
 Accounts and roles live separately in `cvebeacon-users.db` beside the watch
-database. Before an upgrade, stop the scanner/dashboard and back up both data
-stores. Schema upgrades preserve existing observations and delivery records;
-an older application requires its corresponding pre-upgrade backups.
+database. The operations job table (`dashboard-jobs.db`) and its logs share the
+private `dashboard-jobs/` directory beside the state database; the directory and
+its files are owner-only. Every account that can write the state directory is
+trusted with the databases and SQLite sidecar files in it; keep it writable only
+by trusted accounts. Before an
+upgrade, stop the scanner/dashboard and back up all three data stores. Schema
+upgrades preserve existing observations and delivery records; an older
+application requires its corresponding pre-upgrade backups.
 
 ## Package identities and advisory views
 

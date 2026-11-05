@@ -1,7 +1,9 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -32,6 +34,25 @@ def test_preserves_core_exit_and_health(tmp_path, code):
     assert read_snapshot(config.inventory_path).records[0]["product"] == "example"
     if code == 4:
         assert status(config.state_dir)["status"] == "coverage_warning"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mounted directory modes")
+@pytest.mark.parametrize("mode", [0o775, 0o777, 0o1777])
+def test_real_core_preserves_coverage_warning_in_shared_state(tmp_path, mode):
+    config, _ = setup(tmp_path)
+    shared = tmp_path / "core-state"
+    shared.mkdir()
+    shared.chmod(mode)
+    config.core_config.write_text(config.core_config.read_text().replace(
+        'database="core.db"', 'database="core-state/core.db"'
+    ))
+    for _ in range(2):
+        assert run_pipeline(config) == 4
+        assert status(config.state_dir)["core_exit"] == 4
+        assert status(config.state_dir)["status"] == "coverage_warning"
+    with sqlite3.connect(shared / "core.db") as db:
+        assert db.execute("SELECT count(*) FROM runs").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM deliveries").fetchone()[0] == 0
 
 
 def test_required_failure_preserves_previous_inventory(tmp_path):

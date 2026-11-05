@@ -7,6 +7,8 @@ import getpass
 import json
 import logging
 import secrets
+import signal
+import threading
 import sys
 import warnings
 from contextlib import closing
@@ -22,6 +24,7 @@ from .errors import CVEBeaconError, SourceError
 from .http import HttpClient
 from .inventory import inspect_inventory, load_inventory
 from .identity import normalize_asset, identity_conflict
+from .locking import OperationLock
 from .models import Asset, HealthStatus
 from .notifications import GraphMailNotifier, TeamsNotifier, alert_items, configured_channels
 from .reporting import write_json, write_xlsx
@@ -940,6 +943,20 @@ def _run_all(config: AppConfig, *, yes: bool = False) -> int:
     return 0
 
 
+def _lock_required(args: argparse.Namespace) -> bool:
+    """Commands that change monitoring, delivery or report state."""
+    if args.command in {"scan", "run"}:
+        return True
+    if args.command != "watch":
+        return False
+    if args.watch_command in {"sync", "run", "evaluate", "report", "unreport"}:
+        return True
+    return (
+        args.watch_command == "notify"
+        and getattr(args, "notify_command", None) != "test"
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     if args.command == "dashboard":
         from .dashboard_auth import hash_password
@@ -959,30 +976,53 @@ def run(args: argparse.Namespace) -> int:
         print("removed" if remove(system=args.platform) else "not installed")
         return 0
     config = load_config(args.config)
-    if args.command == "users":
-        return _run_users(args, config)
-    if args.command == "watch":
-        return _run_watch(args, config)
-    if args.command == "run":
-        return _run_all(config, yes=args.yes)
-    if (
-        args.command in {"doctor", "serve"}
-        and config.inventory is None
-        and config.watch.enabled
-    ):
-        raise CVEBeaconError(
-            f"{args.command} requires an inventory; add [inventory] path, or use "
-            f"'cvebeacon --config {config.config_path} watch run' from cron or "
-            "Task Scheduler"
+    lock = None
+    if _lock_required(args):
+        label = " ".join(
+            part
+            for part in (
+                args.command,
+                getattr(args, "watch_command", None),
+            )
+            if part
         )
-    if args.command in {"scan", "export", "asset", "doctor", "serve"}:
-        _inventory_config(config)
-    if args.command == "inventory" and not args.path:
-        _inventory_config(config)
-    if args.command == "scan":
-        return _run_scan(config, report=args.report)
-    store = StateStore(config.database_path)
-    return _run_configured(args, config, store)
+        lock = OperationLock(config, label.replace(" ", "-"))
+        if not lock.acquire():
+            detail = f" ({lock.holder})" if lock.holder else ""
+            print(
+                f"error: another run is in progress{detail}; wait for it to "
+                "finish or cancel it from the dashboard",
+                file=sys.stderr,
+            )
+            return 2
+    try:
+        if args.command == "users":
+            return _run_users(args, config)
+        if args.command == "watch":
+            return _run_watch(args, config)
+        if args.command == "run":
+            return _run_all(config, yes=args.yes)
+        if (
+            args.command in {"doctor", "serve"}
+            and config.inventory is None
+            and config.watch.enabled
+        ):
+            raise CVEBeaconError(
+                f"{args.command} requires an inventory; add [inventory] path, or use "
+                f"'cvebeacon --config {config.config_path} watch run' from cron or "
+                "Task Scheduler"
+            )
+        if args.command in {"scan", "export", "asset", "doctor", "serve"}:
+            _inventory_config(config)
+        if args.command == "inventory" and not args.path:
+            _inventory_config(config)
+        if args.command == "scan":
+            return _run_scan(config, report=args.report)
+        store = StateStore(config.database_path)
+        return _run_configured(args, config, store)
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def _normalize_password(value: str) -> str:
@@ -1184,6 +1224,16 @@ def _reject_password_arguments(arguments: list[str]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else list(argv)
+    # Frozen interpreters may ignore PYTHONUNBUFFERED. Progress must still
+    # reach a dashboard pipe before the command finishes.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and callable(getattr(stream, "reconfigure", None)):
+            stream.reconfigure(line_buffering=True)
+    break_signal = getattr(signal, "SIGBREAK", None)
+    previous_break = None
+    if break_signal is not None and threading.current_thread() is threading.main_thread():
+        previous_break = signal.getsignal(break_signal)
+        signal.signal(break_signal, signal.default_int_handler)
     try:
         _reject_password_arguments(arguments)
         parser = _parser(); args = parser.parse_args(arguments)
@@ -1198,6 +1248,9 @@ def main(argv: list[str] | None = None) -> int:
         print("error: not enough memory to complete the command", file=sys.stderr); return 2
     except KeyboardInterrupt:
         print("cancelled", file=sys.stderr); return 130
+    finally:
+        if previous_break is not None:
+            signal.signal(break_signal, previous_break)
 
 
 if __name__ == "__main__":

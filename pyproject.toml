@@ -41,7 +41,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-cvebeacon = ["templates/*.html", "static/*.css"]
+cvebeacon = ["templates/*.html", "static/*.css", "static/*.js"]
 "cvebeacon.watch" = ["templates/*.md"]
 
 [tool.pytest.ini_options]

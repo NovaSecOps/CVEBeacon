@@ -487,7 +487,7 @@ def test_windows_registration_temp_directory_failure_is_controlled(
         raise PermissionError("temporary directory denied")
 
     monkeypatch.setattr("cvebeacon.scheduling.tempfile.mkdtemp", fail)
-    with pytest.raises(SchedulingError, match="temporary directory denied"):
+    with pytest.raises(SchedulingError, match="password-bearing diagnostics"):
         install(plan, password="secret")
 
 
@@ -501,7 +501,7 @@ def test_windows_registration_xml_write_failure_is_controlled(
         raise PermissionError("xml write denied")
 
     monkeypatch.setattr("cvebeacon.scheduling.Path.write_bytes", fail)
-    with pytest.raises(SchedulingError, match="xml write denied"):
+    with pytest.raises(SchedulingError, match="password-bearing diagnostics"):
         install(plan, password="secret")
 
 
@@ -515,7 +515,7 @@ def test_windows_registration_script_write_failure_is_controlled(
         raise PermissionError("script write denied")
 
     monkeypatch.setattr("cvebeacon.scheduling.Path.write_text", fail)
-    with pytest.raises(SchedulingError, match="script write denied"):
+    with pytest.raises(SchedulingError, match="password-bearing diagnostics"):
         install(plan, password="secret")
 
 
@@ -601,7 +601,8 @@ def test_cli_temp_failure_is_one_error_line(tmp_path, monkeypatch, capsys):
         == 2
     )
     error = capsys.readouterr().err
-    assert "temporary directory denied" in error
+    assert "password-bearing diagnostics" in error
+    assert "temporary directory denied" not in error
     assert "\n" in error
     assert "Traceback" not in error
 
@@ -760,7 +761,7 @@ def test_windows_access_denied_asks_for_the_service_account_shell(
     with pytest.raises(SchedulingError) as error:
         install(plan, run=fake_run, password="secret")
     message = str(error.value)
-    assert "Access is denied" in message
+    assert "access denied" in message
     assert "elevated administrator shell" in message
     assert "account name" in message
     assert "\n" not in message
@@ -838,7 +839,8 @@ def test_windows_access_denied_stays_one_line_with_extra_diagnostics(
     with pytest.raises(SchedulingError) as error:
         install(plan, run=fake_run, password="secret")
     assert "\n" not in str(error.value)
-    assert "Another diagnostic line" in str(error.value)
+    assert "Another diagnostic line" not in str(error.value)
+    assert "elevated administrator shell" in str(error.value)
 
 
 def test_linux_failure_never_gets_the_windows_access_hint(tmp_path, monkeypatch):

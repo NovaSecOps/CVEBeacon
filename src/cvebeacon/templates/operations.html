@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block title %}Operations · CVEBeacon{% endblock %}
+{% block content %}<h1>Operations</h1>
+{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+{% if not accounts %}<p class="warning" role="alert">Operations require a CVEBeacon account. Create the first administrator with the local <a href="{{ url_for('bootstrap') }}">bootstrap form</a> or <code>cvebeacon users add NAME --admin</code>.</p>{% endif %}
+{% if full_history %}<p class="warning" role="alert">Watch is configured to start with <strong>full history</strong>. The first sync can download years of public records and take hours. It runs only from the confirmed form below, which supplies the same confirmation as the CLI's <code>--yes</code>.</p>{% endif %}
+<p>Operations run as separate <code>cvebeacon</code> processes. Operations that write the same storage share locks, so a scheduled or command-line run using that storage also blocks a new job here. Each job records its start and outcome in the account audit trail.</p>
+
+{% if accounts %}<h2>Run a job</h2><div class="table-wrap"><table><thead><tr><th>Operation</th><th>Action</th></tr></thead><tbody>
+{% for operation, label in operation_labels.items() %}{% if (operation == 'scan' and has_inventory) or (operation != 'scan' and operation != 'run' and watch_enabled) or (operation == 'run' and (has_inventory or watch_enabled)) %}<tr><td>{{ label }}</td><td>
+{% if 'run' in permissions %}{% if full_history and operation in ['watch-sync', 'watch-run', 'run'] %}
+<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}"><input type="hidden" name="confirm" value="full-history"><button type="submit">Confirm full-history {{ label | lower }}</button></form>
+{% else %}
+<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}"><button type="submit">{{ label }}</button></form>
+{% endif %}{% else %}<span class="muted">Requires the run permission.</span>{% endif %}
+</td></tr>{% endif %}{% endfor %}
+</tbody></table></div>
+
+<h2>Retry deliveries</h2><p>Failed deliveries are retried by the normal notify job. Use these variants only when a delivery definitely failed or its outcome is unknown.</p>
+{% for operation, label in retry_labels.items() %}{% if watch_enabled %}<form method="post" action="{{ url_for('operations.retry_jobs') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}">{% if 'retry' in permissions %}<button type="submit">{{ label }}</button>{% else %}<span class="muted">{{ label }} requires the retry permission.</span>{% endif %}</form>{% endif %}{% endfor %}
+
+{% if watch_enabled %}<h2>Test a channel</h2><p>A test message is labelled and does not change delivery state. It is not subject to the data-changing run lock.</p>
+{% for channel in channels %}<form method="post" action="{{ url_for('operations.test_channel') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="channel" value="{{ channel }}">{% if 'test_channel' in permissions %}<button type="submit">Send test to {{ channel }}</button>{% else %}<span class="muted">{{ channel }} requires the test_channel permission.</span>{% endif %}</form>{% else %}<p class="muted">No enabled watch channels are configured.</p>{% endfor %}{% endif %}
+{% endif %}
+
+<h2>Current and recent jobs</h2>
+{% if active %}<ul>{% for job in active %}<li><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">Job {{ job.id }} · {{ job.label }}</a> · {{ job.status }} · started by {{ job.started_by }}</li>{% endfor %}</ul>{% else %}<p>No job is queued or running.</p>{% endif %}
+<p><a href="{{ url_for('operations.jobs') }}">Full job history</a>{% if accounts and 'manage_schedule' in permissions %} · <a href="{{ url_for('operations.schedule') }}">Schedule</a>{% endif %}</p>
+{% endblock %}

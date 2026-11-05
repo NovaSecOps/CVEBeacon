@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+{% block title %}Schedule · CVEBeacon{% endblock %}
+{% block head %}<script src="{{ url_for('static', filename='schedule.js') }}" defer></script>{% endblock %}
+{% block content %}<h1>Native schedule</h1>
+{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+<p>Platform: {{ platform_name }}. The schedule runs a separate <code>cvebeacon</code> command, not the dashboard process. Installation and removal are recorded in the account audit trail.</p>
+
+<h2>Current status</h2>
+{% if status_error %}<p class="warning" role="alert">Schedule status is unavailable: {{ status_error }}</p>{% else %}<pre>{{ status_text }}</pre>{% endif %}
+
+{% if block_reason %}<p class="warning" role="alert">{{ block_reason }} Use the command-line fallback below from the intended account instead.</p>{% endif %}
+<h2>Install or update</h2>
+{% if block_reason %}<p>The dashboard will not install a schedule in this setup.</p>{% else %}
+<form method="post" action="{{ url_for('operations.schedule_install') }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Schedule type <select name="mode"><option value="interval">Interval</option><option value="times">Fixed local times</option></select></label>
+<label>Interval in hours <input name="every" type="number" min="2" max="24" value="4"></label>
+<label>Times <input name="times" placeholder="07:00,19:00" maxlength="200"></label>
+<label>Command <select name="command">{% if has_inventory %}<option value="scan">scan</option>{% endif %}{% if watch_enabled %}<option value="watch" {% if not has_inventory %}selected{% endif %}>watch</option>{% endif %}{% if has_inventory and watch_enabled %}<option value="both" {% if default_command == 'both' %}selected{% endif %}>both</option>{% endif %}</select></label>
+<label>Run logged out (Windows only) <input type="checkbox" name="run_logged_out" value="yes"></label>
+<label>Windows account <input name="account" maxlength="256" autocomplete="off" disabled></label>
+<label>Account password (Windows logged-out only; never stored) <input type="password" name="password" maxlength="1024" autocomplete="off" disabled></label>
+<button type="submit">Install schedule</button>
+</form>
+<p class="muted">Fixed times use the host's local clock. On Linux intervals must divide 24 hours. A Windows logged-out task stores the password with the operating system's task service; the dashboard passes it only to the existing installer and does not keep or log it.</p>
+{% endif %}
+
+<h2>Remove</h2>
+<form method="post" action="{{ url_for('operations.schedule_remove') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="confirm" value="remove"><button type="submit">Remove the CVEBeacon schedule</button></form>
+
+<h2>Command-line fallback</h2>
+<p>Use the same command from the account that should own the schedule when the dashboard runs under a different account or service identity. It is exactly equivalent to the form. When <code>--password-stdin</code> appears, the command reads the Windows account password from one line on standard input and does not accept it as an argument.</p>
+<pre>{{ fallback_command }}</pre>
+<p class="muted">The scheduled command is short-lived and takes the same storage locks as dashboard jobs. If another run holds a required lock it exits with an error instead of changing data concurrently.</p>
+<p><a href="{{ url_for('operations.index') }}">Back to operations</a></p>
+{% endblock %}
