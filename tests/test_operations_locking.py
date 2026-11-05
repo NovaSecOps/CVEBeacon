@@ -1,6 +1,7 @@
 """Run-lock privacy, contention and cooperative interrupt regressions."""
 
 from dataclasses import replace
+import errno
 import os
 import signal
 import subprocess
@@ -80,6 +81,24 @@ def test_contention_without_readable_metadata_is_still_busy(tmp_path, monkeypatc
     monkeypatch.setattr(os, "read", lambda *a: (_ for _ in ()).throw(PermissionError()))
     assert not lock.acquire()
     assert lock.probe() is not None
+
+
+def test_lock_metadata_write_failure_is_a_controlled_cli_error(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path)
+    called = []
+    monkeypatch.setattr(cli, "_run_scan", lambda *a, **k: called.append(True) or 17)
+    real_write = os.write
+    def full_disk(fd, data):
+        if b'"account"' in data:
+            raise OSError(errno.ENOSPC, "synthetic full disk")
+        return real_write(fd, data)
+    monkeypatch.setattr(os, "write", full_disk)
+    assert cli.main(["--config", str(config.config_path), "scan"]) == 2
+    error = capsys.readouterr().err
+    assert error.startswith("error: cannot write the operation lock metadata")
+    assert "Traceback" not in error
+    assert len(error.strip().splitlines()) == 1
+    assert called == []
 
 
 @pytest.mark.parametrize("operation", ["report", "unreport"])

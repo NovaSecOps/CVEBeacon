@@ -191,11 +191,16 @@ class RunLock:
             if self.command:
                 metadata["command"] = self.command
             payload = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
-            os.lseek(descriptor, 1, os.SEEK_SET)
-            written = 0
-            while written < len(payload):
-                written += os.write(descriptor, payload[written:])
-            os.ftruncate(descriptor, len(payload) + 1)
+            try:
+                os.lseek(descriptor, 1, os.SEEK_SET)
+                written = 0
+                while written < len(payload):
+                    written += os.write(descriptor, payload[written:])
+                os.ftruncate(descriptor, len(payload) + 1)
+            except OSError as exc:
+                raise CVEBeaconError(
+                    "cannot write the operation lock metadata"
+                ) from exc
             self._descriptor = descriptor
             return True
         except BaseException:
