@@ -246,6 +246,8 @@ def create_web_blueprint(config):
                         abort(403)
                     stamp = datetime.now(timezone.utc).isoformat()
                     def audit(name, detail):
+                        if len(detail) > 1024 or any(ord(char) < 32 for char in detail):
+                            raise ConfigurationError("invalid audit detail")
                         users._append_audit(db, name + ":" + detail, actor.username, stamp, actor=actor.username)
                     for detail in details:
                         audit(event, detail)

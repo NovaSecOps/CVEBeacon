@@ -611,3 +611,30 @@ def test_bulk_removal_rollback_restores_only_readable_results(web, monkeypatch):
     assert {file: file.read_bytes() for file in readable} == before
     assert not output.exists()
     assert users.audit_entries() == audit_before
+
+
+def test_oversized_stored_hostname_cannot_bypass_audit_bound(web):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, _ = paths(config, "Acme")
+    document, _ = read_allowlist(path, "Acme")
+    document["assets"][0]["hostname"] = "x" * 2000
+    save_allowlist(path, document)
+    before, audit_before = path.read_bytes(), users.audit_entries()
+    response = save(client, action="remove-all", confirm="yes")
+    assert response.status_code == 400 and "invalid audit detail" in response.text
+    assert path.read_bytes() == before and users.audit_entries() == audit_before
+
+
+def test_stored_control_characters_are_escaped_in_audit_details(web):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, _ = paths(config, "Acme")
+    document, _ = read_allowlist(path, "Acme")
+    document["assets"][0]["hostname"] = "host\n\x00.invalid"
+    save_allowlist(path, document)
+    assert save(client, action="remove-all", confirm="yes").status_code == 303
+    detail = next(item.action.split(":", 1)[1] for item in users.audit_entries()
+                  if item.action.startswith("web_asset_remove:"))
+    assert len(detail) <= 1024 and all(ord(char) >= 32 for char in detail)
+    assert json.loads(detail)["host"] == "host\n\x00.invalid"
