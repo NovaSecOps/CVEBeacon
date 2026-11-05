@@ -107,3 +107,26 @@ def test_correlation_uses_one_read_transaction(tmp_path, monkeypatch):
         return original(db)
     monkeypatch.setattr(clients, "_latest_successful_scan", check)
     assert affected_clients(path, ("CVE-2026-0001",)) == {}
+
+
+def test_client_filter_production_query_seeks_clients_then_assets(tmp_path, monkeypatch):
+    path = tmp_path / "state.db"
+    asset = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    item = Finding(asset, Vulnerability("CVE-2026-0001"),
+        Applicability.AFFECTED, "high", "test")
+    StateStore(path).record_scan([QueryResult(asset, (item,), ())])
+    real_connect = sqlite3.connect
+    statements = []
+    def traced(*args, **kwargs):
+        db = real_connect(*args, **kwargs)
+        db.set_trace_callback(statements.append)
+        return db
+    monkeypatch.setattr(sqlite3, "connect", traced)
+    assert client_cves(path, "Acme") == ("CVE-2026-0001",)
+    sql = next(sql for sql in statements if sql.startswith("SELECT DISTINCT sf.identifier"))
+    with real_connect(path) as db:
+        descriptions = [row[3] for row in db.execute("EXPLAIN QUERY PLAN " + sql)]
+    assert descriptions[0].startswith("SEARCH sac USING")
+    assert "scan_asset_clients_client (run_id=? AND client_key=?)" in descriptions[0]
+    assert any("scan_findings_asset (run_id=? AND asset_id=? AND applicability=?)" in row
+        for row in descriptions)

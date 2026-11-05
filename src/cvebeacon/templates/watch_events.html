@@ -18,6 +18,8 @@
   <label>CVE<input name="cve" value="{{ filters.cve }}" maxlength="32" placeholder="CVE-2026-1234"></label>
   <button>Filter</button>
 </form>
+{% if clients_incomplete %}<p>Client choices are incomplete. Use the <a href="{{ url_for('watch.clients') }}">Clients page</a> to select other clients.</p>{% endif %}
+{% if results_incomplete %}<p role="status">Results incomplete: this client's CVE list exceeds the filter limit. Filter by an exact CVE to check its membership directly.</p>{% endif %}
 <p><a href="{{ url_for('watch.events') }}">Clear filters</a> · Page {{ page }}{% if has_previous %} · <a href="{{ page_url(page - 1) }}">Newer events</a>{% endif %}{% if has_next %} · <a href="{{ page_url(page + 1) }}">Older events</a>{% endif %}</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Time</th><th>Rule</th><th>CVE</th><th>Kind</th><th>Initial</th><th>Published</th><th>First seen</th><th>Reported</th></tr></thead>

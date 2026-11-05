@@ -41,7 +41,11 @@ change scan or delivery state.
 - **Events:** filter by rule, kind, initial flag, date range, exact CVE, client
   and pending delivery. The client filter matches CVEs currently affecting that
   client in the latest successful inventory scan. Results are ordered newest
-  first and limited to 50 per page. Each row shows the published and first-seen
+  first and limited to 50 per page. Client choices are capped at 1,000 with an
+  explicit notice; select other clients through the paginated Clients page.
+  A client filter exceeding 100,000 CVEs shows a results-incomplete notice;
+  an exact CVE filter checks membership directly without that cap.
+  Each row shows the published and first-seen
   dates and the current reported mark. Report and unreport notices are excluded;
   they appear in the CVE trail.
 - **Clients:** every client label in the latest successful inventory scan with

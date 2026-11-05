@@ -342,46 +342,82 @@ def client_summaries(
     return scan, clients
 
 
-def client_names(path: str | Path) -> tuple[str, ...]:
-    """Return distinct client labels from the latest successful scan."""
+def client_options(path: str | Path) -> tuple[tuple[str, ...], bool]:
+    """Return bounded client choices and whether more choices exist."""
     def read(db: sqlite3.Connection):
         scan = _latest_successful_scan(db)
         if scan is None:
-            return ()
+            return (), False
         rows = db.execute(
             "SELECT MIN(client) AS client FROM scan_asset_clients "
             "WHERE run_id=? AND client_key<>'' GROUP BY client_key "
             "ORDER BY client_key LIMIT ?",
-            (scan.run_id, MAX_SUMMARY_CLIENTS),
+            (scan.run_id, MAX_SUMMARY_CLIENTS + 1),
         ).fetchall()
-        return tuple(str(row["client"]) for row in rows)
+        return (tuple(str(row["client"]) for row in rows[:MAX_SUMMARY_CLIENTS]),
+                len(rows) > MAX_SUMMARY_CLIENTS)
 
-    return _read(path, read, ())
+    return _read(path, read, ((), False))
 
 
-def client_cves(path: str | Path, name: str) -> tuple[str, ...]:
-    """Return the CVE aliases currently affecting one client, by exact name."""
+def client_names(path: str | Path) -> tuple[str, ...]:
+    """Return the first bounded set of client labels; see client_options."""
+    return client_options(path)[0]
+
+
+def client_name(path: str | Path, name: str) -> str | None:
+    """Resolve a selected client by exact indexed membership, beyond the choices."""
     wanted = name.strip().casefold()
     if not wanted:
-        return ()
+        return None
 
     def read(db: sqlite3.Connection):
         scan = _latest_successful_scan(db)
         if scan is None:
-            return ()
-        cursor = db.execute(
-            "SELECT DISTINCT sf.identifier FROM scan_findings sf "
-            "JOIN scan_asset_clients sac "
-            "ON sac.run_id = sf.run_id AND sac.asset_id = sf.asset_id "
-            "WHERE sf.run_id=? AND sac.client_key=? "
-            "AND sf.applicability IN ('affected','needs_review') "
-            "AND sf.identifier LIKE 'CVE-%' ORDER BY sf.identifier LIMIT ?",
-            (scan.run_id, wanted, MAX_CLIENT_CVES + 1),
-        )
-        rows = cursor.fetchmany(MAX_CLIENT_CVES + 1)
-        return tuple(str(row["identifier"]) for row in rows[:MAX_CLIENT_CVES])
+            return None
+        row = db.execute(
+            "SELECT MIN(client) FROM scan_asset_clients "
+            "WHERE run_id=? AND client_key=?",
+            (scan.run_id, wanted),
+        ).fetchone()
+        return str(row[0]) if row[0] is not None else None
 
-    return _read(path, read, ())
+    return _read(path, read, None)
+
+
+def client_cve_filter(
+    path: str | Path, name: str, *, cve_id: str | None = None
+) -> tuple[tuple[str, ...], bool]:
+    """Return client CVEs with explicit overflow, or check one exact CVE."""
+    wanted = name.strip().casefold()
+    if not wanted:
+        return (), False
+
+    def read(db: sqlite3.Connection):
+        scan = _latest_successful_scan(db)
+        if scan is None:
+            return (), False
+        exact = " AND sf.identifier=?" if cve_id else ""
+        limit = 1 if cve_id else MAX_CLIENT_CVES + 1
+        cursor = db.execute(
+            "SELECT DISTINCT sf.identifier FROM scan_asset_clients sac "
+            "CROSS JOIN scan_findings sf "
+            "ON sac.run_id = sf.run_id AND sac.asset_id = sf.asset_id "
+            "WHERE sac.run_id=? AND sac.client_key=? "
+            "AND sf.applicability IN ('affected','needs_review') "
+            "AND sf.identifier LIKE 'CVE-%'" + exact + " ORDER BY sf.identifier LIMIT ?",
+            (scan.run_id, wanted, *((cve_id.upper(),) if cve_id else ()), limit),
+        )
+        rows = cursor.fetchmany(limit)
+        return (tuple(str(row["identifier"]) for row in rows[:MAX_CLIENT_CVES]),
+                not cve_id and len(rows) > MAX_CLIENT_CVES)
+
+    return _read(path, read, ((), False))
+
+
+def client_cves(path: str | Path, name: str) -> tuple[str, ...]:
+    """Return the first bounded set of client CVEs; see client_cve_filter."""
+    return client_cve_filter(path, name)[0]
 
 
 def _impact_parts(value) -> tuple[tuple[ClientImpact, ...], int]:

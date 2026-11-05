@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from io import BytesIO
+import sqlite3
+import pytest
+
+import cvebeacon.clients as clients_module
 
 from test_dashboard_watch import csrf, login, seeded
 
@@ -198,3 +202,59 @@ def test_large_client_does_not_break_the_clients_page_or_events_filter(tmp_path)
     events = client.get("/watch/events", query_string={"client": "Acme"})
     assert events.status_code == 200
     assert "No matching events" in events.text
+
+
+def test_client_1001_events_link_and_dropdown_overflow(tmp_path):
+    config, _, _, _, client = seeded(tmp_path)
+    StateStore(config.database_path).record_scan([
+        QueryResult(Asset(f"a{index}", "Acme", "Widget", "1",
+            client=f"Client {index:04d}"), (), ()) for index in range(1001)
+    ])
+    login(client, "reader")
+    page = client.get("/watch/clients?page=21")
+    assert page.status_code == 200
+    assert 'href="/watch/events?client=Client+1000"' in page.text
+    response = client.get("/watch/events?client=Client+1000")
+    assert response.status_code == 200
+    assert '<option value="Client 1000" selected>' in response.text
+    assert "Client choices are incomplete" in response.text
+    assert client.get("/watch/events?client=Missing").status_code == 400
+
+
+@pytest.mark.parametrize("exact", (False, True))
+def test_client_cve_overflow_is_explicit_and_exact_filter_checks_membership(tmp_path, monkeypatch, exact):
+    monkeypatch.setattr(clients_module, "MAX_CLIENT_CVES", 1)
+    _, _, _, _, client = with_scan(tmp_path)
+    login(client, "reader")
+    response = client.get("/watch/events?client=Globex" + ("&cve=CVE-2026-0002" if exact else ""))
+    assert response.status_code == 200
+    if exact:
+        assert 'href="/watch/cve/CVE-2026-0002"' in response.text
+        assert "Results incomplete" not in response.text
+    else:
+        assert "Results incomplete" in response.text
+    excluded = client.get("/watch/events?client=Acme&cve=CVE-2026-0002")
+    assert excluded.status_code == 200
+    assert "No matching events" in excluded.text
+
+
+@pytest.mark.parametrize("exact", (False, True))
+def test_real_100001_cve_filter_keeps_tail_event(tmp_path, exact):
+    config, _, _, _, client = with_scan(tmp_path)
+    with sqlite3.connect(config.database_path) as db:
+        run = db.execute("SELECT run_id FROM runs WHERE status='completed'").fetchone()[0]
+        # CVE-2026-0002 has a real watch event and sorts after this prefix.
+        db.executemany("INSERT INTO scan_findings VALUES (?,?,?,?,?)", (
+            (run, "a1", f"CVE-2026-0001{index:06d}", f"CVE-2026-0001{index:06d}", "affected")
+            for index in range(100000)
+        ))
+        db.execute("INSERT INTO scan_findings VALUES (?,?,?,?,?)",
+            (run, "a1", "CVE-2026-0002", "CVE-2026-0002", "affected"))
+    login(client, "reader")
+    response = client.get("/watch/events?client=Acme" + ("&cve=CVE-2026-0002" if exact else ""))
+    assert response.status_code == 200
+    if exact:
+        assert 'href="/watch/cve/CVE-2026-0002"' in response.text
+        assert "Results incomplete" not in response.text
+    else:
+        assert "Results incomplete" in response.text

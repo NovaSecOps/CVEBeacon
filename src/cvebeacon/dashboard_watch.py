@@ -33,8 +33,9 @@ from flask import (
 from .config import AppConfig
 from .clients import (
     affected_clients,
-    client_cves,
-    client_names,
+    client_cve_filter,
+    client_name,
+    client_options,
     client_page,
     latest_successful_scan,
 )
@@ -334,15 +335,19 @@ def events():
             cve = normalize_cve_id(filters["cve"])
         except ConfigurationError:
             abort(400)
-    available_clients = client_names(config.database_path)
-    client_lookup = {name.casefold(): name for name in available_clients}
+    available_clients, clients_incomplete = client_options(config.database_path)
     client_cves_filter: tuple[str, ...] | None = None
+    results_incomplete = False
     if filters["client"]:
-        chosen = client_lookup.get(filters["client"].casefold())
+        chosen = client_name(config.database_path, filters["client"])
         if chosen is None:
             abort(400)
         filters["client"] = chosen
-        client_cves_filter = client_cves(config.database_path, chosen)
+        if chosen not in available_clients:
+            available_clients = (*available_clients, chosen)
+        client_cves_filter, results_incomplete = client_cve_filter(
+            config.database_path, chosen, cve_id=cve
+        )
     pending = (
         None
         if filters["pending"] == "no"
@@ -383,6 +388,8 @@ def events():
         kinds=EVENT_KINDS,
         rule_names=[rule.name for rule in config.watch.rules],
         client_names=available_clients,
+        clients_incomplete=clients_incomplete,
+        results_incomplete=results_incomplete,
         page=page,
         has_previous=page > 1,
         has_next=has_next,

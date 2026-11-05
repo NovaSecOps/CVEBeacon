@@ -192,6 +192,7 @@ class StateStore:
                 CREATE INDEX IF NOT EXISTS advisory_aliases_alias ON advisory_aliases(alias, asset_id);
                 CREATE INDEX IF NOT EXISTS advisory_aliases_primary ON advisory_aliases(asset_id, primary_id, alias);
                 CREATE INDEX IF NOT EXISTS scan_findings_lookup ON scan_findings(run_id, identifier, asset_id, applicability);
+                CREATE INDEX IF NOT EXISTS scan_findings_asset ON scan_findings(run_id, asset_id, applicability, identifier);
                 CREATE INDEX IF NOT EXISTS scan_findings_advisory ON scan_findings(run_id, advisory_id, asset_id);
                 """
             )
