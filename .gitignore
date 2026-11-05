@@ -40,6 +40,13 @@ credentials.json
 secrets.*
 secrets/
 
+# Configuration editor generated data (may contain secrets)
+dashboard-secrets/
+.dashboard-secret-*
+.dashboard-staged-*
+.*.backups/
+.config-*
+
 # Local monitoring databases and sidecars
 *.db
 *.db-*

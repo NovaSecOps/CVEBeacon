@@ -246,6 +246,7 @@ logout, even if its role has no permissions.
 | `edit_http` | Edit HTTP client settings |
 | `edit_system` | Edit state database and report output paths |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
+| `manage_secrets` | Change secret references and replace secret-file contents |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
 
@@ -368,17 +369,24 @@ remove existing rows. Every submitted document is validated by `load_config`,
 including channel references and source requirements. Invalid submissions show
 the loader's guidance with submitted values redacted and leave the file intact.
 Unrecognized configuration fields must be reviewed outside the editor before
-editing; they are never silently copied or discarded.
+editing; they are never silently copied or discarded. Column mappings must use
+only the known canonical or optional inventory fields, so an unknown column is
+never rendered or preserved. Existing generic webhook endpoint values are
+legacy direct values: they are hidden and retained unchanged. New generic
+webhook channels must supply `url_env` or `url_file`.
 
 **Validate and preview** builds TOML in a temporary file beside the configuration.
-Review the diff, then **Confirm and save**. Previews expire after ten minutes,
-belong to the current session and section, and can be used once. If the original
-file changed since the form loaded or preview was created, the save is refused;
-reload the form. The editor serializes its writers using the account database
-transaction and checks the file again immediately before replacement. External
-editors do not participate in that lock: avoid simultaneous filesystem edits.
-Requests are bounded by the dashboard's 8192-byte form limit; split large edits
-into smaller saves where possible.
+The diff contains only the selected section and its editable fields; nested
+sections with separate permissions are excluded. Review the diff, then
+**Confirm and save**. Previews expire after ten minutes, belong to the current
+session and section, and can be used once. Each session has a bounded number of
+pending previews, so one editor cannot fill the shared preview space. If the
+original file changed since the form loaded or preview was created, the save is
+refused; reload the form. The editor serializes its writers using the account
+database transaction and checks the file again immediately before replacement.
+External editors do not participate in that lock: avoid simultaneous filesystem
+edits. Requests are bounded by the dashboard's 8192-byte form limit; split large
+edits into smaller saves where possible.
 
 Saving removes hand-written **comments and formatting**. Before replacement,
 the original bytes are kept in an owner-only sibling directory named
@@ -391,17 +399,26 @@ New backup and secret directories are owner-only. On Windows, apply the same
 service-account-only ACL protections described in the account guide; POSIX
 mode bits do not establish Windows ACL isolation.
 
-The account audit records the actor, time, section and changed-line count, never
-configuration values. Permission and credential revocation are rechecked in
-the write transaction. The complete replacement application is prepared before
-the live file changes. Validation, replacement preparation and handled write or
-audit failures leave the existing application and configuration in place.
-Successful saves reload the dashboard and end **all dashboard sessions**; log
-in again. Requests already running finish with their original configuration.
-Other running commands retain their configuration until restarted.
+The account audit records the actor, time, section, changed-line count and the
+number of secret files written, never configuration values.
+Permission and credential revocation are rechecked in the write transaction.
+The complete replacement application is prepared before the live file changes.
+Validation, replacement preparation and handled write or audit failures leave
+the existing application and configuration in place. Successful saves reload the
+dashboard and end **all dashboard sessions**; log in again. Requests already
+running finish with their original configuration. Other running commands retain
+their configuration until restarted.
 Run the disposable loopback acceptance check with
 `python tools/dashboard_config_smoke.py`; it creates no schedules and sends no
 notifications.
+
+Access and session comparisons use both the validated current file and the
+running configuration, at preview and again in the write transaction. A stale
+in-process configuration therefore cannot skip a lockout confirmation or an
+account-store administrator check. Operational watch, state and output paths
+must not alias the configuration file, the account store, the backup directory,
+the secret directory, or files inside those protected stores; resolved paths and
+existing hard links are checked. A path collision is rejected with guidance.
 
 All dashboard setting changes require an additional access confirmation.
 Changing the effective account database path (the sibling of the watch
@@ -414,25 +431,47 @@ before choosing it. Keep a working administrator login for that destination.
 
 Secrets remain `*_env` or `*_file` references. Environment variables can be named
 but cannot be set. Existing secret contents are never returned, including in
-validation errors, diffs or audit entries. Generic webhook endpoint values are
-also hidden: leave their input blank to retain the endpoint. For any secret-file
-field, an optional password input writes a **new**, randomly named 0600 file in
-`dashboard-secrets` beside the account database, inside the protected data
-directory. Its reference replaces the field; a supplied destination path is
-never overwritten. No secret value is placed in TOML or a confirmation form.
-The file is staged for validation before confirmation. Invalid submissions
-remove staged files; expired previews remove them on the next editor request.
-A process restart can leave unreferenced staged files. Existing files and files
-referenced by configuration backups are retained; rollback does not restore or
-delete secret contents.
+validation errors, diffs, audit entries or logs. Slack, Teams, Discord and
+generic webhook URLs are credentials: the first three use `webhook_url_env` or
+`webhook_url_file`, and a generic webhook uses `url_env` or `url_file`. URL
+values are hidden in forms, diffs and audit records. Existing generic webhook
+`url` values remain supported for existing configurations, are shown read-only,
+are retained unchanged, and are not used for new channels.
+
+Existing references cannot be changed without `manage_secrets`: they render
+read-only and the server rechecks the rule at preview and again inside the write
+transaction. An editor without that permission may still replace the **contents**
+of an existing `*_file` reference. The submitted value is staged, then written
+to the same owner-only file atomically; the reference itself does not change.
+Creating a new file reference or changing an environment or file reference
+requires `manage_secrets`, which administrators always have. A supplied
+destination path is never overwritten: a new file secret is created with a
+random name in `dashboard-secrets` beside the account database, inside the
+protected data directory. No secret value is placed in TOML or a confirmation
+form.
+
+A new file value is rejected when its paired `*_env` reference is also set,
+because the environment value would take precedence at run time. Clear the
+environment reference first so the rotation is not silently ignored. Staged
+files expire with their preview after ten minutes. Cleanup runs on editor
+requests and for old unreferenced files after a restart. A staged file is
+removed only when no current configuration or retained backup references it, so
+another preview cannot delete a committed secret. Invalid submissions remove
+their staged files. Generated names use `.dashboard-secret-` and
+`.dashboard-staged-`; configuration backups use `.CONFIG_FILENAME.backups`,
+and validation temporaries use `.config-`. These paths are ignored by the
+repository's `.gitignore`; keep runtime data directories outside the worktree
+where possible.
 
 **Backups and rollback** requires `view` and every configuration edit permission,
-because a backup can change every section. Choose a backup, validate it, review
+because a backup can change every section. Changing a secret reference through
+rollback also requires `manage_secrets`. Choose a backup, validate it, review
 the diff and confirm. Rollback uses the same validation, concurrency checks,
 access confirmation, audit, atomic replacement, backup and reload path as saving.
-Invalid or unavailable secret references prevent rollback. Configuration
-permissions allow changing operational paths and notification destinations;
-grant them only to accounts trusted to control those settings.
+Invalid or unavailable secret references prevent rollback. Rollback does not
+restore secret-file contents; it preserves files referenced by retained backups.
+Configuration permissions allow changing operational paths and notification
+destinations; grant them only to accounts trusted to control those settings.
 
 ## Package identities and advisory views
 

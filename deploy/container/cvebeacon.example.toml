@@ -37,6 +37,6 @@ channels = ["soc-webhook"]
 [watch.channels.soc-webhook]
 type = "webhook"
 enabled = false
-url = "https://example.invalid/cvebeacon"
+url_env = "CVEBEACON_HOOK_URL"
 header_name = "X-CVEBeacon-Secret"
 header_value_env = "CVEBEACON_HOOK_SECRET"

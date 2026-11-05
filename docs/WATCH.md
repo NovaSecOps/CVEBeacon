@@ -274,13 +274,18 @@ priority = 5                    # -2 to 10
 ```toml
 [watch.channels.hook]
 type = "webhook"
-url = "https://example.org/cvebeacon"
+url_env = "CVEBEACON_HOOK_URL"
+# url_file = "secrets/hook-url"
 # header_name = "X-Auth"
 # header_value_env = "CVEBEACON_HOOK_SECRET"
 ```
 
-The URL must use HTTPS unless `allow_insecure = true`. The channel POSTs the
-stable document described below. Redirects are never followed.
+Use `url_env` or `url_file` for a new generic webhook. The URL is a credential
+and is never included in dashboard forms, diffs or audit records. An existing
+configuration may use a direct `url` value; the dashboard preserves it
+read-only and new channels use a reference. The URL must use HTTPS unless
+`allow_insecure = true`. The channel POSTs the stable document described below.
+Redirects are never followed.
 
 ### HTTP behavior
 

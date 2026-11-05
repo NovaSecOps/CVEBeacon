@@ -231,16 +231,17 @@ sudo cp /opt/cvebeacon/deploy/container/cvebeacon.example.toml /srv/cvebeacon/cv
 `/srv/cvebeacon/inventory` empty. `run` and `scan` need a real `inventory.json`
 there (validate with `cvebeacon inventory validate`; see [setup](SETUP.md)).
 The example writes state and the watch database to `/state`, and keeps
-`[watch]` and its sample channel disabled: enable both and replace the webhook
-URL. Leave `[watch] database` unset. Do not reuse a native wizard
-configuration, which sets that path beside the read-only `/config`.
+`[watch]` and its sample channel disabled: enable both and set the webhook URL
+environment variable or use `url_file`. Leave `[watch] database` unset. Do not
+reuse a native wizard configuration, which sets that path beside the read-only
+`/config`.
 
 ### Secrets
 
 Prefer an untracked `/srv/cvebeacon/cvebeacon.env`, mode `0600`, with the
-`*_env` names the configuration uses (for example `NVD_API_KEY` and
-`CVEBEACON_HOOK_SECRET`). The `watch` and `run` services load it when present;
-a missing file is fine. Secret file paths are relative to `/config`, so
+`*_env` names the configuration uses (for example `NVD_API_KEY`,
+`CVEBEACON_HOOK_URL` and `CVEBEACON_HOOK_SECRET`). The `watch` and `run` services
+load it when present; a missing file is fine. Secret file paths are relative to `/config`, so
 `secrets/...` is `/config/secrets/...`. Install each prepared file directly,
 mode `0600` owned by `65532:65532`:
 
