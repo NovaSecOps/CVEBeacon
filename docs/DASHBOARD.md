@@ -561,7 +561,7 @@ the worktree where possible.
 **Backups and rollback** requires `view` and every configuration edit permission,
 because a backup can change every section. Rolling back an edit to a
 credential-bearing channel also requires `manage_secrets`; a backup that simply
-omits the channel is a deletion. Restoring path settings that differ from the
+omits the channel is a deletion. Restoring path or dashboard settings that differ from the
 running configuration requires an administrator. Choose a backup, validate it,
 review the diff and confirm. Rollback uses the same validation, concurrency checks, access
 confirmation, audit, atomic replacement, backup and reload path as saving.
@@ -571,7 +571,7 @@ chosen backup, and shows a static "current configuration is invalid or missing"
 notice instead of diffing unvalidated live values. Rollback requires the access
 confirmation; a missing, unparseable or malformed-shape live file also requires
 `manage_secrets`. A parseable file that fails only field validation can be
-restored with the configuration edit permissions. A backup whose path settings
+restored with the configuration edit permissions. A backup whose path or dashboard settings
 differ from the running configuration requires an administrator. Sections cannot be edited
 from an invalid live file, so restore a backup first. Rollback does not restore
 secret-file contents; it preserves files referenced by retained backups.
