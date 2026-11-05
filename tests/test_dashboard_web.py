@@ -619,7 +619,8 @@ def test_bulk_removal_rollback_restores_only_readable_results(web, monkeypatch):
     assert users.audit_entries() == audit_before
 
 
-def test_oversized_stored_hostname_cannot_bypass_audit_bound(web):
+@pytest.mark.parametrize("action", ["remove", "change", "remove-all"])
+def test_oversized_stored_hostname_can_be_recovered_with_bounded_audit(web, action):
     config, users, _, client = web
     assert save(client).status_code == 303
     path, _ = paths(config, "Acme")
@@ -627,9 +628,15 @@ def test_oversized_stored_hostname_cannot_bypass_audit_bound(web):
     document["assets"][0]["hostname"] = "x" * 2000
     save_allowlist(path, document)
     before, audit_before = path.read_bytes(), users.audit_entries()
-    response = save(client, action="remove-all", confirm="yes")
-    assert response.status_code == 400 and "invalid audit detail" in response.text
-    assert path.read_bytes() == before and users.audit_entries() == audit_before
+    response = save(client, action=action, index="0", confirm="yes")
+    assert response.status_code == 303, response.text
+    assets = read_allowlist(path, "Acme")[0]["assets"]
+    assert [row["hostname"] for row in assets] == (["example.invalid"] if action == "change" else [])
+    added = users.audit_entries()
+    added = [entry for entry in added if entry not in audit_before]
+    assert added and all(len(entry.action.split(":", 1)[1]) <= 1024 for entry in added)
+    assert any(json.loads(entry.action.split(":", 1)[1]).get("host") == "invalid" for entry in added)
+    assert path.read_bytes() != before and not users.verify_audit()
 
 
 def test_stored_control_characters_are_escaped_in_audit_details(web):
@@ -644,3 +651,72 @@ def test_stored_control_characters_are_escaped_in_audit_details(web):
                   if item.action.startswith("web_asset_remove:"))
     assert len(detail) <= 1024 and all(ord(char) >= 32 for char in detail)
     assert json.loads(detail)["host"] == "host\n\x00.invalid"
+
+
+@pytest.mark.parametrize("hostname", ["x" * 2000, "host\n\x00.invalid"])
+def test_invalid_submitted_hostname_still_leaves_storage_and_audit_unchanged(web, hostname):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, _ = paths(config, "Acme")
+    before, audit_before = path.read_bytes(), users.audit_entries()
+    assert save(client, action="change", index="0", hostname=hostname).status_code == 400
+    assert path.read_bytes() == before and users.audit_entries() == audit_before
+
+
+def test_surrogate_ca_bundle_keeps_bulk_recovery_available(web):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, _ = paths(config, "Acme")
+    document, _ = read_allowlist(path, "Acme")
+    document["ca_bundle"] = "\ud800"
+    web_assets.replace_bytes(path, json.dumps(document).encode("utf-8"))
+    before = path.read_bytes()
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200 and "Remove all assets" in page.text
+    assert path.read_bytes() == before
+    assert save(client, action="remove-all", confirm="yes").status_code == 303
+    recovered = read_allowlist(path, "Acme")[0]
+    assert recovered["assets"] == [] and recovered["ca_bundle"] == "\ud800"
+    assert not users.verify_audit()
+
+
+@pytest.mark.parametrize("suffix", ["", ".manifest.json", ".review.json", ".removed"])
+def test_bulk_removal_reports_directory_before_any_write(web, monkeypatch, suffix):
+    from cvebeacon import dashboard_web
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, output = paths(config, "Acme")
+    target = Path(str(output) + suffix)
+    target.mkdir()
+    (target / "keep").write_bytes(b"private data")
+    before, audit_before = path.read_bytes(), users.audit_entries()
+    def unexpected_write(*args):
+        pytest.fail("directory results must be classified before writing")
+    monkeypatch.setattr(dashboard_web, "save_allowlist", unexpected_write)
+    response = save(client, action="remove-all", confirm="yes")
+    assert response.status_code == 400
+    assert "saved result path is a directory" in response.text
+    assert "web-inventory" in response.text
+    assert path.read_bytes() == before and users.audit_entries() == audit_before
+    assert (target / "keep").read_bytes() == b"private data"
+
+
+def test_bulk_removal_reports_delete_failure_and_rolls_back(web, monkeypatch):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    path, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    before, audit_before = path.read_bytes(), users.audit_entries()
+    unlink = Path.unlink
+    def blocked(target, *args, **kwargs):
+        if target == output:
+            raise PermissionError("SECRET_PATH")
+        return unlink(target, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", blocked)
+    response = save(client, action="remove-all", confirm="yes")
+    assert response.status_code == 400
+    assert "Saved results could not be removed" in response.text
+    assert "close open readers" in response.text and "SECRET_PATH" not in response.text
+    assert path.read_bytes() == before and users.audit_entries() == audit_before
+    assert output.read_bytes()
+

@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import math
+import stat
 from urllib.parse import urlsplit
 
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
@@ -44,6 +45,14 @@ def _editable_entry(entry):
         except (ValueError, TypeError, AttributeError):
             pass  # Keep recovery controls available for malformed local entries.
     return result
+
+
+def _audit_detail(client, host, *, stored=False):
+    detail = json.dumps({"client": client, "host": host}, ensure_ascii=False)
+    if stored and len(detail) > 1024:
+        # Corrupt saved hosts must remain removable without unbounded audit data.
+        detail = json.dumps({"client": client, "host": "invalid"}, ensure_ascii=False)
+    return detail
 
 
 def _review_metadata(detail, client):
@@ -107,6 +116,9 @@ def create_web_blueprint(config):
                 document, version = read_allowlist(path, client)
                 client = document["client"]
                 document = {**document, "assets": [_editable_entry(row) for row in document["assets"]]}
+                ca = document.get("ca_bundle", "")
+                if not isinstance(ca, str) or any(0xD800 <= ord(char) <= 0xDFFF for char in ca):
+                    document["ca_bundle"] = ""
                 removed = output.with_name(output.name + ".removed").exists()
                 if output.exists() or output.is_symlink():
                     try:
@@ -212,12 +224,12 @@ def create_web_blueprint(config):
                         candidate.pop("ca_bundle", None)
                     for position, row in enumerate(candidate["assets"]):
                         if position != index:
-                            extra_changes.append(json.dumps({"client": client, "host": _host(row)}, ensure_ascii=False))
+                            extra_changes.append(_audit_detail(client, _host(row), stored=True))
                         row.update(authorized_by=g.user.username, authorized_at=entry["authorized_at"])
             validate_allowlist(config, path, candidate)
-            details = [json.dumps({"client": client, "host": _host(row)}, ensure_ascii=False)
+            details = [_audit_detail(client, _host(row), stored=True)
                        for row in current["assets"]] if action == "remove-all" else [
-                           json.dumps({"client": client, "host": host}, ensure_ascii=False)]
+                           _audit_detail(client, host, stored=action == "remove")]
             event = "web_asset_" + ("remove" if action == "remove-all" else action)
             users = current_app.extensions["dashboard_users"]
             targets = [path]
@@ -227,6 +239,17 @@ def create_web_blueprint(config):
                             output.with_name(output.name + ".review.json"), marker]
             elif action == "remove":
                 targets.append(marker)
+            if action == "remove-all":
+                for target in targets[1:]:
+                    try:
+                        info = target.lstat()
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISDIR(info.st_mode):
+                        raise ConfigurationError(
+                            "A saved result path is a directory; move it out of "
+                            "web-inventory and retry removal"
+                        )
             originals = {}
             for target in targets:
                 try:
@@ -254,15 +277,21 @@ def create_web_blueprint(config):
                     for detail in extra_changes:
                         audit("web_asset_change", detail)
                     if action == "change" and _host(current["assets"][index]) != host:
-                        audit("web_asset_replaced", json.dumps(
-                            {"client": client, "host": _host(current["assets"][index])}, ensure_ascii=False))
+                        audit("web_asset_replaced", _audit_detail(
+                            client, _host(current["assets"][index]), stored=True))
                     if action == "remove-all":
                         audit("web_snapshot_remove", json.dumps({"client": client}, ensure_ascii=False))
                     writing = True
                     save_allowlist(path, candidate)
                     if action == "remove-all":
                         for target in targets[1:]:
-                            target.unlink(missing_ok=True)
+                            try:
+                                target.unlink(missing_ok=True)
+                            except OSError as exc:
+                                raise ConfigurationError(
+                                    "Saved results could not be removed; close open readers, "
+                                    "check file permissions and retry"
+                                ) from exc
                     elif action == "remove":
                         save_allowlist(marker, {"client": client})
             except BaseException:

@@ -112,9 +112,13 @@ and refuses an asset ID collision. An empty web-only inventory fails validation.
 Saved snapshots are retained observations with their original timestamps; they
 are not refreshed automatically or removed by an age limit. Review their age and
 rerun detection as needed. Removing one asset retains observations and shows
-"Results include assets removed since the last run" until detection runs again;
-a request plan does not clear that notice. **Remove all assets** also deletes
+"Results include assets removed since the last run" until a detection
+successfully refreshes the saved results; a request plan or a failed detection
+does not clear that notice. **Remove all assets** also deletes
 the client's saved snapshot, manifest and review metadata, with an audit entry.
+Oversized hostnames in corrupt saved rows are recorded as `invalid` in recovery
+audit entries. If a result path is a directory, move that directory out of
+`web-inventory/` before retrying bulk removal; no allowlist change is made.
 Normal scans preserve the client label in assets and
 in **Affected clients** alert lines.
 

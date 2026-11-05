@@ -74,7 +74,7 @@ def read_allowlist(path, client):
 
 
 def temporary_json(directory, document):
-    return temporary_bytes(directory, (json.dumps(document, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+    return temporary_bytes(directory, (json.dumps(document, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8"))
 
 
 def temporary_bytes(directory, data):
@@ -121,7 +121,9 @@ def validate_allowlist(config, path, document):
 
 
 def save_allowlist(path, document):
-    replace_bytes(path, (json.dumps(document, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+    # Escape corrupt stored Unicode too, so empty-list recovery can retain
+    # untouched metadata without failing UTF-8 encoding before publication.
+    replace_bytes(path, (json.dumps(document, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8"))
 
 
 def replace_bytes(path, data):
