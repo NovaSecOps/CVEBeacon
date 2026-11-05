@@ -599,6 +599,23 @@ def test_external_deleted_channel_secret_is_administrator_responsibility(account
     assert response.status_code == 200, response.text
 
 
+def test_dashboard_missing_live_rollback_rejects_default_signing_settings(accounts):
+    config, users, app, client = accounts
+    config.config_path.write_text('[dashboard]\nsecure_cookie = true\n\n' + BASE,
+                                  encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    editor = app.extensions["dashboard_config"]
+    backup = _manual_backup(editor, BASE)
+    config.config_path.unlink()
+    set_role(users, "all-manager", set(dc.SECTIONS.values()) | {"view", "manage_secrets"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 403
+
+
 def _manual_backup(editor, text):
     editor.backup_dir.mkdir(mode=0o700, exist_ok=True)
     name = "20260101T000000000000Z-0123456789abcdef.toml"
@@ -628,14 +645,16 @@ def test_loader_normalised_paths_cannot_bypass_administrator_boundary(accounts):
 def test_loader_normalised_file_reference_cannot_bypass_administrator_boundary(
         accounts, tmp_path):
     config, users, _, client = accounts
-    inside = make_secret(config.config_path.parent / "inside-key", "inside synthetic")
-    outside = make_secret(tmp_path.parent / "outside-key", "outside synthetic")
+    inside_path = config.config_path.parent / "tmp" / "outside-key"
+    inside_path.parent.mkdir(parents=True, exist_ok=True)
+    inside = make_secret(inside_path, "inside synthetic")
+    outside = make_secret(tmp_path.parents[2] / "outside-key", "outside synthetic")
     config.config_path.write_text(with_file(config, inside), encoding="utf-8")
     client = dashboard.create_app(load_config(config.config_path)).test_client()
     set_role(users, "source-manager", {"view", "edit_sources", "manage_secrets"})
     login(client)
     before = config.config_path.read_bytes()
-    response = preview(client, "sources", g0_nvd_api_key_file=" /" + str(outside))
+    response = preview(client, "sources", g0_nvd_api_key_file=" /.." + str(outside))
     assert response.status_code == 403
     assert config.config_path.read_bytes() == before
 
