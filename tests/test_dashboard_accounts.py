@@ -79,13 +79,14 @@ def test_every_route_declares_and_enforces_its_permission(accounts, path, endpoi
     _, users, app, client = accounts
     policy = getattr(app.view_functions[endpoint], "dashboard_permissions", {})
     permission = policy.get(method)
-    assert permission in PERMISSIONS | {"public", "self"}, "every route must declare its policy"
+    needed = {permission} if isinstance(permission, str) else set(permission or ())
+    assert needed and needed <= PERMISSIONS | {"public", "self", "admin"}, "every route must declare its policy"
     admin = users.authenticate("admin", PASSWORD)
     users.save_role("empty", set(), authorization=admin)
     users.edit_user("reader", role="empty", disabled=False, authorization=admin)
     login(client)
     path = path.replace("<username>", "reader").replace("<int:event_id>", "1")
-    if permission in PERMISSIONS:
+    if needed & (PERMISSIONS | {"admin"}):
         response = client.open(path, method=method, data={"csrf": csrf(client)})
         assert response.status_code == 403
         if method == "GET":
@@ -387,7 +388,7 @@ def test_admin_pages_and_delegated_user_management(accounts):
     manager = client.application.test_client()
     login(manager)
     assert manager.get("/users").status_code == 200
-    assert manager.get("/roles").status_code == 200
+    assert manager.get("/roles").status_code == 403
     assert manager.get("/audit").status_code == 200
     assert manager.get("/").status_code == 403
     assert users.verify_audit() is None
@@ -479,3 +480,23 @@ def test_login_spam_keeps_worker_capacity_for_authenticated_requests(accounts, m
         finally:
             release.set()
         assert first.result().status_code == second.result().status_code == 401
+
+
+@pytest.mark.parametrize("permissions,path,method,data,status", [
+    ({"run"}, "/query", "GET", {}, 200),
+    ({"run"}, "/reports", "GET", {}, 200),
+    ({"view"}, "/query", "GET", {}, 403),
+    ({"view"}, "/reports", "GET", {}, 403),
+    ({"run"}, "/query", "POST", {"vendor": "acme", "product": "widget", "version": "1"}, 403),
+    ({"run"}, "/reports", "POST", {"format": "json"}, 403),
+    ({"manage_users"}, "/roles", "GET", {}, 403),
+    ({"manage_users"}, "/roles", "POST", {"action": "save", "name": "newrole"}, 403),
+])
+def test_capabilities_grant_only_their_required_pages(accounts, permissions, path, method, data, status):
+    _, users, _, client = accounts
+    admin = users.authenticate("admin", PASSWORD)
+    users.save_role("limited", permissions, authorization=admin)
+    users.edit_user("reader", role="limited", disabled=False, authorization=admin)
+    login(client)
+    response = client.open(path, method=method, data={"csrf": csrf(client), **data})
+    assert response.status_code == status

@@ -151,8 +151,14 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
             permission = policy.get("GET" if request.method == "HEAD" else request.method)
             if permission is None and request.method != "OPTIONS":
                 abort(403)
-            if account_mode and permission not in {None, "public", "self"} and permission not in g.permissions:
-                abort(403)
+            if account_mode:
+                if permission == "admin":
+                    if g.user is None or not g.user.is_admin:
+                        abort(403)
+                elif permission not in {None, "public", "self"}:
+                    needed = {permission} if isinstance(permission, str) else set(permission)
+                    if not needed <= g.permissions:
+                        abort(403)
 
     @app.context_processor
     def shared():
@@ -376,7 +382,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         return render_template("asset.html", data=data, asset=data["inventory"][identifier], rows=rows, coverage=coverage)
 
     @app.route("/query", methods=["GET", "POST"])
-    @requires("view", post="run")
+    @requires("run", post=("run", "view"))
     def query():
         result = None
         mode = _text(request.form if request.method == "POST" else request.args, "mode") or "product"
@@ -397,7 +403,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         return render_template("query.html", result=result, values=values, mode=mode)
 
     @app.route("/reports", methods=["GET", "POST"])
-    @requires("view", post="run")
+    @requires("run", post=("run", "view"))
     def reports():
         if request.method == "GET":
             return render_template("reports.html")
@@ -446,6 +452,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
             abort(400)
         return values[0]
 
+    def assignable_roles():
+        return {name: values for name, values in users.roles().items()
+                if g.user.is_admin or (name != "admin" and values <= g.permissions)}
+
     @app.route("/users", methods=["GET", "POST"])
     @requires("manage_users")
     def user_list():
@@ -462,7 +472,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
                 return redirect(url_for("user_list"), code=303)
             except ConfigurationError as exc:
                 error = str(exc)
-        return render_template("users.html", users=users.users(), roles=users.roles(),
+        return render_template("users.html", users=users.users(), roles=assignable_roles(),
                                user_roles=users.user_roles(), error=error), 400 if error else 200
 
     @app.route("/users/<username>", methods=["GET", "POST"])
@@ -472,6 +482,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         target = users.find(username)
         if target is None:
             abort(404)
+        if target.is_admin and not g.user.is_admin:
+            abort(403)
         error = None
         if request.method == "POST":
             action = _text(request.form, "action", required=True)
@@ -493,11 +505,11 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
                 return redirect(url_for("user_list"), code=303)
             except ConfigurationError as exc:
                 error = str(exc)
-        return render_template("user_edit.html", target=target, roles=users.roles(),
+        return render_template("user_edit.html", target=target, roles=assignable_roles(),
                                role=users.user_roles().get(target.id), error=error), 400 if error else 200
 
     @app.route("/roles", methods=["GET", "POST"])
-    @requires("manage_users")
+    @requires("admin")
     def roles():
         account_required()
         error = None

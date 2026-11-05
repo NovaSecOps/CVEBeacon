@@ -882,6 +882,7 @@ class UserStore:
                 actor = "(bootstrap)"
             elif authorization is not None:
                 current = self.require_permission_in(db, authorization, "manage_users")
+                self._authorize_assignment_in(db, current, "admin" if is_admin else role)
                 actor = current.username
             else:
                 actor = None
@@ -958,7 +959,7 @@ class UserStore:
             if authorization is not None:
                 current = self._validate_proof_in(db, authorization)
                 if current.id != user.id:
-                    self.require_permission_in(db, authorization, "manage_users")
+                    self._authorize_target_in(db, authorization, user)
                 actor = current.username
             else:
                 actor = None
@@ -1020,7 +1021,7 @@ class UserStore:
                     "bootstrap is only valid for the first administrator"
                 )
             if authorization is not None:
-                current = self.require_permission_in(db, authorization, "manage_users")
+                current = self._authorize_target_in(db, authorization, user)
                 actor = current.username
             else:
                 actor = None
@@ -1058,7 +1059,7 @@ class UserStore:
                     "bootstrap is only valid for the first administrator"
                 )
             if authorization is not None:
-                current = self.require_permission_in(db, authorization, "manage_users")
+                current = self._authorize_target_in(db, authorization, user)
                 actor = current.username
             else:
                 actor = None
@@ -1276,6 +1277,24 @@ class UserStore:
             raise ConfigurationError("permission required")
         return current
 
+    def _authorize_target_in(self, db, proof, target):
+        actor = self.require_permission_in(db, proof, "manage_users")
+        if target.is_admin and not actor.is_admin:
+            raise ConfigurationError("administrator login required")
+        if not actor.is_admin and not self.permissions_in(db, target) <= self.permissions_in(db, actor):
+            raise ConfigurationError("cannot manage an account with permissions you do not hold")
+        return actor
+
+    def _authorize_assignment_in(self, db, actor, role):
+        if actor.is_admin:
+            return
+        if role == "admin":
+            raise ConfigurationError("administrator login required")
+        self._require_role_in(db, role)
+        row = db.execute("SELECT permissions FROM cb_role WHERE name=?", (role,)).fetchone()
+        if not frozenset(json.loads(row[0])) <= self.permissions_in(db, actor):
+            raise ConfigurationError("cannot grant permissions you do not hold")
+
     def dashboard_identity(self, proof: AuthenticatedUser) -> tuple[User, frozenset[str]]:
         with closing(self._connect(create=False)) as db:
             db.execute("BEGIN")
@@ -1312,7 +1331,7 @@ class UserStore:
             raise ConfigurationError("unknown permission")
         self.initialize()
         with self.transaction() as db:
-            actor = self.require_permission_in(db, authorization, "manage_users")
+            actor = self.require_admin_in(db, authorization)
             db.execute("INSERT INTO cb_role VALUES (?,?) ON CONFLICT(name) DO UPDATE SET permissions=excluded.permissions",
                        (name, json.dumps(sorted(permissions))))
             self._append_audit(db, "role_save:" + name + ":" + ",".join(sorted(permissions)), actor.username,
@@ -1321,7 +1340,7 @@ class UserStore:
     def delete_role(self, name, *, authorization: AuthenticatedUser) -> None:
         self.initialize()
         with self.transaction() as db:
-            actor = self.require_permission_in(db, authorization, "manage_users")
+            actor = self.require_admin_in(db, authorization)
             self._require_role_in(db, name)
             if db.execute("SELECT 1 FROM cb_user_role r JOIN cb_user u ON u.id=r.user_id WHERE r.role=? AND u.is_admin=0", (name,)).fetchone():
                 raise ConfigurationError("reassign users before deleting their role")
@@ -1337,6 +1356,11 @@ class UserStore:
             if row is None:
                 raise ConfigurationError("user not found")
             user = self._user(row)
+            self._authorize_target_in(db, authorization, user)
+            if not actor.is_admin and actor.id == user.id and role != self.role_in(db, user):
+                raise ConfigurationError("cannot change your own role")
+            if role != self.role_in(db, user):
+                self._authorize_assignment_in(db, actor, role)
             if role != "admin":
                 self._require_role_in(db, role)
             if user.is_admin and not user.disabled and (role != "admin" or disabled):

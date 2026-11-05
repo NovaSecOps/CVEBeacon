@@ -119,3 +119,59 @@ def test_identity_reads_do_not_require_writer_lock(users):
     proof = users.authenticate("admin", PASSWORD)
     with users.transaction():
         assert users.dashboard_identity(proof)[0].username == "admin"
+
+
+@pytest.mark.parametrize("operation", [
+    "promote", "self_role", "admin_edit", "admin_password", "admin_disable",
+    "admin_enable", "admin_unlock", "create_admin", "grant_stronger", "assign_stronger",
+    "create_role", "edit_role", "delete_role",
+])
+def test_delegated_manager_cannot_escalate(users, operation):
+    admin = users.authenticate("admin", PASSWORD)
+    users.save_role("manager", {"manage_users"}, authorization=admin)
+    users.edit_user("reader", role="manager", disabled=False, authorization=admin)
+    users.add("target", password=PASSWORD)
+    manager = users.authenticate("reader", PASSWORD)
+    actions = {
+        "promote": lambda: users.edit_user("target", role="admin", disabled=False, authorization=manager),
+        "self_role": lambda: users.edit_user("reader", role="viewer", disabled=False, authorization=manager),
+        "admin_edit": lambda: users.edit_user("admin", role="admin", disabled=False, display_name="changed", authorization=manager),
+        "admin_password": lambda: users.set_password("admin", PASSWORD + " changed", authorization=manager),
+        "admin_disable": lambda: users.disable("admin", authorization=manager),
+        "admin_enable": lambda: users.enable("admin", authorization=manager),
+        "admin_unlock": lambda: users.unlock("admin", authorization=manager),
+        "create_admin": lambda: users.add("extra", password=PASSWORD, is_admin=True, authorization=manager),
+        "grant_stronger": lambda: users.add("extra", password=PASSWORD, role="viewer", authorization=manager),
+        "assign_stronger": lambda: users.edit_user("target", role="operator", disabled=False, authorization=manager),
+        "create_role": lambda: users.save_role("newrole", {"manage_users"}, authorization=manager),
+        "edit_role": lambda: users.save_role("manager", {"manage_users", "view"}, authorization=manager),
+        "delete_role": lambda: users.delete_role("operator", authorization=manager),
+    }
+    before = users.users(), users.roles(), users.user_roles(), users.audit_entries()
+    with pytest.raises(ConfigurationError):
+        actions[operation]()
+    assert (users.users(), users.roles(), users.user_roles(), users.audit_entries()) == before
+
+
+def test_delegated_manager_can_manage_subset_roles(users):
+    admin = users.authenticate("admin", PASSWORD)
+    users.save_role("manager", {"manage_users", "view"}, authorization=admin)
+    users.edit_user("reader", role="manager", disabled=False, authorization=admin)
+    manager = users.authenticate("reader", PASSWORD)
+    users.add("target", password=PASSWORD, role="viewer", authorization=manager)
+    users.edit_user("target", role="viewer", disabled=False, display_name="Changed", authorization=manager)
+    users.set_password("target", PASSWORD + " changed", authorization=manager)
+    users.disable("target", authorization=manager)
+    users.enable("target", authorization=manager)
+    users.unlock("target", authorization=manager)
+    assert users.find("target").display_name == "Changed"
+
+
+def test_delegated_manager_cannot_take_over_a_more_privileged_member(users):
+    admin = users.authenticate("admin", PASSWORD)
+    users.save_role("manager", {"manage_users"}, authorization=admin)
+    users.edit_user("reader", role="manager", disabled=False, authorization=admin)
+    users.add("operator", password=PASSWORD, role="operator")
+    proof = users.authenticate("reader", PASSWORD)
+    with pytest.raises(ConfigurationError):
+        users.set_password("operator", PASSWORD + " changed", authorization=proof)
