@@ -1,5 +1,6 @@
 """Regressions for the final independent configuration-editor review."""
 
+import json
 import os
 from pathlib import Path
 import threading
@@ -587,7 +588,7 @@ type = "smtp"
 host = "smtp.example.invalid"
 from = "sender@example.invalid"
 to = ["soc@example.invalid"]
-password_file = "{reference}"
+password_file = {json.dumps(str(reference))}
 '''
         for name in ("first", "second")
     )
@@ -786,7 +787,7 @@ type = "smtp"
 host = "smtp.example.invalid"
 from = "sender@example.invalid"
 to = ["soc@example.invalid"]
-password_file = "{channel_file}"
+password_file = {json.dumps(str(channel_file))}
 ''',
         encoding="utf-8",
     )
@@ -867,7 +868,7 @@ type = "smtp"
 host = "smtp.example.invalid"
 from = "sender@example.invalid"
 to = ["soc@example.invalid"]
-password_file = "{target}"
+password_file = {json.dumps(str(target))}
 ''',
         encoding="utf-8",
     )
@@ -1042,7 +1043,7 @@ type = "smtp"
 host = "smtp.example.invalid"
 from = "sender@example.invalid"
 to = ["soc@example.invalid"]
-password_file = "{target}"
+password_file = {json.dumps(str(target))}
 ''', encoding="utf-8")
     login(client, "admin")
     response = preview(client, "channels", g0_password_file_new="replacement")
@@ -1067,7 +1068,7 @@ type = "smtp"
 host = "smtp.example.invalid"
 from = "sender@example.invalid"
 to = ["soc@example.invalid"]
-password_file = "{target}"
+password_file = {json.dumps(str(target))}
 ''', encoding="utf-8")
     login(client, "admin")
     response = preview(client, "channels", g0_password_file_new="replacement generated")

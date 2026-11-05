@@ -1,5 +1,6 @@
 """Regressions for the reviewed configuration-editor security boundaries."""
 
+import json
 import html
 import os
 from pathlib import Path
@@ -96,7 +97,7 @@ def with_file(config, path: Path) -> str:
         reference = str(path)
     return BASE.replace('nvd_api_key_env = "NVD_API_KEY"\n', "").replace(
         "[sources]\n",
-        f'[sources]\nnvd_api_key_file = "{reference}"\n',
+        f'[sources]\nnvd_api_key_file = {json.dumps(str(reference))}\n',
     )
 
 

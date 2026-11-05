@@ -364,7 +364,13 @@ def read_regular(path, *, private=False):
     fd = os.open(path, flags)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or path.lstat() != info:
+        current = path.lstat()
+        # Compare identity, not whole stat results: Windows fills fstat and
+        # lstat fields differently for the same file.
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or not stat.S_ISREG(current.st_mode)
+                or getattr(current, "st_file_attributes", 0) & 0x400
+                or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
             raise ConfigurationError("Configuration must be a regular file with one link")
         if os.name == "posix" and (info.st_uid != os.geteuid() or info.st_mode & (0o077 if private else 0o022)):
             raise ConfigurationError("Unsafe configuration ownership or permissions")

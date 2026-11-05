@@ -1,5 +1,6 @@
 """Regressions for the second configuration-editor review round."""
 
+import json
 import os
 from pathlib import Path
 import re
@@ -49,7 +50,7 @@ type = "smtp"
 host = "smtp.example.invalid"
 from = "sender@example.invalid"
 to = ["soc@example.invalid"]
-{source} = "{value}"
+{source} = {json.dumps(str(value))}
 {extra}
 '''
 
@@ -1010,6 +1011,7 @@ def test_missing_current_secret_file_does_not_block_backups(accounts):
     assert client.get("/config/channels").status_code == 400
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes block writes")
 def test_read_only_configuration_directory_shows_notice_and_blocks_saves(accounts):
     config, _, _, client = accounts
     login(client, "admin")
