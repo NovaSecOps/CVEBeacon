@@ -73,11 +73,15 @@ def read_allowlist(path, client):
 
 
 def temporary_json(directory, document):
+    return temporary_bytes(directory, (json.dumps(document, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+
+
+def temporary_bytes(directory, data):
     path = directory / (".web-assets-" + secrets.token_hex(16) + ".tmp")
     descriptor = private_file(path, create=True, exclusive=True)
     try:
         with os.fdopen(descriptor, "wb") as handle:
-            handle.write((json.dumps(document, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         return path
@@ -116,10 +120,14 @@ def validate_allowlist(config, path, document):
 
 
 def save_allowlist(path, document):
+    replace_bytes(path, (json.dumps(document, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+
+
+def replace_bytes(path, data):
     # Check an existing destination too; replacement must never hide a linked or public file.
     if path.exists() or path.is_symlink():
         read_bytes(path)
-    temporary = temporary_json(path.parent, document)
+    temporary = temporary_bytes(path.parent, data)
     try:
         os.replace(temporary, path)
         if os.name == "posix":

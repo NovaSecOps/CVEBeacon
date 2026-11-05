@@ -212,21 +212,38 @@ def create_web_blueprint(config):
                        for row in current["assets"]] if action == "remove-all" else [
                            json.dumps({"client": client, "host": host}, ensure_ascii=False)]
             event = "web_asset_" + ("remove" if action == "remove-all" else action)
-            for detail in details:
-                manager().audit_action(event + "_requested", g.user.username, detail)
-            for changed_detail in extra_changes:
-                manager().audit_action("web_asset_change_requested", g.user.username, changed_detail)
-            save_allowlist(path, candidate)
-            for detail in details:
-                manager().audit_action(event, g.user.username, detail)
-            for changed_detail in extra_changes:
-                manager().audit_action("web_asset_change", g.user.username, changed_detail)
-            if action == "change":
-                old = current["assets"][index]
-                old_host = _host(old)
-                if old_host != host:
-                    manager().audit_action("web_asset_replaced", g.user.username, json.dumps(
-                        {"client": client, "host": old_host}, ensure_ascii=False))
+            users = current_app.extensions["dashboard_users"]
+            targets = [path]
+            originals = {target: read_bytes(target) if target.exists() or target.is_symlink() else None
+                         for target in targets}
+            writing = False
+            try:
+                # Account writers cannot revoke the proof or authority between
+                # this check, the audit and the final filesystem replacement.
+                with users.transaction() as db:
+                    actor = users.require_permission_in(db, g.entry.proof, "manage_web_assets")
+                    if candidate.get("ca_bundle", "") != current.get("ca_bundle", "") and not actor.is_admin:
+                        abort(403)
+                    stamp = datetime.now(timezone.utc).isoformat()
+                    def audit(name, detail):
+                        users._append_audit(db, name + ":" + detail, actor.username, stamp, actor=actor.username)
+                    for detail in details:
+                        audit(event, detail)
+                    for detail in extra_changes:
+                        audit("web_asset_change", detail)
+                    if action == "change" and _host(current["assets"][index]) != host:
+                        audit("web_asset_replaced", json.dumps(
+                            {"client": client, "host": _host(current["assets"][index])}, ensure_ascii=False))
+                    writing = True
+                    save_allowlist(path, candidate)
+            except BaseException:
+                if writing:
+                    for target, data in originals.items():
+                        if data is None:
+                            target.unlink(missing_ok=True)
+                        else:
+                            web_assets.replace_bytes(target, data)
+                raise
         except (CVEBeaconError, ValueError, OSError) as exc:
             message = str(exc) if isinstance(exc, ConfigurationError) else "The web allowlist could not be saved"
             return render(client, error=message, status=400)
