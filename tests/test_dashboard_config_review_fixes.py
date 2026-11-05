@@ -903,3 +903,100 @@ def test_reserved_secret_temporaries_in_data_root_are_cleaned(accounts):
     os.utime(orphan, (old, old))
     editor.cleanup()
     assert not orphan.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="native POSIX writer guard")
+def test_writer_guard_unlock_error_preserves_commit_and_releases(accounts, monkeypatch):
+    import fcntl
+
+    config, _, _, client = accounts
+    login(client, "admin")
+    response = preview(client, "http", g0_retries="4")
+    before = config.config_path.read_bytes()
+    real_flock = fcntl.flock
+    failed_descriptors = []
+    acquired_elsewhere = []
+    guard = dc._config_thread_lock(config.config_path)
+
+    def fail_post_commit_unlock(descriptor, operation):
+        if (operation == fcntl.LOCK_UN and not failed_descriptors
+                and config.config_path.read_bytes() != before):
+            failed_descriptors.append(descriptor)
+            raise OSError("synthetic lock release failure after successful commit")
+        return real_flock(descriptor, operation)
+
+    def contender():
+        acquired = guard.acquire(timeout=0.2)
+        acquired_elsewhere.append(acquired)
+        if acquired:
+            guard.release()
+
+    monkeypatch.setattr(fcntl, "flock", fail_post_commit_unlock)
+    saved = confirm(client, response, "http")
+    other = threading.Thread(target=contender)
+    other.start()
+    other.join(2)
+    try:
+        assert not other.is_alive()
+        assert acquired_elsewhere == [True]
+        assert saved.status_code == 303
+        assert config.config_path.read_bytes() != before
+    finally:
+        for descriptor in failed_descriptors:
+            try:
+                real_flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+            except OSError:
+                pass
+        if acquired_elsewhere == [False]:
+            guard.release()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="native POSIX writer guard")
+def test_writer_guard_close_error_preserves_commit_and_releases(accounts, monkeypatch):
+    config, _, _, client = accounts
+    login(client, "admin")
+    response = preview(client, "http", g0_retries="4")
+    before = config.config_path.read_bytes()
+    lock_path = config.config_path.with_name(".config-" + config.config_path.name + ".lock")
+    lock_inode = os.stat(lock_path).st_ino
+    real_close = dc.os.close
+    failed_descriptors = []
+    acquired_elsewhere = []
+    guard = dc._config_thread_lock(config.config_path)
+
+    def fail_post_commit_close(descriptor):
+        try:
+            info = os.fstat(descriptor)
+        except OSError:
+            return real_close(descriptor)
+        if (info.st_ino == lock_inode and not failed_descriptors
+                and config.config_path.read_bytes() != before):
+            failed_descriptors.append(descriptor)
+            raise OSError("synthetic lock descriptor close failure after successful commit")
+        return real_close(descriptor)
+
+    def contender():
+        acquired = guard.acquire(timeout=0.2)
+        acquired_elsewhere.append(acquired)
+        if acquired:
+            guard.release()
+
+    monkeypatch.setattr(dc.os, "close", fail_post_commit_close)
+    saved = confirm(client, response, "http")
+    other = threading.Thread(target=contender)
+    other.start()
+    other.join(2)
+    try:
+        assert not other.is_alive()
+        assert acquired_elsewhere == [True]
+        assert saved.status_code == 303
+        assert config.config_path.read_bytes() != before
+    finally:
+        for descriptor in failed_descriptors:
+            try:
+                real_close(descriptor)
+            except OSError:
+                pass
+        if acquired_elsewhere == [False]:
+            guard.release()

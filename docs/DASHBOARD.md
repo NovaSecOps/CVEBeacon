@@ -389,9 +389,11 @@ shared preview space. If the original file changed since the form loaded or
 preview was created, the save is refused; reload the form. The editor serializes
 its writers using the account database transaction and checks the file again
 immediately before replacement. External editors do not participate in that
-lock: avoid simultaneous filesystem edits. Requests are bounded by the
-dashboard's 8192-byte form limit; split large edits into smaller saves where
-possible.
+lock: avoid simultaneous filesystem edits. A configuration-file writer lock
+covers target capture, live secret writes, transaction exit and compensation;
+release and descriptor-close failures are sanitized maintenance so a completed
+save is not reported as failed. Requests are bounded by the dashboard's
+8192-byte form limit; split large edits into smaller saves where possible.
 
 Saving removes hand-written **comments and formatting**. Before replacement,
 the original bytes are kept in an owner-only sibling directory named

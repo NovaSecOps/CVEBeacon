@@ -91,17 +91,36 @@ def _config_writer_lock(path):
             raise ConfigurationError("Cannot acquire the configuration writer lock") from exc
         yield
     finally:
-        if acquired:
-            if os.name == "posix":
-                import fcntl
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            else:
-                import msvcrt
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-        if descriptor is not None:
-            os.close(descriptor)
-        thread_lock.release()
+        try:
+            try:
+                if acquired:
+                    try:
+                        if os.name == "posix":
+                            import fcntl
+                            fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        else:
+                            import msvcrt
+                            os.lseek(descriptor, 0, os.SEEK_SET)
+                            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    except Exception:
+                        logging.getLogger("cvebeacon").warning(
+                            "Configuration writer lock release failed; continuing"
+                        )
+            finally:
+                try:
+                    if descriptor is not None:
+                        os.close(descriptor)
+                except Exception:
+                    logging.getLogger("cvebeacon").warning(
+                        "Configuration writer lock descriptor close failed; continuing"
+                    )
+        finally:
+            try:
+                thread_lock.release()
+            except Exception:
+                logging.getLogger("cvebeacon").warning(
+                    "Configuration writer mutex release failed; continuing"
+                )
 
 
 class _ValidationLogFilter(logging.Filter):
