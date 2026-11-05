@@ -1311,6 +1311,12 @@ def test_partial_snapshot_roundtrips_through_validate_and_merge(tmp_path):
     assert read_snapshot(merged, allow_partial=True).manifest["status"] == "partial"
 
 
+def test_docs_merge_example_accepts_partial_snapshots():
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "docs" / "EXTENSIONS.md").read_text(encoding="utf-8")
+    assert "--output inventory.json --source-id central --allow-partial" in text
+
+
 def test_plan_prints_requests_and_sends_nothing(tmp_path, capsys):
     path = write_allowlist(tmp_path, [asset(), asset(hostname="second.example", path="/status", max_redirects=1)])
     class Forbidden:
