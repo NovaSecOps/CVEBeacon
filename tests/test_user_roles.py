@@ -88,3 +88,34 @@ def test_migration_assigns_viewer_and_does_not_resurrect_roles(users):
     proof = migrated.authenticate("admin", PASSWORD)
     migrated.delete_role("operator", authorization=proof)
     assert "operator" not in UserStore(users.path).roles()
+
+
+def test_password_verification_does_not_hold_writer_lock(users, monkeypatch):
+    from cvebeacon.watch import users as module
+    proof = users.authenticate("admin", PASSWORD)
+    entered, release = threading.Event(), threading.Event()
+    original = module.verify_password
+
+    def verify(encoded, password):
+        entered.set()
+        assert release.wait(10)
+        return original(encoded, password)
+
+    monkeypatch.setattr(module, "verify_password", verify)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        attempt = pool.submit(users.authenticate, "reader", PASSWORD)
+        assert entered.wait(5)
+        try:
+            identity = pool.submit(users.dashboard_identity, proof)
+            assert identity.result(timeout=1)[0].username == "admin"
+            with UserStore(users.path).transaction() as db:
+                db.execute("UPDATE cb_user SET credential_version=credential_version+1 WHERE username='reader'")
+        finally:
+            release.set()
+        assert attempt.result(timeout=5) is None
+
+
+def test_identity_reads_do_not_require_writer_lock(users):
+    proof = users.authenticate("admin", PASSWORD)
+    with users.transaction():
+        assert users.dashboard_identity(proof)[0].username == "admin"

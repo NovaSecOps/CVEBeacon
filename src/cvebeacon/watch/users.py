@@ -1099,7 +1099,8 @@ class UserStore:
         A successful result carries the login audit row that proves the
         password check; a roster lookup cannot produce this type.
         """
-        self.initialize()
+        if self._store_id is None:
+            self.initialize()
         now = self._clock()
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
@@ -1108,26 +1109,33 @@ class UserStore:
         account = os_account()
         host = host_name()
         typed = audit_name(identifier)
+        # Snapshot before hashing; no writer reservation during expensive work.
+        with closing(self._connect(create=False)) as db:
+            snapshot = self._find_username(db, identifier)
+        usable = (snapshot is not None and not snapshot["disabled"]
+                  and snapshot["password_hash"] is not None and not self._locked(snapshot, now))
+        accepted = verify_password(snapshot["password_hash"] if usable else DUMMY_HASH, password)
         with self.transaction() as db:
             row = self._find_username(db, identifier)
             if row is None:
-                verify_password(DUMMY_HASH, password)
-                self._append_audit(
-                    db, "login_failed", typed, stamp, account, host
-                )
+                self._append_audit(db, "login_failed", typed, stamp, account, host)
                 return None
             user = self._user(row)
+            # A password, enabled-state, or role change during verification must
+            # never produce a proof for the new account state. Lockout counters
+            # are deliberately re-read here, serializing simultaneous failures.
+            accepted = (accepted and usable and snapshot["id"] == row["id"]
+                        and snapshot["password_hash"] == row["password_hash"]
+                        and snapshot["credential_version"] == row["credential_version"]
+                        and not user.disabled)
+            now = self._clock()
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            now = now.astimezone(timezone.utc)
+            stamp = _timestamp(now)
             if self._locked(row, now):
-                verify_password(DUMMY_HASH, password)
-                self._append_audit(
-                    db, "login_locked", typed, stamp, account, host
-                )
+                self._append_audit(db, "login_locked", typed, stamp, account, host)
                 return None
-            if user.disabled or row["password_hash"] is None:
-                verify_password(DUMMY_HASH, password)
-                accepted = False
-            else:
-                accepted = verify_password(row["password_hash"], password)
             if not accepted:
                 expired = bool(row["locked_until"]) and not self._locked(
                     row, now
@@ -1269,7 +1277,8 @@ class UserStore:
         return current
 
     def dashboard_identity(self, proof: AuthenticatedUser) -> tuple[User, frozenset[str]]:
-        with self.transaction() as db:
+        with closing(self._connect(create=False)) as db:
+            db.execute("BEGIN")
             user = self._validate_proof_in(db, proof)
             return user, self.permissions_in(db, user)
 

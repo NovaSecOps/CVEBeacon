@@ -18,7 +18,7 @@ from flask import Flask, abort, g, redirect, render_template, request, send_file
 from werkzeug.exceptions import HTTPException, SecurityError
 
 from .config import AppConfig
-from .dashboard_auth import AccountSessions, DashboardAuth, password_hash
+from .dashboard_auth import AccountLoginThrottle, AccountSessions, DashboardAuth, password_hash
 from .errors import CVEBeaconError, ConfigurationError, StateError
 from .inventory import load_inventory
 from .identity import normalize_asset
@@ -83,10 +83,12 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     encoded = None if account_mode else password_hash(config)
     auth = DashboardAuth(encoded, config.dashboard.session_lifetime_seconds) if encoded else None
     account_sessions = AccountSessions(config.dashboard.session_lifetime_seconds, config.dashboard.session_idle_seconds)
+    login_throttle = AccountLoginThrottle()
     app = Flask(__name__)
     app.extensions["dashboard_auth"] = auth
     app.extensions["account_sessions"] = account_sessions
     app.extensions["dashboard_users"] = users
+    app.extensions["account_login_throttle"] = login_throttle
     wildcard = host in {"0.0.0.0", "::"}
     app.config.update(
         SECRET_KEY=secrets.token_bytes(32), DEBUG=False, TESTING=False,
@@ -174,7 +176,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
             if request.method == "POST":
                 name = request.form.getlist("username")
                 password = request.form.getlist("password")
-                proof = users.authenticate(name[0] if len(name) == 1 else None,
+                proof = login_throttle.authenticate(users, request.remote_addr or "unknown",
+                                                    name[0] if len(name) == 1 else None,
                                            password[0] if len(password) == 1 else None)
                 if proof:
                     try:

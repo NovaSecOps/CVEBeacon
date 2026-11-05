@@ -4,7 +4,7 @@ from collections import OrderedDict
 import getpass
 import re
 import secrets
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 import time
 from dataclasses import dataclass
 
@@ -47,13 +47,13 @@ class DashboardAuth:
         self.max_origins = 4096
         self.max_sessions = 256
 
-    def login(self, origin, password):
+    def reserve(self, origin):
         now = self.clock()
         with self.lock:
             self.attempts = {key: value for key, value in self.attempts.items() if value[2] > now}
             failures, next_try, _ = self.attempts.get(origin, (0, 0, 0))
             if now < next_try:
-                return None
+                return False
             if origin not in self.attempts and len(self.attempts) >= self.max_origins:
                 # A full table must not lock out all unrelated clients for
                 # fifteen minutes. Evict the least recently attempted origin.
@@ -63,6 +63,11 @@ class DashboardAuth:
             # Reserve before expensive hashing, so concurrent requests cannot
             # bypass the delay. No sleeps occupy the server's worker threads.
             self.attempts[origin] = (failures, now + min(2 ** (failures - 1), 60), now + 900)
+        return True
+
+    def login(self, origin, password):
+        if not self.reserve(origin):
+            return None
         if not isinstance(password, str) or len(password) > 1024 or not check_password_hash(self.encoded, password):
             return None
         with self.lock:
@@ -159,3 +164,23 @@ class AccountSessions:
             for key, value in list(self.sessions.items()):
                 if value.proof and value.proof.id == user_id:
                     self.sessions.pop(key, None)
+
+
+class AccountLoginThrottle(DashboardAuth):
+    """Bound origins and concurrent hash work without waiting in a worker."""
+
+    def __init__(self):
+        super().__init__(None, 0)
+        self.hash_slots = BoundedSemaphore(2)
+
+    def authenticate(self, users, origin, username, password):
+        if not self.reserve(origin) or not self.hash_slots.acquire(blocking=False):
+            return None
+        try:
+            proof = users.authenticate(username, password)
+            if proof:
+                with self.lock:
+                    self.attempts.pop(origin, None)
+            return proof
+        finally:
+            self.hash_slots.release()

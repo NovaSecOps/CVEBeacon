@@ -152,16 +152,23 @@ def test_missing_policy_fails_closed(accounts):
 
 
 def test_generic_failure_lockout_and_unlock(accounts, caplog):
-    _, users, _, client = accounts
+    _, users, app, client = accounts
+    now = [100.0]
+    app.extensions["account_login_throttle"].clock = lambda: now[0]
     missing = submit(client, "/login", username="missing", password="Wrong password value")
+    now[0] += 61  # Admit each attempt through the new origin backoff.
     wrong = submit(client, "/login", username="reader", password="Wrong password value")
     assert missing.status_code == wrong.status_code == 401
     assert missing.text == wrong.text
     for _ in range(4):
+        now[0] += 61
         assert submit(client, "/login", username="reader", password="Wrong password value").status_code == 401
+    assert users.find("reader").failed_logins == 5
+    now[0] += 61
     assert submit(client, "/login", username="reader", password=PASSWORD).status_code == 401
     proof = users.authenticate("admin", PASSWORD)
     users.unlock("reader", authorization=proof)
+    now[0] += 61
     login(client)
     assert "Wrong password value" not in caplog.text and PASSWORD not in caplog.text
 
@@ -169,12 +176,15 @@ def test_generic_failure_lockout_and_unlock(accounts, caplog):
 def test_missing_and_disabled_accounts_use_dummy_hash(accounts, monkeypatch):
     from cvebeacon.watch import users as module
     from cvebeacon.passwords import DUMMY_HASH
-    _, users, _, client = accounts
+    _, users, app, client = accounts
+    now = [100.0]
+    app.extensions["account_login_throttle"].clock = lambda: now[0]
     users.disable("reader")
     calls = []
     original = module.verify_password
     monkeypatch.setattr(module, "verify_password", lambda encoded, password: calls.append(encoded) or original(encoded, password))
     first = submit(client, "/login", username="missing", password=PASSWORD)
+    now[0] += 61
     second = submit(client, "/login", username="reader", password=PASSWORD)
     assert first.status_code == second.status_code == 401 and first.text == second.text
     assert calls == [DUMMY_HASH, DUMMY_HASH]
@@ -330,7 +340,10 @@ def test_shared_mode_transitions_to_accounts_without_restart(setup, monkeypatch)
     users = UserStore(config.watch.users_database)
     users.add("admin", password=PASSWORD, is_admin=True)
     assert client.get("/").status_code == 303
+    now = [100.0]
+    app.extensions["account_login_throttle"].clock = lambda: now[0]
     assert submit(client, "/login", password=PASSWORD).status_code == 401
+    now[0] += 61
     login(client, "admin")
     monkeypatch.setenv(config.dashboard.password_hash_env, "invalid ignored hash")
     assert dashboard.create_app(config).test_client().get("/login").status_code == 200
@@ -425,3 +438,44 @@ def test_authenticated_session_flood_preserves_other_accounts(accounts):
             pass
     assert len(sessions.sessions) <= 3
     assert client.get("/").status_code == 200
+
+
+def test_account_login_spam_is_reserved_before_hashing(accounts, monkeypatch):
+    _, users, app, client = accounts
+    calls = []
+    monkeypatch.setattr(app.extensions["dashboard_users"], "authenticate", lambda *args: calls.append(args))
+    first = submit(client, "/login", username="missing", password=PASSWORD)
+    for _ in range(5):
+        response = submit(client, "/login", username="missing", password=PASSWORD)
+        assert response.status_code == first.status_code == 401
+    assert len(calls) == 1
+
+
+def test_login_spam_keeps_worker_capacity_for_authenticated_requests(accounts, monkeypatch):
+    _, _, app, client = accounts
+    login(client, "admin")
+    entered = threading.Barrier(3)
+    release = threading.Event()
+
+    def verify(*args):
+        entered.wait(timeout=5)
+        assert release.wait(5)
+
+    monkeypatch.setattr(app.extensions["dashboard_users"], "authenticate", verify)
+
+    def attempt(origin):
+        visitor = app.test_client()
+        token = csrf(visitor, "/login")
+        return visitor.post("/login", data={"csrf": token, "username": "missing", "password": PASSWORD},
+                            environ_overrides={"REMOTE_ADDR": origin})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(attempt, "192.0.2.1")
+        second = pool.submit(attempt, "192.0.2.2")
+        entered.wait(timeout=5)
+        try:
+            assert attempt("192.0.2.3").status_code == 401
+            assert client.get("/").status_code == 200
+        finally:
+            release.set()
+        assert first.result().status_code == second.result().status_code == 401
