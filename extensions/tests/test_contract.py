@@ -324,3 +324,18 @@ def test_windows_publications_pass_core_strict_file_checks(tmp_path):
 def test_posix_publications_keep_owner_only_modes(tmp_path):
     assert_private_publications(tmp_path)
 
+
+def test_cli_shows_path_free_publication_timeout_guidance(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from cvebeacon import publication
+    path = snapshot(tmp_path)
+    elapsed = [0.0]
+    def blocked(*args):
+        raise PermissionError("SECRET_PATH")
+    monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt", replace=blocked))
+    monkeypatch.setattr(publication, "time", SimpleNamespace(
+        monotonic=lambda: elapsed[0], sleep=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay)))
+    assert main(["merge", str(path), "--source-id", "central", "--output", str(tmp_path / 'out.json')]) == 2
+    message = capsys.readouterr().err
+    assert 'Atomic publication' in message and 'close open readers and retry' in message
+    assert 'SECRET_PATH' not in message and str(tmp_path) not in message

@@ -14,6 +14,7 @@ from .dashboard_jobs import JobQueueFull, build_command
 from .dashboard_ops import require_accounts
 from .errors import CVEBeaconError, ConfigurationError
 from .locking import OperationLock, RunInProgress
+from .publication import PublicationTimeout
 from . import web_assets
 from .web_assets import (COMPANION_NOTICE, client_label, directories,
                          paths, read_allowlist, save_allowlist, validate_allowlist)
@@ -303,7 +304,8 @@ def create_web_blueprint(config):
                             web_assets.replace_bytes(target, data)
                 raise
         except (CVEBeaconError, ValueError, OSError) as exc:
-            message = str(exc) if isinstance(exc, ConfigurationError) else "The web allowlist could not be saved"
+            message = (str(exc) if isinstance(exc, (ConfigurationError, PublicationTimeout))
+                       else "The web allowlist could not be saved")
             return render(client, error=message, status=400)
         finally:
             lock.release()

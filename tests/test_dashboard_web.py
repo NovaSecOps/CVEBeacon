@@ -720,3 +720,19 @@ def test_bulk_removal_reports_delete_failure_and_rolls_back(web, monkeypatch):
     assert path.read_bytes() == before and users.audit_entries() == audit_before
     assert output.read_bytes()
 
+
+def test_save_shows_path_free_publication_timeout_guidance(web, monkeypatch):
+    from types import SimpleNamespace
+    from cvebeacon import publication
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    elapsed = [0.0]
+    def blocked(*args):
+        raise PermissionError("SECRET_PATH")
+    monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt", replace=blocked))
+    monkeypatch.setattr(publication, "time", SimpleNamespace(
+        monotonic=lambda: elapsed[0], sleep=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay)))
+    response = save(client, action="change", index="0", path="/updated")
+    assert response.status_code == 400
+    assert "Atomic publication" in response.text and "close open readers and retry" in response.text
+    assert "SECRET_PATH" not in response.text

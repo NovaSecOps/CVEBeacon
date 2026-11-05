@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 from cvebeacon.errors import CVEBeaconError
+from cvebeacon.publication import PublicationTimeout
 
 from .contract import ExtensionError, read_snapshot
 from .merge import merge_snapshots
@@ -97,7 +98,9 @@ def main(argv=None):
             print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
         return 0
     except (ExtensionError, CVEBeaconError, OSError) as exc:
-        # OS errors may include private filesystem paths; don't echo them.
-        message = "filesystem operation failed" if isinstance(exc, OSError) else str(exc)
+        # Only the dedicated timeout has a fixed, path-free OS error message.
+        message = ("filesystem operation failed"
+                   if isinstance(exc, OSError) and not isinstance(exc, PublicationTimeout)
+                   else str(exc))
         print(f"error: {message}", file=sys.stderr)
         return 2
