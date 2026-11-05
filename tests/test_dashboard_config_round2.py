@@ -168,21 +168,18 @@ topic = "alerts"
 def test_credential_destination_rechecked_in_commit_transaction(accounts, monkeypatch):
     config, users, app, client = accounts
     config.config_path.write_text(channel_config(_smtp(reference="password_env")), encoding="utf-8")
-    set_role(users, "channel-manager", {"view", "edit_channels", "manage_secrets"})
-    login(client)
+    login(client, "admin")
     response = preview(client, "channels", g0_host="attacker.example.invalid")
     assert response.status_code == 200, response.text
-    editor = app.extensions["dashboard_config"]
-    real_commit = editor.commit
+    real_permissions = app.extensions["dashboard_users"].permissions_in
 
-    def revoke_then_commit(*args, **kwargs):
-        set_role(users, "channel-manager", {"view", "edit_channels"})
-        return real_commit(*args, **kwargs)
+    def without_manage(db, user):
+        return real_permissions(db, user) - {"manage_secrets"}
 
-    monkeypatch.setattr(editor, "commit", revoke_then_commit)
+    monkeypatch.setattr(app.extensions["dashboard_users"], "permissions_in", without_manage)
     before = config.config_path.read_bytes()
     saved = confirm(client, response, "channels")
-    assert saved.status_code in {400, 403}
+    assert saved.status_code == 403
     assert config.config_path.read_bytes() == before
 
 
@@ -291,21 +288,22 @@ def test_reference_permission_is_rechecked_before_commit_preparation(accounts, m
     first = make_secret(config.config_path.parent / "nvd-key", "synthetic key")
     second = make_secret(config.config_path.parent / "other-key", "other synthetic key")
     config.config_path.write_text(with_file(config, first), encoding="utf-8")
-    set_role(users, "source-manager", {"view", "edit_sources", "manage_secrets"})
-    login(client)
+    login(client, "admin")
     response = preview(client, "sources", g0_nvd_api_key_file=str(second))
     assert response.status_code == 200, response.text
-    editor = app.extensions["dashboard_config"]
-    real_commit = editor.commit
+    real_permissions = app.extensions["dashboard_users"].permissions_in
 
-    def revoke_then_commit(*args, **kwargs):
-        set_role(users, "source-manager", {"view", "edit_sources"})
-        return real_commit(*args, **kwargs)
+    def without_manage(db, user):
+        return real_permissions(db, user) - {"manage_secrets"}
 
-    monkeypatch.setattr(editor, "commit", revoke_then_commit)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("new reference target was prepared before the permission check")
+
+    monkeypatch.setattr(app.extensions["dashboard_users"], "permissions_in", without_manage)
+    monkeypatch.setattr(dc, "replacement_document", forbidden)
     before = config.config_path.read_bytes()
     saved = confirm(client, response, "sources")
-    assert saved.status_code in {400, 403}
+    assert saved.status_code == 403
     assert config.config_path.read_bytes() == before
 
 
@@ -506,3 +504,6 @@ def test_safe_error_keeps_schema_names(tmp_path):
                             tmp_path / "config.toml")
     assert "CPE 2.3 name" in message
     assert "acme" not in message and "widget" not in message
+    message = dc.safe_error(ConfigurationError("[state] must be a table"),
+                            {"state": {"database": "state.db"}}, tmp_path / "config.toml")
+    assert "state" in message and "[value] must be a table" not in message
