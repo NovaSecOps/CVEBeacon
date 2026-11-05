@@ -74,9 +74,9 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
 
 
 def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
-    if config.inventory is None:
+    if config.inventory is None and not config.watch.enabled:
         raise CVEBeaconError(
-            "inventory dashboard pages require an inventory; add [inventory] path to the configuration"
+            "the dashboard requires an inventory or watch mode; add [inventory] path or set [watch] enabled = true"
         )
     users = UserStore(config.watch.users_database)
     account_mode = users.dashboard_accounts()
@@ -177,6 +177,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         return {"csrf": session["csrf"], "auth_enabled": auth is not None,
                 "authenticated": bool(auth and auth.valid(session.get("auth_id")))}
 
+    @app.context_processor
+    def inventory_state():
+        return {"inventory_configured": config.inventory is not None}
+
     @app.route("/login", methods=["GET", "POST"])
     @requires("public")
     def login():
@@ -258,12 +262,16 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     def snapshot():
         data = store.dashboard_snapshot()
         now = datetime.now(timezone.utc)
-        try:
-            assets = {asset.asset_id: asset for asset in load_inventory(config.inventory)}
-            data["inventory_error"] = False
-        except CVEBeaconError:
+        if config.inventory is not None:
+            try:
+                assets = {asset.asset_id: asset for asset in load_inventory(config.inventory)}
+                data["inventory_error"] = False
+            except CVEBeaconError:
+                assets = {}
+                data["inventory_error"] = True
+        else:
             assets = {}
-            data["inventory_error"] = True
+            data["inventory_error"] = False
         data["inventory"] = assets
         data["categories"] = Counter(asset.category or "Uncategorized" for asset in assets.values())
         latest, attempt = data["latest"], data["attempt"]
@@ -289,6 +297,9 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
             "EU KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"]["eu_kev"] is True})}
         return data
 
+    def inventory_required(title: str, *, status: int = 200):
+        return render_template("inventory_required.html", title=title), status
+
     @app.get("/")
     @requires("view")
     def overview():
@@ -297,6 +308,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     @app.get("/findings")
     @requires("view")
     def findings():
+        if config.inventory is None:
+            return inventory_required("Findings")
         data = snapshot()
         filters = {key: _text(request.args, key) for key in ("q", "asset", "vendor", "product", "version", "category", "system_id", "ecosystem", "purl", "advisory", "cve", "applicability", "cvss", "severity", "cisa", "eu")}
         if filters["applicability"] not in {"", *(item.value for item in Applicability)}:
@@ -347,6 +360,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     @app.get("/history")
     @requires("view")
     def history():
+        if config.inventory is None:
+            return inventory_required("Finding history")
         asset_id, cve_id = _text(request.args, "asset"), _text(request.args, "cve")
         cursor = _text(request.args, "before")
         if cursor and (not cursor.isascii() or not cursor.isdigit() or not 1 <= int(cursor) <= 2**63 - 1):
@@ -368,6 +383,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     @app.get("/assets")
     @requires("view")
     def assets():
+        if config.inventory is None:
+            return inventory_required("Inventory assets")
         data = snapshot()
         query = _text(request.args, "q")
         rows = [row for row in data["coverage"] if query.casefold() in " ".join(row["asset"].values()).casefold()]
@@ -376,6 +393,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     @app.get("/asset")
     @requires("view")
     def asset():
+        if config.inventory is None:
+            return inventory_required("Inventory asset")
         identifier = _text(request.args, "asset_id", required=True)
         data = snapshot()
         if identifier not in data["inventory"]:
@@ -387,6 +406,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     @app.route("/query", methods=["GET", "POST"])
     @requires("run", post=("run", "view"))
     def query():
+        if config.inventory is None:
+            return inventory_required("Manual query", status=400 if request.method == "POST" else 200)
         result = None
         mode = _text(request.form if request.method == "POST" else request.args, "mode") or "product"
         if mode not in {"product", "package", "purl"}:
@@ -408,6 +429,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
     @app.route("/reports", methods=["GET", "POST"])
     @requires("run", post=("run", "view"))
     def reports():
+        if config.inventory is None:
+            return inventory_required("Report export", status=400 if request.method == "POST" else 200)
         if request.method == "GET":
             return render_template("reports.html")
         kind = _text(request.form, "format", required=True)

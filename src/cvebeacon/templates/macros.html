@@ -1,3 +1,12 @@
+{% macro inventory_notice() %}
+<section class="warning" role="status">
+<p><strong>No inventory is configured.</strong> Inventory views and inventory scan operations are unavailable in watch-only mode.</p>
+<p>Add an <code>[inventory]</code> section to the configuration:</p>
+<pre>[inventory]
+path = "inventory.csv"</pre>
+<p>See <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/USER_GUIDE.md#3-initial-configuration">docs/USER_GUIDE.md</a> for inventory formats and column mappings.</p>
+</section>
+{% endmacro %}
 {% macro status(data) %}
 {% if data.inventory_error %}<p class="warning" role="alert">Inventory unavailable. Current asset coverage cannot be established; inspect scanner configuration and logs.</p>{% endif %}
 {% if not data.latest %}<p class="warning" role="alert">No scan results recorded. Coverage is unknown.</p>

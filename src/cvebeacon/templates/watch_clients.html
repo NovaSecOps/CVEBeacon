@@ -15,6 +15,6 @@
 </table></div>
 <p>Page {{ page }}{% if has_previous %} · <a href="{{ url_for('watch.clients', page=page - 1) }}">Previous clients</a>{% endif %}{% if has_next %} · <a href="{{ url_for('watch.clients', page=page + 1) }}">Next clients</a>{% endif %}</p>
 {% else %}
-<p>No successful inventory scan is available. Run a scan to populate client allocation and affected CVEs.</p>
+{% if not inventory_configured %}<p>No inventory is configured. Client allocation requires an inventory scan, so this page stays empty until an inventory is added and scanned.</p>{% else %}<p>No successful inventory scan is available. Run a scan to populate client allocation and affected CVEs.</p>{% endif %}
 {% endif %}
 {% endblock %}
