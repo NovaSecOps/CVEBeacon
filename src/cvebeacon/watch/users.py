@@ -42,6 +42,7 @@ DISPLAY_LIMIT = 100
 EMAIL_LIMIT = 254
 LOCKOUT_FAILURES = 5
 LOCKOUT_MINUTES = 15
+MAX_LOGIN_FAILURE_AUDITS = 10_000
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9._@-]{1,64}\Z")
 EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+\Z")
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
@@ -1143,7 +1144,7 @@ class UserStore:
         with self.transaction() as db:
             row = self._find_username(db, identifier)
             if row is None:
-                self._append_audit(db, "login_failed", typed, stamp, account, host)
+                self._append_login_failure_in(db, "login_failed", typed, stamp, account, host)
                 return None
             user = self._user(row)
             # A password, enabled-state, or role change during verification must
@@ -1159,7 +1160,7 @@ class UserStore:
             now = now.astimezone(timezone.utc)
             stamp = _timestamp(now)
             if self._locked(row, now):
-                self._append_audit(db, "login_locked", typed, stamp, account, host)
+                self._append_login_failure_in(db, "login_locked", typed, stamp, account, host)
                 return None
             if not accepted:
                 expired = bool(row["locked_until"]) and not self._locked(
@@ -1178,7 +1179,7 @@ class UserStore:
                     "updated_at=? WHERE id=?",
                     (failures, locked_until, stamp, user.id),
                 )
-                self._append_audit(
+                self._append_login_failure_in(
                     db, "login_failed", typed, stamp, account, host
                 )
                 return None
@@ -1420,6 +1421,28 @@ class UserStore:
                 "the current password does not match the target account"
             )
         return current
+
+    def _append_login_failure_in(self, db, action, username, stamp, account, host):
+        # Preserve the chain and successful-login proofs: never prune old rows.
+        # A bounded counter suppresses further failure entries after one final
+        # chained notice. Upgraded stores count existing failures once.
+        key = "failed_login_audits"
+        row = db.execute("SELECT value FROM cb_user_meta WHERE key=?", (key,)).fetchone()
+        if row is None:
+            count = db.execute(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM cb_user_audit "
+                "WHERE action IN ('login_failed','login_locked') LIMIT ?)",
+                (MAX_LOGIN_FAILURE_AUDITS,),
+            ).fetchone()[0]
+        else:
+            count = int(row[0])
+        if count > MAX_LOGIN_FAILURE_AUDITS:
+            return
+        if count == MAX_LOGIN_FAILURE_AUDITS:
+            action, username = "login_failures_suppressed", "(all accounts)"
+        self._append_audit(db, action, username, stamp, account, host)
+        db.execute("INSERT INTO cb_user_meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                   (key, str(count + 1)))
 
     def _append_audit(
         self,

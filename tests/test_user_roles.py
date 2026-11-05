@@ -186,3 +186,16 @@ def test_bootstrap_recovers_store_with_no_enabled_admin(users):
     assert recovered.is_admin and not recovered.disabled
     with pytest.raises(ConfigurationError, match="administrator login required"):
         users.add("another", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
+
+
+def test_failed_login_audit_growth_is_bounded_without_breaking_chain(users, monkeypatch):
+    from cvebeacon.watch import users as module
+    monkeypatch.setattr(module, "MAX_LOGIN_FAILURE_AUDITS", 2, raising=False)
+    before = users.audit_count()
+    for _ in range(6):
+        assert users.authenticate("missing", PASSWORD) is None
+    assert users.audit_count() == before + 3
+    assert users.audit_entries()[-1].action == "login_failures_suppressed"
+    assert users.verify_audit() is None
+    proof = users.authenticate("admin", PASSWORD)
+    assert users.dashboard_identity(proof)[0].is_admin
