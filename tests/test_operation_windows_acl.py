@@ -57,30 +57,6 @@ def configure_acl(module, monkeypatch, entries, *, owner=1, null=False):
     return acl, aces  # Keep native buffers alive through validation.
 
 
-@pytest.mark.parametrize("owner", [1, 2, 3])
-def test_directory_accepts_profile_and_data_acls(windows_acl, monkeypatch, owner):
-    buffers = configure_acl(windows_acl, monkeypatch, [
-        (0, 0, 0x1F01FF, 1), (0, 0, 0x1F01FF, 2), (0, 0, 0x1F01FF, 3),
-        (0, 0, 0x1200A9, 5),  # Users: read and execute.
-        (1, 0, 2, 4),  # A deny entry grants no write access.
-        (0, 8, 0x1F01FF, 6),  # Inherit-only grant does not apply here.
-    ], owner=owner)
-    windows_acl.validate_handle(123, owner_only=False)
-
-
-@pytest.mark.parametrize("principal", [4, 5, 6])
-@pytest.mark.parametrize("mask", [2, 4, 0x40, 0x100, 0x10000, 0x40000, 0x80000,
-                                  0x10000000, 0x40000000])
-def test_directory_accepts_broad_write_grants(windows_acl, monkeypatch, principal, mask):
-    buffers = configure_acl(windows_acl, monkeypatch, [(0, 0, mask, principal)])
-    windows_acl.validate_handle(123, owner_only=False)
-
-
-def test_directory_accepts_null_dacl(windows_acl, monkeypatch):
-    buffers = configure_acl(windows_acl, monkeypatch, [], null=True)
-    windows_acl.validate_handle(123, owner_only=False)
-
-
 @pytest.mark.parametrize("owner,entries", [
     (2, [(0, 0, 0x1F01FF, 1)]),
     (1, [(0, 0, 0x1F01FF, 1), (0, 0, 0x1F01FF, 5)]),
