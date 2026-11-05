@@ -34,8 +34,10 @@ def main():
         root = Path(temporary)
         root.chmod(0o755)
         for name in ("config", "state", "inventory", "core", "reports", "staging"):
-            (root / name).mkdir(mode=0o777)
-            (root / name).chmod(0o777)
+            # Shared host/image storage needs sticky protection against
+            # deletion or replacement by unrelated accounts.
+            (root / name).mkdir(mode=0o1777)
+            (root / name).chmod(0o1777)
         config = root / "config"
         write_snapshot(config / "host.json", [dict(asset_id="synthetic-host", purl="pkg:pypi/example@1")], source_id="host-a", collector="synthetic")
         for file in config.iterdir():
