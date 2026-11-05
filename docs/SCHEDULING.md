@@ -95,17 +95,23 @@ terminal. Configure `baseline` or `backfill` for unattended first runs, or run
 
 ## Single-flight lock
 
-`scan`, `run`, `watch sync`, `watch evaluate`, `watch run`, `watch report`,
-`watch unreport` and delivery runs
-(`watch notify`, including the retry variants) take one shared lock file,
-`cvebeacon-run.lock`, beside the canonical `[watch] database` path, even when
-watch is disabled. Configurations sharing a watch database use the same lock
-when their inventory state databases are in different directories. The
-dashboard's background jobs take the same lock. A second run fails immediately
-with `another run is in progress` and exit code `2`; it does not wait and never
-changes state concurrently. Channel tests do not take the lock because they do
-not change delivery state. The operating system releases the lock when a
-process exits, including after a crash.
+`scan` locks the inventory state storage beside `[state] database`. `run` locks
+that storage when an inventory is configured and the watch storage when watch
+is enabled. `watch sync`, `watch evaluate`, `watch run`, `watch report`,
+`watch unreport` and delivery runs (`watch notify`, including the retry
+variants) lock the watch storage beside `[watch] database`. Channel tests do
+not take the lock because they do not change delivery state.
+
+Each locked storage location uses a persistent `cvebeacon-run.lock` file in its
+directory. `run` takes both required locks in sorted canonical path order, takes
+a shared-directory lock only once, and releases any partial acquisition if a
+later lock is busy. Inventory-only or watch-only runs take only the applicable
+lock. Configurations sharing either storage location therefore coordinate even
+when their other location differs. The dashboard's background jobs take the
+same locks. A second run fails immediately with `another run is in progress`
+and exit code `2`; it does not wait and never changes state concurrently. The
+operating system releases the lock when a process exits, including after a
+crash.
 
 Inspect or remove the owned schedule:
 
