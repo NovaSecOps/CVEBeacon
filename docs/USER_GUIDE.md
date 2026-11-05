@@ -47,6 +47,8 @@ version = "version"
 
 The legacy product path requires `asset_id`, `vendor`, `product`, and `version` as nonblank text. Explicit package/PURL/CPE/commit identities may omit generic fields; see [identity rules and optional mappings](IDENTITY.md). Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
 
+An optional `client` column labels the client that owns an asset. The value under `[inventory.columns]` is the source column name, not a client name: use `client = "Account"` for a column named `Account`, or `client = "client"` for the default `client` header. A row can then contain `Acme` in that column. Client names are internal, limited to 120 characters, and cannot contain control or format characters. Assets without a client belong to no client. Use one inventory file with a `client` column when several clients share a format; separate inventory files per client are not supported yet.
+
 Source controls, retry/timeouts, output paths, optional exact CPE mappings, and notification settings are illustrated in the example configuration. A configured product CPE must be a complete CPE 2.3 name with a wildcard version; verify it against NVD before use.
 
 ## 4. Inventory formats and mapping
@@ -95,7 +97,7 @@ The first scan may be slow without an NVD API key because the default respects N
 
 Exit codes are `0` for a successful operation, `2` for validation/operational failure, `3` for notification failure, and `4` for a scan with uncertain coverage or degraded sources. A completed scan can contain useful findings and still exit `4`; review its report and `source-status`. Notification failure takes precedence if both occur. `cvebeacon run` uses the same codes across its parts: any part failing gives `2`, otherwise a notification or delivery failure gives `3`, otherwise coverage warnings or degraded sources give `4`.
 
-Package/PURL identities, category and system grouping work in all four input formats; `examples/general.toml` demonstrates a mixed inventory. No accounts or credentials are needed for core scans.
+Package/PURL identities, category and system grouping work in all four input formats; `examples/general.toml` demonstrates a mixed inventory. An optional `client` label assigns an asset to a client for alert and dashboard reporting; it never affects applicability or source queries. No accounts or credentials are needed for core scans.
 
 ## 6. Queries and assets
 
@@ -148,6 +150,8 @@ SemVer and Python version ranges use their respective ordering rules. Generic pr
 Notifications are created for a new finding or a meaningful change to applicability, affected evidence, rejection/withdrawal state, CVSS, CISA KEV membership, EU KEV membership, or a comparable remediation-relevant claim. Upstream modification timestamps and ordinary EPSS movement are stored when available but do not independently trigger alerts.
 
 Any change in the selected CVSS score/vector/version is material. When sources provide different scores, the highest reported base score and its associated vector/version are displayed together; the conflict and original metrics remain in the evidence. Reordering equivalent evidence does not create an alert. Schema 3 preserves legacy fingerprints and alias-only changes do not produce an upgrade alert storm. Changed source claims still produce material events.
+
+Watch alerts, initial digests, `watch events` output, webhook documents and statements show which clients are affected. A client is affected when the latest successful inventory scan recorded an `affected` or `needs_review` finding for the CVE on one of that client's assets. Needs-review clients carry a `(review)` marker. The line is omitted when no successful scan or affected client exists, and client names are never sent to public sources.
 
 ## 10. Degraded sources and diagnostics
 

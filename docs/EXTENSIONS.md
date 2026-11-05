@@ -24,7 +24,8 @@ For automated deployment, see [Kubernetes](KUBERNETES.md) and the
 A snapshot is a UTF-8 JSON list, directly accepted by the existing core JSON
 loader, plus `<snapshot>.manifest.json`. Records use `asset_id`, `vendor`,
 `product`, `version`, `category`, `system_id`, `ecosystem`, `purl`, `cpe`,
-`repository`, `commit`. Values are strings; optional values serialize as empty
+`repository`, `commit`, and the optional `client` label. Values are strings;
+optional values serialize as empty
 strings. Unknown fields and empty records are rejected in the exchange contract.
 IDs are unique under core normalization and case-insensitive comparison. Version spelling and
 explicit identity qualifiers are preserved.

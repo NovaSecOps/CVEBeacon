@@ -1,6 +1,6 @@
 # Component identity and advisory history
 
-Legacy `asset_id`, `vendor`, `product`, `version` inventories continue to work in CSV, XLSX, JSON and YAML. Advanced fields are optional and use the same `[inventory.columns]` mapping. `asset_id` uniquely identifies one component record; `system_id` optionally groups components. Free-form `category` and system labels organize views, reports, and notifications. Neither affects applicability or source queries.
+Legacy `asset_id`, `vendor`, `product`, `version` inventories continue to work in CSV, XLSX, JSON and YAML. Advanced fields are optional and use the same `[inventory.columns]` mapping. `asset_id` uniquely identifies one component record; `system_id` optionally groups components. Free-form `category` and system labels organize views, reports, and notifications. The optional `client` label assigns the record to a client for alert and dashboard reporting. None of these labels affects applicability or source queries.
 
 | Path | Supplied fields | Evidence |
 | --- | --- | --- |

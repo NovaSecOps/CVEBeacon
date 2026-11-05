@@ -24,6 +24,14 @@ from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
 
 from cvebeacon import cli
 from cvebeacon.errors import ConfigurationError
+from cvebeacon.models import (
+    Applicability,
+    Asset,
+    Finding,
+    QueryResult,
+    Vulnerability,
+)
+from cvebeacon.state import StateStore
 from cvebeacon.watch.channels import channel_map
 from cvebeacon.watch.delivery import (
     DeliveryFailure,
@@ -129,6 +137,58 @@ def test_success_marks_the_delivery_sent(tmp_path):
     payload = json.loads(requests[0].content)
     assert payload["version"] == 2
     assert payload["events"][0]["cve_id"] == "CVE-2026-0001"
+    assert "affected_clients" not in payload["events"][0]
+
+
+def test_webhook_lists_affected_clients(tmp_path):
+    config = make_config(tmp_path)
+    store = seed(config)
+    state = StateStore(config.database_path)
+    acme = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    review = Asset("a2", "Acme", "Widget", "2", client="Globex")
+    state.record_scan(
+        [
+            QueryResult(
+                acme,
+                (
+                    Finding(
+                        acme,
+                        Vulnerability("CVE-2026-0001"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+            QueryResult(
+                review,
+                (
+                    Finding(
+                        review,
+                        Vulnerability("CVE-2026-0001"),
+                        Applicability.NEEDS_REVIEW,
+                        "limited",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+        ]
+    )
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    report = deliver(config, store, handler)
+    assert report.failed is False
+    payload = json.loads(requests[0].content)
+    assert payload["events"][0]["affected_clients"] == [
+        {"name": "Acme", "assets": 1, "status": "affected"},
+        {"name": "Globex", "assets": 1, "status": "needs_review"},
+    ]
 
 
 def test_sending_is_committed_before_the_request(tmp_path):
@@ -2760,6 +2820,75 @@ def test_initial_webhook_is_sent_in_chunks_of_one_thousand(tmp_path):
             ).fetchone()[0]
             == 5000
         )
+
+
+@pytest.mark.parametrize("initial", (False, True))
+@pytest.mark.parametrize("character", ("x", "é"))
+def test_webhook_delivery_shrinks_clients_to_serialized_request_budget(tmp_path, initial, character):
+    config = make_config(tmp_path)
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 6))
+    store = seed(config, identifiers=identifiers, initial=initial)
+    assets = [Asset(f"a{index}", "Acme", "Widget", "1",
+        client=f"{index:04d}" + character * 116) for index in range(50)]
+    StateStore(config.database_path).record_scan([
+        QueryResult(asset, tuple(Finding(asset, Vulnerability(cve),
+            Applicability.AFFECTED, "high", "test") for cve in identifiers), ())
+        for asset in assets
+    ])
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+    report = deliver(config, store, handler)
+    assert not report.failed
+    assert report.channels[0].events == 5 and len(requests) == 1
+    assert requests[0].headers["content-type"] == "application/json"
+    assert len(requests[0].content) <= CHANNEL_LIMITS["webhook"]
+    for event in json.loads(requests[0].content)["events"]:
+        assert len(event.get("affected_clients", [])) + event["affected_clients_omitted"] == 50
+        assert all(item["assets"] == 1 for item in event.get("affected_clients", []))
+    assert all(row[1] == "sent" for row in rows(store))
+
+
+@pytest.mark.parametrize("initial", (False, True))
+def test_webhook_keeps_client_details_when_the_base_document_is_over_budget(tmp_path, initial):
+    config = make_config(tmp_path)
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(100))
+    store = seed(config, identifiers=identifiers, initial=initial)
+    asset = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    StateStore(config.database_path).record_scan([
+        QueryResult(asset, tuple(Finding(asset, Vulnerability(cve),
+            Applicability.AFFECTED, "high", "test") for cve in identifiers), ())
+    ])
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+    report = deliver(config, store, handler)
+    assert not report.failed and len(requests) == 1
+    assert len(requests[0].content) > CHANNEL_LIMITS["webhook"]
+    for event in json.loads(requests[0].content)["events"]:
+        assert event["affected_clients"] == [{"name": "Acme", "assets": 1, "status": "affected"}]
+        assert "affected_clients_omitted" not in event
+    assert all(row[1] == "sent" for row in rows(store))
+
+
+@pytest.mark.parametrize("initial", (False, True))
+def test_webhook_budget_never_blocks_a_document_without_clients(tmp_path, initial):
+    # Only client details are trimmed to the budget; a large base document is
+    # delivered unchanged, as it was before client correlation existed.
+    config = make_config(tmp_path)
+    store = seed(config, identifiers=tuple(f"CVE-2026-{index:04d}" for index in range(100)), initial=initial)
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+    report = deliver(config, store, handler)
+    assert not report.failed
+    assert len(requests) == 1
+    assert len(requests[0].content) > CHANNEL_LIMITS["webhook"]
+    assert "affected_clients" not in requests[0].content.decode("utf-8")
+    assert all(row[1] == "sent" for row in rows(store))
 
 
 def test_initial_failed_rows_wait_for_their_backoff(tmp_path):

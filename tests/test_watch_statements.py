@@ -22,6 +22,7 @@ import pytest
 from watch_support import NOW, write_config
 
 from cvebeacon import cli
+from cvebeacon.clients import ClientImpact
 from cvebeacon.errors import CVEBeaconError
 from cvebeacon.watch import statements
 from cvebeacon.watch.reporting import ReportService
@@ -268,6 +269,66 @@ def patch_central_size(
         position += 4
 
 
+def test_affected_clients_field_lists_clients_and_review_status(tmp_path):
+    store = full_store(tmp_path)
+    view = store.view("CVE-2026-0001", catalogs=SOURCES)
+    assert view is not None
+    fields = build_fields(
+        view,
+        first_seen=view.first_seen,
+        generated_at=NOW,
+        client_impacts=(
+            ClientImpact("Acme", 2, "affected"),
+            ClientImpact("Globex", 1, "needs_review"),
+        ),
+    )
+    assert fields["affected_clients"] == "Acme, Globex (review)"
+    assert (
+        render_text("Clients: ${affected_clients}", fields)
+        == "Clients: Acme, Globex (review)"
+    )
+
+
+def test_markdown_statement_escapes_hostile_client_names(tmp_path):
+    store = full_store(tmp_path)
+    template = tmp_path / "template.md"
+    template.write_text("Clients: ${affected_clients}\n", encoding="utf-8")
+    impacts = (
+        ClientImpact(
+            '<img src="https://example.invalid/x"> [Acme](https://example.invalid) *Group*',
+            1,
+            "affected",
+        ),
+    )
+    markdown = tmp_path / "statement.md"
+    statements.write_statement(
+        store,
+        "CVE-2026-0001",
+        catalogs=SOURCES,
+        template=template,
+        out=markdown,
+        client_impacts=impacts,
+    )
+    text = markdown.read_text(encoding="utf-8")
+    assert "<img" not in text
+    assert "&lt;img" in text
+    assert "\\[Acme\\]" in text
+    assert "\\*Group\\*" in text
+
+    plain_template = tmp_path / "template.txt"
+    plain_template.write_text("Clients: ${affected_clients}\n", encoding="utf-8")
+    plain = tmp_path / "statement.txt"
+    statements.write_statement(
+        store,
+        "CVE-2026-0001",
+        catalogs=SOURCES,
+        template=plain_template,
+        out=plain,
+        client_impacts=impacts,
+    )
+    assert "<img" in plain.read_text(encoding="utf-8")
+
+
 def test_fields_cover_the_documented_names(tmp_path):
     store = full_store(tmp_path)
     fields = fields_for(store)
@@ -335,6 +396,7 @@ def test_missing_values_use_the_defined_text(tmp_path):
         "ssvc_exploitation",
         "cwes",
         "affected_products",
+        "affected_clients",
         "references",
         "euvd_id",
         "euvd_url",

@@ -102,7 +102,7 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
                     raise ValueError("must be text; numeric, date, boolean and compound values cannot preserve inventory spelling")
                 # Exact package identifiers must not undergo compatibility
                 # Unicode normalization (which can change registry identity).
-                values[canonical] = _normalized(raw) if canonical in {"asset_id", "category", "system_id"} or (not advanced and canonical in {"vendor", "product"}) else (raw or "").strip()
+                values[canonical] = _normalized(raw) if canonical in {"asset_id", "category", "system_id", "client"} or (not advanced and canonical in {"vendor", "product"}) else (raw or "").strip()
                 if "\x00" in values[canonical]:
                     raise ValueError("contains a null character")
             except (TypeError, ValueError) as exc:

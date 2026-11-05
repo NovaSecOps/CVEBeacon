@@ -27,6 +27,15 @@
   <dt>Products</dt><dd>{{ view.products | join(', ') if view.products else 'Not available' }}</dd>
 </dl>
 
+<h2>Affected clients</h2>
+{% if affected_clients %}
+<ul>{% for item in affected_clients %}<li>{{ item.name }} · {{ item.assets }} asset{{ '' if item.assets == 1 else 's' }}{% if item.status == 'needs_review' %} <span class="badge needs_review">review</span>{% endif %}</li>{% endfor %}</ul>{% if affected_clients.omitted %}<p class="muted">and {{ affected_clients.omitted }} more client{{ '' if affected_clients.omitted == 1 else 's' }}.</p>{% endif %}
+{% elif inventory_scan %}
+<p>No client is affected by this CVE in the latest successful inventory scan.</p>
+{% else %}
+<p>No successful inventory scan is available.</p>
+{% endif %}
+
 <h2>CVSS by provider</h2>
 <div class="table-wrap"><table>
 <thead><tr><th>Provider</th><th>Source</th><th>Version</th><th>Score</th><th>Severity</th><th>Vector</th></tr></thead>

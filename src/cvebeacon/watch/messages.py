@@ -12,6 +12,12 @@ from urllib.parse import quote
 
 from .catalog import DEFAULT_LANGUAGE, catalog_for, translate
 from .records import CVSSEntry, DeliveryEvent, InitialDigest, WatchView
+from ..clients import (
+    ClientImpact,
+    ClientImpacts,
+    format_affected_clients,
+    impacts_for,
+)
 from .reported import (
     NOTICE_KINDS,
     NOTICE_LABEL_KEYS,
@@ -33,6 +39,8 @@ MAX_PARTS = 10
 WEBHOOK_VERSION = 2
 DESCRIPTION_LIMIT = 160
 KEV_ACTION_LIMIT = 120
+MAX_WEBHOOK_CLIENTS = 50
+WEBHOOK_CLIENT_BUDGET = 8_000
 PROVIDER_ORDER = ("cna", "nvd", "cisa-adp", "euvd", "other")
 CHANNEL_LIMITS = {
     "smtp": 1_000_000,
@@ -126,6 +134,40 @@ def _escape_markdown(value: str) -> str:
 
 def _escape_discord(value: str) -> str:
     return _escape_markdown(value).replace("@", "\\@")
+
+
+def _slack_client(value: str) -> str:
+    """Render one client label as literal Slack text, not mrkdwn."""
+    text = _escape_slack(value).replace("`", "\u02cb")
+    return f"`{text}`"
+
+
+def _teams_client(value: str) -> str:
+    """Escape HTML and Markdown tokens that Teams would interpret."""
+    return _escape_markdown(html_module.escape(value, quote=True))
+
+
+def _client_escape(style: str):
+    if style == STYLE_SLACK:
+        return _slack_client
+    if style == STYLE_MARKDOWN:
+        return _teams_client
+    if style == STYLE_DISCORD:
+        return _escape_discord
+    return None
+
+
+def _client_line(
+    impacts: ClientImpacts,
+    style: str,
+    language: str,
+) -> str:
+    return format_affected_clients(
+        impacts,
+        language=language,
+        limit=10,
+        escape=_client_escape(style),
+    )
 
 
 def _dynamic(value: Any, style: str, limit: int | None = None) -> str:
@@ -391,6 +433,8 @@ class _EventFacts:
     date_line: str
     description: str
     extras: tuple[str, ...]
+    client_impacts: ClientImpacts
+    language: str
     reported: str
     rules: tuple[str, ...]
     links: tuple[tuple[str, str], ...]
@@ -401,6 +445,7 @@ def _event_facts(
     names: Mapping[str, str],
     catalog: Mapping[str, str],
     language: str,
+    clients: Mapping[str, ClientImpacts | Sequence[ClientImpact]] | None = None,
 ) -> _EventFacts:
     event = group[0]
     view = event.view
@@ -436,6 +481,8 @@ def _event_facts(
         ),
         description=_clean(view.description, DESCRIPTION_LIMIT),
         extras=tuple(extras),
+        client_impacts=impacts_for(clients, event.cve_id),
+        language=language,
         reported=(
             format_reported(event.reported, language)
             if event.reported is not None
@@ -472,6 +519,10 @@ def _event_lines(
     if facts.extras:
         lines.append(
             "  " + " · ".join(_dynamic(item, style) for item in facts.extras)
+        )
+    if facts.client_impacts:
+        lines.append(
+            "  " + _client_line(facts.client_impacts, style, facts.language)
         )
     if facts.reported:
         lines.append("  " + _dynamic(facts.reported, style))
@@ -733,6 +784,11 @@ def _html_event_block(facts: _EventFacts, catalog: Mapping[str, str]) -> str:
             f'<tr><td style="{_HTML_TD}{_HTML_MUTED}">'
             f'{_h(" · ".join(facts.extras))}</td></tr>'
         )
+    if facts.client_impacts:
+        rows.append(
+            f'<tr><td style="{_HTML_TD}">'
+            f'{_h(format_affected_clients(facts.client_impacts, language=facts.language, limit=10))}</td></tr>'
+        )
     if facts.reported:
         rows.append(
             f'<tr><td style="{_HTML_TD}">{_h(facts.reported)}</td></tr>'
@@ -810,6 +866,11 @@ def _html_digest_fragment(
             cell.append(
                 f'<span style="{_HTML_MUTED}">'
                 f'{_h(" · ".join(item.extras))}</span>'
+            )
+        if item.client_impacts:
+            cell.append(
+                f'<span style="{_HTML_MUTED}">'
+                f'{_h(format_affected_clients(item.client_impacts, language=item.language, limit=10))}</span>'
             )
         if item.reported:
             cell.append(
@@ -892,13 +953,15 @@ def _event_body_and_html(
     max_items: int | None = None,
     byte_limit: bool = False,
     with_html: bool = False,
+    clients: Mapping[str, ClientImpacts] | None = None,
 ) -> tuple[str, str]:
     listed = _group_events(sort_events(events), style, catalog)
     current = max_items
     while True:
         shown = listed if current is None else listed[:current]
         facts = [
-            _event_facts(group, names, catalog, language) for group in shown
+            _event_facts(group, names, catalog, language, clients)
+            for group in shown
         ]
         lines: list[str] = []
         for item in facts:
@@ -994,6 +1057,7 @@ def _initial_body_and_html(
     counts: Sequence[tuple[str, str, int]] | None = None,
     total_cves: int | None = None,
     with_html: bool = False,
+    clients: Mapping[str, ClientImpacts] | None = None,
 ) -> tuple[str, str]:
     ordered = sort_events(events)
     groups = _group_events(ordered, style, catalog)
@@ -1013,7 +1077,8 @@ def _initial_body_and_html(
     while True:
         shown = groups[:current]
         facts = [
-            _event_facts(group, names, catalog, language) for group in shown
+            _event_facts(group, names, catalog, language, clients)
+            for group in shown
         ]
         rule_pairs = _rule_count_pairs(totals, names, catalog)
         lines = [
@@ -1205,6 +1270,7 @@ def build_messages(
     initial: InitialDigest | None = None,
     language: str = DEFAULT_LANGUAGE,
     format: str = "text",
+    clients: Mapping[str, ClientImpacts] | None = None,
 ) -> tuple[OutgoingMessage, ...]:
     """Build the messages one channel should send for the selected events.
 
@@ -1265,6 +1331,7 @@ def build_messages(
             counts=initial.counts,
             total_cves=initial.cves,
             with_html=with_html,
+            clients=clients,
         )
         parts = _partials(
             subject,
@@ -1345,6 +1412,7 @@ def build_messages(
             max_items=None if grouping == "event" else max_items,
             byte_limit=byte_limit,
             with_html=with_html,
+            clients=clients,
         )
         parts = _partials(
             subject,
@@ -1388,24 +1456,30 @@ def simple_html(language: str, subject: str, body: str) -> str:
 
 
 def webhook_payload(
-    events: Sequence[DeliveryEvent], names: Mapping[str, str]
+    events: Sequence[DeliveryEvent],
+    names: Mapping[str, str],
+    clients: Mapping[str, ClientImpacts] | None = None,
 ) -> dict[str, Any]:
-    """Return the stable version 2 webhook document."""
+    """Return the stable version 2 webhook document.
+
+    ``affected_clients`` is added only when at least one client is affected, so
+    documents without clients stay byte-identical to earlier versions.
+    """
     output = []
     alerts = tuple(
         event for event in sort_events(events) if event.kind not in NOTICE_KINDS
     )
     for event in (*alerts, *_sorted_notices(events)):
         view = event.view
-        output.append(
-            {
-                "rule": _display_name(event, names),
-                "cve_id": event.cve_id,
-                "kind": event.kind,
-                "reasons": list(event.reasons),
-                "initial": bool(event.initial),
-                "created_at": event.created_at,
-                "view": {
+        impacts = impacts_for(clients, event.cve_id)
+        entry: dict[str, Any] = {
+            "rule": _display_name(event, names),
+            "cve_id": event.cve_id,
+            "kind": event.kind,
+            "reasons": list(event.reasons),
+            "initial": bool(event.initial),
+            "created_at": event.created_at,
+            "view": {
                     "published": view.published,
                     "first_seen": view.first_seen,
                     "cvss": [
@@ -1476,8 +1550,29 @@ def webhook_payload(
                         "kev": KEV_URL,
                     },
                 },
-            }
-        )
+        }
+        if impacts:
+            shown = []
+            used = 0
+            for item in impacts.clients[:MAX_WEBHOOK_CLIENTS]:
+                cost = len(item.name.encode("utf-8")) + 64
+                if shown and used + cost > WEBHOOK_CLIENT_BUDGET:
+                    break
+                shown.append(item)
+                used += cost
+            if shown:
+                entry["affected_clients"] = [
+                    {
+                        "name": item.name,
+                        "assets": item.assets,
+                        "status": item.status,
+                    }
+                    for item in shown
+                ]
+                omitted = impacts.omitted + len(impacts.clients) - len(shown)
+                if omitted:
+                    entry["affected_clients_omitted"] = omitted
+        output.append(entry)
         if event.kind in NOTICE_KINDS:
             notice = {
                 "action": "report" if event.kind == "reported" else "unreport",
