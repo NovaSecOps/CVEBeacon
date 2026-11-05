@@ -547,6 +547,62 @@ def _operation_storage_paths(config):
     return files, {job_directory}
 
 
+def _backup_reference_paths(backup_dir, base):
+    """Secret files named by retained backups, even after their channel is gone."""
+    if base is None or not backup_dir.is_dir() or backup_dir.is_symlink():
+        return set()
+    result = set()
+    try:
+        names = list(backup_dir.iterdir())
+    except OSError:
+        return set()
+    for entry in names:
+        if not _backup_name(entry.name):
+            continue
+        try:
+            raw = read_regular(entry, private=True)[0]
+            document = tomllib.loads(raw.decode("utf-8"))
+        except (OSError, ValueError, UnicodeError, CVEBeaconError):
+            continue
+        for path, value in secret_references(document).items():
+            if not path[-1].endswith("_file") or not isinstance(value, str) or not value:
+                continue
+            try:
+                result.add(resolve_reference(value, base))
+            except (OSError, RuntimeError, ValueError):
+                continue
+    return result
+
+
+def _candidate_derived_paths(updated, configs):
+    """Candidate sidecars, job storage and run locks for changed storage roots."""
+    state_changed = not any(_same_path(updated.database_path.resolve(),
+                                       config.database_path.resolve())
+                            for config in configs)
+    watch_changed = not any(_same_path(updated.watch.database.resolve(),
+                                       config.watch.database.resolve())
+                            for config in configs)
+    files = set()
+    directories = set()
+    if state_changed:
+        files.update(path.resolve() for path in _database_paths(updated.database_path)
+                     if path != updated.database_path)
+        files.add(Path(updated.database_path).resolve().parent / LOCK_NAME)
+        job_directory = (Path(updated.database_path).parent / "dashboard-jobs").resolve()
+        directories.add(job_directory)
+        files.add((job_directory / "dashboard-jobs.db").resolve())
+        try:
+            files.update(path.resolve() for path in job_directory.glob("job-*.log"))
+        except OSError:
+            pass
+    if watch_changed:
+        files.update(path.resolve() for path in _database_paths(updated.watch.database)
+                     if path != updated.watch.database)
+        files.update(path.resolve() for path in _database_paths(updated.watch.users_database))
+        files.add(Path(updated.watch.database).resolve().parent / LOCK_NAME)
+    return files, directories
+
+
 def _protected_paths(configs, backup_dir, documents=(), *, base=None, reference_target=None):
     """Files and directories that operational or secret writes must not touch."""
     files = set()
@@ -567,6 +623,7 @@ def _protected_paths(configs, backup_dir, documents=(), *, base=None, reference_
         files.update(operation_files)
         directories.update(operation_directories)
     references.update(_config_reference_paths(configs))
+    references.update(_backup_reference_paths(backup_dir, base))
     for document in documents:
         for path, value in secret_references(document).items():
             if not path[-1].endswith("_file") or not value:
@@ -898,7 +955,9 @@ class Editor:
         checks_config = current_config or self.config
         if unparseable and section == "rollback" and "manage_secrets" not in g.permissions:
             abort(403)
-        if ((credential_escape(current_document or {}, document, self.config))
+        if path_settings_changed(current_document or {}, document) and not g.user.is_admin:
+            abort(403)
+        if (credential_change(current_document or {}, document, self.config)
                 and "manage_secrets" not in g.permissions):
             abort(403)
         validation_document = replacement_document(document, replacements, self.path.parent)
@@ -1004,7 +1063,11 @@ class Editor:
             if ((unparseable and section == "rollback"
                     and "manage_secrets" not in early_permissions)):
                 abort(403)
-            if (credential_escape(old or {}, pending.document, self.config)
+            if path_settings_changed(old or {}, pending.document) and not probe.is_admin:
+                abort(403)
+            if pending.replacements and "manage_secrets" not in early_permissions:
+                abort(403)
+            if (credential_change(old or {}, pending.document, self.config)
                     and "manage_secrets" not in early_permissions):
                 abort(403)
             for replacement in pending.replacements:
@@ -1057,7 +1120,11 @@ class Editor:
                 if ((unparseable and section == "rollback"
                         and "manage_secrets" not in users.permissions_in(db, actor))):
                     abort(403)
-                if (credential_escape(old or {}, pending.document, self.config)
+                if path_settings_changed(old or {}, pending.document) and not actor.is_admin:
+                    abort(403)
+                if pending.replacements and "manage_secrets" not in users.permissions_in(db, actor):
+                    abort(403)
+                if (credential_change(old or {}, pending.document, self.config)
                         and "manage_secrets" not in users.permissions_in(db, actor)):
                     abort(403)
                 if old is not None:
@@ -1209,8 +1276,25 @@ def secret_references(document):
 
 
 def _channel_rows(document):
-    channels = get_table(document or {}, "watch.channels")
+    if not isinstance(document, dict):
+        return {}
+    watch = document.get("watch")
+    if not isinstance(watch, dict):
+        return {}
+    channels = watch.get("channels")
     return channels if isinstance(channels, dict) else {}
+
+
+def _channel_baseline_assessable(document):
+    if not isinstance(document, dict):
+        return False
+    if "watch" in document and not isinstance(document["watch"], dict):
+        return False
+    watch = document.get("watch", {})
+    if "channels" in watch and not isinstance(watch["channels"], dict):
+        return False
+    channels = watch.get("channels", {})
+    return all(isinstance(row, dict) for row in channels.values())
 
 
 def _channel_kind(row):
@@ -1242,21 +1326,24 @@ def _non_channel_references(document):
             if not (len(path) >= 2 and path[0] == "watch" and path[1] == "channels")}
 
 
+def _comparable_channel_row(row):
+    return {key: item for key, item in row.items()
+            if not (isinstance(item, str) and item == "")}
+
+
 def credential_escape(current_document, candidate, running_config):
     """Whether this save touches a credential-bearing channel.
 
     Channels are matched one-to-one by name. Adding, editing or renaming a
     channel with a secret reference (or a direct legacy URL) and removing a
     reference from an existing channel all require manage_secrets. Deleting a
-    channel is always allowed. References outside channels keep the same rule.
+    channel is always allowed. References outside channels are compared by full
+    path and value, so removing or changing one also requires the permission.
     """
     current = _channel_rows(current_document)
     candidate_channels = _channel_rows(candidate)
     running = {channel.name: channel for channel in running_config.watch.channels}
-    current_references = _non_channel_references(current_document or {})
-    candidate_references = _non_channel_references(candidate)
-    if any(current_references.get(path) != value
-           for path, value in candidate_references.items()):
+    if _non_channel_references(current_document or {}) != _non_channel_references(candidate):
         return True
     for name, row in candidate_channels.items():
         if not isinstance(row, dict):
@@ -1270,13 +1357,51 @@ def credential_escape(current_document, candidate, running_config):
             if running_channel is not None and _config_channel_has_credentials(running_channel):
                 return True
             continue
-        if row == current_row:
+        if (not isinstance(current_row, dict)
+                or _comparable_channel_row(row) == _comparable_channel_row(current_row)):
             continue
         if candidate_has or channel_has_credentials(current_row):
             return True
         if running_channel is not None and _config_channel_has_credentials(running_channel):
             return True
     return False
+
+
+def credential_change(current_document, candidate, running_config):
+    """Credential check that fails closed when the baseline shape is invalid."""
+    if not _channel_baseline_assessable(current_document):
+        return True
+    return credential_escape(current_document, candidate, running_config)
+
+
+PATH_FIELDS = (("state", "database"), ("output", "directory"),
+               ("watch", "database"), ("inventory", "path"))
+
+
+def _path_settings(document, *, ignore_channel_refs=()):
+    values = {}
+    for path in PATH_FIELDS:
+        item = document_get(document, path)
+        if isinstance(item, str) and item:
+            values[path] = item
+    for path, item in secret_references(document).items():
+        if not path[-1].endswith("_file") or not isinstance(item, str) or not item:
+            continue
+        if (len(path) >= 3 and path[0] == "watch" and path[1] == "channels"
+                and path[2] in ignore_channel_refs):
+            continue
+        values[path] = item
+    return values
+
+
+def path_settings_changed(current_document, candidate):
+    current = _channel_rows(current_document)
+    candidate_channels = _channel_rows(candidate)
+    # Deleting a channel is always allowed; do not treat its disappearing
+    # credential-file field as a path change.
+    deleted = set(current) - set(candidate_channels)
+    return (_path_settings(current_document or {}, ignore_channel_refs=deleted)
+            != _path_settings(candidate))
 
 
 
@@ -1328,6 +1453,8 @@ def check_protected_paths(updated, config_path, backup_dir, configs, documents=(
     """Reject settings that would place operational data in a protected store."""
     protected_files, protected_dirs = _protected_paths(
         configs, backup_dir, documents, base=config_path.parent)
+    existing_files = set(protected_files)
+    existing_dirs = set(protected_dirs)
     # The candidate's own primary paths are the values under test. Protect
     # their sidecars and the account store, but allow an unchanged primary path.
     for path in _database_paths(updated.watch.database) - {updated.watch.database}:
@@ -1375,6 +1502,29 @@ def check_protected_paths(updated, config_path, backup_dir, configs, documents=(
             if _same_path(path.resolve(), other.resolve()):
                 raise ConfigurationError(f"{label} and {other_label} must not use the same path")
 
+    derived_files, derived_dirs = _candidate_derived_paths(updated, configs)
+    for path in derived_files:
+        resolved = path.resolve()
+        if (any(_same_path(resolved, item) for item in existing_files)
+                or any(resolved == directory or _inside(resolved, directory)
+                       for directory in existing_dirs)
+                or any(any(_same_path(parent, item) for item in existing_files)
+                       for parent in resolved.parents)):
+            raise ConfigurationError(
+                "A derived dashboard storage path must not overlap protected data")
+    for directory in derived_dirs:
+        resolved = directory.resolve()
+        if (any(_same_path(resolved, item) for item in existing_files)
+                or any(resolved == item or _inside(resolved, item) for item in existing_dirs)
+                or any(any(_same_path(parent, item) for item in existing_files)
+                       for parent in resolved.parents)):
+            raise ConfigurationError(
+                "A derived dashboard storage path must not overlap protected data")
+        if (any(_inside(item, resolved) for item in existing_files)
+                or any(_inside(item, resolved) for item in existing_dirs)):
+            raise ConfigurationError(
+                "A derived dashboard storage path must not contain protected data")
+
 
 
 def _kind(key):
@@ -1391,7 +1541,8 @@ def _secret_directory(config):
     return config.watch.users_database.parent / "dashboard-secrets"
 
 
-def groups_for(section, document, *, new_type="smtp", row_types=None, count=None, can_manage=False):
+def groups_for(section, document, *, new_type="smtp", row_types=None, count=None,
+               can_manage=False, can_admin=False):
     groups = []
     if section in SCHEMAS:
         for path, schema in SCHEMAS[section]:
@@ -1436,11 +1587,15 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                 hint = "cvebeacon-watch.db beside the state database"
             if direct_url and item is not None:
                 hint = "Existing endpoint is hidden and retained"
+            path_value = key in {"database", "directory", "path"} or key.endswith("_file")
             controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
                              "kind": _kind(key), "secret": key.endswith("_file"),
                              "readonly": readonly_channel or direct_url or
-                             (reference and not can_manage),
-                             "allow_new_secret": key.endswith("_file") and can_manage})
+                             (reference and not can_manage) or
+                             (path_value and not can_admin),
+                             "allow_new_secret": (
+                                 key.endswith("_file") and can_manage
+                                 and (can_admin or bool(item)))})
         output.append({"label": label, "controls": controls, "data": data, "prefix": prefix,
                        "readonly_reason": (
                            "This channel carries a credential or secret reference. "
@@ -1449,7 +1604,7 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
     return output
 
 
-def parse_form(editor, section, document, current_config, permissions):
+def parse_form(editor, section, document, current_config, permissions, *, can_admin=False):
     can_manage = "manage_secrets" in permissions
     try:
         count = int(request.form.get("row_count", "1"))
@@ -1458,7 +1613,8 @@ def parse_form(editor, section, document, current_config, permissions):
     except ValueError:
         abort(400)
     row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
-    groups = groups_for(section, document, count=count, row_types=row_types, can_manage=can_manage)
+    groups = groups_for(section, document, count=count, row_types=row_types,
+                        can_manage=can_manage, can_admin=can_admin)
     rows, staged, replacements, secret_requests = [], [], [], []
     expected = {"csrf", "version", "action", "row_count"}
     try:
@@ -1537,6 +1693,9 @@ def parse_form(editor, section, document, current_config, permissions):
                 staged.append(staged_path)
                 replacements.append(Replacement(target, staged_path, reference_path, environment_path))
             else:
+                if not can_admin:
+                    raise ConfigurationError(
+                        "Creating or changing a file secret path requires an administrator")
                 staged_path = write_temp(directory, secret.encode("utf-8"), prefix=SECRET_PREFIX)
                 staged.append(staged_path)
                 row[key] = str(staged_path)
@@ -1648,7 +1807,7 @@ def register_config(app, config, *, host):
                 if request.form.get("version") != version:
                     abort(409, "Configuration changed; reload the form")
                 candidate, staged, replacements = parse_form(editor, section, document, current_config,
-                                                             g.permissions)
+                                                             g.permissions, can_admin=g.user.is_admin)
                 preview, lockout = editor.preview(
                     section, candidate, version, staged, replacements,
                     current_document=document, current_config=current_config,
@@ -1661,7 +1820,8 @@ def register_config(app, config, *, host):
             new_type = request.args.get("new_type", "smtp")
             return render_template("config_section.html", section=section,
                                    groups=groups_for(section, document, new_type=new_type,
-                                                     can_manage="manage_secrets" in g.permissions),
+                                                     can_manage="manage_secrets" in g.permissions,
+                                                     can_admin=g.user.is_admin),
                                    version=version, preview=preview, diff=diff, lockout=lockout,
                                    channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS, leaves=LEAF_KEYS,
                                    read_only=editor.read_only())

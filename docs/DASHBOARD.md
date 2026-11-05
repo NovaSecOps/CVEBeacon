@@ -237,7 +237,7 @@ logout, even if its role has no permissions.
 | `retry` | Retry failed or ambiguous deliveries as background jobs |
 | `test_channel` | Send a labelled channel test message |
 | `edit_rules` | Edit rules |
-| `edit_channels` | Edit notification channels |
+| `edit_channels` | Edit credential-free notification channels; credential-bearing channels and secret files require `manage_secrets` for any change, though any channel may be deleted |
 | `edit_sources` | Edit source settings |
 | `edit_watch` | Edit watch settings |
 | `edit_reporting` | Edit reporting settings |
@@ -246,9 +246,11 @@ logout, even if its role has no permissions.
 | `edit_http` | Edit HTTP client settings |
 | `edit_system` | Edit state database and report output paths |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
-| `manage_secrets` | Change or replace any credential-bearing channel, add or change secret references, and stage new file-secret contents |
+| `manage_secrets` | Change any credential-bearing channel, add/change/remove secret references, and stage file-secret contents |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
+
+Only administrators may change a filesystem path setting: the state database, watch database, output directory, inventory path, or any `*_file` reference. Delegated editors see those controls read-only, and the server rejects a changed path at preview and again inside the write transaction. Administrators remain subject to the protected-path checks.
 
 Each operation route declares its own permission: running jobs needs `run`, retry jobs need `retry`, channel tests need `test_channel`, schedule changes need `manage_schedule`, and job pages need `view`. A role without `view` cannot open the operations page even if it can call an action route directly. Opening query/report forms requires `run`; submissions require both `run` and `view` because they return findings or exports.
 Role changes and administrative account actions are recorded in the existing
@@ -456,7 +458,10 @@ must not alias the configuration file or its writer lock, the account, watch or
 state databases, any of their `-wal`, `-shm`, `-journal` or `.lock` sidecars,
 the private `dashboard-jobs` directory with its database and logs, both operation
 run-lock files, the backup or secret directories, and every referenced `*_file`
-secret. The inventory input must not equal, share an inode with, or resolve into
+secret, including references retained in backups after a channel is deleted.
+Candidate sidecars, job directories, databases, logs and run locks must not
+overlap existing protected files or directories. The inventory input must not
+equal, share an inode with, or resolve into
 any of those protected files or directories. Equality, same-file identity and
 any path beneath a protected file as an ancestor are rejected, as are watch,
 state and output paths that alias each other. Resolved paths, symbolic links and existing hard links are
@@ -501,7 +506,9 @@ channels one-to-one before any target read and again inside the write
 transaction, so a crafted form cannot bypass the UI.
 
 Secret references and file-secret contents are read-only without
-`manage_secrets`, including source, notification and dashboard references. With
+`manage_secrets`, including source, notification and dashboard references;
+removing a reference also requires it. File-reference paths are additionally
+administrator-only. With
 that permission, added or changed references render editable and a submitted
 file value is staged, validated by the shared loader, then written to the same
 owner-only file atomically when the reference is unchanged. Conflicting new
@@ -531,8 +538,9 @@ because the environment value would take precedence at run time. This includes
 the NVD default `NVD_API_KEY` when that variable has a value, even if the form
 field is blank. An explicit paired environment reference is rejected for file
 rotation until it is cleared. Staged files expire with their preview after ten
-minutes. Cleanup runs on editor requests and for old unreferenced files after a
-restart. Previews that reference another preview's generated file adopt it and
+minutes. Cleanup runs on configuration requests; startup no longer writes the
+writer lock or runs cleanup. Old unreferenced files are removed on a later
+configuration request. Previews that reference another preview's generated file adopt it and
 renew its deletion lease, including across separate application instances. A
 staged file is removed only when no current configuration, retained backup or
 live preview references it; if reference discovery cannot complete, cleanup
@@ -555,9 +563,9 @@ The backups list remains available when the live file fails the loader or is
 missing. The page reads the raw bytes and version signature, validates only the
 chosen backup, and shows a static "current configuration is invalid or missing"
 notice instead of diffing unvalidated live values. Rollback requires the access
-confirmation; a missing or unparseable live file also requires
-`manage_secrets`, while a parseable file that fails the editor schema can be
-restored with the configuration edit permissions. Sections cannot be edited
+confirmation; a missing, unparseable or malformed-shape live file also requires
+`manage_secrets`, while a parseable file that fails only field validation can
+be restored with the configuration edit permissions. Sections cannot be edited
 from an invalid live file, so restore a backup first. Rollback does not restore
 secret-file contents; it preserves files referenced by retained backups.
 Inventory parser diagnostics report only the line number and parser kind, never

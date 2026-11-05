@@ -140,4 +140,5 @@ def test_reconfigure_recovers_a_destination_job_store(tmp_path):
     assert manager.store.path == store.path
     recovered = manager.store.get(queued.id)
     assert recovered is not None and recovered.status == "failed"
+    wait_for(lambda: not manager.store.pending_audits(), timeout=2)
     manager.shutdown()

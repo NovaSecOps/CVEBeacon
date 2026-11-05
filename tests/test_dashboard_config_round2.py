@@ -189,15 +189,11 @@ def test_operational_paths_reject_account_sidecars(accounts, suffix):
     config, users, _, client = accounts
     account = config.watch.users_database
     sidecar = account.with_name(account.name + suffix)
+    login(client, "admin")
     for section, field, value in (
             ("system", "g0_database", str(sidecar / "state.db")),
             ("system", "g1_directory", str(sidecar)),
             ("watch", "g0_database", str(sidecar))):
-        if section == "watch":
-            set_role(users, "path-editor", {"view", "edit_watch"})
-        else:
-            set_role(users, "path-editor", {"view", "edit_system"})
-        login(client)
         before = config.config_path.read_bytes()
         response = preview(client, section, **{field: value})
         assert response.status_code == 400, (section, field, suffix, response.text)
@@ -211,8 +207,7 @@ def test_operational_paths_reject_config_lock_secret_and_inventory(accounts):
     lock = config.config_path.with_name(".config-" + config.config_path.name + ".lock")
     protected = [lock, secret, config.inventory.path,
                  config.watch.users_database.with_name(config.watch.users_database.name + "-wal")]
-    set_role(users, "path-editor", {"view", "edit_system"})
-    login(client)
+    login(client, "admin")
     for target in protected:
         before = config.config_path.read_bytes()
         response = preview(client, "system", g0_database=str(target))
@@ -333,8 +328,7 @@ def test_inventory_input_cannot_alias_protected_storage(accounts):
     config, users, _, client = accounts
     secret = make_secret(config.config_path.parent / "channel-password", "synthetic password")
     config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
-    set_role(users, "inventory-editor", {"view", "edit_inventory"})
-    login(client)
+    login(client, "admin")
     jobs = config.database_path.parent / "dashboard-jobs" / "dashboard-jobs.db"
     for target in (secret, config.watch.users_database,
                    config.database_path, jobs, config.config_path):
@@ -400,6 +394,170 @@ def test_configuration_writer_lock_is_created_lazily(accounts):
     assert lock.exists()
 
 
+def test_channel_reference_removal_requires_manage_secrets(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(BASE, encoding="utf-8")
+    # An environment reference is not a filesystem path; removal still needs
+    # manage_secrets.
+    set_role(users, "source-editor", {"view", "edit_sources"})
+    login(client)
+    before = config.config_path.read_bytes()
+    assert preview(client, "sources", g0_nvd_api_key_env="").status_code == 403
+    assert config.config_path.read_bytes() == before
+
+    set_role(users, "source-manager", {"view", "edit_sources", "manage_secrets"})
+    login(client)
+    response = preview(client, "sources", g0_nvd_api_key_env="")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "sources").status_code == 303
+
+
+@pytest.mark.parametrize("damage", [
+    'watch = "broken"\n',
+    '\n[watch]\nchannels = "broken"\n',
+])
+def test_malformed_live_table_shapes_do_not_block_rollback(accounts, monkeypatch, damage):
+    config, users, app, client = accounts
+    original = load_config(config.config_path)
+    _create_backup(config, client)
+    backup = app.extensions["dashboard_config"].backups()[0]
+    text = config.config_path.read_text(encoding="utf-8")
+    config.config_path.write_text(
+        damage + text if damage.startswith("watch") else text + damage,
+        encoding="utf-8",
+    )
+    set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    assert client.post("/config/backups", data=data).status_code == 403
+
+    login(client, "admin")
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+    assert "Current configuration is invalid or missing" in response.text
+
+    confirm_data = form(response.text, "confirm")
+    confirm_data["lockout"] = "yes"
+    assert client.post("/config/backups", data=confirm_data).status_code == 303
+    assert load_config(config.config_path).http.retries == original.http.retries
+
+
+def test_staged_secret_contents_require_manage_secrets_at_commit(accounts, monkeypatch):
+    config, users, app, client = accounts
+    secret = make_secret(config.config_path.parent / "nvd-key", "old value")
+    config.config_path.write_text(with_file(config, secret), encoding="utf-8")
+    login(client, "admin")
+    response = preview(client, "sources", g0_nvd_api_key_file_new="new value")
+    assert response.status_code == 200, response.text
+    dashboard_users = app.extensions["dashboard_users"]
+    real_permissions = dashboard_users.permissions_in
+
+    def without_manage(db, user):
+        return real_permissions(db, user) - {"manage_secrets"}
+
+    monkeypatch.setattr(dashboard_users, "permissions_in", without_manage)
+    before = config.config_path.read_bytes()
+    saved = confirm(client, response, "sources")
+    assert saved.status_code == 403
+    assert secret.read_text(encoding="utf-8") == "old value"
+    assert config.config_path.read_bytes() == before
+
+
+def test_credential_channel_textareas_render_read_only(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "password", "synthetic password")
+    config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    page = client.get("/config/channels")
+    assert page.status_code == 200
+    assert re.search(r'name="g0_to"[^>]*readonly', page.text)
+
+
+def test_explicit_empty_strings_do_not_block_unrelated_channel_edits(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(channel_config('''
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+username = ""
+password_env = "SMTP_PASSWORD"
+
+[watch.channels.alerts]
+type = "ntfy"
+server = "https://ntfy.example.invalid"
+topic = "alerts"
+'''), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    response = preview(client, "channels", g1_max_items="7")
+    assert response.status_code == 200, response.text
+
+
+def test_path_fields_require_an_administrator(accounts, tmp_path):
+    config, users, _, client = accounts
+    set_role(users, "path-editor", {"view", *dc.SECTIONS.values(), "manage_secrets"})
+    login(client)
+    for section, field in (("system", "g0_database"), ("system", "g1_directory"),
+                           ("watch", "g0_database"), ("inventory", "g0_path")):
+        page = client.get("/config/" + section)
+        assert page.status_code == 200
+        assert re.search(rf'name="{field}"[^>]*readonly', page.text)
+        response = preview(client, section, **{field: str(tmp_path / "moved" / "value")})
+        assert response.status_code == 403, (section, field, response.text)
+
+    secret = make_secret(config.config_path.parent / "nvd-key", "synthetic key")
+    other = make_secret(tmp_path / "other-key", "other key")
+    config.config_path.write_text(with_file(config, secret), encoding="utf-8")
+    login(client)
+    response = preview(client, "sources", g0_nvd_api_key_file=str(other))
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("relative", [
+    "cvebeacon-run.lock",
+    "state.db-wal",
+    "dashboard-jobs/job-1.log",
+])
+def test_candidate_derived_storage_cannot_overlap_a_secret(accounts, relative):
+    config, _, _, client = accounts
+    target = config.config_path.parent / "moved" / relative
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    secret = make_secret(target, "synthetic credential")
+    config.config_path.write_text(channel_config(_smtp(reference=str(secret))), encoding="utf-8")
+    login(client, "admin")
+    before = config.config_path.read_bytes()
+    response = preview(client, "system", g0_database=str(config.config_path.parent / "moved" / "state.db"))
+    assert response.status_code == 400, response.text
+    assert "derived dashboard storage" in response.text
+    assert config.config_path.read_bytes() == before
+
+
+def test_deleting_a_credential_channel_keeps_its_backup_reference_protected(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "channel-password",
+                         "asset_id,vendor,product,version\na,Acme,Widget,1\n")
+    config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    response = preview(client, "channels", remove0="yes")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response, "channels").status_code == 303
+
+    login(client, "admin")
+    before = config.config_path.read_bytes()
+    response = preview(client, "inventory", g0_path=str(secret))
+    assert response.status_code == 400, response.text
+    assert config.config_path.read_bytes() == before
+
+
 def test_operational_paths_reject_dashboard_jobs_storage(accounts):
     config, users, _, client = accounts
     jobs = config.database_path.parent / "dashboard-jobs"
@@ -410,8 +568,7 @@ def test_operational_paths_reject_dashboard_jobs_storage(accounts):
         config.database_path.parent / LOCK_NAME,
         config.watch.database.parent / LOCK_NAME,
     ]
-    set_role(users, "path-editor", {"view", "edit_system"})
-    login(client)
+    login(client, "admin")
     for target in protected:
         before = config.config_path.read_bytes()
         response = preview(client, "system", g0_database=str(target))
@@ -425,8 +582,7 @@ def test_secret_rotation_rejects_dashboard_jobs_storage(accounts):
     jobs.mkdir(mode=0o700, exist_ok=True)
     secret = make_secret(jobs / "job-secret", "synthetic job storage")
     config.config_path.write_text(channel_config(_smtp(reference=str(secret))), encoding="utf-8")
-    set_role(users, "channel-editor", {"view", "edit_channels"})
-    login(client)
+    login(client, "admin")
     response = preview(client, "channels", g0_password_file_new="replacement")
     assert response.status_code == 400
     assert secret.read_text(encoding="utf-8") == "synthetic job storage"
@@ -434,8 +590,7 @@ def test_secret_rotation_rejects_dashboard_jobs_storage(accounts):
 
 def test_operational_paths_cannot_alias_each_other(accounts):
     config, users, _, client = accounts
-    set_role(users, "path-editor", {"view", "edit_system"})
-    login(client)
+    login(client, "admin")
     watch = load_config(config.config_path).watch.database
     response = preview(client, "system", g0_database=str(watch))
     assert response.status_code == 400
