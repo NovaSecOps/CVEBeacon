@@ -95,9 +95,12 @@ terminal. Configure `baseline` or `backfill` for unattended first runs, or run
 
 ## Single-flight lock
 
-`scan`, `run`, `watch sync`, `watch evaluate`, `watch run` and delivery runs
+`scan`, `run`, `watch sync`, `watch evaluate`, `watch run`, `watch report`,
+`watch unreport` and delivery runs
 (`watch notify`, including the retry variants) take one shared lock file,
-`cvebeacon-run.lock`, in the directory that holds the state database. The
+`cvebeacon-run.lock`, beside the canonical `[watch] database` path, even when
+watch is disabled. Configurations sharing a watch database use the same lock
+when their inventory state databases are in different directories. The
 dashboard's background jobs take the same lock. A second run fails immediately
 with `another run is in progress` and exit code `2`; it does not wait and never
 changes state concurrently. Channel tests do not take the lock because they do
