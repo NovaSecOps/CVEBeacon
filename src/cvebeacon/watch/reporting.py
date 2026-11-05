@@ -18,7 +18,7 @@ from .reported import (
     validate_identity,
     validate_identity_mode,
 )
-from .users import UserStore
+from .users import AuthenticatedUser, UserStore
 
 
 class ReportService:
@@ -61,8 +61,28 @@ class ReportService:
         user: object | None,
         password: object | None,
         password_prompt: Callable[[str], str] | None,
+        authenticated: AuthenticatedUser | None = None,
     ) -> ReportIdentity:
         mode = self._mode
+        if authenticated is not None:
+            if mode != "authenticated":
+                raise ConfigurationError(
+                    "a dashboard login is only available when "
+                    "watch.reporting.identity = authenticated"
+                )
+            if by is not None or user is not None or password is not None:
+                raise ConfigurationError(
+                    "a dashboard login cannot be combined with --by or --user"
+                )
+            if not isinstance(authenticated, AuthenticatedUser):
+                raise ConfigurationError("a successful login is required")
+            return ReportIdentity(
+                "authenticated",
+                validate_identity(authenticated.user.identity),
+                user=authenticated.user,
+                authenticated=authenticated,
+                email=authenticated.user.email,
+            )
         if mode == "open":
             if user is not None or password is not None:
                 raise ConfigurationError(
@@ -145,6 +165,7 @@ class ReportService:
         user: object | None = None,
         password: object | None = None,
         password_prompt: Callable[[str], str] | None = None,
+        authenticated: AuthenticatedUser | None = None,
         note: object | None = None,
         force: bool = False,
         notify_channels: Iterable[str] = (),
@@ -154,6 +175,7 @@ class ReportService:
             user=user,
             password=password,
             password_prompt=password_prompt,
+            authenticated=authenticated,
         )
         with self._identity_guard(identity) as db:
             recheck = (
@@ -178,6 +200,7 @@ class ReportService:
         user: object | None = None,
         password: object | None = None,
         password_prompt: Callable[[str], str] | None = None,
+        authenticated: AuthenticatedUser | None = None,
         note: object | None = None,
         notify_channels: Iterable[str] = (),
     ):
@@ -186,6 +209,7 @@ class ReportService:
             user=user,
             password=password,
             password_prompt=password_prompt,
+            authenticated=authenticated,
         )
         with self._identity_guard(identity) as db:
             recheck = (
