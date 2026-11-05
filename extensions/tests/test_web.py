@@ -852,6 +852,26 @@ def test_concatenated_gzip_members_are_decoded_together():
     assert read_body(io.BytesIO(payload), "gzip") == b"first-second"
 
 
+def test_concatenated_gzip_members_split_across_reads():
+    first = gzip.compress(b"first")
+    payload = first + gzip.compress(b"-second")
+
+    class Chunks:
+        def __init__(self):
+            self.offset = 0
+
+        def read(self, size):
+            if self.offset == 0:
+                end = len(first)
+            else:
+                end = len(payload)
+            value = payload[self.offset:end]
+            self.offset = end
+            return value
+
+    assert read_body(Chunks(), "gzip") == b"first-second"
+
+
 def test_concatenated_gzip_members_share_one_output_cap():
     small = gzip.compress(b"tiny")
     bomb = gzip.compress(b"\0" * (BODY_LIMIT + 1))

@@ -529,12 +529,11 @@ class _BodyDecoder:
         while data:
             if self._object.eof:
                 trailing = self._object.unused_data or self._object.unconsumed_tail
-                if not trailing:
-                    break
                 if not self._gzip:
                     raise _UnsupportedEncodingFailure("trailing data after a complete compressed stream")
+                if trailing:
+                    data = trailing
                 self._object = self._new()
-                data = trailing
                 continue
             part = self._decompress(data, remaining - len(output) + 1)
             output.extend(part)
