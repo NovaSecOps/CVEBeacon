@@ -386,11 +386,15 @@ def test_full_history_route_has_a_confirmation_step(tmp_path):
     assert captured["value"] is True
 
 
-def test_schedule_page_installs_and_removes_with_fake_runners(ops):
+def test_schedule_page_installs_and_removes_with_fake_runners(ops, monkeypatch):
     config, _, app, client = ops
     state = {}
     runner, calls = fake_scheduler(state)
     app.extensions["dashboard_schedule_runner"] = runner
+    # Keep launcher paths independent of the checkout's name.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(scheduling.sys, "executable", "/opt/monitor/python")
+    monkeypatch.setattr(scheduling.sys, "argv", ["/opt/monitor/pytest"])
     login(client)
     page = client.get("/operations/schedule")
     assert page.status_code == 200
@@ -404,7 +408,8 @@ def test_schedule_page_installs_and_removes_with_fake_runners(ops):
     )
     assert response.status_code == 303
     assert any(args == ["crontab", "-"] for args, _ in calls)
-    assert "CVEBeacon" in state["text"]
+    assert scheduling.CRON_BEGIN in state["text"]
+    assert scheduling.CRON_END in state["text"]
     assert "0 7,19 * * *" in state["text"]
     page = client.get("/operations/schedule")
     assert "CVEBeacon" in page.text
@@ -419,7 +424,8 @@ def test_schedule_page_installs_and_removes_with_fake_runners(ops):
     assert "schedule_removed" in actions
 
 
-def test_schedule_interval_install(ops):
+def test_schedule_interval_install(ops, monkeypatch):
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     _, _, app, client = ops
     state = {}
     runner, _ = fake_scheduler(state)
