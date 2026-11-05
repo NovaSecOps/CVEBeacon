@@ -2891,6 +2891,44 @@ def test_webhook_budget_never_blocks_a_document_without_clients(tmp_path, initia
     assert all(row[1] == "sent" for row in rows(store))
 
 
+def test_webhook_resolves_reference_url_before_applying_client_budget(tmp_path, monkeypatch):
+    url = "https://example.test/services/reference-hook"
+    monkeypatch.setenv("HOOK_URL", url)
+    config = make_config(
+        tmp_path,
+        channels='\n[watch.channels.hook]\ntype = "webhook"\nurl_env = "HOOK_URL"\n',
+    )
+    identifiers = tuple(f"CVE-2026-{index:04d}" for index in range(1, 6))
+    store = seed(config, identifiers=identifiers)
+    assets = [
+        Asset(f"a{index}", "Acme", "Widget", "1", client=f"{index:04d}" + "é" * 116)
+        for index in range(50)
+    ]
+    StateStore(config.database_path).record_scan([
+        QueryResult(
+            asset,
+            tuple(Finding(asset, Vulnerability(cve), Applicability.AFFECTED, "high", "test")
+                  for cve in identifiers),
+            (),
+        )
+        for asset in assets
+    ])
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    report = deliver(config, store, handler)
+    assert not report.failed and len(requests) == 1
+    assert str(requests[0].url) == url
+    assert len(requests[0].content) <= CHANNEL_LIMITS["webhook"]
+    for event in json.loads(requests[0].content)["events"]:
+        assert (len(event.get("affected_clients", []))
+                + event["affected_clients_omitted"]) == 50
+    assert all(row[1] == "sent" for row in rows(store))
+
+
 def test_initial_failed_rows_wait_for_their_backoff(tmp_path):
     config = make_config(tmp_path)
     store = seed(config, initial=True)

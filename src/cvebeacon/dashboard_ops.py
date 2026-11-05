@@ -207,13 +207,13 @@ def _render_schedule(
     ), status
 
 
-def create_blueprint(config: AppConfig) -> Blueprint:
+def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
     blueprint = Blueprint("operations", __name__, url_prefix="/operations")
 
     @blueprint.record_once
     def setup(state):
         app = state.app
-        app.extensions["dashboard_jobs"] = JobManager(
+        app.extensions["dashboard_jobs"] = job_manager or JobManager(
             config, app.extensions["dashboard_users"]
         )
         app.extensions.setdefault("dashboard_schedule_runner", None)

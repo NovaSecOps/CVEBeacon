@@ -448,3 +448,73 @@ def test_runtime_secret_errors_do_not_echo_a_bad_env_name():
     message = str(excinfo.value)
     assert "CANARY" not in message
     assert "is not set" in message
+
+
+def test_generic_webhook_url_accepts_env_and_file_references(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_HOOK_URL", "https://example.org/hook")
+    config = write(
+        tmp_path,
+        WATCH
+        + """
+[watch.channels.hook]
+type = "webhook"
+url_env = "TEST_HOOK_URL"
+""",
+    )
+    channel = config.watch.channels[0]
+    assert isinstance(channel.options["url"], SecretRef)
+    assert channel.secret("url").peek() == "https://example.org/hook"
+
+    secret = tmp_path / "hook-url"
+    secret.write_text("https://example.org/file-hook", encoding="utf-8")
+    os.chmod(secret, 0o600)
+    config = write(
+        tmp_path,
+        WATCH
+        + f"""
+[watch.channels.hook]
+type = "webhook"
+url_file = "{secret.name}"
+""",
+    )
+    assert config.watch.channels[0].secret("url").peek() == "https://example.org/file-hook"
+
+
+def test_generic_webhook_url_rejects_ambiguous_and_missing_references(tmp_path):
+    with pytest.raises(ConfigurationError, match="not both"):
+        write(
+            tmp_path,
+            WATCH
+            + """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.org/hook"
+url_env = "TEST_HOOK_URL"
+""",
+        )
+    with pytest.raises(ConfigurationError, match="requires url, url_env or url_file"):
+        write(tmp_path, WATCH + '[watch.channels.hook]\ntype = "webhook"\n')
+
+
+def test_generic_webhook_runtime_resolves_url_reference(tmp_path, monkeypatch):
+    from cvebeacon.watch import delivery
+
+    monkeypatch.setenv("TEST_HOOK_URL", "https://example.org/hook")
+    config = write(
+        tmp_path,
+        WATCH
+        + """
+[watch.channels.hook]
+type = "webhook"
+url_env = "TEST_HOOK_URL"
+""",
+    )
+    calls = []
+
+    def capture(http, method, url, **kwargs):
+        calls.append(url)
+        return type("Result", (), {"status_code": 200})()
+
+    monkeypatch.setattr(delivery, "_http_call", capture)
+    delivery._send_webhook(config.watch.channels[0], (), object(), 5.0, {})
+    assert calls == ["https://example.org/hook"]

@@ -224,10 +224,22 @@ def _csv_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]]
                     configured: row.get(header_lookup[configured.casefold()])
                     for configured in mapped.values() if configured.casefold() in header_lookup
                 }
-        except csv.Error as exc:
+        except csv.Error:
             raise InventoryValidationError(
-                [ValidationIssue(f"malformed CSV near line {reader.line_num}: {exc}")]
-            ) from exc
+                [ValidationIssue(f"malformed CSV near line {reader.line_num}")]
+            ) from None
+
+
+def _structured_error(kind: str, error: BaseException) -> str:
+    """Return a parser diagnostic without source text or parser excerpts."""
+    if isinstance(error, json.JSONDecodeError):
+        return f"cannot read JSON inventory near line {error.lineno}"
+    if isinstance(error, yaml.YAMLError):
+        mark = getattr(error, "problem_mark", None)
+        if mark is not None:
+            return f"cannot read YAML inventory near line {mark.line + 1}"
+        return "cannot read YAML inventory"
+    return f"cannot read {kind.upper()} inventory"
 
 
 def _structured_rows(config: InventoryConfig, kind: str) -> Iterable[tuple[str, Mapping[str, Any]]]:
@@ -236,9 +248,7 @@ def _structured_rows(config: InventoryConfig, kind: str) -> Iterable[tuple[str, 
         root = json.loads(text) if kind == "json" else yaml.safe_load(text)
         records = _resolve_records(root, config.records_path)
     except (OSError, LookupError, json.JSONDecodeError, yaml.YAMLError, KeyError) as exc:
-        raise InventoryValidationError(
-            [ValidationIssue(f"cannot read {kind.upper()} inventory: {exc}")]
-        ) from exc
+        raise InventoryValidationError([ValidationIssue(_structured_error(kind, exc))]) from exc
     if not isinstance(records, list):
         location = config.records_path or "document root"
         raise InventoryValidationError(
@@ -303,16 +313,14 @@ def inspect_inventory(path: str | Path, *, header_row: int = 1, encoding: str = 
                 reader = csv.reader(handle, delimiter=delimiter)
                 headers = next(reader, [])
                 sample = [row for _, row in zip(range(3), reader)]
-        except (OSError, LookupError, csv.Error) as exc:
-            raise InventoryValidationError([ValidationIssue(f"cannot read CSV: {exc}")]) from exc
+        except (OSError, LookupError, csv.Error):
+            raise InventoryValidationError([ValidationIssue("cannot read CSV inventory")]) from None
         return {"path": str(source), "format": kind, "headers": headers, "sample_rows": sample}
     try:
         text = source.read_text(encoding=encoding)
         root = json.loads(text) if kind == "json" else yaml.safe_load(text)
     except (OSError, LookupError, json.JSONDecodeError, yaml.YAMLError) as exc:
-        raise InventoryValidationError(
-            [ValidationIssue(f"cannot read {kind.upper()} inventory: {exc}")]
-        ) from exc
+        raise InventoryValidationError([ValidationIssue(_structured_error(kind, exc))]) from exc
     result: dict[str, Any] = {"path": str(source), "format": kind, "root_type": type(root).__name__}
     if isinstance(root, list):
         result["record_count"] = len(root)

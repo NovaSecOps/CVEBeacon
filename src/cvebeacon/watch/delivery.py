@@ -418,6 +418,25 @@ def _webhook_body(
                     del entry["affected_clients"]
 
 
+def _webhook_url(channel: ChannelConfig) -> str:
+    reference = channel.secret("url")
+    if reference is not None:
+        value = _secret(channel, "url")
+    else:
+        value = str(channel.options["url"])
+    try:
+        # A reference may be populated or changed after the configuration loaded.
+        validate_webhook_url(
+            value,
+            channel.type,
+            f"watch channel {channel.name!r} webhook_url",
+            allow_insecure=bool(channel.options.get("allow_insecure")),
+        )
+    except ConfigurationError as exc:
+        raise DeliveryFailure(str(exc)) from None
+    return value
+
+
 def _send_webhook(
     channel: ChannelConfig,
     events: Sequence[DeliveryEvent],
@@ -426,6 +445,7 @@ def _send_webhook(
     names: Mapping[str, str],
     clients: Mapping[str, ClientImpacts] | None = None,
 ) -> None:
+    url = _webhook_url(channel)
     body = _webhook_body(events, names, clients)
     headers: dict[str, str] = {"Content-Type": "application/json"}
     header_name = channel.options.get("header_name")
@@ -434,7 +454,7 @@ def _send_webhook(
     result = _http_call(
         http,
         "POST",
-        str(channel.options["url"]),
+        url,
         headers=headers,
         content=body,
         timeout=timeout,
@@ -1306,7 +1326,7 @@ def send_test(
             result = _http_call(
                 http,
                 "POST",
-                str(channel.options["url"]),
+                _webhook_url(channel),
                 headers=headers,
                 json_body={
                     "version": WEBHOOK_VERSION,

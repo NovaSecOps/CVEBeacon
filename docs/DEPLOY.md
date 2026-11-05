@@ -224,23 +224,24 @@ from the checkout after every upgrade.
 sudo install -d -m 0700 -o 65532 -g 65532 /srv/cvebeacon/state /srv/cvebeacon/reports /srv/cvebeacon/secrets
 sudo install -d -m 0755 /srv/cvebeacon/inventory
 sudo cp /opt/cvebeacon/deploy/container/compose.yml /srv/cvebeacon/compose.yml
-sudo cp /opt/cvebeacon/deploy/container/cvebeacon.example.toml /srv/cvebeacon/cvebeacon.toml
+sudo install -o 65532 -g 65532 -m 0644 /opt/cvebeacon/deploy/container/cvebeacon.example.toml /srv/cvebeacon/cvebeacon.toml
 ```
 
 `watch` does not read the inventory, so a watch-only deployment may leave
 `/srv/cvebeacon/inventory` empty. `run` and `scan` need a real `inventory.json`
 there (validate with `cvebeacon inventory validate`; see [setup](SETUP.md)).
 The example writes state and the watch database to `/state`, and keeps
-`[watch]` and its sample channel disabled: enable both and replace the webhook
-URL. Leave `[watch] database` unset. Do not reuse a native wizard
-configuration, which sets that path beside the read-only `/config`.
+`[watch]` and its sample channel disabled: enable both and set the webhook URL
+environment variable or use `url_file`. Leave `[watch] database` unset. Do not
+reuse a native wizard configuration, which sets that path beside the read-only
+`/config`.
 
 ### Secrets
 
 Prefer an untracked `/srv/cvebeacon/cvebeacon.env`, mode `0600`, with the
-`*_env` names the configuration uses (for example `NVD_API_KEY` and
-`CVEBEACON_HOOK_SECRET`). The `watch` and `run` services load it when present;
-a missing file is fine. Secret file paths are relative to `/config`, so
+`*_env` names the configuration uses (for example `NVD_API_KEY`,
+`CVEBEACON_HOOK_URL` and `CVEBEACON_HOOK_SECRET`). The `watch` and `run` services
+load it when present; a missing file is fine. Secret file paths are relative to `/config`, so
 `secrets/...` is `/config/secrets/...`. Install each prepared file directly,
 mode `0600` owned by `65532:65532`:
 
@@ -250,7 +251,44 @@ sudo install -m 0600 -o 65532 -g 65532 /path/to/prepared-secret /srv/cvebeacon/s
 
 Repeat for each named secret; do not use a wildcard, because a normal shell
 cannot list the `0700` directory. CVEBeacon rejects group- or other-readable
-secret files, including `sources.nvd_api_key_file`.
+secret files, including `sources.nvd_api_key_file`. Existing files under
+`/config/secrets` remain readable by the loader and are suitable for command-line
+runs, but dashboard in-place rotation requires the referenced file to resolve
+inside the account data directory (the directory containing the watch and
+account databases; `/state` in this layout). Use an environment reference or
+place a dashboard-managed secret in that protected data directory instead.
+
+### Dashboard configuration editor
+
+The container example runs the dashboard with a read-only root filesystem and
+mounts `cvebeacon.toml` and `secrets/` read-only. That is the hardened default,
+and the configuration editor will show a read-only notice: sections can be
+inspected, but saving and rollback are disabled. Keep this layout unless
+browser-based editing is required. The dashboard service runs as `65532:65532`,
+so the configuration file and secrets are installed with that owner; a
+root-owned readable file cannot be inspected by the editor.
+
+To enable editing, give only the dashboard service a writable configuration
+**directory** (not a single-file mount, because atomic replacement needs
+directory write access). For example, keep the file at
+`/srv/cvebeacon/config/cvebeacon.toml`, owned by `65532:65532`, and use:
+
+```yaml
+  dashboard:
+    read_only: true
+    volumes:
+      - ./config:/config:rw
+```
+
+Mount the same directory read-only in the watch, report and scheduled services.
+The dashboard still needs its normal writable `/state` and `/reports` mounts.
+The configuration directory, its `.CONFIG_FILENAME.backups` directory and any
+dashboard-managed secret files must be writable by the service account; keep
+them owner-only and outside the checkout. After a save the dashboard reloads
+its own configuration, but other services keep their old configuration until
+restarted. Restart the watch and report services after changing settings they
+consume. See the [dashboard guide](DASHBOARD.md#configuration-editor) for the
+validation, backup and permission behavior.
 
 Load the command once in your shell, again as a function:
 

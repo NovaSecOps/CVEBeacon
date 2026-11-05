@@ -237,16 +237,20 @@ logout, even if its role has no permissions.
 | `retry` | Retry failed or ambiguous deliveries as background jobs |
 | `test_channel` | Send a labelled channel test message |
 | `edit_rules` | Edit rules |
-| `edit_channels` | Edit notification channels |
+| `edit_channels` | Edit credential-free notification channels; credential-bearing channels require `manage_secrets` for any change, `*_file` paths are administrator-only, and any channel may be deleted |
 | `edit_sources` | Edit source settings |
 | `edit_watch` | Edit watch settings |
 | `edit_reporting` | Edit reporting settings |
-| `edit_dashboard` | Edit dashboard settings |
+| `edit_dashboard` | View dashboard sign-in and session settings; changes are administrator-only |
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
+| `edit_system` | View state database and report output paths; changes are administrator-only |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
+| `manage_secrets` | Change any credential-bearing channel, add/change/remove environment references, and stage file-secret contents; `*_file` paths are administrator-only |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
 | `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
+
+Only administrators may change a filesystem path setting: the state database, watch database, output directory, inventory path, or any `*_file` reference. They are also the only accounts that may change the whole `[dashboard]` sign-in and session section, because it controls access for everyone. Delegated editors see those controls read-only, and the server rejects changes at preview and again inside the write transaction. Administrators remain subject to the protected-path checks.
 
 Each operation route declares its own permission: running jobs needs `run`, retry jobs need `retry`, channel tests need `test_channel`, schedule changes need `manage_schedule`, and job pages need `view`. A role without `view` cannot open the operations page even if it can call an action route directly. Opening query/report forms requires `run`; submissions require both `run` and `view` because they return findings or exports.
 Role changes and administrative account actions are recorded in the existing
@@ -324,7 +328,7 @@ Built-in password authentication does **not** protect passwords or session cooki
 
 Loopback bindings validate the requested host. Wildcard bindings accept numeric IP host headers and `localhost`, protecting against arbitrary hostname rebinding. For a reverse proxy, forward a numeric backend `Host` header and preserve the application at the URL root. Forwarded host, address and scheme headers are not trusted. A specific hostname binding accepts that hostname. Outbound TLS verification remains enabled. Password configuration affects only the dashboard; core monitoring continues to work without credentials.
 
-Forms use CSRF protection, output is escaped, errors omit sensitive details, and downloads cannot select filesystem paths. Configuration and credential values are not rendered. Report/query operations are synchronous; avoid submitting repeated requests while an investigation is running.
+Forms use CSRF protection, output is escaped, errors omit sensitive details, and downloads cannot select filesystem paths. Credential values are not rendered. Report/query operations are synchronous; avoid submitting repeated requests while an investigation is running.
 
 The monitoring SQLite database stores observations and dashboard scan metadata.
 Accounts and roles live separately in `cvebeacon-users.db` beside the watch
@@ -336,6 +340,260 @@ by trusted accounts. Before an
 upgrade, stop the scanner/dashboard and back up all three data stores. Schema
 upgrades preserve existing observations and delivery records; an older
 application requires its corresponding pre-upgrade backups.
+
+## Configuration editor
+
+After account login, open **Configuration**. Each section requires both `view`
+and its edit permission for viewing, previewing and saving. Shared-password and
+anonymous sessions cannot use the editor. A viewer without edit permissions
+can see the section index, but cannot read configuration values.
+
+The editor needs a configuration directory that the dashboard service can
+write: atomic replacement needs directory write access, not only write access
+to the file. The hardened container example keeps the configuration mount
+read-only. In that mode the editor shows a read-only notice: sections can be
+inspected, but saving and rollback are disabled with an explanation. To enable
+editing, give only the dashboard service a writable configuration directory,
+for example a writable bind mount containing the TOML file; the container root
+filesystem can remain read-only. Keep the watch and report services read-only
+and restart them after a configuration save. See the deployment guide for the
+container layout.
+
+| Section | Required edit permission |
+| --- | --- |
+| Watch settings | `edit_watch` |
+| Sources | `edit_sources` |
+| Rules: conditions, event triggers and channel assignments | `edit_rules` |
+| Watch notification channels, with fields for the selected type | `edit_channels` |
+| Legacy Teams and email notifications | `edit_channels` (view; changes require `manage_secrets`) |
+| Watch reporting identity | `edit_reporting` |
+| Inventory and exact product mappings | `edit_inventory` |
+| Dashboard sessions and cookies | `edit_dashboard` (view; changes administrator-only) |
+| HTTP client | `edit_http` |
+| State database and report output paths | `edit_system` (view; changes administrator-only) |
+
+Blank fields omit a setting and use the configuration loader's default. String
+fields accept plain text; arrays, column mappings and nested rule conditions
+accept TOML values. For example, use `["soc-email"]` for channels and
+`{ any = [{ cvss_min = 9.0 }, { epss_min = 0.5 }] }` for a condition.
+The final blank row adds a rule, mapping or channel. Choose the new channel type
+before making other changes; choosing it reloads the form. Removal checkboxes
+remove existing rows. Every submitted document is validated by `load_config`,
+including channel references and source requirements. Invalid submissions show
+the loader's guidance with submitted values redacted and leave the file intact.
+Unrecognized configuration fields must be reviewed outside the editor before
+editing; they are never silently copied or discarded. Column mappings must use
+only the known canonical or optional inventory fields, so an unknown column is
+never rendered or preserved. Channel types are matched case-insensitively after surrounding whitespace,
+as the loader does; the submitted spelling is preserved. Existing generic webhook
+endpoint values are legacy direct values: they are hidden and retained only
+while the same direct value remains, including through a rename. New or
+converted channels must supply `url_env` or `url_file`.
+
+**Validate and preview** builds TOML in a temporary file beside the configuration.
+The diff contains only the selected section and its editable fields; nested
+sections with separate permissions are excluded. Review the diff, then
+**Confirm and save**. Replacement file contents are validated through the same
+loader before preview and again before publication; every consumer of a shared
+file is checked with the staged bytes, even when another consumer names an
+environment variable that would otherwise mask the file at run time. Previews
+expire after ten minutes and belong to the current session and section. A
+successful save consumes the preview; a failed confirmation leaves it usable
+until it expires. Each session has a bounded number of pending previews, so one
+editor cannot fill the shared preview space; one account may hold several
+sessions. If the original file changed since the form loaded or preview was
+created, the save is refused with a reload message. The editor serializes its
+writers using the account database transaction and checks the file again
+immediately before replacement. External editors do not participate in that
+lock: avoid simultaneous filesystem edits. A configuration-file writer lock
+covers target capture, live secret writes, transaction exit and compensation;
+release and descriptor-close failures are sanitized maintenance so a completed
+save is not reported as failed. The writer lock and orphan cleanup are created
+on the first configuration request, not by dashboard startup. A configuration
+request holds the editor's process lock for its full duration, deliberately
+serialising configuration work with other dashboard traffic in the supported
+single-process deployment.
+Requests are bounded by the dashboard's
+8192-byte form limit, and a section form accepts at most 101 rows per save;
+split larger edits into smaller saves where possible. Pending previews hold
+full documents, so a session's pending count is also a memory bound.
+
+Saving removes hand-written **comments and formatting**. Before replacement,
+the original bytes are kept in an owner-only sibling directory named
+`.CONFIG_FILENAME.backups`. The last ten timestamped backups are retained.
+The new configuration is written atomically with `os.replace`, preserving the
+original owner and mode. Configuration files must be regular files with no
+extra hard links, owned by the service account and not group or other writable
+on POSIX. Parent directories must pass the account store's ownership checks.
+New backup and secret directories are owner-only. On Windows, apply the same
+service-account-only ACL protections described in the account guide; POSIX
+mode bits do not establish Windows ACL isolation.
+
+The account audit records the actor, time, section, changed-line count and the
+number of secret files written, never configuration values.
+Permission and credential revocation are rechecked in the write transaction.
+The complete replacement application is prepared from the validated final
+contents before the live file changes. Validation, replacement preparation and
+handled write or audit failures leave the existing application and configuration
+in place, including restoring any secret contents already replaced. Post-commit
+temporary cleanup is best-effort maintenance and cannot turn a completed save
+into a failure. Successful saves reload the dashboard and end **all dashboard
+sessions**; log in again. Already-running non-configuration requests finish with
+their original configuration; a configuration request that reaches the old
+application during the swap is refused and can be retried after reloading. Other
+running commands retain their configuration until restarted. A reload reuses the
+process's single dashboard job manager: queued and running jobs keep their
+worker and store, future jobs use the reloaded settings, and `serve` shuts the
+same manager down when the process exits. Moving the state database, and with it
+the private job storage directory, is refused while a job or pending job audit
+is active. The transition is reserved under the manager before the account
+transaction and the live file replacement, so a refused move leaves no save
+audit entry or new backup. Existing job history is not moved to a new store.
+Run the disposable loopback acceptance check with
+`python tools/dashboard_config_smoke.py`; it creates no schedules and sends no
+notifications.
+
+Access and session comparisons use the running configuration and the current
+file where it is valid, at preview and again in the write transaction. A stale
+in-process configuration therefore cannot skip a lockout confirmation or an
+account-store administrator check. Operational watch, state and output paths
+must not alias the configuration file or its writer lock, the account, watch or
+state databases, any of their `-wal`, `-shm`, `-journal` or `.lock` sidecars,
+the private `dashboard-jobs` directory with its database and logs, both operation
+run-lock files, the backup or secret directories, every file inside the private
+`dashboard-secrets` directory (whether or not it is still referenced), and every
+currently referenced `*_file`. Files outside that directory are the
+administrator's responsibility because only administrators can change paths.
+Candidate sidecars, job directories, databases, logs and run locks must not
+overlap existing protected files or directories. The inventory input must not
+equal, share an inode with, or resolve into
+any of those protected files or directories. Equality, same-file identity and
+any path beneath a protected file as an ancestor are rejected, as are watch,
+state and output paths that alias each other. Resolved paths, symbolic links and existing hard links are
+checked. A path collision is rejected with guidance.
+
+All dashboard setting changes require an additional access confirmation.
+Changing the effective account database path (the sibling of the watch
+database, including changes induced by the state database default) also requires
+an administrator and an existing destination store with an enabled administrator.
+The editor cannot turn off account authentication. It does not move databases.
+Host and port remain `serve --host` and `--port` options; they are not TOML
+settings. Moving stores requires making the protected destination available
+before choosing it. Keep a working administrator login for that destination.
+
+Secrets remain `*_env` or `*_file` references. Environment variables can be named
+but cannot be set. Names accepted by the editor begin with a letter or underscore
+and contain only letters, digits and underscores, up to 128 characters; the core
+loader accepts a wider historical range, so repair such a name outside the editor.
+Existing secret contents are never returned, including in
+validation errors, diffs, audit entries or logs. Slack, Teams, Discord and
+generic webhook URLs are credentials: the first three use `webhook_url_env` or
+`webhook_url_file`, and a generic webhook uses `url_env` or `url_file`. URL
+values are hidden in forms, diffs and audit records. Existing generic webhook
+`url` values remain supported for existing configurations, are hidden and
+retained while the same direct value remains, including through a rename, and
+are not used for new direct values. An existing
+direct value can be converted to `url_env` or `url_file` with
+`manage_secrets`; the conversion removes the direct value from the next saved
+file. The resolved URL is revalidated with the channel's HTTPS or explicit
+`allow_insecure` setting immediately before every delivery or test send.
+
+Legacy `[notifications.teams]` and `[notifications.email]` rows are
+credential-bearing channels even when disabled, because they carry default
+environment references. They render read-only without `manage_secrets` and are
+checked at preview and both commit stages.
+
+A watch channel that has, or would have, any secret reference is credential-bearing:
+an `*_env` or `*_file` reference, a URL reference, or a header secret. A direct
+legacy webhook `url` is also a credential. Any edit of such a channel requires
+`manage_secrets`: changing any field, adding, changing or removing a reference,
+renaming it, or staging new contents for one of its secret files. Without that
+permission the channel renders read-only with a short explanation. An editor
+with `edit_channels` may create, edit and rename channels that carry no
+credential at all, delete any channel, and change which channels a rule routes
+to with `edit_rules`. A single save that deletes a credential-bearing channel
+and adds a channel of the same type is treated as a credential change and needs
+`manage_secrets`; the same deletion and addition in two separate saves do not. The server compares current, running and candidate
+channels one-to-one before any target read and again inside the write
+transaction, so a crafted form cannot bypass the UI.
+
+Secret references and file-secret contents are read-only without
+`manage_secrets`, including source, notification and dashboard references;
+removing a reference also requires it. File-reference paths are additionally
+administrator-only. With
+that permission, added or changed environment references render editable;
+`*_file` paths stay administrator-only. A submitted file value is staged,
+validated by the shared loader, then written to the same owner-only file
+atomically when the reference is unchanged. Conflicting new
+contents for one physical file are rejected; identical writes are coalesced.
+Renaming a channel and rotating its secret file must be saved separately: a
+rename with new file contents is refused with guidance. Writable secret files must
+resolve inside the current protected data directory and must not be symbolic
+links or extra hard links. They use the same protected set as operational-path
+checks: the configuration file and writer lock, every current, running and
+candidate account, watch and state database with its `-wal`, `-shm`, `-journal`
+and `.lock` sidecars, the private `dashboard-jobs` directory with its database
+and logs, both operation run-lock files, backups, secret directories, and every
+referenced `*_file`. The inventory input is checked against the same set.
+Files inside the protected `dashboard-secrets`
+directory remain writable when they are the referenced secret, including when a
+report output directory contains that secret directory. Readable external
+references remain usable by the loader but are never written through this
+interface. Adding or changing an environment reference, or staging file
+contents, requires `manage_secrets`; changing a `*_file` path requires an
+administrator. A
+supplied destination path is never overwritten: a new file secret is created
+with a random name in `dashboard-secrets` beside the account database, inside
+the protected data directory. No secret value is placed in TOML or a
+confirmation form.
+
+A new file value is rejected when its paired `*_env` reference is also set,
+because the environment value would take precedence at run time. This includes
+the NVD default `NVD_API_KEY` when that variable has a value, even if the form
+field is blank. An explicit paired environment reference is rejected for file
+rotation until it is cleared. `.dashboard-staged-` temporaries expire with their
+preview after ten minutes and are removed on a later configuration request,
+unless the current or running configuration or a retained backup references
+them; when that cannot be determined, files are kept.
+Committed `.dashboard-secret-` files are never deleted automatically, whether or
+not they are still referenced, and remain inside the protected secret directory.
+Cleanup runs on configuration requests; startup no longer writes the writer lock
+or runs cleanup. Previews may reference another preview's generated file,
+including across separate application instances. Invalid submissions remove
+their own staging temporaries. Abandoned `.dashboard-staged-` names are removed
+after their lease expires; no `.dashboard-secret-` or other data-directory files
+are auto-deleted. Generated names use
+`.dashboard-secret-` and `.dashboard-staged-`; configuration backups use
+`.CONFIG_FILENAME.backups`, validation temporaries use `.config-`, and the
+configuration writer lock uses `.config-CONFIG_FILENAME.lock`. These paths are
+ignored by the repository's `.gitignore`; keep runtime data directories outside
+the worktree where possible.
+
+**Backups and rollback** requires `view` and every configuration edit permission,
+because a backup can change every section. Rolling back an edit to a
+credential-bearing channel also requires `manage_secrets`; a backup that simply
+omits the channel is a deletion. Restoring path or dashboard settings that differ from the
+running configuration requires an administrator. Choose a backup, validate it,
+review the diff and confirm. Rollback uses the same validation, concurrency checks, access
+confirmation, audit, atomic replacement, backup and reload path as saving.
+The backups list remains available when the live file fails the loader or is
+missing. The page reads the raw bytes and version signature; only the chosen
+backup must validate (the live file is inspected only to classify it and to pick
+the comparison baseline), and the page shows a static "current configuration is
+invalid or missing" notice instead of diffing unvalidated live values. Rollback requires the access
+confirmation. A missing or unparseable live file also requires
+`manage_secrets`. A parseable file that fails validation is compared with the
+running configuration and can be restored with the configuration edit
+permissions unless the backup changes credentials; a backup whose path or
+dashboard settings differ from the running configuration requires an
+administrator. Sections cannot be edited
+from an invalid live file, so restore a backup first. Rollback does not restore
+secret-file contents; it preserves files referenced by retained backups.
+Inventory parser diagnostics report only the line number and parser kind, never
+source lines. Configuration permissions allow changing notification
+destinations; path settings and the dashboard sign-in section are
+administrator-only. Grant edit permissions only to accounts trusted to control
+those settings.
 
 ## Package identities and advisory views
 

@@ -545,6 +545,22 @@ class JobQueueFull(CVEBeaconError):
     """The bounded set of pending jobs is full."""
 
 
+class _JobStorageTransition:
+    """A reserved job-manager configuration update, published after a save."""
+
+    def __init__(self, manager, config, users, store):
+        self.manager = manager
+        self.config = config
+        self.users = users
+        self.store = store
+
+    def publish(self) -> None:
+        self.manager._publish_reconfigure(self.config, self.users, self.store)
+
+    def abort(self) -> None:
+        self.manager._abort_reconfigure()
+
+
 class JobManager:
     """Serialize dashboard jobs and keep their persistent state current."""
 
@@ -575,12 +591,72 @@ class JobManager:
         self._running: int | None = None
         self._audit_lock = threading.RLock()
         self._stopping = False
+        self._reserved = False
         self._cancel_deadline: float | None = None
         try:
             if self.store.pending_audits() or self.store.pending_actions():
                 self.start_thread()
         except CVEBeaconError:
             pass
+
+    def reserve_reconfigure(self, config: AppConfig, users):
+        """Reserve a job-manager update before a configuration is committed.
+
+        The manager stays on its current store until ``publish``. Reservations
+        block new submissions so a concurrent job cannot invalidate a storage
+        move between the preflight and the live configuration replacement.
+        """
+        store = JobStore(Path(config.database_path).parent / "dashboard-jobs")
+        changed = store.path != self.store.path
+        with self._condition:
+            if self._reserved:
+                raise ConfigurationError(
+                    "A dashboard job configuration change is already in progress")
+            if changed and (
+                self._queue
+                or self._running is not None
+                or (self._thread is not None and self._thread.is_alive())
+            ):
+                raise ConfigurationError(
+                    "Cannot change dashboard job storage while a job or pending job audit is active"
+                )
+            if changed:
+                try:
+                    store.fail_interrupted()
+                except CVEBeaconError as exc:
+                    raise ConfigurationError(
+                        "Cannot use the destination dashboard job storage") from exc
+            self._reserved = True
+        return _JobStorageTransition(self, config, users, store)
+
+    def _publish_reconfigure(self, config, users, store) -> None:
+        changed = store.path != self.store.path
+        with self._condition:
+            self.config = config
+            self.users = users
+            self.store = store
+            self._reserved = False
+            self._condition.notify_all()
+        if changed:
+            try:
+                if self.store.pending_audits() or self.store.pending_actions():
+                    self.start_thread()
+            except Exception:
+                LOG.warning("Destination job storage could not be recovered; restart may be required.")
+
+    def _abort_reconfigure(self) -> None:
+        with self._condition:
+            self._reserved = False
+            self._condition.notify_all()
+
+    def reconfigure(self, config: AppConfig, users) -> None:
+        """Point the process-wide manager at a reloaded configuration."""
+        transition = self.reserve_reconfigure(config, users)
+        try:
+            transition.publish()
+        except BaseException:
+            transition.abort()
+            raise
 
     def start_thread(self) -> None:
         with self._condition:
@@ -611,6 +687,9 @@ class JobManager:
         with self._condition:
             if self._stopping:
                 raise ConfigurationError("the dashboard is stopping")
+            if self._reserved:
+                raise ConfigurationError(
+                    "a configuration change is in progress; try again")
             if len(self.store.active()) >= MAX_PENDING_JOBS:
                 raise JobQueueFull("the job queue is full; wait for a job to finish")
             job = self.store.create(operation, started_by, argv)
