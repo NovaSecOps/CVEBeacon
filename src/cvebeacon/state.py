@@ -172,6 +172,8 @@ class StateStore:
                     primary_id TEXT NOT NULL,
                     PRIMARY KEY(asset_id, alias)
                 );
+                CREATE INDEX IF NOT EXISTS runs_successful ON runs(status, completed_at);
+                CREATE INDEX IF NOT EXISTS advisory_aliases_alias ON advisory_aliases(alias, asset_id);
                 """
             )
             rows = db.execute("SELECT version FROM schema_info").fetchall()

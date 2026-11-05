@@ -9,7 +9,8 @@ from cvebeacon.sources.euvd import EUVDSource
 
 def test_generic_public_requests_exclude_operational_metadata():
     asset = Asset("internal-asset-marker", "PublicVendor", "PublicProduct", "1.0.0",
-                  category="private-category-marker", system_id="internal-host-marker")
+                  category="private-category-marker", system_id="internal-host-marker",
+                  client="private-client-marker")
     observed = []
     def handler(request):
         observed.append(request)
@@ -26,5 +27,5 @@ def test_generic_public_requests_exclude_operational_metadata():
             EUVDSource(http).search(asset.vendor, asset.product)
     assert len(observed) == 3
     wire = " ".join(str(request.url) + request.content.decode() + str(request.headers) for request in observed)
-    assert all(value not in wire for value in (asset.asset_id, asset.category, asset.system_id, "asset_id", "system_id", "category"))
+    assert all(value not in wire for value in (asset.asset_id, asset.category, asset.system_id, asset.client, "asset_id", "system_id", "category", "client"))
     assert all("authorization" not in request.headers and "apikey" not in request.headers for request in observed)

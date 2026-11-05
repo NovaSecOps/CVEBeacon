@@ -79,11 +79,18 @@ def name_key(ecosystem: str, value: str) -> str:
     return value
 
 
+MAX_CLIENT_LENGTH = 120
+
+
 def normalize_asset(asset: Asset) -> Asset:
     for name in asset.__dataclass_fields__:
         value = getattr(asset, name)
         if not isinstance(value, str) or any(ord(char) < 32 for char in value):
             raise ValueError(f"{name} must be text without control characters")
+    if len(asset.client) > MAX_CLIENT_LENGTH:
+        raise ValueError(
+            f"client must be at most {MAX_CLIENT_LENGTH} characters"
+        )
     if not asset.asset_id:
         raise ValueError("blank required field: asset_id")
     if asset.purl:
