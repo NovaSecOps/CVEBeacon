@@ -567,3 +567,17 @@ def test_audit_action_does_not_create_a_missing_user_store(tmp_path):
     with pytest.raises(StateError, match="not found"):
         users.record_action("job_started", username="admin")
     assert not (tmp_path / "users.db").exists()
+
+
+def test_channel_tests_disabled_in_builder_and_routes(tmp_path):
+    config = make_config(tmp_path)
+    config = replace(config, watch=replace(config.watch, enabled=False))
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    client = app.test_client()
+    login(client)
+    assert 'Test a channel' not in client.get('/operations/').text
+    assert submit(client, '/operations/test', channel='sink').status_code == 400
+    assert app.extensions['dashboard_jobs'].store.recent() == ()
+    with pytest.raises(ConfigurationError, match='disabled'):
+        build_command(config, 'notify-test', channel='sink')

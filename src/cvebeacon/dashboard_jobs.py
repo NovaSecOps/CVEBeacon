@@ -56,7 +56,7 @@ RUN_OPERATIONS = (
 )
 RETRY_OPERATIONS = ("watch-retry-failed", "watch-retry-ambiguous")
 FULL_HISTORY_OPERATIONS = frozenset({"watch-sync", "watch-run", "run"})
-WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:-1]) | frozenset(RETRY_OPERATIONS)
+WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:-1]) | frozenset(RETRY_OPERATIONS) | {"notify-test"}
 
 OPERATION_LABELS = {
     "scan": "Scan inventory",
