@@ -1664,10 +1664,14 @@ def safe_secret_target(path):
     if os.name == "posix":
         if details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077:
             raise ConfigurationError("Secret file must be owned by this account and private")
-    try:
-        UserStore._trusted_directory_chain(path.parent)
-    except CVEBeaconError:
-        raise ConfigurationError("Secret file directory is not trusted") from None
+    if os.name == "posix":
+        try:
+            UserStore._trusted_directory_chain(path.parent)
+        except CVEBeaconError:
+            raise ConfigurationError("Secret file directory is not trusted") from None
+    elif getattr(path.parent.lstat(), "st_file_attributes", 0) & 0x400:
+        # Windows: the directory must not be a junction or other reparse point.
+        raise ConfigurationError("Secret file directory is not trusted")
     return details
 
 
