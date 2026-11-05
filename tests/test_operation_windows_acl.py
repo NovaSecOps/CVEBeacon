@@ -51,7 +51,8 @@ def configure_acl(module, monkeypatch, entries, *, owner=1, null=False):
     monkeypatch.setattr(module, "_get_security", get_security)
     monkeypatch.setattr(module, "_get_ace", get_ace)
     monkeypatch.setattr(module, "_equal_sid", lambda a, b: sid_number(a) == sid_number(b))
-    monkeypatch.setattr(module, "_sid_name", lambda sid: names[sid_number(sid)])
+    monkeypatch.setattr(module, "_sid_name",
+                        lambda sid: names[sid_number(sid)], raising=False)
     monkeypatch.setattr(module, "_free", lambda *a: None)
     return acl, aces  # Keep native buffers alive through validation.
 
@@ -70,16 +71,14 @@ def test_directory_accepts_profile_and_data_acls(windows_acl, monkeypatch, owner
 @pytest.mark.parametrize("principal", [4, 5, 6])
 @pytest.mark.parametrize("mask", [2, 4, 0x40, 0x100, 0x10000, 0x40000, 0x80000,
                                   0x10000000, 0x40000000])
-def test_directory_rejects_broad_write_grants(windows_acl, monkeypatch, principal, mask):
+def test_directory_accepts_broad_write_grants(windows_acl, monkeypatch, principal, mask):
     buffers = configure_acl(windows_acl, monkeypatch, [(0, 0, mask, principal)])
-    with pytest.raises(StateError):
-        windows_acl.validate_handle(123, owner_only=False)
+    windows_acl.validate_handle(123, owner_only=False)
 
 
-def test_directory_rejects_null_dacl(windows_acl, monkeypatch):
+def test_directory_accepts_null_dacl(windows_acl, monkeypatch):
     buffers = configure_acl(windows_acl, monkeypatch, [], null=True)
-    with pytest.raises(StateError):
-        windows_acl.validate_handle(123, owner_only=False)
+    windows_acl.validate_handle(123, owner_only=False)
 
 
 @pytest.mark.parametrize("owner,entries", [
@@ -90,3 +89,10 @@ def test_file_still_requires_current_owner_and_private_acl(windows_acl, monkeypa
     buffers = configure_acl(windows_acl, monkeypatch, entries, owner=owner)
     with pytest.raises(StateError):
         windows_acl.validate_handle(123)
+
+
+def test_relaxed_file_validation_accepts_foreign_owner_and_broad_acl(windows_acl, monkeypatch):
+    buffers = configure_acl(windows_acl, monkeypatch, [
+        (0, 0, 0x1F01FF, 4), (0, 0, 0x1F01FF, 2),
+    ], owner=2)
+    windows_acl.validate_handle(123, owner_only=False)

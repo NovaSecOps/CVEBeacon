@@ -27,20 +27,15 @@ def _check_directory_chain(path: Path) -> None:
     current = path.absolute()
     while True:
         details = current.lstat()
-        mode = stat.S_IMODE(details.st_mode)
         if not stat.S_ISDIR(details.st_mode):
             raise StateError("operation storage directory must not be a symlink")
-        if mode & 0o002 and not mode & stat.S_ISVTX:
-            raise StateError(
-                "operation storage directory must not be world-writable without "
-                f"the sticky bit: {current}; chmod o-w {current} or chmod +t {current}"
-            )
         if current.parent == current:
             break
         current = current.parent
 
 
-def validate_file(descriptor: int, path: Path) -> os.stat_result:
+def validate_file(descriptor: int, path: Path,
+                  *, owner_only: bool = True) -> os.stat_result:
     details = os.fstat(descriptor)
     current = path.lstat()
     if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1
@@ -48,6 +43,8 @@ def validate_file(descriptor: int, path: Path) -> os.stat_result:
             or getattr(current, "st_file_attributes", 0) & 0x400
             or (current.st_dev, current.st_ino) != (details.st_dev, details.st_ino)):
         raise StateError("operation storage must be a regular file without links")
+    if not owner_only:
+        return details
     if os.name == "posix":
         if details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077:
             raise StateError("operation storage file must be owner-only")
@@ -59,8 +56,8 @@ def validate_file(descriptor: int, path: Path) -> os.stat_result:
 
 
 def private_file(path: Path, *, create: bool = False, exclusive: bool = False,
-                 readonly: bool = False) -> int:
-    """Open without following links; new files are private before first use."""
+                 readonly: bool = False, owner_only: bool = True) -> int:
+    """Open without following links; new files are private unless relaxed."""
     try:
         current = path.lstat()
     except FileNotFoundError:
@@ -72,7 +69,10 @@ def private_file(path: Path, *, create: bool = False, exclusive: bool = False,
             raise StateError("operation storage must be a regular file without links")
     if os.name == "nt":
         from .windows_private import open_file
-        descriptor = open_file(path, create=create, exclusive=exclusive, readonly=readonly)
+        descriptor = open_file(
+            path, create=create, exclusive=exclusive, readonly=readonly,
+            owner_only=owner_only,
+        )
     else:
         flags = (os.O_RDONLY if readonly else os.O_RDWR) | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
@@ -86,7 +86,7 @@ def private_file(path: Path, *, create: bool = False, exclusive: bool = False,
     try:
         if os.name == "posix" and created:
             os.fchmod(descriptor, 0o600)
-        validate_file(descriptor, path)
+        validate_file(descriptor, path, owner_only=owner_only)
         return descriptor
     except BaseException:
         if os.name == "posix":

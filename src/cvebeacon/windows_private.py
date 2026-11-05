@@ -79,46 +79,26 @@ def _attributes(*, directory=False):
             _free(descriptor)
 
 
-def _sid_name(sid):
-    text = c.c_void_p()
-    _check(_sid_text(sid, c.byref(text)))
-    try:
-        return c.wstring_at(text)
-    finally:
-        _free(text)
-
-
 def validate_handle(handle, *, owner_only=True):
+    if not owner_only:
+        # Run-lock files carry no stored state; callers still require a
+        # regular, unlinked file and open without truncation.
+        return
     owner, acl, descriptor = c.c_void_p(), c.c_void_p(), c.c_void_p()
     result = _get_security(handle, 1, 5, c.byref(owner), None, c.byref(acl), None, c.byref(descriptor))
     if result:
         raise c.WinError(result)
     try:
         with _identity() as sid:
-            if not acl.value and not owner_only:
-                raise StateError("operation storage directory must not grant unrestricted Windows access")
-            if (owner_only and not _equal_sid(owner, sid)) or not acl.value:
+            if not _equal_sid(owner, sid) or not acl.value:
                 raise StateError("operation storage must have an owner-only Windows ACL")
             count = struct.unpack("<BBHHH", c.string_at(acl, 8))[3]
-            if owner_only and not count:
+            if not count:
                 raise StateError("operation storage ACL grants no owner access")
             for index in range(count):
                 ace = c.c_void_p()
                 _check(_get_ace(acl, index, c.byref(ace)))
                 kind, flags, size, mask = struct.unpack("<BBHI", c.string_at(ace, 8))
-                if not owner_only:
-                    # Inherit-only and deny entries grant no access here.
-                    if flags & 8 or kind == 1:
-                        continue
-                    if kind != 0:
-                        raise StateError("operation storage ACL contains an unsupported entry")
-                    broad = {"S-1-1-0", "S-1-5-32-545", "S-1-5-11"}
-                    # Data/child creation, deletion, attributes, ACL/owner
-                    # changes, and generic write/all are all write access.
-                    writable = 0x40000000 | 0x10000000 | 0xD0156
-                    if _sid_name(ace.value + 8) in broad and mask & writable:
-                        raise StateError("operation storage directory is writable by broad Windows principals")
-                    continue
                 if kind != 0:
                     raise StateError("operation storage ACL contains an unsupported entry")
                 allowed = bool(_equal_sid(ace.value + 8, sid))
@@ -128,17 +108,25 @@ def validate_handle(handle, *, owner_only=True):
         _free(descriptor)
 
 
-def open_file(path, *, create=False, exclusive=False, readonly=False):
+def open_file(path, *, create=False, exclusive=False, readonly=False,
+              owner_only=True):
     import msvcrt
-    with _attributes() as attributes:
-        disposition = 1 if exclusive else 4 if create else 3
-        # OPEN_REPARSE_POINT refuses redirection; the caller also checks lstat.
-        handle = _create(str(path), 0x80000000 | (0 if readonly else 0x40000000),
-                         3, c.byref(attributes), disposition, 0x00200000, None)
-        if handle == c.c_void_p(-1).value:
-            raise c.WinError(c.get_last_error())
+    disposition = 1 if exclusive else 4 if create else 3
+    # OPEN_REPARSE_POINT refuses redirection; the caller also checks lstat.
+    access = 0x80000000 | (0 if readonly else 0x40000000)
+    if owner_only:
+        with _attributes() as attributes:
+            handle = _create(str(path), access, 3, c.byref(attributes),
+                             disposition, 0x00200000, None)
+    else:
+        # Lock files carry no data. Let a new file inherit the storage
+        # directory ACL so another service account can coordinate on it.
+        handle = _create(str(path), access, 3, None, disposition,
+                         0x00200000, None)
+    if handle == c.c_void_p(-1).value:
+        raise c.WinError(c.get_last_error())
     try:
-        validate_handle(handle)
+        validate_handle(handle, owner_only=owner_only)
         return msvcrt.open_osfhandle(handle, os.O_BINARY | (os.O_RDONLY if readonly else os.O_RDWR))
     except BaseException:
         _close(handle)
@@ -155,6 +143,8 @@ def private_directory(path: Path):
         else:
             if details.st_file_attributes & 0x400:
                 raise StateError("operation storage directory must not be a link")
+            if not current.is_dir():
+                raise StateError("operation storage directory must be a directory")
         if current.parent == current:
             break
         current = current.parent
@@ -165,12 +155,6 @@ def private_directory(path: Path):
         with _attributes(directory=True) as attributes:
             if not _mkdir(str(path), c.byref(attributes)) and c.get_last_error() != 183:
                 raise c.WinError(c.get_last_error())
-    if path.lstat().st_file_attributes & 0x400 or not path.is_dir():
+    details = path.lstat()
+    if details.st_file_attributes & 0x400 or not path.is_dir():
         raise StateError("operation storage directory must not be a link")
-    handle = _create(str(path), 0x80000000, 3, None, 3, 0x02200000, None)
-    if handle == c.c_void_p(-1).value:
-        raise c.WinError(c.get_last_error())
-    try:
-        validate_handle(handle, owner_only=False)
-    finally:
-        _close(handle)

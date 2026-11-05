@@ -127,6 +127,7 @@ def test_log_symlinks_and_paths_outside_log_directory_are_refused(tmp_path):
     assert target.read_bytes() == b"private"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX path replacement while open")
 def test_log_rotation_keeps_checked_descriptor_after_path_swap(tmp_path):
     store = jobs.JobStore(tmp_path / "jobs.db")
     job = store.create("scan", "admin", ["scan"])
@@ -142,13 +143,33 @@ def test_log_rotation_keeps_checked_descriptor_after_path_swap(tmp_path):
     assert target.read_bytes() == b"private target"
 
 
+def test_log_rotation_stays_in_place_and_bounded(tmp_path):
+    store = jobs.JobStore(tmp_path / "jobs.db")
+    job = store.create("scan", "admin", ["scan"])
+    log = jobs._JobLog(job.log_path)
+    try:
+        log.write(b"a" * (jobs.MAX_LOG_BYTES + 100))
+        log.write(b"b" * (jobs.MAX_LOG_BYTES + 100))
+    finally:
+        log.close()
+    path = Path(job.log_path)
+    assert path.stat().st_size == jobs.MAX_LOG_BYTES
+    assert path.read_bytes() == b"b" * jobs.MAX_LOG_BYTES
+    assert [item.name for item in path.parent.iterdir()] == [path.name]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory modes")
-def test_existing_world_writable_nonsticky_log_directory_is_rejected(tmp_path):
+def test_existing_world_writable_log_directory_is_accepted(tmp_path):
+    from cvebeacon.dashboard_jobs import JobStore, _JobLog
     directory = tmp_path / "dashboard-jobs"
     directory.mkdir(mode=0o777)
     directory.chmod(0o777)
-    with pytest.raises(StateError):
-        jobs.JobStore(tmp_path / "jobs.db").create("scan", "admin", ["scan"])
+    store = JobStore(tmp_path / "jobs.db")
+    job = store.create("scan", "admin", ["scan"])
+    log = _JobLog(job.log_path)
+    log.write(b"shared log storage")
+    log.close()
+    assert store.log_tail(job) == "shared log storage"
 
 
 def test_capture_failure_reaps_child_before_marking_failed(tmp_path, monkeypatch):

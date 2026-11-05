@@ -37,7 +37,7 @@ def test_preserves_core_exit_and_health(tmp_path, code):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX mounted directory modes")
-@pytest.mark.parametrize("mode", [0o775, 0o1777])
+@pytest.mark.parametrize("mode", [0o775, 0o777, 0o1777])
 def test_real_core_preserves_coverage_warning_in_shared_state(tmp_path, mode):
     config, _ = setup(tmp_path)
     shared = tmp_path / "core-state"

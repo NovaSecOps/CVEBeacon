@@ -1,9 +1,10 @@
 """Crash-safe resource locks for data-changing CVEBeacon operations.
 
 The locks coordinate the dashboard's background jobs with scheduled and
-interactive command-line runs. Persistent, owner-only files live in the
-storage directories; the operating system releases locks when a process exits,
-so a crashed run cannot block later work permanently.
+interactive command-line runs. Persistent lock files live in the storage
+directories and carry no state, so they may be shared with another service
+account; the operating system releases locks when a process exits, so a
+crashed run cannot block later work permanently.
 """
 
 from __future__ import annotations
@@ -231,7 +232,9 @@ class RunLock:
     def _open(self) -> int:
         try:
             private_directory(self.path.parent)
-            return private_file(self.path, create=True)
+            # The lock file carries no state. It may pre-exist from another
+            # service account, so do not require its owner or permissions.
+            return private_file(self.path, create=True, owner_only=False)
         except OSError as exc:
             raise CVEBeaconError("cannot open the run lock safely") from exc
 

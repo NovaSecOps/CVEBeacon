@@ -26,7 +26,7 @@ def test_shared_watch_database_has_one_lock(tmp_path):
         assert not contender.acquire()
 
 
-@pytest.mark.parametrize("unsafe", ["hardlink", "symlink", "mode", "directory"])
+@pytest.mark.parametrize("unsafe", ["hardlink", "symlink", "directory"])
 def test_lock_refuses_unsafe_files_without_changing_target(tmp_path, unsafe):
     target = tmp_path / "target"
     target.write_bytes(b"keep this content")
@@ -36,15 +36,40 @@ def test_lock_refuses_unsafe_files_without_changing_target(tmp_path, unsafe):
         os.link(target, path)
     elif unsafe == "symlink":
         path.symlink_to(target)
-    elif unsafe == "mode":
-        path.write_bytes(b"unsafe")
-        path.chmod(0o666)
     else:
         path.mkdir()
     with pytest.raises(CVEBeaconError):
         with RunLock(path):
             pass
     assert target.read_bytes() == b"keep this content"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and modes")
+def test_lock_accepts_permissive_file_from_another_account(tmp_path, monkeypatch):
+    path = tmp_path / "run.lock"
+    path.write_bytes(b"holder metadata")
+    path.chmod(0o666)
+    real_lstat = Path.lstat
+    def foreign_owner(target, *args, **kwargs):
+        details = real_lstat(target, *args, **kwargs)
+        if target == path:
+            values = list(details)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return details
+    monkeypatch.setattr(Path, "lstat", foreign_owner)
+    with RunLock(path, command="scan"):
+        pass
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_job_history_still_requires_a_private_file(tmp_path):
+    from cvebeacon.dashboard_jobs import JobStore
+    path = tmp_path / "jobs.db"
+    path.write_bytes(b"")
+    path.chmod(0o666)
+    with pytest.raises(CVEBeaconError):
+        JobStore(path).initialize()
 
 
 def test_lock_rejects_symlinked_directory_before_creating_targets(tmp_path):
@@ -86,22 +111,17 @@ def test_contention_without_readable_metadata_is_still_busy(tmp_path, monkeypatc
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
-def test_lock_refuses_preexisting_writable_directory_with_fix(tmp_path):
+def test_lock_accepts_preexisting_world_writable_directory(tmp_path):
     shared = tmp_path / "shared"
     shared.mkdir()
     shared.chmod(0o777)
-    try:
-        with pytest.raises(CVEBeaconError) as caught:
-            RunLock(shared / "run.lock").acquire()
-    finally:
-        shared.chmod(0o700)
-    message = str(caught.value)
-    assert str(shared) in message
-    assert f"chmod o-w {shared}" in message
+    with RunLock(shared / "run.lock"):
+        assert (shared / "run.lock").exists()
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o777
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
-@pytest.mark.parametrize("mode", [0o770, 0o775, 0o1777])
+@pytest.mark.parametrize("mode", [0o770, 0o775, 0o777, 0o1777])
 def test_lock_and_job_storage_accept_shared_directories(tmp_path, mode):
     from cvebeacon.dashboard_jobs import JobStore, _JobLog
     shared = tmp_path / "shared"
@@ -122,11 +142,11 @@ def test_lock_and_job_storage_accept_shared_directories(tmp_path, mode):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory ownership")
-def test_lock_accepts_foreign_owned_sticky_mount(tmp_path, monkeypatch):
+def test_lock_accepts_foreign_owned_world_writable_mount(tmp_path, monkeypatch):
     real_lstat = Path.lstat
     shared = tmp_path / "shared"
     shared.mkdir()
-    shared.chmod(0o1777)
+    shared.chmod(0o777)
     def mounted_owner(path, *args, **kwargs):
         details = real_lstat(path, *args, **kwargs)
         if path == shared or (path in shared.parents and path != Path("/")):

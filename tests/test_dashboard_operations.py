@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 import re
 import stat
 import sys
@@ -255,6 +256,8 @@ def test_cancel_sends_interrupt_and_cleanup_runs(ops, tmp_path):
                 raise SystemExit(130)
 
             signal.signal(signal.SIGINT, stop)
+            if hasattr(signal, "SIGBREAK"):
+                signal.signal(signal.SIGBREAK, stop)
             print("ready", flush=True)
             time.sleep(30)
             """,
@@ -552,10 +555,23 @@ def test_job_history_store_retains_only_the_latest_jobs(tmp_path):
 
 
 def test_job_history_file_is_owner_only(tmp_path):
+    from cvebeacon.dashboard_jobs import _JobLog
     store = JobStore(tmp_path / "jobs.db")
     job = store.create("scan", "admin", ["scan"])
-    assert stat.S_IMODE((tmp_path / "jobs.db").stat().st_mode) == 0o600
-    assert Path(job.log_path).parent.stat().st_mode & 0o077 == 0
+    log = _JobLog(job.log_path)
+    log.write(b"private log")
+    log.close()
+    paths = (tmp_path / "jobs.db", Path(job.log_path))
+    if os.name == "nt":
+        import msvcrt
+        from cvebeacon.windows_private import validate_handle
+        for path in paths:
+            with open(path, "rb") as handle:
+                validate_handle(msvcrt.get_osfhandle(handle.fileno()))
+    else:
+        for path in paths:
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert Path(job.log_path).parent.stat().st_mode & 0o077 == 0
 
 
 def test_abandoned_jobs_are_failed_after_a_restart(tmp_path):
