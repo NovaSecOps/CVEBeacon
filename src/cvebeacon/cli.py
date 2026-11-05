@@ -7,6 +7,8 @@ import getpass
 import json
 import logging
 import secrets
+import signal
+import threading
 import sys
 import warnings
 from contextlib import closing
@@ -932,7 +934,7 @@ def _lock_required(args: argparse.Namespace) -> bool:
         return True
     if args.command != "watch":
         return False
-    if args.watch_command in {"sync", "run", "evaluate"}:
+    if args.watch_command in {"sync", "run", "evaluate", "report", "unreport"}:
         return True
     return (
         args.watch_command == "notify"
@@ -1207,6 +1209,16 @@ def _reject_password_arguments(arguments: list[str]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else list(argv)
+    # Frozen interpreters may ignore PYTHONUNBUFFERED. Progress must still
+    # reach a dashboard pipe before the command finishes.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and callable(getattr(stream, "reconfigure", None)):
+            stream.reconfigure(line_buffering=True)
+    break_signal = getattr(signal, "SIGBREAK", None)
+    previous_break = None
+    if break_signal is not None and threading.current_thread() is threading.main_thread():
+        previous_break = signal.getsignal(break_signal)
+        signal.signal(break_signal, signal.default_int_handler)
     try:
         _reject_password_arguments(arguments)
         parser = _parser(); args = parser.parse_args(arguments)
@@ -1221,6 +1233,9 @@ def main(argv: list[str] | None = None) -> int:
         print("error: not enough memory to complete the command", file=sys.stderr); return 2
     except KeyboardInterrupt:
         print("cancelled", file=sys.stderr); return 130
+    finally:
+        if previous_break is not None:
+            signal.signal(break_signal, previous_break)
 
 
 if __name__ == "__main__":

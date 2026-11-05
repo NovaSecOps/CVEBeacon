@@ -2,7 +2,7 @@
 
 The lock coordinates the dashboard's background jobs with scheduled and
 interactive command-line runs. It is a persistent, owner-only file in the
-state directory; the operating system releases the lock when a process exits,
+watch database directory; the operating system releases the lock when a process exits,
 so a crashed run cannot block later work permanently.
 """
 
@@ -16,6 +16,7 @@ from pathlib import Path
 import socket
 
 from .errors import CVEBeaconError
+from .private_storage import private_directory, private_file
 
 LOCK_NAME = "cvebeacon-run.lock"
 _METADATA_LIMIT = 4096
@@ -35,7 +36,7 @@ class RunInProgress(CVEBeaconError):
 
 def run_lock_path(config) -> Path:
     """Return the single lock path shared by CLI and dashboard in a config."""
-    return Path(config.database_path).parent / LOCK_NAME
+    return Path(config.watch.database).resolve().parent / LOCK_NAME
 
 
 def _account_name() -> str:
@@ -99,7 +100,8 @@ class RunLock:
             return
         import fcntl
 
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        kind = fcntl.LOCK_SH if getattr(self, "_probing", False) else fcntl.LOCK_EX
+        fcntl.flock(descriptor, kind | fcntl.LOCK_NB)
 
     def _unlock(self, descriptor: int) -> None:
         if os.name == "nt":  # pragma: no cover - exercised on Windows
@@ -115,31 +117,12 @@ class RunLock:
     def acquire(self) -> bool:
         if self._descriptor is not None:
             return True
+        descriptor = self._open()
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            descriptor = os.open(
-                self.path,
-                os.O_RDWR
-                | os.O_CREAT
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_BINARY", 0),
-                0o600,
-            )
-        except OSError as exc:
-            raise CVEBeaconError(
-                f"cannot open the run lock {self.path}: {exc}"
-            ) from exc
-        try:
-            if os.name == "nt":  # pragma: no cover - exercised on Windows
-                if os.fstat(descriptor).st_size == 0:
-                    os.write(descriptor, b"\n")
             try:
                 self._lock(descriptor)
             except OSError:
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                self.holder = describe_holder(
-                    os.read(descriptor, _METADATA_LIMIT)
-                )
+                self.holder = self._holder(descriptor)
                 os.close(descriptor)
                 return False
             metadata = {
@@ -152,16 +135,11 @@ class RunLock:
             if self.command:
                 metadata["command"] = self.command
             payload = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
-            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.lseek(descriptor, 1, os.SEEK_SET)
             written = 0
             while written < len(payload):
                 written += os.write(descriptor, payload[written:])
-            os.ftruncate(descriptor, len(payload))
-            if os.name == "posix":
-                try:
-                    os.fchmod(descriptor, 0o600)
-                except OSError:
-                    pass
+            os.ftruncate(descriptor, len(payload) + 1)
             self._descriptor = descriptor
             return True
         except BaseException:
@@ -177,13 +155,10 @@ class RunLock:
             return
         self._descriptor = None
         try:
-            if os.name == "nt":  # pragma: no cover - exercised on Windows
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                self._unlock(descriptor)
-                os.ftruncate(descriptor, 0)
-            else:
-                os.ftruncate(descriptor, 0)
-                self._unlock(descriptor)
+            # Byte zero is reserved for Windows locking. Never write it, and
+            # clear metadata while still locked so a successor cannot be erased.
+            os.ftruncate(descriptor, 1)
+            self._unlock(descriptor)
         except OSError:
             pass
         finally:
@@ -192,38 +167,38 @@ class RunLock:
             except OSError:
                 pass
 
-    def probe(self) -> str | None:
-        """Return the current holder without disturbing the lock.
-
-        ``None`` means the lock is free. The check is advisory; the real
-        command still takes the lock before changing data.
-        """
+    def _open(self) -> int:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            descriptor = os.open(
-                self.path,
-                os.O_RDWR
-                | os.O_CREAT
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_BINARY", 0),
-                0o600,
-            )
+            private_directory(self.path.parent)
+            return private_file(self.path, create=True)
         except OSError as exc:
-            raise CVEBeaconError(
-                f"cannot inspect the run lock {self.path}: {exc}"
-            ) from exc
+            raise CVEBeaconError("cannot open the run lock safely") from exc
+
+    @staticmethod
+    def _holder(descriptor: int) -> str:
         try:
-            if os.name == "nt" and os.fstat(descriptor).st_size == 0:
-                # msvcrt locks a byte range, so the file must contain one.
-                os.write(descriptor, b"\n")
+            os.lseek(descriptor, 1, os.SEEK_SET)
+            return describe_holder(os.read(descriptor, _METADATA_LIMIT)) or "holder unavailable"
+        except OSError:
+            return "holder unavailable"
+
+    def probe(self) -> str | None:
+        """Advisory contention check; the child always takes the real lock.
+
+        POSIX readers share a probe lock. Windows requires a brief nonblocking
+        byte-range attempt. Contention is busy even without readable metadata.
+        """
+        descriptor = self._open()
+        self._probing = True
+        try:
             try:
                 self._lock(descriptor)
             except OSError:
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                return describe_holder(os.read(descriptor, _METADATA_LIMIT))
+                return self._holder(descriptor)
             self._unlock(descriptor)
             return None
         finally:
+            self._probing = False
             os.close(descriptor)
 
     def __enter__(self) -> "RunLock":
