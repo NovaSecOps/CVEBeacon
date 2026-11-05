@@ -72,15 +72,24 @@ option cannot silently fall back to a less safe default.
 - `authorized_by` and `authorized_at` are required. `expires_at` is optional.
   Timestamps are ISO 8601 UTC values. A future `authorized_at` is refused.
 - `allow_redirects` defaults to true and `max_redirects` to 2 (the hard maximum
-  is 2). A redirect must stay on an endpoint present in the same allowlist,
-  stay on the same registrable domain, and must not downgrade HTTPS to HTTP.
-- Private, loopback, link-local, metadata, multicast, reserved, unspecified,
-  IPv4-mapped/compatible IPv6 and NAT64 answers are refused by default. Set
+  is 2). The authorisation unit is the scheme, host and port of each listed
+  entry; the configured path is only the starting point. A redirect may use any
+  path and query on an allowlisted host and port, provided the path plus query
+  is at most 2,048 characters, contains no credentials and has no fragment. The
+  originating entry's `allow_redirects`, `max_redirects` and
+  `allow_private_address` policy applies to every hop, and an HTTPS to HTTP
+  downgrade is refused.
+- Private, loopback, link-local, metadata, multicast, reserved, unspecified and
+  NAT64 answers are refused. IPv4-mapped and IPv4-compatible IPv6 forms are also
+  refused by default, even when the embedded address is public. Set
   `allow_private_address: true` on a specific entry to attest an internal site;
-  loopback still needs that explicit flag. This is intended for controlled
-  internal services, not as a general scanner switch.
+  loopback and the mapped/compatible forms still need that explicit flag. NAT64
+  remains refused even with the flag. 6to4 answers are accepted only when both
+  the IPv6 address and its embedded IPv4 address are globally routable. This is
+  intended for controlled internal services, not as a general scanner switch.
 - `ca_bundle` is optional and relative paths are resolved against the
-  allowlist file. It must be a regular file.
+  allowlist file. It must be a regular file, not a symlink. Its certificates are
+  trusted in addition to the system roots.
 
 Preview the request count without resolving or sending anything:
 
@@ -101,10 +110,13 @@ cvebeacon-ext web detect --client acme --assets acme-assets.json \
 - Resolve first, reject the asset if any answer is non-global (unless
   `allow_private_address` is set), then connect to the validated IP while
   keeping the original Host header and TLS SNI. Every redirect is resolved and
-  validated again.
+  validated again. DNS resolution runs in a bounded worker.
 - Connect timeout 5 seconds, read timeout 10 seconds and 20 seconds total per
-  asset. Response headers are capped at 64 KiB and the decompressed body at
-  2 MiB; gzip and deflate streams are decoded incrementally with the same cap.
+  asset, covering resolution, connect, header parsing and every body read.
+  Response headers (including the status line) are capped at 64 KiB before they
+  are parsed, and the decompressed body at 2 MiB. Gzip and deflate streams must
+  be complete; concatenated gzip members are decoded under one cumulative cap
+  and chunk framing and trailers count toward the 4 MiB compressed wire limit.
 - At most 4 assets run concurrently, with one request per host per second. A
   run is capped at 1,000 assets and 15 minutes.
 - `429` and `503` stop that host for the rest of the run and record
@@ -116,10 +128,12 @@ cvebeacon-ext web detect --client acme --assets acme-assets.json \
 ### Output and feeding the core inventory
 
 The command writes the usual `cvebeacon.inventory.v1` snapshot, manifest and
-`<snapshot>.review.json`. Every inventory row carries the `client` label, and
-one snapshot is produced per client run. Asset and system IDs are stable,
-client-scoped hashes rather than raw hostnames. CDN and edge technologies have
-`category = "edge"` and are never attributed to the origin server.
+`<snapshot>.review.json`. The review sidecar, snapshot and manifest are
+published under one output lock. Every inventory row carries the `client`
+label, and one snapshot is produced per client run. Asset and system IDs are
+stable, client-scoped hashes rather than raw hostnames. CDN and edge
+technologies have `category = "edge"` and are never attributed to the origin
+server.
 
 Unknown versions are never written as `unknown` or inferred. When a validated
 CPE carries the product identity, the row keeps an empty version and a
@@ -142,10 +156,13 @@ Validate or merge the result with the normal extension commands, then point the
 core inventory at it. The core remains the applicability authority:
 
 ```console
-cvebeacon-ext validate acme-web.json
+cvebeacon-ext validate acme-web.json --allow-partial
 cvebeacon-ext merge acme-web.json other-client-web.json \
   --output inventory.json --source-id central
 ```
+
+Add `--allow-partial` to `validate` whenever the snapshot is partial (for
+example after a version-unknown review or an accepted fetch failure).
 
 ```toml
 [inventory]

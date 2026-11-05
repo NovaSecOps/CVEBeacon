@@ -29,7 +29,7 @@ from cvebeacon.identity import validate_client_name
 
 from . import __version__
 from .contract import (ExtensionError, MAX_BYTES, _atomic, _regular, decode_json, json_bytes,
-                       label, read_bytes, timestamp, utc_now, write_snapshot)
+                       label, output_lock, read_bytes, timestamp, utc_now, write_snapshot)
 from .webrules import detect, page_from
 
 CONNECT_TIMEOUT = 5.0
@@ -54,14 +54,6 @@ FAILURE_REASONS = {
     "unsupported-encoding",
 }
 
-# Suffixes that make the last label pair ambiguous. This is deliberately a
-# small reviewed list, not a general public-suffix database dependency.
-_TWO_LABEL_SUFFIXES = {
-    "ac.uk", "co.in", "co.jp", "co.kr", "co.nz", "co.uk", "co.za", "com.ar",
-    "com.au", "com.br", "com.cn", "com.hk", "com.mx", "com.pl", "com.sg",
-    "com.tr", "com.tw", "com.ua", "edu.au", "gov.uk", "net.au", "net.nz",
-    "org.au", "org.uk", "org.za",
-}
 _NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _PATH = re.compile(r"/[!-~]*")
@@ -148,12 +140,6 @@ class Allowlist:
     def endpoints(self) -> frozenset[tuple[str, str, int]]:
         return frozenset((asset.endpoint.scheme, asset.endpoint.hostname, asset.endpoint.port)
                          for asset in self.assets)
-
-    def asset_for(self, endpoint: Endpoint) -> WebAsset | None:
-        key = (endpoint.scheme, endpoint.hostname, endpoint.port)
-        return next((asset for asset in self.assets
-                     if (asset.endpoint.scheme, asset.endpoint.hostname, asset.endpoint.port) == key),
-                    None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,9 +308,9 @@ def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> A
         ca_bundle = Path(value).expanduser()
         if not ca_bundle.is_absolute():
             ca_bundle = Path(path).parent / ca_bundle
-        ca_bundle = ca_bundle.resolve()
-        if not ca_bundle.is_file() or ca_bundle.is_symlink():
+        if ca_bundle.is_symlink() or not ca_bundle.is_file():
             raise ExtensionError("ca_bundle must be a regular file")
+        ca_bundle = ca_bundle.resolve()
     raw_assets = document.get("assets")
     if not isinstance(raw_assets, list) or not raw_assets:
         raise ExtensionError("assets must be a non-empty list")
@@ -374,28 +360,19 @@ def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> A
 
 def format_plan(allowlist: Allowlist) -> str:
     lines = [f"client: {allowlist.client}", f"assets: {len(allowlist.assets)}"]
-    total = 0
+    normal = 0
+    worst = 0
     for asset in allowlist.assets:
         maximum = 1 + (asset.max_redirects if asset.allow_redirects else 0)
-        total += maximum
+        normal += maximum
+        worst += maximum * (1 + MAX_RETRIES)
         lines.append(
             f"{asset.endpoint.url} GET host={asset.endpoint.hostname} port={asset.endpoint.port} "
             f"path={asset.endpoint.path} max_requests={maximum}"
         )
-    lines.append(f"planned requests: {len(allowlist.assets)} assets, up to {total} requests")
+    lines.append(f"planned requests: {len(allowlist.assets)} assets, {normal} requests on "
+                 f"the normal path, up to {worst} including connection retries")
     return "\n".join(lines)
-
-
-def _registrable_domain(hostname: str) -> str:
-    try:
-        ipaddress.ip_address(hostname)
-        return hostname
-    except ValueError:
-        pass
-    labels = hostname.casefold().split(".")
-    if len(labels) >= 3 and ".".join(labels[-2:]) in _TWO_LABEL_SUFFIXES:
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
 
 
 def _is_nat64(value: str) -> bool:
@@ -404,6 +381,11 @@ def _is_nat64(value: str) -> bool:
     except ValueError:
         return False
     return isinstance(address, ipaddress.IPv6Address) and any(address in network for network in _NAT64)
+
+
+def _is_public_unicast(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return not (address.is_multicast or address.is_reserved or address.is_unspecified
+                or address.is_loopback or address.is_link_local or address.is_private) and address.is_global
 
 
 def _is_global_address(value: str) -> bool:
@@ -416,17 +398,20 @@ def _is_global_address(value: str) -> bool:
         if any(address in network for network in _NAT64):
             return False
         if address.ipv4_mapped is not None:
-            address = address.ipv4_mapped
-        elif int(address) >> 32 == 0:
-            # IPv4-compatible, including ::1 and ::. Treat the embedded IPv4
-            # address as the real destination so it cannot bypass the policy.
-            address = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
-        elif address.sixtofour is not None:
-            address = address.sixtofour
-    if (address.is_multicast or address.is_reserved or address.is_unspecified
-            or address.is_loopback or address.is_link_local or address.is_private):
-        return False
-    return address.is_global
+            # IPv4-mapped forms are refused by default, even when the
+            # embedded address is public. Only the per-asset attestation
+            # relaxes this.
+            return False
+        if int(address) >> 32 == 0:
+            # IPv4-compatible forms, including ::1 and ::, are refused by
+            # default for the same reason.
+            return False
+        if not _is_public_unicast(address):
+            return False
+        if address.sixtofour is not None and not _is_public_unicast(address.sixtofour):
+            return False
+        return True
+    return _is_public_unicast(address)
 
 
 def _addresses(value: str, port: int) -> tuple[str, ...]:
@@ -446,6 +431,34 @@ def _addresses(value: str, port: int) -> tuple[str, ...]:
     if not result:
         raise _ConnectionFailure("DNS resolution returned no usable address")
     return tuple(result)
+
+
+def _resolve_bounded(resolver, hostname: str, port: int, deadline: float,
+                     clock: Callable[[], float]) -> tuple[str, ...]:
+    """Run the resolver in a daemon worker so a wedged lookup cannot hang a run."""
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise _TimeoutFailure("DNS resolution exceeded the asset time limit")
+    outcome: dict[str, object] = {}
+
+    def work() -> None:
+        try:
+            outcome["value"] = resolver.resolve(hostname, port)
+        except BaseException as exc:  # propagated in the calling thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=work, name="cvebeacon-web-resolve", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - clock()))
+    if worker.is_alive():
+        raise _TimeoutFailure("DNS resolution exceeded the asset time limit")
+    if "error" in outcome:
+        error = outcome["error"]
+        if isinstance(error, BaseException):
+            raise error
+        raise _ConnectionFailure("DNS resolution failed")
+    value = outcome.get("value", ())
+    return tuple(value) if isinstance(value, (list, tuple)) else ()
 
 
 class SystemResolver:
@@ -482,33 +495,57 @@ def _content_encoding(headers: Mapping[str, tuple[str, ...]]) -> str:
 class _BodyDecoder:
     def __init__(self, encoding: str):
         self.encoding = encoding
+        self._gzip = encoding in {"gzip", "x-gzip"}
         self._deflate = encoding == "deflate"
         self._raw = False
-        if encoding in {"gzip", "x-gzip"}:
-            self._object = zlib.decompressobj(16 + zlib.MAX_WBITS)
-        elif self._deflate:
-            self._object = zlib.decompressobj()
+        if self._gzip or self._deflate:
+            self._object = self._new()
         else:
             raise _UnsupportedEncodingFailure("unsupported content encoding")
+
+    def _new(self):
+        if self._gzip:
+            return zlib.decompressobj(16 + zlib.MAX_WBITS)
+        if self._raw:
+            return zlib.decompressobj(-zlib.MAX_WBITS)
+        return zlib.decompressobj()
+
+    def _decompress(self, data: bytes, limit: int) -> bytes:
+        try:
+            return self._object.decompress(data, limit)
+        except zlib.error as exc:
+            if self._deflate and not self._raw:
+                self._raw = True
+                self._object = self._new()
+                try:
+                    return self._object.decompress(data, limit)
+                except zlib.error:
+                    pass
+            raise _UnsupportedEncodingFailure("invalid compressed response body") from exc
 
     def feed(self, chunk: bytes, remaining: int) -> bytes:
         output = bytearray()
         data = chunk
         while data:
-            try:
-                part = self._object.decompress(data, remaining - len(output) + 1)
-            except zlib.error as exc:
-                if self._deflate and not self._raw:
-                    self._raw = True
-                    self._object = zlib.decompressobj(-zlib.MAX_WBITS)
-                    continue
-                raise _UnsupportedEncodingFailure("invalid compressed response body") from exc
+            if self._object.eof:
+                trailing = self._object.unused_data or self._object.unconsumed_tail
+                if not trailing:
+                    break
+                if not self._gzip:
+                    raise _UnsupportedEncodingFailure("trailing data after a complete compressed stream")
+                self._object = self._new()
+                data = trailing
+                continue
+            part = self._decompress(data, remaining - len(output) + 1)
             output.extend(part)
             if len(output) > remaining:
                 raise _TooLargeFailure("decompressed body exceeds 2 MiB")
-            data = self._object.unconsumed_tail
-            if data and not part:
-                raise _UnsupportedEncodingFailure("invalid compressed response body")
+            if self._object.unconsumed_tail:
+                data = self._object.unconsumed_tail
+            elif self._object.eof:
+                data = self._object.unused_data
+            else:
+                data = b""
         return bytes(output)
 
     def finish(self, remaining: int) -> bytes:
@@ -518,12 +555,17 @@ class _BodyDecoder:
             raise _UnsupportedEncodingFailure("invalid compressed response body") from exc
         if len(part) > remaining:
             raise _TooLargeFailure("decompressed body exceeds 2 MiB")
+        if not self._object.eof:
+            raise _UnsupportedEncodingFailure("compressed response body ended before the stream was complete")
+        if self._object.unused_data:
+            raise _UnsupportedEncodingFailure("trailing data after a complete compressed stream")
         return part
 
 
 def read_body(reader, content_encoding: str, *, deadline: float | None = None,
               clock: Callable[[], float] = time.monotonic, limit: int = BODY_LIMIT,
-              wire_limit: int = WIRE_LIMIT) -> bytes:
+              wire_limit: int = WIRE_LIMIT,
+              before_read: Callable[[], None] | None = None) -> bytes:
     """Stream a response body, decoding gzip/deflate with a hard output cap."""
     decoder = None if content_encoding in {"", "identity"} else _BodyDecoder(content_encoding)
     output = bytearray()
@@ -531,6 +573,8 @@ def read_body(reader, content_encoding: str, *, deadline: float | None = None,
     while True:
         if deadline is not None and clock() >= deadline:
             raise _TimeoutFailure("response exceeded the asset time limit")
+        if before_read is not None:
+            before_read()
         chunk = reader.read(65536)
         if not chunk:
             break
@@ -548,24 +592,170 @@ def read_body(reader, content_encoding: str, *, deadline: float | None = None,
     return bytes(output)
 
 
+class _DeadlineReader:
+    """Socket reader that bounds total bytes and checks the deadline per read."""
+
+    def __init__(self, sock: socket.socket, *, deadline: float, clock: Callable[[], float],
+                 limit: int, message: str):
+        self._sock = sock
+        self._deadline = deadline
+        self._clock = clock
+        self._limit = limit
+        self._message = message
+        self._buffer = bytearray()
+        self._eof = False
+        self.count = 0
+
+    def set_limit(self, limit: int, message: str) -> None:
+        self._limit = limit
+        self._message = message
+        self.count = 0
+
+    def _fill(self) -> bool:
+        if self._eof:
+            return False
+        remaining = self._deadline - self._clock()
+        if remaining <= 0:
+            raise _TimeoutFailure("response exceeded the asset time limit")
+        self._sock.settimeout(min(READ_TIMEOUT, remaining))
+        try:
+            data = self._sock.recv(65536)
+        except (socket.timeout, TimeoutError) as exc:
+            raise _TimeoutFailure("network read timed out") from exc
+        if not data:
+            self._eof = True
+            return False
+        self._buffer.extend(data)
+        return True
+
+    def _consume(self, size: int) -> bytes:
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        self.count += len(data)
+        if self.count > self._limit:
+            raise _TooLargeFailure(self._message)
+        return data
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            while self._fill():
+                pass
+            return self._consume(len(self._buffer))
+        while len(self._buffer) < size and not self._eof:
+            if not self._fill():
+                break
+        return self._consume(min(size, len(self._buffer)))
+
+    def readline(self, size: int = -1) -> bytes:
+        limit = None if size is None or size < 0 else size
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                end = newline + 1
+                if limit is not None:
+                    end = min(end, limit)
+                return self._consume(end)
+            if limit is not None and len(self._buffer) >= limit:
+                return self._consume(limit)
+            if not self._fill():
+                end = len(self._buffer) if limit is None else min(limit, len(self._buffer))
+                return self._consume(end)
+
+    def readinto(self, buffer) -> int:
+        data = self.read(len(buffer))
+        buffer[:len(data)] = data
+        return len(data)
+
+    def read1(self, size: int = -1) -> bytes:
+        return self.read(size)
+
+    def peek(self, size: int = -1) -> bytes:
+        while not self._buffer and not self._eof:
+            if not self._fill():
+                break
+        return bytes(self._buffer if size is None or size < 0 else self._buffer[:size])
+
+    def settimeout(self, timeout: float | None) -> None:
+        self._sock.settimeout(timeout)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        # The owning HTTPConnection closes the socket; the response object must
+        # be able to detach without racing that close.
+        self._buffer.clear()
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+
+class _BoundHTTPResponse(http.client.HTTPResponse):
+    def __init__(self, sock: socket.socket, *, deadline: float, clock: Callable[[], float]):
+        super().__init__(sock, method="GET")
+        self.fp.close()
+        self.fp = _DeadlineReader(sock, deadline=deadline, clock=clock, limit=HEADER_LIMIT,
+                                  message="response headers exceed 64 KiB")
+
+    def begin(self) -> None:
+        super().begin()
+        self.fp.set_limit(WIRE_LIMIT, "response body exceeds the wire limit")
+
+
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     def __init__(self, host: str, port: int, address: str, *, timeout: float):
         super().__init__(host, port, timeout=timeout)
         self._address = address
 
     def connect(self) -> None:
-        self.sock = socket.create_connection((self._address, self.port), self.timeout)
+        family = socket.AF_INET6 if ":" in self._address else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect((self._address, self.port))
+        except BaseException:
+            sock.close()
+            raise
+        self.sock = sock
 
 
-class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+class _PinnedHTTPSConnection(http.client.HTTPConnection):
     def __init__(self, host: str, port: int, address: str, *, context: ssl.SSLContext,
-                 timeout: float):
-        super().__init__(host, port, context=context, timeout=timeout)
+                 timeout: float, deadline: float, clock: Callable[[], float]):
+        super().__init__(host, port, timeout=timeout)
         self._address = address
+        self._context = context
+        self._deadline = deadline
+        self._clock = clock
+
+    @staticmethod
+    def _expire(sock: socket.socket) -> None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def connect(self) -> None:
-        sock = socket.create_connection((self._address, self.port), self.timeout)
-        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        family = socket.AF_INET6 if ":" in self._address else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        timer = None
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect((self._address, self.port))
+            remaining = self._deadline - self._clock()
+            if remaining <= 0:
+                raise _TimeoutFailure("asset exceeded the total time limit")
+            sock.settimeout(remaining)
+            timer = threading.Timer(remaining, self._expire, args=(sock,))
+            timer.daemon = True
+            timer.start()
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        except BaseException:
+            sock.close()
+            raise
+        finally:
+            if timer is not None:
+                timer.cancel()
 
 
 class StdlibTransport:
@@ -574,11 +764,19 @@ class StdlibTransport:
 
     @staticmethod
     def _context(ca_bundle: Path | None) -> ssl.SSLContext:
-        context = ssl.create_default_context(cafile=str(ca_bundle) if ca_bundle else None)
+        context = ssl.create_default_context()
+        if ca_bundle is not None:
+            context.load_verify_locations(cafile=str(ca_bundle))
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = True
         context.verify_mode = ssl.CERT_REQUIRED
         return context
+
+    def _timeout(self, socket_, deadline: float) -> None:
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            raise _TimeoutFailure("asset exceeded the total time limit")
+        socket_.settimeout(min(READ_TIMEOUT, remaining))
 
     def fetch(self, endpoint: Endpoint, address: str, *, ca_bundle: Path | None,
               deadline: float, user_agent: str) -> _Response:
@@ -592,14 +790,14 @@ class StdlibTransport:
             except (ssl.SSLError, OSError) as exc:
                 raise _TlsFailure("TLS trust store could not be loaded") from exc
             connection = _PinnedHTTPSConnection(endpoint.hostname, endpoint.port, address,
-                                                context=context, timeout=connect_timeout)
+                                                context=context, timeout=connect_timeout,
+                                                deadline=deadline, clock=self._clock)
         else:
             connection = _PinnedHTTPConnection(endpoint.hostname, endpoint.port, address,
                                                timeout=connect_timeout)
         try:
             connection.connect()
-            if connection.sock is not None:
-                connection.sock.settimeout(max(0.1, min(READ_TIMEOUT, deadline - self._clock())))
+            self._timeout(connection.sock, deadline)
             connection.request("GET", endpoint.path, headers={
                 "Host": endpoint.authority,
                 "User-Agent": user_agent,
@@ -609,20 +807,31 @@ class StdlibTransport:
                 "Cache-Control": "no-cache",
                 "Connection": "close",
             })
-            response = connection.getresponse()
+            response = _BoundHTTPResponse(connection.sock, deadline=deadline, clock=self._clock)
+            response.begin()
             items = response.getheaders()
             _check_header_size(items)
             headers = _header_map(items)
+            if not 200 <= response.status < 300:
+                # Redirect and error bodies are not part of the observation.
+                # Reading status first also lets the caller stop a host before
+                # any body decoding can fail.
+                return _Response(response.status, headers, b"")
             body = read_body(response, _content_encoding(headers), deadline=deadline,
-                             clock=self._clock)
+                             clock=self._clock,
+                             before_read=lambda: self._timeout(connection.sock, deadline))
             return _Response(response.status, headers, body)
         except ssl.SSLError as exc:
+            if self._clock() >= deadline:
+                raise _TimeoutFailure("asset exceeded the total time limit") from exc
             raise _TlsFailure("TLS verification or handshake failed") from exc
         except (socket.timeout, TimeoutError) as exc:
             raise _TimeoutFailure("network read timed out") from exc
         except http.client.LineTooLong as exc:
             raise _TooLargeFailure("a response header line exceeded the limit") from exc
         except (ConnectionError, OSError) as exc:
+            if self._clock() >= deadline:
+                raise _TimeoutFailure("asset exceeded the total time limit") from exc
             raise _ConnectionFailure("connection failed") from exc
         except http.client.HTTPException as exc:
             raise _ConnectionFailure("invalid HTTP response") from exc
@@ -639,19 +848,27 @@ class _Pacer:
         self._last: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def wait(self, hostname: str) -> None:
+    def wait(self, hostname: str, deadline: float | None = None) -> None:
         if self._interval <= 0:
             return
         while True:
+            now = self._clock()
+            remaining = None if deadline is None else deadline - now
+            if remaining is not None and remaining <= 0:
+                raise _TimeoutFailure("pacing exceeded the asset time limit")
             with self._lock:
-                now = self._clock()
                 previous = self._last.get(hostname)
                 delay = self._interval - (now - previous) if previous is not None else 0.0
                 if delay <= 0:
                     self._last[hostname] = now
                     return
+            if remaining is not None:
+                delay = min(delay, remaining)
             before = self._clock()
-            self._sleep(delay)
+            if delay > 0:
+                self._sleep(delay)
+            if remaining is not None and self._clock() >= deadline:
+                raise _TimeoutFailure("pacing exceeded the asset time limit")
             if self._clock() <= before:
                 # A test seam or a clock with insufficient resolution must not
                 # spin forever. Real sleeping always advances the clock.
@@ -705,8 +922,9 @@ class Fetcher:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return min(max(int((parsed - datetime.now(timezone.utc)).total_seconds()), 0), 86400)
 
-    def _address(self, endpoint: Endpoint, asset: WebAsset) -> str:
-        addresses = self.resolver.resolve(endpoint.hostname, endpoint.port)
+    def _address(self, endpoint: Endpoint, asset: WebAsset, deadline: float) -> str:
+        addresses = _resolve_bounded(self.resolver, endpoint.hostname, endpoint.port, deadline,
+                                     self._clock)
         if not addresses:
             raise _ConnectionFailure("DNS resolution returned no address")
         accepted = []
@@ -734,8 +952,8 @@ class Fetcher:
                 detail = "host stopped after a rate-limit response"
                 raise _BlockedFailure(detail, retry_after=blocked)
             try:
-                address = self._address(endpoint, asset)
-                self._pacer.wait(endpoint.hostname)
+                address = self._address(endpoint, asset, deadline)
+                self._pacer.wait(endpoint.hostname, deadline)
                 blocked = self._blocked_info(endpoint.hostname)
                 if blocked is not False:
                     raise _BlockedFailure("host stopped after a rate-limit response",
@@ -765,11 +983,10 @@ class Fetcher:
                 raise _ConnectionFailure(f"HTTP {response.status}", status=response.status)
             return response
 
-    def _redirect(self, current: Endpoint, location: str, asset: WebAsset,
-                  allowlist: Allowlist) -> Endpoint:
+    def _redirect(self, current: Endpoint, location: str, allowlist: Allowlist) -> Endpoint:
         try:
             target = urlsplit(urljoin(current.url, location))
-            port = target.port
+            target_port = target.port
             target_host = target.hostname
         except ValueError as exc:
             raise _RedirectFailure("redirect target is not a valid URL") from exc
@@ -782,18 +999,19 @@ class Fetcher:
         scheme = target.scheme.casefold()
         if current.scheme == "https" and scheme == "http":
             raise _RedirectFailure("HTTPS to HTTP downgrade is not allowed")
-        hostname = _hostname(target_host)
-        port = _port(port, scheme)
-        path = target.path or "/"
-        if target.query:
-            path += "?" + target.query
-        if not _PATH.fullmatch(path.split("?", 1)[0]) or any(
+        try:
+            hostname = _hostname(target_host)
+            port = _port(target_port, scheme)
+        except ExtensionError as exc:
+            raise _RedirectFailure("redirect target is not a valid host and port") from exc
+        path = (target.path or "/") + (("?" + target.query) if target.query else "")
+        if len(path) > 2048:
+            raise _RedirectFailure("redirect target path and query exceed 2048 characters")
+        if not _PATH.fullmatch(target.path or "/") or any(
                 ord(character) < 33 or ord(character) > 126 for character in path):
             raise _RedirectFailure("redirect target has an invalid path")
-        if _registrable_domain(current.hostname) != _registrable_domain(hostname):
-            raise _RedirectFailure("redirect leaves the registrable domain")
         if (scheme, hostname, port) not in allowlist.endpoints:
-            raise _RedirectFailure("redirect target is not in the allowlist")
+            raise _RedirectFailure("redirect target is not an allowlisted host and port")
         return Endpoint(scheme, hostname, port, path)
 
     def fetch(self, asset: WebAsset, allowlist: Allowlist, *, run_deadline: float | None = None) -> _FetchSuccess:
@@ -801,31 +1019,24 @@ class Fetcher:
         if run_deadline is not None:
             deadline = min(deadline, run_deadline)
         current = asset.endpoint
-        current_asset = asset
-        max_redirects = asset.max_redirects
         redirects: list[str] = []
         observed_at = self._now()
         for hop in range(asset.max_redirects + 1):
             if self._clock() >= deadline:
                 raise _TimeoutFailure("asset exceeded the total time limit")
-            response = self._request(current, current_asset, deadline, allowlist.ca_bundle)
+            response = self._request(current, asset, deadline, allowlist.ca_bundle)
             if response.status not in REDIRECT_STATUSES:
                 if not 200 <= response.status < 300:
                     raise _ConnectionFailure(f"HTTP {response.status}", status=response.status)
                 return _FetchSuccess(response, tuple(redirects), observed_at)
-            if not asset.allow_redirects or hop >= max_redirects:
+            if not asset.allow_redirects or hop >= asset.max_redirects:
                 raise _RedirectFailure("redirect limit reached", status=response.status)
             locations = response.headers.get("location", ())
             if not locations:
                 raise _RedirectFailure("redirect response has no Location", status=response.status)
-            target = self._redirect(current, locations[0], asset, allowlist)
-            target_asset = allowlist.asset_for(target)
-            if target_asset is None:
-                raise _RedirectFailure("redirect target is not in the allowlist")
+            target = self._redirect(current, locations[0], allowlist)
             redirects.append(target.url)
             current = target
-            current_asset = target_asset
-            max_redirects = min(max_redirects, target_asset.max_redirects)
         raise _RedirectFailure("redirect limit reached")
 
 
@@ -853,6 +1064,18 @@ def _asset_id(client: str, endpoint: Endpoint, vendor: str, product: str) -> str
     value = "\0".join((client, endpoint.scheme, endpoint.hostname, str(endpoint.port),
                        endpoint.path, vendor, product)).encode("utf-8")
     return "web-" + hashlib.sha256(value).hexdigest()[:32]
+
+
+def _preferred_version(versions: tuple[str, ...]) -> str | None:
+    """Return the most specific version when every value is a prefix of it."""
+    if not versions:
+        return ""
+    ordered = sorted(versions, key=lambda value: (value.count("."), len(value), value))
+    longest = ordered[-1]
+    for value in ordered[:-1]:
+        if longest != value and not longest.startswith(value + ".") and not longest.startswith(value + "-"):
+            return None
+    return longest
 
 
 @dataclass(slots=True)
@@ -897,13 +1120,14 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
         row_id = _asset_id(allowlist.client, asset.endpoint, detection.vendor,
                            detection.product)
         detail = dict(base, asset_id=row_id)
-        if len(detection.versions) > 1:
+        preferred = _preferred_version(detection.versions)
+        if preferred is None:
             reviews.append(dict(detail, reason="version-conflict", product=display,
                                 category=detection.category, versions=list(detection.versions),
                                 confidence=detection.confidence))
             omissions.add("version-conflict")
             continue
-        version = detection.versions[0] if detection.versions else ""
+        version = preferred
         if not version and not detection.cpe:
             # The core product identity requires a version unless an explicit
             # CPE carries the identity. Keep the observation as a review item
@@ -962,6 +1186,8 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     if Path(path).resolve() in destinations:
         raise ExtensionError("output must not overwrite the asset allowlist")
     allowlist = load_allowlist(Path(path), client=client, now=now())
+    if allowlist.ca_bundle is not None and allowlist.ca_bundle.resolve() in destinations:
+        raise ExtensionError("output must not overwrite the CA bundle")
     if plan:
         print(format_plan(allowlist))
         return None
@@ -969,7 +1195,8 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                       now=now, host_interval=host_interval)
     run_deadline = clock() + RUN_TIMEOUT
     results: list[_AssetResult] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(allowlist.assets)))) as pool:
+    workers = max(1, min(max_workers, MAX_WORKERS, len(allowlist.assets)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_observe, asset, allowlist, fetcher, run_deadline=run_deadline)
                    for asset in allowlist.assets]
         for future in as_completed(futures):
@@ -981,11 +1208,12 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                                    item.get("detail", "")))
     omissions = sorted({reason for result in results for reason in result.omissions})
     observed = [result.observed_at for result in results if result.observed_at is not None]
-    _publish_review(output, client, source_id, reviews)
-    if not rows:
-        raise ExtensionError("no technologies with usable identity; review output written")
-    if set(omissions) & FAILURE_REASONS and not allow_partial:
-        raise ExtensionError("web detection with fetch failures requires --allow-partial; review output written")
-    return write_snapshot(output, rows, source_id=source_id, collector="web-detect",
-                          observed_at=min(observed).isoformat() if observed else None,
-                          omissions=omissions)
+    with output_lock(output):
+        _publish_review(output, client, source_id, reviews)
+        if not rows:
+            raise ExtensionError("no technologies with usable identity; review output written")
+        if set(omissions) & FAILURE_REASONS and not allow_partial:
+            raise ExtensionError("web detection with fetch failures requires --allow-partial; review output written")
+        return write_snapshot(output, rows, source_id=source_id, collector="web-detect",
+                              observed_at=min(observed).isoformat() if observed else None,
+                              omissions=omissions, lock=False)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -158,11 +159,13 @@ def _atomic(path: Path, data: bytes):
 
 
 def write_snapshot(path: Path, records: list[dict], *, source_id: str, collector: str,
-                   observed_at: str | None = None, omissions: list[str] | None = None) -> dict:
+                   observed_at: str | None = None, omissions: list[str] | None = None,
+                   lock: bool = True) -> dict:
     """Publish inventory then manifest; interrupted pairs fail hash verification.
 
     Parent directory must already exist and be controlled by the administrator.
-    A per-output exclusive lock prevents concurrent cooperating writers.
+    A per-output exclusive lock prevents concurrent cooperating writers. Pass
+    ``lock=False`` only while holding :func:`output_lock` for the same path.
     """
     path = Path(path)
     label(source_id)
@@ -185,6 +188,18 @@ def write_snapshot(path: Path, records: list[dict], *, source_id: str, collector
     metadata = json_bytes(manifest)
     if len(metadata) > 65536:
         raise ExtensionError("manifest exceeds size limit")
+    if lock:
+        with output_lock(path):
+            _write_snapshot_files(path, data, metadata)
+    else:
+        _write_snapshot_files(path, data, metadata)
+    return manifest
+
+
+@contextmanager
+def output_lock(path: Path):
+    """Serialise every file published for one output path."""
+    path = Path(path)
     lock = path.with_name(path.name + ".lock")
     try:
         descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -192,15 +207,18 @@ def write_snapshot(path: Path, records: list[dict], *, source_id: str, collector
         raise ExtensionError("output is locked; investigate an interrupted or concurrent writer") from exc
     try:
         os.close(descriptor)
-        # Preflight both destinations before replacing either.
-        for destination in (path, manifest_path(path)):
-            if destination.exists() or destination.is_symlink():
-                _regular(destination)
-        _atomic(path, data)
-        _atomic(manifest_path(path), metadata)
+        yield
     finally:
         os.unlink(lock)
-    return manifest
+
+
+def _write_snapshot_files(path: Path, data: bytes, metadata: bytes) -> None:
+    # Preflight both destinations before replacing either.
+    for destination in (path, manifest_path(path)):
+        if destination.exists() or destination.is_symlink():
+            _regular(destination)
+    _atomic(path, data)
+    _atomic(manifest_path(path), metadata)
 
 
 @dataclass(frozen=True)

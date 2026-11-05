@@ -1,8 +1,17 @@
 import gzip
 import io
 import json
+import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
+import socket
+import socketserver
+import ssl
+import subprocess
+import threading
+import time
 
 import pytest
 
@@ -13,6 +22,8 @@ from cvebeacon_extensions.merge import merge_snapshots
 from cvebeacon_extensions.web import (
     BODY_LIMIT,
     HEADER_LIMIT,
+    MAX_RETRIES,
+    WIRE_LIMIT,
     Allowlist,
     Endpoint,
     Fetcher,
@@ -23,10 +34,10 @@ from cvebeacon_extensions.web import (
     _TlsFailure,
     _TimeoutFailure,
     _TooLargeFailure,
+    _UnsupportedEncodingFailure,
     _check_header_size,
     _hostname,
     _is_global_address,
-    _registrable_domain,
     detect_web,
     format_plan,
     load_allowlist,
@@ -36,6 +47,7 @@ from cvebeacon_extensions.webrules import RULES, detect, normalize_version, page
 
 NOW = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
 PUBLIC = "93.184.216.34"
+REAL_CONNECT = socket.socket.__mro__[1].connect
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +110,91 @@ def response(status=200, headers=None, body=b"<html>plain</html>"):
     return _Response(status, values, body)
 
 
+class _LocalHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        try:
+            self.request.settimeout(10)
+            data = self.request.recv(65536)
+            self.server.requests.append(data)
+            self.server.responder(self.request, data)
+        except OSError:
+            pass
+
+
+class _LocalServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, responder):
+        self.responder = responder
+        self.requests = []
+        super().__init__(("127.0.0.1", 0), _LocalHandler)
+
+    def handle_error(self, request, client_address):
+        pass
+
+
+@contextmanager
+def local_server(monkeypatch, responder):
+    monkeypatch.setattr(socket.socket, "connect", REAL_CONNECT)
+    server = _LocalServer(responder)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class _TlsLocalServer(_LocalServer):
+    def __init__(self, responder, context):
+        self.context = context
+        super().__init__(responder)
+
+    def get_request(self):
+        sock, address = super().get_request()
+        return self.context.wrap_socket(sock, server_side=True), address
+
+
+@contextmanager
+def local_tls_server(monkeypatch, responder, certfile, keyfile):
+    monkeypatch.setattr(socket.socket, "connect", REAL_CONNECT)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(certfile), str(keyfile))
+    server = _TlsLocalServer(responder, context)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def local_endpoint(server, *, scheme="http", path="/"):
+    return Endpoint(scheme, "127.0.0.1", server.server_address[1], path)
+
+
+def make_certificate(directory):
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl is not available")
+    certfile = directory / "cert.pem"
+    keyfile = directory / "key.pem"
+    completed = subprocess.run(
+        [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(keyfile),
+         "-out", str(certfile), "-days", "1", "-subj", "/CN=127.0.0.1",
+         "-addext", "subjectAltName=IP:127.0.0.1"],
+        capture_output=True, text=True,
+    )
+    if completed.returncode != 0:
+        pytest.skip("openssl could not create a test certificate")
+    return certfile, keyfile
+
+
 def run(tmp_path, assets, responses, *, mapping=None, allow_partial=True, client="acme",
         max_workers=1, **kwargs):
     path = write_allowlist(tmp_path, assets)
@@ -137,7 +234,7 @@ FIXTURES = {
     "apache-tomcat": ({"header": ("server", "Apache-Coyote/1.1")}, ""),
     "jetty": ({"header": ("server", "Jetty(9.4.43.v20210629)")}, "9.4.43"),
     "wildfly": ({"header": ("server", "WildFly/26.1.2.Final")}, "26.1.2"),
-    "weblogic": ({"header": ("server", "WebLogic Server 12.2.1.3.0")}, "12.2.1.3"),
+    "weblogic": ({"header": ("server", "WebLogic Server 12.2.1.3.0")}, ""),
     "websphere": ({"header": ("server", "WebSphere Application Server/9.0.5.13")}, "9.0.5.13"),
     "glassfish": ({"header": ("server", "GlassFish Server Open Source Edition 5.1.0")}, "5.1.0"),
     "php-header": ({"header": ("x-powered-by", "PHP/8.2.1")}, "8.2.1"),
@@ -244,6 +341,34 @@ def test_version_normalisation(value, expected):
     assert normalize_version(value) == expected
 
 
+def test_five_component_server_version_is_unknown_not_truncated():
+    page = fixture_page({"header": ("server", "WebLogic Server 12.2.1.3.0")})
+    found = matching(detect(page), next(rule for rule in RULES if rule.key == "weblogic"))
+    assert found and found[0].versions == ()
+
+
+def test_prefix_compatible_versions_prefer_the_most_specific(tmp_path):
+    manifest, output, resolver, transport = run(
+        tmp_path, [asset()],
+        [response(headers={"server": ["nginx/1.25.3", "nginx/1.25"]})],
+        allow_partial=False)
+    assert manifest["status"] == "success"
+    records = read_snapshot(output).records
+    nginx = [row for row in records if row["product"] == "nginx"]
+    assert nginx[0]["version"] == "1.25.3"
+    review = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert review["reviews"] == []
+
+
+def test_disjoint_versions_still_require_review(tmp_path):
+    with pytest.raises(ExtensionError, match="no technologies"):
+        run(tmp_path, [asset()],
+            [response(headers={"server": ["nginx/1.25.3", "nginx/1.26.0"]})],
+            allow_partial=True)
+    reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
+    assert reviews[0]["reason"] == "version-conflict"
+
+
 def test_every_rule_cpe_is_accepted_by_the_core_parser():
     from cvebeacon.sources.nvd import split_cpe23
     for rule in RULES:
@@ -340,6 +465,70 @@ def test_allowlist_limit_and_ca_bundle(tmp_path, monkeypatch):
     assert load_allowlist(path, client="acme", now=NOW).ca_bundle == ca.resolve()
 
 
+def test_ca_bundle_symlink_is_refused(tmp_path):
+    target = tmp_path / "real-ca.pem"
+    target.write_text("placeholder", encoding="utf-8")
+    link = tmp_path / "ca.pem"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are not available")
+    path = write_allowlist(tmp_path, [asset()], ca_bundle="ca.pem")
+    with pytest.raises(ExtensionError, match="regular file"):
+        load_allowlist(path, client="acme", now=NOW)
+
+
+def test_output_cannot_overwrite_the_ca_bundle(tmp_path):
+    ca = tmp_path / "ca.pem"
+    ca.write_text("placeholder", encoding="utf-8")
+    path = write_allowlist(tmp_path, [asset()], ca_bundle="ca.pem")
+    transport = Transport([response(headers={"server": "nginx/1.25.3"})])
+    with pytest.raises(ExtensionError, match="CA bundle"):
+        detect_web(path, ca, client="acme", source_id="acme-web", allow_partial=False,
+                   resolver=Resolver({"example.com": [PUBLIC]}), transport=transport,
+                   now=lambda: NOW, host_interval=0, max_workers=1)
+    assert ca.read_text(encoding="utf-8") == "placeholder"
+    assert transport.calls == []
+
+
+def test_ca_bundle_adds_to_default_roots(tmp_path):
+    certfile, keyfile = make_certificate(tmp_path)
+    context = StdlibTransport._context(certfile)
+    defaults = ssl.create_default_context().get_ca_certs()
+    if not defaults:
+        pytest.skip("the platform has no default trust roots")
+    assert len(context.get_ca_certs()) >= len(defaults) + 1
+
+
+def test_real_tls_uses_the_client_ca_bundle(tmp_path, monkeypatch):
+    certfile, keyfile = make_certificate(tmp_path)
+
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\nServer: nginx/1.25.3\r\nContent-Length: 2\r\n\r\nok")
+
+    with local_tls_server(monkeypatch, responder, certfile, keyfile) as server:
+        endpoint = Endpoint("https", "127.0.0.1", server.server_address[1], "/")
+        response = StdlibTransport().fetch(endpoint, "127.0.0.1", ca_bundle=certfile,
+                                           deadline=time.monotonic() + 10, user_agent="test")
+        assert response.status == 200
+        assert response.headers["server"] == ("nginx/1.25.3",)
+
+
+def test_real_tls_without_the_client_ca_is_a_tls_error(tmp_path, monkeypatch):
+    certfile, keyfile = make_certificate(tmp_path)
+
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+
+    with local_tls_server(monkeypatch, responder, certfile, keyfile) as server:
+        endpoint = Endpoint("https", "127.0.0.1", server.server_address[1], "/")
+        with pytest.raises(_TlsFailure):
+            StdlibTransport().fetch(endpoint, "127.0.0.1", ca_bundle=None,
+                                    deadline=time.monotonic() + 10, user_agent="test")
+
+
+
+
 @pytest.mark.parametrize("hostname", ["2130706433", "0x7f000001", "127.1", "0177.0.0.1"])
 def test_numeric_loopback_spellings_are_blocked_without_attestation(tmp_path, hostname):
     path = write_allowlist(tmp_path, [asset(hostname=hostname)])
@@ -368,6 +557,9 @@ def test_numeric_loopback_spellings_are_blocked_without_attestation(tmp_path, ho
     "::1",
     "::ffff:127.0.0.1",
     "::127.0.0.1",
+    "::ffff:8.8.8.8",
+    "::8.8.8.8",
+    "2002:0808:0808::1",
     "64:ff9b::7f00:1",
     "2002:7f00:1::",
     "fd00::1",
@@ -395,7 +587,8 @@ def test_ssrf_matrix_blocks_before_transport(tmp_path):
     assert transport.calls == []
 
 
-@pytest.mark.parametrize("address", ["127.0.0.1", "::1", "10.0.0.1", "169.254.169.254", "fe80::1"])
+@pytest.mark.parametrize("address", ["127.0.0.1", "::1", "10.0.0.1", "169.254.169.254",
+                                      "fe80::1", "::ffff:8.8.8.8", "::8.8.8.8"])
 def test_private_address_attestation_allows_internal_sites(tmp_path, address):
     manifest, output, resolver, transport = run(
         tmp_path, [asset(allow_private_address=True)],
@@ -440,7 +633,11 @@ def test_redirect_to_private_address_is_blocked(tmp_path):
     assert reviews[0]["reason"] == "blocked"
 
 
-@pytest.mark.parametrize("location", ["https://[bad/", "https://example.com:99999/", "https://example.com/bad path"])
+@pytest.mark.parametrize("location", [
+    "https://[bad/", "https://example.com:99999/", "https://example.com/bad path",
+    "https://bad_host/", "https://example.com:0/",
+    "https://user:pass@example.com/", "https://example.com/path#fragment",
+])
 def test_redirect_with_invalid_location_is_blocked(tmp_path, location):
     path = write_allowlist(tmp_path, [asset()])
     transport = Transport([response(302, {"location": location})])
@@ -461,6 +658,61 @@ def test_redirect_to_unlisted_same_domain_host_is_blocked(tmp_path):
                    transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
     reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
     assert reviews[0]["reason"] == "redirect-blocked"
+
+
+def test_redirect_may_change_path_and_query_on_an_authorised_host(tmp_path):
+    manifest, output, resolver, transport = run(
+        tmp_path, [asset(path="/approved")],
+        [response(302, {"location": "/unapproved?token=canary"}),
+         response(headers={"server": "nginx/1.25.3"})],
+        allow_partial=False)
+    assert manifest["status"] == "success"
+    assert [call[0].path for call in transport.calls] == ["/approved", "/unapproved?token=canary"]
+
+
+def test_redirect_path_and_query_are_bounded(tmp_path):
+    location = "/" + "a" * 3000
+    path = write_allowlist(tmp_path, [asset()])
+    transport = Transport([response(302, {"location": location})])
+    with pytest.raises(ExtensionError):
+        detect_web(path, tmp_path / "snapshot.json", client="acme", source_id="acme-web",
+                   allow_partial=True, resolver=Resolver({"example.com": [PUBLIC]}),
+                   transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
+    assert len(transport.calls) == 1
+    reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
+    assert reviews[0]["reason"] == "redirect-blocked"
+
+
+def test_redirect_policy_comes_from_the_originating_entry(tmp_path):
+    assets = [asset(path="/start", max_redirects=2),
+              asset(hostname="second.example", path="/middle", max_redirects=0)]
+    manifest, output, resolver, transport = run(
+        tmp_path, assets,
+        [response(302, {"location": "https://second.example/middle"}),
+         response(302, {"location": "https://second.example/end"}),
+         response(headers={"server": "nginx/1.25.3"}),
+         response(headers={"server": "nginx/1.25.3"})],
+        mapping={"example.com": [PUBLIC], "second.example": [PUBLIC]},
+        allow_partial=False)
+    assert manifest["status"] == "success"
+    assert [call[0].path for call in transport.calls[:3]] == ["/start", "/middle", "/end"]
+
+
+def test_redirect_private_address_policy_comes_from_the_originating_entry(tmp_path):
+    assets = [asset(path="/start"),
+              asset(hostname="internal.example.com", allow_private_address=True)]
+    path = write_allowlist(tmp_path, assets)
+    resolver = Resolver({"example.com": [PUBLIC], "internal.example.com": ["127.0.0.1"]})
+    transport = Transport([response(302, {"location": "https://internal.example.com/"}),
+                           response(403), response(403)])
+    with pytest.raises(ExtensionError):
+        detect_web(path, tmp_path / "snapshot.json", client="acme", source_id="acme-web",
+                   allow_partial=True, resolver=resolver, transport=transport,
+                   now=lambda: NOW, host_interval=0, max_workers=1)
+    assert len(transport.calls) == 2
+    assert transport.calls[0][0].hostname == "example.com"
+    reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
+    assert [item["reason"] for item in reviews] == ["blocked", "blocked"]
 
 
 def test_redirect_to_other_domain_and_scheme_downgrade_are_blocked(tmp_path):
@@ -514,10 +766,98 @@ def test_slow_response_maps_to_timeout():
         read_body(Reader(), "", deadline=50.0, clock=lambda: next(ticks))
 
 
+def test_slow_dns_resolution_is_bounded_by_the_asset_deadline(tmp_path, monkeypatch):
+    from cvebeacon_extensions import web
+
+    class SlowResolver:
+        def resolve(self, hostname, port):
+            time.sleep(0.4)
+            return (PUBLIC,)
+
+    path = write_allowlist(tmp_path, [asset()])
+    allowlist = load_allowlist(path, client="acme", now=NOW)
+    monkeypatch.setattr(web, "ASSET_TIMEOUT", 0.15)
+    fetcher = Fetcher(resolver=SlowResolver(), transport=Transport([]), host_interval=0)
+    started = time.monotonic()
+    with pytest.raises(_TimeoutFailure):
+        fetcher.fetch(allowlist.assets[0], allowlist)
+    assert time.monotonic() - started < 0.35
+
+
+def test_slow_headers_are_bounded_by_the_deadline(monkeypatch):
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\n")
+        for _ in range(100):
+            sock.sendall(b"X")
+            time.sleep(0.02)
+
+    with local_server(monkeypatch, responder) as server:
+        transport = StdlibTransport()
+        started = time.monotonic()
+        with pytest.raises(_TimeoutFailure):
+            transport.fetch(local_endpoint(server), "127.0.0.1", ca_bundle=None,
+                            deadline=time.monotonic() + 0.25, user_agent="test")
+        assert time.monotonic() - started < 1.0
+
+
+def test_slow_body_is_bounded_by_the_deadline(monkeypatch):
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n")
+        for _ in range(100):
+            sock.sendall(b"x")
+            time.sleep(0.02)
+
+    with local_server(monkeypatch, responder) as server:
+        transport = StdlibTransport()
+        started = time.monotonic()
+        with pytest.raises(_TimeoutFailure):
+            transport.fetch(local_endpoint(server), "127.0.0.1", ca_bundle=None,
+                            deadline=time.monotonic() + 0.25, user_agent="test")
+        assert time.monotonic() - started < 1.0
+
+
+def test_pacing_wait_respects_the_asset_deadline():
+    clock = [0.0]
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    pacer = Fetcher(sleep=sleep, clock=lambda: clock[0], host_interval=5.0)._pacer
+    pacer.wait("example.com", 10.0)
+    with pytest.raises(_TimeoutFailure):
+        pacer.wait("example.com", 2.0)
+    assert sleeps == [2.0]
+
+
+
 def test_deflate_roundtrip():
     import zlib
     payload = b"<html>ok</html>" * 100
     assert read_body(io.BytesIO(zlib.compress(payload)), "deflate") == payload
+
+
+def test_truncated_compressed_stream_is_rejected():
+    payload = gzip.compress(b"<html>complete</html>")
+    with pytest.raises(_UnsupportedEncodingFailure):
+        read_body(io.BytesIO(payload[:-4]), "gzip")
+    import zlib
+    with pytest.raises(_UnsupportedEncodingFailure):
+        read_body(io.BytesIO(zlib.compress(b"<html>complete</html>")[:-4]), "deflate")
+
+
+def test_concatenated_gzip_members_are_decoded_together():
+    payload = gzip.compress(b"first") + gzip.compress(b"-second")
+    assert read_body(io.BytesIO(payload), "gzip") == b"first-second"
+
+
+def test_concatenated_gzip_members_share_one_output_cap():
+    small = gzip.compress(b"tiny")
+    bomb = gzip.compress(b"\0" * (BODY_LIMIT + 1))
+    with pytest.raises(_TooLargeFailure):
+        read_body(io.BytesIO(small + bomb), "gzip")
+
 
 
 def test_429_stops_the_host_and_records_retry_after(tmp_path):
@@ -575,6 +915,136 @@ def test_transport_failures_are_reviewed_not_clean(tmp_path, failure, reason):
                    transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
     reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
     assert reviews[0]["reason"] == reason
+
+
+def test_real_transport_bounds_headers_before_parsing(monkeypatch):
+    state = {"sent": 0}
+    line = b"X-Filler: " + b"a" * 60000 + b"\r\n"
+
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\n")
+        try:
+            for _ in range(100):
+                sock.sendall(line)
+                state["sent"] += len(line)
+                time.sleep(0.001)
+            sock.sendall(b"\r\n")
+        except OSError:
+            pass
+
+    with local_server(monkeypatch, responder) as server:
+        with pytest.raises(_TooLargeFailure):
+            StdlibTransport().fetch(local_endpoint(server), "127.0.0.1", ca_bundle=None,
+                                    deadline=time.monotonic() + 10, user_agent="test")
+    assert state["sent"] < 2_000_000
+
+
+def test_real_transport_counts_chunk_trailers_in_the_wire_budget(monkeypatch):
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n")
+        trailer = b"X-Trailer: " + b"a" * 60000 + b"\r\n"
+        try:
+            for _ in range(80):
+                sock.sendall(trailer)
+            sock.sendall(b"\r\n")
+        except OSError:
+            pass
+
+    with local_server(monkeypatch, responder) as server:
+        with pytest.raises(_TooLargeFailure):
+            StdlibTransport().fetch(local_endpoint(server), "127.0.0.1", ca_bundle=None,
+                                    deadline=time.monotonic() + 20, user_agent="test")
+
+
+def test_real_transport_rejects_truncated_gzip(monkeypatch):
+    payload = gzip.compress(b"<html>complete</html>")[:-4]
+
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: "
+                     + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+
+    with local_server(monkeypatch, responder) as server:
+        with pytest.raises(_UnsupportedEncodingFailure):
+            StdlibTransport().fetch(local_endpoint(server), "127.0.0.1", ca_bundle=None,
+                                    deadline=time.monotonic() + 10, user_agent="test")
+
+
+def test_real_transport_decodes_concatenated_gzip(monkeypatch):
+    payload = gzip.compress(b"first") + gzip.compress(b"-second")
+
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: "
+                     + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+
+    with local_server(monkeypatch, responder) as server:
+        response = StdlibTransport().fetch(local_endpoint(server), "127.0.0.1",
+                                           ca_bundle=None, deadline=time.monotonic() + 10,
+                                           user_agent="test")
+    assert response.body == b"first-second"
+
+
+def test_real_429_stops_the_host_before_reading_its_body(tmp_path, monkeypatch):
+    def responder(sock, request):
+        path = request.split(b" ", 2)[1]
+        if path == b"/one":
+            sock.sendall(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\n"
+                         b"Content-Length: 3145728\r\n\r\n")
+            try:
+                for _ in range(48):
+                    sock.sendall(b"x" * 65536)
+            except OSError:
+                pass
+        else:
+            sock.sendall(b"HTTP/1.1 200 OK\r\nServer: nginx/1.25.3\r\nContent-Length: 2\r\n\r\nok")
+
+    with local_server(monkeypatch, responder) as server:
+        port = server.server_address[1]
+        assets = [
+            asset(hostname="127.0.0.1", scheme="http", port=port, path="/one",
+                  allow_private_address=True),
+            asset(hostname="127.0.0.1", scheme="http", port=port, path="/two",
+                  allow_private_address=True),
+        ]
+        path = write_allowlist(tmp_path, assets)
+        with pytest.raises(ExtensionError):
+            detect_web(path, tmp_path / "snapshot.json", client="acme", source_id="acme-web",
+                       allow_partial=True, resolver=Resolver({"127.0.0.1": ["127.0.0.1"]}),
+                       now=lambda: NOW, host_interval=0, max_workers=1)
+        assert len(server.requests) == 1
+        reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
+        assert [item["reason"] for item in reviews] == ["blocked", "blocked"]
+        assert all(item.get("retry_after") == 60 for item in reviews)
+
+
+def test_real_403_with_broken_chunking_is_not_retried(tmp_path, monkeypatch):
+    def responder(sock, request):
+        sock.sendall(b"HTTP/1.1 403 Forbidden\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\n")
+
+    with local_server(monkeypatch, responder) as server:
+        port = server.server_address[1]
+        path = write_allowlist(tmp_path, [asset(hostname="127.0.0.1", scheme="http",
+                                                port=port, allow_private_address=True)])
+        with pytest.raises(ExtensionError):
+            detect_web(path, tmp_path / "snapshot.json", client="acme", source_id="acme-web",
+                       allow_partial=True, resolver=Resolver({"127.0.0.1": ["127.0.0.1"]}),
+                       now=lambda: NOW, host_interval=0, max_workers=1)
+        assert len(server.requests) == 1
+        reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
+        assert reviews[0]["reason"] == "blocked"
+        assert reviews[0]["status"] == 403
+
+
+def test_review_and_snapshot_share_the_output_lock(tmp_path):
+    path = write_allowlist(tmp_path, [asset()])
+    output = tmp_path / "snapshot.json"
+    Path(str(output) + ".lock").write_text("held", encoding="utf-8")
+    transport = Transport([response(headers={"server": "nginx/1.25.3"})])
+    with pytest.raises(ExtensionError, match="locked"):
+        detect_web(path, output, client="acme", source_id="acme-web", allow_partial=False,
+                   resolver=Resolver({"example.com": [PUBLIC]}), transport=transport,
+                   now=lambda: NOW, host_interval=0, max_workers=1)
+    assert not Path(str(output) + ".review.json").exists()
+
 
 
 def test_no_technologies_is_reviewed_and_never_published_as_empty_success(tmp_path):
@@ -647,7 +1117,9 @@ def test_plan_prints_requests_and_sends_nothing(tmp_path, capsys):
                  "--output", str(output), "--source-id", "acme-web", "--plan"]) == 0
     printed = capsys.readouterr().out
     assert "host=example.com" in printed and "port=443" in printed and "path=/status" in printed
-    assert "max_requests=2" in printed and "up to 5 requests" in printed
+    assert "max_requests=2" in printed
+    assert "5 requests on the normal path" in printed
+    assert f"up to {5 * (1 + MAX_RETRIES)} including connection retries" in printed
     assert not output.exists()
     assert detect_web(path, output, client="acme", source_id="acme-web", plan=True,
                       resolver=Forbidden(), transport=ForbiddenTransport()) is None
@@ -708,11 +1180,8 @@ def test_client_label_with_spaces_is_preserved(tmp_path):
     assert read_snapshot(tmp_path / "snapshot.json").records[0]["client"] == "Acme Corp"
 
 
-def test_endpoint_helpers_and_registrable_domain():
+def test_endpoint_helpers():
     assert _hostname("[2001:db8::1]") == "2001:db8::1"
-    assert _registrable_domain("www.example.com") == "example.com"
-    assert _registrable_domain("a.b.example.co.uk") == "example.co.uk"
-    assert _registrable_domain("127.0.0.1") == "127.0.0.1"
     with pytest.raises(Exception):
         _hostname("bad host")
     plan = format_plan(Allowlist("acme", None, ()))
