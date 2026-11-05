@@ -21,8 +21,9 @@ import tomllib
 
 from flask import Blueprint, abort, g, redirect, render_template, request, url_for
 
-from .config import (DashboardConfig, EmailConfig, HttpConfig, InventoryConfig,
-                     SourceConfig, TeamsConfig, WatchConfig, load_config)
+from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, DashboardConfig,
+                     EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
+                     TeamsConfig, WatchConfig, load_config)
 from .errors import ConfigurationError
 from .watch.channels import ChannelConfig, COMMON_KEYS, TYPE_KEYS, ENV_NAME_PATTERN, SECRET_FILE_LIMIT
 from .watch.directories import ensure_private_directory
@@ -52,8 +53,8 @@ def value(item):
     if isinstance(item, str):
         return json.dumps(item, ensure_ascii=False).replace("\x7f", "\\u007f")
     if isinstance(item, int):
-        if not -(2**63) <= item < 2**63:
-            raise ValueError("TOML integer out of range")
+        # tomllib (and therefore load_config) accepts arbitrary-size integers.
+        # Rejecting them here would make accepted live configurations unreadable.
         return str(item)
     if isinstance(item, float):
         return repr(item)
@@ -163,15 +164,26 @@ def check_document(document):
                 raise ConfigurationError("Unrecognized configuration fields; review the file before editing")
     if set(get_table(document, "notifications")) - {"teams", "email"}:
         raise ConfigurationError("Unrecognized notification fields")
+    inventory = get_table(document, "inventory")
+    columns = inventory.get("columns")
+    if columns is not None:
+        if not isinstance(columns, dict):
+            raise ConfigurationError("inventory.columns must be a table")
+        allowed_columns = set(CANONICAL_FIELDS) | set(OPTIONAL_FIELDS)
+        if set(columns) - allowed_columns:
+            raise ConfigurationError("Unrecognized inventory column keys; review the file before editing")
+        if any(not isinstance(item, str) for item in columns.values()):
+            raise ConfigurationError("Inventory column mappings must be strings")
     rules = get_table(document, "watch").get("rules", [])
     mappings = document.get("product_mappings", [])
     for rows, schema in ((rules, RULE_FIELDS), (mappings, MAPPING_FIELDS)):
         if not isinstance(rows, list) or any(not isinstance(row, dict) or set(row) - set(schema) for row in rows):
             raise ConfigurationError("Unrecognized configuration row fields")
     for row in get_table(document, "watch.channels").values():
-        if not isinstance(row, dict) or row.get("type") not in TYPE_KEYS:
+        kind = row.get("type") if isinstance(row, dict) else None
+        if not isinstance(row, dict) or not isinstance(kind, str) or kind not in TYPE_KEYS:
             raise ConfigurationError("Unknown channel type")
-        if set(row) - COMMON_KEYS - TYPE_KEYS[row["type"]]:
+        if set(row) - COMMON_KEYS - TYPE_KEYS[kind]:
             raise ConfigurationError("Unrecognized channel fields; use secret references")
     # The core loader accepts older env names more liberally. The editor only
     # permits names, never pasted URLs or credential assignments.
@@ -214,12 +226,21 @@ def safe_error(error, document, path):
         elif isinstance(item, str) and item:
             strings.append(item)
     collect(document)
+    # Loader guidance can interpolate values with repr() or JSON quoting, so
+    # redact the escaped representations as well as the literal strings.
+    variants = set()
+    for text in strings:
+        variants.add(text)
+        variants.add(repr(text))
+        variants.add(repr(text)[1:-1])
+        variants.add(json.dumps(text, ensure_ascii=False))
+        variants.add(json.dumps(text, ensure_ascii=False)[1:-1])
     # Preserve loader guidance, but never repeat submitted values or unknown
     # keys (including labels and URLs) in error output.
-    for text in sorted(set(strings), key=len, reverse=True):
+    for text in sorted((item for item in variants if item), key=len, reverse=True):
         if len(text) > 2:
             message = message.replace(text, "[value]")
-        elif text:
+        else:
             import re
             message = re.sub(r"(?<![\w])" + re.escape(text) + r"(?![\w])", "[value]", message)
     return message
@@ -537,7 +558,7 @@ def parse_form(editor, section, document):
                 key, name = control["key"], control["id"]
                 expected.add(name)
                 text = request.form.get(name, "")
-                if text.strip() and not remove:
+                if not remove and (text != "" if control["kind"] == "string" else text.strip() != ""):
                     if control["kind"] == "string":
                         row[key] = text
                     else:
