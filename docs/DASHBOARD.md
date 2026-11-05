@@ -45,9 +45,10 @@ change scan or delivery state.
   dates and the current reported mark. Report and unreport notices are excluded;
   they appear in the CVE trail.
 - **Clients:** every client label in the latest successful inventory scan with
-  its asset count and the CVEs currently affecting it. A `review` badge marks
-  findings stored as needs-review. Client names are internal and never sent to
-  public sources.
+  its asset count and the CVEs currently affecting it, 50 clients per page. A
+  `review` badge marks findings stored as needs-review; advisory identifiers
+  without a CVE are shown without a CVE link. Client names are internal and
+  never sent to public sources.
 - **CVE detail:** the stored view with CVSS by provider, EPSS, CISA and EU KEV
   dates and required action, SSVC exploitation, CWEs, products, references,
   publication and first-seen dates, the clients affected in the latest

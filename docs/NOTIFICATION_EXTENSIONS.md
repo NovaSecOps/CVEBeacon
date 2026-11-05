@@ -100,7 +100,9 @@ Core database selected by the Core configuration. It does not collect inventory 
 invoke a scan. The complete `run` pipeline dispatches after its Core scan boundary.
 
 The compact alert contains the asset ID, bounded product/version labels, advisory
-ID, material event type, applicability, CVSS score and CISA/EU KEV flags. Unknown
+ID, material event type, applicability, CVSS score, CISA/EU KEV flags and, when
+the latest successful Core scan records matching clients, an affected-clients
+line. Unknown
 fields remain labelled unknown. Payload metadata, evidence, references, reasons,
 source identifiers, collector paths and host credentials are excluded. Control
 characters in labels are flattened. Asset and component labels still describe your

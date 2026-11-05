@@ -38,6 +38,23 @@ def test_roundtrip_matches_real_core(tmp_path):
     assert observed.records[1]["version"] == "01.020"
 
 
+def test_inventory_v1_includes_the_optional_client_label():
+    assert "client" in contract.FIELDS
+    records = contract.canonical_records(
+        [
+            {
+                "asset_id": "a",
+                "vendor": "Acme",
+                "product": "Widget",
+                "version": "1",
+                "client": "Acme",
+            }
+        ]
+    )
+    assert records[0]["client"] == "Acme"
+    assert records[0].keys() == set(contract.FIELDS)
+
+
 @pytest.mark.parametrize("records", [[], [dict(asset_id="a", version=1)], [dict(asset_id="a", unknown="x")],
     [row(), row("A")], [dict(asset_id="a", purl="pkg:pypi/example@1", version="2")],
     [dict(asset_id="a", purl="pkg:pypi/example@1", cpe="cpe:2.3:a:acme:example:1:*:*:*:*:*:*:*")]])

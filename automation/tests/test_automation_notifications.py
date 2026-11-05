@@ -15,6 +15,16 @@ from cvebeacon_automation.notifications.adapters import bind, retry_delay, split
 from cvebeacon_automation.notifications.ledger import destination, ledger, prepare
 from cvebeacon_automation.notifications.reader import core_reader, event_batch, render_event
 
+from cvebeacon.clients import affected_clients_on_connection
+from cvebeacon.models import (
+    Applicability,
+    Asset,
+    Finding,
+    QueryResult,
+    Vulnerability,
+)
+from cvebeacon.state import StateStore
+
 
 TOKEN = "1234:SYNTHETIC_NOTIFICATION_CANARY_ONLY_000"
 HOOK = "https://discord.com/api/webhooks/1234/SYNTHETIC_NOTIFICATION_CANARY_ONLY_000"
@@ -413,6 +423,81 @@ def test_changed_matrix_token_pauses_an_attempted_transaction(tmp_path, secrets,
     with ledger(cfg, readonly=True) as db:
         assert db.execute("SELECT error FROM deliveries").fetchone()[0] == "matrix_credential_context_changed"
     assert len(wire.calls) == 2
+
+
+def test_render_event_includes_affected_clients(tmp_path):
+    path = tmp_path / "core.db"
+    store = StateStore(path)
+    asset = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    review = Asset("g1", "Acme", "Widget", "2", client="Globex")
+    store.record_scan(
+        [
+            QueryResult(
+                asset,
+                (
+                    Finding(
+                        asset,
+                        Vulnerability("CVE-2026-1234"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+            QueryResult(
+                review,
+                (
+                    Finding(
+                        review,
+                        Vulnerability("CVE-2026-1234"),
+                        Applicability.NEEDS_REVIEW,
+                        "limited",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+        ]
+    )
+    with core_reader(path) as db:
+        row = event_batch(db)[0]
+        impacts = affected_clients_on_connection(
+            db, (row["cve_id"],)
+        ).get(str(row["cve_id"]).strip().upper())
+        _, text = render_event(row, impacts)
+    assert "Affected clients: Acme, Globex (review)" in text
+
+
+def test_dispatch_sends_affected_clients_to_automation_channels(
+    tmp_path, secrets
+):
+    cfg = config(tmp_path, ("discord",))
+    path = tmp_path / "core.db"
+    store = StateStore(path)
+    asset = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    store.record_scan(
+        [
+            QueryResult(
+                asset,
+                (
+                    Finding(
+                        asset,
+                        Vulnerability("CVE-2026-1234"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            )
+        ]
+    )
+    wire = Wire()
+    result = dispatch(cfg, path, wire, Clock())
+    assert result["attempted"] == 1
+    body = wire.calls[-1][3].decode("utf-8")
+    assert "Affected clients: Acme" in body
 
 
 def test_matrix_token_change_before_first_attempt_is_safe(tmp_path, secrets, monkeypatch):

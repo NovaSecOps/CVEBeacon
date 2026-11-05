@@ -10,6 +10,7 @@ import uuid
 
 from ..common import AutomationError, digest, lock
 from ..http import HTTPS
+from cvebeacon.clients import affected_clients_on_connection
 from .adapters import Outcome, bind, split_message, validate_channels
 from .ledger import check_paths, claim, destination, due, enforce_replay_scope, finish, ledger, next_due, prepare, recover, summary
 from .reader import core_reader, event_batch, render_event
@@ -125,7 +126,12 @@ def _deliver(config, *, core_db=None, messages=(), selected=None, only_event=Non
                             if reader is not None:
                                 rows = event_batch(reader, cursor["cursor_id"], cursor["cursor_run"], target.channel.batch_size)
                                 for row in rows:
-                                    event_key, text = render_event(row)
+                                    event_key, text = render_event(
+                                        row,
+                                        affected_clients_on_connection(
+                                            reader, (row["cve_id"],)
+                                        ).get(str(row["cve_id"]).strip().upper()),
+                                    )
                                     prepare(connection, target, event_key, split_message(text, target.channel), _timestamp(clock),
                                             cursor=(row["event_id"], row["run_id"]))
                             for event_key, text in messages:
