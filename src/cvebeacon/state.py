@@ -14,6 +14,7 @@ from typing import Iterator, Sequence
 
 from .errors import StateError
 from .models import Finding, QueryResult, HealthStatus
+from .watch.directories import ensure_private_directory
 
 SCHEMA_VERSION = 3
 
@@ -71,7 +72,7 @@ class StateStore:
 
     def _connect(self) -> sqlite3.Connection:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(self.path.parent)
             connection = sqlite3.connect(self.path, timeout=30)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")

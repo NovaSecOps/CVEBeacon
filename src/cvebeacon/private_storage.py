@@ -33,7 +33,10 @@ def _check_directory_chain(path: Path, *, owner_only: bool = False) -> None:
         if details.st_uid not in {os.geteuid(), 0} and not mode & stat.S_ISVTX:
             raise StateError("operation storage directory has an unsafe owner")
         if mode & 0o022 and not mode & stat.S_ISVTX:
-            raise StateError("operation storage directory must not be writable by other accounts")
+            raise StateError(
+                "operation storage directory must not be writable by other "
+                f"accounts: {current}; chmod go-w {current}"
+            )
         if current == path.absolute() and owner_only:
             if details.st_uid != os.geteuid() or mode & 0o077:
                 raise StateError("operation log directory must be owner-only")

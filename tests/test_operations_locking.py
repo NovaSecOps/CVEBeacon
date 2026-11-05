@@ -3,7 +3,9 @@
 from dataclasses import replace
 import errno
 import os
+from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 
@@ -81,6 +83,40 @@ def test_contention_without_readable_metadata_is_still_busy(tmp_path, monkeypatc
     monkeypatch.setattr(os, "read", lambda *a: (_ for _ in ()).throw(PermissionError()))
     assert not lock.acquire()
     assert lock.probe() is not None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+def test_lock_refuses_preexisting_writable_directory_with_fix(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o770)
+    try:
+        with pytest.raises(CVEBeaconError) as caught:
+            RunLock(shared / "run.lock").acquire()
+    finally:
+        shared.chmod(0o700)
+    message = str(caught.value)
+    assert str(shared) in message
+    assert f"chmod go-w {shared}" in message
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+@pytest.mark.parametrize("mask", [0o002, 0o022])
+def test_doctor_then_scan_creates_private_state_directory(tmp_path, monkeypatch, mask):
+    config = make_config(tmp_path)
+    config = replace(config, database_path=tmp_path / "state" / "state.db")
+    monkeypatch.setattr(cli, "load_config", lambda _: config)
+    state_directory = Path(config.database_path).resolve().parent
+    assert not state_directory.exists()
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(cli, "_run_scan", lambda *a, **k: 17)
+    previous = os.umask(mask)
+    try:
+        assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+        assert cli.main(["--config", str(config.config_path), "scan"]) == 17
+        assert stat.S_IMODE(state_directory.stat().st_mode) == 0o700
+    finally:
+        os.umask(previous)
 
 
 def test_lock_metadata_write_failure_is_a_controlled_cli_error(tmp_path, monkeypatch, capsys):
