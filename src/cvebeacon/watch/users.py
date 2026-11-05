@@ -447,6 +447,7 @@ class UserStore:
         *,
         create: bool = True,
         _creation_locked: bool = False,
+        _writable: bool = False,
     ) -> sqlite3.Connection:
         try:
             parent = self.path.parent
@@ -465,7 +466,9 @@ class UserStore:
                     return self._connect(
                         create=create,
                         _creation_locked=True,
+                        _writable=_writable,
                     )
+            mode = "rwc" if create else "rw" if _writable else "ro"
             connection = None
             if os.name == "posix":
                 try:
@@ -498,7 +501,7 @@ class UserStore:
                 # The process-lifetime pin prevents an unlinked inode from
                 # being reused during SQLite and post-open identity checks.
                 connection = sqlite3.connect(
-                    f"{path.as_uri()}?mode={'rwc' if create else 'ro'}",
+                    f"{path.as_uri()}?mode={mode}",
                     uri=True,
                     timeout=30,
                 )
@@ -528,7 +531,7 @@ class UserStore:
                 if not create and not path.exists():
                     raise StateError("CVEBeacon user database not found")
                 connection = sqlite3.connect(
-                    str(path), timeout=30
+                    f"{path.as_uri()}?mode={mode}", uri=True, timeout=30
                 )
             try:
                 self._verify_store_content(
@@ -651,6 +654,7 @@ class UserStore:
             self._connect(
                 create=create,
                 _creation_locked=creation_locked,
+                _writable=True,
             )
         ) as db:
             for statement in _SCHEMA:

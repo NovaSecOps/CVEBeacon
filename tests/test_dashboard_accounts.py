@@ -569,3 +569,14 @@ def test_security_recovery_and_permission_boundaries_are_documented():
     assert "10,000" in guide and "login_failures_suppressed" in guide
     for document in (guide, watch):
         assert "cb_role" in document and "cb_user_role" in document
+
+
+def test_existing_account_store_is_migrated_without_creating_a_missing_one(accounts):
+    config, users, _, _ = accounts
+    with users.transaction() as db:
+        db.execute("DROP TABLE cb_role")
+        db.execute("DROP TABLE cb_user_role")
+        db.execute("DELETE FROM cb_user_meta WHERE key='roles_initialized'")
+    app = dashboard.create_app(config)
+    login(app.test_client())
+    assert app.extensions["dashboard_users"].roles()["viewer"] == {"view"}
