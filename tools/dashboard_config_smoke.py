@@ -60,10 +60,11 @@ def smoke(directory):
             def token(page):
                 return re.search(r'name="csrf" value="([^"]+)"', page)[1]
 
-            def login():
-                page = client.get("/login")
+            def login(target=None, username="admin"):
+                target = target or client
+                page = target.get("/login")
                 assert page.status_code == 200
-                assert client.post("/login", data={"csrf": token(page.text), "username": "admin",
+                assert target.post("/login", data={"csrf": token(page.text), "username": username,
                                                    "password": PASSWORD}).status_code == 303
 
             page = client.get("/bootstrap")
@@ -80,9 +81,15 @@ def smoke(directory):
                 page = client.post("/config/" + section, data=data)
                 assert page.status_code == 200, "preview failed"
                 assert SECRET not in page.text
-                assert client.post("/config/" + section, data=controls(page.text, "confirm")).status_code == 303
+                assert confirm(page, section) == 303
                 assert client.get("/").status_code == 303
                 login()
+
+            def confirm(page, section):
+                data = controls(page.text, "confirm")
+                if 'name="lockout"' in page.text:
+                    data["lockout"] = "yes"
+                return client.post("/config/" + section, data=data).status_code
 
             save("channels", g0_name="soc", g0_type="smtp", g0_host="smtp.example.invalid",
                  g0_from="alerts@example.invalid", g0_to='["soc@example.invalid"]',
@@ -92,14 +99,33 @@ def smoke(directory):
             save("rules", g0_name="critical", g0_condition="{ cvss_min = 9.0 }",
                  g0_channels='["soc"]', g0_events='["match"]')
             assert load_config(path).watch.rules[0].name == "critical"
+
+            users = app.extensions["dashboard_users"]
+            proof = users.authenticate("admin", PASSWORD)
+            users.save_role("channel-editor", {"view", "edit_channels"}, authorization=proof)
+            users.add("reader", password=PASSWORD)
+            users.edit_user("reader", role="channel-editor", disabled=False, authorization=proof)
+            with httpx.Client(base_url=f"http://127.0.0.1:{server.server_port}",
+                              trust_env=False, timeout=15) as delegated:
+                login(delegated, "reader")
+                page = delegated.get("/config/channels")
+                assert page.status_code == 200
+                data = controls(page.text, "preview")
+                data["g0_host"] = "attacker.example.invalid"
+                refused = delegated.post("/config/channels", data=data)
+                assert refused.status_code == 403
+                assert "attacker.example.invalid" not in path.read_text()
+
+            path.write_text(path.read_text() + "\n[http]\nretries = -1\n", encoding="utf-8")
+            login()
             page = client.get("/config/backups")
+            assert page.status_code == 200
             data = controls(page.text, "preview")
             data["backup"] = sorted(app.extensions["dashboard_config"].backups())[0]
             page = client.post("/config/backups", data=data)
             assert page.status_code == 200 and SECRET not in page.text
-            assert client.post("/config/backups", data=controls(page.text, "confirm")).status_code == 303
+            assert confirm(page, "backups") == 303
             assert tomllib.loads(path.read_text()) == original
-            users = app.extensions["dashboard_users"]
             assert users.verify_audit() is None
             assert SECRET not in str(users.audit_entries())
             assert SECRET not in path.read_text()
@@ -113,4 +139,5 @@ def smoke(directory):
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="cvebeacon-config-smoke-") as directory:
         smoke(Path(directory))
-    print("PASS configuration preview, file-secret channel, rule, reload and rollback over localhost")
+    print("PASS configuration preview, file-secret channel, rule, delegated destination refusal, "
+          "broken-file rollback and reload over localhost")
