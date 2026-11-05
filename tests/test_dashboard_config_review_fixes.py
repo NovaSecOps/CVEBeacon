@@ -214,7 +214,7 @@ def test_real_second_preview_adopts_reference(accounts, second_app):
     assert staged.exists()
 
 
-def test_expired_pending_references_are_eventually_removed(accounts):
+def test_expired_pending_references_are_retained(accounts):
     config, _, app, client = accounts
     login(client, "admin")
     response = preview(client, "sources", g0_nvd_api_key_env="",

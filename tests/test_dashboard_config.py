@@ -319,7 +319,7 @@ def test_file_secret_never_round_trips_and_rule_can_use_channel(accounts, monkey
         assert secret not in backup.read_text()
 
 
-def test_invalid_preview_and_expiration_remove_staged_secrets(accounts):
+def test_invalid_preview_removes_temporary_and_expiration_retains_generated_secret(accounts):
     _, _, app, client = accounts
     login(client, "admin")
     editor = app.extensions["dashboard_config"]

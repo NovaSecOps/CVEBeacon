@@ -284,7 +284,7 @@ def check_document(document):
         if isinstance(item, dict):
             for key, child in item.items():
                 if (key.endswith("_env") and isinstance(child, str)
-                        and ENV_NAME_PATTERN.fullmatch(child) is None):
+                        and child.strip() and ENV_NAME_PATTERN.fullmatch(child.strip()) is None):
                     raise ConfigurationError("Credential references must be environment variable names")
                 references(child)
         elif isinstance(item, list):
@@ -769,7 +769,48 @@ class Editor:
             _VALIDATING.reset(token)
             temporary.unlink(missing_ok=True)
 
+    def _live_staged_paths(self):
+        """Effective staged-secret references in current, running and backups."""
+        live = set()
+        configs = [self.config]
+        if self.path.exists():
+            try:
+                configs.append(load_config(self.path))
+            except (OSError, CVEBeaconError):
+                return None
+        for config in configs:
+            live.update(path.resolve() for path in effective_paths(config).values())
+        if self.backup_dir.exists():
+            if self.backup_dir.is_symlink() or not self.backup_dir.is_dir():
+                return None
+            try:
+                entries = list(self.backup_dir.iterdir())
+            except OSError:
+                return None
+            for entry in entries:
+                if not _backup_name(entry.name):
+                    continue
+                try:
+                    document = tomllib.loads(
+                        read_regular(entry, private=True)[0].decode("utf-8"))
+                except (OSError, ValueError, UnicodeError, CVEBeaconError):
+                    return None
+                for path, value in secret_references(document).items():
+                    if not path[-1].endswith("_file") or not isinstance(value, str):
+                        continue
+                    text = value.strip()
+                    if not text:
+                        continue
+                    try:
+                        live.add(resolve_reference(text, self.path.parent))
+                    except (OSError, RuntimeError, ValueError):
+                        return None
+        return live
+
     def _cleanup_orphans(self):
+        live = self._live_staged_paths()
+        if live is None:
+            return
         active = {path for pending in self.pending.values()
                   for path in (*pending.staged, *pending.references)}
         now = clock.time()
@@ -789,7 +830,7 @@ class Editor:
                 for path in directory.iterdir():
                     if not path.name.startswith(STAGE_PREFIX):
                         continue
-                    if path in active:
+                    if path in active or path.resolve() in live:
                         continue
                     try:
                         age = now - path.lstat().st_mtime
@@ -814,8 +855,12 @@ class Editor:
         active = {path for identifier2, pending2 in self.pending.items()
                   if identifier2 != identifier
                   for path in (*pending2.staged, *pending2.references)}
+        live = self._live_staged_paths()
+        if live is None:
+            return
         for path in pending.staged:
-            if path.name.startswith(STAGE_PREFIX) and path not in active:
+            if (path.name.startswith(STAGE_PREFIX) and path not in active
+                    and path.resolve() not in live):
                 path.unlink(missing_ok=True)
 
     def _check_direct_urls(self, current, candidate, *, rollback):
@@ -1284,11 +1329,12 @@ def credential_authority_changed(candidate, baseline, running):
             return True
         if identity not in running_rows or running_rows[identity] != value:
             return True
-    candidate_channels = {channel.name for channel in candidate.watch.channels}
-    for rows in (baseline_rows, running_rows):
+    candidate_info = _config_channel_info(candidate)
+    for rows, other in ((baseline_rows, baseline), (running_rows, running)):
+        other_info = _config_channel_info(other)
         for identity in rows:
             if (identity[0] == "channel" and identity not in candidate_rows
-                    and identity[1] in candidate_channels):
+                    and _channel_owner_replaced(candidate_info, other_info, identity[1])):
                 return True
     return False
 
@@ -1355,6 +1401,20 @@ def _channel_info_renames(candidate_info, baseline_info):
     return pairs
 
 
+def _channel_owner_replaced(candidate_info, baseline_info, name):
+    """Whether a vanished channel is replaced by a same-type channel rename."""
+    if candidate_info is None or baseline_info is None:
+        return True
+    if name in candidate_info:
+        return True
+    old = baseline_info.get(name)
+    if old is None:
+        return False
+    old_type = old[0]
+    return any(candidate_name not in baseline_info and info[0] == old_type
+               for candidate_name, info in candidate_info.items())
+
+
 DEFAULT_REFERENCES = {
     ("sources", "nvd_api_key_env"): defaults(SourceConfig)["nvd_api_key_env"],
     ("dashboard", "password_hash_env"): defaults(DashboardConfig)["password_hash_env"],
@@ -1386,7 +1446,7 @@ def _raw_reference_map(document, base):
                 values[path] = str(resolve_reference(text, base))
             except (OSError, RuntimeError, ValueError):
                 return None
-        else:
+        elif text:
             values[path] = text
     return values
 
@@ -1432,14 +1492,15 @@ def raw_reference_changes(current_document, candidate, running_config, base, *, 
                    if current_valid and current_document is not None else None)
     candidate_info = _raw_channel_info(candidate, base)
     if current_map is not None:
+        current_info = _raw_channel_info(current_document, base)
         baselines.append((current_map, _channel_info_renames(
-            candidate_info, _raw_channel_info(current_document, base))))
+            candidate_info, current_info), current_info))
     running_map = _config_reference_map(running_config)
+    running_info = _config_channel_info(running_config)
     baselines.append((running_map, _channel_info_renames(
-        candidate_info, _config_channel_info(running_config))))
-    candidate_channels = set(candidate_info or {})
+        candidate_info, running_info), running_info))
     file_changed = env_changed = False
-    for baseline_map, renames in baselines:
+    for baseline_map, renames, baseline_info in baselines:
         translated = {_mapped_reference_key(key, renames): value
                       for key, value in candidate_map.items()}
         for key, value in translated.items():
@@ -1453,7 +1514,7 @@ def raw_reference_changes(current_document, candidate, running_config, base, *, 
             if key in translated:
                 continue
             if (len(key) >= 3 and key[0] == "watch" and key[1] == "channels"
-                    and key[2] not in candidate_channels):
+                    and not _channel_owner_replaced(candidate_info, baseline_info, key[2])):
                 continue
             if key[-1].endswith("_file"):
                 file_changed = True
@@ -1525,7 +1586,7 @@ def path_authority_changed(candidate, baseline, running):
     running_paths = effective_paths(running)
     baseline_renames = _channel_renames(candidate, baseline)
     running_renames = _channel_renames(candidate, running)
-    candidate_channel_names = {channel.name for channel in candidate.watch.channels}
+    candidate_info = _config_channel_info(candidate)
     for identity, path in candidate_paths.items():
         baseline_identity = _mapped_identity(identity, baseline_renames)
         if baseline_paths.get(baseline_identity) != path:
@@ -1540,13 +1601,19 @@ def path_authority_changed(candidate, baseline, running):
     for identity in baseline_paths:
         if identity in baseline_present:
             continue
-        if identity[0] == "channel" and identity[1] not in candidate_channel_names:
+        if (identity[0] == "channel"
+                and not _channel_owner_replaced(candidate_info,
+                                                _config_channel_info(baseline),
+                                                identity[1])):
             continue
         return True
     for identity in running_paths:
         if identity in running_present:
             continue
-        if identity[0] == "channel" and identity[1] not in candidate_channel_names:
+        if (identity[0] == "channel"
+                and not _channel_owner_replaced(candidate_info,
+                                                _config_channel_info(running),
+                                                identity[1])):
             continue
         return True
     return False

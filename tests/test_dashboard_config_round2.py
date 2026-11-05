@@ -1366,3 +1366,102 @@ def test_committed_generated_secret_is_never_auto_deleted(accounts):
     assert client.get("/config/").status_code == 200
     assert generated.exists()
     assert load_config(config.config_path).watch.channels
+
+
+def test_renaming_and_removing_a_credential_reference_is_rejected(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(channel_config(
+        '[watch.channels.mail]\ntype = "smtp"\nhost = "smtp.example.invalid"\n'
+        'from = "sender@example.invalid"\nto = ["soc@example.invalid"]\n'
+        'password_env = "SMTP_PASSWORD"\n'), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "channel-editor", {"view", "edit_channels"})
+    login(client)
+    before = config.config_path.read_bytes()
+    response = preview(client, "channels", g0_name="renamed", g0_password_env="")
+    assert response.status_code == 403
+    assert config.config_path.read_bytes() == before
+
+
+def test_renaming_and_removing_a_file_reference_needs_administrator(accounts):
+    config, users, _, client = accounts
+    secret = make_secret(config.config_path.parent / "password", "synthetic password")
+    config.config_path.write_text(channel_config(_smtp(reference=str(secret))),
+                                  encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "channel-manager", {"view", "edit_channels", "manage_secrets"})
+    login(client)
+    before = config.config_path.read_bytes()
+    response = preview(client, "channels", g0_name="renamed", g0_password_file="")
+    assert response.status_code == 403
+    assert config.config_path.read_bytes() == before
+
+
+def test_rollback_renamed_credential_free_channel_needs_manage_secrets(accounts):
+    config, users, app, client = accounts
+    secret = make_secret(config.config_path.parent / "password", "synthetic password")
+    config.config_path.write_text(channel_config(_smtp(reference=str(secret))),
+                                  encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    editor = app.extensions["dashboard_config"]
+    backup = _manual_backup(editor, channel_config('''
+[watch.channels.renamed]
+type = "smtp"
+host = "smtp.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+'''))
+    set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    assert client.post("/config/backups", data=data).status_code == 403
+
+
+def test_empty_environment_reference_matches_the_loader(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(channel_config(
+        '[watch.channels.mail]\ntype = "smtp"\nhost = "smtp.example.invalid"\n'
+        'from = "sender@example.invalid"\nto = ["soc@example.invalid"]\n'
+        'password_env = ""\n'), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    login(client, "admin")
+    assert client.get("/config/channels").status_code == 200
+
+
+def test_committed_staged_reference_is_never_auto_deleted(accounts):
+    config, users, _, client = accounts
+    secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+    secret_dir.mkdir(mode=0o700, exist_ok=True)
+    staged = make_secret(secret_dir / ".dashboard-staged-live", "synthetic staged")
+    old = time.time() - dc.PREVIEW_SECONDS - 30
+    os.utime(staged, (old, old))
+    config.config_path.write_text(channel_config(
+        f'[watch.channels.mail]\ntype = "smtp"\nhost = "smtp.example.invalid"\n'
+        f'from = "sender@example.invalid"\nto = ["soc@example.invalid"]\n'
+        f'password_file = "dashboard-secrets/{staged.name}"\n'), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    login(client, "admin")
+    assert client.get("/config/").status_code == 200
+    assert staged.exists()
+    assert load_config(config.config_path).watch.channels
+
+
+def test_backup_only_staged_reference_is_not_deleted(accounts):
+    config, _, app, _ = accounts
+    editor = app.extensions["dashboard_config"]
+    secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+    secret_dir.mkdir(mode=0o700, exist_ok=True)
+    staged = make_secret(secret_dir / ".dashboard-staged-backup", "synthetic backup staged")
+    old = time.time() - dc.PREVIEW_SECONDS - 30
+    os.utime(staged, (old, old))
+    editor.backup_dir.mkdir(mode=0o700, exist_ok=True)
+    backup = editor.backup_dir / "20260101T000000000000Z-0123456789abcdef.toml"
+    backup.write_text(channel_config(
+        f'[watch.channels.mail]\ntype = "smtp"\nhost = "smtp.example.invalid"\n'
+        f'from = "sender@example.invalid"\nto = ["soc@example.invalid"]\n'
+        f'password_file = "dashboard-secrets/{staged.name}"\n'), encoding="utf-8")
+    os.chmod(backup, 0o600)
+    editor.cleanup()
+    assert staged.exists()

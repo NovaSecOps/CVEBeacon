@@ -409,7 +409,10 @@ lock: avoid simultaneous filesystem edits. A configuration-file writer lock
 covers target capture, live secret writes, transaction exit and compensation;
 release and descriptor-close failures are sanitized maintenance so a completed
 save is not reported as failed. The writer lock and orphan cleanup are created
-on the first configuration request, not by dashboard startup.
+on the first configuration request, not by dashboard startup. A configuration
+request holds the editor's process lock for its full duration, deliberately
+serialising configuration work with other dashboard traffic in the supported
+single-process deployment.
 Requests are bounded by the dashboard's
 8192-byte form limit, and a section form accepts at most 101 rows per save;
 split larger edits into smaller saves where possible. Pending previews hold
@@ -571,8 +574,8 @@ review the diff and confirm. Rollback uses the same validation, concurrency chec
 confirmation, audit, atomic replacement, backup and reload path as saving.
 The backups list remains available when the live file fails the loader or is
 missing. The page reads the raw bytes and version signature, validates only the
-chosen backup, and shows a static "current configuration is invalid or missing"
-notice instead of diffing unvalidated live values. Rollback requires the access
+chosen backup, which must validate, and shows a static "current configuration is
+invalid or missing" notice instead of diffing unvalidated live values. Rollback requires the access
 confirmation. A missing or unparseable live file also requires
 `manage_secrets`. A parseable file that fails validation is compared with the
 running configuration and can be restored with the configuration edit

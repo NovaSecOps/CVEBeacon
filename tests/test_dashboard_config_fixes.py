@@ -550,12 +550,12 @@ def test_new_generic_webhook_rejects_a_direct_url(accounts):
     assert "url_env" in response.text
 
 
-def test_cleanup_preserves_a_backup_only_reference(accounts):
+def test_cleanup_preserves_a_backup_only_staged_reference(accounts):
     config, _, app, client = accounts
     editor = app.extensions["dashboard_config"]
     secret_dir = config.watch.users_database.parent / "dashboard-secrets"
     secret_dir.mkdir(mode=0o700, exist_ok=True)
-    staged = make_secret(secret_dir / (editor_module.SECRET_PREFIX + "backup"), "Synthetic value")
+    staged = make_secret(secret_dir / (editor_module.STAGE_PREFIX + "backup"), "Synthetic value")
     old = time.time() - editor_module.PREVIEW_SECONDS - 30
     os.utime(staged, (old, old))
     editor.backup_dir.mkdir(mode=0o700, exist_ok=True)
