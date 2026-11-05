@@ -89,15 +89,7 @@ def _connect(path: str | Path) -> sqlite3.Connection | None:
     try:
         if not source.is_file():
             return None
-        # immutable=1 avoids inventing -wal/-shm files next to a quiescent
-        # database. When a writer has left a WAL, read through it normally.
-        params = "mode=ro"
-        if not any(
-            source.with_name(source.name + suffix).exists()
-            for suffix in ("-wal", "-shm")
-        ):
-            params += "&immutable=1"
-        uri = source.resolve().as_uri() + "?" + params
+        uri = source.resolve().as_uri() + "?mode=ro"
         connection = sqlite3.connect(uri, uri=True, timeout=5.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only = ON")
@@ -112,6 +104,7 @@ def _read(path: str | Path, operation, default):
         return default
     try:
         with closing(connection):
+            connection.execute("BEGIN")
             return operation(connection)
     except (sqlite3.Error, OSError, TypeError, ValueError, KeyError):
         return default

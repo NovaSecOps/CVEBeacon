@@ -794,6 +794,13 @@ clients are byte-identical to earlier version-2 output. Notice events can carry
 the same field. Clients come only from local state and are never sent to public
 sources.
 
+Client correlation opens the live inventory database with SQLite `mode=ro` and
+reads one transaction. SQLite may need writable directory access to create WAL
+sidecars, even for this read-only connection. If the database cannot be read
+(including a read-only directory without usable sidecars), the clients line is
+omitted. Use a consistent writer-prepared backup when read-only storage is needed;
+live databases are never opened as immutable snapshots.
+
 ### Privacy
 
 Messages go to the providers you configure: Slack, Discord, Telegram, Teams,

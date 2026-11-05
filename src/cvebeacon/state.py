@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterator, Sequence
 
 from .errors import StateError
+from .identity import validate_client_name
 from .models import Finding, QueryResult, HealthStatus
 
 SCHEMA_VERSION = 3
@@ -189,6 +190,7 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS runs_successful ON runs(status, completed_at);
                 CREATE INDEX IF NOT EXISTS advisory_aliases_alias ON advisory_aliases(alias, asset_id);
+                CREATE INDEX IF NOT EXISTS advisory_aliases_primary ON advisory_aliases(asset_id, primary_id, alias);
                 CREATE INDEX IF NOT EXISTS scan_findings_lookup ON scan_findings(run_id, identifier, asset_id, applicability);
                 CREATE INDEX IF NOT EXISTS scan_findings_advisory ON scan_findings(run_id, advisory_id, asset_id);
                 """
@@ -243,6 +245,10 @@ class StateStore:
                     (run_id, started, completed, "failed" if any(result.coverage is not None or any(health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for health in result.source_health) for result in results) else "completed", len(results), len(findings), sum(result.coverage is not None for result in results)),
                 )
                 for result in results:
+                    try:
+                        validate_client_name(result.asset.client)
+                    except ValueError as exc:
+                        raise StateError(str(exc)) from None
                     db.execute("INSERT INTO scan_assets VALUES (?,?,?)", (
                         run_id, result.asset.asset_id, json.dumps({"asset": asdict(result.asset),
                             "coverage": result.coverage.value if result.coverage else None,
@@ -285,7 +291,22 @@ class StateStore:
                         observed.add(identity)
                         finding = replace(finding, vulnerability=replace(finding.vulnerability, advisory_id=primary))
                         primary_id = primary.strip().upper()
-                        for identifier in finding.vulnerability.identifiers:
+                        # Freeze the known alias closure with this run. Delivery
+                        # must not depend on later changes to the alias ledger.
+                        seeds = ",".join("(?)" for _ in candidates)
+                        known = db.execute(
+                            "WITH RECURSIVE names(identifier) AS ("
+                            f" VALUES {seeds}"
+                            " UNION SELECT aa.alias FROM advisory_aliases aa JOIN names n"
+                            " ON aa.primary_id=n.identifier WHERE aa.asset_id=?"
+                            " UNION SELECT aa.primary_id FROM advisory_aliases aa JOIN names n"
+                            " ON aa.alias=n.identifier WHERE aa.asset_id=?"
+                            ") SELECT identifier FROM names",
+                            (*candidates, finding.asset.asset_id, finding.asset.asset_id),
+                        )
+                        snapshot_identifiers = set(finding.vulnerability.identifiers)
+                        snapshot_identifiers.update(row[0] for row in known)
+                        for identifier in sorted(snapshot_identifiers):
                             value = identifier.strip().upper()
                             if not value:
                                 continue
@@ -293,7 +314,11 @@ class StateStore:
                                 "INSERT INTO scan_findings(run_id,asset_id,identifier,advisory_id,applicability)"
                                 " VALUES (?,?,?,?,?) ON CONFLICT(run_id,asset_id,identifier)"
                                 " DO UPDATE SET advisory_id=excluded.advisory_id,"
-                                " applicability=excluded.applicability",
+                                " applicability=excluded.applicability"
+                                " WHERE CASE excluded.applicability WHEN 'affected' THEN 2"
+                                " WHEN 'needs_review' THEN 1 ELSE 0 END >"
+                                " CASE scan_findings.applicability WHEN 'affected' THEN 2"
+                                " WHEN 'needs_review' THEN 1 ELSE 0 END",
                                 (
                                     run_id,
                                     finding.asset.asset_id,

@@ -94,7 +94,7 @@ def validate_client_name(value: object) -> str:
             f"client must be at most {MAX_CLIENT_LENGTH} characters"
         )
     if any(
-        unicodedata.category(character) in {"Cc", "Cf"}
+        unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
         for character in value
     ):
         raise ValueError(
