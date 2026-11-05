@@ -17,6 +17,7 @@ from urllib.parse import quote
 import httpx
 
 from ..config import AppConfig
+from ..clients import ClientImpact, affected_clients
 from ..errors import ConfigurationError
 from ..http import HttpClient, HttpResult
 from .channels import ChannelConfig, channel_map, validate_webhook_url
@@ -385,6 +386,7 @@ def _send_webhook(
     http: HttpClient,
     timeout: float,
     names: Mapping[str, str],
+    clients: Mapping[str, Sequence[ClientImpact]] | None = None,
 ) -> None:
     headers: dict[str, str] = {}
     header_name = channel.options.get("header_name")
@@ -395,7 +397,7 @@ def _send_webhook(
         "POST",
         str(channel.options["url"]),
         headers=headers,
-        json_body=webhook_payload(events, names),
+        json_body=webhook_payload(events, names, clients),
         timeout=timeout,
     )
     if not 200 <= result.status_code < 300:
@@ -657,6 +659,7 @@ def _send(
     timeout: float,
     names: Mapping[str, str],
     *,
+    clients: Mapping[str, Sequence[ClientImpact]] | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] | None = None,
 ) -> None:
@@ -671,7 +674,7 @@ def _send(
     elif channel.type == "gotify":
         _send_gotify(channel, message, http, timeout)
     elif channel.type == "webhook":
-        _send_webhook(channel, events, http, timeout, names)
+        _send_webhook(channel, events, http, timeout, names, clients)
     elif channel.type == "graph":
         _send_graph(channel, message, http, timeout)
     elif channel.type == "smtp":
@@ -717,6 +720,7 @@ def _channel_messages(
     names: Mapping[str, str],
     since: str | None,
     language: str,
+    clients: Mapping[str, Sequence[ClientImpact]] | None = None,
 ) -> tuple[OutgoingMessage, ...]:
     return build_messages(
         events,
@@ -727,6 +731,7 @@ def _channel_messages(
         since=since,
         language=language,
         format=channel.format,
+        clients=clients,
     )
 
 
@@ -802,6 +807,7 @@ def deliver_pending(
             covered: Sequence[DeliveryEvent],
             sent: int,
             pace: bool,
+            client_impacts: Mapping[str, Sequence[ClientImpact]] | None = None,
         ) -> tuple[int, int, DeliveryFailure | None, bool, bool]:
             delivered = 0
             failure: DeliveryFailure | None = None
@@ -838,6 +844,7 @@ def deliver_pending(
                         http,
                         timeout,
                         names,
+                        clients=client_impacts,
                         deadline=deadline,
                         monotonic=monotonic,
                     )
@@ -900,7 +907,17 @@ def deliver_pending(
                     timeout = max(0.5, min(channel.timeout_seconds, remaining))
                     failure: DeliveryFailure | None = None
                     try:
-                        _send_webhook(channel, chunk, http, timeout, names)
+                        _send_webhook(
+                            channel,
+                            chunk,
+                            http,
+                            timeout,
+                            names,
+                            affected_clients(
+                                config.database_path,
+                                (event.cve_id for event in chunk),
+                            ),
+                        )
                     except DeliveryFailure as exc:
                         failure = exc
                     except ConfigurationError as exc:
@@ -939,6 +956,10 @@ def deliver_pending(
                     include_ambiguous=include_ambiguous,
                 )
                 if digest is not None:
+                    digest_clients = affected_clients(
+                        config.database_path,
+                        (event.cve_id for event in digest.events),
+                    )
                     try:
                         initial_messages = build_messages(
                             (),
@@ -950,6 +971,7 @@ def deliver_pending(
                             initial=digest,
                             language=language,
                             format=channel.format,
+                            clients=digest_clients,
                         )
                     except MessageTooLarge:
                         store.mark_initial_failed(
@@ -977,6 +999,7 @@ def deliver_pending(
                                 digest.events,
                                 messages_sent,
                                 pace_needed,
+                                digest_clients,
                             )
                             if expired:
                                 store.release_initial(channel.name, now=now)
@@ -1043,6 +1066,10 @@ def deliver_pending(
                 batches.append(alerts)
             for batch in batches:
                 index = _event_index(batch)
+                batch_clients = affected_clients(
+                    config.database_path,
+                    (event.cve_id for event in batch),
+                )
                 claim_statuses = (
                     ("ambiguous",)
                     if batch
@@ -1056,6 +1083,7 @@ def deliver_pending(
                         names=names,
                         since=since,
                         language=language,
+                        clients=batch_clients,
                     )
                 except MessageTooLarge:
                     identifiers = tuple(event.event_id for event in batch)
@@ -1141,7 +1169,7 @@ def deliver_pending(
                         expired,
                         pace_needed,
                     ) = send_messages(
-                        group, covered, messages_sent, pace_needed
+                        group, covered, messages_sent, pace_needed, batch_clients
                     )
                     if expired:
                         # Nothing left this run: undo the claim without an

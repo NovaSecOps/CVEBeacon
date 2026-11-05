@@ -1564,6 +1564,7 @@ class WatchStore:
         kind: str | None = None,
         initial: bool | None = None,
         cve: str | None = None,
+        cve_ids: Iterable[str] | None = None,
         since: date | None = None,
         until: date | None = None,
         offset: int = 0,
@@ -1601,6 +1602,16 @@ class WatchStore:
         if cve is not None:
             clauses.append("e.cve_id = ?")
             parameters.append(cve)
+        if cve_ids is not None:
+            selected_cves = tuple(sorted({str(value) for value in cve_ids if value}))
+            if not selected_cves:
+                return ()
+            if len(selected_cves) > 5000:
+                raise StateError("too many event CVEs selected")
+            clauses.append(
+                "e.cve_id IN (" + ",".join("?" for _ in selected_cves) + ")"
+            )
+            parameters.extend(selected_cves)
         if since is not None:
             clauses.append("e.created_at >= ?")
             parameters.append(since.isoformat())

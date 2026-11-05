@@ -24,6 +24,14 @@ from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
 
 from cvebeacon import cli
 from cvebeacon.errors import ConfigurationError
+from cvebeacon.models import (
+    Applicability,
+    Asset,
+    Finding,
+    QueryResult,
+    Vulnerability,
+)
+from cvebeacon.state import StateStore
 from cvebeacon.watch.channels import channel_map
 from cvebeacon.watch.delivery import (
     DeliveryFailure,
@@ -129,6 +137,58 @@ def test_success_marks_the_delivery_sent(tmp_path):
     payload = json.loads(requests[0].content)
     assert payload["version"] == 2
     assert payload["events"][0]["cve_id"] == "CVE-2026-0001"
+    assert "affected_clients" not in payload["events"][0]
+
+
+def test_webhook_lists_affected_clients(tmp_path):
+    config = make_config(tmp_path)
+    store = seed(config)
+    state = StateStore(config.database_path)
+    acme = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    review = Asset("a2", "Acme", "Widget", "2", client="Globex")
+    state.record_scan(
+        [
+            QueryResult(
+                acme,
+                (
+                    Finding(
+                        acme,
+                        Vulnerability("CVE-2026-0001"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+            QueryResult(
+                review,
+                (
+                    Finding(
+                        review,
+                        Vulnerability("CVE-2026-0001"),
+                        Applicability.NEEDS_REVIEW,
+                        "limited",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+        ]
+    )
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    report = deliver(config, store, handler)
+    assert report.failed is False
+    payload = json.loads(requests[0].content)
+    assert payload["events"][0]["affected_clients"] == [
+        {"name": "Acme", "assets": 1, "status": "affected"},
+        {"name": "Globex", "assets": 1, "status": "needs_review"},
+    ]
 
 
 def test_sending_is_committed_before_the_request(tmp_path):
