@@ -6,11 +6,12 @@ from io import BytesIO
 import json
 from pathlib import Path
 import re
+import sqlite3
 
 import pytest
 
 from cvebeacon import dashboard, dashboard_watch
-from cvebeacon.errors import ConfigurationError
+from cvebeacon.errors import CVEBeaconError, ConfigurationError
 from cvebeacon.watch import feeds
 from cvebeacon.watch.records import (
     CVSSEntry,
@@ -605,6 +606,125 @@ def test_statement_rejects_bad_uploads(watch, monkeypatch):
     assert oversized.status_code == 413
 
 
+def test_statement_accepts_uploads_up_to_the_advertised_limit(watch):
+    _, _, _, _, client = watch
+    login(client, "ops")
+    for size in (64 * 1024, 5 * 1024 * 1024):
+        token = csrf(client, "/watch/cve/CVE-2026-0001/statement")
+        response = client.post(
+            "/watch/cve/CVE-2026-0001/statement",
+            data={
+                "csrf": token,
+                "template": "upload",
+                "template_file": (
+                    BytesIO(b"x" * size),
+                    "large.md",
+                ),
+            },
+            content_type="multipart/form-data",
+        )
+        assert response.status_code == 200, (size, response.status_code)
+        assert len(response.data) == size
+    token = csrf(client, "/watch/cve/CVE-2026-0001/statement")
+    oversized = client.post(
+        "/watch/cve/CVE-2026-0001/statement",
+        data={
+            "csrf": token,
+            "template": "upload",
+            "template_file": (
+                BytesIO(b"x" * (5 * 1024 * 1024 + 1)),
+                "large.md",
+            ),
+        },
+        content_type="multipart/form-data",
+    )
+    assert oversized.status_code == 413
+
+
+def test_statement_filesystem_error_does_not_disclose_a_temp_path(
+    watch, monkeypatch
+):
+    _, _, _, _, client = watch
+    login(client, "ops")
+    paths = []
+
+    def fail(store, identifier, *, catalogs, template, out):
+        paths.append(out)
+        raise CVEBeaconError(f"could not write statement: {out}")
+
+    monkeypatch.setattr(dashboard_watch, "write_statement", fail)
+    token = csrf(client, "/watch/cve/CVE-2026-0001/statement")
+    response = client.post(
+        "/watch/cve/CVE-2026-0001/statement",
+        data={"csrf": token, "template": "builtin"},
+    )
+    assert response.status_code == 400
+    assert paths
+    assert str(paths[0]) not in response.text
+    assert "could not write statement" not in response.text
+    assert "temporary file" in response.text
+
+
+def test_cve_detail_deliveries_survive_notice_history(watch):
+    _, _, store, _, client = watch
+    _insert_notice_history(store, "CVE-2026-0001", 600)
+    login(client, "reader")
+    response = client.get("/watch/cve/CVE-2026-0001")
+    assert response.status_code == 200
+    assert "No deliveries recorded." not in response.text
+    assert "hook: pending" in response.text
+    assert "Additional channel deliveries are not shown." not in response.text
+
+
+def test_cve_detail_bounds_channel_overflow(watch):
+    _, _, store, _, client = watch
+    event_id = store.events(cve="CVE-2026-0001")[0].id
+    with sqlite3.connect(store.path) as db:
+        db.executemany(
+            "INSERT OR REPLACE INTO watch_delivery(event_id,channel,status,"
+            "attempts,last_error,updated_at) VALUES (?,?,?,0,NULL,?)",
+            [
+                (event_id, f"channel-{number:02d}", "sent", NOW.isoformat())
+                for number in range(25)
+            ],
+        )
+    login(client, "reader")
+    response = client.get("/watch/cve/CVE-2026-0001")
+    assert response.status_code == 200
+    assert "channel-19: sent" in response.text
+    assert "channel-20: sent" not in response.text
+    assert "Additional channel deliveries are not shown." in response.text
+
+
+def test_cve_detail_notice_query_is_bounded_by_the_rendered_trail(
+    watch, monkeypatch
+):
+    _, _, store, _, client = watch
+    _insert_legacy_reports(store, "CVE-2026-0001", 500)
+    captured = []
+    original = WatchStore.notice_deliveries_for
+
+    def spy(self, cve_id, occurrences, *, per_notice=20):
+        values = list(occurrences)
+        captured.append(values)
+        return original(self, cve_id, values, per_notice=per_notice)
+
+    monkeypatch.setattr(
+        WatchStore, "notice_deliveries_for", spy, raising=False
+    )
+    login(client, "reader")
+    response = client.get("/watch/cve/CVE-2026-0001")
+    assert response.status_code == 200
+    assert len(captured) == 1
+    assert len(captured[0]) == 50
+    assert "Older entries" in response.text
+    second = client.get("/watch/cve/CVE-2026-0001?trail_page=2")
+    assert second.status_code == 200
+    assert len(captured) == 2
+    assert len(captured[1]) == 50
+    assert "Newer entries" in second.text
+
+
 def test_statement_rejects_invalid_placeholders(watch):
     _, _, _, _, client = watch
     login(client, "ops")
@@ -620,6 +740,118 @@ def test_statement_rejects_invalid_placeholders(watch):
     )
     assert response.status_code == 400
     assert "unknown_field" in response.text
+
+
+def _insert_notice_history(store, cve_id: str, count: int) -> None:
+    with sqlite3.connect(store.path) as db:
+        for number in range(count):
+            cursor = db.execute(
+                "INSERT INTO watch_event(rule,cve_id,kind,reasons_json,"
+                "details_json,occurrence,initial,created_at) "
+                "VALUES (?,?,?,?,?,?,0,?)",
+                (
+                    "@reported",
+                    cve_id,
+                    "reported",
+                    '["reported to clients"]',
+                    "{}",
+                    f"report:{900000 + number}",
+                    NOW.isoformat(),
+                ),
+            )
+            db.execute(
+                "INSERT INTO watch_delivery(event_id,channel,status,attempts,"
+                "last_error,updated_at) VALUES (?,?,?,0,NULL,?)",
+                (cursor.lastrowid, "bulk", "sent", NOW.isoformat()),
+            )
+
+
+def _insert_legacy_reports(store, cve_id: str, count: int) -> None:
+    with sqlite3.connect(store.path) as db:
+        db.executemany(
+            "INSERT INTO watch_report(cve_id,action,by,note,at,chain_version) "
+            "VALUES (?,?,?,?,?,0)",
+            [
+                (cve_id, "report", "bulk", "legacy", NOW.isoformat())
+                for _ in range(count)
+            ],
+        )
+
+
+@pytest.mark.parametrize("mode", ["open", "registered", "authenticated"])
+def test_dashboard_session_rejects_a_disabled_account_in_every_mode(
+    tmp_path, mode
+):
+    config, users, store, _, _ = seeded(tmp_path, identity=mode)
+    admin = users.authenticate("admin", PASSWORD)
+    proof = users.authenticate("ops", PASSWORD)
+    assert admin is not None and proof is not None
+    users.disable("ops", authorization=admin)
+    kwargs = {} if mode == "authenticated" else {"by": "ops"}
+    with pytest.raises(ConfigurationError):
+        ReportService(
+            store, config.watch.users_database, mode
+        ).report_cve(
+            "CVE-2026-0002", session=proof, **kwargs
+        )
+    assert store.report_trail("CVE-2026-0002") == ()
+
+
+def test_dashboard_session_rejects_a_disabled_account_on_unreport(tmp_path):
+    config, users, store, _, _ = seeded(tmp_path, identity="open")
+    admin = users.authenticate("admin", PASSWORD)
+    proof = users.authenticate("ops", PASSWORD)
+    assert admin is not None and proof is not None
+    users.disable("ops", authorization=admin)
+    with pytest.raises(ConfigurationError):
+        ReportService(
+            store, config.watch.users_database, "open"
+        ).unreport_cve(
+            "CVE-2026-0001", by="ops", session=proof
+        )
+    assert store.report_trail("CVE-2026-0001")[0].action == "report"
+
+
+@pytest.mark.parametrize("mode", ["open", "registered", "authenticated"])
+def test_dashboard_session_rejects_a_credential_change_in_every_mode(
+    tmp_path, mode
+):
+    config, users, store, _, _ = seeded(tmp_path, identity=mode)
+    admin = users.authenticate("admin", PASSWORD)
+    proof = users.authenticate("ops", PASSWORD)
+    assert admin is not None and proof is not None
+    users.set_password(
+        "ops",
+        "Changed dashboard password 456",
+        authorization=admin,
+    )
+    kwargs = {} if mode == "authenticated" else {"by": "ops"}
+    with pytest.raises(ConfigurationError):
+        ReportService(
+            store, config.watch.users_database, mode
+        ).report_cve(
+            "CVE-2026-0002", session=proof, **kwargs
+        )
+    assert store.report_trail("CVE-2026-0002") == ()
+
+
+@pytest.mark.parametrize("mode", ["open", "registered", "authenticated"])
+def test_dashboard_session_rechecks_report_permission_in_every_mode(
+    tmp_path, mode
+):
+    config, users, store, _, _ = seeded(tmp_path, identity=mode)
+    admin = users.authenticate("admin", PASSWORD)
+    proof = users.authenticate("ops", PASSWORD)
+    assert admin is not None and proof is not None
+    users.save_role("ops", {"view"}, authorization=admin)
+    kwargs = {} if mode == "authenticated" else {"by": "ops"}
+    with pytest.raises(ConfigurationError, match="permission required"):
+        ReportService(
+            store, config.watch.users_database, mode
+        ).report_cve(
+            "CVE-2026-0002", session=proof, **kwargs
+        )
+    assert store.report_trail("CVE-2026-0002") == ()
 
 
 def test_authenticated_report_rechecks_the_account_before_writing(tmp_path):

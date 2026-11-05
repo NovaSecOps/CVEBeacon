@@ -80,6 +80,8 @@
 </table></div>
 
 <h2>Reported-to-clients trail</h2>
+<p class="muted">Newest {{ trail_page_size }} entries per page. Use the reported export for the complete trail.</p>
+<p>Page {{ trail_page }}{% if trail_has_previous %} · <a href="{{ url_for('watch.cve', cve_id=cve_id, trail_page=trail_page - 1) }}">Newer entries</a>{% endif %}{% if trail_has_next %} · <a href="{{ url_for('watch.cve', cve_id=cve_id, trail_page=trail_page + 1) }}">Older entries</a>{% endif %}</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Time</th><th>Action</th><th>By</th><th>Identity mode</th><th>Note</th><th>Notices</th></tr></thead>
 <tbody>{% for row in trail_rows %}<tr>
@@ -89,6 +91,6 @@
   <td>{{ value(row.entry.identity_mode, 'legacy') }}</td>
   <td>{{ value(row.entry.note, '') }}</td>
   <td>{{ deliveries(row.notices) }}</td>
-</tr>{% else %}<tr><td colspan="6">This CVE has never been reported to clients.</td></tr>{% endfor %}</tbody>
+</tr>{% else %}<tr><td colspan="6">{{ 'No entries on this page.' if trail_page > 1 else 'This CVE has never been reported to clients.' }}</td></tr>{% endfor %}</tbody>
 </table></div>
 {% endblock %}

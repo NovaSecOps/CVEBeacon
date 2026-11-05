@@ -42,7 +42,7 @@ from .watch.statements import (
     template_kind,
     write_statement,
 )
-from .watch.store import WatchStore
+from .watch.store import EventDeliveries, WatchStore
 from .watch.sync import euvd_progress
 
 STATE_KEY = "dashboard_watch"
@@ -50,6 +50,7 @@ MAX_STATEMENT_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_REQUEST_BYTES = MAX_STATEMENT_UPLOAD_BYTES + 64 * 1024
 EVENT_PAGE_SIZE = 50
 REPORT_PAGE_SIZE = 100
+TRAIL_PAGE_SIZE = 50
 EXPORT_BATCH = 1000
 MAX_PAGE = 100_000
 MARKS = {
@@ -70,9 +71,16 @@ def register_watch(app, config: AppConfig) -> None:
 
     def limit_request_body():
         # Statement uploads stream to a temporary file and are bounded by the
-        # view. Every other route keeps the original small form limit.
-        if request.endpoint != "watch.statement":
+        # view. Every other route keeps the original small form limits. The
+        # multipart decoder applies max_form_memory_size to its whole buffer,
+        # file parts included, so the statement request needs the larger value
+        # before the shared CSRF guard parses the form.
+        if request.endpoint == "watch.statement":
+            request.max_content_length = MAX_REQUEST_BYTES
+            request.max_form_memory_size = MAX_REQUEST_BYTES
+        else:
             request.max_content_length = 8192
+            request.max_form_memory_size = 8192
 
     # This runs before the shared request guard and its CSRF form read,
     # because the blueprint is registered before that guard is defined.
@@ -97,8 +105,8 @@ def _stamp(value: str | None) -> str:
     return format_timestamp(value) if value else ""
 
 
-def _page_number() -> int:
-    raw = _text(request.args, "page") or "1"
+def _page_number(name: str = "page") -> int:
+    raw = _text(request.args, name) or "1"
     if not raw.isascii() or not raw.isdigit() or not 1 <= int(raw) <= MAX_PAGE:
         abort(400)
     return int(raw)
@@ -145,10 +153,10 @@ def _identity_arguments(config: AppConfig) -> dict[str, object]:
     if g.user is None or g.entry is None or g.entry.proof is None:
         abort(403)
     if config.watch.reporting_identity == "authenticated":
-        return {"authenticated": g.entry.proof}
-    # Open and registered modes both accept a resolved name.  The name is the
-    # logged-in account, so a request cannot claim another person's identity.
-    return {"by": g.user.username}
+        return {"session": g.entry.proof}
+    # Open and registered modes record a name, but the session proof still
+    # authorizes the write and is rechecked inside the report transaction.
+    return {"by": g.user.username, "session": g.entry.proof}
 
 
 def _can_report() -> bool:
@@ -163,13 +171,6 @@ def _can_export() -> bool:
     return not g.accounts or "view_audit" in g.permissions
 
 
-def _delivery_map(rows) -> dict[int, list]:
-    output: dict[int, list] = {}
-    for row in rows:
-        output.setdefault(row.event_id, []).append(row)
-    return output
-
-
 def _cve_context(
     identifier: str,
     *,
@@ -181,9 +182,22 @@ def _cve_context(
     if view is None:
         abort(404)
     events = store.events(limit=EVENT_PAGE_SIZE, cve=identifier)
-    deliveries = _delivery_map(store.event_deliveries(identifier, limit=500))
-    trail = store.report_trail(identifier, limit=100)
-    notices = store.notice_deliveries(cve_id=identifier)
+    trail_page = _page_number("trail_page")
+    trail = store.report_trail(
+        identifier,
+        limit=TRAIL_PAGE_SIZE + 1,
+        offset=(trail_page - 1) * TRAIL_PAGE_SIZE,
+    )
+    trail_has_next = len(trail) > TRAIL_PAGE_SIZE
+    trail = trail[:TRAIL_PAGE_SIZE]
+    deliveries = store.event_deliveries(
+        (event.id for event in events), per_event=20
+    )
+    notices = store.notice_deliveries_for(
+        identifier,
+        (f"{entry.action}:{entry.id}" for entry in trail),
+        per_notice=20,
+    )
     mark = store.reported_marks((identifier,)).get(identifier)
     banner_key = _text(request.args, "mark")
     banner = MARKS.get(banner_key)
@@ -196,17 +210,26 @@ def _cve_context(
         cve_id=identifier,
         view=view,
         event_rows=[
-            {"event": row, "deliveries": deliveries.get(row.id, ())}
+            {
+                "event": row,
+                "deliveries": deliveries.get(row.id, EventDeliveries()),
+            }
             for row in events
         ],
         trail_rows=[
             {
                 "entry": entry,
-                "notices": notices.get((entry.action, entry.id), ()),
+                "notices": notices.get(
+                    (entry.action, entry.id), EventDeliveries()
+                ),
             }
             for entry in trail
         ],
         mark_entry=mark,
+        trail_page=trail_page,
+        trail_page_size=TRAIL_PAGE_SIZE,
+        trail_has_previous=trail_page > 1,
+        trail_has_next=trail_has_next,
         banner=banner,
         error=error,
         can_report=_can_report(),
@@ -482,6 +505,17 @@ def export_reported():
     return response
 
 
+def _statement_error(exc: CVEBeaconError, directory: str) -> str:
+    """Keep template feedback but never echo a temporary filesystem path."""
+    message = str(exc)
+    if directory and directory in message:
+        return (
+            "The statement could not be generated because a temporary file "
+            "could not be read or written."
+        )
+    return message
+
+
 def _save_upload(upload, path: Path) -> None:
     total = 0
     try:
@@ -568,7 +602,11 @@ def statement(cve_id):
             )
             payload = output.read_bytes()
         except CVEBeaconError as exc:
-            return _statement_page(identifier, error=str(exc), status=400)
+            return _statement_page(
+                identifier,
+                error=_statement_error(exc, directory),
+                status=400,
+            )
     return send_file(
         BytesIO(payload),
         as_attachment=True,

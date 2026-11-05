@@ -61,14 +61,26 @@ class ReportService:
         user: object | None,
         password: object | None,
         password_prompt: Callable[[str], str] | None,
+        session: AuthenticatedUser | None = None,
         authenticated: AuthenticatedUser | None = None,
     ) -> ReportIdentity:
         mode = self._mode
+        if session is not None and not isinstance(
+            session, AuthenticatedUser
+        ):
+            raise ConfigurationError(
+                "a dashboard session must be a successful login"
+            )
         if authenticated is not None:
             if mode != "authenticated":
                 raise ConfigurationError(
                     "a dashboard login is only available when "
                     "watch.reporting.identity = authenticated"
+                )
+            if session is not None and session != authenticated:
+                raise ConfigurationError(
+                    "the dashboard session does not match the authentication "
+                    "proof"
                 )
             if by is not None or user is not None or password is not None:
                 raise ConfigurationError(
@@ -82,6 +94,7 @@ class ReportService:
                 user=authenticated.user,
                 authenticated=authenticated,
                 email=authenticated.user.email,
+                session=session,
             )
         if mode == "open":
             if user is not None or password is not None:
@@ -89,10 +102,18 @@ class ReportService:
                     "--user is only available when watch.reporting.identity = "
                     "authenticated"
                 )
-            return ReportIdentity(
-                "open",
-                validate_identity(by if by is not None else default_identity()),
+            display = validate_identity(
+                by
+                if by is not None
+                else session.user.username
+                if session is not None
+                else default_identity()
             )
+            if session is not None and session.user.username != display:
+                raise ConfigurationError(
+                    "the dashboard session does not match the open identity"
+                )
+            return ReportIdentity("open", display, session=session)
         if mode == "registered":
             if user is not None or password is not None:
                 raise ConfigurationError(
@@ -109,11 +130,29 @@ class ReportService:
                 raise ConfigurationError(
                     "reported by must name an enabled CVEBeacon user"
                 )
+            if session is not None and session.user.id != roster.id:
+                raise ConfigurationError(
+                    "the dashboard session does not match the resolved account"
+                )
             return ReportIdentity(
                 "registered",
                 validate_identity(roster.identity),
                 user=roster,
                 email=roster.email,
+                session=session,
+            )
+        if session is not None:
+            if by is not None or user is not None or password is not None:
+                raise ConfigurationError(
+                    "a dashboard session cannot be combined with --by or --user"
+                )
+            return ReportIdentity(
+                "authenticated",
+                validate_identity(session.user.identity),
+                user=session.user,
+                authenticated=session,
+                email=session.user.email,
+                session=session,
             )
         if by is not None:
             raise ConfigurationError(
@@ -147,9 +186,10 @@ class ReportService:
         """Hold the user-database write lock across the report write.
 
         Lock order is always user database then watch database. The same
-        connection is used for the recheck inside the watch transaction.
+        connection is used for the recheck inside the watch transaction. A
+        dashboard session proof is checked even in open mode.
         """
-        if identity.mode == "open":
+        if identity.mode == "open" and identity.session is None:
             yield None
             return
         self.users.initialize()
@@ -165,6 +205,7 @@ class ReportService:
         user: object | None = None,
         password: object | None = None,
         password_prompt: Callable[[str], str] | None = None,
+        session: AuthenticatedUser | None = None,
         authenticated: AuthenticatedUser | None = None,
         note: object | None = None,
         force: bool = False,
@@ -175,6 +216,7 @@ class ReportService:
             user=user,
             password=password,
             password_prompt=password_prompt,
+            session=session,
             authenticated=authenticated,
         )
         with self._identity_guard(identity) as db:
@@ -200,6 +242,7 @@ class ReportService:
         user: object | None = None,
         password: object | None = None,
         password_prompt: Callable[[str], str] | None = None,
+        session: AuthenticatedUser | None = None,
         authenticated: AuthenticatedUser | None = None,
         note: object | None = None,
         notify_channels: Iterable[str] = (),
@@ -209,6 +252,7 @@ class ReportService:
             user=user,
             password=password,
             password_prompt=password_prompt,
+            session=session,
             authenticated=authenticated,
         )
         with self._identity_guard(identity) as db:

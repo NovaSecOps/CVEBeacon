@@ -45,7 +45,9 @@ change scan or delivery state.
 - **CVE detail:** the stored view with CVSS by provider, EPSS, CISA and EU KEV
   dates and required action, SSVC exploitation, CWEs, products, references,
   publication and first-seen dates, the CVE's events with per-channel delivery
-  state, and the report/unreport trail with its notice states. Links open NVD,
+  state, and the report/unreport trail with its notice states. The trail is
+  paginated at 50 entries per page; each event or notice shows at most 20
+  channel deliveries and says explicitly when more exist. Links open NVD,
   CVE.org and EUVD. Reference links are rendered only for HTTP and HTTPS URLs.
 - **Reported to clients:** current report marks, 100 per page. The full
   append-only report/unreport trail downloads as CSV or JSON and requires
@@ -63,13 +65,15 @@ account, never a name supplied by the form. The configured identity mode still
 applies: in `open` mode the account username is recorded as the open identity,
 in `registered` mode the enabled account is resolved to its display identity,
 and in `authenticated` mode the existing dashboard session proof is accepted
-without asking for the password again. The account and credential version are
-rechecked inside the report write transaction, so a disabled or changed account
-fails closed. A channel with `notify_reported = true` gets a queued notice; the
-delivery state is shown in the trail, and delivery still runs through
-`cvebeacon watch notify` or `watch run`. The shared-password compatibility mode
-can browse watch pages and generate statements, but cannot record a client
-report because there is no CVEBeacon account identity.
+without asking for the password again. The dashboard session proof itself
+authorizes the write in every mode; the account, credential version and
+`report` permission are rechecked inside the report write transaction, so a
+disabled account, changed password or revoked permission fails closed even if
+it changes after the request began. A channel with `notify_reported = true`
+gets a queued notice; its delivery state is shown in the trail, and delivery
+still runs through `cvebeacon watch notify` or `watch run`. The shared-password
+compatibility mode can browse watch pages and generate statements, but cannot
+record a client report because there is no CVEBeacon account identity.
 
 ## Freshness and failures
 

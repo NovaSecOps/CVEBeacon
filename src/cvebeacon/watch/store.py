@@ -333,6 +333,12 @@ class DeliveryRow:
 
 
 @dataclass(frozen=True, slots=True)
+class EventDeliveries:
+    rows: tuple[DeliveryRow, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ReportOutcome:
     """The result of recording or withdrawing one client-report mark."""
 
@@ -1643,31 +1649,99 @@ class WatchStore:
         return tuple(output)
 
     def event_deliveries(
-        self, cve_id: str, *, limit: int = 500
-    ) -> tuple[DeliveryRow, ...]:
-        """Return recent per-channel deliveries for one CVE's events."""
-        if limit < 1:
+        self, event_ids: Iterable[int], *, per_event: int = 20
+    ) -> dict[int, EventDeliveries]:
+        """Return capped per-channel deliveries for the selected events.
+
+        Every event has its own channel cap, so one chatty event cannot hide
+        deliveries for another. ``truncated`` marks an event whose channel list
+        exceeded the cap.
+        """
+        if per_event < 1:
             raise StateError("delivery limit must be positive")
+        identifiers = sorted({int(value) for value in event_ids})
+        if not identifiers:
+            return {}
+        if len(identifiers) > 500:
+            raise StateError("too many delivery events selected")
+        marks = ",".join("?" for _ in identifiers)
         self.initialize()
         with closing(self._connect()) as db:
             rows = db.execute(
+                "SELECT event_id,channel,status,attempts,last_error,updated_at,"
+                "row_number FROM ("
                 "SELECT d.event_id,d.channel,d.status,d.attempts,d.last_error,"
-                "d.updated_at FROM watch_delivery d "
-                "JOIN watch_event e ON e.id=d.event_id "
-                "WHERE e.cve_id=? ORDER BY d.event_id DESC, d.channel LIMIT ?",
-                (cve_id, limit),
+                "d.updated_at,ROW_NUMBER() OVER ("
+                "PARTITION BY d.event_id ORDER BY d.channel) AS row_number "
+                "FROM watch_delivery d WHERE d.event_id IN (" + marks + ")"
+                ") WHERE row_number <= ? ORDER BY event_id, channel",
+                (*identifiers, per_event + 1),
             ).fetchall()
-        return tuple(
-            DeliveryRow(
-                int(row["event_id"]),
-                str(row["channel"]),
-                str(row["status"]),
-                int(row["attempts"]),
-                row["last_error"],
-                row["updated_at"],
+        output = {
+            identifier: EventDeliveries() for identifier in identifiers
+        }
+        grouped: dict[int, list[DeliveryRow]] = {
+            identifier: [] for identifier in identifiers
+        }
+        truncated: set[int] = set()
+        for row in rows:
+            event_id = int(row["event_id"])
+            if int(row["row_number"]) > per_event:
+                truncated.add(event_id)
+                continue
+            grouped[event_id].append(
+                DeliveryRow(
+                    event_id,
+                    str(row["channel"]),
+                    str(row["status"]),
+                    int(row["attempts"]),
+                    row["last_error"],
+                    row["updated_at"],
+                )
             )
-            for row in rows
+        for identifier in identifiers:
+            output[identifier] = EventDeliveries(
+                tuple(grouped[identifier]), identifier in truncated
+            )
+        return output
+
+    def notice_deliveries_for(
+        self,
+        cve_id: str,
+        occurrences: Iterable[str],
+        *,
+        per_notice: int = 20,
+    ) -> dict[tuple[str, int], EventDeliveries]:
+        """Return capped notice deliveries for the selected report rows."""
+        values = sorted({str(value) for value in occurrences if value})
+        if not values:
+            return {}
+        if len(values) > 500:
+            raise StateError("too many notice occurrences selected")
+        marks = ",".join("?" for _ in values)
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT id,kind,occurrence FROM watch_event "
+                "WHERE rule=? AND cve_id=? AND occurrence IN (" + marks + ")",
+                (NOTICE_RULE, cve_id, *values),
+            ).fetchall()
+        events: dict[tuple[str, int], int] = {}
+        for row in rows:
+            action = "report" if row["kind"] == "reported" else "unreport"
+            _, _, raw_id = str(row["occurrence"]).partition(":")
+            try:
+                key = (action, int(raw_id))
+            except ValueError:
+                continue
+            events[key] = int(row["id"])
+        deliveries = self.event_deliveries(
+            events.values(), per_event=per_notice
         )
+        return {
+            key: deliveries.get(event_id, EventDeliveries())
+            for key, event_id in events.items()
+        }
 
     @staticmethod
     def _report_entry(row: Mapping[str, Any]) -> ReportedEntry:
@@ -1929,19 +2003,22 @@ class WatchStore:
         return tuple(self._report_entry(row) for row in rows)
 
     def report_trail(
-        self, cve_id: str, *, limit: int = 100
+        self, cve_id: str, *, limit: int = 100, offset: int = 0
     ) -> tuple[ReportedEntry, ...]:
         """Return the newest report and unreport rows for one CVE."""
         if limit < 1:
             raise StateError("report limit must be positive")
+        if offset < 0:
+            raise StateError("report offset must not be negative")
         self.initialize()
         with closing(self._connect()) as db:
             db.text_factory = decode_text
             rows = db.execute(
                 "SELECT id,cve_id,action,by,note,at,user_id,username,"
                 "identity_mode,os_account,host,chain,chain_version "
-                "FROM watch_report WHERE cve_id=? ORDER BY id DESC LIMIT ?",
-                (cve_id, limit),
+                "FROM watch_report WHERE cve_id=? "
+                "ORDER BY id DESC LIMIT ? OFFSET ?",
+                (cve_id, limit, offset),
             ).fetchall()
         return tuple(self._report_entry(row) for row in rows)
 
