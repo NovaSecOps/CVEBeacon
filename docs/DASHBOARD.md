@@ -463,9 +463,10 @@ rotating its secret file must be saved separately. Writable secret files must
 resolve inside the current protected data directory and must not be symbolic
 links, extra hard links, or aliases of the configuration, account database or
 its sidecars and lock, the state or watch databases, inventory inputs, the
-output directory, or backup files and directories. Files inside the protected
-`dashboard-secrets` directory remain writable when they are the referenced
-secret. Readable external references remain usable by the loader but are never
+report output directory or its files, or backup files and directories. Files
+inside the protected `dashboard-secrets` directory remain writable when they
+are the referenced secret, including when a report output directory contains
+that secret directory. Readable external references remain usable by the loader but are never
 written through this interface. Creating a new file reference or changing an environment
 or file reference requires `manage_secrets`, which administrators always have.
 A supplied destination path is never overwritten: a new file secret is created

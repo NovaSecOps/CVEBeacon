@@ -439,8 +439,8 @@ def replacement_document(document, replacements, base):
             continue
         try:
             target = resolve_reference(value, base)
-        except (OSError, RuntimeError):
-            continue
+        except (OSError, RuntimeError, ValueError):
+            raise ConfigurationError("Secret file reference is not a valid path") from None
         if target in staged:
             document_set(result, path, staged[target])
     for replacement in replacements:
@@ -542,6 +542,11 @@ def secret_target(reference, base, configs, backup_dir):
         )
     if _inside(target, backup_dir.resolve()):
         raise ConfigurationError("Secret file reference must not alias a backup store")
+    secret_directories = {_secret_directory(config).resolve() for config in configs}
+    if not any(_inside(target, directory) for directory in secret_directories):
+        for config in configs:
+            if _inside(target, config.output_dir.resolve()):
+                raise ConfigurationError("Secret file reference must not alias report output files")
     safe_secret_target(target)
     return target
 

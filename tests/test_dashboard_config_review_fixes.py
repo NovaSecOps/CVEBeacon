@@ -1000,3 +1000,74 @@ def test_writer_guard_close_error_preserves_commit_and_releases(accounts, monkey
                 pass
         if acquired_elsewhere == [False]:
             guard.release()
+
+
+def test_malformed_retained_backup_rollback_returns_400(accounts):
+    config, _, app, client = accounts
+    editor = app.extensions["dashboard_config"]
+    editor.backup_dir.mkdir(mode=0o700, exist_ok=True)
+    backup = editor.backup_dir / ("20260101T000000000000Z-" + "d" * 16 + ".toml")
+    backup.write_text('[sources]\nnvd_api_key_file = "\\u0000"\n', encoding="utf-8")
+    os.chmod(backup, 0o600)
+    login(client, "admin")
+    before = config.config_path.read_bytes()
+    response = preview(client, "backups", backup=backup.name)
+    assert response.status_code == 400
+    assert config.config_path.read_bytes() == before
+
+
+def test_nul_file_reference_form_returns_400(accounts):
+    config, _, _, client = accounts
+    login(client, "admin")
+    before = config.config_path.read_bytes()
+    response = preview(client, "sources", g0_nvd_api_key_file="\x00")
+    assert response.status_code == 400
+    assert config.config_path.read_bytes() == before
+
+
+def test_secret_rotation_rejects_files_inside_output_directory(accounts):
+    config, _, _, client = accounts
+    output = config.config_path.parent / "reports"
+    output.mkdir(mode=0o700, exist_ok=True)
+    target = make_secret(output / "existing-report-secret", "original report value")
+    config.config_path.write_text(
+        BASE + f'''
+[watch]
+enabled = true
+sources = ["nvd"]
+
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_file = "{target}"
+''', encoding="utf-8")
+    login(client, "admin")
+    response = preview(client, "channels", g0_password_file_new="replacement")
+    assert response.status_code == 400
+    assert target.read_text(encoding="utf-8") == "original report value"
+
+
+def test_generated_secret_remains_rotatable_when_output_contains_it(accounts):
+    config, _, _, client = accounts
+    secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+    secret_dir.mkdir(mode=0o700, exist_ok=True)
+    target = make_secret(secret_dir / (dc.SECRET_PREFIX + "inside-output"), "original generated")
+    config.config_path.write_text(
+        BASE.replace('[output]\ndirectory = "reports"', '[output]\ndirectory = "."')
+        + f'''
+[watch]
+enabled = true
+sources = ["nvd"]
+
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.invalid"
+from = "sender@example.invalid"
+to = ["soc@example.invalid"]
+password_file = "{target}"
+''', encoding="utf-8")
+    login(client, "admin")
+    response = preview(client, "channels", g0_password_file_new="replacement generated")
+    assert response.status_code == 200, response.text
