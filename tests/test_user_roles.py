@@ -175,3 +175,14 @@ def test_delegated_manager_cannot_take_over_a_more_privileged_member(users):
     proof = users.authenticate("reader", PASSWORD)
     with pytest.raises(ConfigurationError):
         users.set_password("operator", PASSWORD + " changed", authorization=proof)
+
+
+def test_bootstrap_recovers_store_with_no_enabled_admin(users):
+    # Simulate an upgrade from a store predating last-admin protection.
+    with users.transaction() as db:
+        db.execute("UPDATE cb_user SET disabled=1 WHERE is_admin=1")
+    assert not users.has_admin()
+    recovered = users.add("recovery", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
+    assert recovered.is_admin and not recovered.disabled
+    with pytest.raises(ConfigurationError, match="administrator login required"):
+        users.add("another", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)

@@ -548,3 +548,12 @@ def test_remote_override_cannot_bypass_missing_account_store(accounts, monkeypat
     users.path.unlink()
     with pytest.raises(StateError):
         dashboard.serve(config, host="0.0.0.0", allow_unauthenticated_remote=True)
+
+
+def test_zero_enabled_admin_store_is_detected(accounts, caplog):
+    config, users, _, _ = accounts
+    with users.transaction() as db:
+        db.execute("UPDATE cb_user SET disabled=1 WHERE is_admin=1")
+    dashboard.create_app(config)
+    assert "no enabled administrator" in caplog.text
+    assert "users add NAME --admin" in caplog.text

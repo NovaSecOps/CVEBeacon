@@ -80,6 +80,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
         )
     users = UserStore(config.watch.users_database)
     account_mode = users.dashboard_accounts()
+    if account_mode and not users.has_admin():
+        LOG.error("Account store has no enabled administrator; recover locally with users add NAME --admin")
     encoded = None if account_mode else password_hash(config)
     auth = DashboardAuth(encoded, config.dashboard.session_lifetime_seconds) if encoded else None
     account_sessions = AccountSessions(config.dashboard.session_lifetime_seconds, config.dashboard.session_idle_seconds)

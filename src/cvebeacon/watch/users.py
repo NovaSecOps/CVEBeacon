@@ -829,7 +829,7 @@ class UserStore:
         self.initialize()
         with closing(self._connect()) as db:
             row = db.execute(
-                "SELECT 1 FROM cb_user WHERE is_admin=1 LIMIT 1"
+                "SELECT 1 FROM cb_user WHERE is_admin=1 AND disabled=0 LIMIT 1"
             ).fetchone()
         return row is not None
 
@@ -897,7 +897,7 @@ class UserStore:
                 raise ConfigurationError("dashboard bootstrap requires an empty account store")
             if isinstance(authorization, BootstrapAuthorization):
                 existing_admin = db.execute(
-                    "SELECT 1 FROM cb_user WHERE is_admin=1 LIMIT 1"
+                    "SELECT 1 FROM cb_user WHERE is_admin=1 AND disabled=0 LIMIT 1"
                 ).fetchone()
                 if existing_admin is not None:
                     raise ConfigurationError(

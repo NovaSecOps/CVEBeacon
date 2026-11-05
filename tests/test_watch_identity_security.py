@@ -1708,3 +1708,16 @@ def test_existing_database_without_meta_gains_one_store_id(tmp_path):
         ).fetchone()
     assert row is not None and len(row[0]) == 64
     assert UserStore(path, clock=lambda: NOW).users()[0].username == "alice"
+
+
+def test_authenticated_cli_can_recover_an_upgrade_without_enabled_admin(tmp_path, monkeypatch):
+    config = config_with(tmp_path, "authenticated")
+    users = UserStore(config.watch.users_database)
+    users.add("oldadmin", password=PASSWORD, is_admin=True)
+    with users.transaction() as db:
+        db.execute("UPDATE cb_user SET disabled=1 WHERE is_admin=1")
+    prompt(monkeypatch, PASSWORD, PASSWORD)
+    base = ["--config", str(config.config_path), "users"]
+    assert cli.main([*base, "add", "recovery", "--admin"]) == 0
+    assert users.find("recovery").is_admin
+    assert users.audit_entries()[-1].actor == "(bootstrap)"
