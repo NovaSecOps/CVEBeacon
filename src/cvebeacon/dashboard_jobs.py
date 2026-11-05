@@ -219,7 +219,7 @@ class JobStore:
             pass
 
     def create(self, operation: str, started_by: str, argv: list[str]) -> Job:
-        private_directory(self.log_directory, owner_only=True)
+        private_directory(self.log_directory)
         with closing(self._connect()) as db, db:
             cursor = db.execute(
                 "INSERT INTO dashboard_job("
@@ -366,7 +366,7 @@ class JobStore:
             path = Path(job.log_path)
             if path != self.log_directory / f"job-{job.id}.log":
                 return ""
-            private_directory(self.log_directory, owner_only=True)
+            private_directory(self.log_directory)
             descriptor = private_file(path, readonly=True)
             with os.fdopen(descriptor, "rb") as handle:
                 size = os.fstat(handle.fileno()).st_size
@@ -404,7 +404,7 @@ class _JobLog:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        private_directory(self.path.parent, owner_only=True)
+        private_directory(self.path.parent)
         descriptor = private_file(self.path, create=True, exclusive=True)
         self._handle = os.fdopen(descriptor, "w+b", buffering=0)
         self._size = 0

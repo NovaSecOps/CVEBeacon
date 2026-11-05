@@ -89,7 +89,7 @@ def test_contention_without_readable_metadata_is_still_busy(tmp_path, monkeypatc
 def test_lock_refuses_preexisting_writable_directory_with_fix(tmp_path):
     shared = tmp_path / "shared"
     shared.mkdir()
-    shared.chmod(0o770)
+    shared.chmod(0o777)
     try:
         with pytest.raises(CVEBeaconError) as caught:
             RunLock(shared / "run.lock").acquire()
@@ -97,7 +97,46 @@ def test_lock_refuses_preexisting_writable_directory_with_fix(tmp_path):
         shared.chmod(0o700)
     message = str(caught.value)
     assert str(shared) in message
-    assert f"chmod go-w {shared}" in message
+    assert f"chmod o-w {shared}" in message
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+@pytest.mark.parametrize("mode", [0o770, 0o775, 0o1777])
+def test_lock_and_job_storage_accept_shared_directories(tmp_path, mode):
+    from cvebeacon.dashboard_jobs import JobStore, _JobLog
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(mode)
+    logs = shared / "dashboard-jobs"
+    logs.mkdir()
+    logs.chmod(mode)
+    with RunLock(shared / "run.lock"):
+        store = JobStore(shared / "jobs.db")
+        job = store.create("scan", "admin", ["scan"])
+        with_log = _JobLog(job.log_path)
+        with_log.write(b"shared storage works")
+        with_log.close()
+        assert store.log_tail(job) == "shared storage works"
+    assert stat.S_IMODE(shared.stat().st_mode) == mode
+    assert stat.S_IMODE(logs.stat().st_mode) == mode
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory ownership")
+def test_lock_accepts_foreign_owned_sticky_mount(tmp_path, monkeypatch):
+    real_lstat = Path.lstat
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o1777)
+    def mounted_owner(path, *args, **kwargs):
+        details = real_lstat(path, *args, **kwargs)
+        if path == shared or (path in shared.parents and path != Path("/")):
+            values = list(details)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return details
+    monkeypatch.setattr(Path, "lstat", mounted_owner)
+    with RunLock(shared / "run.lock"):
+        assert (shared / "run.lock").stat().st_uid == os.geteuid()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")

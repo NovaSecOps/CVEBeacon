@@ -142,10 +142,11 @@ def test_log_rotation_keeps_checked_descriptor_after_path_swap(tmp_path):
     assert target.read_bytes() == b"private target"
 
 
-def test_existing_public_log_directory_is_rejected(tmp_path):
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory modes")
+def test_existing_world_writable_nonsticky_log_directory_is_rejected(tmp_path):
     directory = tmp_path / "dashboard-jobs"
-    directory.mkdir(mode=0o755)
-    directory.chmod(0o755)
+    directory.mkdir(mode=0o777)
+    directory.chmod(0o777)
     with pytest.raises(StateError):
         jobs.JobStore(tmp_path / "jobs.db").create("scan", "admin", ["scan"])
 

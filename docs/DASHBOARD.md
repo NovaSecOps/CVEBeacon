@@ -56,7 +56,7 @@ The **Schedule** page requires `manage_schedule`. It shows `schedule status`, an
 
 Schedule changes require an audited intent before installation or removal. An outcome audit failure returns an error and retains the pending audit for retry; check schedule status before repeating the action. Audit history is append-only and grows independently of job retention.
 
-Operation storage directories must be owned by the service account and protected against writes by other accounts. On POSIX, new directories use 0700 and files use 0600. Windows uses a protected owner-only ACL for newly created files and log directories; existing parent directories may also grant access to SYSTEM and administrators. Unsafe inherited ACLs are refused. Use a single dashboard process per state directory.
+Operation storage accepts existing group-writable POSIX directories; world-writable directories require the sticky bit. Windows directories may use normal profile or data ACLs, but must not grant write access to Everyone, Users or Authenticated Users. New directories use 0700 on POSIX and a protected owner-only ACL on Windows. Lock, history and log files still require service-account ownership, private permissions and no links; new POSIX files use 0600. Use a single dashboard process per state directory.
 
 On Windows, logged-out registration requires the service account password. The dashboard accepts it in a password field, passes it only to the existing installer in memory, and never writes, logs or displays it. The operating system's task service stores it only according to the same rules as the CLI.
 
@@ -315,7 +315,8 @@ Forms use CSRF protection, output is escaped, errors omit sensitive details, and
 The monitoring SQLite database stores observations and dashboard scan metadata.
 Accounts and roles live separately in `cvebeacon-users.db` beside the watch
 database. The operations job table (`dashboard-jobs.db`) and its `dashboard-jobs/`
-log directory sit beside the state database and are owner-only. Before an
+log directory sit beside the state database; the database and log files are
+owner-only. Before an
 upgrade, stop the scanner/dashboard and back up all three data stores. Schema
 upgrades preserve existing observations and delivery records; an older
 application requires its corresponding pre-upgrade backups.

@@ -10,36 +10,31 @@ from .errors import StateError
 from .watch.directories import ensure_private_directory
 
 
-def private_directory(path: Path, *, owner_only: bool = False) -> None:
+def private_directory(path: Path) -> None:
     if os.name == "nt":
         from .windows_private import private_directory as windows_directory
-        windows_directory(path, owner_only=owner_only)
+        windows_directory(path)
         return
     existing = path.absolute()
     while not existing.exists() and not existing.is_symlink():
         existing = existing.parent
     _check_directory_chain(existing)
     ensure_private_directory(path)
-    _check_directory_chain(path, owner_only=owner_only)
+    _check_directory_chain(path)
 
 
-def _check_directory_chain(path: Path, *, owner_only: bool = False) -> None:
+def _check_directory_chain(path: Path) -> None:
     current = path.absolute()
     while True:
         details = current.lstat()
         mode = stat.S_IMODE(details.st_mode)
         if not stat.S_ISDIR(details.st_mode):
             raise StateError("operation storage directory must not be a symlink")
-        if details.st_uid not in {os.geteuid(), 0} and not mode & stat.S_ISVTX:
-            raise StateError("operation storage directory has an unsafe owner")
-        if mode & 0o022 and not mode & stat.S_ISVTX:
+        if mode & 0o002 and not mode & stat.S_ISVTX:
             raise StateError(
-                "operation storage directory must not be writable by other "
-                f"accounts: {current}; chmod go-w {current}"
+                "operation storage directory must not be world-writable without "
+                f"the sticky bit: {current}; chmod o-w {current} or chmod +t {current}"
             )
-        if current == path.absolute() and owner_only:
-            if details.st_uid != os.geteuid() or mode & 0o077:
-                raise StateError("operation log directory must be owner-only")
         if current.parent == current:
             break
         current = current.parent

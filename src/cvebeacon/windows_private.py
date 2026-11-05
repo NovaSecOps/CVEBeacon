@@ -95,20 +95,33 @@ def validate_handle(handle, *, owner_only=True):
         raise c.WinError(result)
     try:
         with _identity() as sid:
-            if not _equal_sid(owner, sid) or not acl.value:
+            if not acl.value and not owner_only:
+                raise StateError("operation storage directory must not grant unrestricted Windows access")
+            if (owner_only and not _equal_sid(owner, sid)) or not acl.value:
                 raise StateError("operation storage must have an owner-only Windows ACL")
             count = struct.unpack("<BBHHH", c.string_at(acl, 8))[3]
-            if not count:
+            if owner_only and not count:
                 raise StateError("operation storage ACL grants no owner access")
             for index in range(count):
                 ace = c.c_void_p()
                 _check(_get_ace(acl, index, c.byref(ace)))
                 kind, flags, size, mask = struct.unpack("<BBHI", c.string_at(ace, 8))
+                if not owner_only:
+                    # Inherit-only and deny entries grant no access here.
+                    if flags & 8 or kind == 1:
+                        continue
+                    if kind != 0:
+                        raise StateError("operation storage ACL contains an unsupported entry")
+                    broad = {"S-1-1-0", "S-1-5-32-545", "S-1-5-11"}
+                    # Data/child creation, deletion, attributes, ACL/owner
+                    # changes, and generic write/all are all write access.
+                    writable = 0x40000000 | 0x10000000 | 0xD0156
+                    if _sid_name(ace.value + 8) in broad and mask & writable:
+                        raise StateError("operation storage directory is writable by broad Windows principals")
+                    continue
                 if kind != 0:
                     raise StateError("operation storage ACL contains an unsupported entry")
                 allowed = bool(_equal_sid(ace.value + 8, sid))
-                if not owner_only:
-                    allowed = allowed or _sid_name(ace.value + 8) in {"S-1-5-18", "S-1-5-32-544"}
                 if not allowed:
                     raise StateError("operation storage must have an owner-only Windows ACL")
     finally:
@@ -132,7 +145,7 @@ def open_file(path, *, create=False, exclusive=False, readonly=False):
         raise
 
 
-def private_directory(path: Path, *, owner_only=False):
+def private_directory(path: Path):
     current = path.absolute()
     while True:
         try:
@@ -158,6 +171,6 @@ def private_directory(path: Path, *, owner_only=False):
     if handle == c.c_void_p(-1).value:
         raise c.WinError(c.get_last_error())
     try:
-        validate_handle(handle, owner_only=owner_only)
+        validate_handle(handle, owner_only=False)
     finally:
         _close(handle)
