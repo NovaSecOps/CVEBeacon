@@ -1,6 +1,7 @@
 """Storage, supervision and accountability regressions for operations."""
 
 from dataclasses import replace
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -77,7 +78,7 @@ def test_live_output_is_visible_before_child_exits(tmp_path):
 
 def test_retention_preserves_all_active_jobs_and_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs, "MAX_JOBS", 3)
-    store = jobs.JobStore(tmp_path / "jobs.db")
+    store = jobs.JobStore(tmp_path / "dashboard-jobs")
     active = [store.create("scan", "admin", ["scan"]) for _ in range(2)]
     store.mark_running(active[0].id)
     for job in active:
@@ -105,17 +106,19 @@ def test_queue_is_bounded_before_audit_and_creation(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("target_exists", [False, True])
 def test_job_database_symlink_is_never_followed(tmp_path, target_exists):
+    directory = tmp_path / "dashboard-jobs"
+    directory.mkdir()
     target = tmp_path / "target"
     if target_exists:
         target.write_bytes(b"keep")
-    (tmp_path / "jobs.db").symlink_to(target)
+    (directory / "dashboard-jobs.db").symlink_to(target)
     with pytest.raises(StateError):
-        jobs.JobStore(tmp_path / "jobs.db").initialize()
+        jobs.JobStore(directory).initialize()
     assert target.read_bytes() == b"keep" if target_exists else not target.exists()
 
 
 def test_log_symlinks_and_paths_outside_log_directory_are_refused(tmp_path):
-    store = jobs.JobStore(tmp_path / "jobs.db")
+    store = jobs.JobStore(tmp_path / "dashboard-jobs")
     job = store.create("scan", "admin", ["scan"])
     target = tmp_path / "target"
     target.write_bytes(b"private")
@@ -129,7 +132,7 @@ def test_log_symlinks_and_paths_outside_log_directory_are_refused(tmp_path):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX path replacement while open")
 def test_log_rotation_keeps_checked_descriptor_after_path_swap(tmp_path):
-    store = jobs.JobStore(tmp_path / "jobs.db")
+    store = jobs.JobStore(tmp_path / "dashboard-jobs")
     job = store.create("scan", "admin", ["scan"])
     log = jobs._JobLog(job.log_path)
     target = tmp_path / "target"
@@ -144,7 +147,7 @@ def test_log_rotation_keeps_checked_descriptor_after_path_swap(tmp_path):
 
 
 def test_log_rotation_stays_in_place_and_bounded(tmp_path):
-    store = jobs.JobStore(tmp_path / "jobs.db")
+    store = jobs.JobStore(tmp_path / "dashboard-jobs")
     job = store.create("scan", "admin", ["scan"])
     log = jobs._JobLog(job.log_path)
     try:
@@ -155,21 +158,40 @@ def test_log_rotation_stays_in_place_and_bounded(tmp_path):
     path = Path(job.log_path)
     assert path.stat().st_size == jobs.MAX_LOG_BYTES
     assert path.read_bytes() == b"b" * jobs.MAX_LOG_BYTES
-    assert [item.name for item in path.parent.iterdir()] == [path.name]
+    assert sorted(item.name for item in path.parent.iterdir()) == [
+        "dashboard-jobs.db", path.name
+    ]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory modes")
-def test_existing_world_writable_log_directory_is_accepted(tmp_path):
-    from cvebeacon.dashboard_jobs import JobStore, _JobLog
+@pytest.mark.parametrize("mode", [0o770, 0o777, 0o1777])
+def test_job_directory_must_be_owner_only(tmp_path, mode):
     directory = tmp_path / "dashboard-jobs"
-    directory.mkdir(mode=0o777)
-    directory.chmod(0o777)
-    store = JobStore(tmp_path / "jobs.db")
-    job = store.create("scan", "admin", ["scan"])
-    log = _JobLog(job.log_path)
-    log.write(b"shared log storage")
-    log.close()
-    assert store.log_tail(job) == "shared log storage"
+    directory.mkdir()
+    directory.chmod(mode)
+    store = jobs.JobStore(directory)
+    with pytest.raises(StateError, match="owner-only"):
+        store.create("scan", "admin", ["scan"])
+    assert not (directory / "dashboard-jobs.db").exists()
+    assert list(directory.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory ownership")
+def test_job_directory_owner_must_be_the_service_account(tmp_path, monkeypatch):
+    directory = tmp_path / "dashboard-jobs"
+    directory.mkdir(mode=0o700)
+    real_lstat = Path.lstat
+    def foreign_owner(path, *args, **kwargs):
+        details = real_lstat(path, *args, **kwargs)
+        if path == directory:
+            values = list(details)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return details
+    monkeypatch.setattr(Path, "lstat", foreign_owner)
+    with pytest.raises(StateError, match="owner-only"):
+        jobs.JobStore(directory).initialize()
+    assert list(directory.iterdir()) == []
 
 
 def test_capture_failure_reaps_child_before_marking_failed(tmp_path, monkeypatch):
@@ -192,7 +214,8 @@ def test_capture_failure_reaps_child_before_marking_failed(tmp_path, monkeypatch
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
-        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
+        for _ in range(3000):
+            time.sleep(0.01)  # short slices let a Windows break handler run
     """, marker))
     try:
         assert manager.wait(job.id).status == "failed"
@@ -280,7 +303,8 @@ def test_cancel_escalates_and_reaps_an_uncooperative_child(tmp_path, monkeypatch
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, signal.SIG_IGN)
         print('ready', flush=True)
-        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
+        for _ in range(3000):
+            time.sleep(0.01)  # short slices let a Windows break handler run
     """))
     process = None
     try:
@@ -309,7 +333,8 @@ def test_shutdown_runs_cleanup_and_reaps_child(tmp_path):
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, stop)
         print('ready', flush=True)
-        [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
+        for _ in range(3000):
+            time.sleep(0.01)  # short slices let a Windows break handler run
     """, marker))
     wait_for(lambda: "ready" in manager.store.log_tail(manager.store.get(job.id)))
     process = manager._process

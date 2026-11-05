@@ -65,11 +65,13 @@ def test_lock_accepts_permissive_file_from_another_account(tmp_path, monkeypatch
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_job_history_still_requires_a_private_file(tmp_path):
     from cvebeacon.dashboard_jobs import JobStore
-    path = tmp_path / "jobs.db"
+    directory = tmp_path / "dashboard-jobs"
+    directory.mkdir()
+    path = directory / "dashboard-jobs.db"
     path.write_bytes(b"")
     path.chmod(0o666)
     with pytest.raises(CVEBeaconError):
-        JobStore(path).initialize()
+        JobStore(directory).initialize()
 
 
 def test_lock_rejects_symlinked_directory_before_creating_targets(tmp_path):
@@ -122,23 +124,21 @@ def test_lock_accepts_preexisting_world_writable_directory(tmp_path):
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
 @pytest.mark.parametrize("mode", [0o770, 0o775, 0o777, 0o1777])
-def test_lock_and_job_storage_accept_shared_directories(tmp_path, mode):
+def test_job_storage_accepts_a_shared_parent_directory(tmp_path, mode):
     from cvebeacon.dashboard_jobs import JobStore, _JobLog
     shared = tmp_path / "shared"
     shared.mkdir()
     shared.chmod(mode)
-    logs = shared / "dashboard-jobs"
-    logs.mkdir()
-    logs.chmod(mode)
+    directory = shared / "dashboard-jobs"
     with RunLock(shared / "run.lock"):
-        store = JobStore(shared / "jobs.db")
+        store = JobStore(directory)
         job = store.create("scan", "admin", ["scan"])
         with_log = _JobLog(job.log_path)
-        with_log.write(b"shared storage works")
+        with_log.write(b"shared parent works")
         with_log.close()
-        assert store.log_tail(job) == "shared storage works"
+        assert store.log_tail(job) == "shared parent works"
     assert stat.S_IMODE(shared.stat().st_mode) == mode
-    assert stat.S_IMODE(logs.stat().st_mode) == mode
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory ownership")

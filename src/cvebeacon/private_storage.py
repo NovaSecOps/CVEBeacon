@@ -10,10 +10,10 @@ from .errors import StateError
 from .watch.directories import ensure_private_directory
 
 
-def private_directory(path: Path) -> None:
+def private_directory(path: Path, *, owner_only: bool = False) -> None:
     if os.name == "nt":
         from .windows_private import private_directory as windows_directory
-        windows_directory(path)
+        windows_directory(path, owner_only=owner_only)
         return
     existing = path.absolute()
     while not existing.exists() and not existing.is_symlink():
@@ -21,6 +21,14 @@ def private_directory(path: Path) -> None:
     _check_directory_chain(existing)
     ensure_private_directory(path)
     _check_directory_chain(path)
+    if owner_only:
+        details = path.lstat()
+        if (details.st_uid != os.geteuid()
+                or stat.S_IMODE(details.st_mode) & 0o077):
+            raise StateError(
+                "operation storage directory must be owner-only: "
+                f"{path}; chmod go-rwx {path}"
+            )
 
 
 def _check_directory_chain(path: Path) -> None:
@@ -76,7 +84,11 @@ def private_file(path: Path, *, create: bool = False, exclusive: bool = False,
     else:
         flags = (os.O_RDONLY if readonly else os.O_RDWR) | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
-            descriptor = os.open(path, flags | (os.O_CREAT | os.O_EXCL if create else 0), 0o600)
+            descriptor = os.open(
+                path,
+                flags | (os.O_CREAT | os.O_EXCL if create else 0),
+                0o600,
+            )
             created = create
         except FileExistsError:
             if exclusive:

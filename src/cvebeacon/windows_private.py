@@ -133,7 +133,7 @@ def open_file(path, *, create=False, exclusive=False, readonly=False,
         raise
 
 
-def private_directory(path: Path):
+def private_directory(path: Path, *, owner_only=False):
     current = path.absolute()
     while True:
         try:
@@ -158,3 +158,11 @@ def private_directory(path: Path):
     details = path.lstat()
     if details.st_file_attributes & 0x400 or not path.is_dir():
         raise StateError("operation storage directory must not be a link")
+    if owner_only:
+        handle = _create(str(path), 0x80000000, 3, None, 3, 0x02200000, None)
+        if handle == c.c_void_p(-1).value:
+            raise c.WinError(c.get_last_error())
+        try:
+            validate_handle(handle)
+        finally:
+            _close(handle)

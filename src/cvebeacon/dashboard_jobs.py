@@ -143,15 +143,16 @@ class Job:
 
 
 class JobStore:
-    """A small owner-only SQLite file for the last ``MAX_JOBS`` jobs."""
+    """A private directory holding the last ``MAX_JOBS`` jobs and their logs."""
 
-    def __init__(self, path: Path):
-        self.path = Path(path).absolute()
-        self.log_directory = self.path.parent / "dashboard-jobs"
+    def __init__(self, directory: Path):
+        self.directory = Path(directory).absolute()
+        self.path = self.directory / "dashboard-jobs.db"
+        self.log_directory = self.directory
 
     def _connect(self) -> sqlite3.Connection:
         try:
-            private_directory(self.path.parent)
+            private_directory(self.path.parent, owner_only=True)
             if os.name == "posix":
                 # Process-lifetime pins avoid closing raw descriptors while
                 # another SQLite connection holds POSIX record locks.
@@ -232,7 +233,7 @@ class JobStore:
             pass
 
     def create(self, operation: str, started_by: str, argv: list[str]) -> Job:
-        private_directory(self.log_directory)
+        private_directory(self.log_directory, owner_only=True)
         with closing(self._connect()) as db, db:
             cursor = db.execute(
                 "INSERT INTO dashboard_job("
@@ -379,7 +380,7 @@ class JobStore:
             path = Path(job.log_path)
             if path != self.log_directory / f"job-{job.id}.log":
                 return ""
-            private_directory(self.log_directory)
+            private_directory(self.log_directory, owner_only=True)
             descriptor = private_file(path, readonly=True)
             with os.fdopen(descriptor, "rb") as handle:
                 size = os.fstat(handle.fileno()).st_size
@@ -422,7 +423,7 @@ class _JobLog:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        private_directory(self.path.parent)
+        private_directory(self.path.parent, owner_only=True)
         descriptor = private_file(self.path, create=True, exclusive=True)
         self._handle = os.fdopen(descriptor, "w+b", buffering=0)
         self._size = 0
@@ -555,7 +556,7 @@ class JobManager:
         self.config = config
         self.users = users
         self.store = store or JobStore(
-            Path(config.database_path).parent / "dashboard-jobs.db"
+            Path(config.database_path).parent / "dashboard-jobs"
         )
         self.command_builder = command_builder
         try:

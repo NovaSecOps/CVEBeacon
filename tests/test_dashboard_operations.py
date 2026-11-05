@@ -259,7 +259,8 @@ def test_cancel_sends_interrupt_and_cleanup_runs(ops, tmp_path):
             if hasattr(signal, "SIGBREAK"):
                 signal.signal(signal.SIGBREAK, stop)
             print("ready", flush=True)
-            [time.sleep(0.01) for _ in range(3000)]  # short slices let a Windows break handler run
+            for _ in range(3000):
+                time.sleep(0.01)  # short slices let a Windows break handler run
             """,
             marker,
         )
@@ -541,7 +542,7 @@ def test_schedule_install_is_blocked_when_it_would_use_root(tmp_path, monkeypatc
 
 
 def test_job_history_store_retains_only_the_latest_jobs(tmp_path):
-    store = JobStore(tmp_path / "jobs.db")
+    store = JobStore(tmp_path / "dashboard-jobs")
     first = store.create("scan", "admin", ["scan"])
     store.finish(first.id, "succeeded", exit_code=0)
     store.clear_audit(first.id)
@@ -556,18 +557,19 @@ def test_job_history_store_retains_only_the_latest_jobs(tmp_path):
 
 def test_job_history_file_is_owner_only(tmp_path):
     from cvebeacon.dashboard_jobs import _JobLog
-    store = JobStore(tmp_path / "jobs.db")
+    store = JobStore(tmp_path / "dashboard-jobs")
     job = store.create("scan", "admin", ["scan"])
     log = _JobLog(job.log_path)
     log.write(b"private log")
     log.close()
-    paths = (tmp_path / "jobs.db", Path(job.log_path))
+    paths = (tmp_path / "dashboard-jobs" / "dashboard-jobs.db", Path(job.log_path))
     if os.name == "nt":
         import msvcrt
         from cvebeacon.windows_private import validate_handle
         for path in paths:
             with open(path, "rb") as handle:
                 validate_handle(msvcrt.get_osfhandle(handle.fileno()))
+        assert Path(job.log_path).parent == tmp_path / "dashboard-jobs"
     else:
         for path in paths:
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -575,7 +577,7 @@ def test_job_history_file_is_owner_only(tmp_path):
 
 
 def test_abandoned_jobs_are_failed_after_a_restart(tmp_path):
-    store = JobStore(tmp_path / "jobs.db")
+    store = JobStore(tmp_path / "dashboard-jobs")
     job = store.create("scan", "admin", ["scan"])
     assert store.mark_running(job.id)
     assert store.fail_interrupted() == 1
