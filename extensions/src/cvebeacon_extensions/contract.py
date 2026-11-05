@@ -16,6 +16,7 @@ import tempfile
 from cvebeacon.config import CANONICAL_FIELDS, OPTIONAL_FIELDS
 from cvebeacon.inventory import validate_records
 from cvebeacon.identity import identity_conflict
+from cvebeacon.publication import replace_file
 
 from . import __version__
 
@@ -146,7 +147,7 @@ def _atomic(path: Path, data: bytes):
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
         if os.name == "posix":
             directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
