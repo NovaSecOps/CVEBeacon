@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% block title %}{{ section }} configuration · CVEBeacon{% endblock %}
 {% block content %}<h1>{{ section }} configuration</h1><p><a href="{{ url_for('config_editor.index') }}">All configuration sections</a></p>
+{% if read_only %}<p><strong>Read-only configuration.</strong> The configuration directory is not writable by the dashboard service. You can inspect these values, but saving and rollback are disabled. Enable editing only for the dashboard service and restart the other services after a save.</p>{% endif %}
 {% if preview %}{% include "config_confirm.html" %}{% else %}
 <p>Blank fields use the loader's defaults. Strings are plain text. Arrays and condition tables use TOML values, for example <code>["soc"]</code> or <code>{ cvss_min = 9.0 }</code>. All settings are validated by the configuration loader before confirmation.</p>
 <p>Comments and formatting are lost on save. A timestamped backup is kept. Saving reloads the dashboard and ends all sessions.</p>
@@ -7,11 +8,11 @@
 {% if section == 'channels' %}<form method="get"><label>New channel type <select name="new_type">{% for kind in channel_types %}<option>{{ kind }}</option>{% endfor %}</select></label><button>Choose type for blank row</button></form><p>Choosing a type reloads the form. Each channel lists its known fields. Leave the last row's name blank to skip it.</p>{% endif %}
 <form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="preview"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="row_count" value="{{ groups|length }}">
 {% for group in groups %}{% set index = loop.index0 %}<fieldset><legend>{{ group.label }}</legend>
-{% if section in ['rules','channels','product-mappings'] %}<label><input type="checkbox" name="remove{{ index }}" value="yes"> Remove this row</label>{% endif %}
-{% for field in group.controls %}<p><label>{{ field.key }}{% if field.kind == 'boolean' %}<select name="{{ field.id }}"><option value="" {% if field.value == '' %}selected{% endif %}>Default</option><option value="true" {% if field.value == 'true' %}selected{% endif %}>true</option><option value="false" {% if field.value == 'false' %}selected{% endif %}>false</option></select>
-{% elif field.kind == 'toml' %}<textarea name="{{ field.id }}" rows="3" cols="60">{{ field.value }}</textarea>
-{% else %}<input name="{{ field.id }}" value="{{ field.value }}" {% if field.readonly %}readonly{% endif %} {% if field.key == 'url' %}type="password" autocomplete="off" placeholder="Existing endpoint is hidden"{% endif %}>{% endif %}</label>
+{% if section in ['rules','channels','product-mappings'] %}<label><input type="checkbox" name="remove{{ index }}" value="yes" {% if read_only %}disabled{% endif %}> Remove this row</label>{% endif %}
+{% for field in group.controls %}<p><label>{{ field.key }}{% if field.kind == 'boolean' %}{% if field.readonly or read_only %}<input type="hidden" name="{{ field.id }}" value="{{ field.value }}"><select disabled><option>{% if field.value == 'true' %}true{% elif field.value == 'false' %}false{% else %}Default{% endif %}</option></select>{% else %}<select name="{{ field.id }}"><option value="" {% if field.value == '' %}selected{% endif %}>Default</option><option value="true" {% if field.value == 'true' %}selected{% endif %}>true</option><option value="false" {% if field.value == 'false' %}selected{% endif %}>false</option></select>{% endif %}
+{% elif field.kind == 'toml' %}<textarea name="{{ field.id }}" rows="3" cols="60" {% if read_only %}readonly{% endif %}>{{ field.value }}</textarea>
+{% else %}<input name="{{ field.id }}" value="{{ field.value }}" {% if field.readonly or read_only %}readonly{% endif %} {% if field.key == 'url' %}type="password" autocomplete="off" placeholder="Existing endpoint is hidden"{% endif %}>{% endif %}</label>
 {% if field.default %}<small>Default: {{ field.default }}</small>{% endif %}
 {% if field.secret and field.allow_new_secret %}<label>New secret value (optional)<input type="password" autocomplete="new-password" name="{{ field.id }}_new"></label><small>{% if field.readonly %}Replace the contents of the existing owner-only file. The reference stays unchanged.{% else %}A new owner-only file is staged in the protected data directory. Its generated reference replaces this field.{% endif %} The value is never shown again. Abandoned previews expire after ten minutes.</small>{% endif %}</p>{% endfor %}
-</fieldset>{% endfor %}<button type="submit">Validate and preview</button></form>{% endif %}
+</fieldset>{% endfor %}{% if not read_only %}<button type="submit">Validate and preview</button>{% endif %}</form>{% endif %}
 {% endblock %}

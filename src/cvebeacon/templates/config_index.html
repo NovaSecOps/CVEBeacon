@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% block title %}Configuration · CVEBeacon{% endblock %}
 {% block content %}<h1>Configuration</h1>
+{% if read_only %}<p><strong>Read-only configuration.</strong> The configuration directory is not writable by the dashboard service, so sections are viewable where possible, but saving and rollback are disabled. Enable editing only for the dashboard service as described in the deployment guide, then restart the other services after a save.</p>{% endif %}
 <p>Choose a section. Viewing and editing require its edit permission and view permission.</p>
 <ul>{% for section, permission in sections.items() %}{% if permission in permissions %}<li><a href="{{ url_for('config_editor.' + section) }}">{{ section }}</a></li>{% endif %}{% endfor %}</ul>
 <p><a href="{{ url_for('config_editor.backups') }}">Backups and rollback</a> require every configuration edit permission.</p>

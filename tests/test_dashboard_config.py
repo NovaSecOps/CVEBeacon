@@ -155,7 +155,7 @@ def test_loader_rejection_preserves_file_and_audit(accounts, field, value):
     before, audit = config.config_path.read_bytes(), users.audit_count()
     response = preview(client, **{field: value})
     assert response.status_code == 400
-    assert "Configuration was not saved" in response.text
+    assert "Configuration could not be loaded or saved" in response.text
     assert "must be" in response.text
     assert config.config_path.read_bytes() == before and users.audit_count() == audit
     assert not app.extensions["dashboard_config"].backups()
