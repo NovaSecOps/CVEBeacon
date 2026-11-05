@@ -371,8 +371,8 @@ the loader's guidance with submitted values redacted and leave the file intact.
 Unrecognized configuration fields must be reviewed outside the editor before
 editing; they are never silently copied or discarded. Column mappings must use
 only the known canonical or optional inventory fields, so an unknown column is
-never rendered or preserved. Channel types are matched case-insensitively, as
-the loader does; the submitted spelling is preserved. Existing generic webhook
+never rendered or preserved. Channel types are matched case-insensitively after surrounding whitespace,
+as the loader does; the submitted spelling is preserved. Existing generic webhook
 endpoint values are legacy direct values: they are hidden and retained only
 when that same channel keeps the exact value. New or converted channels must
 supply `url_env` or `url_file`.
@@ -381,8 +381,8 @@ supply `url_env` or `url_file`.
 The diff contains only the selected section and its editable fields; nested
 sections with separate permissions are excluded. Review the diff, then
 **Confirm and save**. Replacement file contents are validated through the same
-loader before preview and again before publication; the reloaded application
-uses the final references and the new contents. Previews expire after ten
+loader before preview and again before publication; every consumer of a shared
+file is checked with the staged bytes. Previews expire after ten
 minutes, belong to the current session and section, and can be used once. Each
 session has a bounded number of pending previews, so one editor cannot fill the
 shared preview space. If the original file changed since the form loaded or
@@ -455,11 +455,16 @@ read-only and the server rechecks the rule at preview and again inside the write
 transaction. An editor without that permission may still replace the **contents**
 of an existing `*_file` reference. The submitted value is staged, validated by
 the shared loader, then written to the same owner-only file atomically; the
-reference itself does not change. Writable secret files must resolve inside the
-current protected data directory and must not be symbolic links, extra hard
-links, or aliases of the configuration, account, backup or secret stores.
-Readable external references remain usable by the loader but are never written
-through this interface. Creating a new file reference or changing an environment
+reference itself does not change. Conflicting new contents for one physical
+file are rejected; identical writes are coalesced. Renaming a channel and
+rotating its secret file must be saved separately. Writable secret files must
+resolve inside the current protected data directory and must not be symbolic
+links, extra hard links, or aliases of the configuration, account database or
+its sidecars and lock, the state or watch databases, inventory inputs, the
+output directory, or backup files and directories. Files inside the protected
+`dashboard-secrets` directory remain writable when they are the referenced
+secret. Readable external references remain usable by the loader but are never
+written through this interface. Creating a new file reference or changing an environment
 or file reference requires `manage_secrets`, which administrators always have.
 A supplied destination path is never overwritten: a new file secret is created
 with a random name in `dashboard-secrets` beside the account database, inside
@@ -477,11 +482,14 @@ renew its deletion lease, including across separate application instances. A
 staged file is removed only when no current configuration, retained backup or
 live preview references it; if reference discovery cannot complete, cleanup
 retains generated files rather than risk deleting a live secret. Invalid
-submissions remove their staged files. Generated names use
+submissions remove their staged files. Reserved `.dashboard-secret-` and `.dashboard-staged-` names left
+in the protected data directory by a crash are removed after their lease
+expires; no other data-directory files are touched. Generated names use
 `.dashboard-secret-` and `.dashboard-staged-`; configuration backups use
-`.CONFIG_FILENAME.backups`, and validation temporaries use `.config-`. These
-paths are ignored by the repository's `.gitignore`; keep runtime data
-directories outside the worktree where possible.
+`.CONFIG_FILENAME.backups`, validation temporaries use `.config-`, and the
+configuration writer lock uses `.config-CONFIG_FILENAME.lock`. These paths are
+ignored by the repository's `.gitignore`; keep runtime data directories outside
+the worktree where possible.
 
 **Backups and rollback** requires `view` and every configuration edit permission,
 because a backup can change every section. Changing a secret reference through

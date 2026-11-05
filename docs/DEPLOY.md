@@ -251,7 +251,12 @@ sudo install -m 0600 -o 65532 -g 65532 /path/to/prepared-secret /srv/cvebeacon/s
 
 Repeat for each named secret; do not use a wildcard, because a normal shell
 cannot list the `0700` directory. CVEBeacon rejects group- or other-readable
-secret files, including `sources.nvd_api_key_file`.
+secret files, including `sources.nvd_api_key_file`. Existing files under
+`/config/secrets` remain readable by the loader and are suitable for command-line
+runs, but dashboard in-place rotation requires the referenced file to resolve
+inside the account data directory (the directory containing the watch and
+account databases; `/state` in this layout). Use an environment reference or
+place a dashboard-managed secret in that protected data directory instead.
 
 Load the command once in your shell, again as a function:
 
