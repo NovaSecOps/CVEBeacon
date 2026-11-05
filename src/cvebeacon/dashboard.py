@@ -79,7 +79,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
             "inventory dashboard pages require an inventory; add [inventory] path to the configuration"
         )
     users = UserStore(config.watch.users_database)
-    account_mode = bool(users.users()) if users.path.exists() else False
+    account_mode = users.dashboard_accounts()
     encoded = None if account_mode else password_hash(config)
     auth = DashboardAuth(encoded, config.dashboard.session_lifetime_seconds) if encoded else None
     account_sessions = AccountSessions(config.dashboard.session_lifetime_seconds, config.dashboard.session_idle_seconds)
@@ -113,11 +113,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
                     ipaddress.ip_address(hostname or "")
                 except ValueError:
                     abort(400)
-        if account_mode and not users.path.exists():
+        current_mode = users.dashboard_accounts()
+        if account_mode and not current_mode:
             raise StateError("account store unavailable")
-        if not account_mode and users.path.exists():
-            if users.users():
-                account_mode = True
+        account_mode = account_mode or current_mode
         g.accounts = account_mode
         g.user, g.permissions, g.entry, g.sid = None, frozenset(), None, None
         if account_mode:
@@ -578,7 +577,7 @@ def serve(config: AppConfig, *, host="127.0.0.1", port=8787, allow_unauthenticat
         loopback = host.casefold() == "localhost"
     if not loopback:
         users = UserStore(config.watch.users_database)
-        accounts = bool(users.users()) if users.path.exists() else False
+        accounts = users.dashboard_accounts()
         if not accounts and not password_hash(config):
             if not allow_unauthenticated_remote:
                 raise CVEBeaconError("remote dashboard without authentication requires --allow-unauthenticated-remote")

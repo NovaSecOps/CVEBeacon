@@ -833,6 +833,30 @@ class UserStore:
             ).fetchone()
         return row is not None
 
+    def dashboard_accounts(self) -> bool:
+        """Distinguish a fresh install from a lost or inaccessible account store.
+
+        The persistent creation lock also records that this path was initialized.
+        Never create a missing database while deciding authentication mode.
+        """
+        try:
+            present, _ = self._path_state(self.path)
+            initialized, _ = self._path_state(self.path.with_name(self.path.name + ".lock"))
+            if not present:
+                if initialized or self._store_id is not None:
+                    raise StateError("account store unavailable; restore its database before starting the dashboard")
+                return False
+            if self._store_id is None:
+                path = self.path.parent.resolve() / self.path.name
+                if os.name == "posix":
+                    self._trusted_directory_chain(path.parent)
+                with self._creation_lock(path):
+                    self._initialize(create=False, creation_locked=True)
+            with closing(self._connect(create=False)) as db:
+                return db.execute("SELECT 1 FROM cb_user LIMIT 1").fetchone() is not None
+        except (OSError, sqlite3.Error) as exc:
+            raise StateError("account store unavailable") from exc
+
     def users(self) -> tuple[User, ...]:
         self.initialize()
         with closing(self._connect()) as db:

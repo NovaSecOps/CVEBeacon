@@ -511,3 +511,40 @@ def test_shared_password_protects_bootstrap(setup, monkeypatch):
     assert response.status_code == 303 and response.headers["Location"] == "/login"
     assert submit(client, "/login", password=PASSWORD).status_code == 303
     assert submit(client, "/bootstrap", username="admin", password=PASSWORD).status_code == 303
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_missing_store_at_restart_cannot_downgrade_authentication(accounts, monkeypatch, shared):
+    from cvebeacon.passwords import hash_password_value
+    from cvebeacon.errors import StateError
+    config, users, _, _ = accounts
+    if shared:
+        monkeypatch.setenv(config.dashboard.password_hash_env, hash_password_value(PASSWORD))
+    users.path.unlink()
+    with pytest.raises(StateError):
+        dashboard.create_app(config)
+
+
+def test_inaccessible_store_cannot_look_like_fresh_install(accounts, monkeypatch):
+    import os
+    from cvebeacon.errors import StateError
+    config, users, _, _ = accounts
+    original_exists, original_lstat = Path.exists, os.lstat
+    monkeypatch.setattr(Path, "exists", lambda path: False if path == users.path else original_exists(path))
+
+    def lstat(path, *args, **kwargs):
+        if Path(path) == users.path:
+            raise PermissionError("unreadable account store")
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    with pytest.raises(StateError):
+        dashboard.create_app(config)
+
+
+def test_remote_override_cannot_bypass_missing_account_store(accounts, monkeypatch):
+    from cvebeacon.errors import StateError
+    config, users, _, _ = accounts
+    users.path.unlink()
+    with pytest.raises(StateError):
+        dashboard.serve(config, host="0.0.0.0", allow_unauthenticated_remote=True)
