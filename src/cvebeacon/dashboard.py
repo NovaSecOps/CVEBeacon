@@ -177,8 +177,12 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
                 proof = users.authenticate(name[0] if len(name) == 1 else None,
                                            password[0] if len(password) == 1 else None)
                 if proof:
+                    try:
+                        identifier, entry = account_sessions.issue(proof)
+                    except ConfigurationError:
+                        return render_template("login.html", failed=True), 401
                     account_sessions.logout(g.sid)
-                    g.sid, g.entry = account_sessions.issue(proof)
+                    g.sid, g.entry = identifier, entry
                     g.set_account_cookie = True
                     session.clear()
                     return redirect(url_for("overview"), code=303)

@@ -403,10 +403,25 @@ def test_account_session_table_is_bounded_and_restart_revokes(accounts):
     sessions.max_sessions = 2
     login(client)
     identifier = client.get_cookie(dashboard.ACCOUNT_COOKIE).value
-    sessions.issue()
-    sessions.issue()
-    assert len(sessions.sessions) == 2
-    assert client.get("/").status_code == 303
+    for _ in range(5):
+        sessions.issue()
+    assert len(sessions.sessions) <= 2
+    assert client.get("/").status_code == 200
     fresh = dashboard.create_app(config).test_client()
     fresh.set_cookie(dashboard.ACCOUNT_COOKIE, identifier)
     assert fresh.get("/").status_code == 303
+
+
+def test_authenticated_session_flood_preserves_other_accounts(accounts):
+    _, users, app, client = accounts
+    sessions = app.extensions["account_sessions"]
+    sessions.max_sessions = 3
+    login(client, "admin")
+    proof = users.authenticate("reader", PASSWORD)
+    for _ in range(8):
+        try:
+            sessions.issue(proof)
+        except ConfigurationError:
+            pass
+    assert len(sessions.sessions) <= 3
+    assert client.get("/").status_code == 200

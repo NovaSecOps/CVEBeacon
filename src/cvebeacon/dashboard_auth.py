@@ -103,29 +103,40 @@ class AccountSessions:
         self.lifetime, self.idle = lifetime, idle
         self.clock = clock or time.monotonic
         self.sessions = OrderedDict()
+        self.anonymous = OrderedDict()
+        self.max_per_user = 16
         self.lock = Lock()
         self.max_sessions = 256
 
     def _prune(self, now):
-        for key, value in list(self.sessions.items()):
-            if now - value.created >= self.lifetime or now - value.touched >= self.idle:
-                self.sessions.pop(key, None)
+        for pool in (self.sessions, self.anonymous):
+            for key, value in list(pool.items()):
+                if now - value.created >= self.lifetime or now - value.touched >= self.idle:
+                    pool.pop(key, None)
 
     def issue(self, proof=None):
         with self.lock:
             now = self.clock()
             self._prune(now)
-            while len(self.sessions) >= self.max_sessions:
-                self.sessions.popitem(last=False)
+            pool = self.sessions if proof else self.anonymous
+            if proof:
+                own = [key for key, entry in pool.items() if entry.proof.id == proof.id]
+                if len(own) >= self.max_per_user:
+                    pool.pop(own[0])
+                if len(pool) >= self.max_sessions:
+                    raise ConfigurationError("account session capacity reached; try again later")
+            else:
+                while len(pool) >= self.max_sessions:
+                    pool.popitem(last=False)
             identifier = secrets.token_hex(32)
             value = AccountSession(proof, secrets.token_hex(32), now, now)
-            self.sessions[identifier] = value
+            pool[identifier] = value
             return identifier, value
 
     def get(self, identifier):
         with self.lock:
             self._prune(self.clock())
-            value = self.sessions.get(identifier)
+            value = self.sessions.get(identifier) or self.anonymous.get(identifier)
             if value:
                 value.touched = self.clock()
             return value
@@ -133,6 +144,7 @@ class AccountSessions:
     def logout(self, identifier):
         with self.lock:
             self.sessions.pop(identifier, None)
+            self.anonymous.pop(identifier, None)
 
     def own(self, proof):
         with self.lock:
