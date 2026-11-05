@@ -16,6 +16,8 @@ cvebeacon serve --host 0.0.0.0 --port 8787
 
 The dashboard is optional. Scheduled scans and watches remain separate short-lived processes. An authenticated account with the `run` permission can start the same `cvebeacon` commands as background jobs from the **Operations** page; every data-changing job shares a single-flight lock with the command line and scheduled runs.
 
+With no `[inventory] path` and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
+
 ## Views and investigation
 
 - **Overview:** last successful full scan, most recent attempted scan, current inventory count, latest known affected/review findings, coverage gaps, KEV counts, recent material changes, notification acceptance/failure, and source observations.

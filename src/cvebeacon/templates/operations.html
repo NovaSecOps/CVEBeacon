@@ -1,14 +1,17 @@
 {% extends 'base.html' %}
+{% from 'macros.html' import inventory_notice %}
 {% block title %}Operations · CVEBeacon{% endblock %}
 {% block content %}<h1>Operations</h1>
 {% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+{% if not has_inventory %}{{ inventory_notice() }}{% endif %}
 {% if not accounts %}<p class="warning" role="alert">Operations require a CVEBeacon account. Create the first administrator with the local <a href="{{ url_for('bootstrap') }}">bootstrap form</a> or <code>cvebeacon users add NAME --admin</code>.</p>{% endif %}
 {% if full_history %}<p class="warning" role="alert">Watch is configured to start with <strong>full history</strong>. The first sync can download years of public records and take hours. It runs only from the confirmed form below, which supplies the same confirmation as the CLI's <code>--yes</code>.</p>{% endif %}
 <p>Operations run as separate <code>cvebeacon</code> processes. Operations that write the same storage share locks, so a scheduled or command-line run using that storage also blocks a new job here. Each job records its start and outcome in the account audit trail.</p>
 
 {% if accounts %}<h2>Run a job</h2><div class="table-wrap"><table><thead><tr><th>Operation</th><th>Action</th></tr></thead><tbody>
-{% for operation, label in operation_labels.items() %}{% if (operation == 'scan' and has_inventory) or (operation != 'scan' and operation != 'run' and watch_enabled) or (operation == 'run' and (has_inventory or watch_enabled)) %}<tr><td>{{ label }}</td><td>
-{% if 'run' in permissions %}{% if full_history and operation in ['watch-sync', 'watch-run', 'run'] %}
+{% for operation, label in operation_labels.items() %}{% if operation in ['scan', 'run'] or watch_enabled %}{% set available = has_inventory if operation in ['scan', 'run'] else watch_enabled %}<tr><td>{{ label }}</td><td>
+{% if not available %}<span class="muted">Unavailable: no inventory is configured.</span>
+{% elif 'run' in permissions %}{% if full_history and operation in ['watch-sync', 'watch-run', 'run'] %}
 <form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}"><input type="hidden" name="confirm" value="full-history"><button type="submit">Confirm full-history {{ label | lower }}</button></form>
 {% else %}
 <form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}"><button type="submit">{{ label }}</button></form>

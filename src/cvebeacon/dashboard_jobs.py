@@ -495,9 +495,10 @@ def build_command(
         raise ConfigurationError(
             "this configuration has no inventory; scans cannot run"
         )
-    if operation == "run" and config.inventory is None and not config.watch.enabled:
+    if operation == "run" and config.inventory is None:
         raise ConfigurationError(
-            "nothing to run; add an [inventory] path or set [watch] enabled = true"
+            "this configuration has no inventory; add an [inventory] path to "
+            "use the combined run, or choose a watch operation"
         )
     base = [
         *command_prefix(),

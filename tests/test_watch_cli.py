@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import timedelta
 
 import httpx
 from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
 
-from cvebeacon import cli
+from cvebeacon import cli, dashboard
+from cvebeacon.errors import CVEBeaconError
 from cvebeacon.models import (
     Applicability,
     Asset,
@@ -395,17 +397,21 @@ def test_inventory_validate_accepts_an_explicit_path_without_inventory(tmp_path,
     assert "valid: 1 asset(s)" in capsys.readouterr().out
 
 
-def test_dashboard_requires_inventory_when_it_is_missing(tmp_path):
-    from cvebeacon.dashboard import create_app
-    from cvebeacon.errors import CVEBeaconError
-
+def test_dashboard_accepts_watch_only_config_without_inventory(tmp_path):
     config = write_config(tmp_path, inventory=False)
+    dashboard.create_app(config)
+
+
+def test_dashboard_refuses_configuration_without_watch_or_inventory(tmp_path):
+    config = write_config(tmp_path, inventory=False)
+    config = replace(config, watch=replace(config.watch, enabled=False))
     try:
-        create_app(config)
+        dashboard.create_app(config)
     except CVEBeaconError as exc:
-        assert "inventory" in str(exc)
+        assert "[inventory] path" in str(exc)
+        assert "[watch] enabled = true" in str(exc)
     else:
-        raise AssertionError("the dashboard must refuse a watch-only configuration")
+        raise AssertionError("the dashboard must refuse an empty configuration")
 
 
 def test_known_rules_still_load_from_the_old_config_shape(tmp_path):
@@ -477,10 +483,25 @@ def test_watch_only_config_can_schedule_watch_run(tmp_path, monkeypatch, capsys)
     assert "Schedule: daily at 07:00" in output
 
 
-def test_watch_only_config_refuses_doctor_and_serve(tmp_path, capsys):
+def test_watch_only_config_refuses_doctor(tmp_path, capsys):
     config = write_config(tmp_path, inventory=False)
-    for command in ("doctor", "serve"):
-        assert cli.main(["--config", str(config.config_path), command]) == 2
-        error = capsys.readouterr().err
-        assert "requires an inventory" in error
-        assert "watch run" in error
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    error = capsys.readouterr().err
+    assert "requires an inventory" in error
+    assert "watch run" in error
+
+
+def test_watch_only_config_serves_dashboard(tmp_path, monkeypatch):
+    config = write_config(tmp_path, inventory=False)
+    calls = []
+    monkeypatch.setattr(
+        dashboard, "serve", lambda value, **kwargs: calls.append(kwargs)
+    )
+    assert cli.main(["--config", str(config.config_path), "serve"]) == 0
+    assert calls == [
+        {
+            "host": "127.0.0.1",
+            "port": 8787,
+            "allow_unauthenticated_remote": False,
+        }
+    ]

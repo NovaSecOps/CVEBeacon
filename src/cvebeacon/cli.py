@@ -1002,17 +1002,18 @@ def run(args: argparse.Namespace) -> int:
             return _run_watch(args, config)
         if args.command == "run":
             return _run_all(config, yes=args.yes)
-        if (
-            args.command in {"doctor", "serve"}
-            and config.inventory is None
-            and config.watch.enabled
-        ):
+        if args.command == "doctor" and config.inventory is None:
             raise CVEBeaconError(
-                f"{args.command} requires an inventory; add [inventory] path, or use "
+                "doctor requires an inventory; add [inventory] path, or use "
                 f"'cvebeacon --config {config.config_path} watch run' from cron or "
                 "Task Scheduler"
             )
-        if args.command in {"scan", "export", "asset", "doctor", "serve"}:
+        if args.command == "serve" and config.inventory is None and not config.watch.enabled:
+            raise CVEBeaconError(
+                "serve requires an inventory or watch mode; add [inventory] path "
+                "or set [watch] enabled = true"
+            )
+        if args.command in {"scan", "export", "asset", "doctor"}:
             _inventory_config(config)
         if args.command == "inventory" and not args.path:
             _inventory_config(config)
