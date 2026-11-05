@@ -1091,6 +1091,10 @@ delete them and run `watch sync` again. They are not migrated.
   completed EUVD window or with a split probe when catch-up work remains. It is
   cleared when that window starts committing pages or when catch-up reaches
   today.
+- `watch_meta.last_sync_at`, `last_sync_failures`, and the `sync_<source>_*`
+  keys summarize the last completed sync for the dashboard: request and record
+  counts, new and changed counts, timestamp, and any source error. Each sync
+  overwrites them; they do not affect cursors or alert evaluation.
 
 `watch_touched` is the evaluation set; the view fingerprint only detects
 escalations. NVD-only content changes such as products, CWEs, or description

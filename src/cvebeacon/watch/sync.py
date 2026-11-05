@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Mapping
 
 from ..config import AppConfig, WatchConfig
 from ..errors import CVEBeaconError, SourceError, StateError
@@ -53,6 +53,31 @@ class SyncReport:
     @property
     def failures(self) -> tuple[str, ...]:
         return tuple(summary.source for summary in self.summaries if summary.error)
+
+
+def _record_sync_status(
+    store: WatchStore, summaries: tuple[SourceSummary, ...], at: datetime
+) -> None:
+    """Store one bounded summary of the last sync per source.
+
+    The dashboard reads these keys through ``WatchStore.status`` so it does not
+    need a second history table or a query over per-run logs.
+    """
+    values = {
+        "last_sync_at": at.isoformat(),
+        "last_sync_failures": ",".join(
+            summary.source for summary in summaries if summary.error
+        ),
+    }
+    for summary in summaries:
+        prefix = f"sync_{summary.source}"
+        values[f"{prefix}_at"] = at.isoformat()
+        values[f"{prefix}_requests"] = str(summary.requests)
+        values[f"{prefix}_records"] = str(summary.records)
+        values[f"{prefix}_new"] = str(summary.new)
+        values[f"{prefix}_changed"] = str(summary.changed)
+        values[f"{prefix}_error"] = str(summary.error)[:500] if summary.error else ""
+    store.set_metadata(values)
 
 
 def _clock_value(clock: Callable[[], datetime]) -> datetime:
@@ -288,10 +313,12 @@ def sync_watch(
             euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
             initial_window_start=today.isoformat(),
         )
-        return SyncReport(
+        report = SyncReport(
             summaries=tuple(SourceSummary(source) for source in watch.sources),
             baseline=True,
         )
+        _record_sync_status(store, report.summaries, now)
+        return report
 
     initial_run = first_run
     if initial_run:
@@ -302,10 +329,12 @@ def sync_watch(
                 euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
                 initial_window_start=today.isoformat(),
             )
-            return SyncReport(
+            report = SyncReport(
                 summaries=tuple(SourceSummary(source) for source in watch.sources),
                 baseline=True,
             )
+            _record_sync_status(store, report.summaries, now)
+            return report
         resumed = metadata.get("nvd_cursor") is not None
         if resumed:
             nvd_start = _cursor_time(metadata.get("nvd_cursor"))
@@ -881,7 +910,41 @@ def sync_watch(
     )
     if initial_evaluation and not report.failures:
         store.set_metadata({"initial_sync_completed_at": now.isoformat()})
+    _record_sync_status(store, report.summaries, now)
     return report
+
+
+def euvd_progress(metadata: Mapping[str, str]) -> str:
+    """Describe the stored EUVD page or successor-window progress."""
+    cursor_value = metadata.get("euvd_cursor")
+    resume = _euvd_resume(metadata.get("euvd_page_cursor"))
+    if resume is not None and (
+        cursor_value is None or resume.end.isoformat() >= cursor_value
+    ):
+        if resume.phase == "verify":
+            action = "verifying"
+            progress = f"page {resume.page + 1} of {resume.verify}"
+        else:
+            action = "scanning"
+            if resume.total:
+                pages = (
+                    resume.total + feeds.EUVD_PAGE_SIZE - 1
+                ) // feeds.EUVD_PAGE_SIZE
+                progress = f"page {resume.page + 1} of {pages}"
+            else:
+                # A restarted scan has no pinned total until its first page
+                # succeeds; do not present a wide window as one page.
+                progress = f"page {resume.page + 1} (total not yet known)"
+        return (
+            f"{action} {resume.start.isoformat()}..{resume.end.isoformat()}, "
+            f"{progress}"
+        )
+    pending = _euvd_window(metadata.get("euvd_next_window"))
+    if pending is not None and (
+        cursor_value is None or pending[1].isoformat() >= cursor_value
+    ):
+        return f"next {pending[0].isoformat()}..{pending[1].isoformat()}"
+    return ""
 
 
 def watch_status(watch: WatchConfig) -> str:
@@ -891,37 +954,9 @@ def watch_status(watch: WatchConfig) -> str:
     meta = status["meta"]
     euvd_cursor = f"euvd cursor: {meta.get('euvd_cursor', 'not set')}"
     if "euvd" in watch.sources:
-        cursor_value = meta.get("euvd_cursor")
-        resume = _euvd_resume(meta.get("euvd_page_cursor"))
-        if resume is not None and (
-            cursor_value is None or resume.end.isoformat() >= cursor_value
-        ):
-            if resume.phase == "verify":
-                action = "verifying"
-                progress = f"page {resume.page + 1} of {resume.verify}"
-            else:
-                action = "scanning"
-                if resume.total:
-                    pages = (
-                        resume.total + feeds.EUVD_PAGE_SIZE - 1
-                    ) // feeds.EUVD_PAGE_SIZE
-                    progress = f"page {resume.page + 1} of {pages}"
-                else:
-                    # A restarted scan has no pinned total until its first page
-                    # succeeds; do not present a wide window as one page.
-                    progress = f"page {resume.page + 1} (total not yet known)"
-            euvd_cursor += (
-                f" ({action} {resume.start.isoformat()}..{resume.end.isoformat()}, "
-                f"{progress})"
-            )
-        else:
-            pending = _euvd_window(meta.get("euvd_next_window"))
-            if pending is not None and (
-                cursor_value is None or pending[1].isoformat() >= cursor_value
-            ):
-                euvd_cursor += (
-                    f" (next {pending[0].isoformat()}..{pending[1].isoformat()})"
-                )
+        progress = euvd_progress(meta)
+        if progress:
+            euvd_cursor += f" ({progress})"
     lines = [
         f"database: {status['database']}",
         f"schema version: {meta.get('schema_version', 'unknown')}",

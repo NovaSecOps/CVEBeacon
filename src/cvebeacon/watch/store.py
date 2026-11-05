@@ -323,6 +323,22 @@ class DeliveryStatusRow:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryRow:
+    event_id: int
+    channel: str
+    status: str
+    attempts: int
+    last_error: str | None = None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EventDeliveries:
+    rows: tuple[DeliveryRow, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ReportOutcome:
     """The result of recording or withdrawing one client-report mark."""
 
@@ -1544,10 +1560,20 @@ class WatchStore:
         *,
         limit: int = 50,
         rule: str | None = None,
-        pending: bool = False,
+        pending: bool | None = False,
+        kind: str | None = None,
+        initial: bool | None = None,
+        cve: str | None = None,
+        since: date | None = None,
+        until: date | None = None,
+        offset: int = 0,
     ) -> tuple[WatchEventRow, ...]:
         if limit < 1:
             raise StateError("event limit must be positive")
+        if offset < 0:
+            raise StateError("event offset must not be negative")
+        if kind is not None and kind not in EVENT_KINDS:
+            raise StateError("unknown watch event kind")
         self.initialize()
         clauses = [
             "e.kind NOT IN (" + ",".join("?" for _ in NOTICE_KINDS) + ")"
@@ -1556,13 +1582,37 @@ class WatchStore:
         if rule is not None:
             clauses.append("e.rule = ?")
             parameters.append(rule.casefold())
-        if pending:
+        if pending is True:
             clauses.append(
                 "EXISTS (SELECT 1 FROM watch_delivery d "
                 "WHERE d.event_id=e.id AND d.status='pending')"
             )
+        elif pending is None:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM watch_delivery d "
+                "WHERE d.event_id=e.id AND d.status='pending')"
+            )
+        if kind is not None:
+            clauses.append("e.kind = ?")
+            parameters.append(kind)
+        if initial is not None:
+            clauses.append("e.initial = ?")
+            parameters.append(1 if initial else 0)
+        if cve is not None:
+            clauses.append("e.cve_id = ?")
+            parameters.append(cve)
+        if since is not None:
+            clauses.append("e.created_at >= ?")
+            parameters.append(since.isoformat())
+        if until is not None:
+            try:
+                upper = (until + timedelta(days=1)).isoformat()
+            except OverflowError as exc:
+                raise StateError("event date is out of range") from exc
+            clauses.append("e.created_at < ?")
+            parameters.append(upper)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        parameters.append(limit)
+        parameters.extend((limit, offset))
         with closing(self._connect()) as db:
             rows = db.execute(
                 "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,"
@@ -1570,7 +1620,7 @@ class WatchStore:
                 "c.published AS published,c.first_seen AS first_seen "
                 "FROM watch_event e LEFT JOIN watch_cve c ON c.cve_id=e.cve_id"
                 + where
-                + " ORDER BY e.created_at DESC, e.id DESC LIMIT ?",
+                + " ORDER BY e.created_at DESC, e.id DESC LIMIT ? OFFSET ?",
                 parameters,
             ).fetchall()
         output: list[WatchEventRow] = []
@@ -1597,6 +1647,101 @@ class WatchStore:
                 )
             )
         return tuple(output)
+
+    def event_deliveries(
+        self, event_ids: Iterable[int], *, per_event: int = 20
+    ) -> dict[int, EventDeliveries]:
+        """Return capped per-channel deliveries for the selected events.
+
+        Every event has its own channel cap, so one chatty event cannot hide
+        deliveries for another. ``truncated`` marks an event whose channel list
+        exceeded the cap.
+        """
+        if per_event < 1:
+            raise StateError("delivery limit must be positive")
+        identifiers = sorted({int(value) for value in event_ids})
+        if not identifiers:
+            return {}
+        if len(identifiers) > 500:
+            raise StateError("too many delivery events selected")
+        marks = ",".join("?" for _ in identifiers)
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT event_id,channel,status,attempts,last_error,updated_at,"
+                "row_number FROM ("
+                "SELECT d.event_id,d.channel,d.status,d.attempts,d.last_error,"
+                "d.updated_at,ROW_NUMBER() OVER ("
+                "PARTITION BY d.event_id ORDER BY d.channel) AS row_number "
+                "FROM watch_delivery d WHERE d.event_id IN (" + marks + ")"
+                ") WHERE row_number <= ? ORDER BY event_id, channel",
+                (*identifiers, per_event + 1),
+            ).fetchall()
+        output = {
+            identifier: EventDeliveries() for identifier in identifiers
+        }
+        grouped: dict[int, list[DeliveryRow]] = {
+            identifier: [] for identifier in identifiers
+        }
+        truncated: set[int] = set()
+        for row in rows:
+            event_id = int(row["event_id"])
+            if int(row["row_number"]) > per_event:
+                truncated.add(event_id)
+                continue
+            grouped[event_id].append(
+                DeliveryRow(
+                    event_id,
+                    str(row["channel"]),
+                    str(row["status"]),
+                    int(row["attempts"]),
+                    row["last_error"],
+                    row["updated_at"],
+                )
+            )
+        for identifier in identifiers:
+            output[identifier] = EventDeliveries(
+                tuple(grouped[identifier]), identifier in truncated
+            )
+        return output
+
+    def notice_deliveries_for(
+        self,
+        cve_id: str,
+        occurrences: Iterable[str],
+        *,
+        per_notice: int = 20,
+    ) -> dict[tuple[str, int], EventDeliveries]:
+        """Return capped notice deliveries for the selected report rows."""
+        values = sorted({str(value) for value in occurrences if value})
+        if not values:
+            return {}
+        if len(values) > 500:
+            raise StateError("too many notice occurrences selected")
+        marks = ",".join("?" for _ in values)
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT id,kind,occurrence FROM watch_event "
+                "WHERE rule=? AND cve_id=? AND occurrence IN (" + marks + ")",
+                (NOTICE_RULE, cve_id, *values),
+            ).fetchall()
+        events: dict[tuple[str, int], int] = {}
+        for row in rows:
+            action = "report" if row["kind"] == "reported" else "unreport"
+            _, _, raw_id = str(row["occurrence"]).partition(":")
+            try:
+                key = (action, int(raw_id))
+            except ValueError:
+                continue
+            events[key] = int(row["id"])
+        deliveries = self.event_deliveries(
+            events.values(), per_event=per_notice
+        )
+        return {
+            key: deliveries.get(event_id, EventDeliveries())
+            for key, event_id in events.items()
+        }
 
     @staticmethod
     def _report_entry(row: Mapping[str, Any]) -> ReportedEntry:
@@ -1832,15 +1977,48 @@ class WatchStore:
             )
         return ReportOutcome(entry, True, event_id, channels)
 
-    def reported_entries(self) -> tuple[ReportedEntry, ...]:
-        """Return the full append-only audit trail, oldest first."""
+    def reported_entries(
+        self, *, limit: int | None = None, offset: int = 0
+    ) -> tuple[ReportedEntry, ...]:
+        """Return the append-only audit trail, oldest first, optionally paged."""
+        if offset < 0:
+            raise StateError("report offset must not be negative")
+        if limit is None and offset:
+            raise StateError("a report offset requires a limit")
+        if limit is not None and limit < 1:
+            raise StateError("report limit must be positive")
+        self.initialize()
+        sql = (
+            "SELECT id,cve_id,action,by,note,at,user_id,username,"
+            "identity_mode,os_account,host,chain,chain_version "
+            "FROM watch_report ORDER BY id"
+        )
+        parameters: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            parameters = (limit, offset)
+        with closing(self._connect()) as db:
+            db.text_factory = decode_text
+            rows = db.execute(sql, parameters).fetchall()
+        return tuple(self._report_entry(row) for row in rows)
+
+    def report_trail(
+        self, cve_id: str, *, limit: int = 100, offset: int = 0
+    ) -> tuple[ReportedEntry, ...]:
+        """Return the newest report and unreport rows for one CVE."""
+        if limit < 1:
+            raise StateError("report limit must be positive")
+        if offset < 0:
+            raise StateError("report offset must not be negative")
         self.initialize()
         with closing(self._connect()) as db:
             db.text_factory = decode_text
             rows = db.execute(
                 "SELECT id,cve_id,action,by,note,at,user_id,username,"
                 "identity_mode,os_account,host,chain,chain_version "
-                "FROM watch_report ORDER BY id"
+                "FROM watch_report WHERE cve_id=? "
+                "ORDER BY id DESC LIMIT ? OFFSET ?",
+                (cve_id, limit, offset),
             ).fetchall()
         return tuple(self._report_entry(row) for row in rows)
 
@@ -1974,14 +2152,25 @@ class WatchStore:
                 )
         return chained, legacy
 
-    def reported_cves(self) -> tuple[ReportedEntry, ...]:
+    def reported_cves(
+        self, *, limit: int | None = None, offset: int = 0
+    ) -> tuple[ReportedEntry, ...]:
         """Return the latest ``report`` row of every currently reported CVE."""
+        if offset < 0:
+            raise StateError("report offset must not be negative")
+        if limit is None and offset:
+            raise StateError("a report offset requires a limit")
+        if limit is not None and limit < 1:
+            raise StateError("report limit must be positive")
         self.initialize()
+        sql = _LATEST_REPORT_SQL + " ORDER BY r.at, r.id"
+        parameters: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            parameters = (limit, offset)
         with closing(self._connect()) as db:
             db.text_factory = decode_text
-            rows = db.execute(
-                _LATEST_REPORT_SQL + " ORDER BY r.at, r.id"
-            ).fetchall()
+            rows = db.execute(sql, parameters).fetchall()
         return tuple(self._report_entry(row) for row in rows)
 
     @staticmethod
@@ -2022,17 +2211,24 @@ class WatchStore:
             return self._reported_marks_in(db, identifiers)
 
     def notice_deliveries(
-        self,
+        self, *, cve_id: str | None = None
     ) -> dict[tuple[str, int], tuple[NoticeDelivery, ...]]:
         """Return notice delivery states keyed by (action, report id)."""
         self.initialize()
+        sql = (
+            "SELECT e.kind,e.occurrence,d.channel,d.status,d.attempts,"
+            "d.last_error FROM watch_event e "
+            "JOIN watch_delivery d ON d.event_id=e.id "
+            "WHERE e.rule=?"
+        )
+        parameters: tuple[Any, ...] = (NOTICE_RULE,)
+        if cve_id is not None:
+            sql += " AND e.cve_id=?"
+            parameters = (NOTICE_RULE, cve_id)
         with closing(self._connect()) as db:
             rows = db.execute(
-                "SELECT e.kind,e.occurrence,d.channel,d.status,d.attempts,"
-                "d.last_error FROM watch_event e "
-                "JOIN watch_delivery d ON d.event_id=e.id "
-                "WHERE e.rule=? ORDER BY e.id, d.channel",
-                (NOTICE_RULE,),
+                sql + " ORDER BY e.id, d.channel",
+                parameters,
             ).fetchall()
         output: dict[tuple[str, int], list[NoticeDelivery]] = {}
         for row in rows:

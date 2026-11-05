@@ -27,6 +27,7 @@ class ReportIdentity:
     user: User | None = None
     authenticated: AuthenticatedUser | None = None
     email: str | None = None
+    session: AuthenticatedUser | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in IDENTITY_MODES:
@@ -35,16 +36,36 @@ class ReportIdentity:
                 "authenticated"
             )
         validate_identity(self.display)
+        if self.session is not None and not isinstance(
+            self.session, AuthenticatedUser
+        ):
+            raise ConfigurationError(
+                "a dashboard session must be a successful login"
+            )
         if self.mode == "open":
             if self.user is not None or self.authenticated is not None:
                 raise ConfigurationError(
                     "open identity does not accept a resolved user"
+                )
+            if (
+                self.session is not None
+                and self.session.user.username != self.display
+            ):
+                raise ConfigurationError(
+                    "the dashboard session does not match the open identity"
                 )
         elif self.mode == "registered":
             if self.user is None or self.authenticated is not None:
                 raise ConfigurationError(
                     "registered identity requires a resolved user without "
                     "an authentication proof"
+                )
+            if (
+                self.session is not None
+                and self.session.user.id != self.user.id
+            ):
+                raise ConfigurationError(
+                    "the dashboard session does not match the resolved account"
                 )
         else:
             if self.user is None or self.authenticated is None:
@@ -54,6 +75,14 @@ class ReportIdentity:
             if self.authenticated.user != self.user:
                 raise ConfigurationError(
                     "authenticated identity proof does not match the user"
+                )
+            if (
+                self.session is not None
+                and self.session != self.authenticated
+            ):
+                raise ConfigurationError(
+                    "the dashboard session does not match the authentication "
+                    "proof"
                 )
         if self.mode != "open":
             assert self.user is not None

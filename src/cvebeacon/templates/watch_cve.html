@@ -1,0 +1,96 @@
+{% extends 'base.html' %}{% from 'watch_macros.html' import value, day, stamp, report_mark, deliveries %}
+{% block title %}{{ cve_id }} · Watch · CVEBeacon{% endblock %}
+{% block content %}
+<h1>{{ cve_id }}</h1>
+{% if banner %}<p class="badge">{{ banner }}</p>{% endif %}
+{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+<p>
+  <a href="{{ nvd_url }}" rel="noreferrer noopener">NVD</a> ·
+  <a href="{{ cve_org_url }}" rel="noreferrer noopener">CVE.org</a>
+  {% if euvd_url %} · <a href="{{ euvd_url }}" rel="noreferrer noopener">EUVD</a>{% endif %}
+  {% if can_statement %} · <a href="{{ url_for('watch.statement', cve_id=cve_id) }}">Generate statement</a>{% endif %}
+</p>
+<p>{{ report_mark(mark_entry) }}</p>
+
+<h2>Stored view</h2>
+<dl>
+  <dt>Status</dt><dd>{{ view.status }}</dd>
+  <dt>Description</dt><dd>{{ value(view.description) }}</dd>
+  <dt>Published</dt><dd>{{ day(view.published) }}{% if view.published %} <span class="muted">({{ view.published }})</span>{% endif %}</dd>
+  <dt>First seen</dt><dd>{{ day(view.first_seen) }}{% if view.first_seen %} <span class="muted">({{ view.first_seen }})</span>{% endif %}</dd>
+  <dt>Last modified</dt><dd>{{ value(view.last_modified) }}</dd>
+  <dt>Source identifier</dt><dd>{{ value(view.source_identifier) }}</dd>
+  <dt>SSVC exploitation</dt><dd>{{ value(view.ssvc_exploitation) }}</dd>
+  <dt>EPSS</dt><dd>{{ value(view.epss) }}{% if view.epss is not none %} · percentile {{ value(view.epss_percentile) }} · score date {{ value(view.epss_date) }}{% endif %}</dd>
+  <dt>CWEs</dt><dd>{{ view.cwes | join(', ') if view.cwes else 'Not available' }}</dd>
+  <dt>Vendors</dt><dd>{{ view.vendors | join(', ') if view.vendors else 'Not available' }}</dd>
+  <dt>Products</dt><dd>{{ view.products | join(', ') if view.products else 'Not available' }}</dd>
+</dl>
+
+<h2>CVSS by provider</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Provider</th><th>Source</th><th>Version</th><th>Score</th><th>Severity</th><th>Vector</th></tr></thead>
+<tbody>{% for entry in view.cvss %}<tr><td>{{ entry.provider }}</td><td>{{ entry.source }}</td><td>{{ entry.version }}</td><td>{{ entry.score }}</td><td>{{ value(entry.severity) }}</td><td class="break">{{ value(entry.vector, 'Not available') }}</td></tr>{% else %}<tr><td colspan="6">No CVSS score is stored.</td></tr>{% endfor %}</tbody>
+</table></div>
+
+<h2>Known exploitation</h2>
+<dl>
+  <dt>CISA KEV</dt><dd>{% if view.cisa_kev_added %}Yes · added {{ view.cisa_kev_added }}{% else %}No{% endif %}</dd>
+  <dt>CISA due date</dt><dd>{{ value(view.cisa_kev_due, 'Not applicable') }}</dd>
+  <dt>CISA required action</dt><dd>{{ value(view.cisa_required_action, 'Not applicable') }}</dd>
+  <dt>CISA ransomware use</dt><dd>{{ value(view.cisa_ransomware, 'Not applicable') }}</dd>
+  <dt>EU KEV</dt><dd>{% if view.eu_kev_added %}Yes · added {{ view.eu_kev_added }}{% else %}No{% endif %}</dd>
+  <dt>EUVD</dt><dd>{% if view.euvd_id %}{{ view.euvd_id }}{% if view.euvd_exploited_since %} · exploited since {{ view.euvd_exploited_since }}{% endif %}{% else %}Not linked{% endif %}</dd>
+</dl>
+
+<h2>References</h2>
+<ul>{% for reference in view.references %}<li>{% if reference.url.startswith('http://') or reference.url.startswith('https://') %}<a href="{{ reference.url }}" rel="noreferrer noopener" class="break">{{ reference.url }}</a>{% else %}<span class="break">{{ reference.url }}</span>{% endif %}{% if reference.tags %} <span class="muted">({{ reference.tags | join(', ') }})</span>{% endif %}</li>{% else %}<li>No references are stored.</li>{% endfor %}</ul>
+
+{% if can_report %}
+<h2>{{ 'Withdraw report' if mark_entry else 'Report to clients' }}</h2>
+{% if mark_entry %}
+<form method="post" action="{{ url_for('watch.unreport_cve', cve_id=cve_id) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Note (optional)<input name="note" maxlength="500" placeholder="Why the report is withdrawn"></label>
+  <button>Withdraw report</button>
+</form>
+{% else %}
+<form method="post" action="{{ url_for('watch.report_cve', cve_id=cve_id) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Note (optional)<input name="note" maxlength="500" placeholder="Ticket or client reference"></label>
+  <button>Report to clients</button>
+</form>
+{% endif %}
+<p class="muted">The report is recorded as the logged-in account. Channels configured with <code>notify_reported</code> receive a queued notice through the normal delivery ledger.</p>
+{% endif %}
+
+<h2>Events</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Time</th><th>Rule</th><th>Kind</th><th>Initial</th><th>Reasons</th><th>Published</th><th>First seen</th><th>Deliveries</th></tr></thead>
+<tbody>{% for row in event_rows %}<tr>
+  <td>{{ row.event.created_at }}</td>
+  <td>{{ row.event.rule }}</td>
+  <td>{{ row.event.kind }}</td>
+  <td>{{ 'yes' if row.event.initial else 'no' }}</td>
+  <td>{{ row.event.reasons | join('; ') }}</td>
+  <td>{{ day(row.event.published) }}</td>
+  <td>{{ day(row.event.first_seen) }}</td>
+  <td>{{ deliveries(row.deliveries) }}</td>
+</tr>{% else %}<tr><td colspan="8">No stored events for this CVE.</td></tr>{% endfor %}</tbody>
+</table></div>
+
+<h2>Reported-to-clients trail</h2>
+<p class="muted">Newest {{ trail_page_size }} entries per page. Use the reported export for the complete trail.</p>
+<p>Page {{ trail_page }}{% if trail_has_previous %} · <a href="{{ url_for('watch.cve', cve_id=cve_id, trail_page=trail_page - 1) }}">Newer entries</a>{% endif %}{% if trail_has_next %} · <a href="{{ url_for('watch.cve', cve_id=cve_id, trail_page=trail_page + 1) }}">Older entries</a>{% endif %}</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Time</th><th>Action</th><th>By</th><th>Identity mode</th><th>Note</th><th>Notices</th></tr></thead>
+<tbody>{% for row in trail_rows %}<tr>
+  <td>{{ stamp(row.entry.at) }}</td>
+  <td>{{ row.entry.action }}{% if row.entry.legacy %} <span class="badge">legacy unchained</span>{% endif %}</td>
+  <td>{{ watch_identity(row.entry.by, row.entry.username) }}</td>
+  <td>{{ value(row.entry.identity_mode, 'legacy') }}</td>
+  <td>{{ value(row.entry.note, '') }}</td>
+  <td>{{ deliveries(row.notices) }}</td>
+</tr>{% else %}<tr><td colspan="6">{{ 'No entries on this page.' if trail_page > 1 else 'This CVE has never been reported to clients.' }}</td></tr>{% endfor %}</tbody>
+</table></div>
+{% endblock %}

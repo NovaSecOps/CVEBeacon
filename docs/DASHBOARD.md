@@ -26,6 +26,55 @@ The dashboard is optional. Continue running `cvebeacon scan` as a separate short
 - **Reports:** query the current inventory and download an XLSX or JSON report using the existing reporting functions. Exports do not commit monitoring state. Check the report's coverage and source-health fields even when the download succeeds.
 - **Sources:** view cached observations from the latest recorded scan, including check result, retrieval time and available source timestamp. Opening this page does not contact the sources.
 
+### Watch views
+
+The **Watch** pages read the watch database through the same store and status
+helpers as `cvebeacon watch status`. They never contact a source and do not
+change scan or delivery state.
+
+- **Watch overview:** database path and schema, NVD and EUVD cursors (including
+  EUVD page progress), the last sync per source with request counts, EPSS score
+  date, watched/KEV/SSVC counts, per-channel pending, sending, failed and
+  ambiguous deliveries, the reported-to-clients count, and initial-mode state.
+  A database written before sync summaries were recorded shows the counts as not
+  recorded until the next sync.
+- **Events:** filter by rule, kind, initial flag, date range, exact CVE and
+  pending delivery. Results are ordered newest first and limited to 50 per page.
+  Each row shows the published and first-seen dates and the current reported
+  mark. Report and unreport notices are excluded; they appear in the CVE trail.
+- **CVE detail:** the stored view with CVSS by provider, EPSS, CISA and EU KEV
+  dates and required action, SSVC exploitation, CWEs, products, references,
+  publication and first-seen dates, the CVE's events with per-channel delivery
+  state, and the report/unreport trail with its notice states. The trail is
+  paginated at 50 entries per page; each event or notice shows at most 20
+  channel deliveries and says explicitly when more exist. Links open NVD,
+  CVE.org and EUVD. Reference links are rendered only for HTTP and HTTPS URLs.
+- **Reported to clients:** current report marks, 100 per page. The full
+  append-only report/unreport trail downloads as CSV or JSON and requires
+  `view_audit`; the current list requires `view`. CSV cells beginning with
+  `=`, `+`, `-`, `@`, tab or carriage return are prefixed with an apostrophe so
+  spreadsheet software treats them as text.
+- **Statement:** render one stored CVE from the built-in Markdown template or an
+  uploaded UTF-8 `.md`/`.txt` or `.docx` template. Uploads are limited to 5 MiB,
+  read through the existing hardened statement renderer, and processed only in a
+  temporary directory. The generated file is downloaded and not stored by the
+  dashboard.
+
+Reporting from the dashboard requires `report` and always uses the logged-in
+account, never a name supplied by the form. The configured identity mode still
+applies: in `open` mode the account username is recorded as the open identity,
+in `registered` mode the enabled account is resolved to its display identity,
+and in `authenticated` mode the existing dashboard session proof is accepted
+without asking for the password again. The dashboard session proof itself
+authorizes the write in every mode; the account, credential version and
+`report` permission are rechecked inside the report write transaction, so a
+disabled account, changed password or revoked permission fails closed even if
+it changes after the request began. A channel with `notify_reported = true`
+gets a queued notice; its delivery state is shown in the trail, and delivery
+still runs through `cvebeacon watch notify` or `watch run`. The shared-password
+compatibility mode can browse watch pages and generate statements, but cannot
+record a client report because there is no CVEBeacon account identity.
+
 ## Freshness and failures
 
 Stored data is not live source availability. A successful check is labelled as a cached observation and becomes stale after 24 hours. Old scan data, failed/degraded scans, and scan attempts without recorded completion receive prominent warnings. An unfinished attempt may represent a running or interrupted scanner; check the actual process and logs.
@@ -131,9 +180,9 @@ logout, even if its role has no permissions.
 
 | Permission | Capability |
 | --- | --- |
-| `view` | Observation pages, findings, query results and exports |
-| `report` | Mark or unmark a CVE as reported |
-| `statement` | Generate statements |
+| `view` | Observation pages, findings, watch pages, the current reported list, query results and exports |
+| `report` | Mark or unmark a CVE as reported from the CLI or dashboard |
+| `statement` | Generate statements from the CLI or dashboard |
 | `run` | Operation forms; submit manual queries and inventory report exports with `view`; reserved sync, evaluation and notification operations |
 | `retry` | Retry failed or ambiguous deliveries |
 | `test_channel` | Send channel tests |
@@ -147,7 +196,7 @@ logout, even if its role has no permissions.
 | `edit_http` | Edit HTTP client settings |
 | `manage_schedule` | Manage scheduling |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |
-| `view_audit` | View account administration, login and logout history, with hash-chain verification status |
+| `view_audit` | View account administration, login and logout history, with hash-chain verification status; export the full reported audit trail |
 
 Some capabilities reserve authorization for later dashboard operations; granting
 them does not add an operation that the current dashboard does not implement.

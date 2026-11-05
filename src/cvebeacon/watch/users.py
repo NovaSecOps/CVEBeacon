@@ -1203,7 +1203,7 @@ class UserStore:
 
     def require_current(self, identity: "ReportIdentity") -> None:
         """Standalone re-check used by tests and non-atomic probes."""
-        if identity.mode == "open":
+        if identity.mode == "open" and identity.session is None:
             return
         self.initialize()
         with closing(self._connect(create=False)) as db:
@@ -1259,8 +1259,35 @@ class UserStore:
 
         The caller may hold the user-database lock; ``ReportService`` keeps a
         ``transaction()`` open from this check through the report write so a
-        concurrent disable cannot slip between them.
+        concurrent disable cannot slip between them. A dashboard session proof
+        is checked in every identity mode, including open and registered, and
+        must still hold the report permission.
         """
+        if identity.session is not None:
+            current = self.require_permission_in(
+                db, identity.session, "report"
+            )
+            if identity.mode == "open":
+                if current.username != identity.display:
+                    raise ConfigurationError(
+                        "the dashboard session does not match the open identity"
+                    )
+            elif identity.mode == "registered":
+                if identity.user is None or identity.user.id != current.id:
+                    raise ConfigurationError(
+                        "the dashboard session does not match the resolved "
+                        "account"
+                    )
+            else:
+                if (
+                    identity.authenticated is None
+                    or identity.authenticated.user.id != current.id
+                ):
+                    raise ConfigurationError(
+                        "the dashboard session does not match the "
+                        "authentication proof"
+                    )
+            return
         if identity.mode == "open":
             return
         if identity.user is None:

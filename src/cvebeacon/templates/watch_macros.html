@@ -1,0 +1,8 @@
+{% macro value(item, fallback='Unknown') %}{{ item if item is not none and item != '' else fallback }}{% endmacro %}
+{% macro day(item) %}{{ item[:10] if item else 'Unknown' }}{% endmacro %}
+{% macro stamp(item) %}{{ watch_stamp(item) if item else 'Not recorded' }}{% endmacro %}
+{% macro report_mark(item) %}{% if item %}Reported to clients by {{ watch_identity(item.by, item.username) }} at {{ watch_stamp(item.at) }}{% else %}Not reported to clients{% endif %}{% endmacro %}
+{% macro deliveries(bundle) %}
+{% for row in bundle.rows %}<span class="badge">{{ row.channel }}: {{ row.status }} ({{ row.attempts }} attempt{{ '' if row.attempts == 1 else 's' }})</span>{% if row.last_error %}<p class="warning">{{ row.last_error }}</p>{% endif %}{% else %}{% if not bundle.truncated %}<span class="muted">No deliveries recorded.</span>{% endif %}{% endfor %}
+{% if bundle.truncated %}<p class="muted">Additional channel deliveries are not shown.</p>{% endif %}
+{% endmacro %}
