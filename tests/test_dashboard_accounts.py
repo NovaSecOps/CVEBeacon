@@ -500,3 +500,14 @@ def test_capabilities_grant_only_their_required_pages(accounts, permissions, pat
     login(client)
     response = client.open(path, method=method, data={"csrf": csrf(client), **data})
     assert response.status_code == status
+
+
+def test_shared_password_protects_bootstrap(setup, monkeypatch):
+    from cvebeacon.passwords import hash_password_value
+    config = setup[0]
+    monkeypatch.setenv(config.dashboard.password_hash_env, hash_password_value(PASSWORD))
+    client = dashboard.create_app(config).test_client()
+    response = client.get("/bootstrap")
+    assert response.status_code == 303 and response.headers["Location"] == "/login"
+    assert submit(client, "/login", password=PASSWORD).status_code == 303
+    assert submit(client, "/bootstrap", username="admin", password=PASSWORD).status_code == 303

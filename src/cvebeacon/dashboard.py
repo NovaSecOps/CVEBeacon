@@ -134,7 +134,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1") -> Flask:
             if request.endpoint not in {"login", "static", "bootstrap"} and g.user is None:
                 return redirect(url_for("login"), code=303)
         else:
-            if auth and request.endpoint not in {"login", "static", "bootstrap"}:
+            if auth and request.endpoint not in {"login", "static"}:
                 if not auth.valid(session.get("auth_id")):
                     session.clear()
                     return redirect(url_for("login"), code=303)
