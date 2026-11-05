@@ -31,6 +31,11 @@ from flask import (
 )
 
 from .config import AppConfig
+from .clients import (
+    affected_clients,
+    client_summaries,
+    latest_successful_scan,
+)
 from .dashboard import _text, requires
 from .errors import CVEBeaconError, ConfigurationError, StateError
 from .watch.messages import CVE_URL, EUVD_URL, NVD_URL
@@ -199,6 +204,9 @@ def _cve_context(
         per_notice=20,
     )
     mark = store.reported_marks((identifier,)).get(identifier)
+    impacts = affected_clients(
+        config.database_path, (identifier,)
+    ).get(identifier.upper(), ())
     banner_key = _text(request.args, "mark")
     banner = MARKS.get(banner_key)
     if banner_key in {"reported", "already"} and mark is None:
@@ -226,6 +234,8 @@ def _cve_context(
             for entry in trail
         ],
         mark_entry=mark,
+        affected_clients=impacts,
+        inventory_scan=latest_successful_scan(config.database_path),
         trail_page=trail_page,
         trail_page_size=TRAIL_PAGE_SIZE,
         trail_has_previous=trail_page > 1,
@@ -296,7 +306,16 @@ def events():
     config, store = _state()
     filters = {
         key: _text(request.args, key)
-        for key in ("rule", "kind", "initial", "since", "until", "cve", "pending")
+        for key in (
+            "rule",
+            "kind",
+            "initial",
+            "since",
+            "until",
+            "cve",
+            "pending",
+            "client",
+        )
     }
     if filters["kind"] and filters["kind"] not in EVENT_KINDS:
         abort(400)
@@ -313,6 +332,24 @@ def events():
             cve = normalize_cve_id(filters["cve"])
         except ConfigurationError:
             abort(400)
+    _, summaries = client_summaries(config.database_path)
+    client_names = {item.name.casefold(): item.name for item in summaries}
+    client_cves_filter: tuple[str, ...] | None = None
+    if filters["client"]:
+        chosen = next(
+            (
+                item
+                for item in summaries
+                if item.name.casefold() == filters["client"].casefold()
+            ),
+            None,
+        )
+        if chosen is None:
+            abort(400)
+        filters["client"] = chosen.name
+        client_cves_filter = tuple(
+            finding.cve_id for finding in chosen.findings
+        )
     pending = (
         None
         if filters["pending"] == "no"
@@ -326,16 +363,21 @@ def events():
         else filters["initial"] == "yes"
     )
     page = _page_number()
-    rows = store.events(
-        limit=EVENT_PAGE_SIZE + 1,
-        rule=filters["rule"] or None,
-        pending=pending,
-        kind=filters["kind"] or None,
-        initial=initial,
-        cve=cve,
-        since=since,
-        until=until,
-        offset=(page - 1) * EVENT_PAGE_SIZE,
+    rows = (
+        ()
+        if client_cves_filter == ()
+        else store.events(
+            limit=EVENT_PAGE_SIZE + 1,
+            rule=filters["rule"] or None,
+            pending=pending,
+            kind=filters["kind"] or None,
+            initial=initial,
+            cve=cve,
+            cve_ids=client_cves_filter,
+            since=since,
+            until=until,
+            offset=(page - 1) * EVENT_PAGE_SIZE,
+        )
     )
     has_next = len(rows) > EVENT_PAGE_SIZE
     rows = rows[:EVENT_PAGE_SIZE]
@@ -347,9 +389,22 @@ def events():
         filters=filters,
         kinds=EVENT_KINDS,
         rule_names=[rule.name for rule in config.watch.rules],
+        client_names=sorted(client_names.values(), key=lambda value: (value.casefold(), value)),
         page=page,
         has_previous=page > 1,
         has_next=has_next,
+    )
+
+
+@bp.get("/clients")
+@requires("view")
+def clients():
+    config, _ = _state()
+    scan, summaries = client_summaries(config.database_path)
+    return render_template(
+        "watch_clients.html",
+        scan=scan,
+        clients=summaries,
     )
 
 
@@ -592,13 +647,21 @@ def statement(cve_id):
                     identifier, error=str(exc), status=400
                 )
         output = Path(directory) / f"statement{output_suffix}"
+        impacts = affected_clients(
+            config.database_path, (identifier,)
+        ).get(identifier.upper(), ())
+        statement_args = {
+            "catalogs": config.watch.sources,
+            "template": template_path,
+            "out": output,
+        }
+        if impacts:
+            statement_args["client_impacts"] = impacts
         try:
             write_statement(
                 store,
                 identifier,
-                catalogs=config.watch.sources,
-                template=template_path,
-                out=output,
+                **statement_args,
             )
             payload = output.read_bytes()
         except CVEBeaconError as exc:

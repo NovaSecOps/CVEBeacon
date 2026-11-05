@@ -1,0 +1,19 @@
+{% extends 'base.html' %}{% from 'watch_macros.html' import stamp %}
+{% block title %}Clients · CVEBeacon{% endblock %}
+{% block content %}
+<h1>Clients</h1>
+<p>Client allocation comes from the optional <code>client</code> inventory field. Findings come from the latest successful inventory scan. A CVE affects a client when that scan recorded an affected or needs-review finding on one of the client's assets.</p>
+{% if scan %}
+<p class="muted">Latest successful inventory scan completed {{ stamp(scan.completed_at) }}.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Client</th><th>Assets</th><th>Currently affected CVEs</th></tr></thead>
+<tbody>{% for client in clients %}<tr>
+  <td><a href="{{ url_for('watch.events', client=client.name) }}">{{ client.name }}</a></td>
+  <td>{{ client.assets }}</td>
+  <td>{% for finding in client.findings %}<a href="{{ url_for('watch.cve', cve_id=finding.cve_id) }}">{{ finding.cve_id }}</a>{% if finding.status == 'needs_review' %} <span class="badge needs_review">review</span>{% endif %}{% if not loop.last %} · {% endif %}{% else %}<span class="muted">None</span>{% endfor %}</td>
+</tr>{% else %}<tr><td colspan="3">No inventory asset has a client label.</td></tr>{% endfor %}</tbody>
+</table></div>
+{% else %}
+<p>No successful inventory scan is available. Run a scan to populate client allocation and affected CVEs.</p>
+{% endif %}
+{% endblock %}

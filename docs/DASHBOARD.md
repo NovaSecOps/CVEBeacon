@@ -38,13 +38,20 @@ change scan or delivery state.
   ambiguous deliveries, the reported-to-clients count, and initial-mode state.
   A database written before sync summaries were recorded shows the counts as not
   recorded until the next sync.
-- **Events:** filter by rule, kind, initial flag, date range, exact CVE and
-  pending delivery. Results are ordered newest first and limited to 50 per page.
-  Each row shows the published and first-seen dates and the current reported
-  mark. Report and unreport notices are excluded; they appear in the CVE trail.
+- **Events:** filter by rule, kind, initial flag, date range, exact CVE, client
+  and pending delivery. The client filter matches CVEs currently affecting that
+  client in the latest successful inventory scan. Results are ordered newest
+  first and limited to 50 per page. Each row shows the published and first-seen
+  dates and the current reported mark. Report and unreport notices are excluded;
+  they appear in the CVE trail.
+- **Clients:** every client label in the latest successful inventory scan with
+  its asset count and the CVEs currently affecting it. A `review` badge marks
+  findings stored as needs-review. Client names are internal and never sent to
+  public sources.
 - **CVE detail:** the stored view with CVSS by provider, EPSS, CISA and EU KEV
   dates and required action, SSVC exploitation, CWEs, products, references,
-  publication and first-seen dates, the CVE's events with per-channel delivery
+  publication and first-seen dates, the clients affected in the latest
+  successful inventory scan, the CVE's events with per-channel delivery
   state, and the report/unreport trail with its notice states. The trail is
   paginated at 50 entries per page; each event or notice shows at most 20
   channel deliveries and says explicitly when more exist. Links open NVD,
