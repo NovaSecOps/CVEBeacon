@@ -2,6 +2,7 @@
 
 import json
 import html
+import re
 import os
 from pathlib import Path
 import time
@@ -268,8 +269,10 @@ def test_section_preview_does_not_disclose_other_sections(accounts):
     response = preview(client, "http", g0_retries="4")
     assert response.status_code == 200, response.text
     assert '+"retries" = 4' in html.unescape(response.text)
-    assert "4321" not in response.text
-    assert "registered" not in response.text
+    # Random CSRF and preview tokens are hex and could contain the marker.
+    text = re.sub(r'value="[0-9a-f]{32,}"', 'value=""', response.text)
+    assert "4321" not in text
+    assert "registered" not in text
 
 
 @pytest.mark.parametrize("delimiter", ["\t", " "])
