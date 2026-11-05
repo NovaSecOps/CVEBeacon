@@ -284,7 +284,9 @@ Use `url_env` or `url_file` for a new generic webhook. The URL is a credential
 and is never included in dashboard forms, diffs or audit records. An existing
 configuration may use a direct `url` value; the dashboard preserves it
 read-only and new channels use a reference. The URL must use HTTPS unless
-`allow_insecure = true`. The channel POSTs the stable document described below.
+`allow_insecure = true`. The URL is resolved and revalidated immediately before
+each delivery or test send, so a changed environment or file value cannot bypass
+the HTTPS rule. The channel POSTs the stable document described below.
 Redirects are never followed.
 
 ### HTTP behavior
