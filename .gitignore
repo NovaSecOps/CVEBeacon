@@ -46,6 +46,8 @@ dashboard-secrets/
 .dashboard-staged-*
 .*.backups/
 .config-*
+.cvebeacon-secrets-*
+.*.toml.*.tmp
 
 # Local monitoring databases and sidecars
 *.db

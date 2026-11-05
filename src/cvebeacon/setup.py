@@ -10,6 +10,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -1270,20 +1271,36 @@ def _write_secret(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "posix":
         os.chmod(path.parent, 0o700)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if path.is_symlink():
+        raise OSError("secret file must not be a symbolic link")
+    if path.exists():
+        details = path.lstat()
+        if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+            raise OSError("secret file must be a regular file with one link")
+        if os.name == "posix" and details.st_uid != os.geteuid():
+            raise OSError("secret file must be owned by this account")
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(name)
     try:
         if os.name == "posix":
             os.fchmod(descriptor, 0o600)
+            details = os.fstat(descriptor)
+            if stat.S_IMODE(details.st_mode) != 0o600 or details.st_nlink != 1:
+                raise OSError("secret file permissions are unsafe")
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             descriptor = -1
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if os.name == "posix":
+            os.chmod(path, 0o600)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        if os.name == "posix":
-            os.chmod(path, 0o600)
+        temporary.unlink(missing_ok=True)
 
 
 def _write_config(path: Path, text: str) -> Path:

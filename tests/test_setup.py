@@ -15,6 +15,7 @@ from cvebeacon.errors import ConfigurationError
 from cvebeacon.setup import (
     _secret_relative,
     _toml_string,
+    _write_secret,
     run_setup,
 )
 from cvebeacon.watch.delivery import TestOutcome as DeliveryTestOutcome
@@ -782,6 +783,38 @@ def test_gitignore_ignores_the_generated_secret_directory():
     root = Path(__file__).resolve().parents[1]
     lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "secrets/" in lines
+    assert ".cvebeacon-secrets-*" in lines
+    assert ".*.toml.*.tmp" in lines
+
+
+def test_secret_writer_refuses_symlinks_and_extra_hard_links(tmp_path):
+    outside = tmp_path / "outside"
+    outside.write_text("outside synthetic value", encoding="utf-8")
+    outside.chmod(0o600)
+    link = tmp_path / "secrets" / "linked-secret"
+    link.parent.mkdir()
+    link.symlink_to(outside)
+    with pytest.raises(OSError):
+        _write_secret(link, "replacement synthetic value")
+    assert outside.read_text(encoding="utf-8") == "outside synthetic value"
+    assert link.is_symlink()
+
+    target = tmp_path / "secrets" / "hardlinked-secret"
+    target.write_text("original synthetic value", encoding="utf-8")
+    target.chmod(0o600)
+    os.link(target, tmp_path / "second-link")
+    with pytest.raises(OSError):
+        _write_secret(target, "replacement synthetic value")
+    assert target.read_text(encoding="utf-8") == "original synthetic value"
+
+
+def test_secret_writer_replaces_atomically_with_owner_only_mode(tmp_path):
+    target = tmp_path / "secrets" / "secret"
+    _write_secret(target, "new synthetic value")
+    assert target.read_text(encoding="utf-8") == "new synthetic value"
+    if os.name == "posix":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
 
 
 def test_existing_secret_file_is_backed_up_before_replacement(tmp_path, monkeypatch):
