@@ -1094,14 +1094,16 @@ class Editor:
                         sync_directory(target.parent)
                     except OSError:
                         logging.getLogger("cvebeacon").error("Secret file recovery failed")
+                recovered = not replaced
                 if replaced:
                     try:
                         os.replace(recovery, self.path)
                         sync_directory(self.path.parent)
+                        recovered = True
                     except OSError:
                         logging.getLogger("cvebeacon").error(
                             "Configuration recovery failed; inspect the live file and retained backups")
-                if backup:
+                if backup and recovered:
                     backup.unlink(missing_ok=True)
             raise
         finally:
