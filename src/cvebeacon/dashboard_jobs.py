@@ -363,14 +363,16 @@ class JobStore:
         *,
         exit_code: int | None,
         message: str | None = None,
+        audit_action: str | None = None,
     ) -> None:
         if status not in TERMINAL_STATUSES:
             raise ValueError("invalid terminal job status")
+        pending = audit_action or "job_" + status
         with closing(self._connect()) as db, db:
             db.execute(
                 "UPDATE dashboard_job SET status=?,ended_at=?,exit_code=?,"
                 "message=?,audit_pending=? WHERE id=?",
-                (status, _utc_now(), exit_code, message, "job_" + status, job_id),
+                (status, _utc_now(), exit_code, message, pending, job_id),
             )
 
     def log_tail(self, job: Job, limit: int = MAX_LOG_TAIL) -> str:
@@ -882,25 +884,37 @@ class JobManager:
             log.close()
         current = self.store.get(job.id)
         requested = bool(current and current.cancel_requested)
-        if requested or code == 130:
+        audit_action = None
+        if requested:
             status = "cancelled"
             message = (
                 "Cancellation required forced termination; cleanup is not confirmed."
                 if forced else "Cancelled by interrupt; the command had an opportunity to run cleanup."
             )
+            audit_action = "job_cancelled"
+        elif code == 130:
+            status = "failed"
+            message = (
+                "Interrupted externally and forced to terminate; cleanup is not confirmed."
+                if forced
+                else "Interrupted externally; the command had an opportunity to run cleanup."
+            )
+            audit_action = "job_interrupted"
         elif code == 0:
             status = "succeeded"
             message = None
         else:
             status = "failed"
             message = exit_meaning(code)
-        self.store.finish(job.id, status, exit_code=code, message=message)
+        self.store.finish(
+            job.id, status, exit_code=code, message=message, audit_action=audit_action
+        )
         self._audit_finished(
             self.store.get(job.id),
-            {
+            audit_action or {
                 "succeeded": "job_succeeded",
-                "cancelled": "job_cancelled",
                 "failed": "job_failed",
+                "cancelled": "job_cancelled",
             }[status],
         )
 
@@ -973,9 +987,17 @@ class JobManager:
                 current = self.store.get(job.id)
                 if current is None or current.audit_pending != action:
                     return True
+                if action == "job_cancelled":
+                    actor = current.cancelled_by or job.started_by
+                elif action == "job_interrupted":
+                    # The dashboard did not request this stop, so no account
+                    # is recorded as the cancelling actor.
+                    actor = None
+                else:
+                    actor = job.started_by
                 self.users.record_action(
                     action, username=job.started_by,
-                    actor=(current.cancelled_by or job.started_by) if action == "job_cancelled" else job.started_by,
+                    actor=actor,
                     detail=f"{job.id}:{job.operation}",
                 )
                 self.store.clear_audit(job.id)

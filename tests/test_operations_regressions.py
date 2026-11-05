@@ -293,6 +293,45 @@ def test_windows_break_exit_is_reported_as_a_forced_cancellation():
     assert jobs.exit_meaning(0xC000013A) == "Cancelled by an interrupt"
 
 
+def test_worker_labels_unrequested_break_as_external_interrupt(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    monkeypatch.setattr(manager, "start_thread", lambda: None)
+    job = manager.submit("notify-test", started_by="admin", argv=fake_job("pass"))
+    class FakeOutput:
+        def read(self, size):
+            return b""
+        def close(self):
+            pass
+    class FakeProcess:
+        pid = os.getpid()
+        stdout = FakeOutput()
+        returncode = 0xC000013A
+        def poll(self):
+            return self.returncode
+        def wait(self, timeout=None):
+            return self.returncode
+        def send_signal(self, signum):
+            pass
+        def terminate(self):
+            pass
+        def kill(self):
+            pass
+    monkeypatch.setattr(jobs.subprocess, "Popen", lambda *a, **k: FakeProcess())
+    manager._run_job(job)
+    current = manager.store.get(job.id)
+    assert current.exit_code == 130
+    assert current.status == "failed"
+    assert "Interrupted externally" in current.message
+    assert "cleanup is not confirmed" in current.message
+    entry = next(
+        e for e in manager.users.audit_entries()
+        if e.action.startswith("job_interrupted:")
+    )
+    assert entry.action == f"job_interrupted:{job.id}:notify-test"
+    assert entry.username == "admin"
+    assert entry.actor is None
+
+
 def test_cancel_escalates_and_reaps_an_uncooperative_child(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     monkeypatch.setattr(jobs, "CANCEL_GRACE_SECONDS", 0.15, raising=False)
