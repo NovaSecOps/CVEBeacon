@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from cvebeacon import dashboard_config as editor_module
+from cvebeacon import dashboard, dashboard_config as editor_module
 from cvebeacon.config import load_config
 from cvebeacon.watch.permissions import PERMISSIONS
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
@@ -163,6 +163,7 @@ password_file = "{secret.name}"
 """,
         encoding="utf-8",
     )
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
     set_role(users, "channel-editor", {"view", "edit_channels"})
     login(client)
     before = config.config_path.read_bytes()
@@ -204,6 +205,7 @@ def test_existing_file_secret_contents_require_manage_secrets(accounts):
     config, users, _, client = accounts
     secret = make_secret(config.config_path.parent / "nvd-key.txt", "old Synthetic value")
     config.config_path.write_text(with_file(config, secret), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
     set_role(users, "source-editor", {"view", "edit_sources"})
     login(client)
     before = config.config_path.read_bytes()
@@ -259,6 +261,7 @@ def test_section_preview_does_not_disclose_other_sections(accounts):
         ),
         encoding="utf-8",
     )
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
     set_role(users, "http-editor", {"view", "edit_http"})
     login(client)
     response = preview(client, "http", g0_retries="4")

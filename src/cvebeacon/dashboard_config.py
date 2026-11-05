@@ -944,22 +944,16 @@ class Editor:
         checks_config = current_config or self.config
         if unparseable and section == "rollback" and "manage_secrets" not in g.permissions:
             abort(403)
-        if section == "rollback":
-            path_changed = (_path_settings(document, base=self.path.parent)
-                            != running_path_settings(self.config))
-        else:
-            path_changed = path_settings_changed(
-                current_document or {}, document, base=self.path.parent)
-        if path_changed and not g.user.is_admin:
-            abort(403)
-        if (dashboard_settings_changed(current_document or {}, document)
-                and not g.user.is_admin):
-            abort(403)
         if (credential_change(current_document or {}, document, self.config)
                 and "manage_secrets" not in g.permissions):
             abort(403)
         validation_document = replacement_document(document, replacements, self.path.parent)
         updated, _ = self.validate(validation_document)
+        authority_config = updated if not replacements else self.validate(document)[0]
+        if ((path_authority_changed(authority_config, checks_config, self.config)
+                or dashboard_authority_changed(authority_config, checks_config, self.config))
+                and not g.user.is_admin):
+            abort(403)
         if current_document is not None:
             self._check_direct_urls(current_document, document, rollback=section == "rollback")
         for replacement in replacements:
@@ -1061,21 +1055,15 @@ class Editor:
             if ((unparseable and section == "rollback"
                     and "manage_secrets" not in early_permissions)):
                 abort(403)
-            if section == "rollback":
-                path_changed = (_path_settings(pending.document, base=self.path.parent)
-                                != running_path_settings(self.config))
-            else:
-                path_changed = path_settings_changed(
-                    old or {}, pending.document, base=self.path.parent)
-            if path_changed and not probe.is_admin:
-                abort(403)
-            if (dashboard_settings_changed(old or {}, pending.document)
-                    and not probe.is_admin):
-                abort(403)
             if pending.replacements and "manage_secrets" not in early_permissions:
                 abort(403)
             if (credential_change(old or {}, pending.document, self.config)
                     and "manage_secrets" not in early_permissions):
+                abort(403)
+            updated, content = self.validate(pending.document)
+            if ((path_authority_changed(updated, checks_config, self.config)
+                    or dashboard_authority_changed(updated, checks_config, self.config))
+                    and not probe.is_admin):
                 abort(403)
             for replacement in pending.replacements:
                 if not self._check_replacement(old or {}, pending.document, replacement, checks_config):
@@ -1102,7 +1090,6 @@ class Editor:
             self.validate(replacement_document(pending.document, pending.replacements, self.path.parent))
             # The reloaded application uses final references; SecretRef resolves
             # file contents dynamically, so preparation does not touch live files.
-            updated, content = self.validate(pending.document)
             from .dashboard import create_app
             token = _RELOADING.set(self)
             try:
@@ -1127,15 +1114,8 @@ class Editor:
                 if ((unparseable and section == "rollback"
                         and "manage_secrets" not in users.permissions_in(db, actor))):
                     abort(403)
-                if section == "rollback":
-                    path_changed = (_path_settings(pending.document, base=self.path.parent)
-                                    != running_path_settings(self.config))
-                else:
-                    path_changed = path_settings_changed(
-                        old or {}, pending.document, base=self.path.parent)
-                if path_changed and not actor.is_admin:
-                    abort(403)
-                if (dashboard_settings_changed(old or {}, pending.document)
+                if ((path_authority_changed(updated, checks_config, self.config)
+                        or dashboard_authority_changed(updated, checks_config, self.config))
                         and not actor.is_admin):
                     abort(403)
                 if pending.replacements and "manage_secrets" not in users.permissions_in(db, actor):
@@ -1390,108 +1370,82 @@ def credential_change(current_document, candidate, running_config):
     return credential_escape(current_document, candidate, running_config)
 
 
-def dashboard_settings_changed(current_document, candidate):
-    current = current_document.get("dashboard") if isinstance(current_document, dict) else {}
-    updated = candidate.get("dashboard") if isinstance(candidate, dict) else {}
-    if not isinstance(current, dict):
-        current = {}
-    if not isinstance(updated, dict):
-        updated = {}
-    return current != updated
-
-
-PATH_FIELDS = (("state", "database"), ("output", "directory"),
-               ("watch", "database"), ("inventory", "path"))
-PATH_DEFAULTS = {("state", "database"): ".cvebeacon/state.db",
-                 ("output", "directory"): "reports",
-                 ("watch", "database"): "cvebeacon-watch.db"}
-
-
-def _resolved_path(value, base):
-    if not base:
-        return value
-    try:
-        return str(resolve_reference(value, base))
-    except (OSError, RuntimeError, ValueError):
-        return value
-
-
-def _path_settings(document, *, ignore_channel_refs=(), renames=None, base=None):
-    values = {}
-    renames = renames or {}
-    for path in PATH_FIELDS:
-        item = document_get(document, path)
-        if isinstance(item, str) and item:
-            values[path] = _resolved_path(item, base)
-        elif path in PATH_DEFAULTS:
-            values[path] = _resolved_path(PATH_DEFAULTS[path], base)
-    for path, item in secret_references(document).items():
-        if not path[-1].endswith("_file") or not isinstance(item, str) or not item:
-            continue
-        if len(path) >= 3 and path[0] == "watch" and path[1] == "channels":
-            if path[2] in ignore_channel_refs:
-                continue
-            if path[2] in renames:
-                path = (*path[:2], renames[path[2]], *path[3:])
-        values[path] = _resolved_path(item, base)
-    return values
-
-
-def _channel_file_refs(row):
-    kind = _channel_kind(row)
-    if kind not in CREDENTIAL_FIELDS:
-        return {}
-    return {key: row[key] for key in CREDENTIAL_FIELDS[kind]
-            if key.endswith("_file") and isinstance(row.get(key), str) and row[key]}
-
-
-def _channel_renames(current_document, candidate):
-    current = _channel_rows(current_document)
-    candidate_channels = _channel_rows(candidate)
-    deleted = set(current) - set(candidate_channels)
-    pairs = {}
-    used = set()
-    for name, row in candidate_channels.items():
-        if name in current or not isinstance(row, dict):
-            continue
-        for old in sorted(deleted - used):
-            old_row = current.get(old)
-            if (isinstance(old_row, dict)
-                    and _channel_kind(old_row) == _channel_kind(row)
-                    and _channel_file_refs(old_row) == _channel_file_refs(row)):
-                pairs[old] = name
-                used.add(old)
-                break
-    return pairs, deleted - used
-
-
-def path_settings_changed(current_document, candidate, *, base=None):
-    renames, deleted = _channel_renames(current_document or {}, candidate)
-    return (_path_settings(current_document or {}, ignore_channel_refs=deleted,
-                           renames=renames, base=base)
-            != _path_settings(candidate, base=base))
-
-
-def running_path_settings(config, *, base=None):
+def effective_paths(config):
+    """The loader's resolved filesystem identities for an AppConfig."""
     values = {
-        ("state", "database"): str(config.database_path),
-        ("output", "directory"): str(config.output_dir),
-        ("watch", "database"): str(config.watch.database),
+        ("state",): config.database_path,
+        ("watch",): config.watch.database,
+        ("users",): config.watch.users_database,
+        ("output",): config.output_dir,
     }
     if config.inventory is not None:
-        values[("inventory", "path")] = str(config.inventory.path)
+        values[("inventory",)] = config.inventory.path
     if config.sources.nvd_api_key_file is not None:
-        values[("sources", "nvd_api_key_file")] = str(config.sources.nvd_api_key_file)
+        values[("source", "nvd_api_key_file")] = config.sources.nvd_api_key_file
     for channel in config.watch.channels:
         for key in CREDENTIAL_FIELDS.get(channel.type, ()):
             if not key.endswith("_file"):
                 continue
             reference = channel.secret(key[:-5])
             if reference is not None and reference.file is not None:
-                values[("watch", "channels", channel.name, key)] = str(reference.file)
+                values[("channel", channel.name, key)] = reference.file
     return values
 
 
+def _channel_file_paths(channel):
+    return {key: reference.file for key in CREDENTIAL_FIELDS.get(channel.type, ())
+            if key.endswith("_file")
+            for reference in (channel.secret(key[:-5]),)
+            if reference is not None and reference.file is not None}
+
+
+def _channel_renames(candidate, other):
+    """Map candidate channel names to matching deleted channels in ``other``."""
+    other_names = {channel.name for channel in other.watch.channels}
+    candidate_names = {channel.name for channel in candidate.watch.channels}
+    deleted = other_names - candidate_names
+    pairs = {}
+    used = set()
+    other_by_name = {channel.name: channel for channel in other.watch.channels}
+    for name, channel in ((item.name, item) for item in candidate.watch.channels):
+        if name in other_names:
+            continue
+        for old in sorted(deleted - used):
+            previous = other_by_name[old]
+            if (previous.type == channel.type
+                    and _channel_file_paths(previous) == _channel_file_paths(channel)):
+                pairs[name] = old
+                used.add(old)
+                break
+    return pairs
+
+
+def _mapped_identity(identity, renames):
+    if identity[0] == "channel" and identity[1] in renames:
+        return (identity[0], renames[identity[1]], *identity[2:])
+    return identity
+
+
+def path_authority_changed(candidate, baseline, running):
+    """Whether a candidate changes effective filesystem paths as the loader sees them."""
+    candidate_paths = effective_paths(candidate)
+    baseline_paths = effective_paths(baseline)
+    running_paths = effective_paths(running)
+    baseline_renames = _channel_renames(candidate, baseline)
+    running_renames = _channel_renames(candidate, running)
+    for identity, path in candidate_paths.items():
+        baseline_identity = _mapped_identity(identity, baseline_renames)
+        if baseline_paths.get(baseline_identity) != path:
+            return True
+        running_identity = _mapped_identity(identity, running_renames)
+        if running_paths.get(running_identity) != path:
+            return True
+    return False
+
+
+def dashboard_authority_changed(candidate, baseline, running):
+    return (candidate.dashboard != baseline.dashboard
+            or candidate.dashboard != running.dashboard)
 
 def resolve_reference(value, base):
     path = Path(value).expanduser()

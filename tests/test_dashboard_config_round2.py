@@ -7,10 +7,11 @@ import tomllib
 
 import pytest
 
-from cvebeacon import dashboard_config as dc
+from cvebeacon import dashboard, dashboard_config as dc
 from cvebeacon.config import load_config
 from cvebeacon.errors import ConfigurationError
 from cvebeacon.locking import LOCK_NAME
+from cvebeacon.watch.users import BOOTSTRAP, UserStore
 from test_dashboard import setup  # noqa: F401 - registers the shared fixture
 from test_dashboard_accounts import PASSWORD, accounts as account_fixture, login
 from test_dashboard_config_fixes import (
@@ -533,6 +534,7 @@ def test_manage_secrets_can_rename_a_file_reference_channel(accounts):
     config, users, _, client = accounts
     secret = make_secret(config.config_path.parent / "password", "synthetic password")
     config.config_path.write_text(channel_config(_smtp(reference=secret.name)), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
     set_role(users, "channel-manager", {"view", "edit_channels", "manage_secrets"})
     login(client)
     response = preview(client, "channels", g0_name="renamed")
@@ -595,6 +597,139 @@ def test_external_deleted_channel_secret_is_administrator_responsibility(account
     login(client, "admin")
     response = preview(client, "inventory", g0_path=str(secret))
     assert response.status_code == 200, response.text
+
+
+def _manual_backup(editor, text):
+    editor.backup_dir.mkdir(mode=0o700, exist_ok=True)
+    name = "20260101T000000000000Z-0123456789abcdef.toml"
+    path = editor.backup_dir / name
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, 0o600)
+    return name
+
+
+def test_loader_normalised_paths_cannot_bypass_administrator_boundary(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(
+        BASE.replace('database = "state.db"', 'database = "state.db"').replace(
+            '[state]', '[state]').replace(
+            '[output]\ndirectory = "reports"',
+            '[output]\ndirectory = "reports"\n\n[watch]\ndatabase = "watch.db "'),
+        encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "watch-editor", {"view", "edit_watch"})
+    login(client)
+    before = config.config_path.read_bytes()
+    response = preview(client, "watch", g0_database="watch.db /.")
+    assert response.status_code == 403
+    assert config.config_path.read_bytes() == before
+
+
+def test_loader_normalised_file_reference_cannot_bypass_administrator_boundary(
+        accounts, tmp_path):
+    config, users, _, client = accounts
+    inside = make_secret(config.config_path.parent / "inside-key", "inside synthetic")
+    outside = make_secret(tmp_path.parent / "outside-key", "outside synthetic")
+    config.config_path.write_text(with_file(config, inside), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "source-manager", {"view", "edit_sources", "manage_secrets"})
+    login(client)
+    before = config.config_path.read_bytes()
+    response = preview(client, "sources", g0_nvd_api_key_file=" /" + str(outside))
+    assert response.status_code == 403
+    assert config.config_path.read_bytes() == before
+
+
+def test_dashboard_rollback_cannot_change_signing_settings(accounts):
+    config, users, app, client = accounts
+    dashboard_text = '[dashboard]\nsecure_cookie = true\n\n'
+    config.config_path.write_text(dashboard_text + BASE, encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    editor = app.extensions["dashboard_config"]
+    # The retained backup omits [dashboard], so it restores the loader defaults.
+    backup = _manual_backup(editor, BASE)
+    config.config_path.write_text('watch = "broken"\n' + config.config_path.read_text(),
+                                  encoding="utf-8")
+    set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    assert client.post("/config/backups", data=data).status_code == 403
+
+    login(client, "admin")
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+
+
+def test_dashboard_rollback_allows_matching_signing_settings(accounts):
+    config, users, app, client = accounts
+    config.config_path.write_text('[dashboard]\nsecure_cookie = true\n\n' + BASE,
+                                  encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    editor = app.extensions["dashboard_config"]
+    backup = _manual_backup(editor, '[dashboard]\nsecure_cookie = true\n\n' + BASE)
+    config.config_path.unlink()
+    set_role(users, "all-manager", set(dc.SECTIONS.values()) | {"view", "manage_secrets"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+
+
+def test_dashboard_defaults_beside_state_allow_delegated_rollback(accounts):
+    config, users, app, client = accounts
+    config.config_path.write_text(
+        BASE.replace('[state]\ndatabase = "state.db"',
+                     '[state]\ndatabase = ".cvebeacon/state.db"'), encoding="utf-8")
+    loaded = load_config(config.config_path)
+    users = UserStore(loaded.watch.users_database)
+    users.add("admin", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
+    users.add("reader", password=PASSWORD)
+    client = dashboard.create_app(loaded).test_client()
+    _create_backup(config, client)
+    set_role(users, "all-manager", set(dc.SECTIONS.values()) | {"view", "manage_secrets"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = app.extensions["dashboard_config"].backups()[0]
+    response = client.post("/config/backups", data=data)
+    assert response.status_code == 200, response.text
+
+
+def test_explicit_empty_output_directory_is_administrator_only(accounts):
+    config, users, _, client = accounts
+    config.config_path.write_text(
+        BASE.replace('[output]\ndirectory = "reports"', '[output]\ndirectory = ""'),
+        encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    set_role(users, "system-editor", {"view", "edit_system"})
+    login(client)
+    before = config.config_path.read_bytes()
+    response = preview(client, "system", g1_directory="reports")
+    assert response.status_code == 403
+    assert config.config_path.read_bytes() == before
+
+
+def test_rollback_that_removes_a_credential_channel_is_a_deletion(accounts):
+    config, users, app, client = accounts
+    secret = make_secret(config.config_path.parent / "password", "synthetic password")
+    config.config_path.write_text(channel_config(_smtp(reference=str(secret))),
+                                  encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
+    editor = app.extensions["dashboard_config"]
+    backup = _manual_backup(editor, BASE)
+    set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
+    login(client)
+    page = client.get("/config/backups")
+    data = form(page.text)
+    data["backup"] = backup
+    assert client.post("/config/backups", data=data).status_code == 200
 
 
 def test_path_fields_require_an_administrator(accounts, tmp_path):
@@ -712,6 +847,7 @@ webhook_url_file = "{secret.name}"
 type = "teams"
 webhook_url_file = "{secret.name}"
 '''), encoding="utf-8")
+    client = dashboard.create_app(load_config(config.config_path)).test_client()
     set_role(users, "channel-editor", {"view", "edit_channels", "manage_secrets"})
     login(client)
     before = config.config_path.read_bytes()

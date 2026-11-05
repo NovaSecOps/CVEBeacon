@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from cvebeacon import dashboard_config as dc
+from cvebeacon import dashboard, dashboard_config as dc
 from cvebeacon.config import load_config
 from cvebeacon.dashboard import create_app
 from cvebeacon.errors import ConfigurationError
@@ -599,6 +599,8 @@ def test_revoked_actor_never_writes_a_live_secret(accounts, monkeypatch, revocat
     monkeypatch.delenv("NVD_API_KEY", raising=False)
     secret = make_secret(config.config_path.parent / "existing-key", "original synthetic value")
     config.config_path.write_text(with_file(config, secret), encoding="utf-8")
+    app = dashboard.create_app(load_config(config.config_path))
+    client = app.test_client()
     set_role(users, "source-editor", {"view", "edit_sources", "manage_secrets"})
     admin = users.authenticate("admin", PASSWORD)
     login(client)
