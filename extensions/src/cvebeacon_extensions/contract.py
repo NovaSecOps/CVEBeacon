@@ -10,12 +10,14 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import tempfile
 
 from cvebeacon.config import CANONICAL_FIELDS, OPTIONAL_FIELDS
 from cvebeacon.inventory import validate_records
 from cvebeacon.identity import identity_conflict
+from cvebeacon.publication import replace_file
 
 from . import __version__
 
@@ -140,13 +142,20 @@ def manifest_path(path: Path) -> Path:
 def _atomic(path: Path, data: bytes):
     if path.exists() or path.is_symlink():
         _regular(path)
-    descriptor, temporary = tempfile.mkstemp(prefix=".cvebeacon-", dir=path.parent)
+    if os.name == "nt":
+        from cvebeacon.private_storage import private_file
+        # Apply a protected owner-only DACL at creation, before writing data.
+        # A mkstemp file inherits its parent's ACL on Windows.
+        temporary = path.parent / (".cvebeacon-" + secrets.token_hex(16))
+        descriptor = private_file(temporary, create=True, exclusive=True)
+    else:
+        descriptor, temporary = tempfile.mkstemp(prefix=".cvebeacon-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
         if os.name == "posix":
             directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:

@@ -1403,3 +1403,32 @@ def test_endpoint_helpers():
         _hostname("bad host")
     plan = format_plan(Allowlist("acme", None, ()))
     assert "assets: 0" in plan
+
+
+def test_review_persists_request_counts_durations_and_only_evidence_types(tmp_path):
+    secret = "NEVER-PERSIST-RESPONSE-CONTENT"
+    manifest, output, _, transport = run(
+        tmp_path, [asset(), asset(hostname="second.example")],
+        [response(headers={"server": "nginx/1.26.2", "set-cookie": f"sid={secret}"}, body=secret.encode()), response(403)],
+        mapping={"example.com": [PUBLIC], "second.example": [PUBLIC]})
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "partial"
+    assert detail["run"]["request_count"] == len(transport.calls) == 2
+    assert detail["run"]["duration_seconds"] >= 0
+    assert detail["run"]["started_at"] == detail["run"]["ended_at"] == NOW.isoformat()
+    product = detail["products"][0]
+    assert product["product"] == "nginx" and product["versions"] == ["1.26.2"]
+    assert product["evidence_types"] == ["header"]
+    assert "body" not in product and secret not in json.dumps(detail)
+    assert manifest["status"] == "partial"
+
+
+def test_failed_run_refreshes_metadata_and_retains_previous_snapshot(tmp_path):
+    _, output, _, _ = run(tmp_path, [asset()], [response(headers={"server": "nginx/1.26.2"})])
+    before = (output.read_bytes(), manifest_path(output).read_bytes())
+    with pytest.raises(ExtensionError, match="no technologies"):
+        run(tmp_path, [asset()], [response(403)])
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "failed" and detail["run"]["request_count"] == 1
+    assert detail["products"] == [] and detail["reviews"][0]["reason"] == "blocked"
+    assert (output.read_bytes(), manifest_path(output).read_bytes()) == before

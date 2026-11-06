@@ -122,7 +122,7 @@ def run_pipeline(config: Config, *, scanner=None) -> int:
                 merge_snapshots(inputs, candidate, source_id="automation-merged", expected_sources=[source.id for source in config.sources],
                     max_age_seconds=max(source.max_age_seconds for _, source in accepted), allow_partial=True)
                 from dataclasses import replace
-                load_inventory(replace(core.inventory, path=candidate))
+                load_inventory(replace(core.inventory, path=candidate, web_snapshots=False))
                 # Candidate fully validated before replacing previous good inventory.
                 publish_pair(config.inventory_path, read_bytes(candidate), read_bytes(manifest_path(candidate), 65536))
             code = (scanner or core_scan)(config)

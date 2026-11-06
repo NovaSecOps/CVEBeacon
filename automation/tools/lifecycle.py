@@ -315,7 +315,7 @@ def run_demo(output: Path) -> dict:
 
         def scanner(configured):
             core = load_core(configured.core_config)
-            assets = load_inventory(core.inventory)
+            assets = load_inventory(core.inventory, snapshot_directory=core.database_path.parent / "web-inventory")
             with patch.dict("os.environ", clean_environment(), clear=True):
                 assert not set(ENVIRONMENT) & __import__("os").environ.keys()
                 store = StateStore(core.database_path)

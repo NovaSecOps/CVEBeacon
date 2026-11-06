@@ -1,0 +1,62 @@
+{% extends 'base.html' %}
+{% block title %}Web assets · CVEBeacon{% endblock %}
+{% macro asset_fields(entry, document) %}
+<label>Hostname <input name="hostname" value="{{ entry.get('hostname', '') }}" required maxlength="256"></label>
+<label>Scheme <select name="scheme">{% for scheme in ['https','http'] %}<option {% if entry.get('scheme', 'https') == scheme %}selected{% endif %}>{{ scheme }}</option>{% endfor %}</select></label>
+<label>Port <input name="port" type="number" min="1" max="65535" value="{{ entry.get('port', 443) }}" required></label>
+<label>Starting path <input name="path" value="{{ entry.get('path', '/') }}" maxlength="2048" required></label>
+<label>Expiry (optional, ISO 8601 UTC) <input name="expires_at" value="{{ entry.get('expires_at', '') }}" placeholder="2027-11-01T00:00:00Z"></label>
+<label><input name="allow_redirects" type="checkbox" value="yes" {% if entry.get('allow_redirects', true) %}checked{% endif %}>Allow redirects to listed hosts and ports</label>
+<label>Maximum redirects <input name="max_redirects" type="number" min="0" max="2" value="{{ entry.get('max_redirects', 2) }}" required></label>
+<label><input name="allow_private_address" type="checkbox" value="yes" {% if entry.get('allow_private_address') %}checked{% endif %}>I authorise access to private addresses for this asset (including loopback)</label>
+{% if current_user.is_admin %}<label>Client CA bundle path (optional) <input name="ca_bundle" value="{{ document.get('ca_bundle', '') }}"></label><p>Changing the client CA bundle renews authorisation on every saved entry.</p>{% else %}<input type="hidden" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}">{% endif %}
+<label><input name="attest" type="checkbox" value="yes" required>I attest that this client authorises observation of this asset and the selected redirect and address policy.</label>
+{% endmacro %}
+{% block content %}
+<h1>Client web assets</h1>
+<p>Record authorised assets, preview requests, and observe direct product evidence. Detection is manual; scheduling is future work. Results are hints for review.</p>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+{% if not available %}<p role="status">{{ notice }}</p>{% endif %}
+<form method="get"><label>Client label <input name="client" value="{{ client }}" required maxlength="256"></label><button>Open client</button></form>
+<ul>{% for name in clients %}<li><a href="{{ url_for('web.index', client=name) }}">{{ name }}</a></li>{% endfor %}</ul>
+{% if document %}
+<h2>{{ client }}</h2>
+<p>Saving records the signed-in user and current UTC time. Unsaved entries are never observed.</p>
+<h3>Authorised assets</h3>
+{% for entry in document.assets %}
+<article><h4>{{ entry.get('hostname', entry.get('url', '')) }} · {{ entry.get('scheme', 'https') }}:{{ entry.get('port', 443) }}{{ entry.get('path', '/') }}</h4>
+<p>Authorised by {{ entry.get('authorized_by', '') }} at {{ entry.get('authorized_at', '') }}. Expiry: {{ entry.get('expires_at', 'none') }}.</p>
+<p>Redirects: {{ entry.get('allow_redirects', true) }} (maximum {{ entry.get('max_redirects', 2) }}). Private addresses: {{ entry.get('allow_private_address', false) }}.</p>
+{% if accounts and 'manage_web_assets' in permissions %}
+<details><summary>Change asset</summary><form method="post" action="{{ url_for('web.save') }}">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="change"><input type="hidden" name="index" value="{{ loop.index0 }}">
+{{ asset_fields(entry, document) }}<button {% if not available %}disabled{% endif %}>Save with attestation</button></form></details>
+<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="index" value="{{ loop.index0 }}"><button name="action" value="remove" {% if not available %}disabled{% endif %}>Remove asset</button></form>
+{% endif %}</article>
+{% else %}<p>No saved assets.</p>{% endfor %}
+{% if accounts and 'manage_web_assets' in permissions %}
+{% if document.assets or snapshot or removed or run or products or reviews %}<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><label><input type="checkbox" name="confirm" value="yes" required>I want to remove every saved asset and all saved detection results for this client.</label><button name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></form>{% endif %}
+<details><summary>Add authorised asset</summary><form method="post" action="{{ url_for('web.save') }}">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="add">
+{{ asset_fields({}, document) }}<button {% if not available %}disabled{% endif %}>Save with attestation</button></form></details>
+{% endif %}
+{% if accounts and 'run' in permissions %}
+<form method="post" action="{{ url_for('web.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">
+<button name="action" value="web-plan" {% if not available or not document.assets %}disabled{% endif %}>Show planned requests (sends nothing)</button>
+<button name="action" value="web-detect" {% if not available or not document.assets %}disabled{% endif %}>Detect web technologies</button></form>
+{% endif %}
+<h3>Last run</h3>
+{% if removed %}<p role="status">Results include assets removed since the last run. Run detection again to refresh retained results.</p>{% endif %}
+{% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ last_job.created_at }} · {{ last_job.exit_meaning }}</p>{% endif %}
+{% if run %}<p>Last observation: {{ run.get('started_at', '') }} → {{ run.get('ended_at', '') }} · {{ run.get('status', '') }} · requests: {{ run.get('request_count', '') }} · duration: {{ run.get('duration_seconds', '') }} seconds.</p>{% else %}<p>No observation metadata yet.</p>{% endif %}
+{% if snapshot %}<p>Saved inventory: {{ snapshot.generated_at }} · {{ snapshot.status }} · {{ snapshot.record_count }} products. Enable <code>[inventory] web_snapshots = true</code> in <a href="{{ url_for('config_editor.inventory') }}">inventory configuration</a> to include saved snapshots in normal scans. A failed observation retains the previous inventory.</p>{% endif %}
+<h3>Detected products</h3>
+<table><thead><tr><th>Host</th><th>Product</th><th>Versions</th><th>Evidence type</th><th>Category</th><th>Confidence</th></tr></thead><tbody>
+{% for item in products %}<tr><td>{{ item.get('hostname', '') }}</td><td>{{ item.get('vendor', '') }}/{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') or 'version unknown' }}</td><td>{{ item.get('evidence_types', []) | join(', ') }}</td><td>{{ item.get('category', '') }}</td><td>{{ item.get('confidence', '') }}</td></tr>{% else %}<tr><td colspan="6">No detected products.</td></tr>{% endfor %}</tbody></table>
+<h3>Review entries</h3>
+<table><thead><tr><th>Asset</th><th>Reason</th><th>Product</th><th>Conflicting versions</th><th>HTTP status</th><th>Retry after (seconds)</th></tr></thead><tbody>
+{% for item in reviews %}<tr><td>{{ item.get('asset_id', '') }}</td><td>{{ item.get('reason', '') }}</td><td>{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') }}</td><td>{{ item.get('status', '') }}</td><td>{{ item.get('retry_after', '') }}</td></tr>{% else %}<tr><td colspan="6">No review entries.</td></tr>{% endfor %}</tbody></table>
+{% if truncated %}<p>Showing the first 1,000 entries per table. Full results remain in the private data directory.</p>{% endif %}
+<p>Response bodies and cookies are never stored or displayed.</p>
+{% endif %}
+{% endblock %}

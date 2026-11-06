@@ -16,7 +16,7 @@ cvebeacon serve --host 0.0.0.0 --port 8787
 
 The dashboard is optional. Scheduled scans and watches remain separate short-lived processes. An authenticated account with the `run` permission can start the same `cvebeacon` commands as background jobs from the **Operations** page; every data-changing job shares a single-flight lock with the command line and scheduled runs.
 
-With no `[inventory] path` and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
+With no `[inventory] path`, `web_snapshots` disabled (the default), and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
 
 ## Views and investigation
 
@@ -51,6 +51,76 @@ Configurations sharing either storage location therefore coordinate even when th
 **History.** The last 200 terminal jobs are kept in `dashboard-jobs.db` inside the private `dashboard-jobs/` directory beside the state database, with the job logs in the same directory. Active jobs and logs are never pruned. At most 20 jobs may be queued or running; further submissions receive a conflict response. The directory is created 0700 on POSIX or with a protected owner-only ACL on Windows, and an existing directory that is accessible to other accounts is refused. The database and log files are created owner-only, without following links. Existing linked or non-regular log files are refused. Every job start, cancellation request and outcome is appended to the chained account audit trail with its job identifier and operation. Failed outcome appends stay pending and are retried independently, and their rows and logs remain retained. Transient storage or audit failures are logged and retried with a delay capped at five seconds; later jobs can still run once storage recovers. A dashboard restart marks jobs that were still queued or running as failed, because the tracking process no longer exists.
 
 **Full history.** When `[watch] initial = "full"` would make the next sync download the complete history, the UI requires an explicit confirmation before it passes the CLI's `--yes`. The confirmation is separate from the normal run form and is shown with the expected scale of the download. Viewing this warning uses a read-only metadata snapshot and never initializes or migrates watch storage; a database needing recovery or containing a write-ahead log requires confirmation conservatively.
+
+## Client web technology detection
+
+Open **Web assets**, enter a client label, and save each authorised hostname,
+scheme, port and starting path. `view` permits reading allowlists and results;
+`manage_web_assets` permits changes. Administrators have both capabilities. Only
+account sessions can change assets or start jobs. Every saved addition or change
+requires an explicit attestation and records the signed-in username and current
+UTC time; the browser cannot supply those values. Optional expiry, redirects and
+private-address authorisation follow the [companion policy](EXTENSIONS.md#web-technology-detection).
+Expired entries must be renewed before detection. **Remove all assets** lets
+you clear an expired list and rebuild it with fresh attestations; each removed
+host is audited. Client CA bundle paths are
+administrator-only; changing one renews and audits all entries under the same
+attestation.
+
+The optional Extensions package must be installed in the dashboard's Python
+environment. Without it the page explains the requirement and disables the
+companion actions. **Show planned requests** validates the saved document and
+shows the request budget without resolving names or sending anything. **Detect
+web technologies** needs `run` and launches `web-detect <client>` through the job
+manager with a fixed companion argument list, including `--allow-partial`.
+Both actions appear in job history. Detection, plans, edits and normal scans
+share the state directory's run lock. The dashboard adds no network transport.
+Detection scheduling is future work.
+
+Allowlist files live in `<data>/web-assets/<client-key>.json`, where `<data>` is
+the state database's parent directory and the key is a SHA-256 digest of the
+case-folded client label. Files are replaced atomically. The `web-assets/` and `web-inventory/`
+directories and their files must be owner-only (0700/0600 on POSIX, protected
+owner ACLs on Windows), without symlinks. Existing shared state-directory
+parents are supported. Adds, changes and removals enter the chained audit
+with the actor, client and hostname. Stale forms are refused. Snapshots,
+manifests and review metadata live in `<data>/web-inventory/`.
+
+The results page shows the latest job, observation timestamps, status, request
+attempt count, total duration, products, versions, evidence types and review
+reasons. Request counts include connection attempts and redirects. It never
+renders response bodies, cookie values or arbitrary response fields. A failed
+observation retains the last published inventory; its newer failure and review
+entries are shown separately. Unknown versions and conflicts remain visible
+for review. Tables show at most 1,000 entries each; complete records stay in the
+private files.
+
+To include detected products in ordinary scans, enable **web_snapshots** in
+**Configuration → inventory** (`edit_inventory`), or set:
+
+```toml
+[inventory]
+web_snapshots = true
+```
+
+The boolean defaults to false and does not require administrator path privileges.
+A configured inventory file is optional when it is true: saved snapshots alone
+can supply inventory, even without watch mode. Core checks each web snapshot's
+contract, hash-bound manifest and rows with its public inventory validator,
+accepts partial snapshots with a warning, skips corrupt snapshots with a warning,
+and refuses an asset ID collision. An empty web-only inventory fails validation.
+Saved snapshots are retained observations with their original timestamps; they
+are not refreshed automatically or removed by an age limit. Review their age and
+rerun detection as needed. Removing one asset retains observations and shows
+"Results include assets removed since the last run" until a detection
+successfully refreshes the saved results; a request plan or a failed detection
+does not clear that notice. **Remove all assets** also deletes
+the client's saved snapshot, manifest and review metadata, with an audit entry.
+Oversized hostnames in corrupt saved rows are recorded as `invalid` in recovery
+audit entries. If a result path is a directory, move that directory out of
+`web-inventory/` before retrying bulk removal; no allowlist change is made.
+Normal scans preserve the client label in assets and
+in **Affected clients** alert lines.
 
 ## Native schedule
 
@@ -245,6 +315,7 @@ logout, even if its role has no permissions.
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
 | `edit_system` | View state database and report output paths; changes are administrator-only |
+| `manage_web_assets` | Add, change and remove attested client web assets |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
 | `manage_secrets` | Change any credential-bearing channel, add/change/remove environment references, and stage file-secret contents; `*_file` paths are administrator-only |
 | `manage_users` | Manage non-admin accounts and role assignments within the acting permissions; administrators can manage all accounts |

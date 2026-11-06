@@ -114,14 +114,17 @@ def open_file(path, *, create=False, exclusive=False, readonly=False,
     disposition = 1 if exclusive else 4 if create else 3
     # OPEN_REPARSE_POINT refuses redirection; the caller also checks lstat.
     access = 0x80000000 | (0 if readonly else 0x40000000)
+    # Readers may overlap atomic publication; writers and lock handles must
+    # keep preventing replacement of their inode.
+    sharing = 7 if readonly else 3
     if owner_only:
         with _attributes() as attributes:
-            handle = _create(str(path), access, 3, c.byref(attributes),
+            handle = _create(str(path), access, sharing, c.byref(attributes),
                              disposition, 0x00200000, None)
     else:
         # Lock files carry no data. Let a new file inherit the storage
         # directory ACL so another service account can coordinate on it.
-        handle = _create(str(path), access, 3, None, disposition,
+        handle = _create(str(path), access, sharing, None, disposition,
                          0x00200000, None)
     if handle == c.c_void_p(-1).value:
         raise c.WinError(c.get_last_error())

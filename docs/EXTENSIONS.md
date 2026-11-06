@@ -25,6 +25,15 @@ review, not proof that a product is present, unpatched or exploitable. There is
 no active probing, crawling, subresource fetching, JavaScript execution,
 authentication or exploitation.
 
+The dashboard can manage client allowlists, preview requests, run the companion
+and display observation metadata. See [dashboard web assets](DASHBOARD.md#client-web-technology-detection).
+Set `[inventory] web_snapshots = true` to append saved dashboard snapshots to
+normal scans (default false); an inventory path is optional in that mode. Partial
+snapshots remain usable with warnings, corrupt snapshots are skipped with
+warnings, and asset ID collisions fail validation. The companion review file
+also records timestamps, total duration, request attempts and product evidence
+types, without storing response bodies or cookie values.
+
 ### What it sends
 
 - One `GET` to the configured path, plus at most two redirects that are

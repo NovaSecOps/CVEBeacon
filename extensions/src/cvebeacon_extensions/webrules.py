@@ -56,6 +56,7 @@ class Detection:
     cpe: str
     confidence: str
     versions: tuple[str, ...]
+    evidence_types: tuple[str, ...] = ()
 
 
 _VERSION_BODY = r"\d+(?:\.\d+){0,3}"
@@ -401,8 +402,9 @@ def detect(page: Page) -> tuple[Detection, ...]:
         key = (rule.vendor.casefold(), rule.product.casefold())
         entry = grouped.setdefault(key, {"vendor": rule.vendor, "product": rule.product,
                                          "category": rule.category, "cpe": rule.cpe,
-                                         "confidence": rule.confidence, "versions": set()})
+                                         "confidence": rule.confidence, "versions": set(), "evidence_types": set()})
         entry["versions"].update(versions)
+        entry["evidence_types"].add(rule.kind)
         if rule.cpe and not entry["cpe"]:
             entry["cpe"] = rule.cpe
         if rule.category != "edge":
@@ -411,6 +413,7 @@ def detect(page: Page) -> tuple[Detection, ...]:
             entry["confidence"] = "high"
     return tuple(
         Detection(entry["vendor"], entry["product"], entry["category"], entry["cpe"],
-                  entry["confidence"], tuple(sorted(entry["versions"])))
+                  entry["confidence"], tuple(sorted(entry["versions"])),
+                  tuple(sorted(entry["evidence_types"])))
         for _, entry in sorted(grouped.items())
     )

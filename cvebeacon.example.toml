@@ -1,4 +1,6 @@
 [inventory]
+# Include saved dashboard web observations (optional; false by default).
+web_snapshots = false
 path = "examples/inventory.csv"
 format = "auto"
 delimiter = ","

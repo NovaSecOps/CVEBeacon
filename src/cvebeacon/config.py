@@ -43,7 +43,7 @@ def _resolve(base: Path, value: str | Path) -> Path:
 
 @dataclass(frozen=True, slots=True)
 class InventoryConfig:
-    path: Path
+    path: Path | None
     format: str = "auto"
     worksheet: str | None = None
     header_row: int = 1
@@ -53,6 +53,7 @@ class InventoryConfig:
     columns: dict[str, str] = field(
         default_factory=lambda: {name: name for name in CANONICAL_FIELDS}
     )
+    web_snapshots: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +257,10 @@ def load_config(path: str | Path) -> AppConfig:
 
     inv = _table(data, "inventory")
     inventory_config: InventoryConfig | None = None
-    if inv.get("path"):
+    web_snapshots = inv.get("web_snapshots", False)
+    if type(web_snapshots) is not bool:
+        raise ConfigurationError("inventory.web_snapshots must be a boolean")
+    if inv.get("path") or web_snapshots:
         columns = inv.get("columns", {name: name for name in CANONICAL_FIELDS})
         if not isinstance(columns, dict):
             raise ConfigurationError("inventory.columns must be a table")
@@ -279,7 +283,8 @@ def load_config(path: str | Path) -> AppConfig:
         if inventory_format not in {"auto", "xlsx", "csv", "json", "yaml"}:
             raise ConfigurationError("inventory.format must be auto, xlsx, csv, json, or yaml")
         inventory_config = InventoryConfig(
-            path=_resolve(base, inv["path"]),
+            path=_resolve(base, inv["path"]) if inv.get("path") else None,
+            web_snapshots=web_snapshots,
             format=inventory_format,
             worksheet=inv.get("worksheet"),
             header_row=header_row,

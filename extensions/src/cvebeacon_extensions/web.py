@@ -13,7 +13,7 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     as_completed,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import email.utils
 import hashlib
@@ -978,6 +978,7 @@ class Fetcher:
         self._now = now
         self._rng = rng or random.Random()
         self._pacer = _Pacer(sleep=sleep, clock=clock, interval=host_interval)
+        self.request_count = 0
         self._blocked: dict[str, int | None] = {}
         self._lock = threading.Lock()
 
@@ -1053,6 +1054,8 @@ class Fetcher:
                                           retry_after=blocked)
                 if self._clock() >= deadline:
                     raise _TimeoutFailure("asset exceeded the total time limit")
+                with self._lock:
+                    self.request_count += 1
                 response = self.transport.fetch(endpoint, address, ca_bundle=ca_bundle,
                                                 deadline=deadline, user_agent=USER_AGENT)
             except _ConnectionFailure as exc:
@@ -1180,6 +1183,7 @@ class _AssetResult:
     omissions: set[str]
     observed_at: datetime | None
     failure: _FetchFailure | None = None
+    products: list[dict] = field(default_factory=list)
 
 
 def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
@@ -1203,6 +1207,11 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
     page = page_from(success.response.headers, _decode_html(success.response.body,
                                                            success.response.headers))
     detections = detect(page)
+    products = [dict(asset_id=_asset_id(allowlist.client, asset.endpoint, item.vendor, item.product),
+                     hostname=asset.endpoint.hostname, vendor=item.vendor, product=item.product,
+                     versions=list(item.versions), category=item.category,
+                     evidence_types=list(item.evidence_types), confidence=item.confidence)
+                for item in detections]
     rows: list[dict] = []
     reviews: list[dict] = []
     omissions: set[str] = set()
@@ -1249,15 +1258,16 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             reviews.append(dict(detail, reason="version-unknown", product=display,
                                 category=detection.category, confidence=detection.confidence))
             omissions.add("version-unknown")
-    return _AssetResult(asset, rows, reviews, omissions, success.observed_at)
+    return _AssetResult(asset, rows, reviews, omissions, success.observed_at, products=products)
 
 
 def _review_path(output: Path) -> Path:
     return Path(str(output) + ".review.json")
 
 
-def _publish_review(output: Path, client: str, source_id: str, reviews: list[dict]) -> None:
-    data = json_bytes(dict(client=client, source_id=source_id, reviews=reviews))
+def _publish_review(output: Path, client: str, source_id: str, reviews: list[dict], *,
+                    products: list[dict], run: dict) -> None:
+    data = json_bytes(dict(client=client, source_id=source_id, reviews=reviews, products=products, run=run))
     if len(data) > MAX_BYTES:
         raise ExtensionError("review output exceeds size limit")
     destination = _review_path(output)
@@ -1287,7 +1297,8 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
         return None
     fetcher = Fetcher(resolver=resolver, transport=transport, sleep=sleep, clock=clock,
                       now=now, host_interval=host_interval)
-    run_deadline = clock() + RUN_TIMEOUT
+    started_at, started = now().isoformat(), clock()
+    run_deadline = started + RUN_TIMEOUT
     results: list[_AssetResult] = []
     workers = max(1, min(max_workers, MAX_WORKERS, len(allowlist.assets)))
     try:
@@ -1306,7 +1317,12 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     omissions = sorted({reason for result in results for reason in result.omissions})
     observed = [result.observed_at for result in results if result.observed_at is not None]
     with output_lock(output):
-        _publish_review(output, client, source_id, reviews)
+        status = "failed" if not rows or (set(omissions) & FAILURE_REASONS and not allow_partial) else ("partial" if omissions else "success")
+        _publish_review(output, client, source_id, reviews,
+                        products=[product for result in results for product in result.products],
+                        run=dict(started_at=started_at, ended_at=now().isoformat(), status=status,
+                                 request_count=fetcher.request_count,
+                                 duration_seconds=max(0, clock() - started)))
         if not rows:
             raise ExtensionError("no technologies with usable identity; review output written")
         if set(omissions) & FAILURE_REASONS and not allow_partial:

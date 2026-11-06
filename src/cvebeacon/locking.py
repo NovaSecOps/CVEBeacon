@@ -44,7 +44,7 @@ def run_lock_path(config) -> Path:
 def operation_lock_paths(config, operation: str) -> tuple[Path, ...]:
     """Select the stores written by an operation in canonical path order."""
     paths = set()
-    if operation == "scan" or (operation == "run" and config.inventory is not None):
+    if operation in {"scan", "web-detect", "web-plan", "web-assets"} or (operation == "run" and config.inventory is not None):
         paths.add(Path(config.database_path).resolve().parent / LOCK_NAME)
     if (operation == "run" and config.watch.enabled) or operation.startswith("watch-"):
         paths.add(run_lock_path(config))
@@ -97,7 +97,7 @@ def _contention(exc: OSError) -> bool:
 def _account_name() -> str:
     try:
         return getpass.getuser()
-    except (KeyError, OSError, RuntimeError):
+    except (ImportError, KeyError, OSError, RuntimeError):
         return "unknown"
 
 

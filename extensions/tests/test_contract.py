@@ -1,6 +1,7 @@
 from datetime import timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -241,3 +242,100 @@ def test_merge_byte_budget_stops_before_remaining_inputs(tmp_path,monkeypatch):
     with pytest.raises(ExtensionError,match="size limit"):
         merge_snapshots(paths,tmp_path/"merged.json",source_id="central")
     assert calls==paths[:2]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_windows_atomic_creates_private_temporary_before_writing(tmp_path, monkeypatch, failure):
+    import os
+    from cvebeacon import private_storage
+    calls = []
+    create = private_storage.private_file
+    def checked_create(path, **kwargs):
+        calls.append((path, kwargs))
+        return create(path, **kwargs)
+    class WindowsOS:
+        name = "nt"
+        def __getattr__(self, name):
+            return getattr(os, name)
+    monkeypatch.setattr(contract, "os", WindowsOS())
+    monkeypatch.setattr(private_storage, "private_file", checked_create)
+    path = tmp_path / "snapshot.json"
+    path.write_bytes(b'old')
+    def publish(source, destination):
+        assert calls and calls[0][0] == Path(source)
+        assert calls[0][1] == {"create": True, "exclusive": True}
+        assert Path(source).read_bytes() == b'new'
+        if failure:
+            raise PermissionError("held reader")
+        os.replace(source, destination)
+    monkeypatch.setattr(contract, "replace_file", publish)
+    if failure:
+        with pytest.raises(PermissionError, match="held reader"):
+            contract._atomic(path, b'new')
+    else:
+        contract._atomic(path, b'new')
+    assert path.read_bytes() == (b'old' if failure else b'new')
+    assert not list(tmp_path.glob('.cvebeacon-*'))
+
+
+def assert_private_publications(tmp_path):
+    import os
+    from cvebeacon.web_inventory import read_bytes, read_web_snapshot
+    from cvebeacon_extensions.web import _publish_review
+    path = tmp_path / "web.json"
+    for version in ("1", "2"):
+        write_snapshot(path, [row(version=version)], source_id="web-a", collector="web-detect")
+        _publish_review(path, "Acme", "web-a", [], products=[], run={"status": "success"})
+        for target in (path, manifest_path(path), Path(str(path) + '.review.json')):
+            assert read_bytes(target)  # Core's strict owner/file ACL check.
+            if os.name == 'posix':
+                assert target.stat().st_mode & 0o777 == 0o600
+        assert read_web_snapshot(path)[0][0].version == version
+    assert not list(tmp_path.glob('.cvebeacon-*'))
+
+
+@pytest.mark.skipif(os.name != 'nt', reason="native Windows owner-only ACLs")
+def test_windows_publications_pass_core_strict_file_checks(tmp_path):
+    # Use an ordinary parent to ensure files do not depend on private inheritance.
+    assert_private_publications(tmp_path)
+    # Core checks the owner and each ACE; also require inheritance protection.
+    import ctypes as c
+    from ctypes import wintypes as w
+    import msvcrt
+    from cvebeacon import windows_private
+    from cvebeacon.private_storage import private_file
+    control_of = windows_private._bind(windows_private._security,
+        "GetSecurityDescriptorControl", [c.c_void_p, c.POINTER(w.WORD), c.POINTER(w.DWORD)])
+    for path in tmp_path.glob("*.json"):
+        with os.fdopen(private_file(path, readonly=True), "rb") as handle:
+            descriptor = c.c_void_p()
+            result = windows_private._get_security(msvcrt.get_osfhandle(handle.fileno()),
+                1, 4, None, None, None, None, c.byref(descriptor))
+            assert result == 0
+            try:
+                control, revision = w.WORD(), w.DWORD()
+                assert control_of(descriptor, c.byref(control), c.byref(revision))
+                assert control.value & 0x1000  # SE_DACL_PROTECTED
+            finally:
+                windows_private._free(descriptor)
+
+
+@pytest.mark.skipif(os.name != 'posix', reason="POSIX 0600 publication modes")
+def test_posix_publications_keep_owner_only_modes(tmp_path):
+    assert_private_publications(tmp_path)
+
+
+def test_cli_shows_path_free_publication_timeout_guidance(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from cvebeacon import publication
+    path = snapshot(tmp_path)
+    elapsed = [0.0]
+    def blocked(*args):
+        raise PermissionError("SECRET_PATH")
+    monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt", replace=blocked))
+    monkeypatch.setattr(publication, "time", SimpleNamespace(
+        monotonic=lambda: elapsed[0], sleep=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay)))
+    assert main(["merge", str(path), "--source-id", "central", "--output", str(tmp_path / 'out.json')]) == 2
+    message = capsys.readouterr().err
+    assert 'Atomic publication' in message and 'close open readers and retry' in message
+    assert 'SECRET_PATH' not in message and str(tmp_path) not in message
