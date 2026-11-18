@@ -21,7 +21,7 @@ from .dashboard_jobs import (
     full_history_confirmation_required,
 )
 from .errors import CVEBeaconError, ConfigurationError
-from .locking import RunInProgress
+from .locking import OperationLock, RunInProgress
 from .launching import command_prefix
 
 
@@ -76,12 +76,25 @@ def _record(action: str, detail: str | None = None) -> None:
 
 def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
     manager = _manager()
+    external_runs = [record for record in OperationLock(config, "run").snapshots()
+                     if not record["dashboard"] or record["state"] != "active"]
+    schedule = None
+    try:
+        # Reuse the native schedule parser; never install or change a schedule.
+        status = scheduling.status(run=_runner())
+        if status != "not installed":
+            schedule = "Scheduled by cron" if scheduling.platform.system().casefold() == "linux" else status
+    except (CVEBeaconError, OSError):
+        pass
     channels = tuple(
         channel.name for channel in config.watch.channels if channel.enabled
     )
     return {
         "error": error,
         "active": manager.store.active(),
+        "external_runs": external_runs,
+        "schedule_summary": schedule,
+        "queue_details": manager.queue_details(),
         "full_history": full_history_confirmation_required(config),
         "channels": channels,
         "watch_enabled": config.watch.enabled,
@@ -230,6 +243,7 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
             "jobs.html",
             jobs=_manager().store.recent(MAX_HISTORY),
             max_jobs=MAX_HISTORY,
+            queue_details=_manager().queue_details(),
         )
 
     @blueprint.get("/jobs/<int:job_id>")
@@ -241,7 +255,8 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
         if job is None:
             abort(404)
         return render_template(
-            "job.html", job=job, log=_manager().store.log_tail(job)
+            "job.html", job=job, log=_manager().store.log_tail(job),
+            queue_detail=_manager().queue_details().get(job.id),
         )
 
     @blueprint.post("/run")

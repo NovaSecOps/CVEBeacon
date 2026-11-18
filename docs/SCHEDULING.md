@@ -137,6 +137,18 @@ the original final newline state.
 
 The generated command uses absolute executable and configuration paths. A packaged executable schedules itself. A source invocation uses the installed console launcher when available, or the active Python interpreter with `-m cvebeacon`.
 
+Cron, Task Scheduler, interactive commands and dashboard jobs share storage locks.
+If a scheduled or interactive command encounters a held lock, it exits `2` with
+the holder's account, host, PID, UTC start and short command label when readable.
+Wait for that run to finish; cancellation from Operations is offered only when
+the holder is a dashboard job. The dashboard shows external holders in its
+**Active run** panel without a cancel button. Its manual jobs wait in the queue
+for up to six hours from submission, displaying the holder they are waiting for,
+and can be cancelled before they start. Channel tests have a separate serial lane
+and can run during this wait without changing watch state. A stale holder record
+from a dead local PID is labelled stale; the operating system releases the lock
+when the process exits. Do not remove a live lock file to bypass a collision.
+
 For manual administration, create an equivalent task or cron entry that runs
 `cvebeacon --config <absolute-path> scan`, `... watch run`, or both. Run it under
 an account with read access to the inventory and configuration, write access to
