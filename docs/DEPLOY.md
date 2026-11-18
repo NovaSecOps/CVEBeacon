@@ -130,6 +130,29 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now cvebeacon.timer
 ```
 
+### Run the dashboard
+
+`deploy/systemd/cvebeacon-dashboard.service` runs `cvebeacon serve` on
+`127.0.0.1:8787` as the `cvebeacon` user. It assumes the paths in this section;
+edit `WorkingDirectory`, `ExecStart` and `ReadWritePaths` when the checkout or
+data directory differs.
+
+```console
+sudo install -m 0644 /opt/cvebeacon/deploy/systemd/cvebeacon-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cvebeacon-dashboard.service
+```
+
+The unit sets `NoNewPrivileges=yes` and other hardening that keeps the service
+inside the data directory. That setting also prevents the dashboard's Schedule
+page from writing the user crontab. With this unit, install the schedule from
+the CLI as the service user (`sudo -u cvebeacon ... schedule install`) or use
+the systemd timer above. Alternatively, to manage the schedule from the
+dashboard, add a drop-in with `NoNewPrivileges=no`; this permits the dashboard
+process to gain privileges through setuid and setgid helpers such as `crontab`,
+so enable it only where dashboard access is already equivalent to the service
+account.
+
 ### Check the result
 
 ```console
