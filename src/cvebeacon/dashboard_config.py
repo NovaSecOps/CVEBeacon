@@ -243,10 +243,12 @@ def set_table(document, path, data):
 
 def check_document(document):
     """Never carry unknown inline credential fields into a preview or rewrite."""
-    allowed = {"watch", "product_mappings", "notifications"}
+    allowed = {"watch", "product_mappings", "notifications", "update"}
     allowed.update(path for specs in SCHEMAS.values() for path, _ in specs if "." not in path)
     if set(document) - allowed:
         raise ConfigurationError("Unrecognized configuration fields; review the file before editing")
+    if set(get_table(document, "update")) - {"enabled", "daily", "repository", "allow_prereleases"}:
+        raise ConfigurationError("Unrecognized update fields; privileged policy is administrator-owned")
     for specs in SCHEMAS.values():
         for path, schema in specs:
             extra = {"rules", "channels", "reporting"} if path == "watch" else set()
@@ -1645,7 +1647,9 @@ def path_authority_changed(candidate, baseline, running):
 
 def dashboard_authority_changed(candidate, baseline, running):
     return (candidate.dashboard != baseline.dashboard
-            or candidate.dashboard != running.dashboard)
+            or candidate.dashboard != running.dashboard
+            or candidate.update != baseline.update
+            or candidate.update != running.update)
 
 def resolve_reference(value, base):
     path = Path(value).expanduser()

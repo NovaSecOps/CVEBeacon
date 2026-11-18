@@ -134,10 +134,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
                     g.entry = None
             if g.entry:
                 g.sid = identifier
-            if request.endpoint not in {"login", "static", "bootstrap"} and g.user is None:
+            if request.endpoint not in {"login", "static", "bootstrap", "update_health"} and g.user is None:
                 return redirect(url_for("login"), code=303)
         else:
-            if auth and request.endpoint not in {"login", "static"}:
+            if auth and request.endpoint not in {"login", "static", "update_health"}:
                 if not auth.valid(session.get("auth_id")):
                     session.clear()
                     return redirect(url_for("login"), code=303)
@@ -180,6 +180,13 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
     @app.context_processor
     def inventory_state():
         return {"inventory_configured": config.inventory is not None}
+
+    @app.get("/healthz")
+    @requires("public")
+    def update_health():
+        if not _loopback(request.remote_addr):
+            abort(403)
+        return {"status": "ok"}
 
     @app.route("/login", methods=["GET", "POST"])
     @requires("public")
@@ -596,6 +603,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
     register_config(app, config, host=host)
     from .dashboard_web import create_web_blueprint
     app.register_blueprint(create_web_blueprint(config))
+    from .dashboard_update import create_blueprint as create_update_blueprint
+    app.register_blueprint(create_update_blueprint(config))
     return app
 
 

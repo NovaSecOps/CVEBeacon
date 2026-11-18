@@ -6,4 +6,5 @@
 {% if authenticated %}<form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Log out</button></form>{% endif %}
 {% if accounts and authenticated %}<nav aria-label="Account navigation"><a href="{{ url_for('account') }}">My account and sessions</a>{% if 'manage_users' in permissions %}<a href="{{ url_for('user_list') }}">Users</a>{% endif %}{% if current_user.is_admin %}<a href="{{ url_for('roles') }}">Roles</a>{% endif %}{% if 'view_audit' in permissions %}<a href="{{ url_for('audit') }}">Audit</a>{% endif %}</nav>{% endif %}
 {% if accounts and authenticated and 'view' in permissions %}<nav aria-label="Configuration navigation"><a href="{{ url_for('config_editor.index') }}">Configuration</a></nav>{% endif %}
+{% if not accounts or 'view' in permissions %}<nav aria-label="Update navigation"><a href="{{ url_for('updates.index') }}">Updates</a></nav>{% endif %}
 <main>{% block content %}{% endblock %}</main><footer>Stored observations retain their original timestamps. Scheduled and dashboard operations run as separate short-lived processes.</footer></body></html>
