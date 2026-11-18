@@ -1,0 +1,61 @@
+# CVEBeacon dashboard behind Caddy.
+#
+# Install as /etc/caddy/Caddyfile (or import it from there), replace
+# cvebeacon.example.com and the ACME email, then run `caddy validate` and
+# reload Caddy.
+#
+# The dashboard listens on loopback only:
+#   cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml serve
+#
+# It trusts no forwarded host, address or scheme headers, does not support a
+# URL prefix, and checks the Host header against its bind address.
+{
+	email admin@example.com
+}
+
+# Caddy redirects HTTP to HTTPS automatically for site addresses with a host.
+# This explicit block makes the redirect visible and keeps the target fixed.
+http://cvebeacon.example.com {
+	redir https://cvebeacon.example.com{uri} permanent
+}
+
+cvebeacon.example.com {
+	# A private certificate from Caddy's local CA. Remove this line for a
+	# publicly trusted Let's Encrypt certificate; the email above is then
+	# used for ACME account registration and expiry notices.
+	tls internal
+
+	header {
+		# Add includeSubDomains only when every subdomain is HTTPS, and
+		# preload only after the domain meets the HSTS preload list rules.
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		# Append instead of replacing the dashboard's own policy.
+		+Content-Security-Policy "frame-ancestors 'none'"
+		-Server
+	}
+
+	# The dashboard accepts statement uploads up to 5 MiB. Six megabytes
+	# leaves room for multipart framing.
+	request_body {
+		max_size 6MB
+	}
+
+	reverse_proxy 127.0.0.1:8787 {
+		# The dashboard validates this Host header and ignores forwarded
+		# headers. Send the backend address and drop client-supplied
+		# X-Forwarded-* values.
+		header_up Host {upstream_hostport}
+		header_up -X-Forwarded-*
+
+		# Manual queries and report generation can run for several minutes;
+		# background jobs return immediately.
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 300s
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+}
