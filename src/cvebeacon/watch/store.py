@@ -10,7 +10,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -62,11 +62,11 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
-VIEW_POLICY_SOURCES = ("cisa_kev", "eu_kev", "euvd", "epss")
+VIEW_POLICY_SOURCES = ("cisa_kev", "eu_kev", "euvd", "epss", "cve_list")
 VIEW_POLICY_BATCH = 5000
 EVALUATION_BATCH = 5000
 DELIVERY_RETRY_BASE_SECONDS = 300
@@ -129,6 +129,20 @@ _NVD_CONTENT_COLUMNS = (
 )
 
 _SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS watch_source_check (
+        cve_id TEXT NOT NULL, source TEXT NOT NULL, present INTEGER,
+        checked_at TEXT NOT NULL, error TEXT,
+        PRIMARY KEY(cve_id,source)
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_provider (
+        cve_id TEXT NOT NULL, source TEXT NOT NULL,
+        record_json TEXT NOT NULL, payload_json TEXT NOT NULL,
+        source_updated TEXT, checked_at TEXT NOT NULL,
+        PRIMARY KEY(cve_id,source)
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_search (
+        cve_id TEXT PRIMARY KEY, text TEXT NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS watch_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -137,7 +151,7 @@ _SCHEMA = (
         cve_id TEXT PRIMARY KEY,
         published TEXT,
         last_modified TEXT,
-        status TEXT NOT NULL CHECK(status IN ('published','rejected')),
+        status TEXT NOT NULL CHECK(status IN ('published','rejected','reserved')),
         description TEXT,
         source_identifier TEXT,
         cvss_json TEXT NOT NULL,
@@ -503,8 +517,8 @@ class WatchStore:
         with self.transaction(create=False) as db:
             self._ensure_schema(db, _timestamp(self._clock))
 
-    @staticmethod
-    def _ensure_schema(db: sqlite3.Connection, now: str) -> None:
+    @classmethod
+    def _ensure_schema(cls, db: sqlite3.Connection, now: str) -> None:
         db.execute(
             "CREATE TABLE IF NOT EXISTS watch_meta ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -523,11 +537,12 @@ class WatchStore:
                 "INSERT INTO watch_meta(key,value) VALUES "
                 "('report_legacy_max_id','0')"
             )
+            cls._ensure_search(db)
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5", "6", "7"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5", "6", "7", "8"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -566,8 +581,8 @@ class WatchStore:
                     (meta["initial_window_start"],),
                 )
         if version in {"1", "2"}:
-            WatchStore._migrate_event_details(db)
-            WatchStore._migrate_delivery_statuses(db)
+            cls._migrate_event_details(db)
+            cls._migrate_delivery_statuses(db)
         elif version == "3":
             columns = {
                 row["name"]
@@ -578,12 +593,45 @@ class WatchStore:
                     "ALTER TABLE watch_delivery ADD COLUMN first_attempt_at TEXT"
                 )
         if version in {"1", "2", "3", "4", "5", "6"}:
-            WatchStore._migrate_report_identity(db, version)
+            cls._migrate_report_identity(db, version)
         if version != str(SCHEMA_VERSION):
+            # No table references watch_cve; rebuild its status constraint in
+            # the same transaction as the provider and search backfill.
+            statement = next(item for item in _SCHEMA if "CREATE TABLE IF NOT EXISTS watch_cve (" in item)
+            db.execute(statement.replace("IF NOT EXISTS watch_cve", "watch_cve_v8"))
+            db.execute("INSERT INTO watch_cve_v8 SELECT * FROM watch_cve")
+            db.execute("DROP TABLE watch_cve")
+            db.execute("ALTER TABLE watch_cve_v8 RENAME TO watch_cve")
+            db.execute("CREATE INDEX watch_cve_ssvc ON watch_cve(ssvc_exploitation)")
+            for row in db.execute("SELECT * FROM watch_cve"):
+                content = canonical_json(_nvd_content(cls._record(row)))
+                db.execute(
+                    "INSERT OR IGNORE INTO watch_provider VALUES (?,'nvd',?,?,?,?)",
+                    (row["cve_id"], content, content, row["last_modified"], row["updated_at"]),
+                )
+                db.execute("INSERT OR REPLACE INTO watch_search VALUES (?,?)",
+                           (row["cve_id"], row["description"] or ""))
+            cls._ensure_search(db)
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
             )
+
+    @staticmethod
+    def _ensure_search(db: sqlite3.Connection) -> None:
+        try:
+            db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS watch_fts USING fts5(cve_id UNINDEXED,text,content='watch_search',content_rowid='rowid')")
+        except sqlite3.OperationalError as exc:
+            if "no such module" in str(exc).lower():
+                return
+            raise
+        for name, event, action in (
+            ("insert", "INSERT", "INSERT INTO watch_fts(rowid,cve_id,text) VALUES (new.rowid,new.cve_id,new.text);"),
+            ("delete", "DELETE", "INSERT INTO watch_fts(watch_fts,rowid,cve_id,text) VALUES ('delete',old.rowid,old.cve_id,old.text);"),
+            ("update", "UPDATE", "INSERT INTO watch_fts(watch_fts,rowid,cve_id,text) VALUES ('delete',old.rowid,old.cve_id,old.text); INSERT INTO watch_fts(rowid,cve_id,text) VALUES (new.rowid,new.cve_id,new.text);"),
+        ):
+            db.execute(f"CREATE TRIGGER IF NOT EXISTS watch_search_{name} AFTER {event} ON watch_search BEGIN {action} END")
+        db.execute("INSERT INTO watch_fts(watch_fts) VALUES ('rebuild')")
 
     @staticmethod
     def _migrate_event_details(db: sqlite3.Connection) -> None:
@@ -994,7 +1042,7 @@ class WatchStore:
     def _mark_touched(
         cls, db: sqlite3.Connection, identifiers: Iterable[str], now: str
     ) -> tuple[str, ...]:
-        """Queue evaluation for CVEs that already have an NVD row."""
+        """Queue evaluation for CVEs that already have a watch row."""
         known = cls._known_identifiers(db, identifiers)
         db.executemany(
             "INSERT OR IGNORE INTO watch_touched(cve_id,touched_at) VALUES (?,?)",
@@ -1002,42 +1050,97 @@ class WatchStore:
         )
         return known
 
-    def upsert_nvd(
-        self,
-        records: Sequence[WatchRecord],
-        *,
-        meta: Mapping[str, str] | None = None,
-        catalogs: Sequence[str] = (),
+    def _upsert_provider(
+        self, source: str, records, *, meta=None, catalogs=(),
     ) -> StepCounts:
         self.initialize()
         now = _timestamp(self._clock)
-        outcomes: list[tuple[str, str]] = []
+        outcomes = []
+        unchanged = 0
         with self.transaction() as db:
-            for record in records:
-                outcome = self._write_nvd(db, record, now)
-                db.execute("DELETE FROM watch_lookup WHERE cve_id=?", (record.cve_id,))
+            for record, payload in records:
+                content = canonical_json(_nvd_content(record))
+                raw = canonical_json(payload)
+                previous = db.execute("SELECT record_json,payload_json FROM watch_provider WHERE cve_id=? AND source=?",
+                                      (record.cve_id, source)).fetchone()
+                db.execute("INSERT INTO watch_provider VALUES (?,?,?,?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET record_json=excluded.record_json,payload_json=excluded.payload_json,source_updated=excluded.source_updated,checked_at=excluded.checked_at",
+                           (record.cve_id, source, content, raw, record.last_modified, now))
+                if previous and previous["record_json"] == content and previous["payload_json"] == raw:
+                    unchanged += 1
+                    continue
+                merged = self._merged_record(db, record.cve_id)
+                outcome = self._write_nvd(db, merged, now)
                 outcomes.append((record.cve_id, outcome))
-            written = [
-                identifier
-                for identifier, outcome in outcomes
-                if outcome in ("new", "changed")
-            ]
+                # Search all provider descriptions, including text beyond the
+                # bounded alert preview. Raw containers remain separately held.
+                texts = [merged.description or ""]
+                from .cve_list import description_text
+                for row in db.execute("SELECT source,payload_json FROM watch_provider WHERE cve_id=?", (record.cve_id,)):
+                    payload = json.loads(row["payload_json"])
+                    texts.append(description_text(payload) if row["source"] == "cve_list" else payload.get("description") or "")
+                db.execute("INSERT INTO watch_search VALUES (?,?) ON CONFLICT(cve_id) DO UPDATE SET text=excluded.text",
+                           (record.cve_id, "\n".join(texts)))
+                if source == "nvd":
+                    db.execute("DELETE FROM watch_lookup WHERE cve_id=?", (record.cve_id,))
+            written = [identifier for identifier, _ in outcomes]
             views = self._refresh_views(db, written, catalogs, now)
             queued = self._mark_touched(db, written, now)
             if meta:
                 self._set_meta(db, meta)
-        new_ids = tuple(identifier for identifier, outcome in outcomes if outcome == "new")
-        changed_ids = tuple(
-            identifier for identifier, outcome in outcomes if outcome == "changed"
-        )
-        return StepCounts(
-            new=len(new_ids),
-            changed=views.changed,
-            unchanged=sum(outcome == "unchanged" for _, outcome in outcomes),
-            new_ids=new_ids,
-            changed_ids=changed_ids,
-            touched_ids=queued,
-        )
+        return StepCounts(new=views.new, changed=views.changed, unchanged=unchanged,
+                          new_ids=views.new_ids, changed_ids=views.changed_ids,
+                          touched_ids=queued)
+
+    def _merged_record(self, db, identifier):
+        providers = {row["source"]: self._record({"cve_id": identifier, **json.loads(row["record_json"])})
+                     for row in db.execute("SELECT source,record_json FROM watch_provider WHERE cve_id=?", (identifier,))}
+        primary = providers.get("nvd") or providers["cve_list"]
+        official = providers.get("cve_list")
+        if official is None:
+            return primary
+        records = list(providers.values())
+        return replace(primary,
+                       status=official.status,
+                       published=primary.published or official.published,
+                       last_modified=max((item.last_modified for item in records if item.last_modified), default=None),
+                       description="\n".join(dict.fromkeys(item.description for item in records if item.description)) or None,
+                       source_identifier=primary.source_identifier or official.source_identifier,
+                       cvss=tuple(entry for item in records for entry in item.cvss),
+                       cwes=tuple(value for item in records for value in item.cwes),
+                       products=tuple(value for item in records for value in item.products),
+                       references=tuple(value for item in records for value in item.references))
+
+    def upsert_nvd(self, records, *, meta=None, catalogs=()) -> StepCounts:
+        return self._upsert_provider("nvd", ((item, _nvd_content(item)) for item in records), meta=meta, catalogs=catalogs)
+
+    def upsert_cve_list(self, records, *, meta=None, catalogs=()) -> StepCounts:
+        from .cve_list import parse_record
+        return self._upsert_provider("cve_list", ((parse_record(item), item) for item in records), meta=meta, catalogs=catalogs)
+
+    def search(self, **kwargs):
+        from .explorer import search
+        return search(self, **kwargs)
+
+    def provider_records(self, identifier):
+        self.initialize()
+        with self.transaction() as db:
+            return tuple({"source": row["source"], "payload": json.loads(row["payload_json"])}
+                         for row in db.execute("SELECT source,payload_json FROM watch_provider WHERE cve_id=? ORDER BY source", (identifier,)))
+
+    def source_presence(self, identifier):
+        from .explorer import source_presence
+        return source_presence(self, identifier)
+
+    def evaluate_one(self, identifier, rules, *, catalogs=()):
+        identifier = normalize_cve_id(identifier)
+        self.initialize()
+        with self.transaction() as db:
+            present = self._row(db, identifier) is not None
+            self._refresh_views(db, [identifier], catalogs, _timestamp(self._clock))
+            counts = self._evaluate_batch(db, [identifier] if present else [], rules, catalogs,
+                                          _clock_value(self._clock), False)
+            db.execute("DELETE FROM watch_touched WHERE cve_id=?", (identifier,))
+        return self._evaluation_result(int(present), counts)
 
     def replace_euvd_items(
         self,

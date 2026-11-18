@@ -57,3 +57,37 @@ This product uses data from the NVD API but is not endorsed or certified by the 
 - Teams: [webhooks through Teams Workflows](https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook).
 - Email: [Microsoft Graph sendMail](https://learn.microsoft.com/en-us/graph/api/user-sendmail?view=graph-rest-1.0) with [app-only authentication](https://learn.microsoft.com/en-us/graph/auth-v2-service).
 - Limitations: an HTTP 202 from Graph means the request was accepted for processing, not that final mailbox delivery is proven.
+
+### CVE List watch feed
+
+The `cve_list` watch provider reads the official
+[CVEProject/cvelistV5 release assets](https://github.com/CVEProject/cvelistV5#releases):
+a daily baseline and an hourly delta cumulative since that baseline. Release
+metadata uses conditional ETag requests. An unchanged archive is not downloaded
+again. After a day change or a gap, the next daily baseline closes the gap before
+the current delta is applied. This avoids relying on the rolling retention of
+`deltaLog.json` or issuing a request for every historical CVE.
+
+Downloads use the shared HTTP timeouts, retries and pacing. Release metadata is
+limited to 4 MiB, each compressed archive to 1 GiB, total expanded members to
+8 GiB, individual records to 4 MiB, and archive entries to one million. Archives
+are spooled to temporary disk and records are imported in batches of 100. The
+published size and SHA-256 digest (when supplied by GitHub), ZIP CRCs and
+record/file identifiers are checked. The baseline's optional `cves.zip` wrapper
+is supported without extracting paths. Redirects are limited to GitHub's release
+asset hosts. Failures preserve committed batches and never advance the failed
+archive's cursor; retries replay those batches idempotently.
+
+The first `full` import and each new daily baseline may download hundreds of MiB
+(up to the 1 GiB cap), requiring temporary disk for the archive and possibly its
+inner ZIP, plus the watch database and indexes. `backfill` reads the same archive
+but imports only records modified in its configured window. `baseline` initially
+records a starting point without a download. Later imports keep changes since
+the cursor, with the configured overlap. This trades a daily archive download
+for complete recovery across gaps. A source failure remains visible; no partial
+archive is described as complete.
+
+CNA and ADP containers remain stored with their descriptions, affected products,
+metrics, references and dates. Published, rejected and visible reserved records
+are kept. CVE List-only records enter the same rule and event history as NVD
+records; later NVD enrichment does not create a second initial match.

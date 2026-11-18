@@ -246,6 +246,10 @@ class HttpClient:
         headers: Mapping[str, str] | None = None,
         minimum_interval: float = 0,
         counter: list[int] | None = None,
+        response_headers: dict[str, str] | None = None,
+        allow_not_modified: bool = False,
+        redirect_hosts: tuple[str, ...] = (),
+        redirect_limit: int = 3,
     ) -> Iterator[bytes]:
         """Stream a bounded response body without holding it in memory.
 
@@ -268,9 +272,24 @@ class HttpClient:
                     headers=headers,
                     follow_redirects=False,
                 ) as response:
+                    if response_headers is not None:
+                        response_headers.update(dict(response.headers))
+                    if response.status_code == 304 and allow_not_modified:
+                        return
+                    if response.status_code in (301, 302, 303, 307, 308) and redirect_hosts and redirect_limit > 0:
+                        from urllib.parse import urljoin, urlsplit
+                        target = urljoin(url, response.headers.get("location", ""))
+                        parsed = urlsplit(target)
+                        if parsed.scheme != "https" or parsed.hostname not in redirect_hosts or parsed.username or parsed.password:
+                            raise SourceError(source, "source returned an unsafe redirect")
+                        yield from self.stream_bytes(target, source=source, byte_cap=byte_cap,
+                                                     headers=headers, counter=counter,
+                                                     response_headers=response_headers,
+                                                     redirect_hosts=redirect_hosts, redirect_limit=redirect_limit - 1)
+                        return
                     if response.status_code == 200:
                         total = 0
-                        for chunk in response.iter_bytes():
+                        for chunk in response.iter_bytes(chunk_size=65536):
                             total += len(chunk)
                             if total > byte_cap:
                                 raise SourceError(

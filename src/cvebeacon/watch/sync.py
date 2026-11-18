@@ -13,6 +13,7 @@ from ..config import AppConfig, WatchConfig
 from ..errors import CVEBeaconError, SourceError, StateError
 from ..http import HttpClient, Throttle
 from . import feeds
+from . import cve_list
 from .records import EPSS_BANDS
 from .rules import rule_epss_thresholds
 from .store import WatchStore
@@ -76,6 +77,8 @@ def _record_sync_status(
         values[f"{prefix}_records"] = str(summary.records)
         values[f"{prefix}_new"] = str(summary.new)
         values[f"{prefix}_changed"] = str(summary.changed)
+        if not summary.error and summary.requests:
+            values[f"{prefix}_success_at"] = at.isoformat()
         values[f"{prefix}_error"] = str(summary.error)[:500] if summary.error else ""
     store.set_metadata(values)
 
@@ -313,6 +316,8 @@ def sync_watch(
             euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
             initial_window_start=today.isoformat(),
         )
+        if "cve_list" in watch.sources:
+            cve_list.sync(http, store, watch, now)
         report = SyncReport(
             summaries=tuple(SourceSummary(source) for source in watch.sources),
             baseline=True,
@@ -329,6 +334,8 @@ def sync_watch(
                 euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
                 initial_window_start=today.isoformat(),
             )
+            if "cve_list" in watch.sources:
+                cve_list.sync(http, store, watch, now)
             report = SyncReport(
                 summaries=tuple(SourceSummary(source) for source in watch.sources),
                 baseline=True,
@@ -393,6 +400,15 @@ def sync_watch(
     lookup_failures = 0
     touched: set[str] = set(policy_touched)
     summaries: list[SourceSummary] = []
+    if "cve_list" in watch.sources:
+        before = http.requests
+        try:
+            records, new, changed, identifiers = cve_list.sync(http, store, watch, now)
+        except SourceError as exc:
+            summaries.append(SourceSummary("cve_list", http.requests - before, error=str(exc)))
+        else:
+            touched.update(identifiers)
+            summaries.append(SourceSummary("cve_list", http.requests - before, records, new, changed))
     pending_windows = list(reversed(feeds.nvd_windows(nvd_start, nvd_end)))
     first_commit = True
     while pending_windows:

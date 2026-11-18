@@ -32,7 +32,7 @@ def test_old_config_without_watch_still_loads(tmp_path):
     config = write(tmp_path, "")
     assert config.watch.enabled is False
     assert config.watch.database == (tmp_path / "state" / "cvebeacon-watch.db").resolve()
-    assert config.watch.sources == ("nvd", "euvd", "cisa_kev", "eu_kev", "epss")
+    assert config.watch.sources == ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list")
     assert config.watch.initial == "baseline"
     assert config.watch.backfill_days == 7
     assert config.watch.overlap_minutes == 15
