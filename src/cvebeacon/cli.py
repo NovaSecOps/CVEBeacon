@@ -24,7 +24,7 @@ from .errors import CVEBeaconError, SourceError
 from .http import HttpClient
 from .inventory import inspect_inventory, load_inventory
 from .identity import normalize_asset, identity_conflict
-from .locking import OperationLock
+from .locking import OperationLock, RunInProgress
 from .models import Asset, HealthStatus
 from .notifications import GraphMailNotifier, TeamsNotifier, alert_items, configured_channels
 from .reporting import write_json, write_xlsx
@@ -998,12 +998,7 @@ def run(args: argparse.Namespace) -> int:
         )
         lock = OperationLock(config, label.replace(" ", "-"))
         if not lock.acquire():
-            detail = f" ({lock.holder})" if lock.holder else ""
-            print(
-                f"error: another run is in progress{detail}; wait for it to "
-                "finish or cancel it from the dashboard",
-                file=sys.stderr,
-            )
+            print(f"error: {RunInProgress(lock.holder)}", file=sys.stderr)
             return 2
     try:
         if args.command == "web-detect":

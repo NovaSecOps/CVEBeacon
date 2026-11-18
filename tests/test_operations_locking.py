@@ -27,10 +27,7 @@ def test_lock_metadata_survives_unavailable_account_lookup(tmp_path, monkeypatch
     monkeypatch.setattr(locking.getpass, "getuser", unavailable)
     path = tmp_path / "run.lock"
     with RunLock(path, command="scan") as lock:
-        # Windows reserves byte zero for the active range lock. Read metadata
-        # through the held descriptor, starting beyond that byte.
-        os.lseek(lock._descriptor, 1, os.SEEK_SET)
-        metadata = json.loads(os.read(lock._descriptor, 4096))
+        metadata = json.loads(lock.owner_path.read_bytes())
         assert metadata["account"] == "unknown" and metadata["command"] == "scan"
 
 
@@ -130,11 +127,13 @@ def test_windows_lock_keeps_byte_zero_separate_and_clears_before_unlock(tmp_path
     def release(fd):
         os.lseek(fd, 1, os.SEEK_SET)
         assert os.read(fd, 4096) == b""
+        assert not lock.owner_path.exists()
         events.append("unlocked")
     monkeypatch.setattr(lock, "_lock", take)
     monkeypatch.setattr(lock, "_unlock", release)
     assert lock.acquire()
-    assert lock.path.read_bytes().startswith(b"\0{")
+    assert lock.path.read_bytes() == b"\0"
+    assert json.loads(lock.owner_path.read_bytes())["pid"] == os.getpid()
     lock.release()
     assert events == ["locked", "unlocked"]
 
