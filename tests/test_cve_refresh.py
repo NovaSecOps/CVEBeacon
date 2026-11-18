@@ -147,3 +147,43 @@ def test_refresh_job_permission_csrf_audit_and_command(tmp_path, monkeypatch):
     assert any(entry.action == f'job_started:{job.id}:watch-refresh' for entry in users.audit_entries())
     assert users.verify_audit() is None
     manager.shutdown()
+
+
+@pytest.mark.parametrize('available', ['euvd', 'cisa_kev'])
+def test_refresh_can_create_a_cve_from_enrichment_only(tmp_path, available):
+    config = config_for(tmp_path)
+    config = replace(config, watch=replace(config.watch, sources=('nvd', available)))
+    fixture = Lookups()
+    def handler(request):
+        if str(request.url).split('?')[0] == CVE_URL:
+            return httpx.Response(404)
+        return fixture(request)
+    with mock_client(handler) as http:
+        report, result = refresh_watch(config, http, ID)
+    store = WatchStore(config.watch.database)
+    assert not report.failures
+    assert store.view(ID, catalogs=config.watch.sources) is not None
+    assert result.events == 1
+    assert {item['source'] for item in store.provider_records(ID)} == {available}
+
+
+def test_euvd_only_refresh_does_not_pin_an_old_score(tmp_path):
+    config = config_for(tmp_path)
+    config = replace(config, watch=replace(config.watch, sources=('nvd', 'euvd')))
+    score = [9.5]
+    def handler(request):
+        if str(request.url).split('?')[0] == CVE_URL:
+            return httpx.Response(404)
+        return httpx.Response(200, json={'total': 1, 'items': [{'id': 'EUVD-2026-1', 'aliases': ID,
+            'description': 'EUVD discovery', 'baseScore': score[0], 'baseScoreVersion': '3.1'}]})
+    with mock_client(handler) as http:
+        refresh_watch(config, http, ID)
+        score[0] = 4.0
+        refresh_watch(config, http, ID)
+    store = WatchStore(config.watch.database)
+    view = store.view(ID, catalogs=config.watch.sources)
+    assert [entry.score for entry in view.cvss] == [4.0]
+    assert len([event for event in store.events(cve=ID) if event.kind == 'match']) == 1
+    store.upsert_nvd([WatchRecord(ID, 'published', description='NVD enrichment')], catalogs=config.watch.sources)
+    store.evaluate_one(ID, config.watch.rules, catalogs=config.watch.sources)
+    assert len([event for event in store.events(cve=ID) if event.kind == 'match']) == 1

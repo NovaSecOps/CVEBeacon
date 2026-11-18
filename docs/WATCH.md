@@ -1459,7 +1459,10 @@ cvebeacon watch refresh CVE-2026-12345
 This uses bounded single-record NVD, EUVD, CVE List and EPSS lookups for enabled
 sources. KEV catalogs have no per-ID endpoint: their small, bounded catalogs are
 read and only the requested CVE's rows are updated. Each reply is capped at
-8 MiB. No full sync runs and no feed cursor advances. Only the requested CVE's
+8 MiB. A CVE found only in EUVD or KEV also creates a watch record, without
+claiming NVD presence. EUVD scores remain in its enrichment table so later
+refreshes can lower as well as raise the stored score. No full sync runs and no
+feed cursor advances. Only the requested CVE's
 rules are evaluated; matching events and pending deliveries use the normal
 ledger. Refresh does not send notifications; `watch notify` or `watch run`
 delivers them normally. Source errors retain previous observations and are

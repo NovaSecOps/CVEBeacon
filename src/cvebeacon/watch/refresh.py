@@ -9,7 +9,7 @@ from ..sources.cve_list import CVEListSource
 from ..sources.epss import EPSSSource
 from ..sources.euvd import SEARCH_URL
 from . import feeds
-from .records import EUVDUpdate, euvd_datetime
+from .records import EUVDUpdate, WatchRecord, euvd_datetime
 from ..sources.common import source_payload
 from .reported import normalize_cve_id
 from .store import WatchStore
@@ -79,6 +79,14 @@ def refresh_watch(config, http, identifier):
                 counts = store.replace_euvd_items(updates, catalogs=catalogs)
                 new, changed = counts.new, counts.changed
                 records = len(updates)
+                if updates:
+                    best = max(updates, key=lambda item: item.rank())
+                    raw = next(item for item in payload["items"] if item.get("id") == best.euvd_id)
+                    record = WatchRecord(identifier, "published",
+                                         euvd_datetime(raw.get("datePublished")), best.date_updated,
+                                         str(raw.get("description") or "") or None)
+                    counts = store.upsert_discovered("euvd", record, payload=raw, catalogs=catalogs)
+                    new, changed = counts.new, counts.changed
             elif source == "epss":
                 scores = EPSSSource(http).scores([identifier])
                 with store.transaction() as db:
@@ -100,6 +108,13 @@ def refresh_watch(config, http, identifier):
                         db.execute("INSERT INTO watch_kev VALUES (?,?,?,?,?,?)",
                                    (catalog, identifier, entry.added, entry.due, entry.required_action, entry.ransomware))
                         records = 1
+                if entry is not None:
+                    record = WatchRecord(identifier, "published", last_modified=entry.added)
+                    counts = store.upsert_discovered(source, record,
+                        payload={"added": entry.added, "due": entry.due,
+                                 "required_action": entry.required_action, "ransomware": entry.ransomware},
+                        catalogs=catalogs)
+                    new, changed = counts.new, counts.changed
         except SourceError as exc:
             if exc.status_code != 404 or source not in {"nvd", "cve_list"}:
                 error = str(exc)

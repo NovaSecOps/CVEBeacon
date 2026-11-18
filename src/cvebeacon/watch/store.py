@@ -1094,7 +1094,8 @@ class WatchStore:
     def _merged_record(self, db, identifier):
         providers = {row["source"]: self._record({"cve_id": identifier, **json.loads(row["record_json"])})
                      for row in db.execute("SELECT source,record_json FROM watch_provider WHERE cve_id=?", (identifier,))}
-        primary = providers.get("nvd") or providers["cve_list"]
+        primary = (providers.get("nvd") or providers.get("cve_list")
+                   or providers.get("euvd") or next(iter(providers.values())))
         official = providers.get("cve_list")
         if official is None:
             return primary
@@ -1116,6 +1117,16 @@ class WatchStore:
     def upsert_cve_list(self, records, *, meta=None, catalogs=()) -> StepCounts:
         from .cve_list import parse_record
         return self._upsert_provider("cve_list", ((parse_record(item), item) for item in records), meta=meta, catalogs=catalogs)
+
+    def upsert_discovered(self, source, record, *, payload, catalogs=()):
+        """Keep a targeted EUVD/KEV discovery without inventing NVD presence.
+
+        EUVD scores and products continue to come from its normal enrichment
+        table, so a later lookup cannot pin an obsolete severity in this row.
+        """
+        if source not in {"euvd", "cisa_kev", "eu_kev"}:
+            raise StateError("unsupported discovery provider")
+        return self._upsert_provider(source, [(record, payload)], catalogs=catalogs)
 
     def search(self, **kwargs):
         from .explorer import search
