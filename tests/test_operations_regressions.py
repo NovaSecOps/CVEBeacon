@@ -350,7 +350,7 @@ def test_cancel_escalates_and_reaps_an_uncooperative_child(tmp_path, monkeypatch
     process = None
     try:
         wait_for(lambda: "ready" in manager.store.log_tail(manager.store.get(job.id)))
-        process = manager._process
+        process = manager._free_lane._process
         manager.cancel(job.id)
         result = manager.wait(job.id, timeout=2)
         assert result.status == "cancelled"
@@ -378,7 +378,7 @@ def test_shutdown_runs_cleanup_and_reaps_child(tmp_path):
             time.sleep(0.01)  # short slices let a Windows break handler run
     """, marker))
     wait_for(lambda: "ready" in manager.store.log_tail(manager.store.get(job.id)))
-    process = manager._process
+    process = manager._free_lane._process
     try:
         manager.shutdown()
         assert process.poll() is not None
