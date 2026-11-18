@@ -33,6 +33,7 @@ from flask import (
 from .config import AppConfig
 from .clients import (
     affected_clients,
+    cve_findings,
     client_cve_filter,
     client_name,
     client_options,
@@ -45,7 +46,7 @@ from .locking import RunInProgress, RunLock, run_lock_path
 from .watch.messages import CVE_URL, EUVD_URL, NVD_URL
 from .watch.reported import format_timestamp, identity_label, normalize_cve_id
 from .watch.reporting import ReportService
-from .watch.rules import EVENT_KINDS
+from .watch.rules import EVENT_KINDS, evaluate_condition
 from .watch.statements import (
     default_template_text,
     template_kind,
@@ -189,7 +190,7 @@ def _cve_context(
     config, store = _state()
     view = store.view(identifier, catalogs=config.watch.sources)
     if view is None:
-        abort(404)
+        return render_template("watch_missing.html", cve_id=identifier, presence=store.source_presence(identifier)), 404 if status == 200 else status
     events = store.events(limit=EVENT_PAGE_SIZE, cve=identifier)
     trail_page = _page_number("trail_page")
     trail = store.report_trail(
@@ -220,6 +221,11 @@ def _cve_context(
     return render_template(
         "watch_cve.html",
         cve_id=identifier,
+        presence=store.source_presence(identifier),
+        scan_findings=cve_findings(config.database_path, identifier),
+        provider_records=store.provider_records(identifier),
+        rule_matches=[{"name": rule.name, "matched": evaluate_condition(view, rule.condition, rule)[0],
+                       "enabled": rule.enabled} for rule in config.watch.rules],
         view=view,
         event_rows=[
             {
@@ -417,6 +423,63 @@ def clients():
         has_next=page * limit < total,
         total=total,
     )
+
+
+@bp.get("/cves")
+@requires("view")
+def explorer():
+    config, store = _state()
+    filters = {name: _text(request.args, name) for name in
+               ("q", "source", "kev", "severity", "has_events", "reported", "client", "sort")}
+    for name in ("kev", "has_events", "reported"):
+        if filters[name] not in ("", "yes", "no"):
+            abort(400)
+    selected = None
+    if filters["client"]:
+        selected, overflow = client_cve_filter(config.database_path, filters["client"])
+        if overflow:
+            abort(400, description="Client filter exceeds the local result limit")
+    page = _page_number()
+    try:
+        result = store.search(query=filters["q"], source=filters["source"], kev=filters["kev"],
+                              severity=filters["severity"], has_events=filters["has_events"],
+                              reported=filters["reported"], sort=filters["sort"] or "modified",
+                              since=_date_filter("since"), until=_date_filter("until"),
+                              client_ids=selected, limit=50, offset=(page - 1) * 50,
+                              catalogs=config.watch.sources)
+    except StateError as exc:
+        abort(400, description=str(exc))
+    from .sources.common import cve_id
+    identifier = cve_id(filters["q"])
+    missing = identifier if identifier and store.view(identifier, catalogs=config.watch.sources) is None else None
+    links = dict(request.args)
+    links.pop("page", None)
+    return render_template("watch_explorer.html", result=result, filters=filters, page=page,
+                           next_url=url_for("watch.explorer", **links, page=page + 1) if page * 50 < result.total else None,
+                           previous_url=url_for("watch.explorer", **links, page=page - 1) if page > 1 else None,
+                           missing=missing, presence=store.source_presence(identifier) if missing else (),
+                           clients=client_options(config.database_path))
+
+
+@bp.post("/cve/<cve_id>/refresh")
+@requires("run")
+def refresh_cve(cve_id):
+    from .dashboard_jobs import build_command, JobQueueFull
+    from .dashboard_ops import require_accounts
+    require_accounts()
+    identifier = _cve_from_path(cve_id)
+    config, _ = _state()
+    try:
+        argv = build_command(config, "watch-refresh", cve_id=identifier)
+        current_app.extensions["dashboard_users"].record_action(
+            "cve_refresh_requested", username=g.user.username, actor=g.user.username, detail=identifier)
+        job = current_app.extensions["dashboard_jobs"].submit(
+            "watch-refresh", started_by=g.user.username, argv=argv)
+    except (RunInProgress, JobQueueFull) as exc:
+        abort(409, description=str(exc))
+    except CVEBeaconError:
+        abort(400, description="The refresh could not be started")
+    return redirect(url_for("operations.job_detail", job_id=job.id), code=303)
 
 
 @bp.get("/cve/<cve_id>")

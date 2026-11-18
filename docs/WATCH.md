@@ -38,7 +38,7 @@ configuration:
 [watch]
 enabled = false
 database = "cvebeacon-watch.db"
-sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
+sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list"]
 initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
@@ -54,7 +54,7 @@ language = "en"
   Configurations from earlier builds that omitted this setting should pin
   `database = "cvebeacon-watch.db"` before upgrading, or the old file is
   ignored and a new baseline starts.
-- `sources`: any subset of `nvd`, `euvd`, `cisa_kev`, `eu_kev`, and `epss`.
+- `sources`: any subset of `nvd`, `euvd`, `cisa_kev`, `eu_kev`, `epss`, and `cve_list`.
   `nvd` is required. Unknown names are rejected.
 - `initial`: what the first sync does; see [initial modes](#initial-modes).
 - `backfill_days`: 1 to 120, used only when `initial = "backfill"`.
@@ -1420,3 +1420,55 @@ Watch mode uses the same public sources as the rest of CVEBeacon:
 - [FIRST EPSS](https://www.first.org/epss/) for exploitation probability.
 
 See [sources](SOURCES.md) for the full source roles and limitations.
+
+## CVE List and the explorer
+
+`cve_list` is enabled in new setup files and in the default source selection.
+Existing explicit `sources` lists keep their selection; add `"cve_list"` to opt
+in. Existing files with no source list receive the new default. The watch
+schema migrates transactionally to version 8, retaining CVEs, events, deliveries,
+reports and EUVD resume progress. The new provider has its own initial mode,
+window and archive cursors; adding it does not reset an initial EUVD import.
+
+Its initial mode follows `watch.initial`: `baseline` saves a starting point
+without importing history, `backfill` imports records modified in the recent
+window, and `full` imports the complete daily baseline plus its cumulative hourly
+delta. Full history still uses the existing confirmation. First backfill/full
+syncs and daily baseline changes download a potentially large archive; see
+[feed limits and cost](SOURCES.md#cve-list-watch-feed). The CVE Program does not
+publish every reserved ID; only visible reserved records can be stored. Regular
+severity rules do not initially match rejected or reserved records unless their
+status is explicitly requested.
+
+The dashboard **CVEs** page lists stored watch CVEs with pagination, source,
+KEV, severity, publication date, event, reported and affected-client filters.
+Search accepts an exact case-insensitive CVE ID or description keywords and
+aliases. FTS5 is used when available, with literal LIKE search as a fallback;
+queries are limited to 256 characters and results to 100 per storage request
+(50 per dashboard page). FTS search uses word prefixes; fallback search uses a
+literal substring. Sorting supports publication date, modification date, CVSS,
+EPSS and KEV. A missing ID shows “Not in our database” and the stored source
+sync times. Source absence never proves that an asset is unaffected.
+
+To fetch a missing CVE or refresh an existing one:
+
+```console
+cvebeacon watch refresh CVE-2026-12345
+```
+
+This uses bounded single-record NVD, EUVD, CVE List and EPSS lookups for enabled
+sources. KEV catalogs have no per-ID endpoint: their small, bounded catalogs are
+read and only the requested CVE's rows are updated. Each reply is capped at
+8 MiB. No full sync runs and no feed cursor advances. Only the requested CVE's
+rules are evaluated; matching events and pending deliveries use the normal
+ledger. Refresh does not send notifications; `watch notify` or `watch run`
+delivers them normally. Source errors retain previous observations and are
+reported as degraded coverage.
+
+The dashboard action requires an account with `run`, a valid CSRF token and an
+auditable job submission. It uses the shared run lock; a conflict may require a
+retry after the active run finishes. CVE IDs are validated before any request or
+job is started. The existing CVE detail page includes source presence and
+update/check times, original provider records, current rule matches, events,
+deliveries, report state and the latest successful inventory scan's findings and
+affected clients. Scan findings are limited to 100 displayed rows.

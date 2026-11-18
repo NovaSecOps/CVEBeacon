@@ -12,6 +12,7 @@
 </p>
 <p>{{ report_mark(mark_entry) }}</p>
 
+{% include 'watch_presence.html' %}
 <h2>Stored view</h2>
 <dl>
   <dt>Status</dt><dd>{{ view.status }}</dd>
@@ -35,6 +36,14 @@
 {% else %}
 <p>No successful inventory scan is available.</p>
 {% endif %}
+
+<h2>Scan findings</h2>
+<p class="muted">Latest successful inventory scan, up to 100 findings.</p>
+<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Client</th><th>Advisory</th><th>Applicability</th></tr></thead><tbody>
+{% for item in scan_findings %}<tr><td>{{ item.asset_id }}</td><td>{{ item.client or 'Unassigned' }}</td><td>{{ item.advisory_id }}</td><td>{{ item.applicability }}</td></tr>{% else %}<tr><td colspan="4">No scan findings are stored for this CVE.</td></tr>{% endfor %}
+</tbody></table></div>
+<h2>Provider records</h2>
+{% for item in provider_records %}<details><summary>{{ item.source }} record</summary><pre class="break">{{ item.payload | tojson(indent=2) }}</pre></details>{% endfor %}
 
 <h2>CVSS by provider</h2>
 <div class="table-wrap"><table>
@@ -73,6 +82,8 @@
 <p class="muted">The report is recorded as the logged-in account. Channels configured with <code>notify_reported</code> receive a queued notice through the normal delivery ledger.</p>
 {% endif %}
 
+<h2>Current rule matches</h2>
+<ul>{% for item in rule_matches %}<li>{{ item.name }} · {{ 'Matches' if item.matched else 'Does not match' }}{% if not item.enabled %} · disabled{% endif %}</li>{% else %}<li>No watch rules are configured.</li>{% endfor %}</ul>
 <h2>Events</h2>
 <div class="table-wrap"><table>
 <thead><tr><th>Time</th><th>Rule</th><th>Kind</th><th>Initial</th><th>Reasons</th><th>Published</th><th>First seen</th><th>Deliveries</th></tr></thead>
