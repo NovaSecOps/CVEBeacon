@@ -559,7 +559,7 @@ class Native:
         self.run([venv / "bin/python", "-I", "-m", "pip", "--isolated", "check"])
 
     def command(self, release, command):
-        options = ["--allow-watch-only"] if command == "doctor" else []
+        options = ["--allow-watch-only", "--local-state"] if command == "doctor" else []
         return self.run([release / ".venv/bin/cvebeacon", "--config", self.policy.config, command, *options], service=True)
 
     def state(self, python, action, backup):

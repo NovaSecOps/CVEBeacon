@@ -45,7 +45,7 @@ Never run the privileged updater inside a container.
    when those distributions were installed before. No PyPI or git pull is part
    of the updater. Never mix unverified files into the wheel directory.
 5. As the service account, run the new `cvebeacon --config CONFIG migrate` and
-   `doctor --allow-watch-only`. These commands migrate and integrity-check local databases without
+   `doctor --allow-watch-only --local-state`. These commands migrate and integrity-check local databases without
    contacting sources; `doctor` also validates an inventory when configured.
 6. Select the new installation, restart the dashboard and re-enable the
    scheduler. Check `doctor` and the loopback `/healthz` endpoint. If validation
@@ -168,6 +168,10 @@ service account, not root; backups live under the protected code prefix.
 The configuration writer lock stays held while discovering and waiting for run
 locks, so the dashboard cannot move storage paths during that wait. Dashboard
 children finish before the dashboard unit is stopped.
+The updater's `doctor` uses `--local-state --allow-watch-only`: it checks the
+configuration, inventory when present, and local databases. Notification
+environment variables are loaded by the restarted service units and are not
+passed through the privileged updater. This health check sends no test alerts.
 
 The verified wheelhouse installs offline into `releases/VERSION/.venv`, retaining
 the optional extensions/automation distributions already present. The new

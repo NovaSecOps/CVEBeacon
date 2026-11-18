@@ -76,6 +76,7 @@ def _parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor", help="validate configuration, inventory, and local state access")
     doctor.add_argument("--live", action="store_true", help="also test enabled public source connectivity")
     doctor.add_argument("--allow-watch-only", action="store_true", help="validate local watch state when no inventory is configured")
+    doctor.add_argument("--local-state", action="store_true", help="validate local state without requiring notification environment variables")
     commands.add_parser("migrate", help="migrate and integrity-check local databases without network access")
     update = commands.add_parser("update", help="check or apply signed GitHub releases")
     update_sub = update.add_subparsers(dest="update_command", required=True)
@@ -1179,6 +1180,8 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         inventory_config = _inventory_config(config)
         assets = _load_inventory(config, inventory_config); store.initialize()
         checks = {"configuration": "ok", "inventory": f"ok ({len(assets)} assets)", "state": "ok", "teams_secret": "not required" if not config.teams.enabled else ("set" if config.secret(config.teams.webhook_env) else "missing"), "email_secrets": "not required" if not config.email.enabled else ("set" if all(config.secret(x) for x in (config.email.tenant_id_env, config.email.client_id_env, config.email.client_secret_env)) else "missing")}
+        if args.local_state:
+            checks["teams_secret"] = checks["email_secrets"] = "not checked (local state only)"
         if args.live:
             checks["live_sources"] = _live_source_checks(config)
         print(json.dumps(checks, indent=2))
