@@ -140,6 +140,32 @@ def test_operations_offers_watch_jobs_and_disables_inventory_jobs(watch_only_cli
     assert text.count("Unavailable: no inventory is configured.") == 2
 
 
+def test_overview_explains_watch_alerting_without_inventory(watch_only_client):
+    _, _, client = watch_only_client
+    text = client.get("/").text
+    assert (
+        "KEV, critical-severity and custom rule alerting still work without an "
+        "inventory" in text
+    )
+    assert "<code>[inventory]</code> is optional for watch mode" in text
+
+
+def test_header_groups_main_and_account_navigation(watch_only_client):
+    _, _, client = watch_only_client
+    text = client.get("/watch").text
+    header, remainder = text.split("</header>", 1)
+    assert 'class="main-nav"' in header
+    assert 'class="header-actions"' in header
+    assert ">Overview<" in header
+    assert ">Watch<" in header
+    assert "My account and sessions" in header
+    assert ">Configuration<" in header
+    assert ">Log out<" in header
+    assert 'name="csrf"' in header
+    assert header.index('class="main-nav"') < header.index('class="header-actions"')
+    assert "<nav" not in remainder
+
+
 @pytest.mark.parametrize("operation", ["scan", "run"])
 def test_inventory_operations_are_refused(watch_only_client, operation):
     _, _, client = watch_only_client
