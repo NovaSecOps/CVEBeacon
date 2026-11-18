@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import replace
 from datetime import timedelta
 
 import httpx
+import pytest
 from watch_support import NOW, mock_client, nvd_cve, nvd_page, write_config
 
 from cvebeacon import cli, dashboard
@@ -376,7 +378,6 @@ def test_inventory_commands_fail_clearly_without_inventory(tmp_path, capsys):
         ["export"],
         ["inventory", "validate"],
         ["inventory", "inspect"],
-        ["doctor"],
     ):
         assert cli.main(["--config", str(config.config_path), *command]) == 2
         error = capsys.readouterr().err
@@ -483,12 +484,56 @@ def test_watch_only_config_can_schedule_watch_run(tmp_path, monkeypatch, capsys)
     assert "Schedule: daily at 07:00" in output
 
 
-def test_watch_only_config_refuses_doctor(tmp_path, capsys):
-    config = write_config(tmp_path, inventory=False)
+def test_watch_only_config_doctor_checks_watch_deployment(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False, sources=("nvd", "epss"))
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+    output = capsys.readouterr().out
+    checks = json.loads(output)
+    assert checks["configuration"] == "ok"
+    assert checks["inventory"].startswith("skipped (watch-only deployment")
+    assert checks["data_directory"].startswith("ok (")
+    assert checks["watch_database"] == "ok (0 CVEs, schema 7)"
+    assert checks["watch_channels"] == "ok (no enabled channels)"
+    assert checks["watch_sources"] == "ok (nvd, epss; NVD API key not set (optional))"
+    assert checks["schedule"] == "not installed"
+    assert (tmp_path / "watch.db").exists()
+
+
+def test_watch_only_doctor_fails_for_a_missing_channel_secret(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(
+        tmp_path,
+        inventory=False,
+        channels="""
+[watch.channels.hook]
+type = "webhook"
+url_env = "CVEBEACON_TEST_MISSING_HOOK"
+""",
+    )
+    monkeypatch.delenv("CVEBEACON_TEST_MISSING_HOOK", raising=False)
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
     assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
-    error = capsys.readouterr().err
-    assert "requires an inventory" in error
-    assert "watch run" in error
+    output = capsys.readouterr().out
+    assert '"watch_channels": "missing: hook (url)"' in output
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+def test_watch_only_doctor_reports_unsafe_data_directory(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    tmp_path.chmod(0o777)
+    try:
+        assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    finally:
+        tmp_path.chmod(0o700)
+    output = capsys.readouterr().out
+    assert '"data_directory": "unsafe (group or other writable:' in output
 
 
 def test_watch_only_config_serves_dashboard(tmp_path, monkeypatch):

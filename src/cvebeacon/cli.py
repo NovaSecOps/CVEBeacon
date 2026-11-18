@@ -6,8 +6,10 @@ import argparse
 import getpass
 import json
 import logging
+import os
 import secrets
 import signal
+import stat
 import threading
 import sys
 import warnings
@@ -149,7 +151,7 @@ def _parser() -> argparse.ArgumentParser:
         default="text",
         help="export format for --all",
     )
-    watch_evaluate = watch_sub.add_parser("evaluate", help="re-evaluate stored CVEs against the current rules")
+    watch_evaluate = watch_sub.add_parser("evaluate", help="re-evaluate stored CVEs against the current rules (creates events; deliver with watch notify or watch run)")
     watch_evaluate.add_argument("--all", action="store_true", required=True, dest="all_cves", help="evaluate every stored CVE")
     watch_evaluate.add_argument("--yes", action="store_true", help="skip the confirmation")
     watch_rules = watch_sub.add_parser("rules", help="inspect watch rules")
@@ -853,9 +855,16 @@ def _source_status(store: StateStore) -> list[dict[str, object]]:
         return [] if row is None else [dict(x) for x in db.execute("SELECT asset_id,source,status,checked_at,message,freshness_at FROM source_health WHERE run_id=? ORDER BY asset_id,source", (row[0],))]
 
 
-def _live_source_checks(config: AppConfig) -> dict[str, str]:
+def _live_source_checks(
+    config: AppConfig, *, only: tuple[str, ...] | None = None
+) -> dict[str, str]:
     target = "CVE-2021-44228"
     checks: dict[str, str] = {}
+    wanted = (
+        (lambda name, enabled: enabled)
+        if only is None
+        else (lambda name, enabled: name in only)
+    )
     with HttpClient(config.http) as http:
         def nvd_check():
             api_key = config.nvd_api_key()
@@ -871,7 +880,7 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
             return payload
 
         operations = []
-        if config.sources.osv_enabled:
+        if wanted("osv", config.sources.osv_enabled):
             from .sources.osv import OSVSource
             def osv_check():
                 asset = Asset("connectivity", ecosystem="PyPI", product="requests", version="2.31.0")
@@ -879,18 +888,18 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
                 if result.error:
                     raise SourceError("osv", result.error)
             operations.append(("osv", osv_check))
-        if config.sources.nvd_enabled:
+        if wanted("nvd", config.sources.nvd_enabled):
             operations.append(("nvd", nvd_check))
-        if config.sources.cve_enabled:
+        if wanted("cve_list", config.sources.cve_enabled):
             operations.append(("cve_list", lambda: CVEListSource(http).record(target)))
-        if config.sources.euvd_enabled:
+        if wanted("euvd", config.sources.euvd_enabled):
             operations.append(("euvd", euvd_check))
         kev = KEVSource(http)
-        if config.sources.cisa_kev_enabled:
+        if wanted("cisa_kev", config.sources.cisa_kev_enabled):
             operations.append(("cisa_kev", kev.cisa))
-        if config.sources.eu_kev_enabled:
+        if wanted("eu_kev", config.sources.eu_kev_enabled):
             operations.append(("eu_kev", kev.eu))
-        if config.sources.epss_enabled:
+        if wanted("epss", config.sources.epss_enabled):
             operations.append(("epss", lambda: EPSSSource(http).scores([target])))
         for name, operation in operations:
             try:
@@ -898,6 +907,94 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
                 checks[name] = "ok"
             except CVEBeaconError as exc:
                 checks[name] = f"failed: {exc}"
+    return checks
+
+
+_WATCH_REQUIRED_SECRETS = {
+    "graph": ("client_secret",),
+    "teams": ("webhook_url",),
+    "slack": ("webhook_url",),
+    "discord": ("webhook_url",),
+    "telegram": ("bot_token",),
+    "matrix": ("access_token",),
+    "gotify": ("app_token",),
+    "webhook": ("url",),
+}
+
+
+def _watch_channel_check(config: AppConfig) -> str:
+    enabled = [channel for channel in config.watch.channels if channel.enabled]
+    missing: list[str] = []
+    for channel in enabled:
+        for key in _WATCH_REQUIRED_SECRETS.get(channel.type, ()):
+            reference = channel.secret(key)
+            if reference is None:
+                if key == "url" and channel.options.get("url"):
+                    continue
+                missing.append(f"{channel.name} ({key.replace('_', ' ')})")
+            elif reference.peek() is None:
+                missing.append(f"{channel.name} ({key.replace('_', ' ')})")
+    if missing:
+        return "missing: " + ", ".join(missing)
+    if not enabled:
+        return "ok (no enabled channels)"
+    names = ", ".join(channel.name for channel in enabled)
+    return f"ok ({len(enabled)} enabled: {names})"
+
+
+def _watch_source_check(config: AppConfig) -> str:
+    key = "set" if config.nvd_api_key() else "not set (optional)"
+    return f"ok ({', '.join(config.watch.sources)}; NVD API key {key})"
+
+
+def _data_directory_check(directory: Path) -> str:
+    try:
+        details = directory.stat()
+    except OSError:
+        return f"missing ({directory})"
+    if not directory.is_dir():
+        return f"not a directory ({directory})"
+    if not os.access(directory, os.W_OK | os.X_OK):
+        return f"not writable ({directory})"
+    if os.name == "posix" and stat.S_IMODE(details.st_mode) & 0o022:
+        return f"unsafe (group or other writable: {directory})"
+    return f"ok ({directory})"
+
+
+def _schedule_check() -> str:
+    try:
+        text = status().strip()
+    except OSError:
+        return "not checked (crontab is unavailable)"
+    except CVEBeaconError:
+        return "not checked (schedule status failed)"
+    if not text:
+        return "not installed"
+    first = text.splitlines()[0]
+    if first.casefold().startswith("not installed"):
+        return "not installed"
+    return f"installed ({first})"
+
+
+def _watch_only_doctor_checks(config: AppConfig) -> dict[str, object]:
+    from .watch.directories import ensure_private_directory
+    from .watch.store import WatchStore
+
+    ensure_private_directory(config.watch.database.parent)
+    store = WatchStore(config.watch.database)
+    watch_status = store.status(catalogs=config.watch.sources)
+    checks: dict[str, object] = {
+        "configuration": "ok",
+        "inventory": "skipped (watch-only deployment; KEV, critical and rule alerting work without one)",
+        "data_directory": _data_directory_check(config.watch.database.parent),
+        "watch_database": (
+            f"ok ({watch_status['rows']} CVEs, schema "
+            f"{watch_status['meta'].get('schema_version', 'unknown')})"
+        ),
+        "watch_channels": _watch_channel_check(config),
+        "watch_sources": _watch_source_check(config),
+        "schedule": _schedule_check(),
+    }
     return checks
 
 
@@ -1016,11 +1113,24 @@ def run(args: argparse.Namespace) -> int:
         if args.command == "run":
             return _run_all(config, yes=args.yes)
         if args.command == "doctor" and config.inventory is None:
-            raise CVEBeaconError(
-                "doctor requires an inventory; add [inventory] path, or use "
-                f"'cvebeacon --config {config.config_path} watch run' from cron or "
-                "Task Scheduler"
+            checks = _watch_only_doctor_checks(config)
+            if args.live:
+                checks["live_sources"] = _live_source_checks(
+                    config, only=config.watch.sources
+                )
+            print(json.dumps(checks, indent=2))
+            failed_live = any(
+                value != "ok" for value in checks.get("live_sources", {}).values()
             )
+            failed_local = any(
+                isinstance(value, str)
+                and value.startswith(
+                    ("missing", "unsafe", "not writable", "not a directory")
+                )
+                for name, value in checks.items()
+                if name != "live_sources"
+            )
+            return 2 if failed_local or failed_live else 0
         if args.command == "serve" and config.inventory is None and not config.watch.enabled:
             raise CVEBeaconError(
                 "serve requires an inventory or watch mode; add [inventory] path "
