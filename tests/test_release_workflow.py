@@ -103,3 +103,31 @@ def test_release_build_toolchain_is_hash_pinned():
         "setuptools",
         "wheel",
     }
+
+
+def test_release_builds_optional_wheels_and_the_binary_runtime_closure(jobs):
+    steps = jobs["python-dist"]["steps"]
+    build = step_with(steps, name="Build core sdist and wheel")["run"]
+    assert "--wheel --outdir dist ./extensions" in build
+    assert "--wheel --outdir dist ./automation" in build
+    assert step_with(steps, name="Assemble the offline runtime wheelhouse")["run"] == "python scripts/build_release_wheelhouse.py dist"
+
+
+def test_publishing_requires_signing_key_and_verifies_namespace_and_pin(jobs):
+    for job in ("release", "container-publish"):
+        gate = jobs[job]["steps"][0]
+        assert gate["env"]["RELEASE_SIGNING_KEY"] == "${{ secrets.RELEASE_SIGNING_KEY }}"
+        assert 'test -n "${RELEASE_SIGNING_KEY:-}"' in gate["run"]
+    steps = jobs["release"]["steps"]
+    signing = step_with(steps, name="Sign and verify the checksum manifest")
+    assert "ssh-keygen -Y sign" in signing["run"]
+    assert "-n cvebeacon-release" in signing["run"]
+    assert "ssh-keygen -Y verify -f src/cvebeacon/release-allowed-signers" in signing["run"]
+    assert "trap 'rm -f" in signing["run"]
+    assert steps.index(signing) < steps.index(step_with(steps, name="Create the draft release"))
+
+
+def test_wheelhouse_smoke_resolves_only_compatible_runtime_wheels(jobs):
+    smoke = step_with(jobs["python-dist"]["steps"], name="Install and smoke-test the wheel")["run"]
+    assert "--no-index --only-binary=:all: --find-links dist cvebeacon cvebeacon-extensions cvebeacon-automation" in smoke
+    assert "pip install dist/*.whl" not in smoke

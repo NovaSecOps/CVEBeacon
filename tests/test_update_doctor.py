@@ -18,4 +18,3 @@ def test_windows_check_status_uses_portable_atomic_publication(tmp_path, monkeyp
     assert json.loads(path.read_text()) == {"available": "0.1.1"}
     assert not list(tmp_path.glob(".update-*"))
     assert "Windows" in u.unsupported_reason()
-

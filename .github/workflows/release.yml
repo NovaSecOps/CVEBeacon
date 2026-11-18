@@ -16,6 +16,10 @@ on:
       - '.dockerignore'
       - 'Dockerfile'
       - 'pyproject.toml'
+      - 'extensions/pyproject.toml'
+      - 'automation/pyproject.toml'
+      - 'scripts/build_release_wheelhouse.py'
+      - 'src/cvebeacon/release-allowed-signers'
       - 'deploy/container/entrypoint.py'
       - 'requirements/release-build.txt'
       - 'scripts/build-windows.ps1'
@@ -56,6 +60,10 @@ jobs:
           expected = f"v{version}"
           if tag != expected:
               raise SystemExit(f"tag {tag!r} does not match pyproject version {version!r}; expected {expected!r}")
+          for project in ("extensions", "automation"):
+              other = tomllib.loads(pathlib.Path(project, "pyproject.toml").read_text())["project"]["version"]
+              if other != version:
+                  raise SystemExit(f"{project} version must match the core release version")
           print(f"tag {tag} matches pyproject version {version}")
           PY
       - name: Install all distributions
@@ -82,11 +90,15 @@ jobs:
           python -m pip install --require-hashes --only-binary :all: -r requirements/release-build.txt
           python -m pip show pip build setuptools wheel packaging pyproject_hooks | grep -E '^(Name|Version):'
           python -m build --no-isolation --sdist --wheel --outdir dist
+          python -m build --no-isolation --wheel --outdir dist ./extensions
+          python -m build --no-isolation --wheel --outdir dist ./automation
+      - name: Assemble the offline runtime wheelhouse
+        run: python scripts/build_release_wheelhouse.py dist
       - name: Install and smoke-test the wheel
         run: |
           python -m venv "$RUNNER_TEMP/wheel-venv"
           "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install --upgrade 'pip>=26.2'
-          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install --no-index --only-binary=:all: --find-links dist cvebeacon cvebeacon-extensions cvebeacon-automation
           "$RUNNER_TEMP/wheel-venv/bin/python" -m pip check
           "$RUNNER_TEMP/wheel-venv/bin/cvebeacon" --help
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -212,11 +224,13 @@ jobs:
       - name: Require release publishing opt-in
         env:
           RELEASE_PUBLISH_ENABLED: ${{ vars.RELEASE_PUBLISH_ENABLED }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           if [ "${RELEASE_PUBLISH_ENABLED:-}" != "true" ]; then
             echo "::error::RELEASE_PUBLISH_ENABLED is not exactly 'true' in the merged vars context. Publishing is disabled; the protected 'release' environment must exist and set this variable (docs/RELEASE_CHECKLIST.md)."
             exit 1
           fi
+          test -n "${RELEASE_SIGNING_KEY:-}" || { echo '::error::Release signing key is required.'; exit 1; }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
@@ -280,11 +294,13 @@ jobs:
       - name: Require release publishing opt-in
         env:
           RELEASE_PUBLISH_ENABLED: ${{ vars.RELEASE_PUBLISH_ENABLED }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           if [ "${RELEASE_PUBLISH_ENABLED:-}" != "true" ]; then
             echo "::error::RELEASE_PUBLISH_ENABLED is not true in the 'release' environment. Release creation is disabled; configure the protected environment first (docs/RELEASE_CHECKLIST.md)."
             exit 1
           fi
+          test -n "${RELEASE_SIGNING_KEY:-}" || { echo '::error::Release signing key is required.'; exit 1; }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
@@ -324,6 +340,20 @@ jobs:
           pathlib.Path("release-notes.md").write_text(notes)
           print(notes)
           PY
+      - name: Sign and verify the checksum manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_SIGNING_KEY:-}" || { echo '::error::Release signing key is required.'; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/release-signing-key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
+          ssh-keygen -Y sign -f "$key" -n cvebeacon-release release-assets/SHA256SUMS
+          ssh-keygen -Y verify -f src/cvebeacon/release-allowed-signers \
+            -I cvebeacon-release -n cvebeacon-release \
+            -s release-assets/SHA256SUMS.sig < release-assets/SHA256SUMS
       - name: Verify the tag still points at the built commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

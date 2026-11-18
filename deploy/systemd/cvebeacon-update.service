@@ -1,0 +1,19 @@
+[Unit]
+Description=Apply a requested signed CVEBeacon update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/
+EnvironmentFile=-/etc/cvebeacon/update.env
+ExecStart=/opt/cvebeacon/current/.venv/bin/cvebeacon update apply --from-request
+TimeoutStartSec=infinity
+UMask=0022
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/cvebeacon /var/lib/cvebeacon
