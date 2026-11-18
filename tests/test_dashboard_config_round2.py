@@ -1211,6 +1211,22 @@ recipients = ["soc@example.invalid"]
     assert config.config_path.read_bytes() == before
 
 
+def test_config_section_descriptions_distinguish_notification_kinds(accounts):
+    _, _, _, client = accounts
+    login(client, "admin")
+    notifications = client.get("/config/notifications")
+    assert notifications.status_code == 200
+    assert "Scan-report notifications (legacy)." in notifications.text
+    assert "watch alert channels" in notifications.text
+    channels = client.get("/config/channels")
+    assert channels.status_code == 200
+    assert "Watch alert channels." in channels.text
+    assert "scan-report notifications" in channels.text
+    index = client.get("/config/")
+    assert "scan-report notifications (legacy; secrets from the environment)" in index.text
+    assert "watch alert channels" in index.text
+
+
 def test_stale_live_credential_change_needs_manage_secrets(accounts):
     config, users, _, client = accounts
     secret = make_secret(config.config_path.parent / "password", "synthetic password")

@@ -47,6 +47,8 @@ version = "version"
 
 The legacy product path requires `asset_id`, `vendor`, `product`, and `version` as nonblank text. Explicit package/PURL/CPE/commit identities may omit generic fields; see [identity rules and optional mappings](IDENTITY.md). Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
 
+An inventory is optional in watch-only mode. Set `[watch] enabled = true` and no `[inventory] path` to keep KEV, critical-severity and custom-rule alerting; those alerts work without an inventory. Add `[inventory]` later to enable asset applicability, findings and reports. See [watch mode](WATCH.md#configuration).
+
 An optional `client` column labels the client that owns an asset. The value under `[inventory.columns]` is the source column name, not a client name: use `client = "Account"` for a column named `Account`, or `client = "client"` for the default `client` header. A row can then contain `Acme` in that column. Client names are internal, limited to 120 characters, and cannot contain control or format characters. Assets without a client belong to no client. Use one inventory file with a `client` column when several clients share a format; separate inventory files per client are not supported yet.
 
 Source controls, retry/timeouts, output paths, optional exact CPE mappings, and notification settings are illustrated in the example configuration. A configured product CPE must be a complete CPE 2.3 name with a wildcard version; verify it against NVD before use.
@@ -169,7 +171,7 @@ cvebeacon doctor --live
 cvebeacon source-status
 ```
 
-`doctor --live` also performs a bounded query against enabled public sources without committing scan state and returns a nonzero status if any check fails. `source-status` reports the latest persisted scan’s per-asset source outcome, including failed refreshes. An incomplete scan is recorded with run status `failed` and retains its source-health evidence and useful partial findings. Use `--verbose` for additional local diagnostics. Secrets and full webhook URLs are not printed.
+`doctor --live` also performs a bounded query against enabled public sources without committing scan state and returns a nonzero status if any check fails. Without an inventory, `doctor` checks the watch deployment instead: configuration, the watch data directory, watch database, channels, sources and the native schedule; it says that inventory checks are skipped and exits nonzero only for a real problem. `source-status` reports the latest persisted scan’s per-asset source outcome, including failed refreshes. An incomplete scan is recorded with run status `failed` and retains its source-health evidence and useful partial findings. Use `--verbose` for additional local diagnostics. Secrets and full webhook URLs are not printed.
 
 Common failures:
 
@@ -180,6 +182,8 @@ Common failures:
 - notification authentication errors: verify environment variables, tenant consent, sender, recipient, and workflow ownership.
 
 ## 11. Teams notifications
+
+`[notifications.teams]` and `[notifications.email]` are the scan-report notification sections. They are legacy, send scan findings, and read secrets from the environment. Watch alert channels use the separate `[watch.channels.*]` tables described in [watch mode](WATCH.md#channels); the two mechanisms are independent.
 
 Create a Teams Workflow with the “When a Teams webhook request is received” trigger and an action that posts the received Adaptive Card to the intended channel or chat. Store the generated URL in an environment variable, then enable the channel:
 
