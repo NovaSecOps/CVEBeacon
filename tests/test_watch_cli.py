@@ -513,10 +513,10 @@ def test_watch_only_doctor_checks_an_existing_watch_database(
     monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
     assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
     checks = json.loads(capsys.readouterr().out)
-    assert checks["watch_database"] == "ok (0 CVEs, schema 8)"
+    assert checks["watch_database"] == "ok (0 CVEs, schema 9)"
 
 
-@pytest.mark.parametrize("version", ["9", "999", "not-a-version"])
+@pytest.mark.parametrize("version", ["10", "999", "not-a-version"])
 def test_watch_only_doctor_rejects_an_unsupported_watch_schema(
     tmp_path, monkeypatch, capsys, version
 ):
@@ -530,7 +530,7 @@ def test_watch_only_doctor_rejects_an_unsupported_watch_schema(
     assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
     checks = json.loads(capsys.readouterr().out)
     assert checks["watch_database"] == (
-        f"unreadable (unsupported watch schema version {version}; expected 8 or "
+        f"unreadable (unsupported watch schema version {version}; expected 9 or "
         "an older supported schema)"
     )
 
@@ -549,7 +549,7 @@ def test_watch_only_doctor_accepts_an_older_supported_watch_schema(
     assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
     checks = json.loads(capsys.readouterr().out)
     assert checks["watch_database"] == (
-        f"ok (0 CVEs, schema {version}; will migrate to 8 on the next write)"
+        f"ok (0 CVEs, schema {version}; will migrate to 9 on the next write)"
     )
 
 

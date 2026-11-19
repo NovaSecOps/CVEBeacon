@@ -13,6 +13,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +56,7 @@ CHANNEL_INFO = (
     ("ntfy", "ntfy topic"),
     ("gotify", "Gotify server"),
     ("webhook", "generic JSON webhook"),
+    ("teams_bot", "Microsoft Teams bot direct messages (Azure registration required)"),
 )
 RULE_PRESETS = (
     ("critical", "CVSS at least 9.0"),
@@ -896,6 +898,33 @@ def _ask_webhook_channel(base: Path, name: str, kind: str) -> ChannelDraft:
     return draft
 
 
+def _ask_teams_bot(base: Path, name: str) -> ChannelDraft:
+    print("Register a single-tenant Azure Bot and install its Teams app first; see docs/TEAMS.md.")
+
+    def identifier(value: str) -> str:
+        try:
+            return str(uuid.UUID(value))
+        except ValueError:
+            raise ValueError("Enter a UUID.") from None
+
+    def recipient(value: str) -> str:
+        return _validate_email(value) if "@" in value else identifier(value)
+
+    tenant = _ask_validated("Teams bot tenant ID", "", identifier)
+    app = _ask_validated("Teams bot app ID", "", identifier)
+    recipients = _ask_list("Recipient object IDs or UPNs (comma-separated)", "", validator=recipient)
+    draft = ChannelDraft(name, "teams_bot", {
+        "type": "teams_bot", "tenant_id": tenant, "app_id": app,
+        "recipients": recipients, "format": "adaptive_card",
+    })
+    secret = _ask_secret_value("Teams bot client secret")
+    draft.secret_fields.append(("client_secret", SecretChoice(
+        file=_secret_relative(base, name, "client_secret"), value=secret,
+    )))
+    draft.comments.extend(_common_comments("teams_bot"))
+    return draft
+
+
 def _ask_telegram(base: Path, name: str) -> ChannelDraft:
     chat_id = _ask_validated(
         "Telegram chat id or @channel (e.g. -1001234567890)",
@@ -1041,6 +1070,8 @@ def _ask_channel(base: Path, name: str) -> ChannelDraft:
         return _ask_smtp(base, name)
     if kind == "graph":
         return _ask_graph(base, name)
+    if kind == "teams_bot":
+        return _ask_teams_bot(base, name)
     if kind in {"teams", "slack", "discord"}:
         return _ask_webhook_channel(base, name, kind)
     if kind == "telegram":

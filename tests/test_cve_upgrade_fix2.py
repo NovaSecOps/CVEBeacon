@@ -31,6 +31,7 @@ def prerelease_eight(path, *, corrupt=False):
         content=json.dumps(_nvd_content(record))
         db.execute("INSERT INTO watch_provider VALUES (?,'nvd',?,?,?,?)",(ID,'not-json' if corrupt else content,content,record.last_modified,NOW.isoformat()))
         db.execute("UPDATE watch_cve SET status='published',description='mixed old preview'")
+        db.execute("UPDATE watch_meta SET value='8' WHERE key='schema_version'")
     return store
 
 
