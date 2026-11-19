@@ -1170,22 +1170,30 @@ class WatchStore:
                     metadata = payload.get("cveMetadata") if isinstance(payload, dict) else None
                     raw_updated = metadata.get("dateUpdated") if isinstance(metadata, dict) else None
                     updated = self._parse_timestamp(raw_updated)
-                    stored = (self._parse_timestamp(previous["source_updated"])
-                              if previous and previous["source_updated"] else None)
-                    if updated is None:
-                        if previous is not None and stored is None:
-                            # Both revisions are undated. Keep the existing
-                            # evidence; an older archive cannot be proven newer.
-                            unchanged += 1
-                            continue
-                        if previous is not None and previous["source_updated"]:
-                            # Store the undated change, but retain the last
-                            # known revision so a later valid date cannot move
-                            # the row backwards.
-                            source_updated = previous["source_updated"]
-                    elif stored is not None and updated < stored:
+                    stored = None
+                    if previous is not None:
+                        try:
+                            previous_payload = json.loads(previous["payload_json"])
+                        except (TypeError, ValueError):
+                            previous_payload = None
+                        previous_metadata = (previous_payload.get("cveMetadata")
+                                             if isinstance(previous_payload, dict) else None)
+                        previous_updated = (previous_metadata.get("dateUpdated")
+                                            if isinstance(previous_metadata, dict) else None)
+                        stored = self._parse_timestamp(previous_updated)
+                    if updated is not None and stored is not None and updated < stored:
+                        # Both observations carry a valid date: the newer one
+                        # wins.
                         unchanged += 1
                         continue
+                    if updated is None:
+                        # With no usable incoming date, the observation fetched
+                        # now wins. Retain the last known valid revision for
+                        # display.
+                        source_updated = None
+                        if previous is not None and previous["source_updated"]:
+                            if self._parse_timestamp(previous["source_updated"]) is not None:
+                                source_updated = previous["source_updated"]
                 db.execute("INSERT INTO watch_provider VALUES (?,?,?,?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET record_json=excluded.record_json,payload_json=excluded.payload_json,source_updated=excluded.source_updated,checked_at=excluded.checked_at",
                            (record.cve_id, source, content, raw, source_updated, now))
                 if previous and previous["record_json"] == content and previous["payload_json"] == raw:

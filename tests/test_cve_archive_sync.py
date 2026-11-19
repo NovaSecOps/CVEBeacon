@@ -501,12 +501,40 @@ def test_initial_cve_list_import_does_not_send_regular_events_for_known_cve(tmp_
     assert any(event.kind=='severity_increase' and event.initial for event in events)
 
 
-def test_undated_archive_does_not_replace_undated_targeted_lookup(tmp_path):
+@pytest.mark.parametrize('first_hour,second_hour,expected',[
+    (10,11,'second'),
+    (11,10,'first'),
+    (10,None,'second'),
+    (None,10,'second'),
+    (None,None,'second'),
+    (None,None,'first'),
+])
+def test_record_precedence_for_dated_and_undated_observations(tmp_path,first_hour,second_hour,expected):
     store=WatchStore(tmp_path/'watch.db',clock=lambda:NOW)
-    targeted=record(description='live refresh v2')
-    del targeted['cveMetadata']['dateUpdated']
-    store.upsert_cve_list([targeted])
-    older=record(description='older archive v1')
-    del older['cveMetadata']['dateUpdated']
-    store.upsert_cve_list([older])
-    assert store.view(ID).description=='live refresh v2'
+    def observation(label,hour):
+        payload=record(description=label)
+        if hour is None:
+            del payload['cveMetadata']['dateUpdated']
+        else:
+            payload['cveMetadata']['dateUpdated']=NOW.replace(hour=hour).isoformat()
+        return payload
+    first=observation('first',first_hour)
+    second=observation('second',second_hour)
+    if expected=='first' and first_hour is None and second_hour is None:
+        first,second=second,first
+    store.upsert_cve_list([first])
+    store.upsert_cve_list([second])
+    assert store.view(ID).description==('first' if expected=='first' else 'second')
+
+def test_dated_row_wins_after_an_undated_row_replaced_it(tmp_path):
+    store=WatchStore(tmp_path/'watch.db',clock=lambda:NOW)
+    dated=record(description='dated eleven')
+    dated['cveMetadata']['dateUpdated']=NOW.replace(hour=11).isoformat()
+    undated=record(description='undated later fetch')
+    del undated['cveMetadata']['dateUpdated']
+    later=record(description='dated ten fetched last')
+    later['cveMetadata']['dateUpdated']=NOW.replace(hour=10).isoformat()
+    store.upsert_cve_list([dated])
+    store.upsert_cve_list([undated])
+    store.upsert_cve_list([later])
+    assert store.view(ID).description=='dated ten fetched last'
