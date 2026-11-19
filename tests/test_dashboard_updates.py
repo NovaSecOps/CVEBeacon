@@ -44,6 +44,16 @@ def test_admin_request_only_queues_version_and_audits(updates):
     assert any(entry.action == "update_request:0.1.1" for entry in users.audit_entries())
 
 
+def test_update_check_is_attributed_to_the_administrator(updates, monkeypatch):
+    config, users, client = updates
+    login(client)
+    monkeypatch.setattr(dashboard_update, "check", lambda *args: None)
+    assert submit(client, "/updates/check").status_code == 303
+    entry = users.audit_entries()[-1]
+    assert entry.action == "update_check"
+    assert entry.actor == "admin"
+
+
 def test_request_needs_account_admin_and_valid_csrf(updates):
     config, _, client = updates
     login(client)

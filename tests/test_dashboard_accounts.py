@@ -51,10 +51,17 @@ def test_local_bootstrap_is_one_time(setup):
     assert client.get("/bootstrap", environ_overrides={"REMOTE_ADDR": "192.0.2.1"}).status_code == 403
     assert submit(client, "/bootstrap", username="admin", password=PASSWORD).status_code == 303
     response = client.get("/bootstrap")
-    assert response.status_code in {303, 403}
-    if response.status_code == 403:
-        assert "closes it once an account exists" in response.text
-        assert "it accepts connections only from the computer running CVEBeacon" in response.text
+    assert response.status_code == 403
+    assert "closes it once an account exists" in response.text
+    assert "it accepts connections only from the computer running CVEBeacon" in response.text
+
+
+def test_account_pages_are_denied_before_accounts_exist(setup):
+    _, _, client = setup
+    response = client.get("/users")
+    assert response.status_code == 403
+    assert "may need an account store that has not been created yet" in response.text
+    assert "Ask an administrator" not in response.text
 
 
 def login(client, username="reader"):
@@ -331,7 +338,12 @@ def test_bootstrap_requires_empty_store_and_transaction_guard(accounts):
 def test_bootstrap_csrf_and_ipv6(setup):
     client = setup[2]
     assert client.post("/bootstrap", data={"username": "admin", "password": PASSWORD}).status_code == 400
-    assert client.get("/bootstrap", environ_overrides={"REMOTE_ADDR": "::1"}).status_code == 200
+    response = client.get("/bootstrap", environ_overrides={"REMOTE_ADDR": "::1"})
+    assert response.status_code == 200
+    missing = client.post("/bootstrap", data={"username": "admin", "password": PASSWORD})
+    assert missing.status_code == 400
+    assert "Return to the form, check what you entered, and submit it again." in missing.text
+    assert "closes it once an account exists" not in missing.text
 
 
 def test_shared_mode_transitions_to_accounts_without_restart(setup, monkeypatch):
