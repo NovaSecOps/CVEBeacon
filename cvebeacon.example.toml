@@ -74,7 +74,9 @@ overlap_minutes = 15
 
 # Optional local backups. See docs/BACKUP.md.
 [backup]
-directory = "backups"
+# Relative to this configuration file; disabled to use the state database's
+# backup directory by default.
+# directory = "backups"
 retention_days = 7
 keep_min = 3
 compress = true
