@@ -29,7 +29,10 @@ def sync_directory(path):
 
 
 def sync_file(path):
-    with Path(path).open("rb") as stream:
+    # Windows' FlushFileBuffers requires a writable handle; the updater's
+    # POSIX read-only handle remains unchanged on other platforms.
+    mode = "rb+" if os.name == "nt" else "rb"
+    with Path(path).open(mode) as stream:
         os.fsync(stream.fileno())
 
 

@@ -521,6 +521,20 @@ def test_corrupt_database_returns_a_backup_error(tmp_path):
     assert cli.main(["--config", str(config.config_path), "backup", "create"]) == 2
 
 
+def test_generic_failure_reports_the_exception_class_without_details(tmp_path, monkeypatch):
+    config = write_config(tmp_path, inventory=False)
+
+    def fail(*args, **kwargs):
+        raise OSError("/sensitive/example/path")
+
+    monkeypatch.setattr(backup, "_create", fail)
+    with pytest.raises(backup.BackupError) as failure:
+        backup.create(config)
+    assert "backup creation failed" in str(failure.value)
+    assert "OSError" in str(failure.value)
+    assert "/sensitive/example/path" not in str(failure.value)
+
+
 def test_backup_settings_use_existing_config_editor_metadata():
     from cvebeacon import dashboard_config as dc
 

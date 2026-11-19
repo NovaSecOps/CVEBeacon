@@ -666,8 +666,8 @@ def _locked(config: AppConfig, operation: str):
         lock.release()
 
 
-def _failure(operation: str):
-    return BackupError(f"{operation} failed")
+def _failure(operation: str, exc: BaseException) -> BackupError:
+    return BackupError(f"{operation} failed ({type(exc).__name__})")
 
 
 def create(config: AppConfig, *, include_secrets: bool = False, created_by: str = "cli") -> Backup:
@@ -676,8 +676,8 @@ def create(config: AppConfig, *, include_secrets: bool = False, created_by: str 
             return _create(config, include_secrets=include_secrets, created_by=created_by)
     except BackupError:
         raise
-    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error):
-        raise _failure("backup creation") from None
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error) as exc:
+        raise _failure("backup creation", exc) from None
 
 
 def verify(config: AppConfig, backup_id: str) -> Backup:
@@ -687,8 +687,8 @@ def verify(config: AppConfig, backup_id: str) -> Backup:
         return backup
     except BackupError:
         raise
-    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error):
-        raise _failure("backup verification") from None
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error) as exc:
+        raise _failure("backup verification", exc) from None
 
 
 def _active_jobs(config: AppConfig) -> list[dict]:
@@ -936,8 +936,8 @@ def restore(config: AppConfig, backup_id: str) -> dict:
         return _restore(config, backup_id)
     except BackupError:
         raise
-    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error):
-        raise _failure("backup restore") from None
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error) as exc:
+        raise _failure("backup restore", exc) from None
 
 
 def _restore(config: AppConfig, backup_id: str) -> dict:
@@ -1019,8 +1019,8 @@ def prune(config: AppConfig) -> dict:
             return _prune(config)
     except BackupError:
         raise
-    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error):
-        raise _failure("backup prune") from None
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error) as exc:
+        raise _failure("backup prune", exc) from None
 
 
 def _prune(config: AppConfig) -> dict:
@@ -1072,8 +1072,8 @@ def build_archive(config: AppConfig, backup_id: str, *, compress: bool | None = 
             return _build_archive(config, backup_id, compress=compress)
     except BackupError:
         raise
-    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error, tarfile.TarError):
-        raise _failure("backup download") from None
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error, tarfile.TarError) as exc:
+        raise _failure("backup download", exc) from None
 
 
 def _build_archive(config: AppConfig, backup_id: str, *, compress: bool | None = None) -> BinaryIO:
