@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from .config import AppConfig, InventoryConfig, load_config
+from .config import AppConfig, ConfigurationError, InventoryConfig, load_config
 from .clients import affected_clients, format_affected_clients
 from .engine import QueryEngine
 from .errors import CVEBeaconError, SourceError
@@ -72,6 +72,12 @@ def _parser() -> argparse.ArgumentParser:
     export = commands.add_parser("export", help="run a current query and write a report without committing state")
     export.add_argument("--format", choices=("xlsx", "json"), default="xlsx")
     export.add_argument("--output")
+    export_sub = export.add_subparsers(dest="export_command")
+    stix = export_sub.add_parser("stix", help="export the latest successful scan as a STIX 2.1 bundle")
+    stix.add_argument("--output", required=True, help="bundle JSON file to write")
+    stix.add_argument("--client", help="only export findings for this client label")
+    stix.add_argument("--include-clients", action="store_true", help="include client identity objects and labels")
+    stix.add_argument("--since", help="only export findings first seen on or after this ISO date")
     notify = commands.add_parser("notify", help="test configured notification channels")
     notify_sub = notify.add_subparsers(dest="notify_command", required=True)
     notify_test = notify_sub.add_parser("test")
@@ -874,6 +880,43 @@ def _report_path(config: AppConfig, kind: str) -> Path:
     return config.output_dir / f"cvebeacon-{stamp}.{kind}"
 
 
+def _run_stix_export(args, config: AppConfig) -> int:
+    from .stix import export_stix
+
+    destination = Path(args.output).expanduser().resolve()
+    protected = {config.config_path}
+    for database in (
+        config.database_path,
+        config.watch.database,
+        config.watch.users_database,
+    ):
+        protected.add(database)
+        protected.update(
+            Path(str(database) + suffix)
+            for suffix in ("-wal", "-shm", "-journal")
+        )
+    if config.inventory is not None and config.inventory.path is not None:
+        protected.add(config.inventory.path)
+    if destination in protected:
+        raise CVEBeaconError(
+            "STIX output cannot overwrite the configuration, inventory or "
+            "local database, including SQLite sidecar files"
+        )
+    print(
+        export_stix(
+            config.database_path,
+            destination,
+            client=args.client,
+            include_clients=args.include_clients,
+            since=args.since,
+            warning=lambda message: print(
+                f"warning: {message}", file=sys.stderr
+            ),
+        )
+    )
+    return 0
+
+
 def _source_status(store: StateStore) -> list[dict[str, object]]:
     store.initialize()
     with closing(store._connect()) as db:
@@ -1303,7 +1346,20 @@ def run(args: argparse.Namespace) -> int:
         if not args.yes and input("Remove the CVEBeacon schedule? [y/N] ").strip().casefold() not in {"y", "yes"}: print("cancelled"); return 1
         print("removed" if remove(system=args.platform) else "not installed")
         return 0
-    config = load_config(args.config)
+    stix_export = (
+        args.command == "export"
+        and getattr(args, "export_command", None) == "stix"
+    )
+    try:
+        config = load_config(args.config)
+    except ConfigurationError:
+        if not stix_export:
+            raise
+        # A state-only configuration is enough to read completed scan state;
+        # it needs no inventory path for this export.
+        config = load_config(args.config, allow_state_only=True)
+    if stix_export:
+        return _run_stix_export(args, config)
     lock = None
     if _lock_required(args):
         label = " ".join(
