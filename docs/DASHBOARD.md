@@ -669,3 +669,34 @@ those settings.
 ## Package identities and advisory views
 
 The manual query page has Product, Package (ecosystem/name/version), and Explicit PURL modes. Each uses the CLI assessment engine and preserves monitoring/event/delivery state. Findings can be filtered by category, system, ecosystem, PURL, advisory ID and CVE alias. Asset and evidence details show supplied identities, aliases and fixed boundaries. Fixed boundaries require review of the branch and source range before choosing an upgrade. Reports include separate Identities and Advisory Details sheets to keep Findings compact. Authentication and CSRF protection apply equally to all query modes.
+
+## CVE explorer and refresh
+
+Open **CVEs** (`/watch/cves`) to browse stored watch records, including CVE
+List-only entries. Search by CVE ID, description keyword or alias, then filter
+by source, KEV, severity, publication dates, events, reported status or affected
+client. Results are paginated in groups of 50 and sort by publication,
+modification, CVSS, EPSS or KEV. Searches are limited to 256 characters. New provider descriptions use FTS5 word prefixes when available, with literal
+LIKE fallback. Existing NVD descriptions use LIKE in place, without a copying
+migration.
+
+An absent ID shows “Not in our database”, source sync times and, for accounts
+with `run`, a **Fetch or refresh this CVE now** action. The same action appears
+on `/watch/cve/<CVE-ID>`. It submits an audited background job under the shared
+run lock, requires CSRF protection, and refreshes only that CVE from enabled
+sources. It evaluates that CVE's rules and queues matching deliveries without
+sending them. They go out on the next `watch notify` or `watch run`; users with
+`run` permission can choose **Deliver now** to start the existing audited notify
+job. Both the CVE and refresh-job pages explain this timing. Errors remain visible
+in the job log and source check status.
+
+The existing detail page adds presence (present, absent or not synced), source
+update and check times, retained provider containers, current rule matches and
+up to 100 findings from the latest successful inventory scan, including
+unassigned assets. Existing report history, statement generation, event and
+delivery status remain available. Remote source values are escaped, provider
+previews are capped at 64 KiB with
+a truncation marker, and no channel credentials are displayed. Read-only pages
+use snapshots and never migrate the watch DB or acquire writer locks. See
+[watch behavior](WATCH.md#cve-list-and-the-explorer)
+for feed limits, first-sync costs, upgrade behavior and CLI refresh.

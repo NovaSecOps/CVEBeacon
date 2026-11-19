@@ -18,7 +18,7 @@ from .watch.rules import Rule, parse_rules, validate_rule_sources
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
 OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit", "client")
-WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss")
+WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list")
 WATCH_INITIAL_MODES = ("baseline", "backfill", "full")
 WATCH_SETTINGS = {
     "enabled",

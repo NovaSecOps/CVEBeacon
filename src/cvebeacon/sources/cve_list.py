@@ -35,7 +35,7 @@ class CVEListSource:
         version = str(payload.get("dataVersion") or "")
         if not isinstance(metadata, dict) or cve_id(metadata.get("cveId")) != normalized or version not in {"5.0", "5.0.0", "5.1", "5.1.0", "5.1.1", "5.2", "5.2.0"}:
             raise SourceError("cve_list", "official record omitted required CVE JSON 5 metadata")
-        if metadata.get("state") not in {"PUBLISHED", "REJECTED"} or not isinstance(payload.get("containers"), dict) or not isinstance(payload["containers"].get("cna"), dict):
+        if (metadata.get("state") not in {"PUBLISHED", "REJECTED", "RESERVED"} or (metadata.get("state") != "RESERVED" and (not isinstance(payload.get("containers"), dict) or not isinstance(payload["containers"].get("cna"), dict)))):
             raise SourceError("cve_list", "official record omitted its state or CNA container")
         return payload
 

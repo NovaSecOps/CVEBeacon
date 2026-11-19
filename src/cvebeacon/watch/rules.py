@@ -142,7 +142,7 @@ class AlertSnapshot:
             raise ValueError("invalid alert snapshot")
         if snapshot.epss_band not in EPSS_BAND_LABELS:
             raise ValueError("invalid alert snapshot")
-        if snapshot.status not in {"published", "rejected"}:
+        if snapshot.status not in {"published", "rejected", "reserved"}:
             raise ValueError("invalid alert snapshot")
         if snapshot.max_severity_band not in SEVERITY_BANDS:
             raise ValueError("invalid alert snapshot")
@@ -274,7 +274,7 @@ def _leaf_value(key: str, value: Any, path: str) -> Any:
     if key in {"vendor", "product", "keyword", "cna"}:
         return _strings(value, path)
     if key == "status":
-        return _enum(value, path, ("published", "rejected"))
+        return _enum(value, path, ("published", "rejected", "reserved"))
     _fail(path, "is not a known condition key")
     raise AssertionError("unreachable")
 
@@ -831,7 +831,7 @@ def evaluate(
     snapshot = snapshot_for(view, rule)
     if previous is None:
         matched, reasons = evaluate_condition(view, rule.condition, rule)
-        if matched and view.status == "rejected" and "status rejected" not in reasons:
+        if matched and view.status in {"rejected", "reserved"} and f"status {view.status}" not in reasons:
             matched, reasons = False, ()
         if not matched:
             return None, ()

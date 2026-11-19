@@ -13,6 +13,7 @@ from ..config import AppConfig, WatchConfig
 from ..errors import CVEBeaconError, SourceError, StateError
 from ..http import HttpClient, Throttle
 from . import feeds
+from . import cve_list
 from .records import EPSS_BANDS
 from .rules import rule_epss_thresholds
 from .store import WatchStore
@@ -54,6 +55,11 @@ class SyncReport:
     def failures(self) -> tuple[str, ...]:
         return tuple(summary.source for summary in self.summaries if summary.error)
 
+    @property
+    def initial_complete(self) -> bool:
+        """CVE List initialization is independent of the existing window."""
+        return not any(source != "cve_list" for source in self.failures)
+
 
 def _record_sync_status(
     store: WatchStore, summaries: tuple[SourceSummary, ...], at: datetime
@@ -76,6 +82,8 @@ def _record_sync_status(
         values[f"{prefix}_records"] = str(summary.records)
         values[f"{prefix}_new"] = str(summary.new)
         values[f"{prefix}_changed"] = str(summary.changed)
+        if not summary.error and summary.requests:
+            values[f"{prefix}_success_at"] = at.isoformat()
         values[f"{prefix}_error"] = str(summary.error)[:500] if summary.error else ""
     store.set_metadata(values)
 
@@ -280,6 +288,17 @@ def _confirm(message: str) -> bool:
         return False
 
 
+def _sync_cve_list(config, http, store, now, initial_mode=None):
+    before = http.requests
+    try:
+        records, new, changed, identifiers = cve_list.sync(http, store, config.watch, now, initial_mode=initial_mode)
+    except SourceError as exc:
+        return SourceSummary("cve_list", http.requests - before, error=str(exc)), ()
+    pending = bool(store.metadata().get("cve_list_pending_until"))
+    return SourceSummary("cve_list", http.requests - before, records, new, changed,
+                        error="bounded delta catch-up pending; progress retained" if pending else None), identifiers
+
+
 def sync_watch(
     config: AppConfig,
     http: HttpClient,
@@ -288,6 +307,7 @@ def sync_watch(
     clock: Callable[[], datetime] = _utc_now,
     confirm: Callable[[str], bool] = _confirm,
     sleep: Callable[[float], None] = time.sleep,
+    cve_list_initial: str | None = None,
 ) -> SyncReport:
     watch = config.watch
     _require_enabled(watch)
@@ -296,6 +316,11 @@ def sync_watch(
     now = _clock_value(clock)
     today = now.date()
     first_run = "initialized_at" not in metadata
+    if cve_list_initial is not None:
+        if cve_list_initial not in {"baseline", "backfill", "full"}:
+            raise StateError("invalid CVE List initial mode")
+        if cve_list_initial != "baseline" and not (assume_yes or confirm("Import CVE List history, including its full archive download? [y/N] ")):
+            return SyncReport(cancelled=True)
     stored_mode = metadata.get("initial_mode")
     mode = stored_mode or (watch.initial if first_run else "baseline")
     initial_evaluation = (
@@ -313,8 +338,11 @@ def sync_watch(
             euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
             initial_window_start=today.isoformat(),
         )
+        cve_summary, identifiers = (_sync_cve_list(config,http,store,now,cve_list_initial)
+                                    if "cve_list" in watch.sources else (None,()))
         report = SyncReport(
-            summaries=tuple(SourceSummary(source) for source in watch.sources),
+            summaries=tuple(cve_summary if source == "cve_list" else SourceSummary(source) for source in watch.sources),
+            touched_ids=identifiers,
             baseline=True,
         )
         _record_sync_status(store, report.summaries, now)
@@ -329,8 +357,11 @@ def sync_watch(
                 euvd_cursor=today.isoformat() if "euvd" in watch.sources else None,
                 initial_window_start=today.isoformat(),
             )
+            cve_summary, identifiers = (_sync_cve_list(config,http,store,now,cve_list_initial)
+                                        if "cve_list" in watch.sources else (None,()))
             report = SyncReport(
-                summaries=tuple(SourceSummary(source) for source in watch.sources),
+                summaries=tuple(cve_summary if source == "cve_list" else SourceSummary(source) for source in watch.sources),
+                touched_ids=identifiers,
                 baseline=True,
             )
             _record_sync_status(store, report.summaries, now)
@@ -393,6 +424,11 @@ def sync_watch(
     lookup_failures = 0
     touched: set[str] = set(policy_touched)
     summaries: list[SourceSummary] = []
+    if "cve_list" in watch.sources:
+        summary, identifiers = _sync_cve_list(config,http,store,now,cve_list_initial)
+        summaries.append(summary)
+        touched.update(identifiers)
+    nvd_before = http.requests
     pending_windows = list(reversed(feeds.nvd_windows(nvd_start, nvd_end)))
     first_commit = True
     while pending_windows:
@@ -908,7 +944,7 @@ def sync_watch(
         touched_ids=tuple(sorted(touched)),
         initial_evaluation=initial_evaluation,
     )
-    if initial_evaluation and not report.failures:
+    if initial_evaluation and report.initial_complete:
         store.set_metadata({"initial_sync_completed_at": now.isoformat()})
     _record_sync_status(store, report.summaries, now)
     return report

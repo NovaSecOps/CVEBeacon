@@ -1,4 +1,4 @@
--- Schema 8 with sparse provider/search storage, before Teams bot storage.
+-- Fresh-install schema 8 with sparse provider/search storage, before Teams bot storage.
 CREATE TABLE IF NOT EXISTS watch_origin (
         cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
     );
