@@ -216,7 +216,7 @@ def test_job_succeeds_records_log_and_audit(ops):
     history = client.get("/operations/jobs")
     assert history.status_code == 200
     assert "Deliver pending alerts" in history.text
-    assert "succeeded" in history.text
+    assert "Succeeded" in history.text
     actions = [entry.action for entry in users.audit_entries()]
     assert f"job_started:{job.id}:{job.operation}" in actions
     wait_for(lambda: f"job_succeeded:{job.id}:{job.operation}" in [entry.action for entry in users.audit_entries()])

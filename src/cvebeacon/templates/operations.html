@@ -1,37 +1,105 @@
 {% extends 'base.html' %}
 {% from 'macros.html' import inventory_notice %}
+{% from 'watch_macros.html' import stamp %}
+{% from 'ui.html' import page_header, card, callout, empty_state, definition_list, table_wrap, badge, button %}
 {% block title %}Operations · CVEBeacon{% endblock %}
 {% block head %}{% if active or external_runs %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
-{% block content %}<h1>Operations</h1>
-{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
-{% for holder in external_runs %}<section class="panel"><h2>{{ 'Active run' if holder.state == 'active' else 'Run record · ' ~ holder.state }}</h2>
-<dl><dt>Command</dt><dd>{{ holder.command or 'Unavailable' }}</dd><dt>Account</dt><dd>{{ holder.account or 'unknown' }}</dd><dt>Host</dt><dd>{{ holder.host or 'unknown' }}</dd><dt>PID</dt><dd>{{ holder.pid or 'unknown' }}</dd><dt>Started (UTC)</dt><dd>{{ holder.started_at or 'unknown' }}</dd><dt>Elapsed</dt><dd>{{ holder.elapsed if holder.elapsed is not none else 'unknown' }} seconds</dd></dl>
-{% if holder.state == 'active' %}<p>Wait for this run to finish. External runs are managed by their command-line process or scheduler.</p>{% endif %}</section>{% endfor %}
-{% if schedule_summary %}<p>{{ schedule_summary }}</p>{% endif %}
-{% if not has_inventory %}{{ inventory_notice() }}{% endif %}
-{% if not accounts %}<p class="warning" role="alert">Operations require a CVEBeacon account. Create the first administrator with the local <a href="{{ url_for('bootstrap') }}">bootstrap form</a> or <code>cvebeacon users add NAME --admin</code>.</p>{% endif %}
-{% if full_history %}<p class="warning" role="alert">Watch is configured to start with <strong>full history</strong>. The first sync can download years of public records and take hours. It runs only from the confirmed form below, which supplies the same confirmation as the CLI's <code>--yes</code>.</p>{% endif %}
-<p>Operations run as separate <code>cvebeacon</code> processes. Operations that write the same storage share locks. Manual jobs wait in the queue for scheduled or command-line runs to finish, for up to six hours from submission. Channel tests use a separate lane with one test at a time. Each job records its start and outcome in the account audit trail.</p>
+{% block content %}
+{{ page_header('Operations', 'Start checks and deliveries, follow their progress, and confirm that automatic runs are in place.') }}
+{% if error %}{% call callout('danger', 'The job was not started') %}<p>{{ error }}</p><p>Nothing was changed. Check the message and try again.</p>{% endcall %}{% endif %}
 
-{% if accounts %}<h2>Run a job</h2><div class="table-wrap"><table><thead><tr><th>Operation</th><th>Action</th></tr></thead><tbody>
-{% for operation, label in operation_labels.items() %}{% if operation in ['scan', 'run'] or watch_enabled %}{% set available = has_inventory if operation in ['scan', 'run'] else watch_enabled %}<tr><td>{{ label }}</td><td>
+{% for holder in external_runs %}
+{% if holder.state == 'active' %}
+{% call card('Active run', 'A command started outside the dashboard is using the same storage. Jobs started here wait for it to finish.') %}
+{{ definition_list([('Command', holder.command or 'Unavailable'), ('Account', holder.account or 'unknown'), ('Host', holder.host or 'unknown'), ('Process ID', holder.pid or 'unknown'), ('Started (UTC)', stamp(holder.started_at) if holder.started_at else 'unknown'), ('Elapsed', (holder.elapsed if holder.elapsed is not none else 'unknown') ~ ' seconds')]) }}
+{% call callout('info', 'Nothing to do here') %}<p>Wait for this run to finish. External runs are managed by their command-line process or scheduler.</p>{% endcall %}
+{% endcall %}
+{% else %}
+{% call card('Run record · ' ~ holder.state, 'This record is from a command that is no longer running.' if holder.state == 'stale' else 'The current run status could not be read.') %}
+{{ definition_list([('Command', holder.command or 'Unavailable'), ('Account', holder.account or 'unknown'), ('Host', holder.host or 'unknown'), ('Process ID', holder.pid or 'unknown'), ('Started (UTC)', stamp(holder.started_at) if holder.started_at else 'unknown'), ('Elapsed', (holder.elapsed if holder.elapsed is not none else 'unknown') ~ ' seconds')]) }}
+{% if holder.state == 'unavailable' %}{% call callout('warning', 'Run status is unknown') %}<p>The run lock could not be read, so another command may still be running. Do not assume the storage is free.</p>{% endcall %}{% else %}{% call callout('info') %}<p>No command from this record is running now. The record is kept for diagnosis.</p>{% endcall %}{% endif %}
+{% endcall %}
+{% endif %}
+{% endfor %}
+
+{% call card('Schedule', 'Whether CVEBeacon runs by itself without someone opening this dashboard.') %}
+{% set can_schedule = accounts and 'manage_schedule' in permissions %}
+{% if schedule_summary == 'Schedule not installed' %}
+<p>{{ badge('Not installed', 'neutral') }}</p>
+<p>No automatic run is set up.{% if not can_schedule %} Ask an administrator to add one.{% endif %}</p>
+{% elif schedule_summary %}
+<p>{{ badge('Installed', 'success') }} {{ schedule_summary }}.</p>
+<p class="muted">{% if can_schedule %}Check the Schedule page for the current times and the command it runs.{% else %}Ask an administrator for the current times and the command it runs.{% endif %}</p>
+{% else %}
+<p>{{ badge('Unknown', 'warning') }}</p>
+<p>Schedule status is unavailable.{% if can_schedule %} Check the Schedule page before relying on automatic runs.{% else %} Ask an administrator to check it before relying on automatic runs.{% endif %}</p>
+{% endif %}
+{% if can_schedule %}<p><a href="{{ url_for('operations.schedule') }}">Open Schedule</a></p>{% endif %}
+{% endcall %}
+
+{% if not has_inventory %}{{ inventory_notice() }}{% endif %}
+{% if not accounts %}{% call callout('warning', 'Operations need an account') %}<p>Create the first administrator with the local <a href="{{ url_for('bootstrap') }}">bootstrap form</a> or <code>cvebeacon users add NAME --admin</code>.</p>{% endcall %}{% endif %}
+{% if full_history %}{% call callout('warning', 'Full history is on') %}<p>The first watch sync can download years of public records and take hours. It starts only from the confirmed button in Run a job, which supplies the same confirmation as the command line's <code>--yes</code>.</p>{% endcall %}{% endif %}
+
+{% call callout('info', 'How jobs work') %}<p>Each job runs as a separate <code>cvebeacon</code> process, not inside this dashboard. Jobs that change the same data take turns: a manual job can wait in the queue for up to six hours from submission behind a scheduled or command-line run. Channel tests run separately, one at a time. Every job records its start and outcome in the account audit trail.</p>{% endcall %}
+
+{% if accounts %}
+{% set operation_help = {
+  'scan': 'Check the inventory for known flaws.',
+  'watch-sync': 'Download new public vulnerability records.',
+  'watch-evaluate': 'Recheck every stored vulnerability record against the alert rules.',
+  'watch-notify': 'Send the alerts that are waiting.',
+  'watch-run': 'Fetch new records, recheck them and send alerts.',
+  'run': 'Scan the inventory, then run watch.',
+} %}
+{% call card('Run a job', 'Choose one action. The job starts in the background and you can follow it below.') %}
+{% call table_wrap('Operations available to run') %}<table>
+<thead><tr><th>Operation</th><th>What it does</th><th>Start it</th></tr></thead>
+<tbody>
+{% for operation, label in operation_labels.items() %}{% if operation in ['scan', 'run'] or watch_enabled %}{% set available = has_inventory if operation in ['scan', 'run'] else watch_enabled %}<tr><td>{{ label }}</td><td class="muted">{{ operation_help.get(operation, '') }}</td><td>
 {% if not available %}<span class="muted">Unavailable: no inventory is configured.</span>
 {% elif 'run' in permissions %}{% if full_history and operation in ['watch-sync', 'watch-run', 'run'] %}
-<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}"><input type="hidden" name="confirm" value="full-history"><button type="submit">Confirm full-history {{ label | lower }}</button></form>
+<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}"><input type="hidden" name="confirm" value="full-history">{{ button('Confirm full-history ' ~ (label | lower)) }}</form>
 {% else %}
-<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}"><button type="submit">{{ label }}</button></form>
+<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}">{{ button(label, kind='secondary') }}</form>
 {% endif %}{% else %}<span class="muted">Requires the run permission.</span>{% endif %}
 </td></tr>{% endif %}{% endfor %}
-</tbody></table></div>
+</tbody></table>{% endcall %}
+{% endcall %}
 
-<h2>Retry deliveries</h2><p>Failed deliveries are retried by the normal notify job. Use these variants only when a delivery definitely failed or its outcome is unknown.</p>
-{% for operation, label in retry_labels.items() %}{% if watch_enabled %}<form method="post" action="{{ url_for('operations.retry_jobs') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}">{% if 'retry' in permissions %}<button type="submit">{{ label }}</button>{% else %}<span class="muted">{{ label }} requires the retry permission.</span>{% endif %}</form>{% endif %}{% endfor %}
+{% if watch_enabled %}
+<div class="card-grid">
+{% call card('Retry deliveries', 'Failed deliveries are retried by the normal notify job. Use these only when a delivery definitely failed or its outcome is unknown.') %}
+{% for operation, label in retry_labels.items() %}
+<form method="post" action="{{ url_for('operations.retry_jobs') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="{{ operation }}">{% if 'retry' in permissions %}{{ button(label, kind='secondary') }}{% else %}<span class="muted">{{ label }} requires the retry permission.</span>{% endif %}</form>
+{% endfor %}
+{% endcall %}
 
-{% if watch_enabled %}<h2>Test a channel</h2><p>A test message is labelled and does not change delivery state. It is not subject to the data-changing run lock.</p>
-{% for channel in channels %}<form method="post" action="{{ url_for('operations.test_channel') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="channel" value="{{ channel }}">{% if 'test_channel' in permissions %}<button type="submit">Send test to {{ channel }}</button>{% else %}<span class="muted">{{ channel }} requires the test_channel permission.</span>{% endif %}</form>{% else %}<p class="muted">No enabled watch channels are configured.</p>{% endfor %}{% endif %}
+{% call card('Test a channel', 'A test message is marked as a test and does not change delivery state. It can run while a data-changing job is running.') %}
+{% for channel in channels %}
+<form method="post" action="{{ url_for('operations.test_channel') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="channel" value="{{ channel }}">{% if 'test_channel' in permissions %}{{ button('Send test to ' ~ channel, kind='secondary') }}{% else %}<span class="muted">{{ channel }} requires the test_channel permission.</span>{% endif %}</form>
+{% else %}<p class="muted">No enabled watch channels are configured.</p>{% endfor %}
+{% endcall %}
+</div>
+{% endif %}
 {% endif %}
 
-<h2>Current and recent jobs</h2>
-{% if active %}<ul>{% for job in active %}<li><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">Job {{ job.id }} · {{ job.label }}</a> · {{ job.status }} · started by {{ job.started_by }}{% if job.id in queue_details %} · {{ queue_details[job.id] }}{% endif %}</li>{% endfor %}</ul>{% elif not external_runs %}<p>No job is queued or running.</p>{% endif %}
-<p><a href="{{ url_for('operations.jobs') }}">Full job history</a>{% if accounts and 'manage_schedule' in permissions %} · <a href="{{ url_for('operations.schedule') }}">Schedule</a>{% endif %}</p>
+{% call card('Current and recent jobs', 'Jobs that are queued or running now. Open the job history for earlier results.') %}
+{% if active %}
+{% set status_variants = {'queued': 'neutral', 'running': 'info', 'succeeded': 'success', 'failed': 'danger', 'cancelled': 'neutral'} %}
+{% set status_labels = {'queued': 'Queued', 'running': 'Running', 'succeeded': 'Succeeded', 'failed': 'Failed', 'cancelled': 'Cancelled'} %}
+{% call table_wrap('Jobs in progress') %}<table>
+<thead><tr><th>Job</th><th>Operation</th><th>Status</th><th>Started by</th></tr></thead>
+<tbody>{% for job in active %}<tr>
+<td><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">Job {{ job.id }}</a></td>
+<td>{{ job.label }}</td>
+<td>{{ badge(status_labels.get(job.status, job.status), status_variants.get(job.status, 'neutral')) }}{% if job.id in queue_details %}<br><span class="muted">{{ queue_details[job.id] }}</span>{% endif %}</td>
+<td>{{ job.started_by }}</td>
+</tr>{% endfor %}</tbody>
+</table>{% endcall %}
+{% elif not external_runs %}
+{{ empty_state('No job is queued or running', 'Start one above, or open the job history to see earlier results.', url_for('operations.jobs'), 'View job history') }}
+{% endif %}
+<p class="muted"><a href="{{ url_for('operations.jobs') }}">Full job history</a>{% if accounts and 'manage_schedule' in permissions %} · <a href="{{ url_for('operations.schedule') }}">Schedule</a>{% endif %}</p>
+{% endcall %}
 {% endblock %}
