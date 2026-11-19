@@ -7,6 +7,7 @@ import math
 import os
 import re
 import stat
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -22,6 +23,7 @@ CHANNEL_TYPES = (
     "smtp",
     "graph",
     "teams",
+    "teams_bot",
     "slack",
     "discord",
     "telegram",
@@ -75,6 +77,10 @@ TYPE_KEYS = {
         "format",
     },
     "teams": {"webhook_url_env", "webhook_url_file"},
+    "teams_bot": {
+        "tenant_id", "app_id", "client_secret_file", "recipients",
+        "conversation_references", "service_url", "format",
+    },
     "slack": {"webhook_url_env", "webhook_url_file"},
     "discord": {"webhook_url_env", "webhook_url_file"},
     "telegram": {"bot_token_env", "bot_token_file", "chat_id"},
@@ -93,6 +99,7 @@ TYPE_KEYS = {
 SMTP_DEFAULT_PORTS = {"starttls": 587, "tls": 465, "none": 25}
 SMTP_SECURITY = ("starttls", "tls", "none")
 MESSAGE_FORMATS = ("text", "html")
+TEAMS_BOT_FORMATS = ("adaptive_card",)
 CREDENTIAL_FIELDS = {
     channel_type: frozenset(key for key in keys if key.endswith(("_env", "_file")))
     for channel_type, keys in TYPE_KEYS.items()
@@ -406,9 +413,12 @@ def _common(table: Mapping[str, Any], label: str, channel_type: str) -> dict[str
         if message_format is None:
             _fail(f"{label} format", "must not be empty")
     else:
-        message_format = "text"
+        message_format = "adaptive_card" if channel_type == "teams_bot" else "text"
     message_format = message_format.casefold()
-    if message_format not in MESSAGE_FORMATS:
+    if channel_type == "teams_bot":
+        if message_format not in TEAMS_BOT_FORMATS:
+            _fail(f"{label} format", "must be adaptive_card")
+    elif message_format not in MESSAGE_FORMATS:
         _fail(f"{label} format", "must be text or html")
     return {
         "enabled": enabled,
@@ -478,6 +488,86 @@ def _parse_graph(
         "to": _email_addresses(table, "to", label, required=True),
         "cc": _email_addresses(table, "cc", label, required=False),
         "bcc": _email_addresses(table, "bcc", label, required=False),
+    }
+
+
+# Public cloud only; sovereign clouds require a different token authority/scope.
+TEAMS_SERVICE_HOSTS = frozenset({"smba.trafficmanager.net"})
+
+
+def teams_service_url(value: str, label: str, *, allow_insecure: bool = False) -> str:
+    """Allow only the documented public-cloud Teams Connector origin."""
+    _https_url(value, label, allow_http=allow_insecure)
+    parts = urlsplit(value)
+    try:
+        port = parts.port
+    except ValueError:
+        _fail(label, "has an invalid port")
+    if (
+        parts.scheme != "https"
+        or parts.hostname not in TEAMS_SERVICE_HOSTS
+        or port not in {None, 443}
+    ):
+        _fail(label, "must use an allowed Microsoft Bot Framework HTTPS service URL")
+    if parts.query or parts.fragment or "\\" in value or "%" in parts.path or any(
+        segment in {".", ".."} for segment in parts.path.split("/")
+    ):
+        _fail(label, "must not contain a query, fragment or escaped path")
+    return value.rstrip("/") + "/"
+
+
+def _parse_teams_bot(
+    table: Mapping[str, Any], label: str, base: Path, common: dict[str, Any]
+) -> dict[str, Any]:
+    identifiers = {}
+    for key in ("tenant_id", "app_id"):
+        value = _string(table, key, label, required=True)
+        try:
+            identifiers[key] = str(uuid.UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            _fail(f"{label} {key}", "must be a UUID")
+    recipients = []
+    for recipient in _string_list(table, "recipients", label):
+        try:
+            recipient = str(uuid.UUID(recipient))
+        except ValueError:
+            if not re.fullmatch(r"[^@\s/?#\\\x7f]+@[^@\s/?#\\\x7f]+", recipient):
+                _fail(f"{label} recipients", "must contain object IDs or user principal names")
+            recipient = recipient.casefold()
+        if recipient not in recipients:
+            recipients.append(recipient)
+    service_url = teams_service_url(
+        _string(table, "service_url", label, maximum=2000)
+        or "https://smba.trafficmanager.net/teams/",
+        f"{label} service_url", allow_insecure=common["allow_insecure"],
+    )
+    references = table.get("conversation_references", [])
+    if not isinstance(references, list) or len(references) > 100:
+        _fail(f"{label} conversation_references", "must be a list of at most 100 tables")
+    parsed_references = []
+    for reference in references:
+        reference = _table(reference, f"{label} conversation reference")
+        if set(reference) - {"conversation_id", "service_url"}:
+            _fail(f"{label} conversation reference", "has unknown fields")
+        conversation_id = _string(reference, "conversation_id", label, required=True, maximum=2048)
+        endpoint = teams_service_url(
+            _string(reference, "service_url", label, maximum=2000) or service_url,
+            f"{label} conversation service_url", allow_insecure=common["allow_insecure"],
+        )
+        item = (conversation_id, endpoint)
+        if item not in parsed_references:
+            parsed_references.append(item)
+    if not recipients and not parsed_references:
+        _fail(label, "requires recipients or conversation_references")
+    if len(recipients) + len(parsed_references) > 100:
+        _fail(label, "must have at most 100 destinations")
+    return {
+        **common, **identifiers, "recipients": tuple(recipients),
+        "conversation_references": tuple(parsed_references), "service_url": service_url,
+        "client_secret": _secret(
+            table, "client_secret_env", "client_secret_file", f"{label} client_secret", base,
+            required=True,
+        ),
     }
 
 
@@ -673,6 +763,8 @@ def parse_channels(raw: Any, *, base: Path) -> tuple[ChannelConfig, ...]:
             options = _parse_smtp(table, label, base, common)
         elif channel_type == "graph":
             options = _parse_graph(table, label, base, common)
+        elif channel_type == "teams_bot":
+            options = _parse_teams_bot(table, label, base, common)
         elif channel_type in {"teams", "slack", "discord"}:
             options = _parse_webhook_channel(
                 table, label, base, common, channel_type

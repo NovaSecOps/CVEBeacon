@@ -22,7 +22,7 @@ def test_legacy_nvd_search_preserves_fts_tokens(tmp_path,query,expected,migrate)
     if migrate:
         store.initialize()
     assert store.search(query=query).total == expected
-    assert store.metadata()['schema_version'] == ('8' if migrate else '7')
+    assert store.metadata()['schema_version'] == ('9' if migrate else '7')
 
 
 def test_search_terms_can_span_enabled_providers(tmp_path):
