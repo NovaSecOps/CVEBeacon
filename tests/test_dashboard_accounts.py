@@ -403,6 +403,16 @@ def test_audit_tamper_is_visible(accounts):
     assert "Chain verification failed at row 1" in client.get("/audit").text
 
 
+def test_permission_denial_explains_the_role_and_local_only_options(accounts):
+    _, _, _, client = accounts
+    login(client)
+    response = client.get("/users")
+    assert response.status_code == 403
+    assert "not available to your account or from this connection" in response.text
+    assert "may need a permission your role does not include" in response.text
+    assert "may open only from the computer running CVEBeacon" in response.text
+
+
 @pytest.mark.parametrize("value", ["0", "true", "86401", "'900'", "59"])
 def test_idle_config_validation(setup, value):
     path = setup[0].config_path

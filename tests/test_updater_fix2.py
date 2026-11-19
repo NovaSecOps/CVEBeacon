@@ -181,7 +181,10 @@ def test_dashboard_check_handles_storage_oserrors(updates, monkeypatch):
     _, _, client = updates
     login(client)
     monkeypatch.setattr(dashboard_update, "check", lambda *args: (_ for _ in ()).throw(PermissionError("synthetic storage error")))
-    assert submit(client, "/updates/check").status_code == 400
+    response = submit(client, "/updates/check")
+    assert response.status_code == 400
+    assert "Release check failed." in response.text
+    assert "Return to the form, check what you entered, and submit it again." in response.text
 
 
 def test_tampered_snapshot_config_never_replaces_the_live_config(tmp_path):
