@@ -139,6 +139,15 @@ class UpdateConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BackupConfig:
+    """Optional local backup policy; the default directory follows the data."""
+    directory: Path | None = None
+    retention_days: int = 7
+    keep_min: int = 3
+    compress: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     config_path: Path
     inventory: InventoryConfig | None
@@ -152,6 +161,7 @@ class AppConfig:
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    backup: BackupConfig = field(default_factory=BackupConfig)
 
     def secret(self, env_name: str, *, required: bool = False) -> str | None:
         value = os.environ.get(env_name)
@@ -211,7 +221,9 @@ def notification_recipients(value):
     return tuple(item.strip() for item in value)
 
 
-def load_config(path: str | Path) -> AppConfig:
+def load_config(
+    path: str | Path, *, allow_state_only: bool = False
+) -> AppConfig:
     config_path = Path(path).expanduser().resolve()
     try:
         with config_path.open("rb") as handle:
@@ -311,7 +323,7 @@ def load_config(path: str | Path) -> AppConfig:
             encoding=str(inv.get("encoding", "utf-8-sig")),
             columns={name: str(value) for name, value in columns.items() if name in CANONICAL_FIELDS + OPTIONAL_FIELDS},
         )
-    elif not watch_enabled:
+    elif not watch_enabled and not allow_state_only:
         raise ConfigurationError("inventory.path is required")
 
     output = _table(data, "output")
@@ -321,6 +333,18 @@ def load_config(path: str | Path) -> AppConfig:
     update_data = _table(data, "update")
     if set(update_data) - {"enabled", "daily", "repository", "allow_prereleases"}:
         raise ConfigurationError("unknown update setting; privileged policy belongs in the administrator-owned update policy")
+    backup_data = _table(data, "backup")
+    if set(backup_data) - {"directory", "retention_days", "keep_min", "compress"}:
+        raise ConfigurationError("unknown backup setting: " + ", ".join(sorted(set(backup_data) - {"directory", "retention_days", "keep_min", "compress"})))
+    raw_backup_directory = backup_data.get("directory")
+    backup_directory: Path | None = None
+    if raw_backup_directory is not None:
+        if not isinstance(raw_backup_directory, str) or not raw_backup_directory.strip():
+            raise ConfigurationError("backup.directory must be a nonempty path")
+        backup_directory = _resolve(base, raw_backup_directory.strip())
+    backup_retention = _bounded_int(backup_data.get("retention_days", 7), "backup.retention_days", 1, 3650)
+    backup_keep_min = _bounded_int(backup_data.get("keep_min", 3), "backup.keep_min", 0, 1000)
+    backup_compress = _boolean(backup_data, "compress", True)
     repository = update_data.get("repository", "NovaSecOps/CVEBeacon")
     if not valid_repository(repository):
         raise ConfigurationError("update.repository must be an owner/repository name")
@@ -442,6 +466,7 @@ def load_config(path: str | Path) -> AppConfig:
         product_mappings=tuple(mappings),
         dashboard=DashboardConfig(hash_env.strip(), lifetime, _boolean(dashboard_data, "secure_cookie", False), idle),
         update=UpdateConfig(_boolean(update_data, "enabled", False), _boolean(update_data, "daily", False), repository, _boolean(update_data, "allow_prereleases", False)),
+        backup=BackupConfig(backup_directory, backup_retention, backup_keep_min, backup_compress),
         teams=TeamsConfig(
             enabled=teams_enabled,
             webhook_env=str(
