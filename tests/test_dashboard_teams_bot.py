@@ -22,6 +22,8 @@ def test_teams_bot_field_metadata():
     assert controls["recipients"]["default"] == "[]"
     assert controls["client_secret_file"]["secret"]
     assert controls["client_secret_file"]["allow_new_secret"]
+    assert controls["tenant_id"]["required"] and controls["app_id"]["required"]
+    assert controls["client_secret_file"]["required"] and not controls["recipients"]["required"]
     assert "client_secret_env" not in controls
 
 

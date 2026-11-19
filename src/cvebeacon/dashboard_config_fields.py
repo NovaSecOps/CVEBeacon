@@ -64,6 +64,7 @@ CHANNEL_DEFAULTS = {"allow_insecure": False, "security": "starttls", "port": SMT
 CHANNEL_REQUIRED = {
     "smtp": {"host", "from", "to"},
     "graph": {"tenant_id", "client_id", "sender", "to"},
+    "teams_bot": {"tenant_id", "app_id", "client_secret_file"},
     "telegram": {"chat_id"}, "matrix": {"homeserver", "room_id"},
     "ntfy": {"topic"}, "gotify": {"server"},
 }
