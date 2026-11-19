@@ -5,13 +5,23 @@
   'add': 'Account added',
   'passwd': 'Password changed',
   'unlock': 'Account unlocked',
+  'disable': 'Account disabled',
+  'enable': 'Account enabled',
   'login': 'Signed in',
   'logout': 'Signed out',
   'logout_all': 'Signed out everywhere',
+  'login_failed': 'Sign-in failed',
+  'login_locked': 'Sign-in refused while locked',
   'login_failures_suppressed': 'Repeated failed sign-ins suppressed',
   'role_save': 'Role permissions changed',
   'role_delete': 'Role deleted',
   'user_edit': 'Account changed',
+  'config_save': 'Configuration changed',
+  'web_asset_add': 'Web asset added',
+  'web_asset_change': 'Web asset changed',
+  'web_asset_remove': 'Web asset removed',
+  'web_asset_replaced': 'Web asset replaced',
+  'web_snapshot_remove': 'Web snapshot removed',
   'update_check': 'Release check',
   'update_request': 'Update requested',
   'backup_create_requested': 'Backup requested',
@@ -34,7 +44,7 @@
   'schedule_remove_skipped': 'Schedule removal skipped',
 } %}
 {% block content %}
-{{ page_header('Account audit', 'A chronological log of the actions CVEBeacon recorded about accounts, roles, sign-ins, backups and jobs, with a check that recorded rows were not edited.') }}
+{{ page_header('Account audit', 'A chronological log of the actions CVEBeacon recorded, with a check that recorded rows still match their checksums.') }}
 {% if broken is none %}
 {% call callout('success', 'Record chain verified') %}<p>Chain verified: every recorded row still matches its tamper-evident checksum. The check detects edits to recorded rows. It does not cover removal of the newest rows, or changes made directly in other account tables.</p>{% endcall %}
 {% else %}
@@ -42,9 +52,9 @@
 {% endif %}
 {% call table_wrap('Account audit entries') %}
 <table><thead><tr><th>Time</th><th>Action</th><th>Account</th><th>Actor</th></tr></thead><tbody>
-{% for entry in entries %}{% set parts = entry.action.split(':', 1) %}{% set label = action_labels.get(parts[0]) %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{% if label %}<span title="{{ entry.action }}">{{ label }}</span>{% if parts[1] %} <code class="muted">{{ parts[1] }}</code>{% endif %}{% else %}<span title="{{ entry.action }}"><code>{{ entry.action }}</code></span>{% endif %}</td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
+{% for entry in entries %}{% set parts = entry.action.split(':', 1) %}{% set label = action_labels.get(parts[0]) %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{% if label %}<span title="{{ entry.action }}">{{ label }}</span>{% else %}{{ entry.action }}{% endif %}<br><code class="muted">{{ entry.action }}</code></td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
 {% else %}<tr><td colspan="4">No audit entries recorded yet. Entries appear when accounts are created, changed or used.</td></tr>{% endfor %}
 </tbody></table>
 {% endcall %}
-<p class="muted">Actions are recorded by CVEBeacon itself: the dashboard, the command-line tool and background jobs. An empty Actor means the action happened outside the dashboard, such as a command-line command. The text after the action name shows the affected account, role or backup. Actions never recorded — for example changes made directly in the databases — are not in this log, and the chain check can only verify the rows that are here.</p>
+<p class="muted">Actions are recorded by CVEBeacon itself: the dashboard, the command-line tool and background jobs. An action with an empty Actor happened outside the dashboard's administrator gate, such as a sign-in attempt or a command-line command. Where recorded, the text after the action name identifies the affected job, version, setting or record. Actions never recorded — for example changes made directly in the databases — are not in this log, and the chain check can only verify the rows that are here.</p>
 {% endblock %}
