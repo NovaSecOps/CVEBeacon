@@ -27,11 +27,15 @@ def zipped(records, *, nested=False):
     with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
         for payload in records:
             name = payload['cveMetadata']['cveId']
-            archive.writestr(f"cves/2026/10xxx/{name}.json", json.dumps(payload))
+            info = zipfile.ZipInfo(f"cves/2026/10xxx/{name}.json", date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, json.dumps(payload))
     if nested:
         outer = BytesIO()
         with zipfile.ZipFile(outer, "w", zipfile.ZIP_STORED) as archive:
-            archive.writestr("cves.zip", data.getvalue())
+            info = zipfile.ZipInfo("cves.zip", date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            archive.writestr(info, data.getvalue())
         return outer.getvalue()
     return data.getvalue()
 

@@ -538,3 +538,12 @@ def test_dated_row_wins_after_an_undated_row_replaced_it(tmp_path):
     store.upsert_cve_list([undated])
     store.upsert_cve_list([later])
     assert store.view(ID).description=='dated ten fetched last'
+
+def test_asset_identity_is_stable_when_synthetic_digest_changes():
+    first={'id':1,'name':'2026-11-03_delta_CVEs_at_1200Z.zip','size':100,
+           'digest':'sha256:'+'1'*64,'browser_download_url':cve_list.ASSET_PREFIX+'fake/one.zip'}
+    second={**first,'digest':'sha256:'+'2'*64}
+    assert cve_list._asset_token(first)==cve_list._asset_token(second)
+    dated={**first,'updated_at':'2026-11-03T12:00:00Z'}
+    changed={**dated,'updated_at':'2026-11-03T13:00:00Z'}
+    assert cve_list._asset_token(dated)!=cve_list._asset_token(changed)
