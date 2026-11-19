@@ -1,3 +1,7 @@
 {% extends 'base.html' %}{% from 'macros.html' import inventory_notice %}
+{% from 'ui.html' import page_header %}
 {% block title %}{{ title }} · CVEBeacon{% endblock %}
-{% block content %}<h1>{{ title }}</h1>{{ inventory_notice() }}{% endblock %}
+{% block content %}
+{{ page_header(title, 'This page needs an inventory: the list of the software and systems you run.') }}
+{{ inventory_notice() }}
+{% endblock %}

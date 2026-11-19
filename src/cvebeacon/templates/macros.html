@@ -1,3 +1,4 @@
+{% from 'ui.html' import callout, table_wrap, applicability_badge, badge, term %}
 {% macro inventory_notice() %}
 <section class="warning" role="status">
 <p><strong>No inventory is configured.</strong> Inventory views and inventory scan operations are unavailable in watch-only mode.</p>
@@ -8,30 +9,67 @@ path = "inventory.csv"</pre>
 <p>See <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/USER_GUIDE.md#3-initial-configuration">docs/USER_GUIDE.md</a> for inventory formats and column mappings.</p>
 </section>
 {% endmacro %}
+
 {% macro status(data) %}
-{% if data.inventory_error %}<p class="warning" role="alert">Inventory unavailable. Current asset coverage cannot be established; inspect scanner configuration and logs.</p>{% endif %}
-{% if not data.latest %}<p class="warning" role="alert">No scan results recorded. Coverage is unknown.</p>
-{% elif data.stale %}<p class="warning" role="alert">Stale scan data: the last result is over 24 hours old or its timestamp cannot be trusted. Current coverage is unknown.</p>{% endif %}
-{% if data.failed %}<p class="warning" role="alert">{% if data.unfinished %}A scan has no recorded completion. It may be running or interrupted; check the scanner process.{% else %}The latest scan or delivery failed, or coverage was incomplete.{% endif %} Retained observations are not proof of current coverage.</p>{% endif %}
+{% if data.inventory_error %}{% call callout('warning', 'Inventory unavailable') %}<p>Current asset coverage cannot be established; inspect scanner configuration and logs. Fix the inventory file, then run a scan.</p>{% endcall %}{% endif %}
+{% if not data.latest %}{% call callout('warning', 'No scan results recorded') %}<p>Coverage is unknown. Run a scan to compare your inventory with known vulnerabilities.</p>{% endcall %}
+{% elif data.stale %}{% call callout('warning', 'Stale scan data') %}<p>The last result is over 24 hours old or its timestamp cannot be trusted. Current coverage is unknown. Run a new scan for an up-to-date view.</p>{% endcall %}{% endif %}
+{% if data.failed %}{% call callout('warning', 'The latest scan needs attention') %}<p>{% if data.unfinished %}A scan has no recorded completion. It may be running or interrupted; check the scanner process.{% else %}The latest scan or delivery failed, or coverage was incomplete.{% endif %} Retained observations are not proof of current coverage. Review source status and the scan log, then run a new scan.</p>{% endcall %}{% endif %}
 {% endmacro %}
+
 {% macro kev(value) %}{{ 'Unknown' if value is none else 'Yes' if value else 'No' }}{% endmacro %}
+
 {% macro finding_detail(f) %}
-<dl>{% for key, label in [('category','Category'),('system_id','System'),('ecosystem','Ecosystem'),('purl','PURL'),('cpe','CPE'),('repository','Repository'),('commit','Commit')] %}{% if f.asset[key] %}<dt>{{ label }}</dt><dd class="break">{{ f.asset[key] }}</dd>{% endif %}{% endfor %}
-<dt>Advisory / CVE</dt><dd>{{ f.vulnerability.advisory_id or f.vulnerability.cve_id }} · {{ f.vulnerability.cve_id or 'No CVE assigned' }}</dd>
-<dt>Aliases / source IDs</dt><dd>{{ f.vulnerability.aliases | default([]) | join(', ') }} · {{ f.vulnerability.source_ids | default([]) | join(', ') }}</dd>
-{% if f.vulnerability.fixed_versions %}<dt>Fixed boundaries</dt><dd>{{ f.vulnerability.fixed_versions | join(', ') }} — review the source ranges and branch before choosing an upgrade.</dd>{% endif %}</dl>
-<p><strong>{{ f.applicability }}</strong> · Confidence: {{ f.confidence }}</p><p>{{ f.reason }}</p>{% if f.vulnerability.summary %}<p>{{ f.vulnerability.summary }}</p>{% endif %}
-<dl><dt>CVSS</dt><dd>{{ f.vulnerability.cvss_score if f.vulnerability.cvss_score is not none else 'Unknown' }} · {{ f.vulnerability.cvss_version or 'Version unknown' }} · {{ f.vulnerability.cvss_vector or 'No vector' }}</dd>
-<dt>EPSS</dt><dd>{{ f.vulnerability.epss_score if f.vulnerability.epss_score is not none else 'Unknown' }} · Percentile {{ f.vulnerability.epss_percentile if f.vulnerability.epss_percentile is not none else 'unknown' }} · Date {{ f.vulnerability.epss_date or 'unknown' }}</dd>
-<dt>Known exploitation</dt><dd>CISA KEV: {{ kev(f.vulnerability.cisa_kev) }} · EU KEV: {{ kev(f.vulnerability.eu_kev) }}</dd></dl>
-{% for conflict in f.conflicts %}<p class="warning">{{ conflict }}</p>{% endfor %}
-{% for e in f.evidence %}<details><summary>{{ e.source }} · {{ e.role }} · {{ e.statement }}</summary><p>Retrieved {{ e.retrieved_at }} · Source timestamp {{ e.source_timestamp or 'unknown' }}</p><p class="break">{{ e.source_url or 'No source URL' }}</p><pre>{{ e.details | tojson(indent=2) }}</pre></details>{% else %}<p>No supporting evidence recorded; treat applicability with caution.</p>{% endfor %}
+<dl>
+<dt>Applies to this asset?</dt><dd>{{ applicability_badge(f.applicability) }} <span class="muted">Confidence: {{ f.confidence }}</span></dd>
+<dt>Why this result</dt><dd>{{ f.reason }}</dd>
+{% if f.vulnerability.summary %}<dt>Summary</dt><dd>{{ f.vulnerability.summary }}</dd>{% endif %}
+<dt>{{ term('CVSS', 'a 0-10 severity score') }}</dt><dd>{{ f.vulnerability.cvss_score if f.vulnerability.cvss_score is not none else 'Unknown' }} · {{ f.vulnerability.cvss_version or 'Version unknown' }} · {{ f.vulnerability.cvss_vector or 'No vector' }}</dd>
+<dt>{{ term('EPSS', 'estimated chance the flaw is exploited in the next 30 days') }}</dt><dd>{{ f.vulnerability.epss_score if f.vulnerability.epss_score is not none else 'Unknown' }} · Percentile {{ f.vulnerability.epss_percentile if f.vulnerability.epss_percentile is not none else 'unknown' }} · Date {{ f.vulnerability.epss_date or 'unknown' }}</dd>
+<dt>Known exploitation</dt><dd>CISA {{ term('KEV', 'on the list of flaws known to be actively exploited') }}: {{ kev(f.vulnerability.cisa_kev) }} · EU KEV: {{ kev(f.vulnerability.eu_kev) }}</dd>
+<dt>Advisory and {{ term('CVE', 'a public ID for one known security flaw') }}</dt><dd>{{ f.vulnerability.advisory_id or f.vulnerability.cve_id }} · {{ f.vulnerability.cve_id or 'No CVE assigned' }}</dd>
+<dt>Aliases and source IDs</dt><dd>{% set aliases = f.vulnerability.aliases | default([]) | join(', ') %}{% set source_ids = f.vulnerability.source_ids | default([]) | join(', ') %}{% if aliases %}{{ aliases }}{% endif %}{% if aliases and source_ids %} · {% endif %}{% if source_ids %}{{ source_ids }}{% endif %}{% if not aliases and not source_ids %}None recorded{% endif %}</dd>
+{% if f.vulnerability.fixed_versions %}<dt>Fixed versions and boundaries</dt><dd>{{ f.vulnerability.fixed_versions | join(', ') }} — review the source ranges and branch before choosing an upgrade.</dd>{% endif %}
+{% for key, label in [('category','Category'),('system_id','System'),('ecosystem','Ecosystem')] %}{% if f.asset[key] %}<dt>{{ label }}</dt><dd>{{ f.asset[key] }}</dd>{% endif %}{% endfor %}
+{% if f.asset['purl'] %}<dt>{{ term('PURL', 'a standard name for a software package') }}</dt><dd class="break">{{ f.asset['purl'] }}</dd>{% endif %}
+{% if f.asset['cpe'] %}<dt>{{ term('CPE', 'a standard name for a product and version') }}</dt><dd class="break">{{ f.asset['cpe'] }}</dd>{% endif %}
+{% for key, label in [('repository','Repository'),('commit','Commit')] %}{% if f.asset[key] %}<dt>{{ label }}</dt><dd class="break">{{ f.asset[key] }}</dd>{% endif %}{% endfor %}
+</dl>
+{% for conflict in f.conflicts %}{% call callout('warning', 'Sources disagree') %}<p>{{ conflict }}</p>{% endcall %}{% endfor %}
+{% for e in f.evidence %}<details class="disclosure"><summary>{{ e.source }} · {{ e.role }} · {{ e.statement }}</summary><p>Retrieved {{ watch_stamp(e.retrieved_at) if e.retrieved_at else 'unknown' }} · Source timestamp {{ watch_stamp(e.source_timestamp) if e.source_timestamp else 'unknown' }}</p><p class="break">{{ e.source_url or 'No source URL' }}</p><pre>{{ e.details | tojson(indent=2) }}</pre></details>{% else %}<p>{{ badge('No supporting evidence recorded', 'warning') }} Treat applicability with caution.</p>{% endfor %}
 {% endmacro %}
+
 {% macro findings_table(rows) %}
-<div class="table-wrap"><table><thead><tr><th>Asset / version</th><th>Advisory</th><th>Applicability</th><th>CVSS</th><th>CISA / EU KEV</th><th>Observation and evidence</th></tr></thead><tbody>
-{% for row in rows %}{% set f = row.finding %}<tr><td>{{ f.asset.asset_id }}<br>{{ f.asset.vendor }} · {{ f.asset.product }}<br>{{ f.asset.version }}{% if not row.current_inventory %}<p class="warning">Inventory changed or asset removed — historical observation</p>{% endif %}</td><td>{{ f.vulnerability.advisory_id or f.vulnerability.cve_id }}</td><td><span class="badge {{ f.applicability }}">{{ f.applicability }}</span></td><td>{{ f.vulnerability.cvss_score if f.vulnerability.cvss_score is not none else 'Unknown' }}</td><td>{{ kev(f.vulnerability.cisa_kev) }} / {{ kev(f.vulnerability.eu_kev) }}</td><td>Last observed {{ row.last_seen }}{% if row.stale %}<p class="warning">Retained observation; not refreshed in the latest scan or over 24 hours old.</p>{% endif %}<details><summary>Evidence and assessment</summary>{{ finding_detail(f) }}</details></td></tr>
-{% else %}<tr><td colspan="6">No matching observations. This is not proof of complete vulnerability coverage.</td></tr>{% endfor %}</tbody></table></div>
+{% call table_wrap('Findings and their evidence') %}
+<table>
+<thead><tr><th>Asset and version</th><th>Advisory</th><th>Does it apply?</th><th>Severity (CVSS)</th><th>Known exploited</th><th>Last observed</th></tr></thead>
+<tbody>
+{% for row in rows %}{% set f = row.finding %}{% set score = f.vulnerability.cvss_score %}<tr>
+<td>{% if row.current_inventory %}<a href="{{ url_for('asset', asset_id=f.asset.asset_id) }}">{{ f.asset.asset_id }}</a>{% else %}<span class="break">{{ f.asset.asset_id }}</span>{% endif %}<br><span class="muted">{{ f.asset.vendor }} · {{ f.asset.product }}</span><br><span class="muted">Version {{ f.asset.version or 'unknown' }}</span>{% if not row.current_inventory %}<p>{{ badge('Historical observation', 'warning') }} Inventory changed or asset removed.</p>{% endif %}</td>
+<td>{{ f.vulnerability.advisory_id or f.vulnerability.cve_id }}</td>
+<td>{{ applicability_badge(f.applicability) }}</td>
+<td>{% if score is none %}<span class="muted">Unknown</span>{% else %}{% set level = 'critical' if score >= 9 else 'high' if score >= 7 else 'medium' if score >= 4 else 'low' if score > 0 else 'none' %}{{ badge(level | capitalize, level if level in ['critical', 'high', 'medium', 'low'] else 'neutral') }} <span class="num">{{ score }}</span>{% endif %}</td>
+<td>CISA: {{ 'Yes' if f.vulnerability.cisa_kev else 'No' if f.vulnerability.cisa_kev is not none else 'Unknown' }}<br>EU: {{ 'Yes' if f.vulnerability.eu_kev else 'No' if f.vulnerability.eu_kev is not none else 'Unknown' }}</td>
+<td>{% if row.last_seen %}Last observed {{ watch_stamp(row.last_seen) }}{% else %}Not recorded{% endif %}{% if row.stale %}<p>{{ badge('Retained observation', 'warning') }} Not refreshed in the latest scan or over 24 hours old.</p>{% endif %}<details class="disclosure"><summary>Evidence and assessment</summary>{{ finding_detail(f) }}</details></td>
+</tr>
+{% else %}<tr><td colspan="6">No matching observations. This is not proof of complete vulnerability coverage.</td></tr>{% endfor %}
+</tbody></table>
+{% endcall %}
 {% endmacro %}
+
 {% macro health_table(rows) %}
-<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Source</th><th>Last check result</th><th>Freshness</th><th>Checked / source timestamp</th><th>Detail</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ row.asset_id }}</td><td>{{ row.source }}</td><td>{{ row.status }}</td><td>{{ row.freshness | default('query observation') }}</td><td>{{ row.checked_at }}<br>{{ row.freshness_at or 'Source timestamp unavailable' }}</td><td>{{ row.message }}</td></tr>{% else %}<tr><td colspan="6">No source observations recorded. Availability is unknown.</td></tr>{% endfor %}</tbody></table></div>
+{% call table_wrap('Source observations') %}
+<table>
+<thead><tr><th>Asset</th><th>Source</th><th>Last check result</th><th>Freshness</th><th>Checked / source timestamp</th><th>Detail</th></tr></thead>
+<tbody>
+{% for row in rows %}{% set variant = {'ok': 'success', 'degraded': 'warning', 'failed': 'danger', 'disabled': 'neutral'}.get(row.status, 'neutral') %}{% set status_label = {'ok': 'OK', 'degraded': 'Degraded', 'failed': 'Failed', 'disabled': 'Disabled'}.get(row.status, row.status | capitalize) %}{% set freshness = {'stale': 'Stale', 'cached observation': 'Cached observation', 'query observation': 'Query observation'}.get(row.freshness, row.freshness or 'Query observation') %}<tr>
+<td>{{ row.asset_id }}</td>
+<td>{{ row.source }}</td>
+<td>{{ badge(status_label, variant) }}</td>
+<td>{{ freshness }}</td>
+<td>{{ watch_stamp(row.checked_at) if row.checked_at else 'Not recorded' }}<br><span class="muted">{{ watch_stamp(row.freshness_at) if row.freshness_at else 'Source timestamp unavailable' }}</span></td>
+<td>{{ row.message }}</td>
+</tr>{% else %}<tr><td colspan="6">No source observations recorded. Availability is unknown.</td></tr>{% endfor %}
+</tbody></table>
+{% endcall %}
 {% endmacro %}
