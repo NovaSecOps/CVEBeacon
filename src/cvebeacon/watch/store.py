@@ -62,7 +62,7 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 8
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -647,9 +647,9 @@ class WatchStore:
             cls._set_meta(db, {"provider_storage": "sparse-v1"})
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5", "6", "7", "8", "9"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5", "6", "7", "8"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -759,7 +759,7 @@ class WatchStore:
 
     @classmethod
     def _ensure_teams_bot_schema(cls, db: sqlite3.Connection) -> None:
-        """Validate bot tables after main schema 7 or provider schema 8 migration."""
+        """Validate bot tables after the schema 7 to 8 migration."""
         if not cls._storage_columns_present(db, _TEAMS_BOT_COLUMNS):
             raise StateError("unsupported Teams bot storage layout; refusing to skip migration")
         db.execute(

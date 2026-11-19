@@ -545,7 +545,7 @@ that stronger claim. `watch reported --verify` reports the first broken row and
 exits 2; when it succeeds it prints how many rows are chained and how many are
 legacy and unchained. The user audit table uses the same construction.
 
-The watch database schema is version 9. Rows written before the identity upgrade
+The watch database schema is version 8. Rows written before the identity upgrade
 have `chain_version = 0`, a null chain, and are reported as legacy unchained;
 the chain starts with the first report written after the upgrade. Migration
 records the highest legacy row id in `watch_meta` once. A legacy row must be at
@@ -1050,7 +1050,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 9. An unknown version still fails closed. The version 1
+place to schema version 8. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to
@@ -1072,7 +1072,8 @@ existing chains and gains `chain_version = 1` without re-hashing them. Migration
 never rewrites a stored chain, even when the version metadata claims to be
 older. Later edits and middle deletions then fail `watch reported --verify`.
 The version 7 to 8 upgrade adds empty tables and a sparse FTS index for new
-provider descriptions. Existing NVD/EUVD data and extra legacy columns stay in
+provider descriptions, plus the Teams bot conversation, batch and delivery
+tables. Existing NVD/EUVD data and extra legacy columns stay in
 place: there is no historical JSON validation, payload copy, description copy
 or `watch_cve` rebuild. Read-only pages use snapshots without writer locks and
 can browse schema-7 observations before the first mutating command upgrades

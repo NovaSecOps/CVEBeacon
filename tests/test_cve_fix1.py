@@ -103,7 +103,7 @@ def test_migration_adds_no_copies_and_tolerates_legacy_rows(tmp_path, corrupt, e
         assert db.execute('SELECT count(*) FROM watch_provider').fetchone()[0] == 0
         assert db.execute('SELECT count(*) FROM watch_search').fetchone()[0] == 0
         assert db.execute('SELECT description FROM watch_cve').fetchone()[0] == 'retained'
-        assert db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone()[0] == '9'
+        assert db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone()[0] == '8'
     if corrupt:
         with pytest.raises(StateError, match=ID):
             store.view(ID)

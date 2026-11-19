@@ -10,7 +10,9 @@ locks. Schema-7 watch observations can be browsed before the first write.
 
 Existing NVD rows and EUVD items remain in place, including extra legacy
 columns. The migration adds empty provider, origin, source-check, scoped EUVD,
-initial-evaluation and delta-progress tables. It does not copy or parse existing
+initial-evaluation and delta-progress tables. The same transaction adds the
+Teams bot conversation-reference, frozen-batch and per-destination delivery
+tables. It does not copy or parse existing
 NVD/EUVD records, backfill descriptions, rebuild `watch_cve`, or index the full
 historical database. Reserved CVE List state lives in its provider record;
 legacy identity placeholders do not require replacing the old status constraint.
@@ -41,19 +43,12 @@ hold the existing NVD/EUVD initial window open.
 ## Optional Teams bot channel
 
 Back up the watch database before upgrading. The first write-capable watch
-operation migrates schema 8 to 9 in a transaction, preserving existing event,
-delivery and reporting history. The new tables store Teams bot conversation
-references, frozen message batches and per-recipient results. Bot migration
-checks actual tables and columns even if an earlier build already wrote the
-version number. Main's schema 7 upgrades directly to 9 in the same transaction,
-including provider/search storage before bot storage. CVE-1's schema 8 to 9
-upgrade preserves its existing provider and search data. Both fresh-install and
-upgraded schema-8 layouts are supported; the legacy CVE status constraint stays
-unchanged. Read-only views do not migrate an existing database.
-
-The unreleased Teams schema 8 was never shipped and is not a supported upgrade
-input. There is no migration for its initial-digest batches or missing columns.
-Schema 8 here means CVE-1's provider schema; CVE-1 is incorporated first.
+operation migrates schema 7 to 8 in a single transaction, preserving existing
+event, delivery and reporting history. The new tables store Teams bot
+conversation references, frozen message batches and per-recipient results. Bot
+migration checks actual tables and columns even if an earlier build already
+wrote the version number. The legacy CVE status constraint stays unchanged.
+Read-only views do not migrate an existing database.
 
 Existing Teams Workflow webhook configuration remains unchanged. A pre-release
 `teams_bot` configuration with a custom HTTPS `service_url` outside the allowed
