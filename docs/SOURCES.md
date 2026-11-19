@@ -82,7 +82,9 @@ where the newest available boundary is stored without importing an archive.
   exactly on the boundary is re-offered idempotently, so it is neither lost nor
   alerted twice. Records with a missing or unparseable `dateUpdated` are always
   imported and counted, regardless of `dateReserved` or `datePublished`; they
-  are never silently skipped. The fallback baseline therefore fills exactly the
+  are never silently skipped. When both observations have a valid
+  `dateUpdated`, the newer date wins; when either lacks one, the observation
+  fetched most recently wins. The fallback baseline therefore fills exactly the
   outstanding interval and is complete by construction.
 - **Manual refresh:** `watch refresh` never changes the feed cursor, archive
   token or initial state.

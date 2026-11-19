@@ -1010,7 +1010,9 @@ rule sets `old_cves = "alert"`.
 
 An evaluation during the first sync of a database in `backfill` or `full` mode
 marks its `match` events `initial = 1`. `cvebeacon watch evaluate --all` marks
-only the `match` events it creates as initial; escalations keep `initial = 0`.
+only the `match` events it creates as initial; escalations keep `initial = 0`,
+except for CVEs still carrying a pending CVE List source-initial mark, whose
+events all use the initial ledger.
 It always does this, including after initialization is closed, so re-evaluating
 after a rule change produces a summary digest instead of individual alerts. It
 requires `--yes` or a confirmation. Once a failure-free initial sync has
@@ -1482,8 +1484,8 @@ cvebeacon watch sync --cve-list-initial full --yes
 
 Without `--yes`, history needs an affirmative confirmation. The same option is
 available on `watch run`; existing NVD/EUVD initialization and cursors are not
-reset. Source-specific initial matches use the normal initial delivery ledger,
-while unrelated incremental matches stay normal. A CVE List failure or pending
+reset. Source-specific initial events use the normal initial delivery ledger,
+while unrelated incremental events stay normal. A CVE List failure or pending
 bounded catch-up is degraded coverage and does not hold other sources' initial
 completion open.
 
@@ -1509,7 +1511,9 @@ at or after the cursor as normal changes that can alert; records before the
 cursor are skipped as already known, and a boundary record is re-offered
 idempotently so it is neither lost nor alerted twice. Records with a missing or
 unparseable `dateUpdated` are always imported and counted, regardless of
-`dateReserved` or `datePublished`, never silently skipped. A gap-fallback
+`dateReserved` or `datePublished`, never silently skipped. When both
+observations have a valid `dateUpdated`, the newer date wins; when either lacks
+one, the observation fetched most recently wins. A gap-fallback
 baseline therefore fills the outstanding interval completely. Until the
 end-of-day tag is published shortly after 00:00, a sync that needs it fails
 closed with the cursor unchanged and retries; daily schedules should avoid the
