@@ -211,7 +211,7 @@ def test_shell_helper_reports_registered_endpoints(watch_only_client):
 
 def test_navigation_contrast_and_narrow_layout(watch_only_client):
     _, _, client = watch_only_client
-    css = client.get("/static/dashboard.css").text
+    css = client.get("/static/dashboard.css").text.replace("\r\n", "\n")
     for token in ("--nav-bg", "--nav-text", "--nav-active-bg", "--nav-active-text", "--focus"):
         assert css.count(f"{token}:") >= 3  # light, system dark, manual dark
     assert ':root[data-theme="dark"]' in css and ':root[data-theme="light"]' in css
@@ -256,9 +256,9 @@ def test_stylesheet_has_no_external_urls():
     from pathlib import Path
 
     static = Path(dashboard.__file__).parent / "static"
-    css = (static / "dashboard.css").read_text()
+    css = (static / "dashboard.css").read_text(encoding="utf-8")
     assert not re.search(r"(?i)(https?:)?//|@import|url\(", css)
-    assert not re.search(r"(?i)https?://|\bimport\b|\beval\(", (static / "ui.js").read_text())
+    assert not re.search(r"(?i)https?://|\bimport\b|\beval\(", (static / "ui.js").read_text(encoding="utf-8"))
 
 
 def test_templates_use_no_inline_styles_or_scripts():
@@ -266,7 +266,7 @@ def test_templates_use_no_inline_styles_or_scripts():
 
     templates = Path(dashboard.__file__).parent / "templates"
     for path in sorted(templates.glob("*.html")):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert not re.search(r"(?i)\sstyle\s*=", text), path.name
         assert not re.search(r"(?i)\son[a-z]+\s*=", text), path.name
         assert not re.search(r"(?is)<script\b(?![^>]*\bsrc=)[^>]*>", text), path.name
