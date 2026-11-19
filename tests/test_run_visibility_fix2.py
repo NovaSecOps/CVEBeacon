@@ -101,3 +101,31 @@ def test_permission_fallback_does_not_retain_partial_publication(tmp_path, monke
     finally:
         lock.release()
 
+
+@pytest.mark.parametrize("error", sorted({errno.ENOSYS, errno.EOPNOTSUPP}))
+def test_unsupported_hard_links_leave_normal_runs_usable(tmp_path, monkeypatch, error):
+    attempts = []
+    def unsupported(source, target):
+        attempts.append((source, target))
+        raise OSError(error, "synthetic filesystem without hard-link support")
+    monkeypatch.setattr(locking.os, "link", unsupported)
+    with RunLock(tmp_path / "run.lock", command="scan") as lock:
+        snapshot = RunLock(lock.path).snapshot()
+        assert snapshot["state"] == "active" and snapshot["description"] == "holder unavailable"
+        assert lock._owner_descriptor is None
+        assert list(tmp_path.glob("run.lock.owner.*")) == []
+    assert len(attempts) == 1
+    assert RunLock(lock.path).probe() is None
+
+
+@pytest.mark.parametrize("winerror", [1, 50, 120])
+def test_unsupported_windows_link_errors_leave_normal_runs_usable(tmp_path, monkeypatch, winerror):
+    def unsupported(source, target):
+        error = OSError(errno.EINVAL, "synthetic unsupported Windows link operation")
+        error.winerror = winerror
+        raise error
+    monkeypatch.setattr(locking.os, "link", unsupported)
+    with RunLock(tmp_path / "run.lock") as lock:
+        assert RunLock(lock.path).snapshot()["description"] == "holder unavailable"
+        assert list(tmp_path.glob("run.lock.owner.*")) == []
+
