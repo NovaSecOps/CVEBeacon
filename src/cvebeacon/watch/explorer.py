@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import closing
 import json
 import re
+import sqlite3
 
 from ..errors import StateError
 from ..sources.common import cve_id
@@ -27,7 +29,7 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
     query = query.strip()
     limit = max(1, min(int(limit), 100))
     offset = max(0, min(int(offset), 5_000_000))
-    with store.read() as db:
+    with store.read() as db, closing(sqlite3.connect(":memory:")) as matcher:
         active = tuple(name for name in SOURCES if name in catalogs)
         enabled = "(" + ",".join("'" + name + "'" for name in active) + ")" if active else "('')"
         fallback = f"(SELECT p.record_json FROM watch_provider p WHERE p.cve_id=b.cve_id AND p.source IN {enabled} ORDER BY CASE p.source WHEN 'cve_list' THEN 0 WHEN 'euvd' THEN 1 ELSE 2 END LIMIT 1)"
@@ -52,13 +54,35 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
                 tokens = re.findall(r"\w+", query, re.UNICODE)[:32]
                 fts = bool(use_fts and tokens and db.execute("SELECT 1 FROM sqlite_master WHERE name='watch_fts'").fetchone())
                 if fts:
-                    provider_query = f"c.cve_id IN (SELECT s.cve_id FROM watch_fts JOIN watch_search s ON s.rowid=watch_fts.rowid WHERE watch_fts MATCH ? AND s.source IN {enabled})"
-                    values.append(' AND '.join('"' + token + '"*' for token in tokens))
+                    # Reuse the exact SQLite tokenizer and prefix semantics on
+                    # one candidate at a time. No historical text copy, index
+                    # backfill or persistent write is needed for legacy NVD.
+                    matcher.execute("CREATE VIRTUAL TABLE candidate USING fts5(text,content='')")
+                    ascii_terms = re.findall(r"[A-Za-z0-9]+", " ".join(tokens)) if all(token.isascii() for token in tokens) else ()
+                    last_text, last_result = None, 0
+                    def matches(text, expression):
+                        nonlocal last_text, last_result
+                        if text == last_text:
+                            return last_result
+                        # This rejection is safe only when both sides are
+                        # ASCII. Unicode/diacritic behavior belongs to FTS5.
+                        if ascii_terms and text.isascii():
+                            folded = text.lower()
+                            if any(term.lower() not in folded for term in ascii_terms):
+                                return 0
+                        matcher.execute("INSERT INTO candidate(candidate) VALUES ('delete-all')")
+                        matcher.execute("INSERT INTO candidate VALUES (?)", (text,))
+                        last_result = matcher.execute("SELECT EXISTS(SELECT 1 FROM candidate WHERE candidate MATCH ?)", (expression,)).fetchone()[0]
+                        last_text = text
+                        return last_result
+                    db.create_function("watch_text_match", 2, matches)
+                    expression = ' AND '.join('"' + token + '"*' for token in tokens)
                 else:
-                    provider_query = f"c.cve_id IN (SELECT cve_id FROM watch_search WHERE text LIKE ? ESCAPE '\\' AND source IN {enabled})"
-                    values.append('%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
-                where.append("(" + provider_query + " OR (NOT EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=c.cve_id) AND c.description LIKE ? ESCAPE '\\'))")
-                values.append('%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
+                    expression = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+                texts = f"COALESCE((SELECT group_concat(text,char(10)) FROM (SELECT s.text FROM watch_search s WHERE s.cve_id=c.cve_id AND s.source IN {enabled} ORDER BY s.source)),'')"
+                texts += " || CASE WHEN NOT EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=c.cve_id) THEN char(10)||COALESCE(c.description,'') ELSE '' END"
+                where.append(f"watch_text_match({texts},?)" if fts else f"({texts}) LIKE ? ESCAPE '\\'")
+                values.append(expression)
         presence = {
             "nvd": "NOT EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=c.cve_id)",
             "cve_list": "EXISTS(SELECT 1 FROM watch_provider p WHERE p.cve_id=c.cve_id AND p.source='cve_list')",
