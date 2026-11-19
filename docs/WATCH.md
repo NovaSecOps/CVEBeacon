@@ -1494,8 +1494,9 @@ The latest release is selected from a bounded release listing by hourly archive
 names and UTC date, never by trusting GitHub's `/latest` marker, because the
 end-of-day release can be the repository's latest.
 If a required archive is missing or more than seven days are outstanding, one
-baseline archive is read; only records after the cursor are stored, and catch-up
-continues from its midnight boundary.
+baseline archive is read; records at or after the cursor are stored, so a
+boundary record is re-offered idempotently, and catch-up continues from its
+midnight boundary.
 The CVE List cursor therefore records the last archive that was fully validated
 and committed, except for the baseline start marker, which is stored without an
 archive import. A failure leaves the cursor in place and the next sync retries.

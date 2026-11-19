@@ -56,8 +56,9 @@ where the newest available boundary is stored without importing an archive.
   schedules should avoid the short 00:00–00:45 window.
 - **Missing archive or long gap:** if a required end-of-day archive is absent,
   or more than seven days are outstanding, read one baseline archive instead.
-  It streams in bounded batches; only records newer than the cursor are stored,
-  then catch-up continues from the baseline's published midnight time. A
+  It streams in bounded batches; records at or after the cursor are stored, so
+  a boundary record is re-offered idempotently. Catch-up continues from the
+  baseline's published midnight time. A
   baseline that does not advance past the cursor fails clearly and leaves the
   cursor in place.
 - **Failure:** the cursor advances only after the whole archive has been
