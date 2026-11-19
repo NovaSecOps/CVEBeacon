@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import secrets
 import stat
@@ -25,13 +26,15 @@ from werkzeug.exceptions import HTTPException
 
 from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
-                     TeamsConfig, WatchConfig, load_config)
+                     TeamsConfig, WatchConfig, load_config, notification_recipients)
+from .dashboard_config_fields import metadata
 from .errors import CVEBeaconError, ConfigurationError
-from .locking import LOCK_NAME, run_lock_path
+from .locking import (LOCK_NAME, run_lock_path, owner_storage_paths,
+                      is_owner_record_path, validate_lock_storage)
 from .watch.channels import (CREDENTIAL_FIELDS, ChannelConfig, COMMON_KEYS, TYPE_KEYS,
-                             ENV_NAME_PATTERN, SECRET_FILE_LIMIT, SecretRef)
+                             ENV_NAME_PATTERN, SECRET_FILE_LIMIT, SecretRef, SMTP_DEFAULT_PORTS, _email_addresses)
 from .watch.directories import ensure_private_directory
-from .watch.rules import Rule, EVENT_KINDS, LEAF_KEYS
+from .watch.rules import Rule, EVENT_KINDS, LEAF_KEYS, CONDITION_SCHEMA
 from .watch.users import UserStore
 
 MAX_CONFIG = 256 * 1024
@@ -219,6 +222,166 @@ NUMBER_FIELDS = {"port", "max_items", "priority", "min_interval_seconds", "timeo
                  "session_lifetime_seconds", "session_idle_seconds"}
 COMPLEX_FIELDS = {"sources", "channels", "events", "cvss_providers", "condition", "columns",
                   "to", "cc", "bcc", "recipients"}
+
+
+# This security allowlist is deliberately independent of presentation metadata.
+# New settings must be reviewed here before their changes preserve sessions.
+_SESSION_SAFE_TABLES = {
+    "watch": {"enabled", "sources", "initial", "backfill_days", "overlap_minutes", "language"},
+    "sources": {"osv_enabled", "nvd_enabled", "cve_enabled", "euvd_enabled", "cisa_kev_enabled",
+                "eu_kev_enabled", "epss_enabled", "nvd_api_key_env", "nvd_api_key_file", "minimum_request_interval"},
+    "inventory": {"path", "format", "worksheet", "header_row", "records_path", "delimiter", "encoding", "web_snapshots"},
+    "http": {"connect_timeout", "read_timeout", "retries", "backoff_seconds", "user_agent"},
+    "state": {"database"}, "output": {"directory"},
+    "notifications.teams": {"enabled", "webhook_env"},
+    "notifications.email": {"enabled", "tenant_id_env", "client_id_env", "client_secret_env", "sender", "recipients"},
+    "rule": {"name", "condition", "channels", "events", "cvss_providers", "enabled", "old_cves"},
+    "mapping": {"vendor", "product", "cpe"},
+    "columns": {"asset_id", "vendor", "product", "version", "category", "system_id", "ecosystem",
+                "purl", "cpe", "repository", "commit", "client"},
+}
+_SESSION_CHANNEL_COMMON = {"type", "enabled", "grouping", "max_items", "min_interval_seconds",
+                           "timeout_seconds", "allow_insecure", "notify_reported", "language"}
+_SESSION_CHANNEL_TYPES = {
+    "smtp": {"host", "port", "security", "username", "password_env", "password_file", "from", "to", "cc", "bcc", "format"},
+    "graph": {"tenant_id", "client_id", "client_secret_env", "client_secret_file", "sender", "to", "cc", "bcc", "format"},
+    "teams": {"webhook_url_env", "webhook_url_file"},
+    "slack": {"webhook_url_env", "webhook_url_file"},
+    "discord": {"webhook_url_env", "webhook_url_file"},
+    "telegram": {"bot_token_env", "bot_token_file", "chat_id"},
+    "matrix": {"homeserver", "room_id", "access_token_env", "access_token_file"},
+    "ntfy": {"server", "topic", "token_env", "token_file", "priority"},
+    "gotify": {"server", "app_token_env", "app_token_file", "priority"},
+    "webhook": {"url", "url_env", "url_file", "header_name", "header_value_env", "header_value_file"},
+}
+_SESSION_ABSENT = object()
+
+
+def _toml_equal(left, right):
+    """Python equality alone conflates TOML booleans, integers and floats."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_toml_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_toml_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+_SESSION_CONDITION_KEYS = {"cvss_min", "cvss_max", "epss_min", "kev", "exploitation",
+                           "vendor", "product", "keyword", "cwe", "cna", "status"}
+
+
+def _session_condition_known(value):
+    if not isinstance(value, dict):
+        return False
+    for key, child in value.items():
+        if key in {"any", "all"}:
+            if not isinstance(child, list) or not all(_session_condition_known(row) for row in child):
+                return False
+        elif key == "not":
+            if not _session_condition_known(child):
+                return False
+        elif key not in _SESSION_CONDITION_KEYS or isinstance(child, dict):
+            return False
+        elif isinstance(child, list) and any(isinstance(item, (dict, list)) for item in child):
+            return False
+    return True
+
+
+def _session_table_changed(before, after, allowed, nested=None):
+    before = {} if before is _SESSION_ABSENT else before
+    after = {} if after is _SESSION_ABSENT else after
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return True
+    for key in before.keys() | after.keys():
+        old, new = before.get(key, _SESSION_ABSENT), after.get(key, _SESSION_ABSENT)
+        if _toml_equal(old, new):
+            continue
+        if nested and key in nested:
+            if nested[key](old, new):
+                return True
+        elif key not in allowed:
+            return True
+        else:
+            for item in (old, new):
+                if item is _SESSION_ABSENT:
+                    continue
+                if key == "condition":
+                    if not _session_condition_known(item):
+                        return True
+                elif isinstance(item, dict) or isinstance(item, list) and any(isinstance(child, (dict, list)) for child in item):
+                    return True
+    return False
+
+
+def _session_rows_changed(before, after, schema):
+    before = [] if before is _SESSION_ABSENT else before
+    after = [] if after is _SESSION_ABSENT else after
+    if not isinstance(before, list) or not isinstance(after, list):
+        return True
+    for index in range(max(len(before), len(after))):
+        old = before[index] if index < len(before) else _SESSION_ABSENT
+        new = after[index] if index < len(after) else _SESSION_ABSENT
+        if not _toml_equal(old, new) and _session_table_changed(old, new, _SESSION_SAFE_TABLES[schema]):
+            return True
+    return False
+
+
+def _session_channels_changed(before, after):
+    before = {} if before is _SESSION_ABSENT else before
+    after = {} if after is _SESSION_ABSENT else after
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return True
+    for name in before.keys() | after.keys():
+        old, new = before.get(name, _SESSION_ABSENT), after.get(name, _SESSION_ABSENT)
+        if _toml_equal(old, new):
+            continue
+        for row in (old, new):
+            if row is not _SESSION_ABSENT:
+                if not isinstance(row, dict):
+                    return True
+                kind = row.get("type")
+                if not isinstance(kind, str) or kind.strip().casefold() not in _SESSION_CHANNEL_TYPES:
+                    return True
+        allowed = _SESSION_CHANNEL_COMMON.copy()
+        # A type transition must classify removals and additions separately.
+        for row in (old, new):
+            if row is not _SESSION_ABSENT:
+                allowed.update(_SESSION_CHANNEL_TYPES[row["type"].strip().casefold()])
+        if _session_table_changed(old, new, allowed):
+            return True
+    return False
+
+
+def session_settings_changed(before, after):
+    """End sessions for every changed setting without an explicit classification."""
+    nested = {
+        "watch": lambda old, new: _session_table_changed(old, new, _SESSION_SAFE_TABLES["watch"], {
+            "rules": lambda a, b: _session_rows_changed(a, b, "rule"),
+            "channels": _session_channels_changed,
+        }),
+        "notifications": lambda old, new: _session_table_changed(old, new, set(), {
+            key: lambda a, b, key=key: _session_table_changed(a, b, _SESSION_SAFE_TABLES["notifications." + key])
+            for key in ("teams", "email")
+        }),
+        "inventory": lambda old, new: _session_table_changed(old, new, _SESSION_SAFE_TABLES["inventory"], {
+            "columns": lambda a, b: _session_table_changed(a, b, _SESSION_SAFE_TABLES["columns"]),
+        }),
+        "product_mappings": lambda old, new: _session_rows_changed(old, new, "mapping"),
+    }
+    for section in ("sources", "http", "state", "output"):
+        nested[section] = lambda a, b, section=section: _session_table_changed(a, b, _SESSION_SAFE_TABLES[section])
+    return _session_table_changed(before, after, set(), nested)
+
+
+def access_settings_changed(before, after, updated, baseline, running):
+    return (before is None or session_settings_changed(before, after)
+            or updated.dashboard != baseline.dashboard or updated.dashboard != running.dashboard
+            or updated.watch.users_database != baseline.watch.users_database
+            or updated.watch.users_database != running.watch.users_database
+            or updated.watch.reporting_identity != baseline.watch.reporting_identity
+            or updated.watch.reporting_identity != running.watch.reporting_identity)
 
 
 def get_table(document, path):
@@ -538,6 +701,8 @@ def _operation_storage_paths(config):
         pass
     files.add(Path(config.database_path).resolve().parent / LOCK_NAME)
     files.add(run_lock_path(config).resolve())
+    for lock_path in (Path(config.database_path).resolve().parent / LOCK_NAME, run_lock_path(config)):
+        files.update(owner_storage_paths(lock_path))
     return files, {job_directory, config.database_path.parent / "web-assets",
                    config.database_path.parent / "web-inventory"}
 
@@ -564,6 +729,7 @@ def _candidate_derived_paths(updated, configs):
         directories.update({updated.database_path.parent / "web-assets",
                             updated.database_path.parent / "web-inventory"})
         files.add(Path(updated.database_path).resolve().parent / LOCK_NAME)
+        files.update(owner_storage_paths(Path(updated.database_path).resolve().parent / LOCK_NAME))
         job_directory = (Path(updated.database_path).parent / "dashboard-jobs").resolve()
         directories.add(job_directory)
         files.add((job_directory / "dashboard-jobs.db").resolve())
@@ -580,6 +746,7 @@ def _candidate_derived_paths(updated, configs):
     if watch_parent_changed:
         files.update(path.resolve() for path in _database_paths(updated.watch.users_database))
         files.add(Path(updated.watch.database).resolve().parent / LOCK_NAME)
+        files.update(owner_storage_paths(run_lock_path(updated)))
     return files, directories
 
 
@@ -638,6 +805,8 @@ def secret_target(reference, base, configs, backup_dir, *, documents=()):
         target = raw.resolve()
     except (OSError, RuntimeError, ValueError):
         raise ConfigurationError("Secret file reference is not a valid path") from None
+    if is_owner_record_path(raw.absolute()) or is_owner_record_path(target):
+        raise ConfigurationError("Secret file reference must not alias operation holder storage")
     data_directory = configs[0].watch.users_database.parent.resolve()
     if target == data_directory or not _inside(target, data_directory):
         raise ConfigurationError(
@@ -978,11 +1147,8 @@ class Editor:
                               [checks_config, self.config],
                               [document] if invalid_current else
                               [item for item in (current_document, document) if item is not None])
-        lockout = (invalid_current or
-                   updated.dashboard != self.config.dashboard or
-                   updated.dashboard != checks_config.dashboard or
-                   updated.watch.users_database != self.config.watch.users_database or
-                   updated.watch.users_database != checks_config.watch.users_database)
+        lockout = invalid_current or access_settings_changed(
+            current_document, document, updated, checks_config, self.config)
         if lockout:
             if updated.watch.users_database != self.config.watch.users_database or \
                     updated.watch.users_database != checks_config.watch.users_database:
@@ -1108,7 +1274,10 @@ class Editor:
             from .dashboard import create_app
             token = _RELOADING.set(self)
             try:
-                replacement_app = create_app(updated, host=self.host, jobs=self.jobs)
+                end_sessions = pending.lockout or invalid_current or access_settings_changed(
+                    old, pending.document, updated, checks_config, self.config)
+                replacement_app = create_app(updated, host=self.host, jobs=self.jobs,
+                                             session_app=None if end_sessions else self.active_app)
             finally:
                 _RELOADING.reset(token)
             destination_users = replacement_app.extensions["dashboard_users"]
@@ -1140,12 +1309,7 @@ class Editor:
                     abort(403)
                 if old is not None:
                     self._check_direct_urls(old, pending.document, rollback=section == "rollback")
-                lockout = (pending.lockout or invalid_current or
-                           updated.dashboard != self.config.dashboard or
-                           updated.dashboard != checks_config.dashboard or
-                           updated.watch.users_database != self.config.watch.users_database or
-                           updated.watch.users_database != checks_config.watch.users_database)
-                if lockout and not confirmed:
+                if end_sessions and not confirmed:
                     raise ConfigurationError("Confirm the access and session changes before saving")
                 if (updated.watch.users_database != self.config.watch.users_database or
                         updated.watch.users_database != checks_config.watch.users_database):
@@ -1261,6 +1425,8 @@ class Editor:
             self.discard(identifier, committed=True)
         except OSError:
             logging.getLogger("cvebeacon").warning("Configuration saved; staged secret cleanup failed")
+
+        return end_sessions
 
 
 def _backup_name(name):
@@ -1697,6 +1863,7 @@ def _inside(path, directory):
 
 def check_protected_paths(updated, config_path, backup_dir, configs, documents=()):
     """Reject settings that would place operational data in a protected store."""
+    validate_lock_storage(updated)
     protected_files, protected_dirs = _protected_paths(
         configs, backup_dir, documents, base=config_path.parent)
     existing_files = set(protected_files)
@@ -1773,6 +1940,50 @@ def check_protected_paths(updated, config_path, backup_dir, configs, documents=(
 
 
 
+class FieldValidationError(ConfigurationError):
+    """Build field errors only from known metadata and fixed guidance templates."""
+
+    def __init__(self, control=None, reason=None):
+        if not isinstance(control, dict) or control.get("identity") not in FIELD_METADATA:
+            super().__init__("Invalid configuration field; use the expected format")
+            return
+        identity = control["identity"]
+        spec = FIELD_METADATA[identity]
+        label = control.get("error_identity", identity)
+        if label != identity and re.fullmatch(re.escape(identity) + r" \(row [1-9][0-9]{0,2}\)", label) is None:
+            label = identity
+        expected = {"number": "a TOML number", "boolean": "true or false",
+                    "toml": "a valid TOML array or table"}.get(spec.kind, "plain text")
+        required = {"toml": "a nonempty TOML array or table",
+                    "addresses": "at least one email address"}.get(spec.kind, "nonempty plain text")
+        address_format = ("comma-separated recipient names or a TOML array of nonempty strings"
+                          if identity == "notifications.email.recipients" else
+                          "comma-separated email addresses or a TOML array of email addresses")
+        enabled_format = "a recipient list" if identity == "notifications.email.recipients" else "an email address"
+        guidance = {
+            "environment": "must be an environment variable name, for example EXAMPLE_SECRET",
+            "enum": "must be one of " + ", ".join(map(str, spec.choices)),
+            "addresses": "must be " + address_format,
+            "value": "must be " + expected,
+            "required": "is required; expected " + required,
+            "enabled_required": "is required when enabled; expected " + enabled_format,
+        }.get(reason, "must use the expected format")
+        super().__init__(label + " " + guidance)
+
+
+def form_row_count():
+    text = request.form.get("row_count", "1")
+    try:
+        if len(text) > 3:
+            raise ValueError
+        count = int(text)
+        if not 1 <= count <= 101:
+            raise ValueError
+    except ValueError:
+        abort(400, "row_count must be an integer from 1 to 101")
+    return count
+
+
 def _kind(key):
     if key in BOOLEAN_FIELDS or key.endswith("_enabled"):
         return "boolean"
@@ -1781,6 +1992,34 @@ def _kind(key):
     if key in COMPLEX_FIELDS:
         return "toml"
     return "string"
+
+
+def _field_metadata():
+    result = {}
+    for specs in SCHEMAS.values():
+        for path, schema in specs:
+            for key, default in schema.items():
+                result[f"{path}.{key}"] = metadata(path, key, default, _kind(key))
+    for path, schema in (("watch.rules", RULE_FIELDS), ("product_mappings", MAPPING_FIELDS)):
+        for key, default in schema.items():
+            result[f"{path}.{key}"] = metadata(path, key, default, _kind(key))
+    for kind, keys in TYPE_KEYS.items():
+        common = defaults(ChannelConfig)
+        if kind == "telegram":
+            common["min_interval_seconds"] = 3.0
+        for key in {"name", *COMMON_KEYS, *keys}:
+            result[f"watch.channels.{kind}.{key}"] = metadata(
+                "channel", key, common.get(key), _kind(key), channel_type=kind)
+    return result
+
+
+FIELD_METADATA = _field_metadata()
+
+
+def _display(item):
+    if item is None:
+        return ""
+    return item if isinstance(item, str) else value(item)
 
 
 def _secret_directory(config):
@@ -1826,18 +2065,31 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
             item = data.get(key)
             reference = key.endswith(("_env", "_file"))
             direct_url = key == "url"
-            text = "" if item is None or direct_url else str(item) if _kind(key) == "string" else value(item)
-            default = schema[key]
-            if isinstance(default, tuple):
-                default = list(default)
-            hint = ("" if default is None else str(default) if isinstance(default, Path) else value(default))
+            path = ("watch.channels." + label.split(" channel ", 1)[0].strip().casefold() if section == "channels" else
+                    "watch.rules" if section == "rules" else
+                    "product_mappings" if section == "product-mappings" else label)
+            spec = FIELD_METADATA[f"{path}.{key}"]
+            text = ("" if item is None or direct_url else
+                    (value(item) if any("," in address for address in item) or ", ".join(item).lstrip().startswith("[") else ", ".join(item))
+                    if spec.kind == "addresses" and isinstance(item, list) else
+                    str(item) if spec.kind in {"string", "enum"} else value(item))
+            hint = _display(spec.default)
+            if section == "channels" and path == "watch.channels.smtp" and key == "port":
+                security = data.get("security", "starttls")
+                hint = str(SMTP_DEFAULT_PORTS.get(str(security).strip().casefold(), 587))
             if label == "watch" and key == "database":
                 hint = "cvebeacon-watch.db beside the state database"
             if direct_url and item is not None:
                 hint = "Existing endpoint is hidden and retained"
             path_value = key in {"database", "directory", "path"} or key.endswith("_file")
             controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
-                             "kind": _kind(key), "secret": key.endswith("_file"),
+                             "kind": spec.kind, "choices": spec.choices, "required": spec.required,
+                             "help": spec.help, "example": _display(spec.example), "requirement": spec.requirement,
+                             "minimum": spec.minimum, "maximum": spec.maximum, "step": spec.step,
+                             "checked": item is True or item is None and spec.default is True,
+                             "identity": f"{path}.{key}", "spec": spec,
+                             "error_identity": f"{path}.{key}" + (f" (row {index + 1})" if section == "channels" else ""),
+                             "secret": key.endswith("_file"),
                              "existing": bool(item),
                              "readonly": (readonly_channel or readonly_dashboard
                                           or readonly_notifications or direct_url) or
@@ -1859,14 +2111,10 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
     return output
 
 
-def parse_form(editor, section, document, current_config, permissions, *, can_admin=False):
+def parse_form(editor, section, document, current_config, permissions, *, can_admin=False, count=None):
     can_manage = "manage_secrets" in permissions
-    try:
-        count = int(request.form.get("row_count", "1"))
-        if not 1 <= count <= 101:
-            abort(400)
-    except ValueError:
-        abort(400)
+    if count is None:
+        count = form_row_count()
     row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
     groups = groups_for(section, document, count=count, row_types=row_types,
                         can_manage=can_manage, can_admin=can_admin)
@@ -1883,16 +2131,48 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 expected.add(name)
                 text = request.form.get(name, "")
                 if not remove and (text != "" if control["kind"] == "string" else text.strip() != ""):
-                    if control["kind"] == "string":
+                    if control["kind"] in {"string", "enum"}:
                         row[key] = text
+                        if key.endswith("_env") and text.strip() and ENV_NAME_PATTERN.fullmatch(text.strip()) is None:
+                            raise FieldValidationError(control, "environment")
+                        if control["kind"] == "enum":
+                            choices = control["choices"]
+                            if choices and isinstance(choices[0], int):
+                                try:
+                                    row[key] = int(text)
+                                except ValueError:
+                                    raise FieldValidationError(control, "enum") from None
+                            normalized = row[key].strip().casefold() if isinstance(row[key], str) else row[key]
+                            if normalized not in [choice.casefold() if isinstance(choice, str) else choice for choice in choices]:
+                                # Preserve the loader's legacy inventory format aliases.
+                                if control["identity"] != "inventory.format" or normalized.lstrip(".") not in {*choices, "yml"}:
+                                    raise FieldValidationError(control, "enum")
+                    elif control["kind"] == "addresses":
+                        try:
+                            if text.lstrip().startswith("["):
+                                parsed = tomllib.loads("value = " + text)
+                                if set(parsed) != {"value"}:
+                                    raise ValueError
+                                addresses = parsed["value"]
+                            else:
+                                addresses = [address.strip() for address in text.split(",")]
+                            row[key] = (list(notification_recipients(addresses))
+                                        if control["identity"] == "notifications.email.recipients" else
+                                        list(_email_addresses({key: addresses}, key, control["identity"].rsplit(".", 1)[0], required=control["required"])))
+                        except (ValueError, RecursionError, ConfigurationError):
+                            raise FieldValidationError(control, "addresses") from None
                     else:
                         try:
                             parsed = tomllib.loads("value = " + text)
                             if set(parsed) != {"value"}:
                                 raise ValueError
                             row[key] = parsed["value"]
+                            if control["kind"] == "boolean" and not isinstance(row[key], bool):
+                                raise ValueError
+                            if control["kind"] == "number" and (isinstance(row[key], bool) or not isinstance(row[key], (int, float))):
+                                raise ValueError
                         except (ValueError, RecursionError):
-                            raise ConfigurationError("Enter a valid TOML value in numeric, boolean and structured fields") from None
+                            raise FieldValidationError(control, "value") from None
                 if control["secret"]:
                     secret_name = name + "_new"
                     expected.add(secret_name)
@@ -1909,6 +2189,29 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             rows.append(None if remove else row)
         if set(request.form) - expected or any(len(request.form.getlist(key)) != 1 for key in request.form):
             abort(400)
+        for group, row in zip(groups, rows):
+            active = row is not None and (section not in {"rules", "channels", "product-mappings"}
+                                         or row.get("vendor" if section == "product-mappings" else "name"))
+            if active:
+                for control in group["controls"]:
+                    if control["required"] and not row.get(control["key"]):
+                        raise FieldValidationError(control, "required")
+        if section == "notifications":
+            for group, row in zip(groups, rows):
+                if group["prefix"] == ("notifications", "email") and row is not None and row.get("enabled"):
+                    for key in ("sender", "recipients"):
+                        if not row.get(key):
+                            control = next(control for control in group["controls"] if control["key"] == key)
+                            raise FieldValidationError(control, "enabled_required")
+        if section == "rules":
+            from .watch.rules import parse_condition
+            for index, row in enumerate(rows):
+                if row is not None and row.get("name"):
+                    try:
+                        parse_condition(row.get("condition"), path=f"watch.rules[{index}].condition")
+                    except ConfigurationError as error:
+                        raise ConfigurationError(safe_error(
+                            error, {"condition": row.get("condition")}, editor.path)) from None
         directory = None
         for index, data, row, key, secret, prefix in secret_requests:
             if row is None:
@@ -1925,7 +2228,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             if directory is None:
                 directory = _private_directory(_secret_directory(current_config))
             if not secret.strip() or len(secret.encode("utf-8")) > SECRET_FILE_LIMIT:
-                raise ConfigurationError("Secret must contain 1–16384 bytes of text")
+                raise ConfigurationError(f"{section} row {index + 1}.{key} new contents must contain 1–16384 bytes of text")
             paired_env = key[:-5] + "_env"
             explicit_environment = row.get(paired_env)
             environment_key = effective_environment_row(row, paired_env, prefix)
@@ -1995,7 +2298,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 name = row.pop("name", "")
                 if name:
                     if name in channels:
-                        raise ConfigurationError("Duplicate channel name")
+                        raise ConfigurationError("watch.channels.name must be unique; duplicate channel name")
                     channels[name] = row
             candidate.setdefault("watch", {})["channels"] = channels
         referenced = {value for value in secret_references(candidate).values() if isinstance(value, str)}
@@ -2009,6 +2312,126 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             path.unlink(missing_ok=True)
         raise
 
+
+
+_CREDENTIAL_TEXT = re.compile(r"[a-z][a-z0-9+.-]*://|\b[A-Za-z_][A-Za-z0-9_]*\s*=", re.I)
+
+
+def retainable_form_value(control, submitted, section):
+    """Retain safe ordinary input, without treating rejected text as validated."""
+    key, spec = control["key"], control["spec"]
+    if (control["readonly"] or key in {"url", "name"} or key.endswith(("_env", "_file"))
+            or section == "product-mappings"):
+        return False
+    if spec.kind == "enum":
+        if not submitted.strip():
+            return True
+        if spec.choices and isinstance(spec.choices[0], int):
+            try:
+                return int(submitted) in spec.choices
+            except ValueError:
+                return False
+        normalized = submitted.strip().casefold()
+        if control["identity"] == "inventory.format":
+            normalized = normalized.lstrip(".")
+            normalized = "yaml" if normalized == "yml" else normalized
+        return normalized in [str(choice).casefold() for choice in spec.choices]
+    if spec.kind not in {"toml", "addresses"}:
+        return _CREDENTIAL_TEXT.search(submitted) is None
+    if not submitted.strip():
+        return True
+    if spec.kind == "addresses" and not submitted.lstrip().startswith("["):
+        return _CREDENTIAL_TEXT.search(submitted) is None
+    try:
+        parsed = tomllib.loads("value = " + submitted)
+        if set(parsed) != {"value"}:
+            return False
+        item = parsed["value"]
+        if any(_CREDENTIAL_TEXT.search(text) for text in _form_strings(item)):
+            return False
+        if spec.item_choices:
+            return isinstance(item, list) and all(isinstance(child, str) and child.strip().casefold() in spec.item_choices for child in item)
+        if key == "condition":
+            if not isinstance(item, dict):
+                return False
+            for identity, child in _walk(item):
+                if any(isinstance(part, str) and part not in {*LEAF_KEYS, "any", "all", "not"} for part in identity):
+                    return False
+                key = identity[-1]
+                if key in {"any", "all"} and (not isinstance(child, list) or any(not isinstance(row, dict) for row in child)):
+                    return False
+                if key == "not" and not isinstance(child, dict):
+                    return False
+                leaf = CONDITION_SCHEMA.get(key, {})
+                if leaf.get("kind") in {"strings", "cwe"}:
+                    types = (str, int) if leaf["kind"] == "cwe" else (str,)
+                    if not isinstance(child, list) or any(isinstance(entry, bool) or not isinstance(entry, types) for entry in child):
+                        return False
+                if leaf.get("kind") == "enum":
+                    if isinstance(child, str):
+                        if child.strip().casefold() not in leaf["choices"]:
+                            return False
+                    elif not isinstance(child, bool):
+                        return False
+                if leaf.get("kind") == "number" and not isinstance(child, (int, float)):
+                    return False
+        return True
+    except (ValueError, RecursionError):
+        # Malformed structured text has no trustworthy leaf boundaries.
+        return False
+
+
+def retained_form_value(control, submitted, section):
+    """Return only inspected text; TOML comments are not part of parsed values."""
+    if not retainable_form_value(control, submitted, section):
+        return None
+    if control["kind"] == "toml" or control["kind"] == "addresses" and submitted.lstrip().startswith("["):
+        return _without_toml_comments(submitted)
+    return submitted
+
+
+def _without_toml_comments(text):
+    """Strip comments from parsed TOML while preserving quoted hashes and layout."""
+    result, quote, index = [], None, 0
+    while index < len(text):
+        character = text[index]
+        if quote:
+            if quote[0] == '"' and character == "\\":
+                result.append(text[index:index + 2])
+                index += 2
+            elif text.startswith(quote, index):
+                end = index + len(quote)
+                if len(quote) == 3:
+                    while end < len(text) and text[end] == quote[0]:
+                        end += 1
+                result.append(text[index:end])
+                index, quote = end, None
+            else:
+                result.append(character)
+                index += 1
+        elif character in {"'", '"'}:
+            quote = character * (3 if text.startswith(character * 3, index) else 1)
+            result.append(quote)
+            index += len(quote)
+        elif character == "#":
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+        else:
+            result.append(character)
+            index += 1
+    return "".join(result)
+
+
+def _form_strings(item):
+    if isinstance(item, str):
+        yield item
+    elif isinstance(item, dict):
+        for key, child in item.items():
+            yield key
+            yield from _form_strings(child)
+    elif isinstance(item, list):
+        for child in item:
+            yield from _form_strings(child)
 
 
 def register_config(app, config, *, host):
@@ -2047,6 +2470,8 @@ def register_config(app, config, *, host):
     def page(section, permission):
         error, preview, diff, lockout, staged = None, None, None, False, []
         document = None
+        groups = None
+        version = None
         status = 400
         try:
             document, _, _, version, current_config = editor.read()
@@ -2057,15 +2482,20 @@ def register_config(app, config, *, host):
                         "editing for the dashboard service, then reload this page.")
                 action = request.form.get("action")
                 if action == "confirm":
-                    editor.commit(request.form.get("preview"), section, app.extensions["dashboard_users"],
-                                  {permission}, request.form.get("lockout") == "yes")
-                    return redirect(url_for("login"), code=303)
+                    ended = editor.commit(request.form.get("preview"), section, app.extensions["dashboard_users"],
+                                          {permission}, request.form.get("lockout") == "yes")
+                    return redirect(url_for("login") if ended else
+                                    url_for("config_editor." + section, saved=1), code=303)
                 if action != "preview":
                     abort(400, "Unsupported configuration action; reload the form")
                 if request.form.get("version") != version:
                     abort(409, "Configuration changed; reload the form")
+                count = form_row_count()
+                row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
+                groups = groups_for(section, document, count=count, row_types=row_types,
+                                    can_manage="manage_secrets" in g.permissions, can_admin=g.user.is_admin)
                 candidate, staged, replacements = parse_form(editor, section, document, current_config,
-                                                             g.permissions, can_admin=g.user.is_admin)
+                                                             g.permissions, can_admin=g.user.is_admin, count=count)
                 preview, lockout = editor.preview(
                     section, candidate, version, staged, replacements,
                     current_document=document, current_config=current_config,
@@ -2082,9 +2512,15 @@ def register_config(app, config, *, host):
                                                      can_admin=g.user.is_admin),
                                    version=version, preview=preview, diff=diff, lockout=lockout,
                                    channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS, leaves=LEAF_KEYS,
+                                   condition_schema=CONDITION_SCHEMA, toml_value=value,
+                                   saved=request.args.get("saved") == "1",
                                    read_only=editor.read_only())
+        except FieldValidationError as exc:
+            error = str(exc)
         except ConfigurationError as exc:
-            error = safe_error(exc, document or {}, editor.path)
+            credential_inputs = [text for key, text in request.form.items()
+                                 if key.endswith(("_env", "_file", "_new"))]
+            error = safe_error(exc, [document or {}, credential_inputs], editor.path)
         except HTTPException as exc:
             if exc.code not in {400, 409}:
                 raise
@@ -2092,6 +2528,21 @@ def register_config(app, config, *, host):
         finally:
             for path in staged:
                 path.unlink(missing_ok=True)
+        if groups is not None and status == 400 and request.form.get("action") == "preview":
+            for index, group in enumerate(groups):
+                group["removed"] = request.form.get(f"remove{index}") == "yes"
+                for control in group["controls"]:
+                    key = control["key"]
+                    submitted = request.form.get(control["id"], control["value"])
+                    retained = retained_form_value(control, submitted, section)
+                    if retained is None:
+                        continue
+                    control["value"] = retained
+                    control["checked"] = submitted == "true" or submitted == "" and control["spec"].default is True
+            return render_template("config_section.html", section=section, groups=groups,
+                                   version=version, error=error, events=EVENT_KINDS,
+                                   leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA, toml_value=value,
+                                   channel_types=sorted(TYPE_KEYS), read_only=editor.read_only()), status
         return render_template("config_error.html", error=error,
                                read_only=editor.read_only()), status
 
@@ -2114,9 +2565,10 @@ def register_config(app, config, *, host):
                         "The configuration directory is read-only, so rollback is disabled. "
                         "Ask the operator to enable editing for the dashboard service.")
                 if request.form.get("action") == "confirm":
-                    editor.commit(request.form.get("preview"), "rollback", app.extensions["dashboard_users"],
-                                  set(SECTIONS.values()), request.form.get("lockout") == "yes")
-                    return redirect(url_for("login"), code=303)
+                    ended = editor.commit(request.form.get("preview"), "rollback", app.extensions["dashboard_users"],
+                                          set(SECTIONS.values()), request.form.get("lockout") == "yes")
+                    return redirect(url_for("login") if ended else
+                                    url_for("config_editor.backups", saved=1), code=303)
                 if request.form.get("action") != "preview":
                     abort(400, "Unsupported rollback action; reload the form")
                 if request.form.get("version") != version:

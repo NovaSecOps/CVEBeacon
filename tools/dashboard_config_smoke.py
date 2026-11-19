@@ -82,8 +82,10 @@ def smoke(directory):
                 assert page.status_code == 200, "preview failed"
                 assert SECRET not in page.text
                 assert confirm(page, section) == 303
-                assert client.get("/").status_code == 303
-                login()
+                ended = 'name="lockout"' in page.text
+                assert client.get("/").status_code == (303 if ended else 200)
+                if ended:
+                    login()
 
             def confirm(page, section):
                 data = controls(page.text, "confirm")

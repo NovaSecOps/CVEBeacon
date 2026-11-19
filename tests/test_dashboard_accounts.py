@@ -406,7 +406,7 @@ def test_audit_tamper_is_visible(accounts):
 @pytest.mark.parametrize("value", ["0", "true", "86401", "'900'", "59"])
 def test_idle_config_validation(setup, value):
     path = setup[0].config_path
-    path.write_text(path.read_text() + "\n[dashboard]\nsession_idle_seconds=" + value)
+    path.write_text(path.read_text(encoding="utf-8") + "\n[dashboard]\nsession_idle_seconds=" + value)
     with pytest.raises(ConfigurationError):
         load_config(path)
 
@@ -560,8 +560,8 @@ def test_zero_enabled_admin_store_is_detected(accounts, caplog):
 
 
 def test_security_recovery_and_permission_boundaries_are_documented():
-    guide = (Path(__file__).resolve().parents[1] / "docs" / "DASHBOARD.md").read_text()
-    watch = (Path(__file__).resolve().parents[1] / "docs" / "WATCH.md").read_text()
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "DASHBOARD.md").read_text(encoding="utf-8")
+    watch = (Path(__file__).resolve().parents[1] / "docs" / "WATCH.md").read_text(encoding="utf-8")
     assert "full administrative trust" not in guide
     assert "256 anonymous" in guide and "16 per account" in guide
     assert "no enabled administrator" in guide

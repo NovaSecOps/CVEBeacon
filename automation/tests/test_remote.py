@@ -132,7 +132,7 @@ def test_unverified_package_namespace_stays_partial_review(tmp_path, monkeypatch
     snapshot = read_snapshot(path, allow_partial=True)
     assert snapshot.manifest["omissions"] == ["review-required"]
     assert len(snapshot.records) == 1 and snapshot.records[0]["category"] == "operating-system"
-    review = json.loads(next((config.state_dir / "remote" / source.id).glob("*.review.json")).read_text())
+    review = json.loads(next((config.state_dir / "remote" / source.id).glob("*.review.json")).read_text(encoding="utf-8"))
     assert review["reviews"][0]["reason"] == "package-vendor-namespace-unverified"
 
 

@@ -73,7 +73,7 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
     return current is not None and current.target_key == asset.target_key
 
 
-def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flask:
+def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session_app=None) -> Flask:
     if config.inventory is None and not config.watch.enabled:
         raise CVEBeaconError(
             "the dashboard requires an inventory or watch mode; add [inventory] path or set [watch] enabled = true"
@@ -84,8 +84,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
         LOG.error("Account store has no enabled administrator; recover locally with users add NAME --admin")
     encoded = None if account_mode else password_hash(config)
     auth = DashboardAuth(encoded, config.dashboard.session_lifetime_seconds) if encoded else None
-    account_sessions = AccountSessions(config.dashboard.session_lifetime_seconds, config.dashboard.session_idle_seconds)
-    login_throttle = AccountLoginThrottle()
+    account_sessions = (session_app.extensions["account_sessions"] if session_app is not None else
+                        AccountSessions(config.dashboard.session_lifetime_seconds, config.dashboard.session_idle_seconds))
+    login_throttle = (session_app.extensions["account_login_throttle"] if session_app is not None else
+                      AccountLoginThrottle())
     app = Flask(__name__)
     app.extensions["dashboard_auth"] = auth
     app.extensions["account_sessions"] = account_sessions
@@ -93,7 +95,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
     app.extensions["account_login_throttle"] = login_throttle
     wildcard = host in {"0.0.0.0", "::"}
     app.config.update(
-        SECRET_KEY=secrets.token_bytes(32), DEBUG=False, TESTING=False,
+        SECRET_KEY=session_app.secret_key if session_app is not None else secrets.token_bytes(32), DEBUG=False, TESTING=False,
         MAX_CONTENT_LENGTH=8192, MAX_FORM_MEMORY_SIZE=8192,
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
         SESSION_COOKIE_SECURE=config.dashboard.secure_cookie,

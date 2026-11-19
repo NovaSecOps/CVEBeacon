@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% block title %}Configuration backups · CVEBeacon{% endblock %}
 {% block content %}<h1>Configuration backups</h1><p><a href="{{ url_for('config_editor.index') }}">All configuration sections</a></p>
+{% if request.args.get("saved") == "1" %}<p role="status">Saved; takes effect on the next run. Restart other running commands to use the saved settings.</p>{% endif %}
 {% if read_only %}<p><strong>Rollback is disabled.</strong> The configuration directory is not writable by the dashboard service. Enable editing for the dashboard service, then reload this page.</p>{% endif %}
 {% if current_invalid %}<p><strong>Current configuration is invalid or missing.</strong> The rollback diff is hidden because the live values cannot be validated. The selected backup is validated before it is shown and restored.</p>{% endif %}
 {% if preview %}{% include "config_confirm.html" %}{% else %}<p>Restore a complete configuration through validation and a diff preview. Referenced secret files are not restored or deleted. The current configuration is backed up before rollback.</p>

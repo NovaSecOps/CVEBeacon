@@ -222,7 +222,7 @@ def test_capture_failure_reaps_child_before_marking_failed(tmp_path, monkeypatch
     try:
         assert manager.wait(job.id).status == "failed"
         assert processes[0].poll() is not None
-        assert marker.read_text() == "cleaned"
+        assert marker.read_text(encoding="utf-8") == "cleaned"
     finally:
         for process in processes:
             if process.poll() is None:
@@ -234,10 +234,12 @@ def test_cancel_audits_requester_and_removes_queued_id(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     monkeypatch.setattr(manager, "start_thread", lambda: None)
     job = manager.submit("notify-test", started_by="admin", argv=fake_job("pass"))
+    assert job.id in manager._free_lane._queue
     assert manager.cancel(job.id, actor="runner")
     entry = next(e for e in manager.users.audit_entries() if e.action.startswith("job_cancel_requested"))
     assert entry.actor == "runner"
     assert str(job.id) in entry.action and job.operation in entry.action
+    assert job.id not in manager._free_lane._queue
     assert job.id not in manager._queue
     outcome = next(e for e in manager.users.audit_entries() if e.action.startswith("job_cancelled:"))
     assert outcome.actor == "runner" and outcome.username == "admin"
@@ -350,7 +352,7 @@ def test_cancel_escalates_and_reaps_an_uncooperative_child(tmp_path, monkeypatch
     process = None
     try:
         wait_for(lambda: "ready" in manager.store.log_tail(manager.store.get(job.id)))
-        process = manager._process
+        process = manager._free_lane._process
         manager.cancel(job.id)
         result = manager.wait(job.id, timeout=2)
         assert result.status == "cancelled"
@@ -378,11 +380,11 @@ def test_shutdown_runs_cleanup_and_reaps_child(tmp_path):
             time.sleep(0.01)  # short slices let a Windows break handler run
     """, marker))
     wait_for(lambda: "ready" in manager.store.log_tail(manager.store.get(job.id)))
-    process = manager._process
+    process = manager._free_lane._process
     try:
         manager.shutdown()
         assert process.poll() is not None
-        assert marker.read_text() == "cleaned"
+        assert marker.read_text(encoding="utf-8") == "cleaned"
     finally:
         if process.poll() is None:
             process.kill()

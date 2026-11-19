@@ -10,7 +10,7 @@ from cvebeacon.sources.euvd import EUVDSource
 
 def test_network_privacy_summary_discloses_client_labels():
     root = Path(__file__).resolve().parents[1]
-    paragraphs = (root / "docs/NETWORK_REQUIREMENTS.md").read_text().split("\n\n")
+    paragraphs = (root / "docs/NETWORK_REQUIREMENTS.md").read_text(encoding="utf-8").split("\n\n")
     notification = next(text for text in paragraphs if text.startswith("When explicitly enabled, notifications"))
     assert "client labels" in notification
 
