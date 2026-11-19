@@ -675,12 +675,16 @@ def _run_watch(args, config: AppConfig) -> int:
         with HttpClient(config.http) as http:
             if getattr(args, "notify_command", None) == "test":
                 outcome = send_test(config, http, args.channel)
+                from .watch.delivery import format_recipient_results
+
+                recipient_line = format_recipient_results(outcome.recipients)
                 if outcome.ok:
-                    print(f"{outcome.channel} ({outcome.type}): test message sent")
+                    print(f"{outcome.channel} ({outcome.type}): test message sent" + recipient_line)
                     return 0
                 print(
                     f"{outcome.channel} ({outcome.type}): test message failed"
                     + (f"; {outcome.error}" if outcome.error else "")
+                    + recipient_line
                 )
                 return 3
             delivery = deliver_pending(

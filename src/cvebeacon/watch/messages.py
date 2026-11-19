@@ -1590,3 +1590,23 @@ def webhook_payload(
 
 def rule_display_names(rules: Iterable[Rule]) -> dict[str, str]:
     return {rule.name.casefold(): rule.name for rule in rules}
+
+
+def teams_adaptive_card(message: OutgoingMessage) -> dict:
+    """Render the shared Teams Adaptive Card wire payload."""
+    return {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                        {"type": "TextBlock", "wrap": True, "text": message.text}
+                    ],
+                },
+            }
+        ],
+    }

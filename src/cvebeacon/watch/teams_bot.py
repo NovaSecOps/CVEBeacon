@@ -9,13 +9,13 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from weakref import WeakKeyDictionary
 
 from ..http import HttpClient, HttpResult
-from .channels import ChannelConfig
+from .channels import ChannelConfig, teams_service_url
 from .delivery import AUTH_MAX_ATTEMPTS, DeliveryFailure, _http_call, _json_body, _secret
-from .messages import OutgoingMessage
+from .messages import OutgoingMessage, teams_adaptive_card
 from .store import WatchStore
 
 AUTHORITY = "https://login.microsoftonline.com"
@@ -32,21 +32,18 @@ class RecipientResult:
     status: str
     error: str | None = None
     attempts_limit: int | None = None
+    part_index: int = 0
+    destination_index: int = 0
 
 
-def adaptive_card(message: OutgoingMessage) -> dict:
-    """Use the same card structure as the existing Workflow channel."""
-    return {
-        "type": "message",
-        "attachments": [{
-            "contentType": "application/vnd.microsoft.card.adaptive",
-            "content": {
-                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                "type": "AdaptiveCard", "version": "1.4",
-                "body": [{"type": "TextBlock", "wrap": True, "text": message.text}],
-            },
-        }],
-    }
+adaptive_card = teams_adaptive_card
+
+
+def message_key(message: OutgoingMessage) -> str:
+    return hashlib.sha256(json.dumps(
+        [message.event_ids, message.initial, message.part_index, adaptive_card(message)],
+        sort_keys=True, ensure_ascii=True,
+    ).encode()).hexdigest()
 
 
 class _Session:
@@ -62,7 +59,10 @@ class _Session:
         self.sleep = sleep
         self._token_errors: dict[str, DeliveryFailure] = {}
 
-    def request(self, method: str, url: str, *, activity: bool = False, **kwargs) -> HttpResult:
+    def request(self, method: str, url: str, *, activity: bool = False, scope: str | None = None, **kwargs) -> HttpResult:
+        if scope == BOT_SCOPE and kwargs.get("headers", {}).get("Authorization"):
+            origin = urlsplit(url)
+            teams_service_url(f"{origin.scheme}://{origin.netloc}/", "Teams bot service_url")
         for attempt in range(3):
             remaining = self.deadline - self.monotonic()
             if remaining <= 0:
@@ -80,10 +80,14 @@ class _Session:
             if status in (401, 403):
                 if status == 401:
                     _TOKENS.pop(self.http, None)
-                raise DeliveryFailure(
-                    f"Teams bot authorization failed: HTTP {status}",
+                operation = "Graph user lookup" if scope == GRAPH_SCOPE else "Bot Connector"
+                failure = DeliveryFailure(
+                    f"Teams bot {operation} authorization failed: HTTP {status}",
                     attempts_limit=AUTH_MAX_ATTEMPTS,
                 )
+                if status == 401 and scope:
+                    self._token_errors[scope] = failure
+                raise failure
             if status == 429:
                 retry_after = HttpClient._retry_after_value(
                     result.headers.get("retry-after") or result.headers.get("Retry-After"),
@@ -113,6 +117,7 @@ class _Session:
         try:
             result = self.request(
                 "POST", f"{AUTHORITY}/{tenant}/oauth2/v2.0/token",
+                scope=scope,
                 data={"client_id": app, "client_secret": secret,
                       "scope": scope, "grant_type": "client_credentials"},
             )
@@ -128,13 +133,13 @@ class _Session:
             not isinstance(token, str) or not token or len(token) > 16384
             or any(ord(char) <= 32 or ord(char) == 127 for char in token)
             or isinstance(expiry, bool) or not isinstance(expiry, (int, float))
-            or not 0 < expiry <= 86400 or not math.isfinite(expiry)
+            or not 0 < expiry or not math.isfinite(expiry)
         ):
             failure = DeliveryFailure("Teams bot token response is invalid")
             self._token_errors[scope] = failure
             raise failure
         # Refresh a little early, including unusually short-lived tokens.
-        expires = started + expiry - min(60, expiry / 10)
+        expires = started + min(expiry, 86400) - min(60, expiry / 10)
         if len(cache) >= 32:
             cache.clear()
         cache[key] = (token, expires)
@@ -150,7 +155,7 @@ class _Session:
         if "@" in recipient:
             result = self.request(
                 "GET", f"{GRAPH_URL}/users/{quote(recipient, safe='')}?$select=id",
-                headers={"Authorization": f"Bearer {self.token(GRAPH_SCOPE)}"},
+                headers={"Authorization": f"Bearer {self.token(GRAPH_SCOPE)}"}, scope=GRAPH_SCOPE,
             )
             body = _json_body(result)
             try:
@@ -159,7 +164,7 @@ class _Session:
                 raise DeliveryFailure("Teams bot user lookup response is invalid") from None
         result = self.request(
             "POST", service_url + "v3/conversations",
-            headers={"Authorization": f"Bearer {self.token(BOT_SCOPE)}"},
+            headers={"Authorization": f"Bearer {self.token(BOT_SCOPE)}"}, scope=BOT_SCOPE,
             json_body={
                 "bot": {"id": "28:" + app}, "isGroup": False,
                 "members": [{"id": object_id}],
@@ -180,7 +185,7 @@ class _Session:
 
 def send_bot(
     channel: ChannelConfig, message: OutgoingMessage, http: HttpClient,
-    timeout: float, store: WatchStore, *, deadline: float | None = None,
+    timeout: float, store: WatchStore | None, *, deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep, retry_ambiguous: bool = False,
     wall_time: Callable[[], float] = time.time,
@@ -191,10 +196,7 @@ def send_bot(
     )
     # Parts are individually durable. A later failed part never replays a sent part.
     payload = adaptive_card(message)
-    message_key = hashlib.sha256(json.dumps(
-        [message.event_ids, message.initial, message.part_index, payload],
-        sort_keys=True, ensure_ascii=True,
-    ).encode()).hexdigest()
+    rendered_key = message_key(message)
     destinations = [
         (recipient, None, channel.options["service_url"])
         for recipient in channel.options["recipients"]
@@ -202,11 +204,14 @@ def send_bot(
         ("conversation:" + conversation_id, conversation_id, service_url)
         for conversation_id, service_url in channel.options["conversation_references"]
     ]
+    # Revalidate before any token request, including programmatic channel configs.
+    destinations = [(recipient, conversation_id, teams_service_url(service_url, "Teams bot service_url"))
+                    for recipient, conversation_id, service_url in destinations]
     results = []
-    for recipient, conversation_id, service_url in destinations:
+    for destination_index, (recipient, conversation_id, service_url) in enumerate(destinations):
         destination_key = hashlib.sha256(json.dumps([recipient, service_url]).encode()).hexdigest()
         key = (channel.name, channel.options["tenant_id"], channel.options["app_id"],
-               destination_key, message_key)
+               destination_key, rendered_key)
         # Channel tests deliberately send a fresh labelled card every time.
         durable = bool(message.event_ids) or message.initial
         was_ambiguous = False
@@ -217,16 +222,20 @@ def send_bot(
             was_ambiguous = status == "retrying_ambiguous"
             if status not in {"sending", "retrying_ambiguous"}:
                 results.append(RecipientResult(
-                    recipient, "failed" if status == "deferred" else status,
+                    recipient, status,
                     None if status == "sent" else "Teams bot recipient requires retry" if status == "ambiguous"
                     else "Teams bot recipient is waiting for Retry-After",
+                    part_index=message.part_index, destination_index=destination_index,
                 ))
                 continue
+        activity_started = False
         try:
             conversation_id = conversation_id or session.conversation(store, recipient, service_url)
+            token = session.token(BOT_SCOPE)
+            activity_started = True
             session.request(
                 "POST", service_url + "v3/conversations/" + quote(conversation_id, safe="") + "/activities",
-                headers={"Authorization": f"Bearer {session.token(BOT_SCOPE)}"},
+                headers={"Authorization": f"Bearer {token}"}, scope=BOT_SCOPE,
                 json_body=payload, activity=True,
             )
             if durable:
@@ -241,17 +250,24 @@ def send_bot(
                     )
                 except Exception:
                     # Leave the claimed row for crash recovery if storage is unavailable.
-                    results.append(RecipientResult(recipient, "ambiguous", "Teams bot delivery state could not be saved"))
+                    results.append(RecipientResult(
+                        recipient, "ambiguous" if activity_started or was_ambiguous else "failed",
+                        "Teams bot delivery state could not be saved", part_index=message.part_index,
+                        destination_index=destination_index,
+                    ))
                     continue
-            results.append(RecipientResult(recipient, status, exc.category, exc.attempts_limit))
+            results.append(RecipientResult(recipient, status, exc.category, exc.attempts_limit, message.part_index, destination_index))
         except Exception:
-            # A storage failure after an accepted send must never permit a replay.
+            status = "ambiguous" if activity_started or was_ambiguous else "failed"
             if durable:
                 try:
-                    store.finish_teams_bot_recipient(key, "ambiguous", error="Teams bot delivery interrupted")
+                    store.finish_teams_bot_recipient(key, status, error="Teams bot delivery interrupted")
                 except Exception:
                     pass  # The sending row remains durable and will recover as ambiguous.
-            results.append(RecipientResult(recipient, "ambiguous", "Teams bot delivery interrupted"))
+            results.append(RecipientResult(
+                recipient, status, "Teams bot delivery interrupted", part_index=message.part_index,
+                destination_index=destination_index,
+            ))
         else:
-            results.append(RecipientResult(recipient, "sent"))
+            results.append(RecipientResult(recipient, "sent", part_index=message.part_index, destination_index=destination_index))
     return tuple(results)

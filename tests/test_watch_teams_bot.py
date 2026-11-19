@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import timedelta
 import json
+import os
 import sqlite3
 from urllib.parse import parse_qs
 
@@ -133,6 +134,7 @@ def test_invalid_config_fails_closed(raw, tmp_path, changes):
         channel({**raw, **changes}, tmp_path)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
 def test_secret_file_must_be_private(raw, tmp_path):
     (tmp_path / raw["client_secret_file"]).chmod(0o644)
     with pytest.raises(ConfigurationError, match="group or other"):
@@ -286,7 +288,7 @@ def test_long_retry_after_is_persisted_without_busy_wait(raw, tmp_path):
     assert results[0].status == "failed" and sleeps == []
     results = send_bot(cfg.watch.channels[0], MESSAGE, mock_client(lambda _: pytest.fail("early retry")),
                        30, store, wall_time=lambda: 200)
-    assert results[0].status == "failed" and "Retry-After" in results[0].error
+    assert results[0].status == "deferred" and "Retry-After" in results[0].error
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT not_before FROM watch_teams_bot_delivery").fetchone()[0] == 3700
 
@@ -586,7 +588,7 @@ def test_migration_creates_all_bot_tables(raw, tmp_path):
         db.execute("UPDATE watch_meta SET value='7' WHERE key='schema_version'")
     store.initialize()
     with sqlite3.connect(store.path) as db:
-        names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'watch_teams_bot_%'")}
+        names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'watch_teams_bot_%'")}
     assert names == {"watch_teams_bot_conversation", "watch_teams_bot_delivery", "watch_teams_bot_batch"}
 
 
@@ -631,4 +633,216 @@ def test_service_url_allowlist_rejects_foreign_origins(raw, tmp_path, url, refer
         raw["service_url"] = url
     with pytest.raises(ConfigurationError):
         channel(raw, tmp_path)
+
+
+
+@pytest.mark.parametrize("reference", [False, True])
+def test_runtime_service_url_validation_precedes_token_requests(raw, tmp_path, reference):
+    cfg = config(raw, tmp_path)
+    options = dict(cfg.watch.channels[0].options)
+    if reference:
+        options["conversation_references"] = (("id", "https://example.com/steal/"),)
+    else:
+        options["service_url"] = "https://example.com/steal/"
+    unsafe = replace(cfg.watch.channels[0], options=options)
+    with pytest.raises(ConfigurationError, match="Microsoft"):
+        send_bot(unsafe, MESSAGE, mock_client(lambda _: pytest.fail("untrusted request")),
+                 30, seed(cfg))
+
+
+@pytest.mark.parametrize("stage", ["activities", "conversations", "graph"])
+def test_shared_401_latches_scope_for_remaining_recipients(raw, tmp_path, stage):
+    raw["recipients"] = ["one@example.com", "two@example.com"] if stage == "graph" else [USER, OTHER]
+    cfg = config(raw, tmp_path)
+    connector = Connector()
+    rejected = []
+    def handler(request):
+        if request.url.path.endswith("/" + stage) or (stage == "graph" and request.url.host == "graph.microsoft.com"):
+            rejected.append(request)
+            return httpx.Response(401)
+        return connector(request)
+    outcome = send_test(cfg, mock_client(handler), "bot")
+    assert not outcome.ok and len(outcome.recipients) == 2
+    assert len(rejected) == 1
+    assert len(connector.matching("/token")) == 1
+    if stage == "graph":
+        assert "Graph user lookup" in outcome.error
+
+
+@pytest.mark.parametrize("initial", [False, True])
+@pytest.mark.parametrize("stage", ["teams_bot_conversation", "save_teams_bot_messages"])
+def test_presend_storage_failure_is_retryable(raw, tmp_path, monkeypatch, stage, initial):
+    cfg = config(raw, tmp_path)
+    store = seed(cfg, initial=initial)
+    connector = Connector()
+    def fail(*args, **kwargs):
+        raise StateError("synthetic storage failure")
+    monkeypatch.setattr(store, stage, fail)
+    report = deliver_pending(cfg, store, mock_client(connector), clock=lambda: NOW)
+    assert report.failed and rows(store)[0][1] == "failed"
+    assert not connector.matching("/activities")
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_retry_after_wait_does_not_spend_parent_failure_budget(raw, tmp_path, initial):
+    raw["recipients"] = [USER, OTHER]
+    cfg = config(raw, tmp_path)
+    store = seed(cfg, initial=initial)
+    connector = Connector()
+    requests = []
+    throttled = [True]
+    def handler(request):
+        if request.url.path.endswith(OTHER + "/activities"):
+            requests.append(request)
+            if throttled[0]:
+                return httpx.Response(429, headers={"Retry-After": "604800"})
+        return connector(request)
+    http = mock_client(handler)
+    for index in range(12):
+        deliver_pending(cfg, store, http, clock=lambda: NOW + timedelta(hours=7*index))
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT attempts FROM watch_delivery").fetchone()[0] <= 1
+    assert len(requests) == 1
+    throttled[0] = False
+    assert not deliver_pending(cfg, store, http, clock=lambda: NOW + timedelta(days=8)).failed
+    assert len(requests) == 2 and rows(store)[0][1] == "sent"
+    assert len([r for r in connector.matching("/activities") if USER in r.url.path]) == 1
+
+
+@pytest.mark.parametrize("change", ["ranking", "new_event"])
+def test_initial_retry_freezes_membership_and_sample(raw, tmp_path, change):
+    raw["recipients"] = [USER, OTHER]
+    raw["max_items"] = 1
+    cfg = config(raw, tmp_path)
+    ids = ("CVE-2026-0001", "CVE-2026-0002") if change == "ranking" else ("CVE-2026-0001",)
+    store = seed(cfg, identifiers=ids, initial=True)
+    connector = Connector()
+    connector.activity_status[OTHER] = 503
+    http = mock_client(connector)
+    assert deliver_pending(cfg, store, http, clock=lambda: NOW).failed
+    original = connector.matching("/activities")[0].content
+    if change == "ranking":
+        with sqlite3.connect(store.path) as db:
+            db.execute("UPDATE watch_cve SET cvss_json=? WHERE cve_id=?",
+                       (json.dumps([{"provider": "nvd", "source": "security@example.com", "version": "3.1", "score": 10}]), ids[-1]))
+    else:
+        seed(cfg, identifiers=("CVE-2026-0002",), initial=True)
+    connector.activity_status.clear()
+    assert not deliver_pending(cfg, store, http, clock=lambda: NOW + timedelta(hours=1)).failed
+    calls = connector.matching("/activities")
+    assert len(calls) == 3 and calls[-1].content == original
+    if change == "new_event":
+        assert rows(store)[-1][1] == "pending"
+        assert not deliver_pending(cfg, store, http, clock=lambda: NOW + timedelta(hours=2)).failed
+        assert "CVE-2026-0002" in connector.matching("/activities")[-1].content.decode()
+
+
+def test_resolved_batches_are_pruned_and_indexes_exist(raw, tmp_path):
+    cfg = config(raw, tmp_path)
+    store = seed(cfg)
+    assert not deliver_pending(cfg, store, mock_client(Connector()), clock=lambda: NOW).failed
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT count(*) FROM watch_teams_bot_batch").fetchone() == (0,)
+        assert db.execute("SELECT count(*) FROM watch_teams_bot_delivery").fetchone() == (0,)
+        indexes = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert {"watch_teams_bot_delivery_status", "watch_teams_bot_batch_scope"} <= indexes
+
+
+def test_reference_only_channel_test_does_not_open_database(raw, tmp_path, monkeypatch):
+    raw["recipients"] = []
+    raw["conversation_references"] = [{"conversation_id": "existing"}]
+    cfg = config(raw, tmp_path)
+    monkeypatch.setattr(WatchStore, "initialize", lambda *_: pytest.fail("unneeded database write"))
+    assert send_test(cfg, mock_client(Connector()), "bot").ok
+
+
+def test_conversation_lookup_uses_readonly_connection(raw, tmp_path, monkeypatch):
+    store = seed(config(raw, tmp_path))
+    store.teams_bot_conversation(TENANT, APP, USER, SERVICE, "id")
+    monkeypatch.setattr(store, "transaction", lambda **_: pytest.fail("read acquired write lock"))
+    assert store.teams_bot_conversation(TENANT, APP, USER, SERVICE) == "id"
+
+
+def test_long_lived_token_is_refreshed_at_bounded_cache_expiry(raw, tmp_path):
+    connector = Connector()
+    def handler(request):
+        if request.url.path.endswith("/token"):
+            connector.requests.append(request)
+            return httpx.Response(200, json={"access_token": TOKEN, "expires_in": 172800})
+        return connector(request)
+    now = [0.0]
+    session = _Session(channel(raw, tmp_path), mock_client(handler), 30, 200000,
+                       lambda: now[0], lambda _: None)
+    assert session.token(BOT_SCOPE) == TOKEN
+    now[0] = 86400
+    assert session.token(BOT_SCOPE) == TOKEN
+    assert len(connector.matching("/token")) == 2
+
+
+def test_recipient_summary_is_bounded_and_identifies_parts():
+    from cvebeacon.watch.delivery import ChannelSummary, format_channel_line
+    from cvebeacon.watch.teams_bot import RecipientResult
+    results = tuple(RecipientResult("conversation:private-id", "failed", part_index=i)
+                    for i in range(30))
+    line = format_channel_line(ChannelSummary("bot", "teams_bot", recipients=results))
+    assert "30 failed" in line and "part 1" in line
+    assert "private-id" not in line and len(line) < 1500
+
+
+@pytest.mark.parametrize("ok", [False, True])
+def test_cli_channel_test_prints_recipient_outcomes(raw, tmp_path, monkeypatch, capsys, ok):
+    from cvebeacon import cli
+    from cvebeacon.watch.delivery import TestOutcome
+    from cvebeacon.watch.teams_bot import RecipientResult
+    import cvebeacon.watch.delivery as delivery
+
+    cfg = config(raw, tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda *_: cfg)
+    monkeypatch.setattr(delivery, "send_test", lambda *_: TestOutcome(
+        "bot", "teams_bot", ok, recipients=(RecipientResult("conversation:private-id", "sent" if ok else "failed"),)))
+    assert cli.main(["--config", str(cfg.config_path), "watch", "notify", "test", "bot"]) == (0 if ok else 3)
+    output = capsys.readouterr().out
+    assert "recipients:" in output and "destination 1 part 1" in output
+    assert "private-id" not in output
+
+
+def test_shared_workflow_and_bot_card_builder_preserves_wire_bytes():
+    from cvebeacon.watch.messages import teams_adaptive_card
+    from cvebeacon.watch.teams_bot import adaptive_card
+    assert adaptive_card is teams_adaptive_card
+    expected = b'{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","wrap":true,"text":"CVEBeacon alert"}]}}]}'
+    assert json.dumps(teams_adaptive_card(MESSAGE), separators=(",", ":")).encode() == expected
+
+
+def test_connector_request_rechecks_host_before_attaching_token(raw, tmp_path):
+    session = _Session(channel(raw, tmp_path), mock_client(lambda _: pytest.fail("foreign request")),
+                       30, 1000, lambda: 0, lambda _: None)
+    with pytest.raises(ConfigurationError, match="Microsoft"):
+        session.request("POST", "https://example.com/steal", scope=BOT_SCOPE,
+                        headers={"Authorization": "Bearer " + TOKEN})
+
+
+def test_multipart_results_keep_destination_and_part_identity(raw, tmp_path):
+    raw["recipients"] = [USER, OTHER]
+    cfg = config(raw, tmp_path)
+    store = seed(cfg)
+    connector = Connector()
+    http = mock_client(connector)
+    first = send_bot(cfg.watch.channels[0], replace(MESSAGE, part_index=0), http, 30, store)
+    second = send_bot(cfg.watch.channels[0], replace(MESSAGE, part_index=1), http, 30, store)
+    assert [(r.destination_index, r.part_index) for r in (*first, *second)] == [(0,0),(1,0),(0,1),(1,1)]
+
+
+def test_pruning_preserves_an_ambiguous_destination(raw, tmp_path):
+    cfg = config(raw, tmp_path)
+    store = seed(cfg)
+    connector = Connector()
+    connector.activity_status[USER] = httpx.ReadTimeout("synthetic interruption")
+    assert deliver_pending(cfg, store, mock_client(connector), clock=lambda: NOW).failed
+    # A completed parent alone cannot erase unconfirmed destination evidence.
+    store.mark_delivery((1,), "bot", "sent")
+    store.prune_teams_bot_batches("bot", TENANT, APP)
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT count(*) FROM watch_teams_bot_batch").fetchone() == (1,)
+        assert db.execute("SELECT status FROM watch_teams_bot_delivery").fetchone() == ("ambiguous",)
 

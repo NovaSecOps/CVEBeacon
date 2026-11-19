@@ -65,11 +65,13 @@ class DeliveryFailure(Exception):
         ambiguous: bool = False,
         attempts_limit: int | None = None,
         retry_after: float = 0,
+        deferred: bool = False,
     ) -> None:
         self.category = category
         self.ambiguous = ambiguous
         self.attempts_limit = attempts_limit
         self.retry_after = retry_after
+        self.deferred = deferred
         super().__init__(category)
 
 
@@ -131,7 +133,20 @@ def format_channel_line(summary: ChannelSummary) -> str:
         )
     if summary.error:
         line += f"; {summary.error}"
-    return line
+    return line + format_recipient_results(summary.recipients)
+
+
+def format_recipient_results(results: Sequence[RecipientResult]) -> str:
+    if not results:
+        return ""
+    from collections import Counter
+
+    counts = Counter(result.status for result in results)
+    total = ", ".join(f"{count} {status}" for status, count in sorted(counts.items()))
+    details = ", ".join(f"destination {result.destination_index + 1} part {result.part_index + 1}: {result.status}"
+                        for result in results[:10])
+    omitted = f", +{len(results) - 10} more" if len(results) > 10 else ""
+    return f"; recipients: {total} [{details}{omitted}]"
 
 
 def _http_call(
@@ -208,22 +223,9 @@ def _send_webhook_channel(
     except ConfigurationError as exc:
         raise DeliveryFailure(str(exc)) from None
     if channel.type == "teams":
-        body = {
-            "type": "message",
-            "attachments": [
-                {
-                    "contentType": "application/vnd.microsoft.card.adaptive",
-                    "content": {
-                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                        "type": "AdaptiveCard",
-                        "version": "1.4",
-                        "body": [
-                            {"type": "TextBlock", "wrap": True, "text": message.text}
-                        ],
-                    },
-                }
-            ],
-        }
+        from .messages import teams_adaptive_card
+
+        body = teams_adaptive_card(message)
         result = _http_call(http, "POST", url, json_body=body, timeout=timeout)
         _accepted(result, (200, 202), "Teams rejected the message")
         return
@@ -732,16 +734,17 @@ def _send(
     retry_ambiguous: bool = False,
     recipient_results: list[RecipientResult] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    wall_time: Callable[[], float] = time.time,
 ) -> None:
     if channel.type == "teams_bot":
         from .teams_bot import send_bot
 
-        if store is None:
+        if store is None and (channel.options["recipients"] or message.event_ids or message.initial):
             raise DeliveryFailure("Teams bot requires a watch database")
         results = send_bot(
             channel, message, http, timeout, store, deadline=deadline,
             monotonic=monotonic or time.monotonic, sleep=sleep,
-            retry_ambiguous=retry_ambiguous,
+            retry_ambiguous=retry_ambiguous, wall_time=wall_time,
         )
         if recipient_results is not None:
             recipient_results.extend(results)
@@ -749,6 +752,7 @@ def _send(
         if failures:
             raise DeliveryFailure(
                 failures[0].error or "Teams bot delivery failed",
+                deferred=all(result.status == "deferred" for result in failures),
                 ambiguous=any(result.status == "ambiguous" for result in failures),
                 attempts_limit=min(
                     (result.attempts_limit for result in failures if result.attempts_limit),
@@ -911,17 +915,20 @@ def deliver_pending(
             pace: bool,
             client_impacts: Mapping[str, ClientImpacts] | None = None,
         ) -> tuple[int, int, DeliveryFailure | None, bool, bool]:
-            if channel.type == "teams_bot":
-                if messages and messages[0].initial:
-                    saved = store.teams_bot_saved_messages(
-                        channel.name, channel.options["tenant_id"], channel.options["app_id"],
-                        messages[0].event_ids,
+            try:
+                if channel.type == "teams_bot":
+                    if messages and messages[0].initial:
+                        saved = store.teams_bot_saved_messages(
+                            channel.name, channel.options["tenant_id"], channel.options["app_id"],
+                            messages[0].event_ids,
+                        )
+                        if saved:
+                            messages = saved
+                    store.save_teams_bot_messages(
+                        channel.name, channel.options["tenant_id"], channel.options["app_id"], messages,
                     )
-                    if saved:
-                        messages = saved
-                store.save_teams_bot_messages(
-                    channel.name, channel.options["tenant_id"], channel.options["app_id"], messages,
-                )
+            except Exception:
+                return 0, sent, DeliveryFailure("Teams bot batch state could not be saved"), False, pace
             delivered = 0
             failure: DeliveryFailure | None = None
             expired = False
@@ -964,10 +971,11 @@ def deliver_pending(
                         retry_ambiguous=retry_ambiguous,
                         sleep=sleep,
                         recipient_results=recipient_results,
+                        wall_time=lambda: now.timestamp(),
                     )
                 except DeliveryFailure as exc:
                     failure = exc
-                    if delivered:
+                    if delivered and not exc.deferred:
                         failure = DeliveryFailure(
                             exc.category,
                             ambiguous=True,
@@ -1071,6 +1079,8 @@ def deliver_pending(
                     now=now,
                     max_items=channel.max_items,
                     include_ambiguous=include_ambiguous,
+                    **({"bot_identity": (channel.options["tenant_id"], channel.options["app_id"])}
+                       if channel.type == "teams_bot" else {}),
                 )
                 if digest is not None:
                     digest_clients = affected_clients(
@@ -1120,6 +1130,10 @@ def deliver_pending(
                             )
                             if expired:
                                 store.release_initial(channel.name, now=now)
+                                stop_channel = True
+                            elif failure is not None and failure.deferred:
+                                store.release_initial(channel.name, now=now)
+                                error = failure.category
                                 stop_channel = True
                             elif failure is not None:
                                 store.mark_initial_failed(
@@ -1299,6 +1313,12 @@ def deliver_pending(
                         )
                         stop_channel = True
                         break
+                    if failure is not None and failure.deferred:
+                        store.release_delivery(event_ids, channel.name,
+                                               status="ambiguous" if claim_statuses == ("ambiguous",) else "pending")
+                        error = failure.category
+                        stop_channel = True
+                        break
                     if failure is not None:
                         # A row that was ambiguous before this attempt may
                         # already have been delivered; a later failure cannot
@@ -1329,6 +1349,8 @@ def deliver_pending(
                         break
                     store.mark_delivery(event_ids, channel.name, "sent")
                     events_sent += len(event_ids)
+        if channel.type == "teams_bot":
+            store.prune_teams_bot_batches(channel.name, channel.options["tenant_id"], channel.options["app_id"])
         final_status = _channel_status(store, channel.name)
         summaries.append(
             ChannelSummary(
@@ -1404,8 +1426,9 @@ def send_test(
         else:
             store = None
             if channel.type == "teams_bot":
-                store = WatchStore(config.watch.database)
-                store.initialize()
+                if channel.options["recipients"]:
+                    store = WatchStore(config.watch.database)
+                    store.initialize()
             _send(
                 channel,
                 message,
