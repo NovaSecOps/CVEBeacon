@@ -47,8 +47,8 @@ environment directly.
 7. Confirm that the repository packages namespace can host
    `ghcr.io/novasecops/cvebeacon`. Make the package public after the first
    publish, or grant the intended audience read access.
-8. Confirm that the `release` environment has no secrets. The workflow uses the
-   repository token and does not need a personal token or a registry password.
+8. Add the `RELEASE_SIGNING_KEY` secret to the protected `release` environment
+   using the key setup below. No personal token or registry password is needed.
 9. Verify the setup read-only after the variable is in place:
 
    ```console
@@ -185,3 +185,43 @@ owner-authorized.
 - If an artifact is wrong, edit the draft before publishing when possible.
   After publishing, mark the release as withdrawn in its notes and publish a
   corrected patch release rather than replacing assets.
+
+## One-time release signature setup
+
+Generate a dedicated Ed25519 signing key on a trusted administrative machine:
+
+```console
+ssh-keygen -t ed25519 -N '' -f release-signing-key -C cvebeacon-release
+ssh-keygen -lf release-signing-key.pub
+```
+
+Keep a secure offline copy of the private key. Put its complete private-key text
+in the **environment** secret `RELEASE_SIGNING_KEY` on the existing protected
+`release` environment. Do not create a repository-wide secret or commit the
+private key. A protected `release-signing` gate signs and verifies the complete artifact set
+before either container publication or drafting the release can run. Only that
+job receives the signing secret; the container job never receives the key. The signing step writes it to a private temporary file
+and removes that file on exit.
+
+Replace the fail-closed placeholder in `src/cvebeacon/release-allowed-signers`
+with `cvebeacon-release namespaces="cvebeacon-release"` followed by the public
+key type and base64 public key. Commit only that public pin before building the
+first updatable release. Distribute the fingerprint independently. For a fork,
+pin the fork owner's key and configure its repository in both update settings
+and administrator policy. Rotate keys through an authenticated administrator
+update to the allowed-signers file; never trust a new key from an unsigned asset.
+
+The release builds core, extensions and automation wheels and a binary runtime
+wheelhouse for the documented native targets. All artifacts, including dependency
+wheels, are hashed in `SHA256SUMS`. The workflow signs that exact manifest with
+`ssh-keygen -Y sign -n cvebeacon-release`, then verifies it against the packaged
+pin before either publication job is eligible. The draft job verifies the
+signature and all checksums again after downloading the signed artifact set. Refuse publication if the pin or signature fails.
+An updater checks the signature before trusting hashes, verifies every artifact,
+and installs only from the verified wheel directory. A checksum file without
+its SSH signature is insufficient.
+
+Before publishing the draft, verify all three package versions match the tag,
+verify `SHA256SUMS.sig` and `sha256sum --check SHA256SUMS`, and run the scratch
+upgrade acceptance described in [upgrading](UPGRADING.md). Never replace assets
+on an already published release.

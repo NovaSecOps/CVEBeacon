@@ -1,0 +1,2 @@
+# Fail closed until the owner pins the public release key. See docs/RELEASE_CHECKLIST.md.
+# cvebeacon-release namespaces="cvebeacon-release" ssh-ed25519 PUBLIC_KEY
