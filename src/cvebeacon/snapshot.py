@@ -21,8 +21,6 @@ class SnapshotError(CVEBeaconError):
 
 
 def sync_directory(path):
-    if os.name == "nt":
-        return  # Windows does not provide directory descriptors to fsync.
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)

@@ -539,7 +539,7 @@ def build_command(
             if include_secrets:
                 args.append("--include-secrets")
             if created_by:
-                args.extend(["--created-by", created_by])
+                args.extend([f"--created-by={created_by}"])
             return args
         if not isinstance(backup_id, str) or not backup_id:
             raise ConfigurationError("choose a retained backup")

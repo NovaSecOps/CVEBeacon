@@ -5,7 +5,7 @@
 {% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
 <section class="panel">
 <h2>Status</h2>
-<dl><dt>Retained backups</dt><dd>{{ stats.count }}</dd><dt>Last backup (UTC)</dt><dd>{{ stats.last or 'Never' }}</dd><dt>Retention</dt><dd>{{ retention_days }} day(s), keeping at least {{ keep_min }}</dd></dl>
+<dl><dt>Retained backups</dt><dd>{{ stats.count }}</dd><dt>Last backup (UTC)</dt><dd>{{ stats.last or 'Never' }}</dd>{% if can_admin %}<dt>Retention</dt><dd>{{ retention_days }} day(s), keeping at least {{ keep_min }}</dd>{% endif %}</dl>
 {% if not can_admin %}<p>Backups are managed by an administrator. This page shows when the last backup was taken and how many are retained.</p>{% endif %}
 </section>
 {% if can_admin %}
@@ -19,11 +19,10 @@
 <p>Delete backups older than {{ retention_days }} day(s), keeping at least the newest {{ keep_min }}.</p>
 <form method="post" action="{{ url_for('backups.prune_backups') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Prune expired backups</button></form>
 </section>
-{% endif %}
 <h2>Retained backups</h2>
 {% if active %}<p class="muted">A job is queued or running; wait for it to finish before restoring.</p>{% endif %}
 {% if backups %}
-<div class="table-wrap"><table><thead><tr><th>Backup (UTC)</th><th>Created</th><th>Size</th><th>Databases</th><th>Secrets</th><th>Schema</th><th>State</th>{% if can_admin %}<th>Actions</th>{% endif %}</tr></thead><tbody>
+<div class="table-wrap"><table><thead><tr><th>Backup (UTC)</th><th>Created</th><th>Size</th><th>Databases</th><th>Secrets</th><th>Schema</th><th>State</th><th>Actions</th></tr></thead><tbody>
 {% for backup in backups %}
 <tr>
 <td><code>{{ backup.id }}</code></td>
@@ -33,17 +32,18 @@
 <td>{{ 'included' if backup.include_secrets else 'excluded' }}</td>
 <td>{% for name, value in backup.schema_versions.items()|sort %}{{ name }} {{ value }}{% if not loop.last %}, {% endif %}{% else %}{{ 'unknown' if backup.databases else 'no databases' }}{% endfor %}</td>
 <td>{{ 'ok' if backup.valid else 'invalid' }}{% if backup.error %}<br><span class="muted">{{ backup.error }}</span>{% endif %}</td>
-{% if can_admin %}<td>
+<td>
 {% if backup.valid %}
 <form method="post" action="{{ url_for('backups.verify_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}"><button type="submit">Verify</button></form>
 <form method="post" action="{{ url_for('backups.download_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}"><button type="submit">Download</button></form>
 <form method="post" action="{{ url_for('backups.restore_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}"><label>Type {{ backup.id }} to restore <input type="text" name="confirm" required autocomplete="off" size="24"></label><button type="submit">Restore</button></form>
 <p class="muted">Restore verifies every hash, keeps a pre-restore safety backup, and is refused while dashboard jobs or another run are active.</p>
 {% endif %}
-</td>{% endif %}
+</td>
 </tr>
 {% endfor %}
 </tbody></table></div>
 {% else %}<p>No backups have been taken yet.</p>{% endif %}
-{% if can_admin %}<p class="muted">Downloads are built on request and are not kept on disk. Pruning never removes the newest retained minimum. See the backup guide for cron and systemd-timer examples.</p>{% endif %}
+<p class="muted">Downloads are built on request and are not kept on disk. Pruning never removes the newest retained minimum. See the backup guide for cron and systemd-timer examples.</p>
+{% endif %}
 {% endblock %}

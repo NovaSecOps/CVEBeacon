@@ -8,22 +8,31 @@ about to write. Downloads are built on demand from the verified directory.
 
 from __future__ import annotations
 
+import io
 import json
 import os
-from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import re
 import shutil
 import sqlite3
 import stat
+import sys
 import tarfile
 import tempfile
+import tomllib
+from contextlib import closing, contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import BinaryIO
 
-from .config import AppConfig
+from .config import AppConfig, load_config
 from .errors import CVEBeaconError
-from .locking import OperationLock, RunInProgress, dashboard_job_id
+from .locking import (
+    DASHBOARD_LOCK_CONFLICT_EXIT,
+    OperationLock,
+    RunInProgress,
+    dashboard_job_id,
+)
 from .private_storage import private_directory, private_file
 from .snapshot import (
     SnapshotError,
@@ -46,6 +55,16 @@ DATABASE_FILE = re.compile(r"[0-9]{1,4}\.db")
 
 class BackupError(CVEBeaconError):
     pass
+
+
+class BackupBusy(BackupError):
+    """A backup operation could not take the shared run lock."""
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return  # The updater keeps its original POSIX directory-sync contract.
+    sync_directory(path)
 
 
 @dataclass(frozen=True)
@@ -82,6 +101,8 @@ def jobs_database(config: AppConfig) -> Path:
 
 
 def _current_schemas() -> dict[str, int]:
+    # User and job stores have no schema-version constant; their manifest
+    # values remain informational until one exists.
     from .state import SCHEMA_VERSION as state_schema
     from .watch.store import SCHEMA_VERSION as watch_schema
 
@@ -149,6 +170,7 @@ def _sqlite_files(root: Path, excluded: Path) -> set[Path]:
             name for name in directories
             if not (here / name).is_symlink()
             and not _inside((here / name).resolve(), excluded)
+            and not _backup_store(here / name)
         ]
         for name in directories + files:
             count += 1
@@ -178,15 +200,52 @@ def _inside(path: Path, directory: Path) -> bool:
     return True
 
 
-def _secret_files(config: AppConfig) -> dict[str, Path]:
-    result: dict[str, Path] = {}
+def _secret_files(config: AppConfig, extra=()) -> dict[Path, list[str]]:
+    """Resolve referenced secret files once per target path."""
+    result: dict[Path, list[str]] = {}
+
+    def add(path, reference):
+        target = Path(path).expanduser()
+        result.setdefault(target, []).append(reference)
+
     if config.sources.nvd_api_key_file is not None:
-        result["sources.nvd_api_key_file"] = Path(config.sources.nvd_api_key_file)
+        add(config.sources.nvd_api_key_file, "sources.nvd_api_key_file")
     for channel in config.watch.channels:
         for key, value in channel.options.items():
             if isinstance(value, SecretRef) and value.file is not None:
-                result[f"watch.channels.{channel.name}.{key}"] = Path(value.file)
-    return result
+                add(value.file, f"watch.channels.{channel.name}.{key}")
+    for path in extra:
+        add(path, "restore-target")
+    return {path: list(dict.fromkeys(references)) for path, references in result.items()}
+
+
+def _backup_store(path: Path) -> bool:
+    """Identify a backup directory by name, layout or manifest identity."""
+    if BACKUP_ID.fullmatch(path.name):
+        return True
+    folded = path.name.casefold()
+    if folded in {"backup", "backups"} or folded.startswith(("backup-", "backups-")):
+        return True
+    try:
+        names = {entry.name for entry in path.iterdir()}
+    except OSError:
+        return False
+    if "manifest.json" in names:
+        return True
+    if "config.toml" in names and any(DATABASE_FILE.fullmatch(name) for name in names):
+        return True
+    manifest_path = path / BACKUP_MANIFEST
+    if not manifest_path.exists():
+        return False
+    try:
+        with manifest_path.open("rb") as stream:
+            raw = stream.read(65536)
+        value = json.loads(raw, object_pairs_hook=_unique_pairs)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return (isinstance(value, dict) and value.get("version") == 1
+            and value.get("id") == path.name
+            and isinstance(value.get("databases"), list))
 
 
 def _file_size(path: Path) -> int:
@@ -199,7 +258,8 @@ def _file_size(path: Path) -> int:
     return details.st_size
 
 
-def _create(config: AppConfig, *, include_secrets: bool, created_by: str) -> Backup:
+def _create(config: AppConfig, *, include_secrets: bool, created_by: str,
+            extra_databases=(), extra_secret_paths=()) -> Backup:
     root = backup_root(config)
     private_directory(root, owner_only=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -228,6 +288,12 @@ def _create(config: AppConfig, *, include_secrets: bool, created_by: str) -> Bac
             targets.append((path, role, required))
         data = Path(config.database_path).parent
         for path in sorted(_sqlite_files(data, excluded)):
+            if path in seen:
+                continue
+            seen.add(path)
+            targets.append((path, None, False))
+        for path in extra_databases:
+            path = Path(path).expanduser().resolve()
             if path in seen:
                 continue
             seen.add(path)
@@ -278,10 +344,11 @@ def _create(config: AppConfig, *, include_secrets: bool, created_by: str) -> Bac
         secret_entries: list[dict] = []
         skipped_secrets: list[str] = []
         if include_secrets:
-            for index, (label, path) in enumerate(sorted(_secret_files(config).items())):
+            secret_targets = _secret_files(config, extra_secret_paths)
+            for index, (path, references) in enumerate(sorted(secret_targets.items(), key=lambda item: str(item[0]))):
                 path = path.expanduser()
                 if path.is_symlink() or not path.is_file():
-                    skipped_secrets.append(label)
+                    skipped_secrets.extend(references)
                     continue
                 name = f"secrets/{index}"
                 target = destination / name
@@ -290,7 +357,8 @@ def _create(config: AppConfig, *, include_secrets: bool, created_by: str) -> Bac
                 target.chmod(0o600)
                 sync_file(target)
                 secret_entries.append({
-                    "reference": label,
+                    "reference": references[0],
+                    "references": references,
                     "path": str(path.resolve()),
                     "file": name,
                     "size": _file_size(target),
@@ -313,8 +381,8 @@ def _create(config: AppConfig, *, include_secrets: bool, created_by: str) -> Bac
             "total_size": sum(item["size"] for item in files),
         }
         _write_manifest(destination, manifest)
-        sync_directory(destination)
-        sync_directory(root)
+        _sync_directory(destination)
+        _sync_directory(root)
     except BaseException:
         shutil.rmtree(destination, ignore_errors=True)
         raise
@@ -362,10 +430,10 @@ def _backup(identifier: str, path: Path, manifest: dict) -> Backup:
         created_at=manifest.get("created_at"),
         created_by=manifest.get("created_by"),
         total_size=int(manifest.get("total_size") or 0),
-        databases=len(manifest.get("databases") or ()),
+        databases=sum(1 for row in manifest.get("databases") or () if row.get("exists")),
         include_secrets=bool(manifest.get("include_secrets")),
         schema_versions={key: value for key, value in (manifest.get("schema_versions") or {}).items()
-                         if isinstance(value, int)},
+                         if type(value) is int},
     )
 
 
@@ -379,6 +447,13 @@ def backup_path(config: AppConfig, backup_id: str) -> Path:
     if path.resolve().parent != root.resolve():
         raise BackupError("invalid backup location")
     return path
+
+
+def _backup_id_time(name: str) -> str | None:
+    try:
+        return datetime.strptime(name.split("-", 1)[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
+    except ValueError:
+        return None
 
 
 def list_backups(config: AppConfig) -> list[Backup]:
@@ -396,7 +471,8 @@ def list_backups(config: AppConfig) -> list[Backup]:
         try:
             manifest = _load_manifest(root / name)
         except BackupError as exc:
-            result.append(Backup(name, root / name, valid=False, error=str(exc)))
+            result.append(Backup(name, root / name, created_at=_backup_id_time(name),
+                                 valid=False, error=str(exc)))
             continue
         result.append(_backup(name, root / name, manifest))
     return result
@@ -449,9 +525,8 @@ def _load_manifest(source: Path) -> dict:
     if not isinstance(databases, list) or len(databases) > MAX_DATABASES:
         raise BackupError("invalid backup database list")
     seen_paths: set[str] = set()
-    seen_files: set[str] = set()
+    expected: dict[str, tuple[int, str]] = {}
     schema_versions = {}
-    expected = {"config.toml"}
     for row in databases:
         if not isinstance(row, dict):
             raise BackupError("invalid backup database entry")
@@ -461,24 +536,23 @@ def _load_manifest(source: Path) -> dict:
         seen_paths.add(path)
         if type(row.get("exists")) is not bool:
             raise BackupError("invalid backup database existence marker")
+        role = row.get("role")
+        if role is not None and (not isinstance(role, str) or role not in {"state", "watch", "users", "jobs"}):
+            raise BackupError("invalid backup database role")
         schema = row.get("schema")
         if schema is not None and (type(schema) is not int or schema < 0):
             raise BackupError("invalid backup database schema")
         if row["exists"]:
             name = row.get("backup")
-            if not isinstance(name, str) or not DATABASE_FILE.fullmatch(name) or name in seen_files:
+            if not isinstance(name, str) or not DATABASE_FILE.fullmatch(name) or name in expected:
                 raise BackupError("invalid backup database filename")
-            seen_files.add(name)
-            expected.add(name)
             if not _valid_size(row.get("size")) or not _valid_hash(row.get("sha256")) or not _valid_hash(row.get("logical_sha256")):
                 raise BackupError("invalid backup database checksum")
             if type(row.get("mode")) is not int:
                 raise BackupError("invalid backup database mode")
-        role = row.get("role")
-        if role in {"state", "watch"} and row["exists"]:
-            schema_versions[role] = schema
-        elif role in {"users", "jobs"} and row["exists"]:
-            schema_versions[role] = schema
+            expected[name] = (row["size"], row["sha256"])
+            if role is not None:
+                schema_versions[role] = schema
     config_row = manifest.get("config")
     if not isinstance(config_row, dict) or config_row.get("name") != "config.toml":
         raise BackupError("invalid backup configuration entry")
@@ -488,6 +562,7 @@ def _load_manifest(source: Path) -> dict:
         raise BackupError("invalid backup configuration mode")
     if not isinstance(config_row.get("source"), str) or not Path(config_row["source"]).is_absolute():
         raise BackupError("invalid backup configuration path")
+    expected["config.toml"] = (config_row["size"], config_row["sha256"])
     secrets = manifest.get("secrets")
     if not isinstance(secrets, list):
         raise BackupError("invalid backup secret list")
@@ -495,20 +570,26 @@ def _load_manifest(source: Path) -> dict:
         if not isinstance(row, dict):
             raise BackupError("invalid backup secret entry")
         name = row.get("file")
-        if not isinstance(name, str) or not re.fullmatch(r"secrets/[0-9]{1,4}", name) or name in seen_files:
+        if not isinstance(name, str) or not re.fullmatch(r"secrets/[0-9]{1,4}", name) or name in expected:
             raise BackupError("invalid backup secret filename")
-        seen_files.add(name)
-        expected.add(name)
-        if not isinstance(row.get("reference"), str) or not isinstance(row.get("path"), str) or not Path(row["path"]).is_absolute():
+        if not isinstance(row.get("reference"), str) or not row["reference"]:
             raise BackupError("invalid backup secret reference")
+        references = row.get("references", [row["reference"]])
+        if (not isinstance(references, list) or not references
+                or any(not isinstance(item, str) or not item for item in references)
+                or references[0] != row["reference"]):
+            raise BackupError("invalid backup secret references")
+        if not isinstance(row.get("path"), str) or not Path(row["path"]).is_absolute():
+            raise BackupError("invalid backup secret path")
         if not _valid_size(row.get("size")) or not _valid_hash(row.get("sha256")) or type(row.get("mode")) is not int:
             raise BackupError("invalid backup secret checksum")
+        expected[name] = (row["size"], row["sha256"])
     if manifest.get("schema_versions") != schema_versions:
         raise BackupError("backup schema versions do not match its databases")
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
         raise BackupError("invalid backup file list")
-    listed = set()
+    listed: dict[str, tuple[int, str]] = {}
     total = 0
     for row in files:
         if not isinstance(row, dict):
@@ -516,9 +597,9 @@ def _load_manifest(source: Path) -> dict:
         name = row.get("name")
         if not isinstance(name, str) or name in listed:
             raise BackupError("invalid backup file name")
-        listed.add(name)
         if not _valid_size(row.get("size")) or not _valid_hash(row.get("sha256")):
             raise BackupError("invalid backup file checksum")
+        listed[name] = (row["size"], row["sha256"])
         total += row["size"]
     if listed != expected or total != manifest.get("total_size"):
         raise BackupError("backup file list does not match its content")
@@ -578,22 +659,36 @@ def _refuse_newer(manifest: dict) -> None:
 def _locked(config: AppConfig, operation: str):
     lock = OperationLock(config, operation)
     if not lock.acquire():
-        raise BackupError(f"{operation.replace('-', ' ')} refused: {RunInProgress(lock.holder)}")
+        raise BackupBusy(f"{operation.replace('-', ' ')} refused: {RunInProgress(lock.holder)}")
     try:
         yield
     finally:
         lock.release()
 
 
+def _failure(operation: str):
+    return BackupError(f"{operation} failed")
+
+
 def create(config: AppConfig, *, include_secrets: bool = False, created_by: str = "cli") -> Backup:
-    with _locked(config, "backup-create"):
-        return _create(config, include_secrets=include_secrets, created_by=created_by)
+    try:
+        with _locked(config, "backup-create"):
+            return _create(config, include_secrets=include_secrets, created_by=created_by)
+    except BackupError:
+        raise
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error):
+        raise _failure("backup creation") from None
 
 
 def verify(config: AppConfig, backup_id: str) -> Backup:
-    with _locked(config, "backup-verify"):
-        backup, _ = _verify(config, backup_id)
-    return backup
+    try:
+        with _locked(config, "backup-verify"):
+            backup, _ = _verify(config, backup_id)
+        return backup
+    except BackupError:
+        raise
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error):
+        raise _failure("backup verification") from None
 
 
 def _active_jobs(config: AppConfig) -> list[dict]:
@@ -615,104 +710,102 @@ def _active_jobs(config: AppConfig) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _restore_database(config: AppConfig, source: Path, row: dict) -> None:
-    data = Path(config.database_path).parent.resolve()
-    configured = {path.resolve() for path, _, _ in _configured_databases(config)}
-    raw = Path(row["path"])
-    if raw.is_symlink():
-        raise BackupError("restore target must not be a symbolic link")
-    target = raw.resolve()
-    if not (_inside(target, data) or target in configured):
-        raise BackupError("restore target is outside the configured state")
-    if target.parent.is_symlink() or (target.exists() and target.is_symlink()):
-        raise BackupError("restore target must not be a symbolic link")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if row["exists"]:
-        saved = source / row["backup"]
-        if digest(saved) != row["sha256"]:
-            raise BackupError("backup database changed during restore")
-        for suffix in ("-wal", "-shm", "-journal"):
-            Path(str(target) + suffix).unlink(missing_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=".backup-restore-", dir=target.parent)
-        os.close(descriptor)
-        temporary_path = Path(temporary)
-        try:
-            copy_sqlite(saved, temporary_path)
-            _normalize_sqlite_copy(temporary_path)
-            temporary_path.chmod(0o600)
-            if logical_digest(temporary_path) != row["logical_sha256"]:
-                raise BackupError("restored database verification failed")
-            os.replace(temporary, target)
-            sync_directory(target.parent)
-        finally:
-            for candidate in (temporary_path, *(Path(str(temporary_path) + suffix)
-                                                for suffix in ("-wal", "-shm", "-journal"))):
-                candidate.unlink(missing_ok=True)
-    else:
-        target.unlink(missing_ok=True)
-        for suffix in ("-wal", "-shm", "-journal"):
-            Path(str(target) + suffix).unlink(missing_ok=True)
-        sync_directory(target.parent)
+@dataclass(frozen=True)
+class _StagedFile:
+    kind: str
+    target: Path
+    temporary: Path
+    reference: str | None = None
 
 
-def _restore_config(config: AppConfig, source: Path, manifest: dict) -> None:
-    entry = manifest["config"]
-    saved = source / entry["name"]
-    if digest(saved) != entry["sha256"]:
-        raise BackupError("backup configuration changed during restore")
-    target = Path(config.config_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=".backup-config-", dir=target.parent)
-    os.close(descriptor)
+def _rewrite_secret_paths(node, base: Path, copies: dict[Path, Path]) -> None:
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if key.endswith("_file") and isinstance(value, str):
+                raw = Path(value).expanduser()
+                target = (raw if raw.is_absolute() else base / raw).resolve()
+                if target in copies:
+                    node[key] = str(copies[target])
+            else:
+                _rewrite_secret_paths(value, base, copies)
+    elif isinstance(node, list):
+        for item in node:
+            _rewrite_secret_paths(item, base, copies)
+
+
+def _validate_restored_config(config: AppConfig, source: Path, manifest: dict):
+    """Load the backed-up configuration with the running loader.
+
+    Secret file references are validated against private copies of the files
+    that this restore would install, so missing live secrets do not reject a
+    complete backup and no live path is touched.
+    """
+    base = Path(config.config_path).parent
+    directory = None
+    copies: dict[Path, Path] = {}
+    validation = None
     try:
-        shutil.copyfile(saved, temporary)
-        if digest(temporary) != entry["sha256"]:
-            raise BackupError("backup configuration verification failed")
-        Path(temporary).chmod(entry.get("mode", 0o600) & 0o777)
-        sync_file(temporary)
-        os.replace(temporary, target)
-        sync_directory(target.parent)
+        if manifest["secrets"]:
+            directory = tempfile.TemporaryDirectory(prefix=".backup-validate-", dir=base)
+            for index, row in enumerate(manifest["secrets"]):
+                target = Path(row["path"]).expanduser().resolve()
+                staged = Path(directory.name) / str(index)
+                shutil.copyfile(source / row["file"], staged)
+                staged.chmod(0o600)
+                copies[target] = staged
+        raw = (source / manifest["config"]["name"]).read_bytes()
+        document = tomllib.loads(raw.decode("utf-8"))
+        _rewrite_secret_paths(document, base, copies)
+        from .dashboard_config import dumps
+
+        content = dumps(document).encode("utf-8")
+        descriptor, name = tempfile.mkstemp(prefix=".backup-config-", dir=base)
+        validation = Path(name)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        validation.chmod(0o600)
+        restored = load_config(validation)
+        return restored, directory, copies
+    except (CVEBeaconError, OSError, ValueError, UnicodeError):
+        if directory is not None:
+            directory.cleanup()
+        raise BackupError("backup configuration is not compatible with this version") from None
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        if validation is not None:
+            validation.unlink(missing_ok=True)
 
 
-def _restore_secrets(config: AppConfig, source: Path, manifest: dict) -> list[str]:
+def _allowed_paths(config: AppConfig):
     data = Path(config.database_path).parent.resolve()
-    allowed = {path.expanduser().resolve() for path in _secret_files(config).values()}
-    restored = []
-    for row in manifest["secrets"]:
-        raw = Path(row["path"])
-        if raw.is_symlink():
-            raise BackupError("restore target must not be a symbolic link")
-        target = raw.resolve()
-        if not (_inside(target, data) or target in allowed):
-            raise BackupError("restore target is outside the configured secret files")
-        saved = source / row["file"]
-        if digest(saved) != row["sha256"]:
-            raise BackupError("backup secret changed during restore")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=".backup-secret-", dir=target.parent)
-        os.close(descriptor)
-        try:
-            shutil.copyfile(saved, temporary)
-            if digest(temporary) != row["sha256"]:
-                raise BackupError("backup secret verification failed")
-            Path(temporary).chmod(0o600)
-            sync_file(temporary)
-            os.replace(temporary, target)
-            sync_directory(target.parent)
-            restored.append(row["reference"])
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-    return restored
+    configured = {path.expanduser().resolve() for path, _, _ in _configured_databases(config)}
+    secrets = set(_secret_files(config))
+    return data, configured, secrets
 
 
-def _validate_restore(config: AppConfig, manifest: dict) -> None:
-    """Refuse every unsafe target before the first write."""
-    data = Path(config.database_path).parent.resolve()
-    configured = {path.resolve() for path, _, _ in _configured_databases(config)}
-    seen: set[Path] = {Path(config.config_path).resolve()}
+def _preserved_absent(manifest: dict) -> list[str]:
+    preserved = []
     for row in manifest["databases"]:
+        if not row["exists"] and Path(row["path"]).exists():
+            preserved.append(row.get("role") or Path(row["path"]).name)
+    return preserved
+
+
+def _validate_restore(config: AppConfig, restored: AppConfig, manifest: dict,
+                      validation_copies: dict[Path, Path]) -> None:
+    """Refuse every unsafe target before the first write."""
+    current_data, current_configured, current_secrets = _allowed_paths(config)
+    restored_data, restored_configured, restored_secrets_by_path = _allowed_paths(restored)
+    staged_to_target = {staged: target for target, staged in validation_copies.items()}
+    restored_secrets = {
+        staged_to_target.get(path, path) for path in restored_secrets_by_path
+    }
+    seen: set[Path] = {Path(config.config_path).resolve()}
+    backup_directory = backup_root(config).resolve()
+    for row in manifest["databases"]:
+        if not row["exists"]:
+            continue
         raw = Path(row["path"])
         if raw.is_symlink():
             raise BackupError("restore target must not be a symbolic link")
@@ -720,9 +813,13 @@ def _validate_restore(config: AppConfig, manifest: dict) -> None:
         if target in seen:
             raise BackupError("backup contains duplicate restore targets")
         seen.add(target)
-        if not (_inside(target, data) or target in configured):
+        if _inside(target, backup_directory):
+            raise BackupError("restore target must not be inside the backup store")
+        if not (_inside(target, current_data) or _inside(target, restored_data)
+                or target in current_configured or target in restored_configured):
             raise BackupError("restore target is outside the configured state")
-    allowed = {path.expanduser().resolve() for path in _secret_files(config).values()}
+        if target.exists() and not target.is_file():
+            raise BackupError("restore target is not a regular file")
     for row in manifest["secrets"]:
         raw = Path(row["path"])
         if raw.is_symlink():
@@ -731,53 +828,202 @@ def _validate_restore(config: AppConfig, manifest: dict) -> None:
         if target in seen:
             raise BackupError("backup contains duplicate restore targets")
         seen.add(target)
-        if not (_inside(target, data) or target in allowed):
+        if _inside(target, backup_directory):
+            raise BackupError("restore target must not be inside the backup store")
+        if not (_inside(target, current_data) or _inside(target, restored_data)
+                or target in current_secrets or target in restored_secrets):
             raise BackupError("restore target is outside the configured secret files")
+        if target.exists() and not target.is_file():
+            raise BackupError("restore target is not a regular file")
+
+
+def _stage_file(source: Path, target: Path, expected: str, *, prefix: str) -> Path:
+    try:
+        private_directory(target.parent)
+    except (CVEBeaconError, OSError):
+        raise BackupError("cannot create a restore directory") from None
+    descriptor, name = tempfile.mkstemp(prefix=prefix, dir=target.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as output, source.open("rb") as stream:
+            shutil.copyfileobj(stream, output, length=1024 * 1024)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.chmod(0o600)
+        if digest(temporary) != expected:
+            raise BackupError("staged restore file checksum differs")
+        return temporary
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _replace_staged(item: _StagedFile) -> None:
+    if item.kind == "database":
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(str(item.target) + suffix).unlink(missing_ok=True)
+    os.replace(item.temporary, item.target)
+    _sync_directory(item.target.parent)
+
+
+def _stage_restore(source: Path, manifest: dict, config: AppConfig,
+                   skip_roles: set[str]) -> tuple[list[_StagedFile], list[Path]]:
+    items: list[_StagedFile] = []
+    created: list[Path] = []
+    try:
+        for row in manifest["databases"]:
+            if not row["exists"] or row.get("role") in skip_roles:
+                continue
+            target = Path(row["path"]).resolve()
+            if not target.exists():
+                created.append(target)
+            items.append(_StagedFile(
+                "database", target,
+                _stage_file(source / row["backup"], target, row["sha256"], prefix=".backup-db-"),
+                row.get("role"),
+            ))
+        config_target = Path(config.config_path)
+        if not config_target.exists():
+            created.append(config_target)
+        items.append(_StagedFile(
+            "config", config_target,
+            _stage_file(source / manifest["config"]["name"], config_target,
+                        manifest["config"]["sha256"], prefix=".backup-config-"),
+            "config",
+        ))
+        for row in manifest["secrets"]:
+            target = Path(row["path"]).resolve()
+            if not target.exists():
+                created.append(target)
+            items.append(_StagedFile(
+                "secret", target,
+                _stage_file(source / row["file"], target, row["sha256"], prefix=".backup-secret-"),
+                row["reference"],
+            ))
+        return items, created
+    except BaseException:
+        for item in items:
+            item.temporary.unlink(missing_ok=True)
+        raise
+
+
+def _rollback(config: AppConfig, safety: Backup, *, skip_roles: set[str],
+              created: list[Path]) -> None:
+    """Best-effort return to the pre-restore safety backup."""
+    manifest = _load_manifest(safety.path)
+    items, _ = _stage_restore(safety.path, manifest, config, skip_roles)
+    safety_targets = {item.target for item in items}
+    try:
+        for item in items:
+            _replace_staged(item)
+        for target in created:
+            if target in safety_targets:
+                continue
+            target.unlink(missing_ok=True)
+            for suffix in ("-wal", "-shm", "-journal"):
+                Path(str(target) + suffix).unlink(missing_ok=True)
+            _sync_directory(target.parent)
+        for target in {item.target.parent for item in items}:
+            _sync_directory(target)
+    finally:
+        for item in items:
+            item.temporary.unlink(missing_ok=True)
 
 
 def restore(config: AppConfig, backup_id: str) -> dict:
-    """Verify, snapshot, then replace state with a complete backup."""
+    """Verify, validate, snapshot, stage and atomically apply one backup."""
+    try:
+        return _restore(config, backup_id)
+    except BackupError:
+        raise
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error):
+        raise _failure("backup restore") from None
+
+
+def _restore(config: AppConfig, backup_id: str) -> dict:
     backup, manifest = _verify(config, backup_id)
     _refuse_newer(manifest)
-    _validate_restore(config, manifest)
-    with _locked(config, "backup-restore"):
-        own_job = dashboard_job_id()
-        active = [job for job in _active_jobs(config) if job["id"] != own_job]
-        if active:
-            labels = ", ".join(
-                f"job {job['id']} ({job['operation']}, {job['status']})" for job in active
+    restored, validation_directory, validation_copies = _validate_restored_config(
+        config, backup.path, manifest
+    )
+    try:
+        _validate_restore(config, restored, manifest, validation_copies)
+        with _locked(config, "backup-restore"):
+            own_job = dashboard_job_id()
+            active = [job for job in _active_jobs(config) if job["id"] != own_job]
+            if active:
+                labels = ", ".join(
+                    f"job {job['id']} ({job['operation']}, {job['status']})" for job in active
+                )
+                raise BackupError(
+                    "restore refused while dashboard jobs are active: " + labels
+                    + "; wait for them to finish or cancel them from the Operations page"
+                )
+            skip_roles = {"users", "jobs"} if own_job is not None else set()
+            preserved = _preserved_absent(manifest)
+            safety = _create(
+                config,
+                include_secrets=bool(manifest["secrets"]),
+                created_by="pre-restore",
+                extra_databases=[Path(row["path"]) for row in manifest["databases"] if row["exists"]],
+                extra_secret_paths=[Path(row["path"]) for row in manifest["secrets"]],
             )
-            raise BackupError(
-                "restore refused while dashboard jobs are active: " + labels
-                + "; wait for them to finish or cancel them from the Operations page"
-            )
-        safety = _create(config, include_secrets=False, created_by="pre-restore")
-        skipped: list[str] = []
-        for row in manifest["databases"]:
-            if own_job is not None and row.get("role") in {"users", "jobs"}:
-                # The dashboard owns its live account audit and job history
-                # while this job runs. The backup still contains both for a
-                # stopped-service restore from the command line.
-                skipped.append(row["role"])
-                continue
-            _restore_database(config, backup.path, row)
-        _restore_config(config, backup.path, manifest)
-        restored_secrets = _restore_secrets(config, backup.path, manifest)
-        from .config import load_config
-        from .update_state import migrate
+            items: list[_StagedFile] = []
+            created: list[Path] = []
+            try:
+                items, created = _stage_restore(backup.path, manifest, config, skip_roles)
+                try:
+                    for item in items:
+                        _replace_staged(item)
+                    from .update_state import migrate
 
-        migrate(load_config(config.config_path))
-    return {
-        "restored": backup_id,
-        "safety": safety.id,
-        "databases": len(manifest["databases"]) - len(skipped),
-        "secrets": restored_secrets,
-        **({"skipped": skipped} if skipped else {}),
-    }
+                    migrate(load_config(config.config_path))
+                except KeyboardInterrupt:
+                    _rollback(config, safety, skip_roles=skip_roles, created=created)
+                    raise
+                except BaseException:
+                    try:
+                        _rollback(config, safety, skip_roles=skip_roles, created=created)
+                    except BaseException:
+                        raise BackupError(
+                            f"restore failed and automatic rollback from safety backup "
+                            f"{safety.id} is incomplete; restore it manually"
+                        ) from None
+                    raise BackupError(
+                        f"restore failed; previous state restored from safety backup {safety.id}"
+                    ) from None
+            finally:
+                for item in items:
+                    item.temporary.unlink(missing_ok=True)
+        skipped = sorted({
+            row["role"] for row in manifest["databases"]
+            if row.get("role") in skip_roles and row["exists"]
+        })
+        return {
+            "restored": backup_id,
+            "safety": safety.id,
+            "databases": sum(1 for item in items if item.kind == "database"),
+            "secrets": [item.reference for item in items if item.kind == "secret"],
+            **({"skipped": skipped} if skipped else {}),
+            **({"preserved": preserved} if preserved else {}),
+        }
+    finally:
+        if validation_directory is not None:
+            validation_directory.cleanup()
 
 
 def prune(config: AppConfig) -> dict:
-    """Delete expired backups while retaining the newest ``keep_min``."""
+    """Delete expired backups while retaining the newest valid ``keep_min``."""
+    try:
+        with _locked(config, "backup-prune"):
+            return _prune(config)
+    except BackupError:
+        raise
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error):
+        raise _failure("backup prune") from None
+
+
+def _prune(config: AppConfig) -> dict:
     root = backup_root(config)
     if root.is_symlink():
         raise BackupError("backup directory must not be a symbolic link")
@@ -786,7 +1032,8 @@ def prune(config: AppConfig) -> dict:
     policy = config.backup
     cutoff = datetime.now(timezone.utc) - timedelta(days=policy.retention_days)
     backups = list_backups(config)
-    keep = {backup.id for backup in backups[:policy.keep_min]}
+    valid = [backup for backup in backups if backup.valid]
+    keep = {backup.id for backup in valid[:policy.keep_min]}
     removed = []
     for backup in backups:
         if backup.id in keep:
@@ -802,21 +1049,47 @@ def prune(config: AppConfig) -> dict:
         shutil.rmtree(backup.path)
         removed.append(backup.id)
     if removed:
-        sync_directory(root)
+        _sync_directory(root)
     return {"removed": removed, "kept": len(backups) - len(removed)}
 
 
-def build_archive(config: AppConfig, backup_id: str, *, compress: bool | None = None) -> object:
+def _archive_manifest(manifest: dict) -> dict:
+    """Remove local filesystem identities from a downloaded manifest."""
+    value = json.loads(json.dumps(manifest))
+    for index, row in enumerate(value["databases"]):
+        row["path"] = row.get("backup") or f"absent-{index}.db"
+    value["config"]["source"] = value["config"]["name"]
+    for row in value["secrets"]:
+        row["path"] = row["file"]
+    value["archived"] = True
+    return value
+
+
+def build_archive(config: AppConfig, backup_id: str, *, compress: bool | None = None) -> BinaryIO:
     """Stream one verified backup through a temporary, unnamed file."""
+    try:
+        with _locked(config, "backup-download"):
+            return _build_archive(config, backup_id, compress=compress)
+    except BackupError:
+        raise
+    except (CVEBeaconError, OSError, sqlite3.Error, shutil.Error, tarfile.TarError):
+        raise _failure("backup download") from None
+
+
+def _build_archive(config: AppConfig, backup_id: str, *, compress: bool | None = None) -> BinaryIO:
     backup, manifest = _verify(config, backup_id)
     gzip = config.backup.compress if compress is None else compress
     buffer = tempfile.TemporaryFile()
     try:
         with tarfile.open(fileobj=buffer, mode="w:gz" if gzip else "w") as archive:
             for row in manifest["files"]:
-                path = backup.path / row["name"]
-                archive.add(path, arcname=f"{backup.id}/{row['name']}")
-            archive.add(backup.path / BACKUP_MANIFEST, arcname=f"{backup.id}/{BACKUP_MANIFEST}")
+                archive.add(backup.path / row["name"], arcname=f"{backup.id}/{row['name']}")
+            raw = json.dumps(_archive_manifest(manifest), ensure_ascii=True,
+                             sort_keys=True, indent=2).encode("utf-8")
+            info = tarfile.TarInfo(f"{backup.id}/{BACKUP_MANIFEST}")
+            info.size = len(raw)
+            info.mtime = int(datetime.now(timezone.utc).timestamp())
+            archive.addfile(info, io.BytesIO(raw))
         buffer.seek(0)
     except BaseException:
         buffer.close()
@@ -836,6 +1109,16 @@ def summary(config: AppConfig) -> dict:
 
 
 def cli(args, config: AppConfig) -> int:
+    try:
+        return _cli(args, config)
+    except BackupBusy as exc:
+        if dashboard_job_id() is not None:
+            print(f"error: {exc}", file=sys.stderr)
+            return DASHBOARD_LOCK_CONFLICT_EXIT
+        raise
+
+
+def _cli(args, config: AppConfig) -> int:
     command = args.backup_command
     if command == "list":
         backups = list_backups(config)
@@ -877,6 +1160,9 @@ def cli(args, config: AppConfig) -> int:
         print(f"restored {result['restored']}; safety backup {result['safety']}")
         if result.get("skipped"):
             print("preserved live dashboard job history: " + ", ".join(result["skipped"]))
+        if result.get("preserved"):
+            print("left live data in place for entries absent from the backup: "
+                  + ", ".join(result["preserved"]))
         return 0
     if command == "prune":
         result = prune(config)

@@ -94,7 +94,8 @@ def operation_lock_paths(config, operation: str) -> tuple[Path, ...]:
         paths.add(Path(config.database_path).resolve().parent / LOCK_NAME)
     if (operation == "run" and config.watch.enabled) or operation.startswith("watch-"):
         paths.add(run_lock_path(config))
-    if operation in {"backup-create", "backup-verify", "backup-restore"}:
+    if operation in {"backup-create", "backup-verify", "backup-restore",
+                     "backup-prune", "backup-download"}:
         paths.add(Path(config.database_path).resolve().parent / LOCK_NAME)
         paths.add(Path(config.watch.database).resolve().parent / LOCK_NAME)
         paths.add(Path(config.watch.users_database).resolve().parent / LOCK_NAME)
@@ -111,7 +112,8 @@ class OperationLock:
             label = "watch notify"
         elif operation == "web-plan":
             label = "web-detect --plan"
-        elif operation in {"backup-create", "backup-verify", "backup-restore"}:
+        elif operation in {"backup-create", "backup-verify", "backup-restore",
+                            "backup-prune", "backup-download"}:
             label = operation.replace("-", " ")
         self.locks = [
             RunLock(path, command=label)
@@ -246,7 +248,8 @@ class RunLock:
         # Only fixed labels may enter the record, never user arguments.
         labels = {"scan", "run", "web-detect", "web-detect --plan", "web-assets"}
         labels.update(f"watch {name}" for name in ("sync", "run", "evaluate", "notify", "report", "unreport"))
-        labels.update({"backup create", "backup verify", "backup restore"})
+        labels.update({"backup create", "backup verify", "backup restore",
+                       "backup prune", "backup download"})
         self.command = command if command in labels else "run"
         self.holder: str | None = None
         self._descriptor: int | None = None

@@ -3,6 +3,7 @@
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, send_file, url_for
 
 from .backup import (
+    BackupBusy,
     BackupError,
     build_archive,
     list_backups,
@@ -122,8 +123,11 @@ def create_blueprint(config):
     @requires("admin")
     def prune_backups():
         require_accounts()
+        _record("backup_prune_requested")
         try:
             result = prune(config)
+        except BackupBusy as exc:
+            return _render(str(exc), status=409)
         except BackupError as exc:
             return _render(str(exc), status=400)
         _record("backup_prune", f"removed={len(result['removed'])}")
@@ -136,8 +140,11 @@ def create_blueprint(config):
         backup_id = _text(request.form, "backup_id", required=True, limit=64)
         if not _known(backup_id):
             abort(404)
+        _record("backup_download_requested", backup_id)
         try:
             stream = build_archive(config, backup_id)
+        except BackupBusy as exc:
+            return _render(str(exc), status=409)
         except BackupError as exc:
             return _render(str(exc), status=400)
         try:
