@@ -422,6 +422,19 @@ def test_wheel_metadata_cannot_request_unverified_urls(tmp_path):
         u.validate_wheel(path)
 
 
+def test_wheel_with_vendored_dist_info_uses_its_own_metadata(tmp_path):
+    path = tmp_path / "tool-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("tool-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: tool\nVersion: 1.0\n")
+        archive.writestr("tool/_vendor/helper-2.0.dist-info/METADATA",
+                         "Metadata-Version: 2.1\nName: helper\nVersion: 2.0\n")
+    u.validate_wheel(path)
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("other-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: other\nVersion: 1.0\n")
+    with pytest.raises(u.UpdateError):
+        u.validate_wheel(path)
+
+
 def test_policy_refuses_unprivileged_apply_and_unprotected_code(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     with pytest.raises(u.UpdateError, match="sudo"):

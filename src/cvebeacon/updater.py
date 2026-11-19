@@ -219,7 +219,10 @@ def validate_wheel(path):
     try:
         package, version, _, _ = parse_wheel_filename(path.name)
         with zipfile.ZipFile(path) as archive:
-            entries = [entry for entry in archive.infolist() if entry.filename.endswith(".dist-info/METADATA")]
+            # Only the top-level dist-info describes this wheel; vendored
+            # packages may carry their own nested dist-info directories.
+            entries = [entry for entry in archive.infolist()
+                       if entry.filename.count("/") == 1 and entry.filename.endswith(".dist-info/METADATA")]
             if len(entries) != 1 or entries[0].file_size > 1024 * 1024:
                 raise UpdateError("invalid wheel metadata")
             with archive.open(entries[0]) as stream:
