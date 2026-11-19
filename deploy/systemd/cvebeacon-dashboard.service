@@ -3,6 +3,7 @@ Description=CVEBeacon dashboard
 Documentation=https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/DEPLOY.md
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -10,7 +11,8 @@ User=cvebeacon
 Group=cvebeacon
 WorkingDirectory=/var/lib/cvebeacon
 EnvironmentFile=-/var/lib/cvebeacon/cvebeacon.env
-ExecStart=/opt/cvebeacon/.venv/bin/cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml serve --host 127.0.0.1 --port 8787
+ExecStartPre=/opt/cvebeacon/current/.venv/bin/cvebeacon update guard --role serve
+ExecStart=/opt/cvebeacon/current/.venv/bin/cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml serve --host 127.0.0.1 --port 8787
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30

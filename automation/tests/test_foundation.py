@@ -43,7 +43,7 @@ def test_real_core_preserves_coverage_warning_in_shared_state(tmp_path, mode):
     shared = tmp_path / "core-state"
     shared.mkdir()
     shared.chmod(mode)
-    config.core_config.write_text(config.core_config.read_text().replace(
+    config.core_config.write_text(config.core_config.read_text(encoding="utf-8").replace(
         'database="core.db"', 'database="core-state/core.db"'
     ))
     for _ in range(2):
@@ -174,7 +174,7 @@ def test_sidecar_cannot_overwrite_input(tmp_path):
     config, source = setup(tmp_path)
     config = replace(config, inventory_path=tmp_path / "overlap.json", sources=(Source("host-a", snapshot=tmp_path / "overlap.json.manifest.json"),))
     # Set a valid matching Core path so collision, not config mismatch, is decisive.
-    config.core_config.write_text(config.core_config.read_text().replace('"merged.json"', '"overlap.json"'))
+    config.core_config.write_text(config.core_config.read_text(encoding="utf-8").replace('"merged.json"', '"overlap.json"'))
     assert run_pipeline(config, scanner=lambda c: pytest.fail("collision")) == 2
     assert "pipeline_path_collision" in status(config.state_dir)["failures"]
 
@@ -228,7 +228,7 @@ def test_kubernetes_observation_collision_preserves_input(tmp_path):
 def test_core_database_cannot_overwrite_static_source(tmp_path):
     config, source = setup(tmp_path)
     raw = source.read_bytes()
-    config.core_config.write_text(config.core_config.read_text().replace('database="core.db"', 'database="source.json"'))
+    config.core_config.write_text(config.core_config.read_text(encoding="utf-8").replace('database="core.db"', 'database="source.json"'))
     assert run_pipeline(config, scanner=lambda c: pytest.fail("database collides with input")) == 2
     assert source.read_bytes() == raw
     assert "core_state_path_collision" in status(config.state_dir)["failures"]
@@ -250,7 +250,7 @@ def test_pipeline_validates_candidate_then_core_loads_web_snapshots(tmp_path):
     from cvebeacon.private_storage import private_directory
     from cvebeacon.web_inventory import read_web_snapshot
     config, _ = setup(tmp_path)
-    config.core_config.write_text(config.core_config.read_text().replace(
+    config.core_config.write_text(config.core_config.read_text(encoding="utf-8").replace(
         '[inventory]\n', '[inventory]\nweb_snapshots=true\n'))
     core = load_core(config.core_config)
     directory = core.database_path.parent / "web-inventory"

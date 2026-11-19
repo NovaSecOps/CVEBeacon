@@ -6,7 +6,7 @@ import yaml
 
 def test_compose_tmpfs_options_are_one_mount_not_yaml_items():
     root = Path(__file__).parents[2]
-    compose = yaml.safe_load((root / "deploy/container/compose.yml").read_text())
+    compose = yaml.safe_load((root / "deploy/container/compose.yml").read_text(encoding="utf-8"))
     for service in compose["services"].values():
         # An unquoted comma-delimited flow item becomes five independent
         # mounts, dropping the size/security options from /tmp.
@@ -18,7 +18,7 @@ def test_compose_tmpfs_options_are_one_mount_not_yaml_items():
 
 def test_compose_watch_and_run_services_are_hardened():
     root = Path(__file__).parents[2]
-    compose = yaml.safe_load((root / "deploy/container/compose.yml").read_text())
+    compose = yaml.safe_load((root / "deploy/container/compose.yml").read_text(encoding="utf-8"))
     expected = {
         "watch": ["--config", "/config/cvebeacon.toml", "watch", "run"],
         "run": ["--config", "/config/cvebeacon.toml", "run"],

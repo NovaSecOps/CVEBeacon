@@ -109,14 +109,15 @@ def validate_handle(handle, *, owner_only=True):
 
 
 def open_file(path, *, create=False, exclusive=False, readonly=False,
-              owner_only=True):
+              owner_only=True, share_delete=False):
     import msvcrt
     disposition = 1 if exclusive else 4 if create else 3
     # OPEN_REPARSE_POINT refuses redirection; the caller also checks lstat.
     access = 0x80000000 | (0 if readonly else 0x40000000)
-    # Readers may overlap atomic publication; writers and lock handles must
-    # keep preventing replacement of their inode.
-    sharing = 7 if readonly else 3
+    # Default writers and run locks still prevent inode replacement. Private
+    # holder leases opt in explicitly so both publication and removal can
+    # unlink their names while the acquisition lease remains open.
+    sharing = 7 if readonly or share_delete else 3
     if owner_only:
         with _attributes() as attributes:
             handle = _create(str(path), access, sharing, c.byref(attributes),

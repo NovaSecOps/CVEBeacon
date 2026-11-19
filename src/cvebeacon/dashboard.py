@@ -6,9 +6,11 @@ from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from importlib.metadata import version as package_version
 import ipaddress
 import logging
 import math
+import os
 from pathlib import Path
 import re
 import secrets
@@ -73,7 +75,8 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
     return current is not None and current.target_key == asset.target_key
 
 
-def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flask:
+def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session_app=None) -> Flask:
+    running_version = package_version("cvebeacon")
     if config.inventory is None and not config.watch.enabled:
         raise CVEBeaconError(
             "the dashboard requires an inventory or watch mode; add [inventory] path or set [watch] enabled = true"
@@ -84,8 +87,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
         LOG.error("Account store has no enabled administrator; recover locally with users add NAME --admin")
     encoded = None if account_mode else password_hash(config)
     auth = DashboardAuth(encoded, config.dashboard.session_lifetime_seconds) if encoded else None
-    account_sessions = AccountSessions(config.dashboard.session_lifetime_seconds, config.dashboard.session_idle_seconds)
-    login_throttle = AccountLoginThrottle()
+    account_sessions = (session_app.extensions["account_sessions"] if session_app is not None else
+                        AccountSessions(config.dashboard.session_lifetime_seconds, config.dashboard.session_idle_seconds))
+    login_throttle = (session_app.extensions["account_login_throttle"] if session_app is not None else
+                      AccountLoginThrottle())
     app = Flask(__name__)
     app.extensions["dashboard_auth"] = auth
     app.extensions["account_sessions"] = account_sessions
@@ -93,7 +98,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
     app.extensions["account_login_throttle"] = login_throttle
     wildcard = host in {"0.0.0.0", "::"}
     app.config.update(
-        SECRET_KEY=secrets.token_bytes(32), DEBUG=False, TESTING=False,
+        SECRET_KEY=session_app.secret_key if session_app is not None else secrets.token_bytes(32), DEBUG=False, TESTING=False,
         MAX_CONTENT_LENGTH=8192, MAX_FORM_MEMORY_SIZE=8192,
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
         SESSION_COOKIE_SECURE=config.dashboard.secure_cookie,
@@ -106,6 +111,12 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
 
     @app.before_request
     def protect_request():
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            from .update_transaction import ensure_ready
+            try:
+                ensure_ready("dashboard-write")
+            except CVEBeaconError:
+                return "Update recovery is in progress", 503
         nonlocal account_mode
         if isinstance(request.routing_exception, SecurityError):
             raise request.routing_exception
@@ -134,10 +145,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
                     g.entry = None
             if g.entry:
                 g.sid = identifier
-            if request.endpoint not in {"login", "static", "bootstrap"} and g.user is None:
+            if request.endpoint not in {"login", "static", "bootstrap", "update_health"} and g.user is None:
                 return redirect(url_for("login"), code=303)
         else:
-            if auth and request.endpoint not in {"login", "static"}:
+            if auth and request.endpoint not in {"login", "static", "update_health"}:
                 if not auth.valid(session.get("auth_id")):
                     session.clear()
                     return redirect(url_for("login"), code=303)
@@ -180,6 +191,13 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
     @app.context_processor
     def inventory_state():
         return {"inventory_configured": config.inventory is not None}
+
+    @app.get("/healthz")
+    @requires("public")
+    def update_health():
+        if not _loopback(request.remote_addr):
+            abort(403)
+        return {"status": "ok", "version": running_version, "pid": os.getpid()}
 
     @app.route("/login", methods=["GET", "POST"])
     @requires("public")
@@ -596,6 +614,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None) -> Flas
     register_config(app, config, host=host)
     from .dashboard_web import create_web_blueprint
     app.register_blueprint(create_web_blueprint(config))
+    from .dashboard_update import create_blueprint as create_update_blueprint
+    app.register_blueprint(create_update_blueprint(config))
     return app
 
 

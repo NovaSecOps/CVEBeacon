@@ -160,6 +160,7 @@ def test_header_groups_main_and_account_navigation(watch_only_client):
     assert ">Watch<" in header
     assert "My account and sessions" in header
     assert ">Configuration<" in header
+    assert ">Updates<" in header
     assert ">Log out<" in header
     assert 'name="csrf"' in header
     assert header.index('class="main-nav"') < header.index('class="header-actions"')
@@ -170,13 +171,14 @@ def test_header_navigation_contrast_and_narrow_layout(watch_only_client):
     _, _, client = watch_only_client
     css = client.get("/static/dashboard.css").text
     containers = re.search(
-        r"\.main-nav,\.account-nav,\.config-nav\{([^}]*)\}", css
+        r"\.main-nav,\.account-nav,\.config-nav,\.update-nav\{([^}]*)\}", css
     )
     assert containers is not None
     declarations = containers.group(1)
     assert "background:transparent" in declarations
     assert "border:0" in declarations
     assert "padding:0" in declarations
+    assert ".update-nav a" in css
     assert ".main-nav{order:3;width:100%" in css
 
 

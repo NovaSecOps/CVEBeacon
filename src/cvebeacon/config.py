@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
+from .release_repository import valid_repository
 from .watch.catalog import DEFAULT_LANGUAGE, canonical_language
 from .watch.channels import ChannelConfig, parse_channels, validate_rule_channels
 from .watch.reported import IDENTITY_MODES
@@ -19,6 +20,7 @@ from .watch.rules import Rule, parse_rules, validate_rule_sources
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
 OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit", "client")
 WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss")
+INVENTORY_FORMATS = ("auto", "xlsx", "csv", "json", "yaml")
 WATCH_INITIAL_MODES = ("baseline", "backfill", "full")
 WATCH_SETTINGS = {
     "enabled",
@@ -129,6 +131,14 @@ class WatchConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class UpdateConfig:
+    enabled: bool = False
+    daily: bool = False
+    repository: str = "NovaSecOps/CVEBeacon"
+    allow_prereleases: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     config_path: Path
     inventory: InventoryConfig | None
@@ -141,6 +151,7 @@ class AppConfig:
     email: EmailConfig = field(default_factory=EmailConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
+    update: UpdateConfig = field(default_factory=UpdateConfig)
 
     def secret(self, env_name: str, *, required: bool = False) -> str | None:
         value = os.environ.get(env_name)
@@ -191,6 +202,13 @@ def _bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ConfigurationError(f"{name} must be an integer from {minimum} to {maximum}")
     return value
+
+
+def notification_recipients(value):
+    """Validate legacy recipients without imposing watch-channel restrictions."""
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise ConfigurationError("notifications.email.recipients must be a list of strings")
+    return tuple(item.strip() for item in value)
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -280,7 +298,7 @@ def load_config(path: str | Path) -> AppConfig:
         inventory_format = str(inv.get("format", "auto")).casefold().lstrip(".")
         if inventory_format == "yml":
             inventory_format = "yaml"
-        if inventory_format not in {"auto", "xlsx", "csv", "json", "yaml"}:
+        if inventory_format not in INVENTORY_FORMATS:
             raise ConfigurationError("inventory.format must be auto, xlsx, csv, json, or yaml")
         inventory_config = InventoryConfig(
             path=_resolve(base, inv["path"]) if inv.get("path") else None,
@@ -300,6 +318,12 @@ def load_config(path: str | Path) -> AppConfig:
     http_data = _table(data, "http")
     source_data = _table(data, "sources")
     dashboard_data = _table(data, "dashboard")
+    update_data = _table(data, "update")
+    if set(update_data) - {"enabled", "daily", "repository", "allow_prereleases"}:
+        raise ConfigurationError("unknown update setting; privileged policy belongs in the administrator-owned update policy")
+    repository = update_data.get("repository", "NovaSecOps/CVEBeacon")
+    if not valid_repository(repository):
+        raise ConfigurationError("update.repository must be an owner/repository name")
     if set(dashboard_data) - {"password_hash_env", "session_lifetime_seconds", "secure_cookie", "session_idle_seconds"}:
         raise ConfigurationError("unknown dashboard setting; supply the password hash only through its environment variable")
     hash_env = dashboard_data.get("password_hash_env", "CVEBEACON_DASHBOARD_PASSWORD_HASH")
@@ -338,11 +362,11 @@ def load_config(path: str | Path) -> AppConfig:
             details = nvd_api_key_file.stat()
         except OSError as exc:
             raise ConfigurationError(
-                f"sources.nvd_api_key_file cannot be read: {nvd_api_key_file}"
+                "sources.nvd_api_key_file cannot be read"
             ) from exc
         if not nvd_api_key_file.is_file():
             raise ConfigurationError(
-                f"sources.nvd_api_key_file must be a file: {nvd_api_key_file}"
+                "sources.nvd_api_key_file must be a file"
             )
         if details.st_size > 16 * 1024:
             raise ConfigurationError("sources.nvd_api_key_file must be at most 16384 bytes")
@@ -350,11 +374,7 @@ def load_config(path: str | Path) -> AppConfig:
             raise ConfigurationError(
                 "sources.nvd_api_key_file must not be group or other accessible"
             )
-    raw_recipients = email_data.get("recipients", [])
-    if not isinstance(raw_recipients, list) or not all(
-        isinstance(value, str) and value.strip() for value in raw_recipients
-    ):
-        raise ConfigurationError("notifications.email.recipients must be a list of strings")
+    raw_recipients = notification_recipients(email_data.get("recipients", []))
     sender = str(email_data.get("sender", "")).strip()
     if email_enabled and (not sender or not raw_recipients):
         raise ConfigurationError("enabled email notifications require sender and at least one recipient")
@@ -421,6 +441,7 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         product_mappings=tuple(mappings),
         dashboard=DashboardConfig(hash_env.strip(), lifetime, _boolean(dashboard_data, "secure_cookie", False), idle),
+        update=UpdateConfig(_boolean(update_data, "enabled", False), _boolean(update_data, "daily", False), repository, _boolean(update_data, "allow_prereleases", False)),
         teams=TeamsConfig(
             enabled=teams_enabled,
             webhook_env=str(
@@ -439,7 +460,7 @@ def load_config(path: str | Path) -> AppConfig:
                 email_data.get("client_secret_env", "CVEBEACON_M365_CLIENT_SECRET")
             ),
             sender=sender,
-            recipients=tuple(value.strip() for value in raw_recipients),
+            recipients=raw_recipients,
         ),
         watch=WatchConfig(
             enabled=watch_enabled,

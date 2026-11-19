@@ -1,0 +1,16 @@
+# Administrator-owned: /etc/cvebeacon/update.toml, mode 0600.
+# Fill and verify the pinned release key before opting in.
+enabled = false
+prefix = "/opt/cvebeacon"
+config = "/var/lib/cvebeacon/cvebeacon.toml"
+data = "/var/lib/cvebeacon"
+user = "cvebeacon"
+repository = "NovaSecOps/CVEBeacon"
+allow_prereleases = false
+# Optional administrator-owned allowed-signers override:
+# signers = "/etc/cvebeacon/release-allowed-signers"
+units = ["cvebeacon.timer", "cvebeacon.service", "cvebeacon-dashboard.service"]
+dashboard_unit = "cvebeacon-dashboard.service"
+probe = "http://127.0.0.1:8787/healthz"
+retention = 7
+wait_seconds = 86400

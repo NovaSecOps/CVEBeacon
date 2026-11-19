@@ -103,17 +103,28 @@ variants) lock the watch storage beside `[watch] database`. Channel tests do
 not take the lock because they do not change delivery state.
 
 Each locked storage location uses a persistent `cvebeacon-run.lock` file in its
-directory. The lock file carries no state, so a shared storage directory and a
+directory. The lock file carries an opaque holder reference, not monitoring state, so a shared storage directory and a
 lock file created by another service account remain usable. A new POSIX lock
 file is created under the process umask rather than a forced mode, so in a
-cross-account setup both accounts need write access to the lock file. `run`
+cross-account setup both accounts need write access to the lock file. Each
+acquisition publishes an owner-only `cvebeacon-run.lock.owner.<token>.json`
+beside it when directory permissions and filesystem link support allow; link
+limits also permit a run with identity unavailable. See the
+[Operations holder-record behavior](DASHBOARD.md#operations-and-background-jobs).
+This private record is bound to
+the acquisition and removed before release. Successors never replace another
+account's orphan record, including in sticky shared directories. If permissions
+prevent private publication, the run continues with identity unavailable; the
+shared lock still excludes concurrent writers. Other accounts may see an active
+run without its private account, host or command details. `run`
 takes both required locks in sorted canonical path order, takes a
 shared-directory lock only once, and releases any partial acquisition if a
 later lock is busy. Inventory-only or watch-only runs take only the applicable
 lock. Configurations sharing either storage location therefore coordinate even
 when their other location differs. The dashboard's background jobs take the
-same locks. A second run fails immediately with `another run is in progress`
-and exit code `2`; it does not wait and never changes state concurrently. The
+same locks. A second interactive CLI or scheduled run fails immediately with
+`another run is in progress` and exit code `2`; it does not wait. Dashboard
+manual jobs queue instead (see below). No run changes state concurrently. The
 operating system releases the lock when a process exits, including after a
 crash.
 
@@ -137,6 +148,18 @@ the original final newline state.
 
 The generated command uses absolute executable and configuration paths. A packaged executable schedules itself. A source invocation uses the installed console launcher when available, or the active Python interpreter with `-m cvebeacon`.
 
+Cron, Task Scheduler, interactive commands and dashboard jobs share storage locks.
+If a scheduled or interactive command encounters a held lock, it exits `2` with
+the holder's account, host, PID, UTC start and short command label when readable.
+Wait for that run to finish; cancellation from Operations is offered only when
+the holder is a dashboard job. The dashboard shows external holders in its
+**Active run** panel without a cancel button. Its manual jobs wait in the queue
+for up to six hours from submission, displaying the holder they are waiting for,
+and can be cancelled before they start. Channel tests have a separate serial lane
+and can run during this wait without changing watch state. A stale holder record
+from a dead local PID is labelled stale; the operating system releases the lock
+when the process exits. Do not remove a live lock file to bypass a collision.
+
 For manual administration, create an equivalent task or cron entry that runs
 `cvebeacon --config <absolute-path> scan`, `... watch run`, or both. Run it under
 an account with read access to the inventory and configuration, write access to
@@ -150,10 +173,10 @@ The repository ships `deploy/systemd/cvebeacon-dashboard.service`, which runs th
 dashboard on `127.0.0.1` as the service user with `NoNewPrivileges=yes`. Under
 that setting `crontab` cannot use its setuid or setgid helper, so the dashboard
 Schedule page cannot read or update the user crontab and shows a permission
-error. Install the schedule from the CLI as the service user, or with the service
-and timer examples in the deployment guide's
-[Schedule it](DEPLOY.md#schedule-it) section; `deploy/systemd` ships no timer
-unit.
+error. Install the schedule from the CLI as the service user, or use the
+reference `deploy/systemd/cvebeacon.timer` and `cvebeacon.service` units (or the
+examples in the deployment guide's [Schedule it](DEPLOY.md#schedule-it)
+section).
 
 To manage the schedule from the dashboard instead, the drop-in must restore both
 the privilege transition and write access to the distribution's cron spool:

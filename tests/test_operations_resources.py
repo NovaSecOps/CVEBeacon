@@ -9,7 +9,7 @@ import pytest
 from cvebeacon import cli, dashboard_jobs as jobs
 from cvebeacon.errors import CVEBeaconError
 from cvebeacon.locking import LOCK_NAME, RunLock, run_lock_path
-from test_dashboard_operations import fake_job, make_config, new_accounts
+from test_dashboard_operations import fake_job, make_config, new_accounts, wait_for
 from test_dashboard_watch import seeded, login as watch_login, csrf as watch_csrf
 
 
@@ -81,10 +81,15 @@ def test_dashboard_job_probes_shared_inventory_storage(tmp_path):
     config = make_config(tmp_path)
     config = replace(config, watch=replace(config.watch, database=tmp_path / 'other' / 'watch.db'))
     manager = jobs.JobManager(config, new_accounts(config))
-    with RunLock(Path(config.database_path).resolve().parent / LOCK_NAME):
-        with pytest.raises(CVEBeaconError, match='another run'):
-            manager.submit('scan', started_by='admin', argv=fake_job('pass'))
-    assert manager.store.recent() == ()
+    try:
+        with RunLock(Path(config.database_path).resolve().parent / LOCK_NAME):
+            job = manager.submit('scan', started_by='admin', argv=fake_job('pass'))
+            wait_for(lambda: manager.store.get(job.id).message)
+            assert manager.store.get(job.id).status == 'queued'
+            assert 'waiting for' in manager.store.get(job.id).message
+        assert manager.wait(job.id).status == 'succeeded'
+    finally:
+        manager.shutdown()
 
 
 

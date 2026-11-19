@@ -140,7 +140,7 @@ def test_cooperating_writers_and_stale_lock_fail_without_replacing(tmp_path, mon
     lock.write_text("investigate this interrupted writer")
     with pytest.raises(ExtensionError, match="investigate"):
         contract.write_snapshot(path, [row], source_id="a", collector="test")
-    assert lock.read_text() == "investigate this interrupted writer"
+    assert lock.read_text(encoding="utf-8") == "investigate this interrupted writer"
 
 
 def test_empty_partial_merge_is_controlled_and_preserves_output(tmp_path):
@@ -281,7 +281,7 @@ def test_linked_publication_leaves_preserve_targets(tmp_path, leaf):
     except OSError: pytest.skip("symlink creation unavailable for this account")
     with pytest.raises(ExtensionError):
         contract.write_snapshot(output, [row], source_id="source", collector="test")
-    assert target.read_text() == "immutable canary target"
+    assert target.read_text(encoding="utf-8") == "immutable canary target"
     assert path.is_symlink()
     assert not output.exists() if leaf != "inventory" else output.is_symlink()
 
@@ -320,7 +320,7 @@ def test_hardlinked_output_replacement_preserves_original_inode(tmp_path):
     target.write_text("original hardlink bytes")
     os.link(target, output)
     contract.write_snapshot(output, [dict(asset_id="a", purl="pkg:pypi/example@1")], source_id="source", collector="test")
-    assert target.read_text() == "original hardlink bytes"
+    assert target.read_text(encoding="utf-8") == "original hardlink bytes"
     assert contract.read_snapshot(output).manifest["status"] == "success"
 
 

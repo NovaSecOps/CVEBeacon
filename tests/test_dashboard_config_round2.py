@@ -674,7 +674,7 @@ def test_dashboard_rollback_cannot_change_signing_settings(accounts):
     editor = app.extensions["dashboard_config"]
     # The retained backup omits [dashboard], so it restores the loader defaults.
     backup = _manual_backup(editor, BASE)
-    config.config_path.write_text('watch = "broken"\n' + config.config_path.read_text(),
+    config.config_path.write_text('watch = "broken"\n' + config.config_path.read_text(encoding="utf-8"),
                                   encoding="utf-8")
     set_role(users, "all-editor", set(dc.SECTIONS.values()) | {"view"})
     login(client)
@@ -1122,7 +1122,7 @@ def test_status_errors_render_configuration_guidance(accounts):
     config, _, _, client = accounts
     login(client, "admin")
     response = preview(client, g0_retries="4")
-    config.config_path.write_text(config.config_path.read_text() + "\n# external edit\n",
+    config.config_path.write_text(config.config_path.read_text(encoding="utf-8") + "\n# external edit\n",
                                   encoding="utf-8")
     data = form(response.text, "confirm")
     response = client.post("/config/http", data=data)
