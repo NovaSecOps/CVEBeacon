@@ -2,10 +2,10 @@
 {% from 'ui.html' import page_header, card, callout, empty_state, table_wrap, applicability_badge, button, link_button %}
 {% block title %}Findings · CVEBeacon{% endblock %}
 {% block content %}
-{{ page_header('Findings', 'Every known vulnerability that the latest scan matched to your inventory, with the evidence behind each match.') }}
+{{ page_header('Findings', 'Findings recorded for your inventory, including retained observations from earlier scans. Open a row for the assessment and any evidence that was recorded.') }}
 {{ status(data) }}
 {% call callout('info', 'How to read this page') %}
-<p>Each row is one finding: a known vulnerability checked against one item in your inventory. <strong>Affected</strong> means the evidence says it applies. <strong>Needs review</strong> means a person should decide. <strong>Coverage unknown</strong> means the scan could not check that item, so its status is not known. <strong>Not affected</strong> means the checked evidence did not match.</p>
+<p>Each row is one finding: a known vulnerability checked against one item in your inventory. <strong>Affected</strong> means the recorded assessment says it applies. <strong>Needs review</strong> means a person should decide. <strong>Coverage unknown</strong> means the scan could not check that item, so its status is not known. <strong>Not affected</strong> means the recorded assessment found no match.</p>
 <p>CVSS is a 0-10 severity score; higher numbers mean more severe flaws. CVE is a public ID for one known security flaw. CISA and EU KEV are lists of flaws known to be actively exploited. EPSS estimates the chance of exploitation in the next 30 days. Retained findings keep their original observation time. Removed assets and changed versions are labelled explicitly.</p>
 {% endcall %}
 {% set active_filters = [] %}{% for key, value in filters.items() %}{% if value %}{% set _ = active_filters.append(key) %}{% endif %}{% endfor %}
@@ -14,16 +14,16 @@
 <form method="get" class="filters">
 {% for key, label in [('q','Search all fields'),('asset','Asset ID'),('vendor','Vendor'),('product','Product'),('version','Version'),('category','Category'),('system_id','System'),('ecosystem','Ecosystem'),('purl','PURL (software package)'),('advisory','Advisory or alias'),('cve','CVE alias'),('cvss','Minimum severity score (CVSS 0-10)')] %}<label>{{ label }}<input name="{{ key }}" value="{{ filters[key] }}" maxlength="256"></label>{% endfor %}
 <label>Applies to this asset?<select name="applicability">{% for value, label in [('', 'All'), ('affected', 'Affected'), ('not_affected', 'Not affected'), ('needs_review', 'Needs review'), ('coverage_unknown', 'Coverage unknown')] %}<option value="{{ value }}" {% if filters.applicability == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
-<label>Severity score<select name="severity">{% for value, label in [('', 'All'), ('critical', 'Critical (9-10)'), ('high', 'High (7-9)'), ('medium', 'Medium (4-7)'), ('low', 'Low (0-4)'), ('none', 'None (0)'), ('unknown', 'Unknown')] %}<option value="{{ value }}" {% if filters.severity == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+<label>Severity score<select name="severity">{% for value, label in [('', 'All'), ('critical', 'Critical (9 and above)'), ('high', 'High (7 to below 9)'), ('medium', 'Medium (4 to below 7)'), ('low', 'Low (above 0 to below 4)'), ('none', 'None (0)'), ('unknown', 'Unknown')] %}<option value="{{ value }}" {% if filters.severity == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
 {% for key, label in [('cisa','CISA known exploited'),('eu','EU known exploited')] %}<label>{{ label }}<select name="{{ key }}">{% for value, text in [('', 'All'), ('yes', 'Yes'), ('no', 'No'), ('unknown', 'Unknown')] %}<option value="{{ value }}" {% if filters[key] == value %}selected{% endif %}>{{ text }}</option>{% endfor %}</select></label>{% endfor %}
 {{ button('Apply filters') }} {{ link_button('Clear filters', url_for('findings'), kind='secondary') }}
 </form>
 </details>
 <p class="muted">{{ rows | length }} matching finding{{ '' if rows | length == 1 else 's' }}{% if active_filters %}. Filters are active; clear them to see the full list.{% endif %}</p>
-{% call card('Latest known findings', 'Stored observations, newest evidence first. Open a row for the assessment and its supporting evidence.') %}
+{% call card('Latest known findings', 'Stored observations, grouped by asset and advisory. Open a row for the assessment and any evidence that was recorded.') %}
 {% if rows %}{{ findings_table(rows) }}{% elif active_filters %}{{ empty_state('No findings match these filters', 'Try removing a filter. This result is not proof of complete vulnerability coverage, so check scan age and source status above before treating the inventory as clear.', url_for('findings'), 'Clear filters') }}{% else %}{{ empty_state('No findings recorded yet', 'No vulnerability matched the latest scan, or no scan has run yet. This is not proof that the inventory is clean; check scan age and source status above.') }}{% endif %}
 {% endcall %}
-{% call card('Coverage by current asset', 'Coverage means whether the last scan could check an asset. Unknown coverage is not the same as no vulnerabilities.') %}
+{% call card('Coverage warnings for current assets', 'Only assets with unresolved coverage are listed, because the last scan could not fully check them. This is not a complete list of assets, and unknown coverage is not the same as no vulnerabilities.') %}
 {% if data.coverage %}
 {% call table_wrap('Coverage by asset') %}
 <table>
@@ -36,7 +36,7 @@
 </table>
 {% endcall %}
 {% else %}
-<p class="muted">No coverage entries match this filtered view. Check scan age, source status, and inventory availability above.</p>
+<p class="muted">No coverage warnings for this view. Check scan age, source status, and inventory availability above.</p>
 {% endif %}
 {% endcall %}
 {% endblock %}

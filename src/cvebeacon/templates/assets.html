@@ -1,8 +1,9 @@
 {% extends 'base.html' %}{% from 'macros.html' import status %}
-{% from 'ui.html' import page_header, card, empty_state, table_wrap, applicability_badge, button, link_button %}
+{% from 'ui.html' import page_header, card, empty_state, table_wrap, applicability_badge, button, link_button, help %}
 {% block title %}Assets · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Assets', 'The software and systems in your inventory, with the coverage recorded by the latest scan.') }}
+{{ help('Coverage means whether the last scan could check an item. Unknown coverage is not the same as no vulnerabilities.') }}
 {{ status(data) }}
 {% call card('Find an asset', 'Search by asset ID, client, vendor, product, version, category, system, ecosystem or package name.') %}
 <form method="get" class="filters">
@@ -31,7 +32,7 @@
 {% if query %}
 {{ empty_state('No assets match this search', 'Try a shorter word or search by another value, such as the client or product name.', url_for('assets'), 'Clear search') }}
 {% else %}
-{{ empty_state('No assets in your inventory yet', 'Assets come from the inventory file. Add the software and systems you run, then run a scan. Missing scan results are not proof that the inventory is clean.') }}
+{{ empty_state('No assets in your inventory yet', 'Assets come from your inventory file or saved web observations. Add the software and systems you run, then run a scan. Missing scan results are not proof that the inventory is clean.') }}
 {% endif %}
 {% endif %}
 {% endblock %}

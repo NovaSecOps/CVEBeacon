@@ -25,12 +25,12 @@
 </tr>{% endfor %}</tbody>
 </table>
 {% endcall %}
-<div class="pagination" role="group" aria-label="Pages of events">
-<a class="btn btn-secondary btn-small" href="{{ url_for('history', asset=asset_id or none, cve=cve_id or none) }}">Newest events</a>
-{% if next_cursor %}<a class="btn btn-secondary btn-small" href="{{ url_for('history', asset=asset_id or none, cve=cve_id or none, before=next_cursor) }}">Older events</a>{% endif %}
-</div>
 {% endcall %}
 {% else %}
 {% if asset_id or cve_id %}{{ empty_state('No matching events', 'No change matches these filters. Clear the filters to see all recorded events.', url_for('history'), 'Clear filters') }}{% else %}{{ empty_state('No events recorded yet', 'Events appear after a scan records a change to a finding. Run a scan, then return here to review what changed.') }}{% endif %}
 {% endif %}
+<div class="pagination" role="group" aria-label="Pages of events">
+<a class="btn btn-secondary btn-small" href="{{ url_for('history', asset=asset_id or none, cve=cve_id or none) }}">Newest events</a>
+{% if next_cursor %}<a class="btn btn-secondary btn-small" href="{{ url_for('history', asset=asset_id or none, cve=cve_id or none, before=next_cursor) }}">Older events</a>{% endif %}
+</div>
 {% endblock %}

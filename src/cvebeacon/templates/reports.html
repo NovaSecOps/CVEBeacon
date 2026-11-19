@@ -2,7 +2,7 @@
 {% from 'ui.html' import page_header, card, callout, button %}
 {% block title %}Reports · CVEBeacon{% endblock %}
 {% block content %}
-{{ page_header('Reports', 'Download a full report of your current inventory and its findings.') }}
+{{ page_header('Reports', 'Download a report of your current inventory and its findings.') }}
 {% call callout('info', 'Before you start') %}
 <p>Generating a report runs a fresh query for the current inventory. This may take several minutes and needs access to enabled sources. Keep this page open until the download starts.</p>
 <p>Review coverage and source health in the report. Missing results do not establish a clean inventory.</p>

@@ -36,7 +36,7 @@ path = "inventory.csv"</pre>
 {% for key, label in [('repository','Repository'),('commit','Commit')] %}{% if f.asset[key] %}<dt>{{ label }}</dt><dd class="break">{{ f.asset[key] }}</dd>{% endif %}{% endfor %}
 </dl>
 {% for conflict in f.conflicts %}{% call callout('warning', 'Sources disagree') %}<p>{{ conflict }}</p>{% endcall %}{% endfor %}
-{% for e in f.evidence %}<details class="disclosure"><summary>{{ e.source }} · {{ e.role }} · {{ e.statement }}</summary><p>Retrieved {{ watch_stamp(e.retrieved_at) if e.retrieved_at else 'unknown' }} · Source timestamp {{ watch_stamp(e.source_timestamp) if e.source_timestamp else 'unknown' }}</p><p class="break">{{ e.source_url or 'No source URL' }}</p><pre>{{ e.details | tojson(indent=2) }}</pre></details>{% else %}<p class="help">No supporting evidence recorded; treat applicability with caution.</p>{% endfor %}
+{% for e in f.evidence %}<details class="disclosure"><summary>{{ e.source }} · {{ e.role }} · {{ e.statement }}</summary><p>Retrieved {{ watch_stamp(e.retrieved_at) if e.retrieved_at else 'unknown' }} · Source timestamp {{ watch_stamp(e.source_timestamp) if e.source_timestamp else 'unknown' }}</p><p class="break">{{ e.source_url or 'No source URL' }}</p><pre>{{ e.details | tojson(indent=2) }}</pre></details>{% else %}<p>{{ badge('No supporting evidence recorded', 'warning') }} Treat applicability with caution.</p>{% endfor %}
 {% endmacro %}
 
 {% macro findings_table(rows) %}
@@ -45,12 +45,12 @@ path = "inventory.csv"</pre>
 <thead><tr><th>Asset and version</th><th>Advisory</th><th>Does it apply?</th><th>Severity (CVSS)</th><th>Known exploited</th><th>Last observed</th></tr></thead>
 <tbody>
 {% for row in rows %}{% set f = row.finding %}{% set score = f.vulnerability.cvss_score %}<tr>
-<td>{% if row.current_inventory %}<a href="{{ url_for('asset', asset_id=f.asset.asset_id) }}">{{ f.asset.asset_id }}</a>{% else %}<span class="break">{{ f.asset.asset_id }}</span>{% endif %}<br><span class="muted">{{ f.asset.vendor }} · {{ f.asset.product }}</span><br><span class="muted">Version {{ f.asset.version or 'unknown' }}</span>{% if not row.current_inventory %}<p class="help">Inventory changed or asset removed — historical observation</p>{% endif %}</td>
+<td>{% if row.current_inventory %}<a href="{{ url_for('asset', asset_id=f.asset.asset_id) }}">{{ f.asset.asset_id }}</a>{% else %}<span class="break">{{ f.asset.asset_id }}</span>{% endif %}<br><span class="muted">{{ f.asset.vendor }} · {{ f.asset.product }}</span><br><span class="muted">Version {{ f.asset.version or 'unknown' }}</span>{% if not row.current_inventory %}<p>{{ badge('Historical observation', 'warning') }} Inventory changed or asset removed.</p>{% endif %}</td>
 <td>{{ f.vulnerability.advisory_id or f.vulnerability.cve_id }}</td>
 <td>{{ applicability_badge(f.applicability) }}</td>
 <td>{% if score is none %}<span class="muted">Unknown</span>{% else %}{% set level = 'critical' if score >= 9 else 'high' if score >= 7 else 'medium' if score >= 4 else 'low' if score > 0 else 'none' %}{{ badge(level | capitalize, level if level in ['critical', 'high', 'medium', 'low'] else 'neutral') }} <span class="num">{{ score }}</span>{% endif %}</td>
 <td>CISA: {{ 'Yes' if f.vulnerability.cisa_kev else 'No' if f.vulnerability.cisa_kev is not none else 'Unknown' }}<br>EU: {{ 'Yes' if f.vulnerability.eu_kev else 'No' if f.vulnerability.eu_kev is not none else 'Unknown' }}</td>
-<td>{% if row.last_seen %}Last observed {{ watch_stamp(row.last_seen) }}{% else %}Not recorded{% endif %}{% if row.stale %}<p class="help">Retained observation; not refreshed in the latest scan or over 24 hours old.</p>{% endif %}<details class="disclosure"><summary>Evidence and assessment</summary>{{ finding_detail(f) }}</details></td>
+<td>{% if row.last_seen %}Last observed {{ watch_stamp(row.last_seen) }}{% else %}Not recorded{% endif %}{% if row.stale %}<p>{{ badge('Retained observation', 'warning') }} Not refreshed in the latest scan or over 24 hours old.</p>{% endif %}<details class="disclosure"><summary>Evidence and assessment</summary>{{ finding_detail(f) }}</details></td>
 </tr>
 {% else %}<tr><td colspan="6">No matching observations. This is not proof of complete vulnerability coverage.</td></tr>{% endfor %}
 </tbody></table>
