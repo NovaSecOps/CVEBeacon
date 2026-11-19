@@ -478,6 +478,18 @@ def _euvd_sql_rank(exploited, updated, identifier):
     return f"{rank[0]}\0{rank[1]}\0{numeric}"
 
 
+def _euvd_covers_observation(updated, scoped_updated, checked_at):
+    if not updated:
+        return False
+    def timestamp(value):
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+    try:
+        return timestamp(updated) >= timestamp(scoped_updated or checked_at)
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 class WatchStore:
     def __init__(self, path: str | Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self.path = Path(path)
@@ -1284,9 +1296,6 @@ class WatchStore:
             for euvd_id in sorted(by_id):
                 update = by_id[euvd_id]
                 cve_ids = tuple(sorted(set(update.cve_ids)))
-                for value in cve_ids:
-                    if db.execute("DELETE FROM watch_euvd_override WHERE cve_id=? AND checked_at<=?", (value, now)).rowcount:
-                        touched.add(value)
                 cve_ids_json = canonical_json(list(cve_ids))
                 vendors_json = _vendors_json(update.vendors)
                 score = update.cvss.score if update.cvss is not None else None
@@ -1330,6 +1339,26 @@ class WatchStore:
                     )
                     outcomes.append((euvd_id, "unchanged"))
                     continue
+                # Reconcile this advisory only, including aliases it removed.
+                # A later observation of unchanged/older data must not erase a
+                # newer scoped refresh (or other advisories in that refresh).
+                for identifier in old_aliases | set(cve_ids):
+                    override = db.execute("SELECT items_json,checked_at FROM watch_euvd_override WHERE cve_id=?", (identifier,)).fetchone()
+                    if override is None:
+                        continue
+                    items = json.loads(override[0])
+                    retained = [
+                        item for item in items
+                        if item['euvd_id'] != euvd_id
+                        or not _euvd_covers_observation(update.date_updated, item.get('date_updated'), override['checked_at'])
+                    ]
+                    if len(retained) == len(items):
+                        continue
+                    if retained:
+                        db.execute("UPDATE watch_euvd_override SET items_json=? WHERE cve_id=?", (canonical_json(retained), identifier))
+                    else:
+                        db.execute("DELETE FROM watch_euvd_override WHERE cve_id=?", (identifier,))
+                    touched.add(identifier)
                 if row is None:
                     db.execute(
                         "INSERT INTO watch_euvd_item("
