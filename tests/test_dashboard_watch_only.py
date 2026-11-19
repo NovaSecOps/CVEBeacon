@@ -158,8 +158,8 @@ def test_shell_groups_main_and_account_navigation(watch_only_client):
     assert 'class="topbar"' in header
     assert 'class="skip-link" href="#content"' in text
     assert 'role="search"' in header and 'placeholder="Search CVE' in header
-    # No CVE explorer endpoint exists here, so search falls back to the alert filter.
-    assert 'action="/watch/events"' in header and 'name="cve"' in header
+    # Global search goes to the CVE explorer and uses its query parameter.
+    assert 'action="/watch/cves"' in header and 'name="q"' in header
     assert "My account" in header
     assert ">Log out<" in header
     assert 'name="csrf"' in header
@@ -174,8 +174,9 @@ def test_shell_groups_main_and_account_navigation(watch_only_client):
         "Configuration", "My account",
     ):
         assert f"<span>{label}</span>" in sidebar, label
-    # Features that are not registered here must not produce dead links.
-    assert "CVE explorer" not in sidebar and "Backups" not in sidebar
+    # Registered optional features appear; unregistered ones produce no dead links.
+    assert "<span>CVE explorer</span>" in sidebar
+    assert "Backups" not in sidebar
     assert 'aria-current="page"' in sidebar
     assert '<main id="content"' in remainder
     # The shell is the only navigation; page bodies add none.
@@ -204,7 +205,8 @@ def test_shell_helper_reports_registered_endpoints(watch_only_client):
     _, app, _ = watch_only_client
     helper = app.jinja_env.globals["has_endpoint"]
     assert helper("watch.events") is True
-    assert helper("watch.explorer") is False
+    assert helper("watch.explorer") is True
+    assert helper("no.such.endpoint") is False
 
 
 def test_navigation_contrast_and_narrow_layout(watch_only_client):
