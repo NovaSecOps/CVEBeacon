@@ -113,9 +113,13 @@ web snapshots. With no configured inventory, the first upload enables scanning.
 New configurations set `[inventory] managed = true`. Older configurations use
 uploads automatically when the folder contains a current inventory. Set
 `managed = false` under `[inventory]` to exclude dashboard uploads. Archived
-versions are used only when restored. Run `cvebeacon inventory validate` or
+versions are used only when restored. Back up the private inventory directory
+with the matching database backups. The JSON download contains the canonical
+records used for inventory input, while collector snapshots also carry a
+separate exchange manifest. Run `cvebeacon inventory validate` or
 `cvebeacon doctor` to check the merged inventory. A corrupt upload is skipped
 with a warning and a duplicate asset ID across inventories prevents the scan.
+Exports wait until unreadable client inventories are replaced or removed.
 
 ## 5. First scan
 

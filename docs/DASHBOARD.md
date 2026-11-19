@@ -215,16 +215,19 @@ to keep the current assets and add new IDs.
 
 The client page shows the asset count, the last upload and who saved it, and
 findings from the latest successful scan. Use it to download the current
-inventory, restore one of the five prior versions, or remove the upload. All
-changes are audited with the account and client. Inventory changes record the
+inventory, restore one of the five prior versions, or remove the upload. The JSON download
+contains the canonical inventory records and can be uploaded again. The
+collector exchange manifest is available through the separate extension
+workflow. All changes are audited with the account and client. Inventory changes record the
 row count and the action. Uploaded rows, contact details and notes stay out of
 the audit.
 
 Administrators can manage inventories. To delegate this workflow, assign
 `view` and `manage_inventory` to a role. Add `run` if that person should also
-be able to choose **Run a scan now**. Scheduled scans use the uploads
-automatically, and **Affected clients** on the CVE page reflects the latest
-successful scan. For format details and how uploads interact with older
+be able to choose **Run a scan now**. The client page shows whether the
+installed native schedule includes scans. For a watch-only schedule, use
+**Schedule** to select **both**, or start a scan from the client page.
+**Affected clients** on the CVE page reflects the latest successful scan. For format details and how uploads interact with older
 configurations, see the [user guide](USER_GUIDE.md#clients-and-inventories).
 
 ## Freshness and failures
@@ -443,9 +446,11 @@ private `dashboard-jobs/` directory beside the state database; the directory and
 its files are owner-only. Every account that can write the state directory is
 trusted with the databases and SQLite sidecar files in it; keep it writable only
 by trusted accounts. Before an
-upgrade, stop the scanner/dashboard and back up all three data stores. Schema
+upgrade, stop the scanner/dashboard and back up the state databases and the private `inventories/` directory. Schema
 upgrades preserve existing observations and delivery records; an older
-application requires its corresponding pre-upgrade backups.
+application requires its corresponding pre-upgrade backups. Keep the inventory directory and its
+retained versions with the matching account database backup, preserving
+owner-only permissions.
 
 ## Configuration editor
 

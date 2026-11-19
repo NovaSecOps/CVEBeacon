@@ -82,19 +82,19 @@ identity = "open"   # open, registered, or authenticated
 
 When `[watch].enabled = true`, `[inventory]` is optional. Commands that need an
 inventory (`scan`, `export`, `asset`, `inventory ...`) fail with a clear message
-until `[inventory] path` is added. `doctor` still runs: it checks the
+until you upload a client inventory in the dashboard or set `[inventory] path`. `doctor` still runs: it checks the
 configuration, the watch and state data directories, the watch database,
 channels, sources and the native schedule, reports the inventory checks as
 skipped, and exits nonzero only when one of those checks fails. A watch schema
 that this release migrates automatically is reported as `ok` with a migration
 note; a schema newer than this release, ambiguous metadata, or an incompatible
-layout fails. The dashboard still starts in watch-only mode: inventory views
-show a configuration notice, client allocation stays empty, and Operations
-offers watch operations only. A configuration with neither watch mode nor an
-inventory is rejected, so existing configurations keep their behavior.
-`schedule install` supports watch-only and combined configurations: it runs
-`watch run` by default when no inventory is configured, and the ordered `run`
-command (scan, then watch run) when both are configured. See
+layout fails. Until the first upload, the dashboard offers watch jobs and the
+Clients page. An inventory-only dashboard can start empty with
+`[inventory] managed = true` so you can upload or restore an inventory.
+Other configurations still require watch mode or an inventory.
+`schedule install` runs `watch run` by default for a watch-only configuration.
+Choose `--command both` to schedule the ordered `run` command. It starts
+including scans as soon as a managed inventory is available. See
 [scheduling](SCHEDULING.md).
 
 The NVD API key is read from the existing `sources.nvd_api_key_env` variable,
