@@ -9,8 +9,11 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 NGINX = ROOT / "deploy" / "reverse-proxy" / "nginx" / "cvebeacon.conf"
 CADDY = ROOT / "deploy" / "reverse-proxy" / "caddy" / "Caddyfile"
+GUIDE = ROOT / "docs" / "HTTPS.md"
 SAMPLES = (NGINX, CADDY)
-CERT_SUFFIXES = (".conf", ".crt", ".key", ".pem", ".toml")
+DOCUMENTATION_FILES = frozenset(
+    {"cvebeacon.conf", "cvebeacon.toml", "fullchain.pem", "internal-ca.crt", "privkey.pem"}
+)
 HOSTNAME = re.compile(
     r"(?<![A-Za-z0-9_.-])"
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}"
@@ -50,9 +53,25 @@ def test_samples_use_only_documentation_hostnames():
         assert "cvebeacon.example.com" in text
         for match in HOSTNAME.finditer(text):
             hostname = match.group().casefold()
-            if hostname.endswith(CERT_SUFFIXES):
+            if hostname in DOCUMENTATION_FILES:
                 continue
             assert hostname == "example.com" or hostname.endswith(".example.com"), (path, hostname)
+
+
+def test_guide_uses_only_documentation_placeholders():
+    text = _text(GUIDE)
+    for match in HOSTNAME.finditer(text):
+        hostname = match.group().casefold()
+        if hostname in DOCUMENTATION_FILES:
+            continue
+        assert hostname == "example.com" or hostname.endswith(".example.com"), (GUIDE, hostname)
+    documentation_network = ipaddress.ip_network("203.0.113.0/24")
+    for match in re.finditer(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", text):
+        address = ipaddress.ip_address(match.group())
+        assert address.is_loopback or address.is_unspecified or address in documentation_network, (GUIDE, match.group())
+    for match in re.finditer(r"\[([0-9A-Fa-f:]+)\]", text):
+        address = ipaddress.ip_address(match.group(1))
+        assert address.is_loopback or address.is_unspecified, (GUIDE, match.group())
 
 
 def test_samples_use_only_loopback_addresses():

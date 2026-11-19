@@ -76,18 +76,24 @@ Do not pass `--host 0.0.0.0` when a proxy is in front of it. If the dashboard
 runs in a container, publish the port on loopback only, for example
 `127.0.0.1:8787:8787`. The samples proxy only to `127.0.0.1:8787`.
 
-The dashboard does not trust `X-Forwarded-For`, `X-Forwarded-Host` or
-`X-Forwarded-Proto`. The proxy adds no forwarded values, and the dashboard
-continues to use the directly connected peer address. Two consequences matter:
+The dashboard does not trust `X-Forwarded-For`, `X-Forwarded-Host`,
+`X-Forwarded-Proto` or any other forwarded header. The samples send no forwarded
+values and clear the client-supplied `Forwarded`, `X-Forwarded-For`,
+`X-Forwarded-Host`, `X-Forwarded-Port`, `X-Forwarded-Proto` and `X-Real-IP`
+headers. The dashboard continues to use the directly connected peer address. Two
+consequences matter:
 
 - Every browser behind the proxy appears as the proxy's loopback address. Login
   backoff and origin limits are shared by all remote clients. Do not try to
   restore per-client limits with forwarded headers; the application ignores
   them by design.
-- The dashboard checks the request `Host` header against its bind address. The
-  samples send `Host: 127.0.0.1:8787` to the backend, which is accepted for the
-  default loopback bind. Forwarding the public hostname instead causes
-  `Invalid request host.` responses.
+- The dashboard checks the request `Host` header against the trusted host set
+  for its bind address. For the default loopback bind that set is the bind host
+  plus `localhost`, `127.0.0.1` and `[::1]`. The samples send
+  `Host: 127.0.0.1:8787` to the backend, which is accepted. Forwarding the
+  public hostname instead causes `Invalid request host.` responses. The
+  dashboard ignores `X-Forwarded-Host`, so setting it does not repair a wrong
+  `Host` header.
 
 The dashboard also decides whether `/bootstrap` is local from the directly
 connected peer address. A local reverse proxy makes every remote visitor appear
@@ -216,12 +222,21 @@ curl --cacert /etc/ssl/cvebeacon/internal-ca.crt -I https://cvebeacon.example.co
 Inspect the login response headers to confirm the cookie flags:
 
 ```console
-curl -sS -D - -o /dev/null https://cvebeacon.example.com/login
+curl --cacert /etc/ssl/cvebeacon/internal-ca.crt -sS -D - -o /dev/null \
+  https://cvebeacon.example.com/login
 ```
 
+Use the same `--cacert` flag as above when the CA is not in the system trust
+store; omit it for a publicly trusted certificate.
+
 After a successful login, the `Set-Cookie` lines must include `Secure`,
-`HttpOnly` and `SameSite=Strict`. Also confirm that the backend is not reachable
-from another host:
+`HttpOnly` and `SameSite=Strict`. Also confirm that canonical redirects stay on
+the public origin. Request a route without its trailing slash, for example
+`https://cvebeacon.example.com/operations`. The `308` response must not contain
+`127.0.0.1:8787` in its `Location` header; the samples rewrite the backend origin
+to the public origin or a relative path and keep any query string.
+
+Also confirm that the backend is not reachable from another host:
 
 ```console
 curl -I --max-time 3 http://203.0.113.10:8787/
@@ -237,9 +252,10 @@ time out.
   proxy entirely. The dashboard then serves plain HTTP with credentials.
 - **Double HSTS.** Adding HSTS in the proxy, the CDN and the upstream application
   makes the effective policy unclear. Keep one source.
-- **Wrong Host header.** `proxy_set_header Host $host`, Caddy's `{host}`, or
-  forwarding `X-Forwarded-Host` sends the public hostname to a loopback-bound
-  dashboard and produces `Invalid request host.` Use the backend address.
+- **Wrong Host header.** `proxy_set_header Host $host` or Caddy's `{host}`
+  sends the public hostname to a loopback-bound dashboard and produces
+  `Invalid request host.` Use the backend address. The dashboard ignores
+  `X-Forwarded-Host`, so setting it neither causes nor fixes that check.
 - **Serving under a subpath.** The dashboard has no prefix setting. A `/cvebeacon/`
   location breaks links, static assets, form actions and redirects. Use a
   dedicated hostname at the root.

@@ -3,13 +3,15 @@
 # Install as /etc/caddy/Caddyfile, or import this file from an existing
 # Caddyfile. This sample has no global options block, so it can be imported
 # without a merge. For public ACME certificates, put the ACME account email in
-# the existing single global options block and remove `tls internal` below.
+# the file's single global options block (add one at the top if absent) and
+# remove `tls internal` below.
 #
 # The dashboard listens on loopback only:
 #   cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml serve
 #
 # It trusts no forwarded host, address or scheme headers, does not support a
-# URL prefix, and checks the Host header against its bind address.
+# URL prefix, and checks the request Host header against the trusted hosts for
+# its bind address.
 
 # Caddy redirects HTTP to HTTPS automatically for site addresses with a host.
 # This explicit block replaces that automatic redirect for this host so the
