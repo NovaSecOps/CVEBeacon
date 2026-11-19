@@ -89,7 +89,7 @@ def test_publication_window_never_attributes_an_old_record(tmp_path, monkeypatch
     assert "old-account" not in observed[0]["description"]
 
 
-def test_legacy_inline_holder_wins_over_unrelated_sidecar(tmp_path):
+def test_legacy_inline_record_is_preserved_without_trusting_live_identity(tmp_path):
     path = tmp_path / "run.lock"
     orphan = path.with_name(path.name + ".owner.json")
     orphan.write_text(json.dumps({"account": "orphan", "dashboard_job": 99, "command": "watch run"}))
@@ -101,11 +101,18 @@ def test_legacy_inline_holder_wins_over_unrelated_sidecar(tmp_path):
         os.lseek(fd, 1, os.SEEK_SET)
         os.write(fd, json.dumps({"account": "legacy", "command": "scan", "pid": os.getpid()}).encode())
         snapshot = RunLock(path).snapshot()
-        assert snapshot["state"] == "active" and snapshot["command"] == "scan"
+        assert snapshot["state"] == "active"
+        assert "account" not in snapshot and "command" not in snapshot
         assert not snapshot["dashboard"]
+        assert "cancel" not in str(locking.RunInProgress(RunLock(path).probe()))
     finally:
         lock._unlock(fd)
         os.close(fd)
+    # Free-lock observation still prefers legacy inline data over an unrelated
+    # sidecar, retaining compatibility without claiming a current acquisition.
+    snapshot = RunLock(path).snapshot()
+    assert snapshot["state"] == "unknown" and snapshot["command"] == "scan"
+    assert snapshot["account"] == "legacy" and not snapshot["dashboard"]
 
 
 @pytest.mark.parametrize("error", [errno.EACCES, errno.EPERM, errno.EROFS])
@@ -124,19 +131,13 @@ def test_private_metadata_permission_failure_does_not_block_shared_lock(tmp_path
         assert "account" not in path.read_text(errors="replace")
 
 
-def test_foreign_orphan_in_sticky_parent_does_not_block_successor(tmp_path, monkeypatch):
+def test_new_acquisition_preserves_a_legacy_orphan_in_a_sticky_parent(tmp_path):
     if os.name == "posix":
         tmp_path.chmod(0o1777)
     path = tmp_path / "run.lock"
     orphan = path.with_name(path.name + ".owner.json")
     orphan.write_bytes(b"foreign private orphan")
     orphan.chmod(0o600)
-    original = locking.os.replace
-    def sticky_replace(source, target):
-        if Path(target) == orphan:
-            raise PermissionError(errno.EPERM, "synthetic foreign owner in sticky directory")
-        return original(source, target)
-    monkeypatch.setattr(locking.os, "replace", sticky_replace)
     with RunLock(path) as lock:
         assert lock.owner_path != orphan
         assert json.loads(lock.owner_path.read_bytes())["pid"] == os.getpid()

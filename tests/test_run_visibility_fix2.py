@@ -1,30 +1,15 @@
 """Windows record cleanup and unverified legacy handoff regressions."""
 
-
 import errno
-
-
 import json
-
-
 import os
-
-
 from pathlib import Path
-
 
 import pytest
 
-
 from cvebeacon import dashboard, locking
-
-
 from cvebeacon.errors import CVEBeaconError
-
-
 from cvebeacon.locking import RunInProgress, RunLock, run_lock_path
-
-
 from test_dashboard_operations import fake_scheduler, login, make_config, new_accounts
 
 
@@ -129,3 +114,60 @@ def test_unsupported_windows_link_errors_leave_normal_runs_usable(tmp_path, monk
         assert RunLock(lock.path).snapshot()["description"] == "holder unavailable"
         assert list(tmp_path.glob("run.lock.owner.*")) == []
 
+
+def test_free_lock_reads_a_legacy_sidecar_only_dead_pid_record(tmp_path, monkeypatch):
+    path = tmp_path / "run.lock"
+    path.write_bytes(b"\0")
+    legacy = path.with_name(path.name + ".owner.json")
+    payload = json.dumps({"account": "previous-account", "host": "example.com", "pid": 123,
+                          "command": "watch run", "started_at": "2026-01-01T00:00:00+00:00"}).encode()
+    descriptor = locking.private_file(legacy, create=True, exclusive=True)
+    try:
+        os.write(descriptor, payload)
+    finally:
+        os.close(descriptor)
+    monkeypatch.setattr(locking, "_dead_local_pid", lambda record: record.get("pid") == 123)
+    snapshot = RunLock(path).snapshot()
+    assert snapshot["state"] == "stale" and snapshot["account"] == "previous-account"
+    assert snapshot["command"] == "watch run" and not snapshot["dashboard"]
+    assert path.read_bytes() == b"\0" and legacy.read_bytes() == payload
+
+
+@pytest.mark.parametrize("dashboard_marker", [False, True])
+def test_legacy_live_pid_cannot_identify_a_new_acquisition(tmp_path, monkeypatch, dashboard_marker):
+    config = make_config(tmp_path)
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    app.extensions["dashboard_schedule_runner"] = fake_scheduler({})[0]
+    client = app.test_client()
+    login(client, "viewer")
+    path = run_lock_path(config)
+    previous = {"account": "previous-account", "host": "example.com", "pid": os.getpid(),
+                "command": "watch run", "started_at": "2026-01-01T00:00:00+00:00"}
+    if dashboard_marker:
+        previous["dashboard_job"] = 99
+    path.write_bytes(b"\0" + json.dumps(previous).encode())
+    monkeypatch.setattr(locking, "_host_name", lambda: "example.com")
+    current = RunLock(path, command="scan")
+    original_lock = current._lock
+    observed = []
+    def take(fd):
+        original_lock(fd)
+        snapshot = RunLock(path).snapshot()
+        holder = RunLock(path).probe()
+        page = client.get("/operations/")
+        observed.append((snapshot, holder, page))
+    monkeypatch.setattr(current, "_lock", take)
+    try:
+        with current:
+            pass
+        snapshot, holder, page = observed[0]
+        assert snapshot["state"] == "active" and snapshot["dashboard"] is False
+        assert "account" not in snapshot and "command" not in snapshot
+        assert "previous-account" not in str(holder)
+        assert "cancel" not in str(RunInProgress(holder))
+        assert page.status_code == 200 and "Active run" in page.text
+        assert "previous-account" not in page.text and "watch run" not in page.text
+        assert "Cancel job" not in page.text
+    finally:
+        app.extensions["dashboard_jobs"].shutdown()

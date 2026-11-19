@@ -483,11 +483,11 @@ class RunLock:
             inline = self._inline(descriptor)
             token = self._token(inline)
             if token is None:
-                # Legacy inline metadata is authoritative over obsolete siblings.
-                holder = describe_holder(inline)
-                if live and holder is not None and _dead_local_pid(holder.record):
+                # Legacy records have no acquisition lease. Even a live local
+                # PID may have been reused since that record was written.
+                if live:
                     return "holder unavailable"
-                return holder or "holder unavailable"
+                return describe_holder(inline) or "holder unavailable"
             path = owner_record_path(self.path, token)
             owner_fd = private_file(path, readonly=os.name != "nt", share_delete=True)
             try:
