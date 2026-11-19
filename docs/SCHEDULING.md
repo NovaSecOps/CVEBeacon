@@ -108,7 +108,10 @@ lock file created by another service account remain usable. A new POSIX lock
 file is created under the process umask rather than a forced mode, so in a
 cross-account setup both accounts need write access to the lock file. Each
 acquisition publishes an owner-only `cvebeacon-run.lock.owner.<token>.json`
-beside it when directory permissions allow. This private record is bound to
+beside it when directory permissions and filesystem link support allow; link
+limits also permit a run with identity unavailable. See the
+[Operations holder-record behavior](DASHBOARD.md#operations-and-background-jobs).
+This private record is bound to
 the acquisition and removed before release. Successors never replace another
 account's orphan record, including in sticky shared directories. If permissions
 prevent private publication, the run continues with identity unavailable; the
