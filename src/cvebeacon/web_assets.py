@@ -16,6 +16,7 @@ from .identity import validate_client_name
 from .launching import child_environment
 from .private_storage import private_directory, private_file
 from .publication import replace_file
+from .snapshot import sync_directory
 from .web_inventory import decode_json, read_bytes
 
 COMPANION_NOTICE = "Web detection requires the optional Extensions package. Install it to enable these actions."
@@ -133,12 +134,7 @@ def replace_bytes(path, data):
     temporary = temporary_bytes(path.parent, data)
     try:
         replace_file(temporary, path)
-        if os.name == "posix":
-            descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+        sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 

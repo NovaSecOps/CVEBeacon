@@ -98,6 +98,8 @@ def test_defaults_match_minimal_loader_output(tmp_path):
                     actual = loaded.output_dir
                 elif section == "watch.reporting":
                     actual = loaded.watch.reporting_identity
+                elif (section, key) == ("inventory", "managed"):
+                    actual = loaded.managed_inventory
                 else:
                     owner = loaded.teams if section == "notifications.teams" else loaded.email if section == "notifications.email" else getattr(loaded, section)
                     actual = getattr(owner, key)

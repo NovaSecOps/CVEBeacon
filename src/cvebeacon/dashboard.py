@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import secrets
 import tempfile
+from threading import Lock
 
 from flask import Flask, abort, g, redirect, render_template, request, send_file, session, url_for
 from werkzeug.exceptions import HTTPException, SecurityError
@@ -24,6 +25,7 @@ from .dashboard_auth import AccountLoginThrottle, AccountSessions, DashboardAuth
 from .errors import CVEBeaconError, ConfigurationError, StateError
 from .inventory import load_inventory
 from .identity import normalize_asset
+from .managed_inventory import ManagedInventoryCollision, inventory_files
 from .models import Applicability, Asset
 from .reporting import write_json, write_xlsx
 from .state import StateStore
@@ -75,9 +77,34 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
     return current is not None and current.target_key == asset.target_key
 
 
+
+def _report_inventory_stamp(inventory, snapshot_directory):
+    """Identify inventory inputs without reading their contents."""
+    paths = []
+    if inventory.path is not None:
+        paths.append(inventory.path)
+    if inventory.managed_directory is not None:
+        paths.append(inventory.managed_directory)
+        for path in inventory_files(inventory.managed_directory, configured=inventory.path):
+            paths.extend((path, path.with_suffix(".client")))
+    if inventory.web_snapshots:
+        paths.append(snapshot_directory)
+        paths.extend(sorted(snapshot_directory.glob("*.json")))
+    stamps = []
+    for path in paths:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            stamps.append((path, None))
+        else:
+            stamps.append((path, info.st_ino, info.st_dev, info.st_mode, info.st_size,
+                           info.st_mtime_ns, info.st_ctime_ns, info.st_uid, info.st_nlink))
+    return tuple(stamps)
+
+
 def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session_app=None) -> Flask:
     running_version = package_version("cvebeacon")
-    if config.inventory is None and not config.watch.enabled:
+    if config.effective_inventory is None and not (config.watch.enabled or config.has_managed_dashboard):
         raise CVEBeaconError(
             "the dashboard requires an inventory or watch mode; add [inventory] path or set [watch] enabled = true"
         )
@@ -154,6 +181,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
                 if not auth.valid(session.get("auth_id")):
                     session.clear()
                     return redirect(url_for("login"), code=303)
+        if request.endpoint == "client_inventory.upload" and (
+            not g.accounts or not {"view", "manage_inventory"} <= g.permissions
+        ):
+            abort(403)
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             token = _text(request.form, "csrf", required=True)
             if account_mode:
@@ -192,7 +223,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
 
     @app.context_processor
     def inventory_state():
-        return {"inventory_configured": config.inventory is not None}
+        return {"inventory_configured": config.effective_inventory is not None}
 
     @app.get("/healthz")
     @requires("public")
@@ -282,9 +313,14 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     def snapshot():
         data = store.dashboard_snapshot()
         now = datetime.now(timezone.utc)
-        if config.inventory is not None:
+        inventory = config.effective_inventory
+        data["inventory_warnings"] = []
+        if inventory is not None:
             try:
-                assets = {asset.asset_id: asset for asset in load_inventory(config.inventory, snapshot_directory=config.database_path.parent / "web-inventory")}
+                assets = {asset.asset_id: asset for asset in load_inventory(
+                    inventory, snapshot_directory=config.database_path.parent / "web-inventory",
+                    managed_warnings=data["inventory_warnings"],
+                )}
                 data["inventory_error"] = False
             except CVEBeaconError:
                 assets = {}
@@ -328,7 +364,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/findings")
     @requires("view")
     def findings():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Findings")
         data = snapshot()
         filters = {key: _text(request.args, key) for key in ("q", "asset", "vendor", "product", "version", "category", "system_id", "ecosystem", "purl", "advisory", "cve", "applicability", "cvss", "severity", "cisa", "eu")}
@@ -380,7 +416,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/history")
     @requires("view")
     def history():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Finding history")
         asset_id, cve_id = _text(request.args, "asset"), _text(request.args, "cve")
         cursor = _text(request.args, "before")
@@ -403,7 +439,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/assets")
     @requires("view")
     def assets():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Inventory assets")
         data = snapshot()
         query = _text(request.args, "q")
@@ -413,7 +449,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/asset")
     @requires("view")
     def asset():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Inventory asset")
         identifier = _text(request.args, "asset_id", required=True)
         data = snapshot()
@@ -426,7 +462,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.route("/query", methods=["GET", "POST"])
     @requires("run", post=("run", "view"))
     def query():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Manual query", status=400 if request.method == "POST" else 200)
         result = None
         mode = _text(request.form if request.method == "POST" else request.args, "mode") or "product"
@@ -446,18 +482,54 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
                 health["asset_id"] = result["asset"]["asset_id"]
         return render_template("query.html", result=result, values=values, mode=mode)
 
+    report_cache = None
+    report_cache_lock = Lock()
+    report_snapshots = config.database_path.parent / "web-inventory"
+
+    def report_inventory(inventory):
+        warnings: list[str] = []
+        try:
+            assets = load_inventory(inventory, snapshot_directory=report_snapshots, managed_warnings=warnings)
+        except ManagedInventoryCollision as exc:
+            warnings.append(str(exc))
+        except (CVEBeaconError, OSError):
+            if not warnings:
+                warnings.append("The inventory could not be read. Check inventory settings and try again.")
+        return (None, warnings) if warnings else (assets, warnings)
+
     @app.route("/reports", methods=["GET", "POST"])
     @requires("run", post=("run", "view"))
     def reports():
-        if config.inventory is None:
-            return inventory_required("Report export", status=400 if request.method == "POST" else 200)
-        if request.method == "GET":
-            return render_template("reports.html")
+        nonlocal report_cache
+        inventory = config.effective_inventory
+        is_post = request.method == "POST"
+        if inventory is None:
+            return inventory_required("Report export", status=400 if is_post else 200)
+        if not is_post:
+            # Static report pages do not need to parse a standalone configured file.
+            warnings = []
+            if inventory.managed_directory is not None:
+                with report_cache_lock:
+                    try:
+                        stamp = _report_inventory_stamp(inventory, report_snapshots)
+                        if report_cache is not None and report_cache[0] == stamp:
+                            warnings = report_cache[1]
+                        else:
+                            _, warnings = report_inventory(inventory)
+                            if stamp == _report_inventory_stamp(inventory, report_snapshots):
+                                report_cache = (stamp, warnings)
+                    except OSError:
+                        _, warnings = report_inventory(inventory)
+            return render_template("reports.html", inventory_warnings=warnings)
         kind = _text(request.form, "format", required=True)
         if kind not in {"json", "xlsx"}:
             abort(400)
+        # Always recheck the actual inputs before an export.
+        assets, warnings = report_inventory(inventory)
+        if warnings:
+            return render_template("reports.html", inventory_warnings=warnings), 409
         from .cli import _run_query
-        results = _run_query(config, load_inventory(config.inventory, snapshot_directory=config.database_path.parent / "web-inventory"))
+        results = _run_query(config, assets)
         with tempfile.TemporaryDirectory(prefix="cvebeacon-report-") as directory:
             path = Path(directory) / f"report.{kind}"
             (write_xlsx if kind == "xlsx" else write_json)(results, path)
@@ -616,6 +688,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     register_config(app, config, host=host)
     from .dashboard_web import create_web_blueprint
     app.register_blueprint(create_web_blueprint(config))
+    from .dashboard_inventory import create_blueprint as create_inventory_blueprint
+    app.register_blueprint(create_inventory_blueprint(config))
     from .dashboard_update import create_blueprint as create_update_blueprint
     app.register_blueprint(create_update_blueprint(config))
     from .dashboard_backup import create_blueprint as create_backup_blueprint

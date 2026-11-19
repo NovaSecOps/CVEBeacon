@@ -8,6 +8,11 @@
 <p>Review coverage and source health in the report. Missing results do not establish a clean inventory.</p>
 <p>Exports do not change scheduled monitoring or notification state.</p>
 {% endcall %}
+{% if inventory_warnings %}
+{% call callout('warning', 'The report is unavailable until all client inventories can be read.') %}
+<ul>{% for warning in inventory_warnings %}<li>{{ warning }}</li>{% endfor %}</ul>
+{% endcall %}
+{% else %}
 {% call card('Choose a format', 'Both formats contain the same findings. Choose the one that is easiest for you to open or share.') %}
 <form method="post" class="stack">
 <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -15,4 +20,5 @@
 <div class="form-actions">{{ button('Generate and download report') }}</div>
 </form>
 {% endcall %}
+{% endif %}
 {% endblock %}

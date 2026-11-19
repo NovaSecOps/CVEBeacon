@@ -1312,6 +1312,21 @@ def test_stix_export_cannot_overwrite_operational_files(
     assert path.read_bytes() == original
 
 
+
+def test_stix_export_cannot_overwrite_managed_client_inventory(tmp_path, capsys):
+    from cvebeacon.managed_inventory import client_key
+
+    build_fixture_database(tmp_path / "state.db")
+    config = _config(tmp_path)
+    directory = tmp_path / "inventories"
+    directory.mkdir(mode=0o700)
+    destination = directory / f"{client_key('Example client')}.json"
+    destination.write_bytes(b"preserved inventory")
+    assert cli.main(["--config", str(config), "export", "stix", "--output", str(destination)]) == 2
+    assert "cannot overwrite" in capsys.readouterr().err
+    assert destination.read_bytes() == b"preserved inventory"
+
+
 def test_export_does_not_change_findings_or_emit_config_paths(
     tmp_path, monkeypatch
 ):

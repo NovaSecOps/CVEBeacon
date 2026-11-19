@@ -1,16 +1,19 @@
 {% from 'ui.html' import callout, table_wrap, applicability_badge, badge, term %}
 {% macro inventory_notice() %}
-<section class="warning" role="status">
-<p><strong>No inventory is configured.</strong> Inventory views and inventory scan operations are unavailable in watch-only mode.</p>
+{% call callout('info', 'No inventory is configured.') %}
+<p>Inventory views and inventory scan operations are unavailable in watch-only mode.</p>
 <p>KEV, critical-severity and custom rule alerting still work without an inventory, so <code>[inventory]</code> is optional for watch mode.</p>
-<p>Add an <code>[inventory]</code> section to the configuration:</p>
+<p>To start scanning, <a href="{{ url_for('watch.clients') }}">open Clients</a> and upload an inventory, or add an <code>[inventory]</code> section to the configuration:</p>
 <pre>[inventory]
 path = "inventory.csv"</pre>
 <p>See <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/USER_GUIDE.md#3-initial-configuration">docs/USER_GUIDE.md</a> for inventory formats and column mappings.</p>
-</section>
+{% endcall %}
 {% endmacro %}
 
 {% macro status(data) %}
+{% for warning in data.inventory_warnings %}
+{% call callout('warning') %}<p>{{ warning }}</p>{% endcall %}
+{% endfor %}
 {% if data.inventory_error %}{% call callout('warning', 'Inventory unavailable') %}<p>Current asset coverage cannot be established; inspect scanner configuration and logs. Fix the inventory file, then run a scan.</p>{% endcall %}{% endif %}
 {% if not data.latest %}{% call callout('warning', 'No scan results recorded') %}<p>Coverage is unknown. Run a scan to compare your inventory with known vulnerabilities.</p>{% endcall %}
 {% elif data.stale %}{% call callout('warning', 'Stale scan data') %}<p>The last result is over 24 hours old or its timestamp cannot be trusted. Current coverage is unknown. Run a new scan for an up-to-date view.</p>{% endcall %}{% endif %}

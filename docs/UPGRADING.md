@@ -124,6 +124,9 @@ Never run the privileged updater inside a container.
    own documented procedure. Keep backups and configuration copies private.
    SQLite files may have live WAL contents: a simple file copy is insufficient.
    Record all paths and ownership.
+   Also copy the private `inventories/` directory beside the monitoring database.
+   It contains client profiles, current uploads and retained versions. Keep its
+   owner-only permissions and restore it with the matching account database.
 3. Obtain the release from the configured GitHub repository. Verify
    `SHA256SUMS.sig` against an independently pinned public key, then verify
    every artifact against `SHA256SUMS`:
@@ -145,8 +148,17 @@ Never run the privileged updater inside a container.
    contacting sources; `doctor` also validates an inventory when configured.
 6. Select the new installation, restart the dashboard and re-enable the
    scheduler. Check `doctor` and the loopback `/healthz` endpoint. If validation
-   fails, stop writers, restore **all** database and config backups with their
-   original service ownership, and restart the previous executable.
+   fails, stop writers, restore **all** database, inventory directory and config
+   backups with their original service ownership, and restart the previous executable.
+
+A watch-only schedule or service that invokes `watch run` continues to run watch
+jobs only after an upload. Use **Operations → Schedule** to select **both** for a
+dashboard-managed schedule, or update the managed service command to
+`cvebeacon --config CONFIG run`. The combined command runs watch jobs before the
+first upload and includes scans once an inventory is available.
+
+Expand YAML aliases and merge keys into individual values before upgrading.
+The inventory loader now requires explicit values in configured YAML files.
 
 ## Adopt an existing single-venv install
 
@@ -301,8 +313,12 @@ path unit. PathExists is checked again after a triggered service exits.
 The updater takes a separate exclusive update lock. After signature and checksum
 verification it stops configured timers, waits for current oneshot services and
 run locks without killing syncs, then stops the dashboard. SQLite's online
-backup captures every database under the data directory, including WAL contents,
-and the config. Symlinks and linked/non-regular data files are refused. All core
+backup captures every database under the data directory, including WAL contents.
+The snapshot also captures the config and recognized managed inventory files,
+including profiles and version history. Rollback verifies and restores those
+files alongside the corresponding account database. Snapshots made before
+managed inventory backup was added contain only the database and config
+copies. Symlinks and linked/non-regular data files are refused. All core
 state paths must stay inside that directory. The snapshot helper runs as the
 service account, not root; backups live under the protected code prefix.
 The configuration writer lock stays held while discovering and waiting for run

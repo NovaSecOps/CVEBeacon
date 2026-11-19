@@ -242,7 +242,8 @@ class StateStore:
                 "ON scan_asset_clients(run_id, client_key, asset_id)"
             )
 
-    def record_scan(self, results: Sequence[QueryResult], *, channels: Sequence[str] = (), attempt_id: str | None = None) -> tuple[str, list[int]]:
+    def record_scan(self, results: Sequence[QueryResult], *, channels: Sequence[str] = (),
+                    attempt_id: str | None = None, inventory_incomplete: bool = False) -> tuple[str, list[int]]:
         self.initialize()
         run_id = str(uuid.uuid4())
         started = completed = _timestamp()
@@ -251,9 +252,15 @@ class StateStore:
             with self.transaction() as db:
                 observed = set()
                 findings = [item for result in results for item in result.findings]
+                coverage_warnings = sum(result.coverage is not None for result in results)
+                degraded = any(
+                    health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED}
+                    for result in results for health in result.source_health
+                )
+                status = "failed" if inventory_incomplete or coverage_warnings or degraded else "completed"
                 db.execute(
                     "INSERT INTO runs VALUES (?,?,?,?,?,?,?)",
-                    (run_id, started, completed, "failed" if any(result.coverage is not None or any(health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for health in result.source_health) for result in results) else "completed", len(results), len(findings), sum(result.coverage is not None for result in results)),
+                    (run_id, started, completed, status, len(results), len(findings), coverage_warnings),
                 )
                 for result in results:
                     try:

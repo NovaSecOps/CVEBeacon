@@ -14,7 +14,7 @@ import re
 from .config import CANONICAL_FIELDS, OPTIONAL_FIELDS
 from .errors import InventoryValidationError, ValidationIssue
 from .identity import identity_conflict
-from .inventory import validate_records
+from .inventory import MAX_CONTRACT_ROWS, MAX_CONTRACT_TEXT, validate_records
 from .private_storage import private_directory, private_file
 
 LOG = logging.getLogger("cvebeacon")
@@ -24,7 +24,7 @@ MANIFEST_KEYS = {"contract", "collector", "collector_version", "source_id", "gen
 
 
 def read_bytes(path: Path, limit: int = MAX_BYTES) -> bytes:
-    descriptor = private_file(path, readonly=True)
+    descriptor = private_file(path, readonly=True, share_delete=True)
     with os.fdopen(descriptor, "rb") as handle:
         if os.fstat(handle.fileno()).st_size > limit:
             raise ValueError("file exceeds size limit")
@@ -43,10 +43,10 @@ def _unique(pairs):
     return result
 
 
-def decode_json(data: bytes):
+def decode_json(data: bytes, *, max_items: int | None = None):
     # Bound depth before entering the recursive decoder, including when a caller
     # has raised the process recursion limit. Delimiters in strings do not count.
-    depth, quoted, escaped = 0, False, False
+    depth, items, quoted, escaped = 0, 0, False, False
     for byte in data:
         if quoted:
             if escaped:
@@ -57,10 +57,15 @@ def decode_json(data: bytes):
                 quoted = False
         elif byte == 34:
             quoted = True
-        elif byte in (91, 123):
-            depth += 1
-            if depth > 64:
-                raise ValueError("JSON nesting exceeds 64 levels")
+        elif byte in (44, 91, 123):
+            if max_items is not None:
+                items += 1
+                if items > max_items:
+                    raise ValueError("JSON has too many items")
+            if byte != 44:
+                depth += 1
+                if depth > 64:
+                    raise ValueError("JSON nesting exceeds 64 levels")
         elif byte in (93, 125):
             depth -= 1
     def invalid(_):
@@ -108,22 +113,28 @@ def read_web_snapshot(path: Path):
     generated, observed = (_timestamp(manifest[key]) for key in ("generated_at", "observed_at"))
     if observed > generated or generated > datetime.now(timezone.utc):
         raise ValueError("invalid future timestamp")
+    assets = read_contract(data)
+    if type(manifest["record_count"]) is not int or manifest["record_count"] != len(assets):
+        raise ValueError("snapshot record count mismatch")
+    return assets, manifest
+
+
+def read_contract(data: bytes):
+    """Validate the canonical record list used by the inventory exchange contract."""
     rows = decode_json(data)
-    if not isinstance(rows, list) or not 0 < len(rows) <= 100000:
+    if not isinstance(rows, list) or not 0 < len(rows) <= MAX_CONTRACT_ROWS:
         raise ValueError("snapshot must contain 1–100000 records")
     for row in rows:
         if (not isinstance(row, dict) or set(row) - set(CANONICAL_FIELDS + OPTIONAL_FIELDS)
-                or any(not isinstance(value, str) or len(value) > 8192
+                or any(not isinstance(value, str) or len(value) > MAX_CONTRACT_TEXT
                        or any(0xD800 <= ord(char) <= 0xDFFF for char in value) for value in row.values())):
             raise ValueError("invalid snapshot row")
     assets = validate_records(rows)
     if len(assets) != len(rows) or any(identity_conflict(asset) for asset in assets):
         raise ValueError("invalid snapshot identity")
-    if any(len(value) > 8192 for asset in assets for value in asdict(asset).values()):
+    if any(len(value) > MAX_CONTRACT_TEXT for asset in assets for value in asdict(asset).values()):
         raise ValueError("normalized inventory value exceeds text limit")
-    if type(manifest["record_count"]) is not int or manifest["record_count"] != len(assets):
-        raise ValueError("snapshot record count mismatch")
-    return assets, manifest
+    return assets
 
 
 def append_snapshots(assets, directory: Path):

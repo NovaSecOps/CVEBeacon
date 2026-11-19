@@ -88,6 +88,7 @@ HELP = {
     "events": "TOML array of event triggers.",
     "cvss_providers": "TOML array of accepted score providers.",
     "columns": "TOML table mapping inventory field names to input column names.",
+    "managed": "Include current client inventories saved from the dashboard.",
     "to": "Comma-separated email addresses or a TOML array. Spaces and duplicate addresses are removed.",
     "cc": "Optional copy recipients, separated by commas or entered as a TOML array.",
     "bcc": "Optional hidden-copy recipients, separated by commas or entered as a TOML array.",
@@ -98,7 +99,7 @@ HELP = {
     "port": "SMTP port. The default follows security: starttls 587, tls 465, none 25.",
     "database": "Database location. Only administrators may change filesystem paths.",
     "directory": "Report output directory. Only administrators may change filesystem paths.",
-    "path": "Inventory input path; optional when watch mode or web snapshots are enabled.",
+    "path": "Inventory input path. You can leave it blank when watch mode or another inventory source is available.",
 }
 EXAMPLES = {"condition": {"kev": "cisa"}, "channels": ["email"],
             "events": ["match"], "cvss_providers": ["nvd"], "sources": ["nvd"],
@@ -117,7 +118,7 @@ def metadata(path, key, default, kind, *, channel_type=None):
                 or channel_type is not None and key in {"name", "type", *CHANNEL_REQUIRED.get(channel_type, ())})
     requirement = ""
     if path == "inventory" and key == "path":
-        requirement = "required unless watch mode or web snapshots are enabled"
+        requirement = "required when there is no other inventory source or watch mode"
     if path == "notifications.email" and key in {"sender", "recipients"}:
         requirement = "required when email notifications are enabled"
     if channel_type and key.endswith(("_env", "_file")):

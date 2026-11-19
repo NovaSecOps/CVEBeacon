@@ -7,7 +7,9 @@ import json
 import unicodedata
 from zipfile import BadZipFile
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from datetime import date, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +21,13 @@ from .config import CANONICAL_FIELDS, OPTIONAL_FIELDS, InventoryConfig
 from .identity import normalize_asset
 from .errors import InventoryValidationError, ValidationIssue
 from .models import Asset
+from .xlsx_safety import MAX_ARCHIVE_BYTES, check_workbook
 
 SUPPORTED_FORMATS = {"xlsx", "csv", "json", "yaml"}
+PREVIEW_COLUMN_LIMIT = 256
+MAX_CONTRACT_ROWS = 100_000
+MAX_CONTRACT_TEXT = 8192
+FORMULA = object()
 
 
 def detect_format(path: Path, configured: str = "auto") -> str:
@@ -134,14 +141,26 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
     return assets
 
 
-def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]]]:
+@contextmanager
+def _open_workbook(path, *, data_only=False, upload=False, header_row=1):
     try:
-        workbook = load_workbook(config.path, read_only=True, data_only=False)
-    except (OSError, ValueError, BadZipFile, InvalidFileException) as exc:
-        raise InventoryValidationError(
-            [ValidationIssue(f"cannot read XLSX workbook: {exc}")]
-        ) from exc
-    try:
+        with path.open("rb") as source:
+            raw = source.read(MAX_ARCHIVE_BYTES + 1)
+        with BytesIO(raw) as stream:
+            limits = ({"row_limit": MAX_CONTRACT_ROWS + header_row, "column_limit": PREVIEW_COLUMN_LIMIT}
+                      if upload else {})
+            check_workbook(stream, use_dimensions=not upload, **limits)
+            workbook = load_workbook(stream, read_only=True, data_only=data_only, keep_links=False)
+            try:
+                yield workbook
+            finally:
+                workbook.close()
+    except (OSError, ValueError, BadZipFile, InvalidFileException, KeyError, IndexError, SyntaxError, RuntimeError) as exc:
+        raise InventoryValidationError([ValidationIssue("The workbook could not be read.")]) from exc
+
+
+def _xlsx_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[tuple[str, Mapping[str, Any]]]:
+    with _open_workbook(config.path, upload=unmapped, header_row=config.header_row) as workbook:
         if config.worksheet:
             if config.worksheet not in workbook.sheetnames:
                 raise InventoryValidationError(
@@ -150,6 +169,13 @@ def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]
             worksheet = workbook[config.worksheet]
         else:
             worksheet = workbook[workbook.sheetnames[0]]
+        if unmapped:
+            if ((worksheet.max_column or 0) > PREVIEW_COLUMN_LIMIT
+                    or (worksheet.max_row or 0) > MAX_CONTRACT_ROWS + config.header_row):
+                raise InventoryValidationError([ValidationIssue("the worksheet is too large")])
+            # Derive rows from actual cells, rather than trusting the advertised
+            # used range to include all of the inventory.
+            worksheet.reset_dimensions()
         header_cells = next(
             worksheet.iter_rows(
                 min_row=config.header_row, max_row=config.header_row, values_only=True
@@ -161,6 +187,8 @@ def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]
                 [ValidationIssue(f"header row {config.header_row} does not exist")]
             )
         headers = [_normalized(value) for value in header_cells]
+        if unmapped and len(headers) > PREVIEW_COLUMN_LIMIT:
+            raise InventoryValidationError([ValidationIssue("the worksheet has too many columns")])
         if any(not value for value in headers):
             raise InventoryValidationError(
                 [ValidationIssue("header row contains a blank column name")]
@@ -173,7 +201,7 @@ def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]
         mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
         required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
         missing = [mapped[name] for name in required if mapped[name].casefold() not in header_lookup]
-        if missing:
+        if missing and not unmapped:
             raise InventoryValidationError(
                 [ValidationIssue("mapped columns not found: " + ", ".join(missing))]
             )
@@ -181,6 +209,14 @@ def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]
             worksheet.iter_rows(min_row=config.header_row + 1),
             start=config.header_row + 1,
         ):
+            if unmapped:
+                if len(values) > len(headers) and any(cell.value is not None for cell in values[len(headers):]):
+                    raise InventoryValidationError([ValidationIssue("a cell is missing a column name", f"row {row_number}")])
+                yield f"row {row_number}", {
+                    name: FORMULA if cell.data_type == "f" else cell.value
+                    for name, cell in zip(headers, values)
+                }
+                continue
             raw_cells = dict(zip(headers, values))
             if any(raw_cells[header_lookup[name.casefold()]].data_type == "f" for name in mapped.values() if name.casefold() in header_lookup):
                 raise InventoryValidationError([ValidationIssue("mapped inventory cells must contain text, not formulas", f"row {row_number}")])
@@ -189,37 +225,56 @@ def _xlsx_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]
                 configured: raw.get(header_lookup[configured.casefold()])
                 for configured in mapped.values() if configured.casefold() in header_lookup
             }
-    finally:
-        workbook.close()
 
 
-def _csv_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]]]:
+def _upload_csv_lines(handle):
+    while line := handle.readline(2 * 1024 * 1024 + 1):
+        if len(line) > 2 * 1024 * 1024:
+            raise InventoryValidationError([ValidationIssue("a CSV line is too long")])
+        yield line
+
+
+def _csv_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[tuple[str, Mapping[str, Any]]]:
     try:
         handle = config.path.open("r", encoding=config.encoding, newline="")
     except (OSError, LookupError) as exc:
         raise InventoryValidationError([ValidationIssue(f"cannot read CSV: {exc}")]) from exc
     with handle:
         try:
-            reader = csv.DictReader(handle, delimiter=config.delimiter, strict=True)
-            if reader.fieldnames is None:
+            reader = csv.reader(_upload_csv_lines(handle) if unmapped else handle, delimiter=config.delimiter, strict=True)
+            fieldnames = next(reader, None)
+            if not fieldnames:
                 raise InventoryValidationError([ValidationIssue("CSV has no header row")])
-            headers = [_normalized(value) for value in reader.fieldnames]
+            headers = [_normalized(value) for value in fieldnames]
+            if unmapped and any(not name for name in headers):
+                raise InventoryValidationError([ValidationIssue("CSV header contains a blank column name")])
+            if unmapped and len(headers) > PREVIEW_COLUMN_LIMIT:
+                raise InventoryValidationError([ValidationIssue("CSV header contains too many columns")])
             if len({value.casefold() for value in headers}) != len(headers):
                 raise InventoryValidationError(
                     [ValidationIssue("CSV header contains duplicate column names")]
                 )
-            reader.fieldnames = headers
             header_lookup = {name.casefold(): name for name in headers}
             mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
             required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
             missing = [mapped[name] for name in required if mapped[name].casefold() not in header_lookup]
-            if missing:
+            if missing and not unmapped:
                 raise InventoryValidationError(
                     [ValidationIssue("mapped columns not found: " + ", ".join(missing))]
                 )
-            for row_number, row in enumerate(reader, start=2):
-                if None in row:
+            while True:
+                row_number = reader.line_num + 1
+                values = next(reader, None)
+                if values is None:
+                    break
+                if not values:
+                    continue
+                if len(values) > len(headers):
                     raise InventoryValidationError([ValidationIssue("CSV row has more fields than its header", f"row {row_number}")])
+                row = dict(zip(headers, values))
+                if unmapped:
+                    yield f"row {row_number}", row
+                    continue
                 yield f"row {row_number}", {
                     configured: row.get(header_lookup[configured.casefold()])
                     for configured in mapped.values() if configured.casefold() in header_lookup
@@ -228,6 +283,39 @@ def _csv_rows(config: InventoryConfig) -> Iterable[tuple[str, Mapping[str, Any]]
             raise InventoryValidationError(
                 [ValidationIssue(f"malformed CSV near line {reader.line_num}")]
             ) from None
+
+
+class BoundedYAMLLoader(yaml.SafeLoader):
+    """Limit YAML parsing before the constructor allocates a large object tree."""
+
+    depth = 0
+    nodes = 0
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            raise InventoryValidationError([ValidationIssue("YAML aliases are not supported. Use a separate value for each field.")])
+        if self.depth >= 32 or self.nodes >= 1_000_000:
+            raise InventoryValidationError([ValidationIssue("The YAML is too complex. Split it into smaller files.")])
+        self.depth += 1
+        self.nodes += 1
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self.depth -= 1
+
+    def construct_mapping(self, node, deep=False):
+        # Alias-based merges are refused during composition. Reject merges
+        # written with inline mappings before SafeLoader flattens them, too.
+        if any(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value):
+            raise InventoryValidationError([ValidationIssue("YAML merge keys are not supported. Use a separate value for each field.")])
+        mapping = super().construct_mapping(node, deep=deep)
+        if len(mapping) != len(node.value):
+            raise InventoryValidationError([ValidationIssue("The YAML contains duplicate field names.")])
+        return mapping
+
+
+def decode_inventory_yaml(text):
+    return yaml.load(text, Loader=BoundedYAMLLoader)
 
 
 def _structured_error(kind: str, error: BaseException) -> str:
@@ -242,10 +330,14 @@ def _structured_error(kind: str, error: BaseException) -> str:
     return f"cannot read {kind.upper()} inventory"
 
 
-def _structured_rows(config: InventoryConfig, kind: str) -> Iterable[tuple[str, Mapping[str, Any]]]:
+def _structured_rows(config: InventoryConfig, kind: str, *, unmapped: bool = False) -> Iterable[tuple[str, Mapping[str, Any]]]:
     try:
         text = config.path.read_text(encoding=config.encoding)
-        root = json.loads(text) if kind == "json" else yaml.safe_load(text)
+        if unmapped:
+            from .inventory_preview import decode_upload_records
+            root = decode_upload_records(text, kind)
+        else:
+            root = json.loads(text) if kind == "json" else decode_inventory_yaml(text)
         records = _resolve_records(root, config.records_path)
     except (OSError, LookupError, json.JSONDecodeError, yaml.YAMLError, KeyError) as exc:
         raise InventoryValidationError([ValidationIssue(_structured_error(kind, exc))]) from exc
@@ -255,7 +347,7 @@ def _structured_rows(config: InventoryConfig, kind: str) -> Iterable[tuple[str, 
             [ValidationIssue("configured records value must be a list", location)]
         )
     for index, record in enumerate(records):
-        yield f"record {index}", record
+        yield (f"row {index + 1}" if unmapped else f"record {index}"), record
 
 
 def validate_records(records: Iterable[Mapping[str, Any]]) -> list[Asset]:
@@ -266,40 +358,39 @@ def validate_records(records: Iterable[Mapping[str, Any]]) -> list[Asset]:
     return _validate_rows(((f"record {index}", row) for index, row in enumerate(records)), {})
 
 
-def load_inventory(config: InventoryConfig, *, snapshot_directory: Path | None = None) -> list[Asset]:
-    assets = _load_file_inventory(config) if config.path is not None else []
+def load_inventory(config: InventoryConfig, *, snapshot_directory: Path | None = None,
+                   managed_warnings: list[str] | None = None, managed_candidate=None) -> list[Asset]:
+    assets = _validate_rows(inventory_rows(config), config.columns) if config.path is not None else []
     if config.web_snapshots:
         if snapshot_directory is None:
             raise InventoryValidationError([ValidationIssue("web snapshots require the data directory")])
         from .web_inventory import append_snapshots
         assets = append_snapshots(assets, snapshot_directory)
+    if config.managed_directory is not None:
+        from .managed_inventory import append_managed_inventory
+        assets = append_managed_inventory(
+            assets, config.managed_directory, configured=config.path, users_path=config.managed_users_path,
+            warnings=managed_warnings, candidate=managed_candidate,
+        )
     if not assets:
         raise InventoryValidationError([ValidationIssue("inventory contains no valid records")])
     return assets
 
 
-def _load_file_inventory(config: InventoryConfig) -> list[Asset]:
+def inventory_rows(config: InventoryConfig, *, unmapped: bool = False):
     kind = detect_format(config.path, config.format)
     if kind == "xlsx":
-        rows = _xlsx_rows(config)
-    elif kind == "csv":
-        rows = _csv_rows(config)
-    else:
-        rows = _structured_rows(config, kind)
-    return _validate_rows(rows, config.columns)
+        return _xlsx_rows(config, unmapped=unmapped)
+    if kind == "csv":
+        return _csv_rows(config, unmapped=unmapped)
+    return _structured_rows(config, kind, unmapped=unmapped)
 
 
 def inspect_inventory(path: str | Path, *, header_row: int = 1, encoding: str = "utf-8-sig", delimiter: str = ",") -> dict[str, Any]:
     source = Path(path).expanduser().resolve()
     kind = detect_format(source)
     if kind == "xlsx":
-        try:
-            workbook = load_workbook(source, read_only=True, data_only=True)
-        except (OSError, ValueError, BadZipFile, InvalidFileException) as exc:
-            raise InventoryValidationError(
-                [ValidationIssue(f"cannot read XLSX workbook: {exc}")]
-            ) from exc
-        try:
+        with _open_workbook(source, data_only=True) as workbook:
             sheets: list[dict[str, Any]] = []
             for worksheet in workbook.worksheets:
                 headers = next(
@@ -317,8 +408,6 @@ def inspect_inventory(path: str | Path, *, header_row: int = 1, encoding: str = 
                     }
                 )
             return {"path": str(source), "format": kind, "sheets": sheets}
-        finally:
-            workbook.close()
     if kind == "csv":
         try:
             with source.open("r", encoding=encoding, newline="") as handle:
@@ -330,7 +419,7 @@ def inspect_inventory(path: str | Path, *, header_row: int = 1, encoding: str = 
         return {"path": str(source), "format": kind, "headers": headers, "sample_rows": sample}
     try:
         text = source.read_text(encoding=encoding)
-        root = json.loads(text) if kind == "json" else yaml.safe_load(text)
+        root = json.loads(text) if kind == "json" else decode_inventory_yaml(text)
     except (OSError, LookupError, json.JSONDecodeError, yaml.YAMLError) as exc:
         raise InventoryValidationError([ValidationIssue(_structured_error(kind, exc))]) from exc
     result: dict[str, Any] = {"path": str(source), "format": kind, "root_type": type(root).__name__}

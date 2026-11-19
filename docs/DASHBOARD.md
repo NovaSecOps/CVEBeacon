@@ -16,13 +16,13 @@ cvebeacon serve --host 0.0.0.0 --port 8787
 
 The dashboard is optional. Scheduled scans and watches remain separate short-lived processes. An authenticated account with the `run` permission can start the same `cvebeacon` commands as background jobs from the **Operations** page; every data-changing job shares a single-flight lock with the command line and scheduled runs.
 
-With no `[inventory] path`, `web_snapshots` disabled (the default), and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
+With no configured file or dashboard inventory, `web_snapshots` disabled (the default), and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
 
 ## Views and investigation
 
 - **Overview:** last successful full scan, most recent attempted scan, current inventory count, latest known affected/review findings, coverage gaps, KEV counts, recent material changes, notification acceptance/failure, and source observations.
 - **Findings:** filter by asset, vendor, product, version, CVE, applicability, severity or minimum CVSS, and CISA/EU KEV. Expand evidence to see the assessment reason, provenance, conflicts, CVSS and EPSS. Unknown KEV membership is distinct from a healthy negative result.
-- **Assets:** search the current configured inventory and inspect an asset's stored findings. A changed version or removed asset leaves its older observations explicitly labelled as historical.
+- **Assets:** search the current inventory, including dashboard uploads, and inspect an asset's stored findings. A changed version or removed asset leaves its older observations explicitly labelled as historical.
 - **History:** browse material events, filter exact asset/CVE identifiers, and open the evidence saved with an event. Older-event links provide access beyond the first page.
 - **Manual query:** query a vendor/product/version using the same core operation as the CLI. Results show uncertainty and degraded source status. Queries can take several minutes and do not change scheduled alert state.
 - **Reports:** query the current inventory and download an XLSX or JSON report using the existing reporting functions. Exports do not commit monitoring state. Check the report's coverage and source-health fields even when the download succeeds.
@@ -39,7 +39,7 @@ Operations run as short-lived children of the same `cvebeacon` executable with t
 | Command | Storage locked |
 | --- | --- |
 | `scan` | Inventory state |
-| `run` | Inventory state when an inventory is configured; watch storage when watch is enabled |
+| `run` | Inventory state when a configured or uploaded inventory is available, plus watch storage when watch is enabled |
 | `watch sync`, `watch evaluate`, `watch run` | Watch storage |
 | `watch notify`, including retry variants | Watch storage |
 | `watch report`, `watch unreport`, dashboard report/unreport | Watch storage |
@@ -205,6 +205,35 @@ still runs through `cvebeacon watch notify` or `watch run`. The shared-password
 compatibility mode can browse watch pages and generate statements, but cannot
 record a client report because there is no CVEBeacon account identity.
 
+### Clients and inventories
+
+Open **Clients → Add client**, enter a name and optional notes and contact, then
+open **Upload inventory** on the new client page. Choose a CSV, Excel (.xlsx),
+JSON or YAML file up to 32 MiB. For Excel, the 32 MiB limit also applies to
+each decompressed part and the workbook's total expanded data. Split a larger
+workbook into smaller uploads. On the preview, match your column names to
+fields such as **Asset ID**, **Vendor**, **Product** and **Version**. Select
+**Check column mapping** to review row warnings and errors before saving. Use
+**Replace this client's inventory** to switch to a new list, or **Add to it**
+to keep the current assets and add new IDs.
+
+The client page shows the asset count, the last inventory change and who made it, and
+findings from the latest successful scan. Use it to download the current
+inventory, restore one of the five prior versions, or remove the upload. The JSON download
+contains the canonical inventory records and can be uploaded again. The
+collector exchange manifest is available through the separate extension
+workflow. All changes are audited with the account and client. Inventory changes record the
+row count and the action. Uploaded rows, contact details and notes stay out of
+the audit.
+
+Administrators can manage inventories. To delegate this workflow, assign
+`view` and `manage_inventory` to a role. Add `run` if that person should also
+be able to choose **Run a scan now**. The client page shows whether the
+installed native schedule includes scans. For a watch-only schedule, use
+**Schedule** to select **both**, or start a scan from the client page.
+**Affected clients** on the CVE page reflects the latest successful scan. For format details and how uploads interact with older
+configurations, see the [user guide](USER_GUIDE.md#clients-and-inventories).
+
 ## Freshness and failures
 
 Stored data is not live source availability. A successful check is labelled as a cached observation and becomes stale after 24 hours. Old scan data, failed/degraded scans, and scan attempts without recorded completion receive prominent warnings. An unfinished attempt may represent a running or interrupted scanner; check the actual process and logs.
@@ -325,6 +354,7 @@ logout, even if its role has no permissions.
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
 | `edit_system` | View state database and report output paths; changes are administrator-only |
+| `manage_inventory` | Add clients and upload, restore or remove their inventories |
 | `manage_web_assets` | Add, change and remove attested client web assets |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
 | `manage_secrets` | Change any credential-bearing channel, add/change/remove environment references, and stage file-secret contents; `*_file` paths are administrator-only |
@@ -420,9 +450,11 @@ private `dashboard-jobs/` directory beside the state database; the directory and
 its files are owner-only. Every account that can write the state directory is
 trusted with the databases and SQLite sidecar files in it; keep it writable only
 by trusted accounts. Before an
-upgrade, stop the scanner/dashboard and back up all three data stores. Schema
+upgrade, stop the scanner/dashboard and back up the state databases and the private `inventories/` directory. Schema
 upgrades preserve existing observations and delivery records; an older
-application requires its corresponding pre-upgrade backups.
+application requires its corresponding pre-upgrade backups. Keep the inventory directory and its
+retained versions with the matching account database backup, preserving
+owner-only permissions.
 
 ## Configuration editor
 

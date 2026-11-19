@@ -1,21 +1,65 @@
-{% extends 'base.html' %}{% from 'watch_macros.html' import stamp %}
-{% from 'ui.html' import page_header, callout, empty_state, table_wrap, badge, pagination %}
+{% extends 'base.html' %}
+{% from 'watch_macros.html' import stamp %}
+{% from 'ui.html' import page_header, card, callout, empty_state, table_wrap, badge, pagination %}
 {% block title %}Clients · CVEBeacon{% endblock %}
 {% block content %}
-{{ page_header('Clients', 'See which clients are affected by known vulnerabilities, based on the latest inventory scan.') }}
-{% call callout('info', 'How this list works') %}<p>Client allocation comes from the optional <code>client</code> inventory field. Findings come from the latest successful inventory scan. A CVE affects a client when that scan recorded an affected or needs-review finding on one of the client's assets.</p>{% endcall %}
+{% set can_add = managed_enabled and accounts and 'manage_inventory' in permissions %}
+{{ page_header('Clients', 'Manage client inventories and see what the latest successful scan found.',
+               url_for('client_inventory.add') if can_add else none, 'Add client' if can_add else none) }}
+
+{% if managed_clients %}
+{% call card('Clients added in the dashboard', 'Open a client to manage their inventory and see their findings.') %}
+{% call table_wrap('Clients added in the dashboard') %}
+<table>
+  <thead><tr><th scope="col">Client</th></tr></thead>
+  <tbody>{% for key, profile in managed_clients.items() %}
+    <tr><td><a href="{{ url_for('client_inventory.detail', key=key) }}">{{ profile.name }}</a></td></tr>
+  {% endfor %}</tbody>
+</table>
+{% endcall %}
+{% endcall %}
+{% endif %}
+
 {% if scan %}
 <p class="muted">Latest successful inventory scan completed {{ stamp(scan.completed_at) }}. {{ total }} client{{ '' if total == 1 else 's' }}.</p>
-{% call table_wrap('Clients and their currently affected CVEs') %}<table>
-<thead><tr><th>Client</th><th>Assets</th><th>Currently affected CVEs</th></tr></thead>
-<tbody>{% for client in clients %}<tr>
-  <td><a href="{{ url_for('watch.events', client=client.name) }}">{{ client.name }}</a></td>
-  <td class="num">{{ client.assets }}</td>
-  <td>{% for finding in client.findings %}{% if finding.is_cve %}<a href="{{ url_for('watch.cve', cve_id=finding.cve_id) }}">{{ finding.cve_id }}</a>{% else %}<span class="break">{{ finding.cve_id }}</span>{% endif %}{% if finding.status == 'needs_review' %} <span class="badge badge-warning needs_review">review</span>{% endif %}{% if not loop.last %} · {% endif %}{% else %}<span class="muted">None</span>{% endfor %}{% if client.omitted_findings %} <span class="muted">and {{ client.omitted_findings }} more</span>{% endif %}</td>
-</tr>{% else %}<tr><td colspan="3">No inventory asset has a client label.</td></tr>{% endfor %}</tbody>
-</table>{% endcall %}
-<div class="pagination" role="group" aria-label="Pages of clients"><span>Page {{ page }}</span>{% if has_previous %}<a href="{{ url_for('watch.clients', page=page - 1) }}">Previous clients</a>{% endif %}{% if has_next %}<a href="{{ url_for('watch.clients', page=page + 1) }}">Next clients</a>{% endif %}</div>
+{% if clients %}
+{% call card('Clients in the latest scan') %}
+{% call callout('info', 'How clients appear here') %}
+<p>Client names come from uploads or the client column of a configured inventory. Findings reflect the latest successful scan.</p>
+{% endcall %}
+{% call table_wrap('Clients and their currently affected CVEs') %}
+<table>
+  <thead><tr><th scope="col">Client</th><th scope="col" class="num">Assets</th><th scope="col">Currently affected CVEs</th><th scope="col">Activity</th></tr></thead>
+  <tbody>{% for client in clients %}
+  <tr>
+    <td><a href="{{ url_for('client_inventory.detail', key=client_links[client.name], name=client.name) }}">{{ client.name }}</a></td>
+    <td class="num">{{ client.assets }}</td>
+    <td>{% for finding in client.findings %}
+      {% if finding.is_cve %}<a href="{{ url_for('watch.cve', cve_id=finding.cve_id) }}">{{ finding.cve_id }}</a>{% else %}<span class="break">{{ finding.cve_id }}</span>{% endif %}
+      {% if finding.status == 'needs_review' %}{{ badge('Needs review', 'warning') }}{% endif %}
+      {% if not loop.last %} · {% endif %}
+    {% else %}<span class="muted">None</span>{% endfor %}
+    {% if client.omitted_findings %}<span class="muted">and {{ client.omitted_findings }} more</span>{% endif %}</td>
+    <td><a href="{{ url_for('watch.events', client=client.name) }}">Watch events</a></td>
+  </tr>
+  {% endfor %}</tbody>
+</table>
+{% endcall %}
+{% endcall %}
+{% elif total %}
+{{ empty_state('No clients on this page', 'Go to the previous page to see more clients.') }}
 {% else %}
-{% if not inventory_configured %}{{ empty_state('No clients yet', 'No inventory is configured. Client allocation requires an inventory scan, so this page stays empty until an inventory is added and scanned.') }}{% else %}{{ empty_state('No scan results yet', 'No successful inventory scan is available. Run a scan to populate client allocation and affected CVEs.') }}{% endif %}
+{{ empty_state('No clients in the latest scan', 'Add a client label to an inventory and run a scan to see findings here.') }}
+{% endif %}
+{% if has_previous or has_next %}
+{{ pagination(page, url_for('watch.clients', page=page - 1) if has_previous else none,
+              url_for('watch.clients', page=page + 1) if has_next else none, 'clients') }}
+{% endif %}
+{% elif not inventory_configured %}
+{{ empty_state('No scan results yet' if managed_clients else 'No clients yet',
+               'Client allocation requires an inventory scan. Add a client and upload their software list to get started.' if can_add else
+               'Client allocation requires an inventory scan. Findings appear after an inventory is available and scanned.') }}
+{% else %}
+{{ empty_state('No scan results yet', 'No successful inventory scan is available. Run a scan to see affected clients.') }}
 {% endif %}
 {% endblock %}

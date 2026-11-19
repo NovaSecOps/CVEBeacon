@@ -521,14 +521,14 @@ def build_command(
         raise ConfigurationError("unknown operation")
     if operation in WATCH_OPERATIONS and not config.watch.enabled:
         raise ConfigurationError("watch mode is disabled; set [watch] enabled = true")
-    if operation == "scan" and config.inventory is None:
+    if operation == "scan" and config.effective_inventory is None:
         raise ConfigurationError(
             "this configuration has no inventory; scans cannot run"
         )
-    if operation == "run" and config.inventory is None:
+    if operation == "run" and config.effective_inventory is None:
         raise ConfigurationError(
-            "this configuration has no inventory; add an [inventory] path to "
-            "use the combined run, or choose a watch operation"
+            "this configuration has no inventory; upload a client inventory "
+            "to use the combined run, or choose a watch operation"
         )
     base = [
         *command_prefix(),

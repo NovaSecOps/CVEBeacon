@@ -115,6 +115,7 @@ def test_inventory_pages_explain_the_missing_configuration(watch_only_client, pa
     assert response.status_code == 200
     text = response.text
     assert "No inventory is configured." in text
+    assert 'href="/watch/clients">open Clients</a>' in text
     assert "[inventory]" in text
     assert 'path = "inventory.csv"' in text
     assert "docs/USER_GUIDE.md" in text

@@ -267,3 +267,32 @@ def test_pipeline_validates_candidate_then_core_loads_web_snapshots(tmp_path):
     with sqlite3.connect(core.database_path) as db:
         payloads = [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM scan_assets")]
     assert any(row["asset"]["client"] == "Web Client" for row in payloads)
+
+
+def test_pipeline_accepts_the_previous_core_inventory_configuration(tmp_path, monkeypatch):
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+
+    from cvebeacon.config import InventoryConfig
+    from cvebeacon.inventory import load_inventory
+    from cvebeacon_automation import pipeline
+
+    @dataclass(frozen=True)
+    class PreviousInventory:
+        path: Path
+        format: str = "json"
+        web_snapshots: bool = True
+
+    config, _ = setup(tmp_path)
+    previous = SimpleNamespace(
+        inventory=PreviousInventory(config.inventory_path), database_path=tmp_path / "core.db",
+    )
+    monkeypatch.setattr(pipeline, "load_core", lambda _: previous)
+
+    def previous_loader(candidate):
+        assert isinstance(candidate, PreviousInventory) and not candidate.web_snapshots
+        return load_inventory(InventoryConfig(candidate.path, format=candidate.format))
+
+    monkeypatch.setattr(pipeline, "load_inventory", previous_loader)
+    assert run_pipeline(config, scanner=lambda _: 0) == 0
+    assert config.inventory_path.exists()

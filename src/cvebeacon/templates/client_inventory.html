@@ -1,0 +1,151 @@
+{% extends 'base.html' %}
+{% set nav_active = 'watch.clients' %}
+{% from 'watch_macros.html' import stamp %}
+{% from 'ui.html' import applicability_badge, button, card, callout, empty_state, link_button, page_header, steps, table_wrap, term %}
+{% block title %}{{ profile.name }} · CVEBeacon{% endblock %}
+{% block content %}
+{% set can_manage = enabled and accounts and 'manage_inventory' in permissions %}
+{% set can_scan = count is not none and enabled and accounts and 'run' in permissions %}
+{% call page_header(profile.name, 'Review this client’s software inventory and the findings from their latest successful scan.') %}
+{% if can_scan %}
+<form method="post" action="{{ url_for('operations.run_job') }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="operation" value="scan">
+  {{ button('Run a scan now') }}
+</form>
+{% elif can_manage %}
+{{ link_button('Upload inventory', '#upload-inventory') }}
+{% endif %}
+{{ link_button('Back to Clients', url_for('watch.clients'), kind='secondary') }}
+{% endcall %}
+
+{% if error %}{% call callout('danger', 'Inventory action could not be completed') %}<p>{{ error }}</p>{% endcall %}{% endif %}
+{% if warning %}{% call callout('warning', 'Inventory needs attention') %}<p>{{ warning }}</p>{% endcall %}{% endif %}
+{% if notice %}{% call callout('success') %}<p>{{ notice }}</p>{% endcall %}{% endif %}
+{% if not enabled %}
+{% call callout('warning', 'Uploads are unavailable') %}<p>Ask an administrator to check inventory settings.</p>{% endcall %}
+{% endif %}
+
+<div class="card-grid inventory-summary">
+{% if profile.contact or profile.notes %}
+{% call card('Client details') %}
+<dl>
+  {% if profile.contact %}<dt>Contact</dt><dd class="break">{{ profile.contact }}</dd>{% endif %}
+  {% if profile.notes %}<dt>Notes</dt><dd class="break">{{ profile.notes }}</dd>{% endif %}
+</dl>
+{% endcall %}
+{% endif %}
+
+{% if count is not none %}
+{% call card('Current inventory', 'The uploaded list of software you monitor for this client.') %}
+<dl>
+  <dt>Assets in the uploaded inventory</dt><dd>{{ count }}</dd>
+  {% if upload %}<dt>Last inventory change</dt><dd>{{ stamp(upload[1]) }} by {{ upload[0] }}</dd>{% endif %}
+</dl>
+<div class="form-actions">
+  {{ link_button('Download current inventory', url_for('client_inventory.download', key=key, name=profile.name), kind='secondary') }}
+  {% if can_manage and can_scan %}{{ link_button('Upload inventory', '#upload-inventory', kind='secondary') }}{% endif %}
+</div>
+{% endcall %}
+{% elif not warning %}
+{{ empty_state('No inventory yet', 'No inventory has been uploaded for this client. Upload a list of their software to get started.' if can_manage else 'No inventory has been uploaded for this client.') }}
+{% endif %}
+
+{% if count is not none and enabled %}
+{% call card('Scan schedule') %}
+<p>A {{ term('scan', 'a check of the inventory against known flaws') }} uses the current inventory.</p>
+{% if scan_schedule == 'scan' %}
+{% call callout('info') %}<p>Your next scheduled scan will include this inventory.</p>{% endcall %}
+{% elif scan_schedule == 'watch' %}
+{% call callout('info') %}<p>Your installed schedule runs watch jobs only. Start a scan or use <a href="{{ url_for('operations.schedule') }}">Schedule</a> to include scans.</p>{% endcall %}
+{% elif scan_schedule == 'none' %}
+{% call callout('info') %}<p>There is no installed native schedule. Start a scan or set up scans in <a href="{{ url_for('operations.schedule') }}">Schedule</a>.</p>{% endcall %}
+{% else %}
+{% call callout('info') %}<p>Check <a href="{{ url_for('operations.schedule') }}">Schedule</a> to see whether scans are scheduled. You can also start a scan now.</p>{% endcall %}
+{% endif %}
+{% if accounts and 'manage_schedule' not in permissions and scan_schedule != 'scan' %}
+<p>Ask an administrator to change the schedule.</p>
+{% endif %}
+<p>The watchlist shows affected clients after a successful scan.</p>
+{% endcall %}
+{% endif %}
+</div>
+
+{% if can_manage %}
+{% call card('Upload inventory', 'Choose a file listing the software you run for this client.', id='upload-inventory') %}
+{{ steps(['Choose a file', 'Review and save'], current=1) }}
+<form method="post" class="stack" enctype="multipart/form-data" action="{{ url_for('client_inventory.upload', key=key, name=profile.name) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="field">
+    <label for="inventory">Inventory file</label>
+    <input type="file" id="inventory" name="inventory" accept=".csv,.xlsx,.json,.yaml,.yml" aria-describedby="inventory-help" required>
+    <p class="help" id="inventory-help">Choose a CSV, Excel (.xlsx), JSON or YAML file up to 32 MiB. The limit also applies to Excel files after decompression. Split larger workbooks into smaller uploads.</p>
+  </div>
+  <div class="form-actions">{{ button('Preview inventory', kind='secondary' if can_scan else 'primary') }}</div>
+</form>
+{% endcall %}
+{% endif %}
+
+{% if summary %}
+{% call card('Latest findings for ' ~ profile.name) %}
+<p class="muted">{{ summary.assets }} assets in the latest successful scan, completed {{ stamp(scan.completed_at) }}.</p>
+{% if summary.findings %}
+{% call table_wrap('Findings for ' ~ profile.name) %}
+<table>
+  <thead><tr><th scope="col">Finding</th><th scope="col">Status</th></tr></thead>
+  <tbody>{% for finding in summary.findings %}
+  <tr>
+    <th scope="row">{% if finding.is_cve %}<a href="{{ url_for('watch.cve', cve_id=finding.cve_id) }}">{{ finding.cve_id }}</a>{% else %}<span class="break">{{ finding.cve_id }}</span>{% endif %}</th>
+    <td>{{ applicability_badge(finding.status) }}</td>
+  </tr>
+  {% endfor %}</tbody>
+</table>
+{% endcall %}
+{% else %}
+<p>No affected or needs-review findings in that scan.</p>
+{% endif %}
+{% if summary.omitted_findings %}<p>{{ summary.omitted_findings }} more findings.</p>{% endif %}
+<p>{{ link_button('View watch events for this client', url_for('watch.events', client=summary.name), kind='secondary') }}</p>
+{% endcall %}
+{% else %}
+{{ empty_state('No scan results for ' ~ profile.name, 'Run a successful inventory scan to see findings for this client.') }}
+{% endif %}
+
+{% if history %}
+{% call card('Version history', 'Restore a previous version to use it as the current inventory.') %}
+{% call table_wrap('Saved inventory versions') %}
+<table>
+  <thead><tr><th scope="col">Saved version</th>{% if can_manage %}<th scope="col">Action</th>{% endif %}</tr></thead>
+  <tbody>{% for version in history %}
+  <tr>
+    <td><time>{{ version_stamp(version) }}</time></td>
+    {% if can_manage %}
+    <td><form method="post" action="{{ url_for('client_inventory.change', key=key, name=profile.name) }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="revision" value="{{ revision }}">
+      <input type="hidden" name="version" value="{{ version }}">
+      {{ button('Restore this version', kind='secondary', name='action', value='restore') }}
+    </form></td>
+    {% endif %}
+  </tr>
+  {% endfor %}</tbody>
+</table>
+{% endcall %}
+{% endcall %}
+{% endif %}
+
+{% if present and accounts and 'manage_inventory' in permissions %}
+{% call card('Remove inventory', tone='danger') %}
+<details class="disclosure">
+<summary>Review removal</summary>
+<form method="post" class="stack" action="{{ url_for('client_inventory.change', key=key, name=profile.name) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="revision" value="{{ revision }}">
+  <p>The next scan will skip this upload. You can restore it from version history.</p>
+  <label for="remove-confirm"><input id="remove-confirm" type="checkbox" name="confirm" value="remove" required> Remove this client's current upload</label>
+  <div class="form-actions">{{ button('Remove inventory', kind='danger', name='action', value='remove') }}</div>
+</form>
+</details>
+{% endcall %}
+{% endif %}
+{% endblock %}

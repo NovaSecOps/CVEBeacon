@@ -195,11 +195,15 @@ def defaults(cls, **overrides):
 
 WATCH_FIELDS = {key: item for key, item in defaults(WatchConfig).items()
                 if key not in {"rules", "channels", "reporting_identity"}}
+INVENTORY_FIELDS = {
+    key: item for key, item in defaults(InventoryConfig, managed=True).items()
+    if key not in {"managed_directory", "managed_users_path"}
+}
 SCHEMAS = {
     "watch": [("watch", WATCH_FIELDS)],
     "sources": [("sources", defaults(SourceConfig))],
     "reporting": [("watch.reporting", {"identity": "open"})],
-    "inventory": [("inventory", defaults(InventoryConfig))],
+    "inventory": [("inventory", INVENTORY_FIELDS)],
     "dashboard": [("dashboard", defaults(DashboardConfig))],
     "http": [("http", defaults(HttpConfig))],
     "system": [("state", {"database": ".cvebeacon/state.db"}), ("output", {"directory": "reports"})],
@@ -216,7 +220,7 @@ SECTIONS = {
 }
 RULE_FIELDS = defaults(Rule)
 MAPPING_FIELDS = dict.fromkeys(("vendor", "product", "cpe"))
-BOOLEAN_FIELDS = {"web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported", "compress"}
+BOOLEAN_FIELDS = {"managed", "web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported", "compress"}
 NUMBER_FIELDS = {"port", "max_items", "priority", "min_interval_seconds", "timeout_seconds",
                  "connect_timeout", "read_timeout", "retries", "backoff_seconds", "header_row",
                  "minimum_request_interval", "backfill_days", "overlap_minutes",
@@ -231,7 +235,7 @@ _SESSION_SAFE_TABLES = {
     "watch": {"enabled", "sources", "initial", "backfill_days", "overlap_minutes", "language"},
     "sources": {"osv_enabled", "nvd_enabled", "cve_enabled", "euvd_enabled", "cisa_kev_enabled",
                 "eu_kev_enabled", "epss_enabled", "nvd_api_key_env", "nvd_api_key_file", "minimum_request_interval"},
-    "inventory": {"path", "format", "worksheet", "header_row", "records_path", "delimiter", "encoding", "web_snapshots"},
+    "inventory": {"path", "format", "worksheet", "header_row", "records_path", "delimiter", "encoding", "web_snapshots", "managed"},
     "http": {"connect_timeout", "read_timeout", "retries", "backoff_seconds", "user_agent"},
     "state": {"database"}, "output": {"directory"},
     "backup": {"directory", "retention_days", "keep_min", "compress"},
@@ -711,7 +715,7 @@ def _operation_storage_paths(config):
     for lock_path in (Path(config.database_path).resolve().parent / LOCK_NAME, run_lock_path(config)):
         files.update(owner_storage_paths(lock_path))
     return files, {job_directory, config.database_path.parent / "web-assets",
-                   config.database_path.parent / "web-inventory"}
+                   config.database_path.parent / "web-inventory", config.inventory_directory}
 
 
 def _candidate_derived_paths(updated, configs):
@@ -734,7 +738,7 @@ def _candidate_derived_paths(updated, configs):
     directories = set()
     if state_parent_changed:
         directories.update({updated.database_path.parent / "web-assets",
-                            updated.database_path.parent / "web-inventory"})
+                            updated.database_path.parent / "web-inventory", updated.inventory_directory})
         files.add(Path(updated.database_path).resolve().parent / LOCK_NAME)
         files.update(owner_storage_paths(Path(updated.database_path).resolve().parent / LOCK_NAME))
         job_directory = (Path(updated.database_path).parent / "dashboard-jobs").resolve()
@@ -951,7 +955,7 @@ class Editor:
         token = _VALIDATING.set(True)
         try:
             config = replace(load_config(temporary), config_path=self.path)
-            if config.inventory is None and not config.watch.enabled:
+            if config.effective_inventory is None and not (config.watch.enabled or config.has_managed_dashboard):
                 raise ConfigurationError("The dashboard requires inventory.path or watch.enabled")
             return config, content
         except ConfigurationError as error:

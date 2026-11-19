@@ -11,6 +11,8 @@
 {% call callout('warning', 'The release service is not available') %}<p>CVEBeacon could not complete the release check or update request. The release feed or local storage may be unavailable. Check the configuration and logs, then try again.</p>{% if message %}<p>{{ message }}</p>{% endif %}{% endcall %}
 {% elif code == 403 %}
 {% call callout('warning', 'You do not have access to this page') %}<p>This page is not available to your account or from this connection. It may need a permission your role does not include, it may open only from the computer running CVEBeacon, or it may need an account store that has not been created yet.{% if accounts %} Ask an administrator if you believe you should have it.{% endif %}</p>{% endcall %}
+{% elif code == 413 and request.endpoint == 'client_inventory.upload' %}
+{% call callout('warning', 'That file is too large') %}<p>Return to the form and choose an inventory file up to 32 MiB.</p>{% endcall %}
 {% elif code in [400, 405, 413] %}
 {% call callout('warning', 'The request was not accepted') %}<p>The form was invalid, expired or too large. Return to the form, check what you entered, and submit it again.</p>{% if message %}<p>{{ message }}</p>{% endif %}{% endcall %}
 {% else %}

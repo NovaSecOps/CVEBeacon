@@ -76,7 +76,7 @@ def _record(action: str, detail: str | None = None) -> None:
     _manager().audit_action(action, _actor(), detail)
 
 
-def _viewer_schedule_summary() -> str | None:
+def _schedule_overview(config: AppConfig) -> tuple[str | None, str]:
     """Cache only a restricted installed-status label, never scheduler output."""
     app = current_app
     guard = app.extensions.setdefault("operations_schedule_guard", threading.Lock())
@@ -87,18 +87,25 @@ def _viewer_schedule_summary() -> str | None:
         if cache and cache[0] is runner and cache[1] == platform and time.monotonic() < cache[2]:
             return cache[3]
         summary = None
+        scan_state = "unknown"
         try:
             def bounded_run(*args, **kwargs):
                 return runner(*args, **kwargs, timeout=2)
             status = scheduling.status(run=bounded_run)
+            scan_state = scheduling.installed_scan_state(status, config.config_path, windows=platform == "windows")
             if status == "not installed":
                 summary = "Schedule not installed"
             else:
                 summary = "Scheduled by cron" if platform == "linux" else "Scheduled by Windows Task Scheduler"
         except (CVEBeaconError, OSError, subprocess.TimeoutExpired):
             pass
-        app.extensions["operations_schedule_summary"] = (runner, platform, time.monotonic() + 30, summary)
-        return summary
+        result = (summary, scan_state)
+        app.extensions["operations_schedule_summary"] = (runner, platform, time.monotonic() + 30, result)
+        return result
+
+
+def schedule_scan_state(config: AppConfig) -> str:
+    return _schedule_overview(config)[1]
 
 
 def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
@@ -108,7 +115,7 @@ def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
                          if not record["dashboard"] or record["state"] != "active"]
     except CVEBeaconError:
         external_runs = [{"state": "unavailable", "dashboard": False, "elapsed": None}]
-    schedule = _viewer_schedule_summary()
+    schedule, _ = _schedule_overview(config)
     channels = tuple(
         channel.name for channel in config.watch.channels if channel.enabled
     )
@@ -121,7 +128,7 @@ def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
         "full_history": full_history_confirmation_required(config),
         "channels": channels,
         "watch_enabled": config.watch.enabled,
-        "has_inventory": config.inventory is not None,
+        "has_inventory": config.effective_inventory is not None,
         "operation_labels": {
             operation: _operation_label(operation) for operation in RUN_OPERATIONS
         },
@@ -151,7 +158,7 @@ def _fallback_install_command(
     account: str | None = None,
 ) -> str:
     target = command or scheduling.default_command(
-        inventory=config.inventory is not None, watch=config.watch.enabled
+        inventory=config.effective_inventory is not None, watch=config.watch.enabled
     )
     parts = [
         *command_prefix(),
@@ -221,10 +228,11 @@ def _schedule_context(
         "fallback_command": fallback_command or _fallback_install_command(config),
         "block_reason": _install_block_reason(),
         "default_command": scheduling.default_command(
-            inventory=config.inventory is not None, watch=config.watch.enabled
+            inventory=config.effective_inventory is not None, watch=config.watch.enabled
         ),
-        "has_inventory": config.inventory is not None,
+        "has_inventory": config.effective_inventory is not None,
         "watch_enabled": config.watch.enabled,
+        "allow_combined": config.watch.enabled and (config.managed_inventory or config.effective_inventory is not None),
     }
 
 
@@ -393,7 +401,8 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
             return _render_schedule(
                 config, error="watch mode is disabled; set [watch] enabled = true", status=400
             )
-        if command in {"scan", "both"} and config.inventory is None:
+        if config.effective_inventory is None and (command == "scan" or (
+                command == "both" and not config.managed_inventory)):
             return _render_schedule(
                 config, error="this configuration has no inventory; choose watch", status=400
             )

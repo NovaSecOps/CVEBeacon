@@ -1,0 +1,92 @@
+{% extends 'base.html' %}
+{% set nav_active = 'watch.clients' %}
+{% from 'ui.html' import badge, button, card, callout, empty_state, link_button, page_header, steps, table_wrap, term %}
+{% block title %}Preview inventory · CVEBeacon{% endblock %}
+{% block content %}
+{% call page_header('Preview inventory for ' ~ profile.name, 'Match the columns, check the rows and choose how to save this upload.') %}
+{{ link_button('Back to ' ~ profile.name, url_for('client_inventory.detail', key=key, name=profile.name), kind='secondary') }}
+{% endcall %}
+{{ steps(['Choose a file', 'Review and save'], current=2) }}
+{% if error %}{% call callout('danger', 'Inventory could not be saved') %}<p>{{ error }}</p>{% endcall %}{% endif %}
+
+{% call card('Review this inventory') %}
+{% if preview.sample %}
+<h3>First rows in your file</h3>
+{% call table_wrap('First rows in your file') %}
+<table>
+  <thead><tr><th scope="col" class="num">Row</th>{% for header in preview.headers %}<th scope="col">{{ header }}</th>{% endfor %}</tr></thead>
+  <tbody>{% for number, cells in preview.sample %}
+    <tr><th scope="row" class="num">{{ number }}</th>{% for cell in cells %}<td>{{ cell }}</td>{% endfor %}</tr>
+  {% endfor %}</tbody>
+</table>
+{% endcall %}
+{% endif %}
+
+<form method="post" class="stack inventory-review" action="{{ url_for('client_inventory.review', key=key, name=profile.name) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <input type="hidden" name="page" value="{{ preview.page }}">
+
+  <h3>Match your columns</h3>
+  <p class="help" id="column-help">Choose the matching column for each field. Use a unique Asset ID for each row. For most software, match Vendor, Product and Version too.</p>
+  <p class="help">{{ term('CPE', 'a standard name for a product and version') }} and {{ term('PURL', 'a standard name for a software package') }} are optional.</p>
+  <div class="card-grid">
+  {% for field, label in fields.items() %}
+    <div class="field">
+      <label for="column-{{ field }}">{{ label }}</label>
+      <select id="column-{{ field }}" name="{{ field }}" aria-describedby="column-help">
+        <option value="">Skip this field</option>
+        {% for header in preview.headers %}<option value="{{ loop.index0 }}"{% if preview.mapping[field] == header %} selected{% endif %}>{{ header }}</option>{% endfor %}
+      </select>
+    </div>
+  {% endfor %}
+  </div>
+  <div class="form-actions">{{ button('Check column mapping', kind='secondary', name='action', value='preview') }}</div>
+
+  <h3>Row validation</h3>
+  <p>{{ preview.assets|length }} ready to import · {{ preview.warnings }} warnings · {{ preview.errors }} errors.</p>
+  {% if preview.first_error %}
+  {% call callout('warning', 'Fix the highlighted rows before saving') %}
+  <p>First error at row {{ preview.first_error[0] }} on page {{ preview.first_error[1] }}.</p>
+  {% endcall %}
+  {% endif %}
+  {% if preview.validation %}
+  {% call table_wrap('Inventory row validation') %}
+  <table>
+    <thead><tr><th scope="col" class="num">Row</th><th scope="col">Status</th><th scope="col">Details</th></tr></thead>
+    <tbody>{% for number, status, message in preview.validation %}
+    <tr><th scope="row" class="num">{{ number }}</th><td>{{ badge(status, {'OK': 'success', 'Warning': 'warning', 'Error': 'danger'}.get(status, 'neutral')) }}</td><td>{{ message }}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+  {% endcall %}
+  {% if preview.pages > 1 %}
+  <div class="pagination" role="group" aria-label="Pages of inventory rows">
+    {% if preview.page > 1 %}{{ button('Previous rows', kind='secondary', name='action', value='previous') }}{% endif %}
+    <span>Page {{ preview.page }} of {{ preview.pages }}</span>
+    {% if preview.page < preview.pages %}{{ button('More rows', kind='secondary', name='action', value='next') }}{% endif %}
+  </div>
+  <div class="field">
+    <label for="jump-page">Go to page</label>
+    <input id="jump-page" name="jump_page" type="number" min="1" max="{{ preview.pages }}" value="{{ preview.first_error[1] if preview.first_error else preview.page }}">
+    {{ button('Go', kind='secondary', name='action', value='jump') }}
+  </div>
+  {% endif %}
+  {% else %}
+  {{ empty_state('No rows to review', 'No rows were found. Add at least one asset to the file and upload it again.') }}
+  {% endif %}
+
+  <fieldset class="stack">
+    <legend>How should we save these assets?</legend>
+    <label for="mode-replace"><input id="mode-replace" type="radio" name="mode" value="replace"{% if mode == 'replace' %} checked{% endif %}> Replace this client's inventory</label>
+    <label for="mode-add"><input id="mode-add" type="radio" name="mode" value="add"{% if mode == 'add' %} checked{% endif %}> Add to it</label>
+  </fieldset>
+  <div class="form-actions">
+    {% if not preview.assets or preview.errors %}
+    <button class="btn" type="submit" name="action" value="save" disabled>Save inventory</button>
+    {% else %}
+    {{ button('Save inventory', name='action', value='save') }}
+    {% endif %}
+  </div>
+</form>
+{% endcall %}
+{% endblock %}

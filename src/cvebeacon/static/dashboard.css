@@ -353,6 +353,11 @@ button:disabled, .btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed;
    form.stack is the standard vertical layout for new pages. */
 form { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; margin: var(--space-4) 0; }
 form.stack { flex-direction: column; align-items: stretch; gap: var(--space-4); max-width: 560px; }
+form.stack.inventory-review { max-width: none; }
+#upload-inventory input[type="file"], .inventory-review select {
+  width: 100%; min-width: 0;
+}
+.inventory-review .field, .inventory-review fieldset { min-width: 0; }
 label { display: flex; flex-direction: column; gap: var(--space-1); font-size: .92rem; font-weight: 600; }
 label .optional { font-weight: 400; color: var(--text-muted); }
 input, select, textarea {
@@ -470,6 +475,8 @@ main > table { background: var(--surface); border: 1px solid var(--border); }
 dl { display: grid; grid-template-columns: minmax(160px, 240px) 1fr; gap: var(--space-3) var(--space-5); margin: 0 0 var(--space-4); }
 dt { font-weight: 650; color: var(--text); }
 dd { margin: 0; overflow-wrap: anywhere; }
+.inventory-summary dl { grid-template-columns: 1fr; row-gap: var(--space-2); }
+.inventory-summary dd + dt { margin-top: var(--space-2); }
 dt .help, dd .help { display: block; margin-top: 2px; }
 
 /* Steps: progress through a multi-step flow */

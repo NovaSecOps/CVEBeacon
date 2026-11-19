@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% set nav_active = 'watch.clients' %}
+{% from 'ui.html' import button, card, callout, field, link_button, page_header %}
+{% block title %}Add client · CVEBeacon{% endblock %}
+{% block content %}
+{% call page_header('Add client', 'Create a client profile so you can upload the software you want to monitor for them.') %}
+{{ link_button('Back to Clients', url_for('watch.clients'), kind='secondary') }}
+{% endcall %}
+{% if error %}{% call callout('danger', 'Client could not be added') %}<p>{{ error }}</p>{% endcall %}{% endif %}
+
+{% call card('Client details') %}
+<form method="post" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  {{ field('Client name', 'name', value=profile.name if profile else '', required=true, maxlength=120) }}
+  {{ field('Contact', 'contact', value=profile.contact if profile else '', optional=true, maxlength=200,
+           help='Enter a name or contact details your team can refer to.') }}
+  <div class="field">
+    <label for="notes">Notes <span class="optional">(optional)</span></label>
+    <textarea id="notes" name="notes" maxlength="1000" rows="3">{{ profile.notes if profile else '' }}</textarea>
+  </div>
+  <div class="form-actions">{{ button('Add client') }}</div>
+</form>
+{% endcall %}
+{% endblock %}

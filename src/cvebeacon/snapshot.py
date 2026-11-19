@@ -21,7 +21,12 @@ class SnapshotError(CVEBeaconError):
 
 
 def sync_directory(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if os.name != "posix":
+        # Windows persists file contents with a writable handle. The
+        # directory-descriptor fsync used on POSIX is unavailable there.
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
     try:
         os.fsync(fd)
     finally:
