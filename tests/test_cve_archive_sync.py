@@ -487,3 +487,26 @@ def test_release_selection_skips_an_invalid_newest_candidate():
     with mock_client(lambda _:httpx.Response(200,json=[invalid,valid])) as http:
         assets,_=cve_list.release(http,{})
     assert assets['delta']['name']=='2026-11-19_delta_CVEs_at_0100Z.zip'
+
+def test_initial_cve_list_import_does_not_send_regular_events_for_known_cve(tmp_path):
+    store=WatchStore(tmp_path/'watch.db',clock=lambda:NOW)
+    rules=parse_rules([{'name':'spring','condition':{'keyword':['spring']},'channels':['sink']}])
+    store.upsert_nvd([WatchRecord(ID,'published',description='Spring issue')],catalogs=('nvd','cve_list'))
+    store.evaluate_touched(rules,catalogs=('nvd','cve_list'))
+    assert [(event.kind,event.initial) for event in store.events(cve=ID)]==[('match',False)]
+    store.upsert_cve_list([official(description='Spring issue')],catalogs=('nvd','cve_list'),initial=True)
+    store.evaluate_touched(rules,catalogs=('nvd','cve_list'))
+    events=store.events(cve=ID)
+    assert [event.kind for event in events if not event.initial]==['match']
+    assert any(event.kind=='severity_increase' and event.initial for event in events)
+
+
+def test_undated_archive_does_not_replace_undated_targeted_lookup(tmp_path):
+    store=WatchStore(tmp_path/'watch.db',clock=lambda:NOW)
+    targeted=record(description='live refresh v2')
+    del targeted['cveMetadata']['dateUpdated']
+    store.upsert_cve_list([targeted])
+    older=record(description='older archive v1')
+    del older['cveMetadata']['dateUpdated']
+    store.upsert_cve_list([older])
+    assert store.view(ID).description=='live refresh v2'
