@@ -227,7 +227,7 @@ def test_main_reads_all_pages_and_writes_the_tags_output(guard, monkeypatch, tmp
     monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     assert guard.main() == 0
-    text = output.read_text()
+    text = output.read_text(encoding="utf-8")
     assert "tags<<RELEASE_TAGS" in text
     assert f"{image}:1.2.0" in text
     assert f"{image}:latest" not in text

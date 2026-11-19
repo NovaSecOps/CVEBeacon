@@ -333,8 +333,8 @@ def test_complete_native_plan_constructs_positive_negative_and_scheduled_specs(a
 
 
 def test_ci_pins_match_frozen_native_versions_and_evidence_is_safe(acceptance):
-    original = (ROOT / ".github/workflows/kubernetes.yml").read_text()
-    new = (ROOT / ".github/workflows/automation-kubernetes.yml").read_text()
+    original = (ROOT / ".github/workflows/kubernetes.yml").read_text(encoding="utf-8")
+    new = (ROOT / ".github/workflows/automation-kubernetes.yml").read_text(encoding="utf-8")
     for value in ("v0.33.0", "v1.36.4", "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d",
                   "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a"):
         assert value in original and value in new
@@ -346,7 +346,7 @@ def test_ci_pins_match_frozen_native_versions_and_evidence_is_safe(acceptance):
         compile(script, "synthetic-in-cluster-script", "exec")
 
 def test_notifier_mount_exposes_only_published_database_snapshot():
-    docs = list(yaml.safe_load_all((ROOT / 'automation/deploy/kubernetes/reference.yaml').read_text()))
+    docs = list(yaml.safe_load_all((ROOT / 'automation/deploy/kubernetes/reference.yaml').read_text(encoding="utf-8")))
     cron = next(item for item in docs if item and item.get('kind') == 'CronJob')
     notifier = cron['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]
     mount = next(item for item in notifier['volumeMounts'] if item['name'] == 'core')

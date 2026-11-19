@@ -71,7 +71,7 @@ def test_partial_snapshot_is_used_and_corrupt_snapshot_warns(tmp_path, caplog):
     assert len(rows) == 2
     assert "Skipping invalid web snapshot broken.json" in caplog.text
     assert "Using partial web snapshot acme.json" in caplog.text
-    assert json.loads((directory / "acme.json.review.json").read_text())["reviews"] == [{"reason": "blocked"}]
+    assert json.loads((directory / "acme.json.review.json").read_text(encoding="utf-8"))["reviews"] == [{"reason": "blocked"}]
 
 
 @pytest.mark.parametrize("collision", ["SUPPLIED", "web-acme"])
@@ -90,9 +90,9 @@ def test_invalid_contract_is_skipped(tmp_path, caplog, fault):
     directory = config.database_path.parent / "web-inventory"
     output = snapshot(directory)
     manifest_path = Path(str(output) + ".manifest.json")
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if fault in {"row", "unknown-field"}:
-        rows = json.loads(output.read_text())
+        rows = json.loads(output.read_text(encoding="utf-8"))
         rows[0]["version" if fault == "row" else "body"] = 1
         save_allowlist(output, rows)
         manifest["sha256"] = hashlib.sha256(output.read_bytes()).hexdigest()

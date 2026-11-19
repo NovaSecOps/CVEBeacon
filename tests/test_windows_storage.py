@@ -39,6 +39,8 @@ def test_windows_read_handles_share_delete_but_writers_do_not(monkeypatch, owner
     module.open_file(Path("run.lock"), readonly=False, owner_only=owner_only)
     assert calls[0][2] == 7  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
     assert calls[1][2] == 3  # An active writer/lock still prevents replacement.
+    module.open_file(Path("holder.json"), readonly=False, owner_only=owner_only, share_delete=True)
+    assert calls[2][2] == 7  # Only explicitly opted-in metadata leases permit deletion.
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows sharing semantics")

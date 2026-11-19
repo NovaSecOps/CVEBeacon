@@ -73,7 +73,7 @@ def test_shutdown_bookkeeping_failure_still_reaps_child(tmp_path, monkeypatch, e
             time.sleep(0.01)  # short slices let a Windows break handler run
     ''', marker))
     wait_for(lambda: 'ready' in manager.store.log_tail(manager.store.get(job.id)))
-    process = manager._process
+    process = manager._free_lane._process
     queued = manager.submit('notify-test', started_by='admin', argv=fake_job('pass'))
     def fail(*args, **kwargs):
         raise error('synthetic cancellation failure')
@@ -83,8 +83,8 @@ def test_shutdown_bookkeeping_failure_still_reaps_child(tmp_path, monkeypatch, e
         callback = manager.shutdown
         callback()
         assert process.poll() is not None
-        assert marker.read_text() == 'cleaned'
-        assert manager._queue == []
+        assert marker.read_text(encoding="utf-8") == 'cleaned'
+        assert manager._free_lane._queue == []
         assert manager.store.get(queued.id).status == 'queued'
         # Failed bookkeeping remains durable for restart recovery.
         jobs.JobManager(config, manager.users).shutdown()
@@ -157,11 +157,11 @@ def test_actual_exit_hook_reaps_child_when_store_and_worker_are_unavailable(tmp_
             assert time.monotonic() < deadline
             time.sleep(0.02)
         manager.submit('notify-test', started_by='admin', argv={fake_job('pass')!r})
-        print(manager._process.pid, flush=True)
+        print(manager._free_lane._process.pid, flush=True)
         original = manager.store.get
         blocked = threading.Event()
         def unavailable(job_id):
-            if threading.current_thread() is manager._thread:
+            if threading.current_thread() is manager._free_lane._thread:
                 blocked.set()
                 for _ in range(3000):
                     time.sleep(0.01)  # short slices let a Windows break handler run
@@ -179,7 +179,7 @@ def test_actual_exit_hook_reaps_child_when_store_and_worker_are_unavailable(tmp_
         stdout, stderr = parent.communicate(timeout=12)
         assert parent.returncode == 0, stderr
         pid = int(stdout.strip())
-        assert marker.read_text() == 'cleaned'
+        assert marker.read_text(encoding="utf-8") == 'cleaned'
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
     finally:
@@ -219,9 +219,10 @@ def test_worker_start_replaces_a_dead_thread_reference(tmp_path):
     dead = threading.Thread(target=lambda: None)
     dead.start()
     dead.join()
-    manager._thread = dead
+    manager._free_lane._thread = dead
     try:
         job = manager.submit('notify-test', started_by='admin', argv=fake_job('pass'))
+        assert manager._free_lane._thread is not dead
         assert manager.wait(job.id, timeout=3).status == 'succeeded'
     finally:
         manager.shutdown()
@@ -245,7 +246,7 @@ def test_active_cancellation_storage_failure_still_runs_child_cleanup(tmp_path, 
             time.sleep(0.01)  # short slices let a Windows break handler run
     ''', marker))
     wait_for(lambda: 'ready' in manager.store.log_tail(manager.store.get(job.id)))
-    process = manager._process
+    process = manager._free_lane._process
     def fail(*args, **kwargs):
         raise StateError('synthetic cancellation storage failure')
     monkeypatch.setattr(manager.store, 'request_cancel', fail)
@@ -253,7 +254,7 @@ def test_active_cancellation_storage_failure_still_runs_child_cleanup(tmp_path, 
         with pytest.raises(StateError):
             manager.cancel(job.id, actor='runner')
         assert process.poll() is not None
-        assert marker.read_text() == 'cleaned'
+        assert marker.read_text(encoding="utf-8") == 'cleaned'
     finally:
         manager.shutdown()
         if process.poll() is None:

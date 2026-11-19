@@ -195,6 +195,6 @@ def test_hash_helper_refuses_echoing_fallback(monkeypatch):
 @pytest.mark.parametrize("setting", ["session_lifetime_seconds=0", "session_lifetime_seconds=true", "session_lifetime_seconds=86401", "secure_cookie='yes'", "password='secret'", "password_hash='hash'", "password_hash_env='' "])
 def test_dashboard_config_validation(setup, setting):
     path = setup[0].config_path
-    path.write_text(path.read_text() + "\n[dashboard]\n" + setting, encoding="utf-8")
+    path.write_text(path.read_text(encoding="utf-8") + "\n[dashboard]\n" + setting, encoding="utf-8")
     with pytest.raises(CVEBeaconError):
         load_config(path)
