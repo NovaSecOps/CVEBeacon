@@ -1217,16 +1217,16 @@ class WatchStore:
         """Bound the disclosure before decoding or pretty-printing payloads."""
         cap = 65536
         with self.read() as db:
-            rows = [dict(item) for item in db.execute("SELECT source,substr(payload_json,1,?) AS raw,length(payload_json)>? AS truncated FROM watch_provider WHERE cve_id=? ORDER BY source", (cap, cap, identifier))]
+            rows = [dict(item) for item in db.execute("SELECT source,substr(CAST(payload_json AS BLOB),1,?) AS raw,length(CAST(payload_json AS BLOB))>? AS truncated FROM watch_provider WHERE cve_id=? ORDER BY source", (cap, cap, identifier))]
             row = self._row(db, identifier)
             if row is not None and not db.execute("SELECT 1 FROM watch_origin WHERE cve_id=?", (identifier,)).fetchone():
-                raw = canonical_json(_nvd_content(self._record(row)))
+                raw = canonical_json(_nvd_content(self._record(row))).encode("utf-8")
                 rows.append({"source": "nvd", "raw": raw[:cap], "truncated": len(raw) > cap})
         output = []
         for item in rows:
             payload = None if item["truncated"] else json.loads(item["raw"])
             output.append({"source": item["source"], "payload": payload,
-                           "display": item["raw"], "truncated": bool(item["truncated"])})
+                           "display": item["raw"].decode("utf-8", errors="ignore"), "truncated": bool(item["truncated"])})
         return tuple(sorted(output, key=lambda item: item["source"]))
 
     def source_presence(self, identifier):

@@ -457,8 +457,7 @@ def explorer():
     return render_template("watch_explorer.html", result=result, filters=filters, page=page,
                            next_url=url_for("watch.explorer", **links, page=page + 1) if page * 50 < result.total else None,
                            previous_url=url_for("watch.explorer", **links, page=page - 1) if page > 1 else None,
-                           missing=missing, presence=store.source_presence(identifier) if missing else (),
-                           clients=client_options(config.database_path))
+                           missing=missing, presence=store.source_presence(identifier) if missing else ())
 
 
 @bp.post("/cve/<cve_id>/refresh")

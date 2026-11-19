@@ -46,3 +46,50 @@ def test_detail_findings_clients_and_delivery_timestamps(tmp_path):
     assert 'CVE-2026-0001' in page.text and 'CVE-2026-0002' not in page.text
     assert client.get('/watch/cves?source=invalid').status_code == 400
     app.extensions['dashboard_jobs'].shutdown()
+
+
+def test_refresh_explains_queue_and_offers_deliver_now(tmp_path,monkeypatch):
+    from test_dashboard_watch import seeded,login,csrf
+    _,_,store,app,client=seeded(tmp_path)
+    manager=app.extensions['dashboard_jobs']
+    monkeypatch.setattr(manager,'start_thread',lambda:None)
+    login(client,'reader')
+    page=client.get('/watch/cve/CVE-2026-0001')
+    assert 'Deliver now' not in page.text
+    login(client,'admin')
+    page=client.get('/watch/cve/CVE-2026-0001')
+    assert 'next watch notify or watch run' in page.text
+    assert 'Deliver now' in page.text
+    token=csrf(client,'/account')
+    response=client.post('/watch/cve/CVE-2026-10001/refresh',data={'csrf':token})
+    assert response.status_code==303
+    job_page=client.get(response.location)
+    assert 'next watch notify or watch run' in job_page.text
+    assert 'Deliver now' in job_page.text
+    assert client.post('/operations/run',data={'operation':'watch-notify'}).status_code==400
+    response=client.post('/operations/run',data={'csrf':token,'operation':'watch-notify'})
+    assert response.status_code==303
+    assert manager.store.recent()[0].operation=='watch-notify'
+    manager.shutdown()
+
+
+def test_large_provider_page_shows_truncated_escaped_preview(tmp_path):
+    from test_dashboard_watch import seeded,login
+    _,_,store,app,client=seeded(tmp_path)
+    store.upsert_cve_list([official('CVE-2026-0001',description='<script>x</script>'+'A'*100_000)])
+    login(client,'reader')
+    page=client.get('/watch/cve/CVE-2026-0001')
+    assert 'Payload preview truncated' in page.text
+    assert '<script>x</script>' not in page.text
+    assert len(page.data)<150_000
+    app.extensions['dashboard_jobs'].shutdown()
+
+
+def test_explorer_avoids_unused_client_options_query(tmp_path,monkeypatch):
+    from cvebeacon import dashboard_watch
+    from test_dashboard_watch import seeded,login
+    _,_,_,app,client=seeded(tmp_path)
+    login(client,'reader')
+    monkeypatch.setattr(dashboard_watch,'client_options',lambda *_: (_ for _ in ()).throw(AssertionError('unused client query')))
+    assert client.get('/watch/cves').status_code==200
+    app.extensions['dashboard_jobs'].shutdown()

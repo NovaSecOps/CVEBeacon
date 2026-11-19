@@ -43,7 +43,7 @@
 {% for item in scan_findings %}<tr><td>{{ item.asset_id }}</td><td>{{ item.client or 'Unassigned' }}</td><td>{{ item.advisory_id }}</td><td>{{ item.applicability }}</td></tr>{% else %}<tr><td colspan="4">No scan findings are stored for this CVE.</td></tr>{% endfor %}
 </tbody></table></div>
 <h2>Provider records</h2>
-{% for item in provider_records %}<details><summary>{{ item.source }} record</summary><pre class="break">{{ item.payload | tojson(indent=2) }}</pre></details>{% endfor %}
+{% for item in provider_records %}<details><summary>{{ item.source }} record</summary><pre class="break">{{ item.display }}</pre>{% if item.truncated %}<p class="muted">Payload preview truncated at 64 KiB. The complete record remains stored.</p>{% endif %}</details>{% endfor %}
 
 <h2>CVSS by provider</h2>
 <div class="table-wrap"><table>

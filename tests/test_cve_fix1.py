@@ -200,3 +200,11 @@ def test_real_legacy_wide_columns_survive_version_one_upgrade(tmp_path):
     with sqlite3.connect(path) as db:
         assert db.execute('SELECT description,euvd_id,epss FROM watch_cve').fetchone()==('retained','EUVD-2026-1',0.5)
         assert db.execute('SELECT count(*) FROM watch_provider').fetchone()[0]==0
+
+
+def test_payload_preview_cap_is_utf8_bytes_not_characters(tmp_path):
+    store=WatchStore(tmp_path/'watch.db')
+    store.upsert_cve_list([official(description='😀'*100_000)])
+    display=store.provider_records(ID)[0]
+    assert display['truncated']
+    assert len(display['display'].encode('utf-8'))<=65_536

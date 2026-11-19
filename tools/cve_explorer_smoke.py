@@ -6,8 +6,7 @@ No source endpoints or notification channels are contacted.
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -30,18 +29,19 @@ from cvebeacon.watch import cve_list, feeds
 from cvebeacon.watch.store import WatchStore
 from cvebeacon.watch.sync import sync_watch
 
-NOW = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 18, 23, tzinfo=timezone.utc)
 
 
 def record(identifier, description):
-    return {"dataVersion": "5.1", "cveMetadata": {"cveId": identifier, "state": "PUBLISHED", "datePublished": "2026-11-02T00:00:00Z", "dateUpdated": "2026-11-03T00:00:00Z"},
+    return {"dataVersion": "5.1", "cveMetadata": {"cveId": identifier, "state": "PUBLISHED", "datePublished": "2026-11-18T00:00:00Z", "dateUpdated": "2026-11-18T23:00:00Z"},
             "containers": {"cna": {"providerMetadata": {"shortName": "Example CNA"}, "descriptions": [{"lang": "en", "value": description}], "metrics": [{"cvssV3_1": {"version": "3.1", "baseScore": 9.8}}], "affected": [{"vendor": "Example", "product": "Widget"}]}}}
 
 
-def archive(payload):
+def archive(payload=None):
     file = BytesIO()
     with zipfile.ZipFile(file, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        zip_file.writestr(payload['cveMetadata']['cveId'] + '.json', json.dumps(payload))
+        if payload is not None:
+            zip_file.writestr(payload['cveMetadata']['cveId'] + '.json', json.dumps(payload))
     return file.getvalue()
 
 
@@ -49,8 +49,20 @@ def main():
     baseline = record('CVE-2026-10001', 'Baseline alias')
     delta = record('CVE-2026-10001', 'Spring4Shell synthetic alias')
     missing = record('CVE-2026-10002', 'Fetched critical synthetic record')
-    bodies = {'2026-11-03_all_CVEs_at_midnight.zip': archive(baseline),
-              '2026-11-03_delta_CVEs_at_1200Z.zip': archive(delta)}
+    # Match the real double-suffix release artifact, including its inner ZIP.
+    wrapped = BytesIO()
+    with zipfile.ZipFile(wrapped, 'w') as outer:
+        outer.writestr('cves.zip', archive(baseline))
+    late = record('CVE-2026-10003', 'Late cross-midnight update')
+    late['cveMetadata']['dateUpdated'] = '2026-11-18T23:55:00Z'
+    next_day = record('CVE-2026-10003', 'Next-day delta update')
+    next_day['cveMetadata']['dateUpdated'] = '2026-11-19T01:00:00Z'
+    bodies = {'2026-11-18_all_CVEs_at_midnight.zip.zip': wrapped.getvalue(),
+              '2026-11-19_all_CVEs_at_midnight.zip.zip': wrapped.getvalue(),
+              '2026-11-18_delta_CVEs_at_2300Z.zip': archive(delta),
+              '2026-11-19_delta_CVEs_at_0000Z.zip': archive(),
+              '2026-11-19_delta_CVEs_at_0100Z.zip': archive(next_day)}
+    phase = [0]
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -61,12 +73,21 @@ def main():
             parsed = urlsplit(self.path)
             seen.append(parsed.path)
             if parsed.path == '/release':
-                assets = [{"name": name, "size": len(body), "digest": 'sha256:' + hashlib.sha256(body).hexdigest(), "browser_download_url": base + '/assets/' + name} for name, body in bodies.items()]
+                names = ["2026-11-18_all_CVEs_at_midnight.zip.zip" if phase[0] < 2 else "2026-11-19_all_CVEs_at_midnight.zip.zip",
+                         ["2026-11-18_delta_CVEs_at_2300Z.zip", "2026-11-19_delta_CVEs_at_0000Z.zip", "2026-11-19_delta_CVEs_at_0100Z.zip"][phase[0]]]
+                assets = [{"name": name, "size": len(bodies[name]), "digest": 'sha256:' + hashlib.sha256(bodies[name]).hexdigest(), "browser_download_url": base + '/assets/' + name} for name in names]
                 body = json.dumps({'assets': assets}).encode()
+            elif parsed.path == '/deltaLog':
+                groups = [{'fetchTime': NOW.isoformat(), 'numberOfChanges': 1, 'new': [{'cveId': 'CVE-2026-10001'}], 'updated': [], 'error': []},
+                          {'fetchTime': (NOW-timedelta(days=30)).isoformat(), 'numberOfChanges': 0, 'new': [], 'updated': [], 'error': []}]
+                if phase[0] > 0:
+                    groups.insert(0, {'fetchTime': '2026-11-19T00:01:00Z', 'numberOfChanges': 1, 'new': [{'cveId': 'CVE-2026-10003'}], 'updated': [], 'error': []})
+                body = json.dumps(groups).encode()
             elif parsed.path.startswith('/assets/'):
                 body = bodies[parsed.path.rsplit('/', 1)[1]]
             elif parsed.path.startswith('/cves/'):
-                body = json.dumps(missing).encode()
+                identifier = parsed.path.rsplit('/', 1)[1][:-5]
+                body = json.dumps({'CVE-2026-10001':delta, 'CVE-2026-10002':missing, 'CVE-2026-10003':late}[identifier]).encode()
             elif parsed.path == '/nvd':
                 query = parse_qs(parsed.query)
                 identifier = query.get('cveId', [None])[0]
@@ -107,7 +128,7 @@ condition = {cvss_min = 9}
 channels = ["sink"]
 ''')
             config = load_config(config_path)
-            for module, name, value in ((cve_list, 'RELEASE_URL', base + '/release'), (cve_list, 'ASSET_PREFIX', base + '/assets/'), (source_list, 'RAW_BASE', base + '/cves'), (feeds, 'CVE_URL', base + '/nvd'), (feeds, 'SEARCH_URL', base + '/euvd'), (euvd, 'SEARCH_URL', base + '/euvd')):
+            for module, name, value in ((cve_list, 'RELEASE_URL', base + '/release'), (cve_list, 'ASSET_PREFIX', base + '/assets/'), (cve_list, 'DELTA_LOG_URL', base + '/deltaLog'), (source_list, 'RAW_BASE', base + '/cves'), (feeds, 'CVE_URL', base + '/nvd'), (feeds, 'SEARCH_URL', base + '/euvd'), (euvd, 'SEARCH_URL', base + '/euvd')):
                 stack.enter_context(patch.object(module, name, value))
             def local_only(request):
                 assert request.url.host == '127.0.0.1' and request.url.port == server.server_port, 'Nonlocal request refused'
@@ -119,20 +140,29 @@ channels = ["sink"]
                 report = sync_watch(config, http, clock=lambda: NOW)
                 assert not report.failures
                 store = WatchStore(config.watch.database)
+                store.evaluate_touched(config.watch.rules, catalogs=config.watch.sources, initial=report.initial_evaluation, complete=report.initial_complete)
                 assert store.search(query='Spring4Shell').total == 1
+                phase[0] = 1
+                midnight = datetime(2026, 11, 19, 0, 35, tzinfo=timezone.utc)
+                assert not sync_watch(config, http, clock=lambda: midnight).failures
+                assert store.view('CVE-2026-10003', catalogs=config.watch.sources).description == late['containers']['cna']['descriptions'][0]['value']
+                phase[0] = 2
+                assert not sync_watch(config, http, clock=lambda: midnight+timedelta(hours=1)).failures
+                assert store.view('CVE-2026-10003', catalogs=config.watch.sources).description == next_day['containers']['cna']['descriptions'][0]['value']
+                assert sum('_all_CVEs_' in path for path in seen) == 1
                 app = dashboard.create_app(config)
                 client = app.test_client()
                 assert client.get('/watch/cves?q=Spring4Shell').status_code == 200
                 assert 'Source presence' in client.get('/watch/cve/CVE-2026-10001').text
                 assert store.view('CVE-2026-10002') is None
                 assert cli.main(['--config', str(config_path), 'watch', 'refresh', 'CVE-2026-10002']) == 0
-                assert store.view('CVE-2026-10002') is not None
+                assert store.view('CVE-2026-10002').description == 'Targeted NVD fake'
                 assert any(event.kind == 'match' for event in store.events(cve='CVE-2026-10002'))
                 assert 'Fetched critical' in client.get('/watch/cve/CVE-2026-10002').text
                 app.extensions['dashboard_jobs'].shutdown()
             finally:
                 http.close()
-        print('PASS: local baseline + delta → sync → search → detail → missing-CVE refresh → rule event')
+        print('PASS: real release names + nested baseline → 23:00/00:00/01:00 deltas → search/detail → targeted refresh/event; baseline downloads: 1')
         print(f'Local fake requests: {len(seen)}; external requests and notifications: 0')
         return 0
     finally:

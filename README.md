@@ -78,7 +78,10 @@ database after the run. ARM devices are expected to take longer in wall time
 and to need about the same RAM (estimate; not measured on ARM). Figures are
 rounded.
 
-| Mode | Peak RAM | Disk after first run | First run | Scheduled run | Requests, first run (NVD, EUVD, KEV, EPSS) |
+The historical measurements below **exclude `cve_list`** and do not describe
+the complete new default source selection.
+
+| Mode | Peak RAM | Disk after first run | First run | Scheduled run | Requests, first run (NVD, EUVD, KEV, EPSS; without CVE List) |
 | --- | ---: | ---: | ---: | ---: | --- |
 | inventory scan only | 87 MiB | 9.5 MiB state DB + about 8 MiB JSON report per scan | 3.5 min cold, 2.5 min warm | 2.5 min | not reported by `scan`; see [network requirements](docs/NETWORK_REQUIREMENTS.md) |
 | watch baseline | 55 MiB | 30 MiB database | 0.3 s empty baseline, then 9 s first real sync | 9 s | NVD 2, EUVD 6, KEV 2, EPSS 2 |
@@ -87,6 +90,18 @@ rounded.
 | backfill 30 days | 226 MiB | 144 MiB database (EUVD incomplete) | 45 min | 30 s | NVD 157, EUVD 216, KEV 2, EPSS 1 |
 | **backfill 120 days** (heavy) | 234 MiB | 231 MiB database | 64 min, plus a 4 min resumed sync | 4 min | NVD 220, EUVD 650 + 139 on resume, KEV 2, EPSS 1 |
 | **full history** (heavy) | 372 MiB | 718 MiB database (EUVD incomplete) | 98 min, then further syncs to finish EUVD | about 20 min per resumed sync while EUVD catch-up lasts | NVD 508 (419,060 CVEs), EUVD 851 (incomplete), KEV 2 (CISA 1, EU 1), EPSS 1 |
+
+CVE List adds a small hourly delta in normal operation and a rolling log plus
+bounded record lookups for cross-midnight/gap repair. There is no daily full
+baseline download. Initial backfill/full history or a gap outside retained
+coverage can download one baseline (about 635 MiB in public metadata observed on
+2026-11-19), requiring space for its cached archive, optional inner ZIP and new
+provider data. The archive cap is 1 GiB; a larger source fails visibly rather
+than buffering without a limit. Schema 7 → 8 adds empty tables/indexes without
+copying the historical NVD/EUVD database. See [source costs](docs/SOURCES.md#cve-list-watch-feed)
+and [upgrading](docs/UPGRADING.md) for limits, retry costs and the reproducible
+430,000-CVE migration check. The table's RAM, disk and timings are not updated
+measurements for this additional source.
 
 The 30-day database has incomplete EUVD data after an HTTP 403 that survived
 retries; NVD, CISA KEV and EPSS completed in the first run, and the EU KEV dump

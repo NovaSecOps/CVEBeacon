@@ -86,7 +86,9 @@ python tools/smoke.py
 The smoke script works in a temporary directory with external sources disabled.
 An offline scan must report incomplete coverage, not a clean result.
 
-Acceptance tools include `tools/scheduler_smoke.py`,
+Acceptance tools include `tools/cve_explorer_smoke.py`,
+`tools/cve_migration_benchmark.py` (synthetic 430,000-CVE upgrade),
+`tools/scheduler_smoke.py`,
 `tools/host_collector_smoke.py`, `tools/container_smoke.py`,
 `tools/kubernetes_smoke.py`, `automation/tools/container_acceptance.py`, and
 `automation/tools/kubernetes_acceptance.py`. CI runs them in these workflows:
