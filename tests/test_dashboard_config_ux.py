@@ -263,3 +263,16 @@ def test_smtp_port_placeholder_follows_security(security, port):
     document = {"watch": {"channels": {"email": {"type": "smtp", "security": security}}}}
     controls = editor_module.groups_for("channels", document)[0]["controls"]
     assert next(field for field in controls if field["key"] == "port")["default"] == str(port)
+
+
+@pytest.mark.parametrize("section,changes,field", [
+    ("sources", {"g0_nvd_api_key_env": "KEY=private-contents"}, "sources.nvd_api_key_env"),
+    ("channels", {"g0_name": "email", "g0_host": "smtp.example.com", "g0_from": "alerts@example.com", "g0_to": "alerts@example.com", "g0_password_file_new": "   "}, "channels row 1.password_file"),
+])
+def test_reference_and_secret_errors_name_field(accounts, section, changes, field):
+    login(accounts[3], "admin")
+    response = preview(accounts[3], section, **changes)
+    assert response.status_code == 400
+    assert field in response.text
+    assert "must be" in response.text or "must contain" in response.text
+    assert "KEY=private-contents" not in response.text

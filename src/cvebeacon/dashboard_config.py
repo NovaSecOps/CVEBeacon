@@ -1963,6 +1963,8 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 if not remove and (text != "" if control["kind"] == "string" else text.strip() != ""):
                     if control["kind"] in {"string", "enum"}:
                         row[key] = text
+                        if key.endswith("_env") and text.strip() and ENV_NAME_PATTERN.fullmatch(text.strip()) is None:
+                            raise ConfigurationError(control["identity"] + " must be an environment variable name, for example EXAMPLE_SECRET")
                         if control["kind"] == "enum":
                             choices = control["choices"]
                             if choices and isinstance(choices[0], int):
@@ -2053,7 +2055,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             if directory is None:
                 directory = _private_directory(_secret_directory(current_config))
             if not secret.strip() or len(secret.encode("utf-8")) > SECRET_FILE_LIMIT:
-                raise ConfigurationError("Secret must contain 1–16384 bytes of text")
+                raise ConfigurationError(f"{section} row {index + 1}.{key} new contents must contain 1–16384 bytes of text")
             paired_env = key[:-5] + "_env"
             explicit_environment = row.get(paired_env)
             environment_key = effective_environment_row(row, paired_env, prefix)
@@ -2123,7 +2125,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 name = row.pop("name", "")
                 if name:
                     if name in channels:
-                        raise ConfigurationError("Duplicate channel name")
+                        raise ConfigurationError("watch.channels.name must be unique; duplicate channel name")
                     channels[name] = row
             candidate.setdefault("watch", {})["channels"] = channels
         referenced = {value for value in secret_references(candidate).values() if isinstance(value, str)}
