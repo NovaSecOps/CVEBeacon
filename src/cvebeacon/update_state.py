@@ -1,6 +1,5 @@
 """Unprivileged, durable SQLite snapshots and independently verified restore."""
 from contextlib import closing
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,31 +11,17 @@ import tempfile
 
 from .config import load_config
 from .errors import CVEBeaconError
+from .snapshot import (
+    SnapshotError,
+    copy_sqlite as _copy_sqlite,
+    digest,
+    logical_digest,
+    sync_directory,
+    sync_file,
+)
 from .state import StateStore
 from .watch.store import WatchStore
 from .watch.users import UserStore
-
-
-class SnapshotError(CVEBeaconError):
-    pass
-
-
-def sync_directory(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def sync_file(path):
-    with Path(path).open("rb") as stream:
-        os.fsync(stream.fileno())
-
-
-def digest(path):
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def databases(config, data, *, validate_known=True):
@@ -72,27 +57,6 @@ def databases(config, data, *, validate_known=True):
             elif path in paths and info.st_size:
                 raise SnapshotError("a configured state database is not SQLite")
     return tuple(sorted(paths))
-
-
-def logical_digest(path):
-    result = hashlib.sha256()
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
-        if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise SnapshotError("SQLite integrity check failed")
-        for line in db.iterdump():
-            result.update(line.encode("utf-8"))
-            result.update(b"\n")
-    return result.hexdigest()
-
-
-def _copy_sqlite(source, destination):
-    with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=30)) as src:
-        with closing(sqlite3.connect(destination)) as dst:
-            src.backup(dst)
-            if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise SnapshotError("SQLite snapshot integrity check failed")
-    destination.chmod(0o600)
-    sync_file(destination)
 
 
 def _manifest(source, data):
