@@ -3,7 +3,7 @@
 {% block title %}Create administrator · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Create the first administrator', 'One-time setup for a fresh installation. This form creates the admin account that controls CVEBeacon.') }}
-{% call callout('warning', 'Use this page only once, from a trusted local computer') %}<p>Only a computer connected directly to CVEBeacon can open this page. The first person to complete this form controls the dashboard. Do not make an empty account list reachable through a proxy or the internet.</p>{% endcall %}
+{% call callout('warning', 'Use this page only once, from a trusted local computer') %}<p>CVEBeacon accepts this page only when the connection appears to come from this computer. A reverse proxy on this computer also appears local, so never make an empty account list reachable through one. The first person to complete this form controls the dashboard.</p>{% endcall %}
 {% if error %}{% call callout('danger', 'The administrator account was not created') %}<p>{{ error }}</p>{% endcall %}{% endif %}
 {% call card('Create the admin account', 'Choose the username and password for the first administrator.') %}
 <form method="post" class="stack">
