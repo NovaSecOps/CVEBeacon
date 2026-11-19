@@ -83,7 +83,7 @@ def test_shutdown_bookkeeping_failure_still_reaps_child(tmp_path, monkeypatch, e
         callback = manager.shutdown
         callback()
         assert process.poll() is not None
-        assert marker.read_text() == 'cleaned'
+        assert marker.read_text(encoding="utf-8") == 'cleaned'
         assert manager._free_lane._queue == []
         assert manager.store.get(queued.id).status == 'queued'
         # Failed bookkeeping remains durable for restart recovery.
@@ -179,7 +179,7 @@ def test_actual_exit_hook_reaps_child_when_store_and_worker_are_unavailable(tmp_
         stdout, stderr = parent.communicate(timeout=12)
         assert parent.returncode == 0, stderr
         pid = int(stdout.strip())
-        assert marker.read_text() == 'cleaned'
+        assert marker.read_text(encoding="utf-8") == 'cleaned'
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
     finally:
@@ -254,7 +254,7 @@ def test_active_cancellation_storage_failure_still_runs_child_cleanup(tmp_path, 
         with pytest.raises(StateError):
             manager.cancel(job.id, actor='runner')
         assert process.poll() is not None
-        assert marker.read_text() == 'cleaned'
+        assert marker.read_text(encoding="utf-8") == 'cleaned'
     finally:
         manager.shutdown()
         if process.poll() is None:

@@ -139,7 +139,7 @@ def test_cli_holder_is_private_and_removed(tmp_path, monkeypatch):
     lock = RunLock(run_lock_path(config))
     seen = []
     def run(*a, **k):
-        record = json.loads(lock.owner_path.read_text())
+        record = json.loads(lock.owner_path.read_text(encoding="utf-8"))
         assert record["command"] == "watch run"
         assert record["pid"] == os.getpid()
         assert record["account"] and record["host"]
@@ -157,7 +157,7 @@ def test_lock_record_never_contains_full_arguments(tmp_path):
     with RunLock(tmp_path / "run.lock", command="scan --token synthetic-secret") as lock:
         record = json.loads(lock.owner_path.read_bytes())
         assert record["command"] == "run"
-        assert "synthetic-secret" not in lock.owner_path.read_text()
+        assert "synthetic-secret" not in lock.owner_path.read_text(encoding="utf-8")
 
 
 def test_dashboard_child_records_its_job_and_conflict_wording(tmp_path, capsys):
@@ -176,7 +176,7 @@ def test_dashboard_child_records_its_job_and_conflict_wording(tmp_path, capsys):
             "raise SystemExit(cli.main(['--config', sys.argv[1], 'watch', 'run']))",
             config.config_path, marker))
         wait_for(lambda: "ready" in manager.store.log_tail(manager.store.get(job.id)))
-        record = json.loads(lock.owner_path.read_text())
+        record = json.loads(lock.owner_path.read_text(encoding="utf-8"))
         assert record["dashboard_job"] == job.id
         assert record["command"] == "watch run" and record["pid"] != os.getpid()
         if os.name == "posix":

@@ -222,7 +222,7 @@ def test_capture_failure_reaps_child_before_marking_failed(tmp_path, monkeypatch
     try:
         assert manager.wait(job.id).status == "failed"
         assert processes[0].poll() is not None
-        assert marker.read_text() == "cleaned"
+        assert marker.read_text(encoding="utf-8") == "cleaned"
     finally:
         for process in processes:
             if process.poll() is None:
@@ -384,7 +384,7 @@ def test_shutdown_runs_cleanup_and_reaps_child(tmp_path):
     try:
         manager.shutdown()
         assert process.poll() is not None
-        assert marker.read_text() == "cleaned"
+        assert marker.read_text(encoding="utf-8") == "cleaned"
     finally:
         if process.poll() is None:
             process.kill()

@@ -216,7 +216,7 @@ def test_discovery_history_changes_and_failure_preserve_good_state(tmp_path, mon
     failed = nmap.run_jobs(settings)["synthetic-services"]
     assert failed["status"] == "incomplete" and not failed["changed"]
     assert (folder / "current.json").read_bytes() == before
-    assert settings.inventory_path.read_text() == "synthetic canonical inventory remains unchanged"
+    assert settings.inventory_path.read_text(encoding="utf-8") == "synthetic canonical inventory remains unchanged"
 
 
 def test_corrupt_history_fails_before_new_process(tmp_path, monkeypatch):

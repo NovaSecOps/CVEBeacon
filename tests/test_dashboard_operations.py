@@ -277,7 +277,7 @@ def test_cancel_sends_interrupt_and_cleanup_runs(ops, tmp_path):
     job = manager.wait(job.id, timeout=10)
     assert job.status == "cancelled"
     assert job.exit_code == 130
-    assert marker.read_text() == "cleaned"
+    assert marker.read_text(encoding="utf-8") == "cleaned"
     assert "cleanup" in client.get(f"/operations/jobs/{job.id}").text.lower()
 
 
