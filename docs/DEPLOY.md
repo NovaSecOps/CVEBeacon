@@ -191,42 +191,63 @@ Use the line for the scheduler you installed; see [exit codes](DEVELOPMENT.md#ex
 
 ### Upgrade
 
-Stop the scheduler you actually use, stop the dashboard service so it cannot
-start new jobs, and wait for a running job to finish; run one line:
+Perform the upgrade in this order.
 
-```console
-cb schedule remove --yes                                # built-in crontab
-sudo systemctl stop cvebeacon.timer cvebeacon.service   # systemd timer
-sudo systemctl stop cvebeacon-dashboard.service         # installed dashboard
-```
+1. Check the dashboard's Operations page and wait for any running job to
+   finish. Do not start another dashboard job: stopping the service terminates
+   its child job processes.
 
-Back up the watch database with SQLite's online backup (use the path
-`watch status` reports). Keep the dashboard stopped and let active jobs finish
-before copying database files or their sidecars.
+2. Stop the dashboard service:
 
-```console
-sudo -u cvebeacon sqlite3 /var/lib/cvebeacon/cvebeacon-watch.db ".backup '/var/lib/cvebeacon/watch-backup.db'"
-sudo -u cvebeacon sh -c 'umask 077; install -m 600 /dev/null /var/lib/cvebeacon/users-backup.db; sqlite3 /var/lib/cvebeacon/cvebeacon-users.db ".backup /var/lib/cvebeacon/users-backup.db"'
-sudo -u cvebeacon chmod 600 /var/lib/cvebeacon/users-backup.db
-```
+   ```console
+   sudo systemctl stop cvebeacon-dashboard.service
+   ```
 
-The account file holds password hashes and is created `0600` on POSIX. Account
-backups need the same confidentiality as the live file: the `install -m 600`
-step resets an existing destination before SQLite copies credential data into
-it, and `chmod 600` is the final check. Verify with
-`stat -c '%a %n' /var/lib/cvebeacon/users-backup.db` (expect `600`). Keep both
-files inside the protected data directory.
+3. Stop the scheduler you use:
 
-If you copy the database, `-wal` and `-shm` files instead, do so only while
-nothing runs. Then upgrade and restore the scheduler you removed:
+   ```console
+   cb schedule remove --yes                                # built-in crontab
+   # or: sudo systemctl stop cvebeacon.timer cvebeacon.service   # systemd timer
+   ```
 
-```console
-sudo -u cvebeacon git -C /opt/cvebeacon pull --ff-only
-sudo -u cvebeacon /opt/cvebeacon/.venv/bin/python -m pip install /opt/cvebeacon
-cb schedule install --times 07:00,19:00 --command watch --yes
-# or: sudo systemctl start cvebeacon.timer
-sudo systemctl start cvebeacon-dashboard.service         # when installed
-```
+4. Back up the watch database with SQLite's online backup (use the path
+   `watch status` reports):
+
+   ```console
+   sudo -u cvebeacon sqlite3 /var/lib/cvebeacon/cvebeacon-watch.db ".backup '/var/lib/cvebeacon/watch-backup.db'"
+   sudo -u cvebeacon sh -c 'umask 077; install -m 600 /dev/null /var/lib/cvebeacon/users-backup.db; sqlite3 /var/lib/cvebeacon/cvebeacon-users.db ".backup /var/lib/cvebeacon/users-backup.db"'
+   sudo -u cvebeacon chmod 600 /var/lib/cvebeacon/users-backup.db
+   ```
+
+   The account file holds password hashes and is created `0600` on POSIX.
+   Account backups need the same confidentiality as the live file: the
+   `install -m 600` step resets an existing destination before SQLite copies
+   credential data into it, and `chmod 600` is the final check. Verify with
+   `stat -c '%a %n' /var/lib/cvebeacon/users-backup.db` (expect `600`). Keep
+   both files inside the protected data directory.
+
+   If you copy the database, `-wal` and `-shm` files instead, do so only while
+   nothing runs. The dashboard, scheduler and jobs are stopped at this point.
+
+5. Upgrade the checkout and packages:
+
+   ```console
+   sudo -u cvebeacon git -C /opt/cvebeacon pull --ff-only
+   sudo -u cvebeacon /opt/cvebeacon/.venv/bin/python -m pip install /opt/cvebeacon
+   ```
+
+6. Restore the scheduler you removed:
+
+   ```console
+   cb schedule install --times 07:00,19:00 --command watch --yes
+   # or: sudo systemctl start cvebeacon.timer
+   ```
+
+7. Start the dashboard service and run the checks below:
+
+   ```console
+   sudo systemctl start cvebeacon-dashboard.service
+   ```
 
 ### Windows data-directory ACLs
 

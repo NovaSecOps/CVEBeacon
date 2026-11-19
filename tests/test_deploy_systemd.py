@@ -47,3 +47,24 @@ def test_dashboard_docs_ship_a_complete_crontab_dropin_and_upgrade_sequence():
     assert "stop cvebeacon-dashboard.service" in deploy
     assert "start cvebeacon-dashboard.service" in deploy
     assert "DEPLOY.md#schedule-it" in scheduling
+
+
+def test_dashboard_upgrade_sequence_drains_jobs_before_stopping_services():
+    deploy = (ROOT / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
+    upgrade = deploy.split("### Upgrade", 1)[1].split("### Windows", 1)[0]
+    assert "run one line" not in upgrade
+    assert "when installed" not in upgrade
+    assert "wait for any running job" in upgrade
+    drain = upgrade.index("wait for any running job")
+    stop_dashboard = upgrade.index(
+        "sudo systemctl stop cvebeacon-dashboard.service"
+    )
+    stop_scheduler = upgrade.index("cb schedule remove --yes")
+    assert drain < stop_dashboard < stop_scheduler
+    for number in range(1, 8):
+        assert f"\n{number}. " in upgrade
+
+
+def test_watch_docs_list_the_state_directory_in_doctor_checks():
+    watch = (ROOT / "docs" / "WATCH.md").read_text(encoding="utf-8")
+    assert "watch and state data directories" in watch
