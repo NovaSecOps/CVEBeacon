@@ -72,6 +72,8 @@ overlap_minutes = 15
 # to = ["security@example.invalid"]
 # format = "html"               # text (default) or html
 
+# Scan-report notifications (legacy; secrets come from the environment).
+# Watch alerts use the separate [watch.channels.*] tables above.
 [notifications.teams]
 enabled = false
 webhook_env = "CVEBEACON_TEAMS_WEBHOOK_URL"

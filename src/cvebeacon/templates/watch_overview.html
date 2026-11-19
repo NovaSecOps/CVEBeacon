@@ -2,6 +2,7 @@
 {% block title %}Watch overview · CVEBeacon{% endblock %}
 {% block content %}
 <h1>Watch overview</h1>
+<p class="muted">Rule evaluation creates alert events; delivery happens on <code>watch notify</code> or the next <code>watch run</code>.</p>
 {% if not watch_enabled %}<p class="warning" role="alert">Watch mode is disabled in the configuration. Stored data is shown as it is; new syncs will not run.</p>{% endif %}
 {% if failures %}<p class="warning" role="alert">The last sync failed for: {{ failures }}.</p>{% endif %}
 <div class="metrics">
@@ -17,6 +18,8 @@
   <dt>Schema version</dt><dd>{{ value(meta.get('schema_version'), 'unknown') }}</dd>
   <dt>NVD cursor</dt><dd>{{ value(meta.get('nvd_cursor'), 'not set') }}</dd>
   <dt>EUVD cursor</dt><dd>{{ value(meta.get('euvd_cursor'), 'not set') }}{% if euvd_progress %} · {{ euvd_progress }}{% endif %}</dd>
+  <dt>CVE List cursor</dt><dd>{{ value(meta.get('cve_list_cursor'), 'not set') }}</dd>
+  <dt>CVE List initial mode</dt><dd>{{ value(meta.get('cve_list_initial_mode'), 'not set') }} · start {{ value(meta.get('cve_list_start'), 'not set') }}{% if meta.get('cve_list_initial_pending') == '1' %} · pending{% endif %}</dd>
   <dt>EPSS score date</dt><dd>{{ value(status.epss_date, 'not set') }} ({{ status.epss_rows }} stored score{{ '' if status.epss_rows == 1 else 's' }})</dd>
   <dt>KEV catalog entries</dt><dd>CISA {{ status.cisa_kev }}, EU {{ status.eu_kev }} ({{ status.any_kev }} distinct CVE{{ '' if status.any_kev == 1 else 's' }})</dd>
   <dt>EUVD items</dt><dd>{{ status.euvd_items }}</dd>

@@ -33,56 +33,109 @@ This product uses data from the NVD API but is not endorsed or certified by the 
 
 ### CVE List watch feed
 
-The `cve_list` provider uses the official
-[CVEProject/cvelistV5 release assets](https://github.com/CVEProject/cvelistV5#releases)
-and repository `cves/deltaLog.json`. Ordinary updates use the hourly cumulative
-delta ZIP, with conditional release metadata and unchanged-asset detection.
-**There is no daily full-baseline download.**
+The `cve_list` provider uses only the official
+[CVEProject/cvelistV5 release assets](https://github.com/CVEProject/cvelistV5#releases).
+It does not read `cves/deltaLog.json`. The cursor is the UTC boundary of the
+last archive that was fully imported, except during baseline initialisation,
+where the newest available boundary is stored without importing an archive.
 
-Across midnight or a longer gap, the rolling log proves continuity from the
-cursor. A durable queue coalesces changed CVE IDs. Cheap daily delta archives
-cover most queued IDs before any remaining records are fetched individually.
-Archive size is compared with an 8 KiB-per-record lookup estimate; a large ZIP
-is skipped when targeted requests are cheaper. At most three archived-day
-metadata lookups and 100 remaining record lookups are processed per run, with
-progress retained between runs. Ordinary same-day syncs do not download the
-rolling log. This combines the small hourly archive with the log's complete
-cross-midnight coverage, without one lookup for every historical change.
+- **Same day:** import the newest hourly cumulative delta archive for the
+  current release (`YYYY-MM-DD_delta_CVEs_at_HHMMZ.zip`). It contains every
+  change since midnight. Imports are idempotent by CVE ID and `dateUpdated`, and
+  never replace a newer stored revision with an older one.
+- **Each past day:** import that day's official closed-day cumulative delta from
+  the separate `cve_YYYY-MM-DD_at_end_of_day` release, asset
+  `YYYY-MM-DD_delta_CVEs_at_end_of_day.zip`. It is published shortly after the
+  following day's 00:00 hourly release and can itself appear as GitHub's
+  `releases/latest`. The sync never trusts `/latest`: it lists a bounded set of
+  recent releases and selects the newest hourly release by its archive names and
+  UTC time; draft and prerelease entries are ignored. Each archive is read
+  independently, so an omitted or stale upstream index cannot hide a record. A
+  sync between the 00:00 release and the end-of-day
+  tag publication fails closed with the cursor unchanged and retries; daily
+  schedules should avoid the short 00:00–00:45 window.
+- **Missing archive or long gap:** if a required end-of-day archive is absent,
+  or more than seven days are outstanding, read one baseline archive instead.
+  It streams in bounded batches; records at or after the cursor are stored, so
+  a boundary record is re-offered idempotently. Catch-up continues from the
+  baseline's published midnight time. A
+  baseline that does not advance past the cursor fails clearly and leaves the
+  cursor in place.
+- **Failure:** the cursor advances only after the whole archive has been
+  validated and committed. Any download, integrity or record failure leaves the
+  previous cursor, and the next sync retries the same archives. Completed
+  batches are replayed idempotently.
+- **Initial modes** apply only to the first initialisation, before any cursor
+  exists. `baseline` stores the newest hourly archive boundary as the cursor
+  without importing or alerting on anything older. `backfill N` imports records
+  whose `dateUpdated` is inside the saved window, as initial and non-alerting;
+  records with no usable `dateUpdated` are also imported as initial. It then
+  stores the newest boundary. `full` imports all records as initial and
+  non-alerting, then stores the newest boundary. Adding this provider to an
+  existing installation defaults to baseline even when the old
+  `watch.initial` says `full` or `backfill`. History requires an explicit
+  confirmed choice.
+- **After initialisation** the initial mode is never consulted again. Every
+  hourly delta, end-of-day delta and gap-fallback baseline imports records whose
+  `dateUpdated` is at or after the cursor as normal changes that can alert.
+  Records before the cursor are skipped as already known; a record stamped
+  exactly on the boundary is re-offered idempotently, so it is neither lost nor
+  alerted twice. Records with a missing or unparseable `dateUpdated` are always
+  imported and counted, regardless of `dateReserved` or `datePublished`; they
+  are never silently skipped. When both observations have a valid
+  `dateUpdated`, the newer date wins; when either lacks one, the observation
+  fetched most recently wins. The fallback baseline therefore fills exactly the
+  outstanding interval and is complete by construction.
+- **Manual refresh:** `watch refresh` never changes the feed cursor, archive
+  token or initial state.
 
-A full baseline is used only for an initial `backfill`/`full` import or when the
-stored cursor predates the log's retained coverage. A new provider on an existing
-installation defaults to no history; history requires an explicit confirmed
-choice. The real baseline name may end in `.zip.zip` and wrap `cves.zip`. The
-00:00 release may contain yesterday's baseline and today's empty delta. That
-combination is valid: the log repairs the intervening changes, and an empty
-midnight delta never advances the cursor past unprocessed records.
+Conditional requests avoid re-reading an unchanged release list, and an unchanged
+archive token is skipped. The real baseline may end in `.zip.zip` and
+wrap `cves.zip`; both published forms are supported. A 00:00 release with
+yesterday's baseline and today's empty delta is valid. Visible published,
+rejected and reserved records are stored.
 
-For cost context, public metadata read on 2026-11-19 advertised a
-665,939,820-byte baseline (about 635 MiB), a 4,551,306-byte 23:00 delta
-(about 4.34 MiB), and a 30,777,380-byte rolling log (about 29.35 MiB).
-Only metadata was read to establish these figures. These sizes vary. A daily
-635 MiB baseline would cost about 226 GiB/year before deltas; this implementation
-does not incur that recurring baseline cost. A first history import or genuine
-retention gap can still require that one large download.
+For cost context, public release metadata read on 2026-11-19 advertised a
+665,939,820-byte baseline (about 635 MiB) and a 4,551,306-byte 23:00 delta
+(about 4.34 MiB). These sizes vary. A routine same-day sync transfers release
+metadata and at most the current cumulative delta. A midnight or multi-day
+catch-up transfers one closed-day archive per outstanding day, up to seven. A
+daily 635 MiB baseline would cost about 226 GiB/year; this design does not
+download one in normal operation. Only a first history import, an explicit
+history reset, a missing archive or a gap longer than seven days pays that
+larger bounded cost.
 
-Downloads use shared HTTP timeouts, retries and pacing. Release metadata is
-limited to 4 MiB, the rolling log to 64 MiB, a compressed archive to 1 GiB,
-expanded members to 8 GiB, a record to 4 MiB, and entries to one million. Before
-`ZipFile` allocates directory objects, an independent scan validates ZIP/ZIP64
-counts, each directory entry, the expanded-size sum and a 64 MiB central-directory
-cap. Bodies stream in batches of 100 records. Published size, SHA-256 when
-supplied, ZIP CRCs and record/file identities are checked. Redirects require
-HTTPS, an exact GitHub asset host, the default TLS port and at most three hops.
-No archive paths are extracted.
+Downloads use shared HTTP timeouts, retries and pacing. Release and tag metadata
+are limited to 4 MiB, each compressed archive to 1 GiB, expanded members to
+8 GiB, each record (including targeted refresh) to 4 MiB, and entries to one
+million. ZIP/ZIP64 preflight validates the exact directory range, member count,
+expanded sizes and a 64 MiB directory-byte cap. Ambiguous prefixed layouts are
+rejected. Directory entries are then read one at a time; there is no full
+`ZipInfo` index. Duplicate detection uses temporary disk storage. Batches contain
+at most 100 records and 8 MiB of serialized JSON (one bounded record may exceed
+the remaining batch space). Decoded JSON and tokenizer objects add overhead to
+these byte budgets, but no global ID queue or whole-log object graph is built.
+Published size, SHA-256 when supplied, CRCs and file/record identities are
+checked. Redirects require HTTPS, an exact GitHub asset host, default TLS port
+and at most three hops. No archive paths are extracted.
 
-Archive caches and the optional inner ZIP live beside the state database rather
-than in an implicit RAM-backed temporary directory. Preflight reserves two
-archive sizes plus 64 MiB of free space; allow additional space for new provider
-data and indexes. Only one compressed cache is retained. Completed downloads
-are reused for parsing retries. A partial network download restarts from zero,
-bounded to one archive of at most 1 GiB per sync; retries before any body arrives
-use the configured bounded HTTP policy. Database batches remain idempotent and
-no failed or unfinished repair advances its cursor.
+Archive caches, duplicate indexes and an optional inner ZIP live beside state,
+not in an implicit RAM-backed directory. Preflight checks compressed space,
+then the inner archive and expanded directory before import. It reserves three
+times expanded bytes for provider/search/index/transaction growth, four times
+directory bytes for temporary indexes, plus 64 MiB. Space is rechecked for each
+batch. This is a storage estimate with a 2x margin over the expanded archive,
+not a guarantee against another process filling the disk; a large baseline can
+still require several GiB of free space. Only one compressed cache is retained.
+A validation or parse failure discards it; the next bounded attempt downloads
+it again.
+An interrupted body restarts without HTTP Range; pre-body retries use the shared
+bounded policy. The limit is **per archive**, not aggregate: an ordinary
+midnight sync can transfer the closed-day archive and current delta (up to
+2 GiB), and a seven-day catch-up can transfer up to eight archive bodies (up to
+8 GiB) besides metadata. A baseline fallback adds its own bounded transfer.
+Database batches are idempotent; completed bytes may be reused, and a failed or
+unfinished import never advances its cursor.
 
 CNA/ADP records retain descriptions, affected products, metrics, references,
 dates and visible published/rejected/reserved states. NVD keeps status and

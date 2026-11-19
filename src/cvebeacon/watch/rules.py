@@ -272,6 +272,7 @@ def _leaf_value(key: str, value: Any, path: str) -> Any:
         return _cwe_values(value, path)
     if schema.get("kind") == "strings":
         return _strings(value, path)
+
     _fail(path, "is not a known condition key")
     raise AssertionError("unreachable")
 

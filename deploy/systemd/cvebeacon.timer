@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CVEBeacon monitoring on a schedule
+
+[Timer]
+OnCalendar=*-*-* 07,19:00:00
+Persistent=true
+Unit=cvebeacon.service
+
+[Install]
+WantedBy=timers.target

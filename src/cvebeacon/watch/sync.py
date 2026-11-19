@@ -294,9 +294,7 @@ def _sync_cve_list(config, http, store, now, initial_mode=None):
         records, new, changed, identifiers = cve_list.sync(http, store, config.watch, now, initial_mode=initial_mode)
     except SourceError as exc:
         return SourceSummary("cve_list", http.requests - before, error=str(exc)), ()
-    pending = bool(store.metadata().get("cve_list_pending_until"))
-    return SourceSummary("cve_list", http.requests - before, records, new, changed,
-                        error="bounded delta catch-up pending; progress retained" if pending else None), identifiers
+    return SourceSummary("cve_list", http.requests - before, records, new, changed), identifiers
 
 
 def sync_watch(
@@ -993,11 +991,19 @@ def watch_status(watch: WatchConfig) -> str:
         progress = euvd_progress(meta)
         if progress:
             euvd_cursor += f" ({progress})"
+    cve_list_cursor = f"cve_list cursor: {meta.get('cve_list_cursor', 'not set')}"
+    if "cve_list" in watch.sources:
+        cve_list_cursor += (
+            f" (initial {meta.get('cve_list_initial_mode', 'not set')}, "
+            f"start {meta.get('cve_list_start', 'not set')}"
+            f"{', pending' if meta.get('cve_list_initial_pending') == '1' else ''})"
+        )
     lines = [
         f"database: {status['database']}",
         f"schema version: {meta.get('schema_version', 'unknown')}",
         f"nvd cursor: {meta.get('nvd_cursor', 'not set')}",
         euvd_cursor,
+        cve_list_cursor,
         f"epss score date: {status['epss_date'] or 'not set'}",
         f"rows: {status['rows']}",
         f"euvd items: {status['euvd_items']}",

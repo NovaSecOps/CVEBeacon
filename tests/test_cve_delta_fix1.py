@@ -10,15 +10,13 @@ from cvebeacon.watch import cve_list
 from cvebeacon.watch.store import WatchStore
 from cvebeacon.watch.sync import sync_watch
 from test_cve_explorer import official
-from test_cve_list_feed import Release, zipped
+from test_cve_list_feed import Release
 from watch_support import NOW, mock_client, nvd_page, write_config
-
-LOG = 'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json'
 
 
 def test_observed_midnight_release_names_are_accepted():
     payload = json.loads((Path(__file__).parent/'fixtures/cvelist_release_midnight.json').read_text())
-    with mock_client(lambda _: httpx.Response(200,json=payload)) as http:
+    with mock_client(lambda _: httpx.Response(200,json=[payload])) as http:
         assets,_ = cve_list.release(http,{})
     assert assets['baseline']['name'].endswith('.zip.zip')
     assert assets['delta']['size'] == 22
@@ -30,8 +28,10 @@ def test_added_source_defaults_to_no_history(tmp_path,initial):
     config=write_config(tmp_path,sources=('nvd','cve_list'),initial=initial)
     store=WatchStore(config.watch.database)
     store.record_baseline(nvd_cursor=NOW.isoformat(),initialized_at=NOW.isoformat(),initial_mode=initial)
-    with mock_client(lambda _: pytest.fail('newly added source downloaded history')) as http:
+    fixture=Release([official()])
+    with mock_client(fixture) as http:
         assert cve_list.sync(http,store,config.watch,NOW)[:3] == (0,0,0)
+    assert not any('/download/' in request.url.path for request in fixture.requests)
     assert store.metadata()['cve_list_initial_mode'] == 'baseline'
 
 
@@ -46,33 +46,6 @@ def test_cve_failure_cannot_hold_other_initial_sources_open(tmp_path):
     assert store.metadata().get('initial_sync_completed_at')
     store.evaluate_touched((),initial=report.initial_evaluation,complete=not report.failures)
     assert store.metadata().get('initial_evaluated_at')
-
-
-def test_day_change_uses_deltas_without_baseline_and_keeps_late_changes(tmp_path):
-    config=write_config(tmp_path,sources=('nvd','cve_list'))
-    store=WatchStore(config.watch.database)
-    since=datetime(2026,11,18,23,tzinfo=timezone.utc)
-    store.set_metadata({'cve_list_start':since.isoformat(),'cve_list_cursor':since.isoformat(),
-                        'cve_list_initial_mode':'baseline','cve_list_baseline_day':'2026-11-18'})
-    payload=json.loads((Path(__file__).parent/'fixtures/cvelist_release_midnight.json').read_text())
-    late=official()
-    late['cveMetadata']['dateUpdated']='2026-11-18T23:55:00Z'
-    snapshot=[{'fetchTime':'2026-11-19T00:01:00Z','numberOfChanges':1,'new':[{'cveId':late['cveMetadata']['cveId'],'dateUpdated':'2026-11-18T23:55:00Z'}],'updated':[],'error':[]},
-              {'fetchTime':'2026-10-25T00:00:00Z','numberOfChanges':0,'new':[],'updated':[],'error':[]}]
-    def handler(request):
-        if str(request.url)==cve_list.RELEASE_URL:
-            return httpx.Response(200,json=payload)
-        if str(request.url)==LOG:
-            return httpx.Response(200,json=snapshot)
-        if request.url.path.endswith(late['cveMetadata']['cveId']+'.json'):
-            return httpx.Response(200,json=late)
-        if '_delta_' in request.url.path:
-            return httpx.Response(200,content=zipped([]))
-        pytest.fail('unexpected baseline or nonlocal request')
-    with mock_client(handler) as http:
-        cve_list.sync(http,store,config.watch,datetime(2026,11,19,0,35,tzinfo=timezone.utc))
-    assert store.view(late['cveMetadata']['cveId']) is not None
-    assert store.metadata()['cve_list_cursor'] >= '2026-11-19T00:01:00'
 
 
 def test_zip_member_limit_precedes_zipfile_allocation(monkeypatch):
@@ -130,37 +103,6 @@ def test_retention_gap_uses_one_baseline_then_returns_to_deltas(tmp_path):
     assert store.view('CVE-2026-10001') is not None
 
 
-def test_log_record_budget_resumes_without_reloading_metadata(tmp_path,monkeypatch):
-    config=write_config(tmp_path,sources=('nvd','cve_list'))
-    store=WatchStore(config.watch.database)
-    start=(NOW-timedelta(days=1)).isoformat()
-    store.set_metadata({'cve_list_start':start,'cve_list_cursor':start,'cve_list_initial_mode':'baseline'})
-    records=[official(f'CVE-2026-{20000+i}') for i in range(3)]
-    group={'fetchTime':NOW.isoformat(),'numberOfChanges':3,'new':[{'cveId':r['cveMetadata']['cveId']} for r in records],'updated':[],'error':[]}
-    old={'fetchTime':(NOW-timedelta(days=30)).isoformat(),'numberOfChanges':0,'new':[],'updated':[],'error':[]}
-    fixture=Release([official()])
-    requests=[]
-    def handler(request):
-        requests.append(request)
-        if str(request.url)==LOG:
-            return httpx.Response(200,json=[group,old])
-        for record in records:
-            if request.url.path.endswith(record['cveMetadata']['cveId']+'.json'):
-                return httpx.Response(200,json=record)
-        return fixture(request)
-    monkeypatch.setattr(cve_list,'MAX_LOOKUPS',2)
-    with mock_client(handler) as http:
-        cve_list.sync(http,store,config.watch,NOW)
-        assert store.search().total==2
-        assert store.metadata()['cve_list_pending_until']
-        checkpoint=len(requests)
-        cve_list.sync(http,store,config.watch,NOW)
-    assert len(requests)-checkpoint==1
-    assert store.search().total==3
-    assert not store.metadata()['cve_list_pending_until']
-    assert not any('_all_CVEs_' in request.url.path for request in requests)
-
-
 def test_inconsistent_zip_counts_cannot_allocate_directory_objects(tmp_path,monkeypatch):
     import struct
     from cvebeacon.errors import SourceError
@@ -184,29 +126,8 @@ def test_unconfirmed_pre_fix_history_marker_does_not_authorize_download(tmp_path
     store=WatchStore(config.watch.database)
     store.record_baseline(nvd_cursor=NOW.isoformat(),initialized_at=NOW.isoformat(),initial_mode='full')
     store.set_metadata({'cve_list_start':NOW.isoformat(),'cve_list_initial_mode':'full'})
-    with mock_client(lambda _:pytest.fail('unconfirmed pre-fix marker authorized history')) as http:
+    fixture=Release([official()])
+    with mock_client(fixture) as http:
         cve_list.sync(http,store,config.watch,NOW)
+    assert not any('/download/' in request.url.path for request in fixture.requests)
     assert store.metadata()['cve_list_initial_mode']=='baseline'
-
-
-def test_an_archive_cannot_ack_a_later_log_change(tmp_path):
-    config=write_config(tmp_path,sources=('nvd','cve_list'))
-    store=WatchStore(config.watch.database)
-    start=(NOW-timedelta(days=1)).isoformat()
-    store.set_metadata({'cve_list_start':start,'cve_list_cursor':start,'cve_list_initial_mode':'baseline'})
-    previous=official(description='archive version')
-    previous['cveMetadata']['dateUpdated']=(NOW-timedelta(hours=1)).isoformat()
-    latest=official(description='later log version')
-    latest['cveMetadata']['dateUpdated']=(NOW+timedelta(minutes=30)).isoformat()
-    fixture=Release([previous],[previous])
-    group={'fetchTime':(NOW+timedelta(minutes=30)).isoformat(),'numberOfChanges':1,'new':[{'cveId':'CVE-2026-10001'}],'updated':[],'error':[]}
-    old={'fetchTime':(NOW-timedelta(days=30)).isoformat(),'numberOfChanges':0,'new':[],'updated':[],'error':[]}
-    def handler(request):
-        if str(request.url)==LOG:
-            return httpx.Response(200,json=[group,old])
-        if request.url.path.endswith('CVE-2026-10001.json'):
-            return httpx.Response(200,json=latest)
-        return fixture(request)
-    with mock_client(handler) as http:
-        cve_list.sync(http,store,config.watch,NOW+timedelta(hours=1))
-    assert store.view('CVE-2026-10001').description=='later log version'

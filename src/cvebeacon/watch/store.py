@@ -62,7 +62,7 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -134,9 +134,6 @@ _SCHEMA = (
     )""",
     """CREATE TABLE IF NOT EXISTS watch_euvd_override (
         cve_id TEXT PRIMARY KEY, items_json TEXT NOT NULL, checked_at TEXT NOT NULL
-    )""",
-    """CREATE TABLE IF NOT EXISTS watch_cve_list_queue (
-        cve_id TEXT PRIMARY KEY, fetch_time TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS watch_initial_cve (
         cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
@@ -308,15 +305,6 @@ _SCHEMA = (
 )
 
 
-_PROVIDER_COLUMNS = {
-    "watch_origin": {"cve_id", "source"},
-    "watch_provider": {"cve_id", "source", "record_json", "payload_json", "source_updated", "checked_at"},
-    "watch_search": {"cve_id", "source", "text"},
-    "watch_source_check": {"cve_id", "source", "present", "checked_at", "error"},
-    "watch_euvd_override": {"cve_id", "items_json", "checked_at"},
-    "watch_cve_list_queue": {"cve_id", "fetch_time"},
-    "watch_initial_cve": {"cve_id", "source"},
-}
 _TEAMS_BOT_COLUMNS = {
     "watch_teams_bot_conversation": {"tenant_id", "app_id", "recipient", "service_url", "conversation_id"},
     "watch_teams_bot_delivery": {"channel", "tenant_id", "app_id", "recipient", "message_key", "status",
@@ -515,6 +503,18 @@ def _euvd_sql_rank(exploited, updated, identifier):
     return f"{rank[0]}\0{rank[1]}\0{numeric}"
 
 
+def _euvd_covers_observation(updated, scoped_updated, checked_at):
+    if not updated:
+        return False
+    def timestamp(value):
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+    try:
+        return timestamp(updated) >= timestamp(scoped_updated or checked_at)
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 class WatchStore:
     def __init__(self, path: str | Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self.path = Path(path)
@@ -585,10 +585,10 @@ class WatchStore:
             else:
                 db.execute("BEGIN")
                 existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('schema_version','provider_storage','teams_bot_storage')")) if 'watch_meta' in existing else {}
+                meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('schema_version','provider_storage')")) if 'watch_meta' in existing else {}
                 if meta.get('provider_storage') != 'sparse-v1':
                     overlays = {'watch_origin','watch_provider','watch_search','watch_source_check',
-                                'watch_euvd_override','watch_cve_list_queue','watch_initial_cve'}
+                                'watch_euvd_override','watch_initial_cve'}
                     for statement in _SCHEMA:
                         if statement.startswith("CREATE TABLE IF NOT EXISTS "):
                             name = statement.split()[5]
@@ -612,7 +612,6 @@ class WatchStore:
                     meta.get("schema_version") == str(SCHEMA_VERSION)
                     and meta.get("provider_storage") == "sparse-v1"
                     and meta.get("teams_bot_storage") == "durable-v1"
-                    and self._storage_columns_present(db, _PROVIDER_COLUMNS)
                     and self._storage_columns_present(db, _TEAMS_BOT_COLUMNS)
                 ):
                     if not _alert_columns_current(db):
@@ -633,7 +632,6 @@ class WatchStore:
         if not rows:
             for statement in _SCHEMA:
                 db.execute(statement)
-            cls._ensure_provider_schema(db)
             cls._ensure_teams_bot_schema(db)
             db.execute(
                 "INSERT INTO watch_meta(key,value) VALUES ('schema_version',?)",
@@ -647,15 +645,32 @@ class WatchStore:
             cls._set_meta(db, {"provider_storage": "sparse-v1"})
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5", "6", "7", "8"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5", "6", "7", "8", "9"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
                 "watch database was created by a pre-release build; "
                 "delete it and run `watch sync` again"
             )
+        version_number = int(version)
+        for minimum, table, column in (
+            (2, "watch_euvd_item", "vendors_json"),
+            (3, "watch_event", "details_json"),
+            (4, "watch_delivery", "first_attempt_at"),
+        ):
+            if version_number < minimum:
+                continue
+            columns = {
+                row["name"]
+                for row in db.execute(f"PRAGMA table_info({table})")
+            }
+            if columns and column not in columns:
+                raise StateError(
+                    "watch database cannot be migrated from schema "
+                    f"{version}: missing {table}.{column}"
+                )
         for statement in _SCHEMA:
             db.execute(statement)
         if version == "1":
@@ -704,11 +719,20 @@ class WatchStore:
         # Existing NVD and EUVD data stay in their original tables. No row
         # rebuild, JSON validation, provider copy or search backfill is needed.
         # Extra legacy columns are deliberately left untouched.
-        if db.execute("SELECT 1 FROM watch_provider WHERE source='nvd' LIMIT 1").fetchone():
+        storage = db.execute("SELECT value FROM watch_meta WHERE key='provider_storage'").fetchone()
+        if version == "8" and (storage is None or storage[0] != 'sparse-v1'):
             # Recover the pre-release provider-copy layout without retaining
             # duplicated NVD payloads. Normal schema-7 upgrades skip this path.
-            columns = ",".join(f"{name}=json_extract(p.record_json,'$.{name}')" for name in _NVD_CONTENT_COLUMNS)
-            db.execute(f"UPDATE watch_cve AS c SET {columns} FROM watch_provider p WHERE p.cve_id=c.cve_id AND p.source='nvd'")
+            for provider in db.execute("SELECT cve_id,record_json FROM watch_provider WHERE source='nvd'"):
+                identifier = provider['cve_id']
+                try:
+                    content = json.loads(provider['record_json'])
+                    record = cls._record({'cve_id': identifier, **content})
+                except (TypeError, ValueError, StateError) as exc:
+                    raise StateError(f"invalid pre-release NVD provider for {identifier}; restore or repair it before upgrading") from exc
+                restored = _nvd_content(record)
+                assignments = ','.join(name + '=?' for name in _NVD_CONTENT_COLUMNS)
+                db.execute(f"UPDATE watch_cve SET {assignments} WHERE cve_id=?", (*[restored[name] for name in _NVD_CONTENT_COLUMNS], identifier))
             db.execute("INSERT OR IGNORE INTO watch_origin SELECT c.cve_id,min(p.source) FROM watch_cve c JOIN watch_provider p ON p.cve_id=c.cve_id WHERE NOT EXISTS(SELECT 1 FROM watch_provider n WHERE n.cve_id=c.cve_id AND n.source='nvd') GROUP BY c.cve_id")
             db.execute("DELETE FROM watch_provider WHERE source='nvd'")
             db.execute("DELETE FROM watch_search WHERE cve_id NOT IN (SELECT cve_id FROM watch_provider)")
@@ -723,13 +747,13 @@ class WatchStore:
                 payload = json.loads(row["payload_json"])
                 text = description_text(payload) if row["source"] == "cve_list" else payload.get("description") or ""
                 db.execute("INSERT INTO watch_search VALUES (?,?,?)", (row["cve_id"], row["source"], text))
-        cls._ensure_provider_schema(db)
         cls._ensure_teams_bot_schema(db)
         cls._ensure_search(db)
         cls._set_meta(db, {"schema_version": str(SCHEMA_VERSION), "provider_storage": "sparse-v1"})
 
     @staticmethod
     def _ensure_search(db: sqlite3.Connection) -> None:
+        existed = db.execute("SELECT 1 FROM sqlite_master WHERE name='watch_fts'").fetchone() is not None
         try:
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS watch_fts USING fts5(cve_id UNINDEXED,text,content='watch_search',content_rowid='rowid')")
         except sqlite3.OperationalError as exc:
@@ -742,7 +766,7 @@ class WatchStore:
             ("update", "UPDATE", "INSERT INTO watch_fts(watch_fts,rowid,cve_id,text) VALUES ('delete',old.rowid,old.cve_id,old.text); INSERT INTO watch_fts(rowid,cve_id,text) VALUES (new.rowid,new.cve_id,new.text);"),
         ):
             db.execute(f"CREATE TRIGGER IF NOT EXISTS watch_search_{name} AFTER {event} ON watch_search BEGIN {action} END")
-        if db.execute("SELECT 1 FROM watch_search LIMIT 1").fetchone():
+        if not existed and db.execute("SELECT 1 FROM watch_search LIMIT 1").fetchone():
             db.execute("INSERT INTO watch_fts(watch_fts) VALUES ('rebuild')")
 
     @staticmethod
@@ -753,13 +777,8 @@ class WatchStore:
         )
 
     @classmethod
-    def _ensure_provider_schema(cls, db: sqlite3.Connection) -> None:
-        if not cls._storage_columns_present(db, _PROVIDER_COLUMNS):
-            raise StateError("unsupported provider storage layout; refusing to skip migration")
-
-    @classmethod
     def _ensure_teams_bot_schema(cls, db: sqlite3.Connection) -> None:
-        """Validate bot tables after the schema 7 to 8 migration."""
+        """Validate bot tables after the schema 8 to 9 migration."""
         if not cls._storage_columns_present(db, _TEAMS_BOT_COLUMNS):
             raise StateError("unsupported Teams bot storage layout; refusing to skip migration")
         db.execute(
@@ -1187,6 +1206,7 @@ class WatchStore:
         return known
 
     def _upsert_provider(self, source, records, *, meta=None, catalogs=(), initial=False) -> StepCounts:
+        from .cve_list import description_text
         self.initialize()
         now = _timestamp(self._clock)
         written = []
@@ -1194,10 +1214,40 @@ class WatchStore:
         with self.transaction() as db:
             for record, payload in records:
                 content, raw = canonical_json(_nvd_content(record)), canonical_json(payload)
-                previous = db.execute("SELECT record_json,payload_json FROM watch_provider WHERE cve_id=? AND source=?",
+                previous = db.execute("SELECT record_json,payload_json,source_updated FROM watch_provider WHERE cve_id=? AND source=?",
                                       (record.cve_id, source)).fetchone()
+                updated = None
+                source_updated = record.last_modified
+                if source == "cve_list":
+                    metadata = payload.get("cveMetadata") if isinstance(payload, dict) else None
+                    raw_updated = metadata.get("dateUpdated") if isinstance(metadata, dict) else None
+                    updated = self._parse_timestamp(raw_updated)
+                    stored = None
+                    if previous is not None:
+                        try:
+                            previous_payload = json.loads(previous["payload_json"])
+                        except (TypeError, ValueError):
+                            previous_payload = None
+                        previous_metadata = (previous_payload.get("cveMetadata")
+                                             if isinstance(previous_payload, dict) else None)
+                        previous_updated = (previous_metadata.get("dateUpdated")
+                                            if isinstance(previous_metadata, dict) else None)
+                        stored = self._parse_timestamp(previous_updated)
+                    if updated is not None and stored is not None and updated < stored:
+                        # Both observations carry a valid date: the newer one
+                        # wins.
+                        unchanged += 1
+                        continue
+                    if updated is None:
+                        # With no usable incoming date, the observation fetched
+                        # now wins. Retain the last known valid revision for
+                        # display.
+                        source_updated = None
+                        if previous is not None and previous["source_updated"]:
+                            if self._parse_timestamp(previous["source_updated"]) is not None:
+                                source_updated = previous["source_updated"]
                 db.execute("INSERT INTO watch_provider VALUES (?,?,?,?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET record_json=excluded.record_json,payload_json=excluded.payload_json,source_updated=excluded.source_updated,checked_at=excluded.checked_at",
-                           (record.cve_id, source, content, raw, record.last_modified, now))
+                           (record.cve_id, source, content, raw, source_updated, now))
                 if previous and previous["record_json"] == content and previous["payload_json"] == raw:
                     unchanged += 1
                     continue
@@ -1207,7 +1257,6 @@ class WatchStore:
                     self._write_nvd(db, WatchRecord(record.cve_id, "published"), now)
                     db.execute("INSERT INTO watch_origin VALUES (?,?)", (record.cve_id, source))
                 written.append(record.cve_id)
-                from .cve_list import description_text
                 text = description_text(payload) if source == "cve_list" else payload.get("description") or ""
                 db.execute("INSERT INTO watch_search VALUES (?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET text=excluded.text", (record.cve_id, source, text))
                 if source == "cve_list" and initial:
@@ -1353,9 +1402,6 @@ class WatchStore:
             for euvd_id in sorted(by_id):
                 update = by_id[euvd_id]
                 cve_ids = tuple(sorted(set(update.cve_ids)))
-                for value in cve_ids:
-                    if db.execute("DELETE FROM watch_euvd_override WHERE cve_id=? AND checked_at<=?", (value, now)).rowcount:
-                        touched.add(value)
                 cve_ids_json = canonical_json(list(cve_ids))
                 vendors_json = _vendors_json(update.vendors)
                 score = update.cvss.score if update.cvss is not None else None
@@ -1399,6 +1445,26 @@ class WatchStore:
                     )
                     outcomes.append((euvd_id, "unchanged"))
                     continue
+                # Reconcile this advisory only, including aliases it removed.
+                # A later observation of unchanged/older data must not erase a
+                # newer scoped refresh (or other advisories in that refresh).
+                for identifier in old_aliases | set(cve_ids):
+                    override = db.execute("SELECT items_json,checked_at FROM watch_euvd_override WHERE cve_id=?", (identifier,)).fetchone()
+                    if override is None:
+                        continue
+                    items = json.loads(override[0])
+                    retained = [
+                        item for item in items
+                        if item['euvd_id'] != euvd_id
+                        or not _euvd_covers_observation(update.date_updated, item.get('date_updated'), override['checked_at'])
+                    ]
+                    if len(retained) == len(items):
+                        continue
+                    if retained:
+                        db.execute("UPDATE watch_euvd_override SET items_json=? WHERE cve_id=?", (canonical_json(retained), identifier))
+                    else:
+                        db.execute("DELETE FROM watch_euvd_override WHERE cve_id=?", (identifier,))
+                    touched.add(identifier)
                 if row is None:
                     db.execute(
                         "INSERT INTO watch_euvd_item("
@@ -1650,7 +1716,10 @@ class WatchStore:
                 if meta.get('cve_list_initial_mode') == 'full':
                     source_backlog = date(1999,1,1)
                 elif meta.get('cve_list_start'):
-                    source_backlog = date.fromisoformat(meta['cve_list_start'][:10])
+                    try:
+                        source_backlog = date.fromisoformat(meta['cve_list_start'][:10])
+                    except ValueError:
+                        source_backlog = None
             view = self._view(db, identifier, catalogs)
             if view is None:
                 continue
@@ -1710,7 +1779,7 @@ class WatchStore:
                             reasons_json,
                             details_json,
                             event.occurrence,
-                            1 if event.initial or ((initial or source_initial) and event.kind == "match") else 0,
+                            1 if event.initial or source_initial or (initial and event.kind == "match") else 0,
                             stamp,
                         ),
                     )

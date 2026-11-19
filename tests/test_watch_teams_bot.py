@@ -368,7 +368,7 @@ def test_migrate_version_seven_preserves_existing_state(raw, tmp_path):
     reopened = WatchStore(store.path)
     reopened.initialize()
     reopened.initialize()
-    assert reopened.metadata()["schema_version"] == "8"
+    assert reopened.metadata()["schema_version"] == "9"
     assert rows(reopened) == before
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT * FROM watch_event").fetchall() == original_events
@@ -806,8 +806,8 @@ def test_authentic_schema_seven_upgrade_preserves_all_existing_rows(tmp_path):
     store = WatchStore(path)
     store.initialize()
     store.initialize()
-    assert SCHEMA_VERSION == 8
-    assert store.metadata()["schema_version"] == "8"
+    assert SCHEMA_VERSION == 9
+    assert store.metadata()["schema_version"] == "9"
     assert store.metadata()["provider_storage"] == "sparse-v1"
     assert store.metadata()["teams_bot_storage"] == "durable-v1"
     with sqlite3.connect(path) as db:
@@ -830,11 +830,11 @@ def test_unknown_bot_layout_fails_without_advancing_schema(raw, tmp_path):
     store = seed(config(raw, tmp_path))
     with sqlite3.connect(store.path) as db:
         db.execute("ALTER TABLE watch_teams_bot_batch RENAME COLUMN messages_json TO invalid")
-        db.execute("UPDATE watch_meta SET value='8' WHERE key='schema_version'")
+        db.execute("UPDATE watch_meta SET value='9' WHERE key='schema_version'")
     with pytest.raises(StateError, match="storage layout"):
         store.initialize()
     with sqlite3.connect(store.path) as db:
-        assert db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone() == ("8",)
+        assert db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone() == ("9",)
 
 
 @pytest.mark.parametrize("ok", [False, True])
@@ -873,7 +873,7 @@ def test_bot_documentation_and_manifest_contract():
     assert "smba.trafficmanager.net" in network and "Teams bot Connector" in network
     assert "protected files" in network and "TEAMS.md" in network
     assert "protected files" in (root / "README.md").read_text()
-    assert "schema is version 8" in watch and "`teams_bot`" in watch.split("Common keys:", 1)[1].split("- `enabled`", 1)[0]
+    assert "schema is version 9" in watch and "`teams_bot`" in watch.split("Common keys:", 1)[1].split("- `enabled`", 1)[0]
     assert "schema 7 to 8" in (root / "docs/UPGRADING.md").read_text()
     assert "placeholder" in guide and "https://example.com/api/messages" in guide
     assert "Object IDs and UPNs must both belong" in guide
@@ -939,7 +939,7 @@ def test_approved_origin_preserves_regional_service_paths(raw, tmp_path, prefix,
 def test_upgrade_guide_covers_existing_custom_bot_urls_and_supported_schemas():
     from pathlib import Path
     guide = (Path(__file__).resolve().parents[1] / "docs/UPGRADING.md").read_text()
-    assert "schema 7 to 8" in guide
+    assert "schema 8 to 9" in guide
     assert "Teams bot" in guide and "provider" in guide
     assert "custom HTTPS" in guide and "remove the channel" in guide
     assert "origin" in guide and "regional" in guide

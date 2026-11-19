@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Updates · CVEBeacon{% endblock %}
+{% block content %}
+<h1>Updates</h1>
+<p>Current version: {{ current }}</p>
+{% if not enabled %}<p>Updates are disabled. An administrator can enable signed release updates using the <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">upgrade guide</a>.</p>{% endif %}
+{% if notice %}<p>{{ notice }} <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">Upgrade instructions</a></p>{% endif %}
+<p>Available version: {{ status.available or 'No newer release checked' }}</p>
+<p>Last check: {{ status.last_check or 'Never' }}</p>
+{% if status.last_request %}<p>Last request: {{ status.last_request.result }} ({{ status.last_request.version or 'unspecified version' }}) at {{ status.last_request.time }}</p>{% endif %}
+{% if status.notes %}<h2>Release notes</h2><pre>{{ status.notes }}</pre>{% endif %}
+{% if status.last_update %}<p>Last update: {{ status.last_update.result }} ({{ status.last_update.version }}) at {{ status.last_update.time }}</p>{% endif %}
+{% if status.last_update and status.last_update.warning %}<p role="alert">{{ status.last_update.warning }}</p>{% endif %}
+{% if accounts and current_user.is_admin and enabled %}
+<form method="post" action="{{ url_for('updates.check_now') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Check for updates</button></form>
+{% if status.available and not notice %}<form method="post" action="{{ url_for('updates.queue') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ status.available }}"><button>Update now</button></form><p>The administrator updater verifies the release and backs up state before applying this request.</p>{% endif %}
+{% endif %}
+{% endblock %}

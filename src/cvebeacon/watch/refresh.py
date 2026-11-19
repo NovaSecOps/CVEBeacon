@@ -17,7 +17,7 @@ from .sync import SourceSummary, SyncReport, _require_enabled
 
 
 class _LookupHTTP:
-    """Keep per-ID replies and the small KEV catalogs within 8 MiB."""
+    """Cap CVE List records at 4 MiB and other lookup/catalog replies at 8 MiB."""
     def __init__(self, http):
         self.http = http
 
@@ -28,7 +28,8 @@ class _LookupHTTP:
     def get_json(self, url, *, source, **kwargs):
         allowed = {key: value for key, value in kwargs.items()
                    if key in {"params", "headers", "minimum_interval"}}
-        raw = b"".join(self.http.stream_bytes(url, source=source, byte_cap=8 * 1024 * 1024, **allowed))
+        cap = 4 * 1024 * 1024 if source == "cve_list" else 8 * 1024 * 1024
+        raw = b"".join(self.http.stream_bytes(url, source=source, byte_cap=cap, **allowed))
         try:
             return json.loads(raw)
         except (ValueError, UnicodeError) as exc:
