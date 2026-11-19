@@ -114,8 +114,8 @@ def test_guided_upload_to_watch_only_with_permissions_and_audit(deployment):
     saved = submit(manager, detail, mapping)
     assert saved.status_code == 303
     saved_page = manager.get(saved.location)
-    assert "next scheduled scan will include it automatically" in saved_page.text
-    assert "Last upload" in saved_page.text and "by manager" in saved_page.text
+    assert "Inventory saved." in saved_page.text
+    assert "Last inventory change" in saved_page.text and "by manager" in saved_page.text
     assert "Run a scan now" not in saved_page.text
     assert "Run a scan now" in _admin(app).get(detail).text
     row, = current(manager, detail)
@@ -252,3 +252,150 @@ def test_stale_preview_cannot_replace_a_newer_save(deployment):
     assert submit(browser, detail, newest).status_code == 303
     assert submit(browser, detail, stale).status_code == 409
     assert current(browser, detail)[0]["asset_id"] == "newer-asset"
+
+
+def test_multiline_notes_and_safe_field_error(deployment):
+    _, _, _, browser = deployment
+    fields = {"csrf": csrf(browser, ADD), "name": "Example", "notes": "First\r\nSecond\rThird"}
+    response = browser.post(ADD, data=fields)
+    assert response.status_code == 303
+    assert "First\nSecond\nThird" in browser.get(response.location).text
+    response = browser.post(ADD, data={**fields, "name": "Another", "notes": "bad\x07"})
+    assert response.status_code == 400 and "Notes contain an unsupported character" in response.text
+
+
+def test_restore_after_removing_the_only_inventory_and_restarting(tmp_path):
+    config = write_config(tmp_path, inventory=False, enabled=False, extra="[inventory]\nmanaged=true\n")
+    users = UserStore(config.watch.users_database)
+    users.add("admin", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
+    browser = _admin(create_app(config))
+    detail = add(browser)
+    assert submit(browser, detail, upload(browser, detail)).status_code == 303
+    assert change(browser, detail, "remove", confirm="remove").status_code == 303
+    from cvebeacon.config import load_config
+    restarted = _admin(create_app(load_config(config.config_path)))
+    selected = re.search(r'name="version" value="([0-9TZ]+)"', restarted.get(detail).text)[1]
+    assert change(restarted, detail, "restore", version=selected).status_code == 303
+    assert current(restarted, detail)[0]["asset_id"] == "private-asset"
+
+
+def test_corrupt_version_gives_recovery_guidance(deployment):
+    config, _, _, browser = deployment
+    detail = add(browser)
+    assert submit(browser, detail, upload(browser, detail)).status_code == 303
+    assert submit(browser, detail, upload(browser, detail)).status_code == 303
+    archived, = config.inventory_directory.glob("*.*.json")
+    archived.write_text("private-corrupt-version")
+    response = change(browser, detail, "restore", version=archived.name.split(".")[1])
+    assert response.status_code == 409
+    assert "Choose another version" in response.text
+    assert "private-corrupt-version" not in response.text
+
+
+@pytest.mark.parametrize("installed", ("watch", "none", "both"))
+def test_client_page_explains_the_installed_schedule(deployment, monkeypatch, installed):
+    from types import SimpleNamespace
+    from cvebeacon import scheduling
+
+    config, _, app, browser = deployment
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    if installed == "none":
+        output = b""
+    else:
+        plan = scheduling.make_plan(config.config_path, 4, system="linux", command=installed)
+        expected = ["watch", "run"] if installed == "watch" else ["run"]
+        assert plan.command[-len(expected):] == expected
+        lines = [scheduling.CRON_BEGIN, *scheduling._cron_lines(plan), scheduling.CRON_END]
+        output = "\n".join(lines).encode()
+
+    def fake_scheduler(argv, **kwargs):
+        assert argv == ["crontab", "-l"]
+        return SimpleNamespace(returncode=0, stdout=output, stderr=b"")
+
+    app.extensions["dashboard_schedule_runner"] = fake_scheduler
+    detail = add(browser)
+    page = browser.get(submit(browser, detail, upload(browser, detail)).location)
+    if installed == "both":
+        assert "Your next scheduled scan will include this inventory." in page.text
+    else:
+        assert "runs watch jobs only" in page.text if installed == "watch" else "no installed native schedule" in page.text
+        assert 'href="/operations/schedule">Schedule</a>' in page.text
+        assert "Your next scheduled scan" not in page.text
+
+
+def test_scan_submission_respects_run_permission(deployment, monkeypatch):
+    from types import SimpleNamespace
+
+    _, _, app, manager = deployment
+    detail = add(manager)
+    assert submit(manager, detail, upload(manager, detail)).status_code == 303
+    submitted = []
+
+    def fake_submit(operation, **kwargs):
+        submitted.append((operation, kwargs["started_by"]))
+        return SimpleNamespace(id=42)
+
+    monkeypatch.setattr(app.extensions["dashboard_jobs"], "submit", fake_submit)
+    path = "/operations/run"
+    assert manager.post(path, data={"csrf": csrf(manager, detail), "operation": "scan"}).status_code == 403
+    admin = _admin(app)
+    result = admin.post(path, data={"csrf": csrf(admin, detail), "operation": "scan"})
+    assert result.status_code == 303 and result.location == "/operations/jobs/42"
+    assert submitted == [("scan", "admin")]
+
+
+def test_corrupt_inventory_blocks_cli_export_and_dashboard_download(deployment, tmp_path, monkeypatch, capsys):
+    from cvebeacon import cli
+
+    config, _, app, browser = deployment
+    corrupted = add(browser, "Unreadable client")
+    healthy = add(browser, "Healthy client")
+    assert submit(browser, corrupted, upload(browser, corrupted)).status_code == 303
+    contents = CSV.replace(b"private-asset", b"healthy")
+    assert submit(browser, healthy, upload(browser, healthy, contents)).status_code == 303
+    path = config.inventory_directory / f"{client_key('Unreadable client')}.json"
+    path.write_text("PRIVATE-INVENTORY-CONTENTS")
+    monkeypatch.setattr(cli, "_run_query", lambda *a, **kw: pytest.fail("queried with incomplete inventory"))
+
+    admin = _admin(app)
+    reports = admin.get("/reports")
+    assert "Unreadable client" in reports.text and "Generate and download" not in reports.text
+    result = admin.post("/reports", data={"csrf": csrf(admin, healthy), "format": "json"})
+    assert result.status_code == 409 and "Content-Disposition" not in result.headers
+    assert "Unreadable client" in result.text
+    assert path.stem not in result.text and "PRIVATE-INVENTORY-CONTENTS" not in result.text
+    command = ["--config", str(config.config_path)]
+    output = tmp_path / "report.json"
+    assert cli.main([*command, "export", "--format", "json", "--output", str(output)]) == 4
+    assert not output.exists()
+    assert cli.main([*command, "asset", "healthy"]) == 4
+    assert "unreadable client inventories" in capsys.readouterr().err
+
+
+def test_combined_schedule_can_be_installed_before_the_first_upload(deployment, monkeypatch):
+    from types import SimpleNamespace
+    from cvebeacon import dashboard_ops, scheduling
+
+    config, _, app, _ = deployment
+    installed = []
+    monkeypatch.setattr(dashboard_ops, "_running_as_root", lambda: False)
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+
+    def fake_scheduler(argv, **kwargs):
+        if argv == ["crontab", "-"]:
+            installed.append(kwargs["input"].decode())
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    app.extensions["dashboard_schedule_runner"] = fake_scheduler
+    admin = _admin(app)
+    path = "/operations/schedule"
+    assert config.effective_inventory is None
+    assert '<option value="both"' in admin.get(path).text
+    response = admin.post(path + "/install", data={
+        "csrf": csrf(admin, path), "mode": "interval", "every": "4", "command": "both",
+    })
+    assert response.status_code == 303
+    block, = installed
+    rendered = scheduling._describe_cron_block(block)
+    assert scheduling.installed_scan_state(rendered, config.config_path) == "scan"
+    assert "watch run" not in block

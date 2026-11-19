@@ -12,11 +12,13 @@ import unicodedata
 
 from .errors import ConfigurationError, InventoryValidationError, StateError, ValidationIssue
 from .private_storage import private_directory
-from .web_assets import client_key, client_label, replace_bytes
+from .inventory_journal import pending_exists, recover, sync_directory
+from .web_assets import client_key as web_client_key, client_label
 from .web_inventory import MAX_BYTES, decode_json, read_bytes, read_contract
 
 LOG = logging.getLogger("cvebeacon")
 KEY = re.compile(r"[0-9a-f]{64}")
+MANAGED_FILE = re.compile(r"[0-9a-f]{64}(?:\.client|(?:\.[0-9]{8}T[0-9]{12}Z)?\.json)")
 VERSION = re.compile(r"[0-9]{8}T[0-9]{12}Z")
 HISTORY_LIMIT = 5
 
@@ -30,23 +32,38 @@ def normalized_client(value):
     return client_label(unicodedata.normalize("NFKC", value).strip())
 
 
-def inventory_files(directory):
-    """Exclude archived versions from monitoring."""
+def client_key(value):
+    """Normalize managed names without changing existing web asset filenames."""
+    return web_client_key(normalized_client(value))
+
+
+def _names(directory):
+    try:
+        # Avoid following an unrelated legacy symlink.
+        if not directory.is_symlink():
+            return tuple(directory.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    return ()
+
+
+def is_managed_file(path):
+    return MANAGED_FILE.fullmatch(path.name) is not None
+
+
+def inventory_files(directory, *, configured=None):
     return sorted(
-        path for path in directory.iterdir()
-        if path.suffix == ".json" and not VERSION.fullmatch(path.stem.rsplit(".", 1)[-1])
+        path for path in _names(directory)
+        if path != configured and path.suffix == ".json" and KEY.fullmatch(path.stem)
     )
 
 
 def has_managed_inventory(directory):
-    try:
-        if directory.is_symlink():
-            return True  # Surface unsafe storage through validation.
-        return bool(inventory_files(directory))
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+    return bool(inventory_files(directory))
+
+
+def has_managed_storage(directory):
+    return pending_exists(directory) or any(is_managed_file(path) for path in _names(directory))
 
 
 def read_inventory(data, *, client=None):
@@ -57,13 +74,13 @@ def read_inventory(data, *, client=None):
     return assets
 
 
-def append_managed_inventory(assets, directory, *, warnings=None, candidate=None):
+def append_managed_inventory(assets, directory, *, configured=None, users_path=None, warnings=None, candidate=None):
     merged = list(assets)
     seen = {asset.asset_id.casefold(): asset.client or "Unassigned" for asset in assets}
-    paths = []
-    if directory.exists() or directory.is_symlink():
+    recover(directory, users_path)
+    paths = inventory_files(directory, configured=configured)
+    if paths:
         private_directory(directory, owner_only=True)
-        paths = inventory_files(directory)
 
     def merge(rows):
         for asset in rows:
@@ -81,10 +98,15 @@ def append_managed_inventory(assets, directory, *, warnings=None, candidate=None
             continue
         try:
             rows = read_inventory(read_bytes(path))
-            if KEY.fullmatch(path.stem) and client_key(rows[0].client) != path.stem:
+            if client_key(rows[0].client) != path.stem:
                 raise ValueError("file key does not match the client label")
         except (OSError, ValueError, InventoryValidationError, StateError):
-            message = f"Skipping invalid client inventory {path.name}; replace it from the Clients page."
+            try:
+                label = read_profile(directory, path.stem)["name"]
+            except (OSError, ValueError, ConfigurationError, StateError):
+                label = None
+            subject = f" for {label!r}" if label else " for an unidentified client"
+            message = f"Skipping invalid client inventory{subject}. Upload a replacement from the Clients page."
             LOG.warning("%s", message)
             if warnings is not None:
                 warnings.append(message)
@@ -102,18 +124,19 @@ def read_profile(directory: Path, key: str):
     data = decode_json(read_bytes(directory / f"{key}.client", 16384))
     if (not isinstance(data, dict) or set(data) != {"name", "notes", "contact"}
             or not all(isinstance(value, str) for value in data.values())
-            or normalized_client(data["name"]) != data["name"]
             or client_key(data["name"]) != key):
         raise ValueError("invalid client profile")
-    return data
+    return {**data, "name": normalized_client(data["name"])}
 
 
-def profiles(directory):
-    if not directory.exists() and not directory.is_symlink():
+def profiles(directory, users_path=None):
+    recover(directory, users_path)
+    paths = [path for path in _names(directory) if path.suffix == ".client" and KEY.fullmatch(path.stem)]
+    if not paths:
         return ()
     private_directory(directory, owner_only=True)
     found = []
-    for path in sorted(directory.glob("*.client")):
+    for path in sorted(paths):
         try:
             found.append(read_profile(directory, path.stem))
         except (OSError, ValueError, ConfigurationError, StateError):
@@ -141,18 +164,17 @@ def versions(path):
     )
 
 
-def archive(path, previous):
-    if previous is None:
-        return None
+def archive_path(path):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    target = path.with_name(f"{path.stem}.{stamp}.json")
-    replace_bytes(target, previous)
-    return target
+    return path.with_name(f"{path.stem}.{stamp}.json")
 
 
 def prune(path):
-    for item in versions(path)[HISTORY_LIMIT:]:
+    excess = versions(path)[HISTORY_LIMIT:]
+    for item in excess:
         try:
             item.unlink(missing_ok=True)
         except OSError:
             LOG.warning("Could not remove an old client inventory version")
+    if excess:
+        sync_directory(path.parent)

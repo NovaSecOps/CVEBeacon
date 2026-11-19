@@ -1550,12 +1550,14 @@ class UserStore:
         )
         return row_id
 
-    def latest_inventory_upload(self, client_key: str) -> tuple[str, str] | None:
-        """Read the actor and time of the last published inventory for a client."""
+    def latest_inventory_upload(self, client_key: str, client: str) -> tuple[str, str] | None:
+        """Read the actor and time of the last inventory change for this client."""
+        prefix = 'inventory_saved:{"client":' + json.dumps(client, ensure_ascii=True) + ","
         with closing(self._connect(create=False)) as db:
             row = db.execute(
-                "SELECT actor, at FROM cb_user_audit WHERE action GLOB ? ORDER BY id DESC LIMIT 1",
-                ("inventory_saved:" + client_key + ":*",),
+                "SELECT actor, at FROM cb_user_audit "
+                "WHERE substr(action,1,?)=? OR action GLOB ? ORDER BY id DESC LIMIT 1",
+                (len(prefix), prefix, "inventory_saved:" + client_key + ":*"),
             ).fetchone()
         return (row["actor"], row["at"]) if row else None
 

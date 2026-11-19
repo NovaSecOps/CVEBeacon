@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import stat
@@ -12,6 +13,11 @@ import tempfile
 
 from .config import load_config
 from .errors import CVEBeaconError
+from .inventory_journal import recover, remove_file
+from .managed_inventory import is_managed_file
+from .private_storage import private_directory
+from .web_assets import replace_bytes
+from .web_inventory import read_bytes
 from .state import StateStore
 from .watch.store import WatchStore
 from .watch.users import UserStore
@@ -116,10 +122,77 @@ def _manifest(source, data):
     return manifest
 
 
+
+def _managed_files(config):
+    directory = config.inventory_directory
+    try:
+        files = sorted(path for path in directory.iterdir() if is_managed_file(path)
+                       and (config.inventory is None or config.inventory.path != path))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    if files:
+        private_directory(directory, owner_only=True)
+    return files
+
+
+def _managed_snapshot(config, destination):
+    recover(config.inventory_directory, config.watch.users_database)
+    items = []
+    for index, path in enumerate(_managed_files(config)):
+        saved = f"inventory-{index}.copy"
+        payload = read_bytes(path)
+        replace_bytes(destination / saved, payload)
+        items.append({"name": path.name, "backup": saved, "sha256": hashlib.sha256(payload).hexdigest()})
+    return items
+
+
+def _managed_entries(config, source, manifest):
+    items = manifest.get("managed_inventories")
+    if items is None:
+        return None  # Snapshots written by earlier releases.
+    if not isinstance(items, list) or len(items) > 20000:
+        raise SnapshotError("invalid managed inventory snapshot")
+    files = {}
+    for item in items:
+        name, saved = item["name"], item["backup"]
+        if (not isinstance(name, str) or Path(name).name != name or not is_managed_file(Path(name))
+                or name in files or not isinstance(saved, str) or not re.fullmatch(r"inventory-[0-9]+\.copy", saved)):
+            raise SnapshotError("invalid managed inventory snapshot filename")
+        target = config.inventory_directory / name
+        if config.inventory is not None and target == config.inventory.path:
+            raise SnapshotError("managed inventory snapshot overlaps the configured inventory")
+        expected = item["sha256"]
+        _verified_managed_bytes(source, saved, expected)
+        files[name] = (saved, expected)
+    return files
+
+
+def _verified_managed_bytes(source, saved, expected):
+    payload = read_bytes(source / saved)
+    if hashlib.sha256(payload).hexdigest() != expected:
+        raise SnapshotError("managed inventory snapshot checksum mismatch")
+    return payload
+
+
+def _restore_managed(config, source, files):
+    if files is None:
+        return
+    directory = config.inventory_directory
+    existing = _managed_files(config)
+    if files:
+        private_directory(directory, owner_only=True)
+    for name, (saved, expected) in files.items():
+        replace_bytes(directory / name, _verified_managed_bytes(source, saved, expected))
+    for path in existing:
+        if path.name not in files:
+            remove_file(path)
+
 def backup(config, data, destination):
     destination = Path(destination)
-    manifest = {"format": 1, "databases": [], "config": config.config_path.name}
-    for index, path in enumerate(databases(config, data)):
+    paths = databases(config, data)
+    manifest = {"format": 1, "databases": [], "config": config.config_path.name,
+                "managed_inventories": _managed_snapshot(config, destination)}
+    for index, path in enumerate(paths):
         exists = path.is_file()
         entry = {"path": path.relative_to(data).as_posix(), "backup": str(index) + ".db", "exists": exists}
         if exists:
@@ -170,6 +243,10 @@ def restore(config, data, source):
     manifest = _manifest(source, data)
     if digest(source / "config.toml") != manifest["config_sha256"]:
         raise SnapshotError("config snapshot checksum mismatch")
+    managed = _managed_entries(config, source, manifest)
+    if managed is not None:
+        # Resolve the live decision before replacing its account audit database.
+        recover(config.inventory_directory, config.watch.users_database)
     original = {row["path"] for row in manifest["databases"]}
     for path in databases(config, data, validate_known=False):
         if path.relative_to(data).as_posix() not in original:
@@ -199,6 +276,7 @@ def restore(config, data, source):
             sync_directory(path.parent)
         finally:
             Path(temporary).unlink(missing_ok=True)
+    _restore_managed(config, source, managed)
     restore_config(config.config_path, data, source)
 
 
@@ -217,6 +295,14 @@ def verify_restore(config, data, source):
             raise SnapshotError("a newly created database was not removed")
     if any(path.exists() and path not in expected for path in databases(config, data)):
         raise SnapshotError("unexpected database remains after restore")
+    managed = _managed_entries(config, Path(source), manifest)
+    if managed is not None:
+        actual = {path.name: path for path in _managed_files(config)}
+        if actual.keys() != managed.keys() or any(
+            hashlib.sha256(read_bytes(actual[name])).hexdigest() != expected
+            for name, (_, expected) in managed.items()
+        ):
+            raise SnapshotError("restored managed inventories do not match their snapshot")
 
 
 def migrate(config):

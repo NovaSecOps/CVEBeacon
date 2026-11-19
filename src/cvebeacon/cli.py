@@ -23,7 +23,7 @@ from types import SimpleNamespace
 from .config import AppConfig, InventoryConfig, load_config
 from .clients import affected_clients, format_affected_clients
 from .engine import QueryEngine
-from .errors import CVEBeaconError, SourceError
+from .errors import CVEBeaconError, InventoryValidationError, SourceError
 from .http import HttpClient
 from .inventory import inspect_inventory, load_inventory
 from .identity import normalize_asset, identity_conflict
@@ -851,7 +851,7 @@ def _inventory_for(config: AppConfig, path: str | None) -> InventoryConfig:
     if not path:
         return _inventory_config(config)
     base = config.inventory or InventoryConfig(path=Path(path).expanduser().resolve())
-    return replace(base, path=Path(path).expanduser().resolve(), managed_directory=None)
+    return replace(base, path=Path(path).expanduser().resolve(), managed_directory=None, managed_users_path=None)
 
 
 def _run_query(config: AppConfig, assets: list[Asset], *, known_findings=()):
@@ -1333,8 +1333,16 @@ def run(args: argparse.Namespace) -> int:
             print(json.dumps({"configuration": "ok", "state": "ok", "watch": "ok"}))
             return 0
         if args.command == "doctor" and config.effective_inventory is None:
-            checks = _watch_only_doctor_checks(config)
-            if args.live:
+            if config.watch.enabled:
+                checks = _watch_only_doctor_checks(config)
+            else:
+                checks = {
+                    "configuration": "ok",
+                    "inventory": "skipped (upload or restore an inventory from the Clients page)",
+                    "state_directory": _data_directory_check(config.database_path.parent),
+                    "schedule": _schedule_check(),
+                }
+            if args.live and config.watch.enabled:
                 checks["live_sources"] = _live_source_checks(
                     config, only=config.watch.sources
                 )
@@ -1359,7 +1367,7 @@ def run(args: argparse.Namespace) -> int:
                 if name != "live_sources"
             )
             return 2 if failed_local or failed_live else 0
-        if args.command == "serve" and config.effective_inventory is None and not config.watch.enabled:
+        if args.command == "serve" and config.effective_inventory is None and not (config.watch.enabled or config.has_managed_dashboard):
             raise CVEBeaconError(
                 "serve requires an inventory or watch mode; add [inventory] path "
                 "or set [watch] enabled = true"
@@ -1440,7 +1448,16 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
             return 2 if managed_warnings else 0
         return 0
     if args.command == "asset":
-        asset = next((item for item in _load_inventory(config) if item.asset_id.casefold() == args.asset_id.casefold()), None)
+        warnings: list[str] = []
+        try:
+            assets = _load_inventory(config, managed_warnings=warnings)
+        except InventoryValidationError:
+            if not warnings:
+                raise
+        if warnings:
+            print("Inventory is incomplete. Replace the unreadable client inventories and retry.", file=sys.stderr)
+            return 4
+        asset = next((item for item in assets if item.asset_id.casefold() == args.asset_id.casefold()), None)
         if not asset: raise CVEBeaconError(f"asset not found: {args.asset_id}")
         result = _run_query(config, [asset])
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
@@ -1455,7 +1472,14 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
     if args.command in {"scan", "export"}:
         inventory_config = _inventory_config(config)
         managed_warnings: list[str] = []
-        assets = _load_inventory(config, inventory_config, managed_warnings=managed_warnings)
+        try:
+            assets = _load_inventory(config, inventory_config, managed_warnings=managed_warnings)
+        except InventoryValidationError:
+            if args.command != "export" or not managed_warnings:
+                raise
+        if managed_warnings and args.command == "export":
+            print("Report unavailable. Replace the unreadable client inventories and retry.", file=sys.stderr)
+            return 4
         results = _run_query(config, assets, known_findings=store.latest_findings()) if args.command == "scan" else _run_query(config, assets)
         if args.command == "scan":
             channels = configured_channels(config)
@@ -1470,7 +1494,7 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
                         delivered = _notify_pending(config, store, http, channel)
                         LOG.info("%s channel accepted %d pending event(s)", channel, delivered)
                     except CVEBeaconError as exc: failures.append(str(exc))
-            if args.report:
+            if args.report and not managed_warnings:
                 path = _report_path(config, args.report)
                 (write_xlsx if args.report == "xlsx" else write_json)(results, path)
                 print(path)
@@ -1522,7 +1546,8 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         )
         if target in {"watch", "both"} and not config.watch.enabled:
             raise CVEBeaconError("watch mode is disabled; set [watch] enabled = true")
-        if target in {"scan", "both"} and config.effective_inventory is None:
+        if config.effective_inventory is None and (target == "scan" or (
+                target == "both" and not config.managed_inventory)):
             raise CVEBeaconError("this configuration has no inventory; use --command watch")
         if args.times is not None and args.every is not None:
             raise CVEBeaconError("--times and --every are mutually exclusive")

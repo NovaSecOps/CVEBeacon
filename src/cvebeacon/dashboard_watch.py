@@ -414,15 +414,20 @@ def clients():
         limit=limit,
         offset=(page - 1) * limit,
     )
-    from .managed_inventory import normalized_client, profiles
-    from .web_assets import client_key
-    managed = {client_key(item["name"]): item for item in profiles(config.inventory_directory)}
+    from .managed_inventory import client_key, profiles
+    managed = {}
+    if config.managed_inventory and page == 1:
+        managed = {
+            client_key(item["name"]): item
+            for item in profiles(config.inventory_directory, config.watch.users_database)
+        }
     return render_template(
         "watch_clients.html",
         scan=scan,
         clients=summaries,
-        managed_clients=managed if page == 1 else {},
-        client_links={client.name: client_key(normalized_client(client.name)) for client in summaries},
+        managed_clients=managed,
+        managed_enabled=config.managed_inventory,
+        client_links={client.name: client_key(client.name) for client in summaries},
         page=page,
         has_previous=page > 1,
         has_next=page * limit < total,

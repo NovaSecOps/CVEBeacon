@@ -6,7 +6,7 @@ import os
 import math
 import stat
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,7 @@ class InventoryConfig:
     )
     web_snapshots: bool = False
     managed_directory: Path | None = None
+    managed_users_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,20 +155,35 @@ class AppConfig:
     watch: WatchConfig = field(default_factory=WatchConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     managed_inventory: bool = True
+    managed_inventory_explicit: bool = False
 
     @property
     def inventory_directory(self) -> Path:
         return self.database_path.parent / "inventories"
 
     @property
+    def has_managed_dashboard(self) -> bool:
+        from .managed_inventory import has_managed_storage
+        return self.managed_inventory and (
+            self.managed_inventory_explicit or has_managed_storage(self.inventory_directory)
+        )
+
+    def inventory_for_management(self) -> InventoryConfig:
+        return replace(
+            self.inventory or InventoryConfig(path=None), managed_directory=self.inventory_directory,
+            managed_users_path=self.watch.users_database,
+        )
+
+    @property
     def effective_inventory(self) -> InventoryConfig | None:
-        if self.inventory is not None:
+        if not self.managed_inventory:
             return self.inventory
-        if self.managed_inventory:
-            from .managed_inventory import has_managed_inventory
-            if has_managed_inventory(self.inventory_directory):
-                return InventoryConfig(path=None, managed_directory=self.inventory_directory)
-        return None
+        from .inventory_journal import recover
+        from .managed_inventory import has_managed_inventory
+        recover(self.inventory_directory, self.watch.users_database)
+        if has_managed_inventory(self.inventory_directory):
+            return self.inventory_for_management()
+        return self.inventory
 
     def secret(self, env_name: str, *, required: bool = False) -> str | None:
         value = os.environ.get(env_name)
@@ -297,7 +313,6 @@ def load_config(path: str | Path) -> AppConfig:
     managed = inv.get("managed", True)
     if type(managed) is not bool:
         raise ConfigurationError("inventory.managed must be a boolean")
-    managed_directory = state_database.parent / "inventories" if managed else None
     if inv.get("path") or web_snapshots:
         columns = inv.get("columns", {name: name for name in CANONICAL_FIELDS})
         if not isinstance(columns, dict):
@@ -323,7 +338,6 @@ def load_config(path: str | Path) -> AppConfig:
         inventory_config = InventoryConfig(
             path=_resolve(base, inv["path"]) if inv.get("path") else None,
             web_snapshots=web_snapshots,
-            managed_directory=managed_directory,
             format=inventory_format,
             worksheet=inv.get("worksheet"),
             header_row=header_row,
@@ -333,8 +347,8 @@ def load_config(path: str | Path) -> AppConfig:
             columns={name: str(value) for name, value in columns.items() if name in CANONICAL_FIELDS + OPTIONAL_FIELDS},
         )
     elif not watch_enabled:
-        from .managed_inventory import has_managed_inventory
-        if managed_directory is None or not has_managed_inventory(managed_directory):
+        from .managed_inventory import has_managed_storage
+        if not managed or not (inv.get("managed") is True or has_managed_storage(state_database.parent / "inventories")):
             raise ConfigurationError("inventory.path is required")
 
     output = _table(data, "output")
@@ -433,6 +447,7 @@ def load_config(path: str | Path) -> AppConfig:
         config_path=config_path,
         inventory=inventory_config,
         managed_inventory=managed,
+        managed_inventory_explicit=inv.get("managed") is True,
         database_path=state_database,
         output_dir=_resolve(base, output.get("directory", "reports")),
         http=HttpConfig(

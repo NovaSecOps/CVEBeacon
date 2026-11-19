@@ -2,7 +2,7 @@
 {% block title %}Clients · CVEBeacon{% endblock %}
 {% block content %}
 <h1>Clients</h1>
-{% if accounts and 'manage_inventory' in permissions %}<p><a href="{{ url_for('client_inventory.add') }}">Add client</a></p>{% endif %}
+{% if managed_enabled and accounts and 'manage_inventory' in permissions %}<p><a href="{{ url_for('client_inventory.add') }}">Add client</a></p>{% endif %}
 {% if managed_clients %}
 <h2>Clients added in the dashboard</h2>
 <ul>{% for key, profile in managed_clients.items() %}
@@ -22,6 +22,6 @@
 </table></div>
 <p>Page {{ page }}{% if has_previous %} · <a href="{{ url_for('watch.clients', page=page - 1) }}">Previous clients</a>{% endif %}{% if has_next %} · <a href="{{ url_for('watch.clients', page=page + 1) }}">Next clients</a>{% endif %}</p>
 {% else %}
-{% if not inventory_configured %}<p>No inventory is configured. Client allocation requires an inventory scan. Add a client and upload their inventory to get started.</p>{% else %}<p>No successful inventory scan is available. Run a scan to populate client allocation and affected CVEs.</p>{% endif %}
+{% if not inventory_configured %}<p>No inventory is configured. Client allocation requires an inventory scan. {% if managed_enabled %}Add a client and upload their inventory to get started.{% endif %}</p>{% else %}<p>No successful inventory scan is available. Run a scan to populate client allocation and affected CVEs.</p>{% endif %}
 {% endif %}
 {% endblock %}

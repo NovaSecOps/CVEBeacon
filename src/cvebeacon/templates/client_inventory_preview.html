@@ -29,6 +29,9 @@
   <button type="submit" name="action" value="preview">Check column mapping</button>
   <h2>Row validation</h2>
   <p>{{ preview.assets|length }} ready to import · {{ preview.warnings }} warnings · {{ preview.errors }} errors.</p>
+  {% if preview.first_error %}
+  <p role="status">First error at row {{ preview.first_error[0] }} on page {{ preview.first_error[1] }}.</p>
+  {% endif %}
   {% if preview.validation %}
   <div class="table-wrap"><table>
     <thead><tr><th scope="col">Row</th><th scope="col">Status</th><th scope="col">Details</th></tr></thead>
@@ -41,6 +44,9 @@
     {% if preview.page > 1 %}<button type="submit" name="action" value="previous">Previous rows</button>{% endif %}
     {% if preview.page < preview.pages %}<button type="submit" name="action" value="next">More rows</button>{% endif %}
   </p>
+  <p><label for="jump-page">Go to page</label>
+     <input id="jump-page" name="jump_page" type="number" min="1" max="{{ preview.pages }}" value="{{ preview.first_error[1] if preview.first_error else preview.page }}">
+     <button type="submit" name="action" value="jump">Go</button></p>
   {% endif %}
   {% else %}<p>No rows were found. Add at least one asset to the file and upload it again.</p>{% endif %}
   <fieldset>

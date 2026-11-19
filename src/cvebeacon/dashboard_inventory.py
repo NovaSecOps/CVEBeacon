@@ -3,36 +3,38 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
 import secrets
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from time import monotonic
+import unicodedata
 
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, send_file, url_for
 
 from .clients import client_name, client_page
-from .config import InventoryConfig
 from .dashboard import _text, requires
-from .dashboard_ops import require_accounts
+from .dashboard_ops import require_accounts, schedule_scan_state
 from .errors import ConfigurationError, InventoryValidationError, StateError
 from .inventory import MAX_CONTRACT_ROWS, SUPPORTED_FORMATS, load_inventory
 from .inventory_preview import FIELDS, FIELD_LABELS, preview_upload
+from .inventory_journal import recover, stage_change, sync_directory
 from .locking import OperationLock
 from .managed_inventory import (
-    HISTORY_LIMIT, KEY, ManagedInventoryCollision, VERSION, archive, encode_records,
-    normalized_client, prune, read_inventory, read_profile, versions,
+    HISTORY_LIMIT, KEY, ManagedInventoryCollision, VERSION, archive_path, client_key, encode_records,
+    normalized_client, read_inventory, read_profile, versions,
 )
 from .private_storage import private_directory
-from .web_assets import client_key, replace_bytes
 from .web_inventory import MAX_BYTES, read_bytes
 
 UPLOAD_REQUEST_BYTES = MAX_BYTES + 64 * 1024
 PREVIEW_TTL = 10 * 60
+_PREVIEW_SLOT = BoundedSemaphore(1)
+MANAGE = ("view", "manage_inventory")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,33 +98,50 @@ def _users():
     return current_app.extensions["dashboard_users"]
 
 
-def _manage():
+def _changes_allowed(config):
     require_accounts()
-    if "manage_inventory" not in g.permissions:
+    if not config.managed_inventory or not set(MANAGE) <= g.permissions:
         abort(403)
 
 
-def _audit(db, actor, event, key, detail):
-    stamp = datetime.now(timezone.utc).isoformat()
-    action = f"{event}:{key}:" + json.dumps(detail, ensure_ascii=True, separators=(",", ":"))
-    _users()._append_audit(db, action, actor.username, stamp, actor=actor.username)
+def _preview(*args, **kwargs):
+    if not _PREVIEW_SLOT.acquire(blocking=False):
+        raise ConfigurationError("Another inventory is being checked. Try again in a moment.")
+    try:
+        return preview_upload(*args, **kwargs)
+    finally:
+        _PREVIEW_SLOT.release()
+
+
+def _notes():
+    value = request.form.get("notes", "").replace("\r\n", "\n").replace("\r", "\n").strip(" ")
+    if len(request.form.getlist("notes")) > 1 or len(value) > 1000:
+        raise ConfigurationError("Enter up to 1,000 characters in Notes.")
+    if any(unicodedata.category(char) in {"Cc", "Cs"} and char != "\n" for char in value):
+        raise ConfigurationError("Notes contain an unsupported character.")
+    return value
+
+
+def _commit_change(config, event, key, detail, changes):
+    users = _users()
+    sync_directory(config.inventory_directory.parent)
+    try:
+        with users.transaction() as db:
+            actor = _require_writer(db)
+            stage_change(config.inventory_directory, db, users, actor, event, key, detail, changes)
+    finally:
+        recover(config.inventory_directory, users.path)
 
 
 def _publish(config, path, profile, previous, assets, mode):
-    """Publish within the authorized account transaction and roll back on error."""
+    """Validate the candidate and commit a recoverable inventory change."""
     label = profile["name"]
-    profile_path = path.with_suffix(".client")
-    archive_path = None
-    change_started = new_profile = False
     data = encode_records(assets) if assets else None
     if data is not None:
-        # Check the exact bytes we will save, including contract size and value bounds.
         read_inventory(data, client=label)
-        inventory = config.inventory or InventoryConfig(path=None)
-        inventory = replace(inventory, managed_directory=path.parent)
         try:
             load_inventory(
-                inventory, snapshot_directory=path.parent.parent / "web-inventory",
+                config.inventory_for_management(), snapshot_directory=path.parent.parent / "web-inventory",
                 managed_candidate=(path, assets),
             )
         except ManagedInventoryCollision:
@@ -132,38 +151,19 @@ def _publish(config, path, profile, previous, assets, mode):
                 "The other inventories could not be checked. Ask an administrator to check the inventory settings."
             ) from exc
 
-    try:
-        with _users().transaction() as db:
-            actor = _require_writer(db)
-            _audit(db, actor, "inventory_saved" if assets else "inventory_removed", path.stem,
-                   {"client": label, "row_count": len(assets), "mode": mode})
-            if not profile_path.exists():
-                new_profile = True
-                replace_bytes(profile_path, _profile_bytes(profile))
-            if previous is not None:
-                try:
-                    read_inventory(previous, client=label)
-                except (InventoryValidationError, ValueError):
-                    pass  # A corrupt current file is replaceable without archiving it.
-                else:
-                    archive_path = archive(path, previous)
-            change_started = True
-            if data is None:
-                path.unlink()
-            else:
-                replace_bytes(path, data)
-    except BaseException:
-        if change_started:
-            if previous is None:
-                path.unlink(missing_ok=True)
-            else:
-                replace_bytes(path, previous)
-        if archive_path:
-            archive_path.unlink(missing_ok=True)
-        if new_profile:
-            profile_path.unlink(missing_ok=True)
-        raise
-    prune(path)
+    changes = {"current": (path, data)}
+    profile_path = path.with_suffix(".client")
+    if not profile_path.exists() and not profile_path.is_symlink():
+        changes["profile"] = (profile_path, _profile_bytes(profile))
+    if previous is not None:
+        try:
+            read_inventory(previous, client=label)
+        except (InventoryValidationError, ValueError):
+            pass  # A corrupt current file is replaceable without archiving it.
+        else:
+            changes["archive"] = (archive_path(path), previous)
+    _commit_change(config, "inventory_saved" if data is not None else "inventory_removed", path.stem,
+                   {"client": label, "row_count": len(assets), "mode": mode}, changes)
 
 
 def _profile_bytes(profile):
@@ -172,7 +172,9 @@ def _profile_bytes(profile):
 
 def _require_writer(db):
     try:
-        return _users().require_permission_in(db, g.entry.proof, "manage_inventory")
+        actor = _users().require_permission_in(db, g.entry.proof, "manage_inventory")
+        _users().require_permission_in(db, g.entry.proof, "view")
+        return actor
     except ConfigurationError:
         abort(403)
 
@@ -182,11 +184,17 @@ def create_blueprint(config):
     pending_uploads = PendingUploads()
     directory = config.inventory_directory
 
+    def active_path(key):
+        path = directory / f"{key}.json"
+        return None if config.inventory and path == config.inventory.path else path
+
     def profile_for(key):
         if not KEY.fullmatch(key):
             abort(404)
-        if directory.exists() or directory.is_symlink():
-            private_directory(directory, owner_only=True)
+        path = directory / f"{key}.client"
+        if config.managed_inventory:
+            recover(directory, config.watch.users_database)
+        if config.managed_inventory and not directory.is_symlink() and (path.exists() or path.is_symlink()):
             try:
                 return read_profile(directory, key)
             except FileNotFoundError:
@@ -208,32 +216,40 @@ def create_blueprint(config):
         lock = OperationLock(config, "client-inventory")
         if not lock.acquire():
             raise ConfigurationError("A scan or inventory change is in progress. Try again when it finishes.")
+        try:
+            recover(directory, config.watch.users_database)
+        except BaseException:
+            lock.release()
+            raise
         return lock
 
     def detail_url(key, profile, **kwargs):
         return url_for(".detail", key=key, name=profile["name"], **kwargs)
 
     def render_detail(key, profile, *, error=None, notice=None, status=200):
-        path = directory / f"{key}.json"
+        path = active_path(key)
         warning = None
         data = None
         count = None
         try:
-            if directory.exists() or directory.is_symlink():
+            if path is not None and config.managed_inventory and not directory.is_symlink() and (
+                    path.exists() or path.is_symlink()):
                 private_directory(directory, owner_only=True)
-            data = _current(path)
-            if data is not None:
-                count = len(read_inventory(data, client=profile["name"]))
+                data = _current(path)
+                if data is not None:
+                    count = len(read_inventory(data, client=profile["name"]))
         except (OSError, ValueError, InventoryValidationError, StateError):
             warning = "The current inventory could not be read. Upload a replacement or ask an administrator to check storage."
         scan, summaries, _ = client_page(config.database_path, limit=1, name=profile["name"])
-        upload = _users().latest_inventory_upload(key) if data is not None and g.accounts else None
+        upload = _users().latest_inventory_upload(key, profile["name"]) if data is not None and g.accounts else None
         return render_template(
             "client_inventory.html", key=key, profile=profile, scan=scan,
             summary=summaries[0] if summaries else None, count=count, upload=upload,
-            enabled=config.managed_inventory, error=error, notice=notice, warning=warning,
+            enabled=config.managed_inventory and path is not None, error=error, notice=notice, warning=warning,
+            scan_schedule=schedule_scan_state(config) if count is not None else None,
             revision=_revision(data), present=data is not None,
-            history=[item.name.split(".")[1] for item in versions(path)[:HISTORY_LIMIT]],
+            history=[item.name.split(".")[1] for item in versions(path)[:HISTORY_LIMIT]]
+            if path is not None and config.managed_inventory and not directory.is_symlink() else [],
         ), status
 
     @bp.app_template_global()
@@ -244,20 +260,21 @@ def create_blueprint(config):
             return value
 
     @bp.route("/add", methods=["GET", "POST"])
-    @requires("manage_inventory")
+    @requires(MANAGE)
     def add():
-        _manage()
+        _changes_allowed(config)
         if request.method == "GET":
             return render_template("client_add.html")
         profile = {
             "name": request.form.get("name", ""),
-            "notes": _text(request.form, "notes", limit=1000),
+            "notes": request.form.get("notes", ""),
             "contact": _text(request.form, "contact", limit=200),
         }
         try:
             if len(request.form.getlist("name")) != 1:
                 abort(400)
             profile["name"] = normalized_client(profile["name"])
+            profile["notes"] = _notes()
             key = client_key(profile["name"])
             lock = locked()
             try:
@@ -265,17 +282,8 @@ def create_blueprint(config):
                 path = directory / f"{key}.client"
                 if path.exists() or path.is_symlink():
                     raise ConfigurationError("That client already exists. Open it from the Clients page.")
-                writing = False
-                try:
-                    with _users().transaction() as db:
-                        actor = _require_writer(db)
-                        _audit(db, actor, "client_added", key, {"client": profile["name"]})
-                        writing = True
-                        replace_bytes(path, _profile_bytes(profile))
-                except BaseException:
-                    if writing:
-                        path.unlink(missing_ok=True)
-                    raise
+                _commit_change(config, "client_added", key, {"client": profile["name"]},
+                               {"profile": (path, _profile_bytes(profile))})
             finally:
                 lock.release()
         except ConfigurationError as exc:
@@ -290,8 +298,8 @@ def create_blueprint(config):
     def detail(key):
         profile = profile_for(key)
         notices = {
-            "saved": "Inventory saved. Your next scheduled scan will include it automatically.",
-            "restored": "Inventory restored. Your next scheduled scan will include it automatically.",
+            "saved": "Inventory saved.",
+            "restored": "Inventory restored.",
             "removed": "Inventory removed. Your next scan will use the remaining inventories.",
         }
         return render_detail(key, profile, notice=notices.get(request.args.get("result")))
@@ -303,12 +311,13 @@ def create_blueprint(config):
         ), status
 
     @bp.post("/<key>/upload")
-    @requires("manage_inventory")
+    @requires(MANAGE)
     def upload(key):
-        _manage()
+        _changes_allowed(config)
         profile = profile_for(key)
-        if not config.managed_inventory:
-            abort(403)
+        path = active_path(key)
+        if path is None:
+            abort(409)
         try:
             files = request.files.getlist("inventory")
             if len(files) != 1 or not files[0].filename:
@@ -319,8 +328,10 @@ def create_blueprint(config):
             data = files[0].stream.read(MAX_BYTES + 1)
             if len(data) > MAX_BYTES:
                 raise ConfigurationError("That file is too large. Choose a file up to 32 MiB.")
-            previous = _revision(_current(directory / f"{key}.json"))
-            preview = preview_upload(data, suffix, profile["name"])
+            if directory.exists() or directory.is_symlink():
+                private_directory(directory, owner_only=True)
+            previous = _revision(_current(path))
+            preview = _preview(data, suffix, profile["name"])
             token = pending_uploads.add(PendingUpload(g.sid, key, data, suffix, previous, monotonic() + PREVIEW_TTL))
             return preview_page(key, profile, preview, token, "replace")
         except ConfigurationError as exc:
@@ -329,28 +340,29 @@ def create_blueprint(config):
             return render_detail(key, profile, error="The upload could not be read. Check storage and retry.", status=503)
 
     @bp.post("/<key>/review")
-    @requires("manage_inventory")
+    @requires(MANAGE)
     def review(key):
-        _manage()
+        _changes_allowed(config)
         profile = profile_for(key)
-        if not config.managed_inventory:
-            abort(403)
+        path = active_path(key)
+        if path is None:
+            abort(409)
         token = _text(request.form, "token", required=True, limit=64)
         pending = pending_uploads.get(token, key)
         if pending is None:
             return render_detail(key, profile, error="This preview has expired. Upload the file again.", status=409)
         action = _text(request.form, "action", required=True)
         mode = _text(request.form, "mode", required=True)
-        if mode not in {"replace", "add"} or action not in {"preview", "previous", "next", "save"}:
+        if mode not in {"replace", "add"} or action not in {"preview", "previous", "next", "jump", "save"}:
             abort(400)
-        page_text = _text(request.form, "page", limit=6)
+        page_text = _text(request.form, "jump_page" if action == "jump" else "page", limit=6)
         if not page_text.isascii() or not page_text.isdecimal():
             abort(400)
         page = max(1, int(page_text) + {"previous": -1, "next": 1}.get(action, 0))
         choices = {field: _text(request.form, field, limit=4) for field in FIELDS}
         preview = None
         try:
-            preview = preview_upload(pending.data, pending.suffix, profile["name"], choices, page=page)
+            preview = _preview(pending.data, pending.suffix, profile["name"], choices, page=page)
             if action != "save":
                 return preview_page(key, profile, preview, token, mode)
             if preview.errors or not preview.assets:
@@ -359,7 +371,6 @@ def create_blueprint(config):
             lock = locked()
             try:
                 private_directory(directory, owner_only=True)
-                path = directory / f"{key}.json"
                 previous = _current(path)
                 if pending_uploads.get(token, key) is None or _revision(previous) != pending.previous:
                     return render_detail(key, profile, error="This inventory changed. Upload the file again.", status=409)
@@ -394,8 +405,12 @@ def create_blueprint(config):
     @requires("view")
     def download(key):
         profile = profile_for(key)
+        path = active_path(key)
+        if path is None or not config.managed_inventory or directory.is_symlink():
+            abort(404)
         try:
-            data = _current(directory / f"{key}.json")
+            private_directory(directory, owner_only=True)
+            data = _current(path)
             if data is None:
                 abort(404)
             read_inventory(data, client=profile["name"])
@@ -405,19 +420,21 @@ def create_blueprint(config):
                          download_name="inventory.json", max_age=0)
 
     @bp.post("/<key>/inventory")
-    @requires("manage_inventory")
+    @requires(MANAGE)
     def change(key):
-        _manage()
+        _changes_allowed(config)
         profile = profile_for(key)
+        path = active_path(key)
+        if path is None:
+            abort(409)
         action = _text(request.form, "action", required=True)
-        if action not in {"restore", "remove"} or (action == "restore" and not config.managed_inventory):
+        if action not in {"restore", "remove"}:
             abort(403)
         expected = _text(request.form, "revision", required=True, limit=64)
         try:
             lock = locked()
             try:
                 private_directory(directory, owner_only=True)
-                path = directory / f"{key}.json"
                 previous = _current(path)
                 if _revision(previous) != expected:
                     raise ConfigurationError("This inventory changed. Review the current inventory before continuing.")
@@ -428,7 +445,12 @@ def create_blueprint(config):
                     version = path.with_name(f"{key}.{stamp}.json")
                     if version not in versions(path)[:HISTORY_LIMIT]:
                         raise ConfigurationError("That version is no longer available.")
-                    assets = read_inventory(read_bytes(version), client=profile["name"])
+                    try:
+                        assets = read_inventory(read_bytes(version), client=profile["name"])
+                    except (InventoryValidationError, ValueError) as exc:
+                        raise ConfigurationError(
+                            "That saved version cannot be used. Choose another version or upload the file again."
+                        ) from exc
                 else:
                     if previous is None or _text(request.form, "confirm") != "remove":
                         raise ConfigurationError("Confirm that you want to remove this inventory.")

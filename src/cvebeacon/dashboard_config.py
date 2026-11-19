@@ -197,7 +197,7 @@ WATCH_FIELDS = {key: item for key, item in defaults(WatchConfig).items()
                 if key not in {"rules", "channels", "reporting_identity"}}
 INVENTORY_FIELDS = {
     key: item for key, item in defaults(InventoryConfig, managed=True).items()
-    if key != "managed_directory"
+    if key not in {"managed_directory", "managed_users_path"}
 }
 SCHEMAS = {
     "watch": [("watch", WATCH_FIELDS)],
@@ -942,7 +942,7 @@ class Editor:
         token = _VALIDATING.set(True)
         try:
             config = replace(load_config(temporary), config_path=self.path)
-            if config.effective_inventory is None and not config.watch.enabled:
+            if config.effective_inventory is None and not (config.watch.enabled or config.has_managed_dashboard):
                 raise ConfigurationError("The dashboard requires inventory.path or watch.enabled")
             return config, content
         except ConfigurationError as error:

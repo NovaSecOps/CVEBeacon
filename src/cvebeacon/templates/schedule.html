@@ -16,7 +16,8 @@
 <label>Schedule type <select name="mode"><option value="interval">Interval</option><option value="times">Fixed local times</option></select></label>
 <label>Interval in hours <input name="every" type="number" min="2" max="24" value="4"></label>
 <label>Times <input name="times" placeholder="07:00,19:00" maxlength="200"></label>
-<label>Command <select name="command">{% if has_inventory %}<option value="scan">scan</option>{% endif %}{% if watch_enabled %}<option value="watch" {% if not has_inventory %}selected{% endif %}>watch</option>{% endif %}{% if has_inventory and watch_enabled %}<option value="both" {% if default_command == 'both' %}selected{% endif %}>both</option>{% endif %}</select></label>
+<label>Command <select name="command">{% if has_inventory %}<option value="scan">scan</option>{% endif %}{% if watch_enabled %}<option value="watch" {% if not has_inventory %}selected{% endif %}>watch</option>{% endif %}{% if allow_combined %}<option value="both" {% if default_command == 'both' %}selected{% endif %}>both (scan and watch)</option>{% endif %}</select></label>
+{% if allow_combined and not has_inventory %}<p>Choose both to run watch jobs now and add scans automatically after the first upload.</p>{% endif %}
 <label>Run logged out (Windows only) <input type="checkbox" name="run_logged_out" value="yes"></label>
 <label>Windows account <input name="account" maxlength="256" autocomplete="off" disabled></label>
 <label>Account password (Windows logged-out only; never stored) <input type="password" name="password" maxlength="1024" autocomplete="off" disabled></label>

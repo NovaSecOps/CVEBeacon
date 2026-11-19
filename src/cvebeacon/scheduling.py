@@ -535,11 +535,11 @@ def _describe_cron_block(block: str) -> str | None:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        fields = stripped.split()
+        fields = stripped.split(maxsplit=5)
         if len(fields) < 6:
             return None
         minute, hour = fields[0], fields[1]
-        command = " ".join(fields[5:])
+        command = fields[5]
         if not minute.isdigit():
             return None
         if hour.startswith("*/") and hour[2:].isdigit():
@@ -859,6 +859,33 @@ def status(*, system: str = "auto", run=subprocess.run) -> str:
     summary = _describe_cron_block(block)
     return f"{summary}\n\nManaged cron block:\n{block}" if summary else block
 
+
+
+def installed_scan_state(summary: str, config_path: Path, *, windows: bool = False) -> str:
+    """Classify the recognized native actions for this configuration only."""
+    if summary == "not installed":
+        return "none"
+    _, marker, commands = summary.partition("Commands:\n")
+    if not marker:
+        return "unknown"
+    known = set()
+    for line in commands.splitlines():
+        if not line.startswith("  "):
+            break
+        try:
+            parts = shlex.split(line, posix=not windows)
+            option = parts.index("--config")
+            path = Path(parts[option + 1].strip('"'))
+            if not path.is_absolute() or path.resolve() != config_path.resolve():
+                continue
+            tail = tuple(parts[option + 2:])
+        except (ValueError, IndexError, OSError):
+            continue
+        if tail in {("scan",), ("run",), ("run", "--yes")}:
+            known.add("scan")
+        elif tail in {("watch", "run"), ("watch", "run", "--yes")}:
+            known.add("watch")
+    return "scan" if "scan" in known else "watch" if "watch" in known else "unknown"
 
 def remove(*, system: str = "auto", run=subprocess.run) -> bool:
     resolved = _host_system(system)

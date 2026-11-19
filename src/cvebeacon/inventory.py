@@ -336,7 +336,8 @@ def load_inventory(config: InventoryConfig, *, snapshot_directory: Path | None =
     if config.managed_directory is not None:
         from .managed_inventory import append_managed_inventory
         assets = append_managed_inventory(
-            assets, config.managed_directory, warnings=managed_warnings, candidate=managed_candidate,
+            assets, config.managed_directory, configured=config.path, users_path=config.managed_users_path,
+            warnings=managed_warnings, candidate=managed_candidate,
         )
     if not assets:
         raise InventoryValidationError([ValidationIssue("inventory contains no valid records")])

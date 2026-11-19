@@ -17,11 +17,23 @@
 {% if count is not none %}
 <dl>
   <dt>Assets in the uploaded inventory</dt><dd>{{ count }}</dd>
-  {% if upload %}<dt>Last upload</dt><dd>{{ stamp(upload[1]) }} by {{ upload[0] }}</dd>{% endif %}
+  {% if upload %}<dt>Last inventory change</dt><dd>{{ stamp(upload[1]) }} by {{ upload[0] }}</dd>{% endif %}
 </dl>
 <p><a href="{{ url_for('client_inventory.download', key=key, name=profile.name) }}">Download current inventory</a></p>
 {% if enabled %}
-<p>Scheduled scans include this inventory. The watchlist uses the latest successful scan to show affected clients.</p>
+{% if scan_schedule == 'scan' %}
+<p>Your next scheduled scan will include this inventory.</p>
+{% elif scan_schedule == 'watch' %}
+<p>Your installed schedule runs watch jobs only. Start a scan or use <a href="{{ url_for('operations.schedule') }}">Schedule</a> to include scans.</p>
+{% elif scan_schedule == 'none' %}
+<p>There is no installed native schedule. Start a scan or set up scans in <a href="{{ url_for('operations.schedule') }}">Schedule</a>.</p>
+{% else %}
+<p>Check <a href="{{ url_for('operations.schedule') }}">Schedule</a> to see whether scans are scheduled. You can also run a scan now.</p>
+{% endif %}
+{% if accounts and 'manage_schedule' not in permissions and scan_schedule != 'scan' %}
+<p>Ask an administrator to change the schedule.</p>
+{% endif %}
+<p>The watchlist shows affected clients after a successful scan.</p>
 {% if accounts and 'run' in permissions %}
 <form method="post" action="{{ url_for('operations.run_job') }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -33,7 +45,7 @@
 {% elif not warning %}
 <p>No inventory has been uploaded for this client.</p>
 {% endif %}
-{% if not enabled %}<p class="warning">Dashboard-managed inventories are disabled in settings.</p>{% endif %}
+{% if not enabled %}<p class="warning">Uploads are unavailable for this client. Ask an administrator to check inventory settings.</p>{% endif %}
 {% if enabled and accounts and 'manage_inventory' in permissions %}
 <section>
 <h2>Upload inventory</h2>

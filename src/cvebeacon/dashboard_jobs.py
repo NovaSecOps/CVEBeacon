@@ -517,8 +517,8 @@ def build_command(
         )
     if operation == "run" and config.effective_inventory is None:
         raise ConfigurationError(
-            "this configuration has no inventory; add an [inventory] path to "
-            "use the combined run, or choose a watch operation"
+            "this configuration has no inventory; upload a client inventory "
+            "to use the combined run, or choose a watch operation"
         )
     base = [
         *command_prefix(),

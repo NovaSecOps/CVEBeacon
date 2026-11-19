@@ -21,7 +21,7 @@ from werkzeug.exceptions import HTTPException, SecurityError
 
 from .config import AppConfig
 from .dashboard_auth import AccountLoginThrottle, AccountSessions, DashboardAuth, password_hash
-from .errors import CVEBeaconError, ConfigurationError, StateError
+from .errors import CVEBeaconError, ConfigurationError, InventoryValidationError, StateError
 from .inventory import load_inventory
 from .identity import normalize_asset
 from .models import Applicability, Asset
@@ -77,7 +77,7 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
 
 def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session_app=None) -> Flask:
     running_version = package_version("cvebeacon")
-    if config.effective_inventory is None and not config.watch.enabled:
+    if config.effective_inventory is None and not (config.watch.enabled or config.has_managed_dashboard):
         raise CVEBeaconError(
             "the dashboard requires an inventory or watch mode; add [inventory] path or set [watch] enabled = true"
         )
@@ -153,7 +153,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
                     session.clear()
                     return redirect(url_for("login"), code=303)
         if request.endpoint == "client_inventory.upload" and (
-            not g.accounts or "manage_inventory" not in g.permissions
+            not g.accounts or not {"view", "manage_inventory"} <= g.permissions
         ):
             abort(403)
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
@@ -456,15 +456,26 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.route("/reports", methods=["GET", "POST"])
     @requires("run", post=("run", "view"))
     def reports():
-        if config.effective_inventory is None:
-            return inventory_required("Report export", status=400 if request.method == "POST" else 200)
-        if request.method == "GET":
-            return render_template("reports.html")
+        inventory = config.effective_inventory
+        is_post = request.method == "POST"
+        if inventory is None:
+            return inventory_required("Report export", status=400 if is_post else 200)
+        warnings: list[str] = []
+        try:
+            assets = load_inventory(
+                inventory, snapshot_directory=config.database_path.parent / "web-inventory",
+                managed_warnings=warnings,
+            )
+        except (InventoryValidationError, OSError):
+            if not warnings and is_post:
+                raise
+        if warnings or not is_post:
+            return render_template("reports.html", inventory_warnings=warnings), 409 if warnings and is_post else 200
         kind = _text(request.form, "format", required=True)
         if kind not in {"json", "xlsx"}:
             abort(400)
         from .cli import _run_query
-        results = _run_query(config, load_inventory(config.effective_inventory, snapshot_directory=config.database_path.parent / "web-inventory"))
+        results = _run_query(config, assets)
         with tempfile.TemporaryDirectory(prefix="cvebeacon-report-") as directory:
             path = Path(directory) / f"report.{kind}"
             (write_xlsx if kind == "xlsx" else write_json)(results, path)
