@@ -1933,7 +1933,34 @@ def check_protected_paths(updated, config_path, backup_dir, configs, documents=(
 
 
 class FieldValidationError(ConfigurationError):
-    """A message made solely from fixed field identities and validation guidance."""
+    """Build field errors only from known metadata and fixed guidance templates."""
+
+    def __init__(self, control=None, reason=None):
+        if not isinstance(control, dict) or control.get("identity") not in FIELD_METADATA:
+            super().__init__("Invalid configuration field; use the expected format")
+            return
+        identity = control["identity"]
+        spec = FIELD_METADATA[identity]
+        label = control.get("error_identity", identity)
+        if label != identity and re.fullmatch(re.escape(identity) + r" \(row [1-9][0-9]{0,2}\)", label) is None:
+            label = identity
+        expected = {"number": "a TOML number", "boolean": "true or false",
+                    "toml": "a valid TOML array or table"}.get(spec.kind, "plain text")
+        required = {"toml": "a nonempty TOML array or table",
+                    "addresses": "at least one email address"}.get(spec.kind, "nonempty plain text")
+        address_format = ("comma-separated recipient names or a TOML array of nonempty strings"
+                          if identity == "notifications.email.recipients" else
+                          "comma-separated email addresses or a TOML array of email addresses")
+        enabled_format = "a recipient list" if identity == "notifications.email.recipients" else "an email address"
+        guidance = {
+            "environment": "must be an environment variable name, for example EXAMPLE_SECRET",
+            "enum": "must be one of " + ", ".join(map(str, spec.choices)),
+            "addresses": "must be " + address_format,
+            "value": "must be " + expected,
+            "required": "is required; expected " + required,
+            "enabled_required": "is required when enabled; expected " + enabled_format,
+        }.get(reason, "must use the expected format")
+        super().__init__(label + " " + guidance)
 
 
 def form_row_count():
@@ -2035,7 +2062,7 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                     "product_mappings" if section == "product-mappings" else label)
             spec = FIELD_METADATA[f"{path}.{key}"]
             text = ("" if item is None or direct_url else
-                    (value(item) if any("," in address for address in item) else ", ".join(item))
+                    (value(item) if any("," in address for address in item) or ", ".join(item).lstrip().startswith("[") else ", ".join(item))
                     if spec.kind == "addresses" and isinstance(item, list) else
                     str(item) if spec.kind in {"string", "enum"} else value(item))
             hint = _display(spec.default)
@@ -2099,19 +2126,19 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                     if control["kind"] in {"string", "enum"}:
                         row[key] = text
                         if key.endswith("_env") and text.strip() and ENV_NAME_PATTERN.fullmatch(text.strip()) is None:
-                            raise FieldValidationError(control["error_identity"] + " must be an environment variable name, for example EXAMPLE_SECRET")
+                            raise FieldValidationError(control, "environment")
                         if control["kind"] == "enum":
                             choices = control["choices"]
                             if choices and isinstance(choices[0], int):
                                 try:
                                     row[key] = int(text)
                                 except ValueError:
-                                    raise FieldValidationError(control["error_identity"] + " must be one of " + ", ".join(map(str, choices))) from None
+                                    raise FieldValidationError(control, "enum") from None
                             normalized = row[key].strip().casefold() if isinstance(row[key], str) else row[key]
                             if normalized not in [choice.casefold() if isinstance(choice, str) else choice for choice in choices]:
                                 # Preserve the loader's legacy inventory format aliases.
                                 if control["identity"] != "inventory.format" or normalized.lstrip(".") not in {*choices, "yml"}:
-                                    raise FieldValidationError(control["error_identity"] + " must be one of " + ", ".join(map(str, choices)))
+                                    raise FieldValidationError(control, "enum")
                     elif control["kind"] == "addresses":
                         try:
                             if text.lstrip().startswith("["):
@@ -2125,10 +2152,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                                         if control["identity"] == "notifications.email.recipients" else
                                         list(_email_addresses({key: addresses}, key, control["identity"].rsplit(".", 1)[0], required=control["required"])))
                         except (ValueError, RecursionError, ConfigurationError):
-                            expected = ("comma-separated recipient names or a TOML array of nonempty strings"
-                                        if control["identity"] == "notifications.email.recipients" else
-                                        "comma-separated email addresses or a TOML array of email addresses")
-                            raise FieldValidationError(control["error_identity"] + " must be " + expected) from None
+                            raise FieldValidationError(control, "addresses") from None
                     else:
                         try:
                             parsed = tomllib.loads("value = " + text)
@@ -2140,8 +2164,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                             if control["kind"] == "number" and (isinstance(row[key], bool) or not isinstance(row[key], (int, float))):
                                 raise ValueError
                         except (ValueError, RecursionError):
-                            expected_format = {"number": "a TOML number", "boolean": "true or false", "toml": "a valid TOML array or table"}[control["kind"]]
-                            raise FieldValidationError(control["error_identity"] + " must be " + expected_format) from None
+                            raise FieldValidationError(control, "value") from None
                 if control["secret"]:
                     secret_name = name + "_new"
                     expected.add(secret_name)
@@ -2164,14 +2187,14 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             if active:
                 for control in group["controls"]:
                     if control["required"] and not row.get(control["key"]):
-                        expected_format = {"toml": "a nonempty TOML array or table", "addresses": "at least one email address"}.get(control["kind"], "nonempty plain text")
-                        raise FieldValidationError(control["error_identity"] + " is required; expected " + expected_format)
+                        raise FieldValidationError(control, "required")
         if section == "notifications":
             for group, row in zip(groups, rows):
                 if group["prefix"] == ("notifications", "email") and row is not None and row.get("enabled"):
                     for key in ("sender", "recipients"):
                         if not row.get(key):
-                            raise FieldValidationError(f"notifications.email.{key} is required when enabled; expected an email address" + (" list" if key == "recipients" else ""))
+                            control = next(control for control in group["controls"] if control["key"] == key)
+                            raise FieldValidationError(control, "enabled_required")
         if section == "rules":
             from .watch.rules import parse_condition
             for index, row in enumerate(rows):
@@ -2321,19 +2344,74 @@ def retainable_form_value(control, submitted, section):
         if spec.item_choices:
             return isinstance(item, list) and all(isinstance(child, str) and child.strip().casefold() in spec.item_choices for child in item)
         if key == "condition":
+            if not isinstance(item, dict):
+                return False
             for identity, child in _walk(item):
                 if any(isinstance(part, str) and part not in {*LEAF_KEYS, "any", "all", "not"} for part in identity):
                     return False
-                leaf = CONDITION_SCHEMA.get(identity[-1], {})
-                if isinstance(child, str) and leaf.get("kind") == "enum":
-                    if child.strip().casefold() not in leaf["choices"]:
+                key = identity[-1]
+                if key in {"any", "all"} and (not isinstance(child, list) or any(not isinstance(row, dict) for row in child)):
+                    return False
+                if key == "not" and not isinstance(child, dict):
+                    return False
+                leaf = CONDITION_SCHEMA.get(key, {})
+                if leaf.get("kind") in {"strings", "cwe"}:
+                    types = (str, int) if leaf["kind"] == "cwe" else (str,)
+                    if not isinstance(child, list) or any(isinstance(entry, bool) or not isinstance(entry, types) for entry in child):
                         return False
-                if isinstance(child, str) and leaf.get("kind") == "number":
+                if leaf.get("kind") == "enum":
+                    if isinstance(child, str):
+                        if child.strip().casefold() not in leaf["choices"]:
+                            return False
+                    elif not isinstance(child, bool):
+                        return False
+                if leaf.get("kind") == "number" and not isinstance(child, (int, float)):
                     return False
         return True
     except (ValueError, RecursionError):
         # Malformed structured text has no trustworthy leaf boundaries.
         return False
+
+
+def retained_form_value(control, submitted, section):
+    """Return only inspected text; TOML comments are not part of parsed values."""
+    if not retainable_form_value(control, submitted, section):
+        return None
+    if control["kind"] == "toml" or control["kind"] == "addresses" and submitted.lstrip().startswith("["):
+        return _without_toml_comments(submitted)
+    return submitted
+
+
+def _without_toml_comments(text):
+    """Strip comments from parsed TOML while preserving quoted hashes and layout."""
+    result, quote, index = [], None, 0
+    while index < len(text):
+        character = text[index]
+        if quote:
+            if quote[0] == '"' and character == "\\":
+                result.append(text[index:index + 2])
+                index += 2
+            elif text.startswith(quote, index):
+                end = index + len(quote)
+                if len(quote) == 3:
+                    while end < len(text) and text[end] == quote[0]:
+                        end += 1
+                result.append(text[index:end])
+                index, quote = end, None
+            else:
+                result.append(character)
+                index += 1
+        elif character in {"'", '"'}:
+            quote = character * (3 if text.startswith(character * 3, index) else 1)
+            result.append(quote)
+            index += len(quote)
+        elif character == "#":
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+        else:
+            result.append(character)
+            index += 1
+    return "".join(result)
 
 
 def _form_strings(item):
@@ -2448,9 +2526,10 @@ def register_config(app, config, *, host):
                 for control in group["controls"]:
                     key = control["key"]
                     submitted = request.form.get(control["id"], control["value"])
-                    if not retainable_form_value(control, submitted, section):
+                    retained = retained_form_value(control, submitted, section)
+                    if retained is None:
                         continue
-                    control["value"] = submitted
+                    control["value"] = retained
                     control["checked"] = submitted == "true" or submitted == "" and control["spec"].default is True
             return render_template("config_section.html", section=section, groups=groups,
                                    version=version, error=error, events=EVENT_KINDS,

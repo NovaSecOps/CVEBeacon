@@ -450,8 +450,9 @@ are marked; requirements on a blank final row apply only when that row is added.
 Defaults appear as placeholders and beneath the controls. Email `to`, `cc`,
 `bcc` and legacy `recipients` accept comma-separated addresses or TOML arrays;
 watch-channel lists are trimmed, deduplicated and validated per address. Existing
-items containing commas, including quoted display names, render as TOML arrays
-so an unchanged form preserves their meaning. Legacy `recipients` keeps the
+items containing commas, including quoted display names, and lists whose joined
+text starts with `[` render as TOML arrays so an unchanged form preserves their
+meaning. Legacy `recipients` keeps the
 loader's nonempty-string rules, ordering and duplicates, including distribution
 names without `@`; it has no separate editor limit on recipient count. Other arrays,
 column mappings and nested rule conditions accept TOML values. For example,
@@ -467,8 +468,10 @@ redisplayed. Changed credential references, unvalidated row labels, rejected
 enum values and unsafe or malformed structured values retain their validated
 baseline instead of repeating potentially sensitive text. This policy does not
 read any reference target. Re-enter changed references and labels after correcting
-an error. The condition
-editor lists valid leaves, values and examples from
+an error. Comments are removed from retained TOML values, while hashes inside
+quoted strings and ordinary correction text are preserved. Unreadable secret-file
+errors identify the setting without repeating the resolved target path. The
+condition editor lists valid leaves, values and examples from
 the parser's schema; for example, `kev` accepts `"cisa"`, `"eu"` or `"any"`, and
 `kev = true` reports the exact condition path and accepted values.
 Unrecognized configuration fields must be reviewed outside the editor before

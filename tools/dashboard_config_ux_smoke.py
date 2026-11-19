@@ -86,15 +86,22 @@ def smoke(directory):
             pasted = "https://secret.example/token/SYNTHETIC-CREDENTIAL"
             for section, changes in [
                 ("sources", {"g0_nvd_api_key_file": pasted, "g0_minimum_request_interval": "oops"}),
+                ("sources", {"g0_nvd_api_key_file": pasted}),
                 ("watch", {"g0_initial": pasted}),
                 ("rules", {"g0_name": "example", "g0_channels": '["email"]', "g0_condition": '{ kev = "' + pasted + '" }'}),
+                ("rules", {"g0_name": "example", "g0_channels": '["email"]', "g0_condition": '{ kev = true } # ' + pasted}),
+                ("rules", {"g0_name": "example", "g0_channels": '["email"]', "g0_condition": '{ kev = ["SYNTHETICTOKEN123"] }'}),
             ]:
                 refused = preview(section, **changes)
                 assert refused.status_code == 400
                 assert pasted not in refused.text
-            confirm("notifications", preview("notifications", g1_recipients='["example-distribution", "one@example.com, two@example.com"]'))
+                assert "SYNTHETICTOKEN123" not in refused.text
+            confirm("channels", preview("channels", g0_to=value(["[alerts@example.com]"])))
+            confirm("channels", preview("channels"))
+            assert tomllib.loads(path.read_text())["watch"]["channels"]["email"]["to"] == ["[alerts@example.com]"]
+            confirm("notifications", preview("notifications", g1_recipients='["[example-distribution]", "one@example.com, two@example.com"]'))
             confirm("notifications", preview("notifications"))
-            assert tomllib.loads(path.read_text())["notifications"]["email"]["recipients"] == ["example-distribution", "one@example.com, two@example.com"]
+            assert tomllib.loads(path.read_text())["notifications"]["email"]["recipients"] == ["[example-distribution]", "one@example.com, two@example.com"]
             confirm("dashboard", preview("dashboard", g0_session_idle_seconds="120"))
             assert client.get("/").status_code == 303
             login()
