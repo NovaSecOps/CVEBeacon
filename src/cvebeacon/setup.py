@@ -1175,16 +1175,16 @@ def _render_config(
         "# Review the paths and secret references before the first run.",
         "",
     ]
+    lines.extend(["[inventory]", "managed = true"])
     if inventory is not None:
         lines.extend(
             [
                 "# Inventory file, format and column names. See docs/USER_GUIDE.md.",
-                "[inventory]",
                 f"path = {_toml_string(inventory.path)}",
                 f"format = {_toml_string(inventory.format)}",
-                "",
             ]
         )
+    lines.append("")
     lines.extend(
         [
             "# Local monitoring state. See docs/USER_GUIDE.md.",

@@ -1,0 +1,109 @@
+"""Dashboard-managed inventory participates in the normal inventory loader."""
+
+from dataclasses import asdict
+import json
+
+import pytest
+
+from cvebeacon.config import load_config
+from cvebeacon.inventory import load_inventory
+from cvebeacon.models import Asset
+from cvebeacon.web_assets import client_key
+
+
+def test_watch_only_config_discovers_inventory_without_reloading(tmp_path):
+    path = tmp_path / "cvebeacon.toml"
+    path.write_text("[state]\ndatabase = 'state.db'\n[watch]\nenabled = true\n")
+    config = load_config(path)
+    assert config.effective_inventory is None
+    directory = tmp_path / "inventories"
+    directory.mkdir(mode=0o700)
+    asset = Asset("asset", vendor="vendor", product="product", version="1", client="Example")
+    source = directory / f"{client_key(asset.client)}.json"
+    source.touch(mode=0o600)
+    source.write_text(json.dumps([asdict(asset)]))
+    assert load_inventory(config.effective_inventory) == [asset]
+    assert load_inventory(load_config(path).effective_inventory) == [asset]
+    source.unlink()
+    assert config.effective_inventory is None
+
+
+def write_managed(directory, client, asset_id):
+    directory.mkdir(mode=0o700, exist_ok=True)
+    path = directory / f"{client_key(client)}.json"
+    path.touch(mode=0o600)
+    asset = Asset(asset_id, vendor="vendor", product="product", version="1", client=client)
+    path.write_text(json.dumps([asdict(asset)]))
+    return path
+
+
+def test_merge_collisions_report_client_names_without_asset_ids(tmp_path):
+    from cvebeacon.errors import InventoryValidationError
+
+    source = tmp_path / "inventory.csv"
+    source.write_text("asset_id,vendor,product,version,client\nprivate-id,v,p,1,Configured client\n")
+    path = tmp_path / "config.toml"
+    path.write_text("[state]\ndatabase='state.db'\n[inventory]\npath='inventory.csv'\n")
+    config = load_config(path)
+    write_managed(config.inventory_directory, "Dashboard client", "PRIVATE-ID")
+    with pytest.raises(InventoryValidationError) as result:
+        load_inventory(config.effective_inventory)
+    assert "Configured client" in str(result.value)
+    assert "Dashboard client" in str(result.value)
+    assert "private-id" not in str(result.value).casefold()
+
+
+def test_validation_and_doctor_report_corrupt_inventory(tmp_path, capsys, caplog):
+    from cvebeacon.cli import main
+
+    path = tmp_path / "config.toml"
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    config = load_config(path)
+    write_managed(config.inventory_directory, "One", "asset-1")
+    corrupt = write_managed(config.inventory_directory, "Two", "asset-2")
+    corrupt.write_text("FILE-CONTENTS-MARKER")
+    assert [asset.asset_id for asset in load_inventory(config.effective_inventory)] == ["asset-1"]
+    assert "Skipping invalid client inventory" in caplog.text
+    assert main(["--config", str(path), "inventory", "validate"]) == 2
+    assert "partial: 1 asset(s)" in capsys.readouterr().out
+    assert main(["--config", str(path), "doctor", "--local-state"]) == 2
+    checks = json.loads(capsys.readouterr().out)
+    assert "Skipping invalid client inventory" in checks["managed_inventory"][0]
+    assert "FILE-CONTENTS-MARKER" not in repr(checks) + caplog.text
+
+
+def test_old_configs_ignore_profiles_and_history_and_can_disable_managed(tmp_path):
+    path = tmp_path / "config.toml"
+    old = "[state]\ndatabase='state.db'\n[watch]\nenabled=true\n"
+    path.write_text(old)
+    config = load_config(path)
+    directory = config.inventory_directory
+    directory.mkdir(mode=0o700)
+    (directory / "unused.client").touch()
+    (directory / f"{client_key('Example')}.20261110T120000000000Z.json").touch()
+    assert config.effective_inventory is None
+    write_managed(directory, "Example", "asset")
+    path.write_text(old + "[inventory]\nmanaged=false\n")
+    assert load_config(path).effective_inventory is None
+
+
+def test_scan_with_a_corrupt_inventory_does_not_replace_successful_correlation(tmp_path, monkeypatch):
+    from cvebeacon import cli
+    from cvebeacon.clients import latest_successful_scan
+    from cvebeacon.models import QueryResult
+
+    path = tmp_path / "config.toml"
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    config = load_config(path)
+    write_managed(config.inventory_directory, "One", "asset-1")
+    monkeypatch.setattr(cli, "_run_query", lambda config, assets, **kwargs: [
+        QueryResult(asset, (), ()) for asset in assets
+    ])
+    command = ["--config", str(path), "scan"]
+    assert cli.main(command) == 0
+    initial = latest_successful_scan(config.database_path)
+    assert initial is not None
+    corrupt = write_managed(config.inventory_directory, "Two", "asset-2")
+    corrupt.write_text("INVALID INVENTORY")
+    assert cli.main(command) == 4
+    assert latest_successful_scan(config.database_path) == initial

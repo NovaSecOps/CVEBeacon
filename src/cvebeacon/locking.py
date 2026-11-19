@@ -90,7 +90,7 @@ def run_lock_path(config) -> Path:
 def operation_lock_paths(config, operation: str) -> tuple[Path, ...]:
     """Select the stores written by an operation in canonical path order."""
     paths = set()
-    if operation in {"scan", "web-detect", "web-plan", "web-assets"} or (operation == "run" and config.inventory is not None):
+    if operation in {"scan", "web-detect", "web-plan", "web-assets", "client-inventory"} or (operation == "run" and config.effective_inventory is not None):
         paths.add(Path(config.database_path).resolve().parent / LOCK_NAME)
     if (operation == "run" and config.watch.enabled) or operation.startswith("watch-"):
         paths.add(run_lock_path(config))
@@ -238,7 +238,7 @@ class RunLock:
         self._temporary_identity: tuple[int, int] | None = None
         self._temporary_descriptor: int | None = None
         # Only fixed labels may enter the record, never user arguments.
-        labels = {"scan", "run", "web-detect", "web-detect --plan", "web-assets"}
+        labels = {"scan", "run", "web-detect", "web-detect --plan", "web-assets", "client-inventory"}
         labels.update(f"watch {name}" for name in ("sync", "run", "evaluate", "notify", "report", "unreport"))
         self.command = command if command in labels else "run"
         self.holder: str | None = None

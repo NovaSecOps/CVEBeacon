@@ -830,25 +830,28 @@ def _print_delivery(report, *, only_selected: bool = False) -> None:
 
 
 def _inventory_config(config: AppConfig) -> InventoryConfig:
-    if config.inventory is None:
+    inventory = config.effective_inventory
+    if inventory is None:
         raise CVEBeaconError(
-            "this command requires an inventory; add [inventory] path to the configuration"
+            "this command requires an inventory; add [inventory] path or upload a client inventory in the dashboard"
         )
-    return config.inventory
+    return inventory
 
 
-def _load_inventory(config: AppConfig, inventory: InventoryConfig | None = None) -> list[Asset]:
+def _load_inventory(config: AppConfig, inventory: InventoryConfig | None = None,
+                    *, managed_warnings: list[str] | None = None) -> list[Asset]:
     selected = inventory if inventory is not None else _inventory_config(config)
-    if selected.web_snapshots:
-        return load_inventory(selected, snapshot_directory=config.database_path.parent / "web-inventory")
-    return load_inventory(selected)
+    return load_inventory(
+        selected, snapshot_directory=config.database_path.parent / "web-inventory",
+        managed_warnings=managed_warnings,
+    )
 
 
 def _inventory_for(config: AppConfig, path: str | None) -> InventoryConfig:
     if not path:
         return _inventory_config(config)
     base = config.inventory or InventoryConfig(path=Path(path).expanduser().resolve())
-    return replace(base, path=Path(path).expanduser().resolve())
+    return replace(base, path=Path(path).expanduser().resolve(), managed_directory=None)
 
 
 def _run_query(config: AppConfig, assets: list[Asset], *, known_findings=()):
@@ -1222,7 +1225,7 @@ def _run_scan(config: AppConfig, *, report: str | None = None) -> int:
 
 def _run_all(config: AppConfig, *, yes: bool = False) -> int:
     parts: list[int] = []
-    if config.inventory is not None:
+    if config.effective_inventory is not None:
         try:
             parts.append(_run_scan(config))
         except CVEBeaconError as exc:
@@ -1294,6 +1297,10 @@ def run(args: argparse.Namespace) -> int:
         print("removed" if remove(system=args.platform) else "not installed")
         return 0
     config = load_config(args.config)
+    if args.command == "run":
+        # Decide which stores this invocation uses before selecting its locks.
+        # A first upload during a watch-only run joins the next invocation.
+        config = replace(config, inventory=config.effective_inventory, managed_inventory=False)
     lock = None
     if _lock_required(args):
         label = " ".join(
@@ -1320,12 +1327,12 @@ def run(args: argparse.Namespace) -> int:
             return _run_watch(args, config)
         if args.command == "run":
             return _run_all(config, yes=args.yes)
-        if args.command == "migrate" or (args.command == "doctor" and config.inventory is None and args.allow_watch_only):
+        if args.command == "migrate" or (args.command == "doctor" and config.effective_inventory is None and args.allow_watch_only):
             from .update_state import migrate
             migrate(config)
             print(json.dumps({"configuration": "ok", "state": "ok", "watch": "ok"}))
             return 0
-        if args.command == "doctor" and config.inventory is None:
+        if args.command == "doctor" and config.effective_inventory is None:
             checks = _watch_only_doctor_checks(config)
             if args.live:
                 checks["live_sources"] = _live_source_checks(
@@ -1352,7 +1359,7 @@ def run(args: argparse.Namespace) -> int:
                 if name != "live_sources"
             )
             return 2 if failed_local or failed_live else 0
-        if args.command == "serve" and config.inventory is None and not config.watch.enabled:
+        if args.command == "serve" and config.effective_inventory is None and not config.watch.enabled:
             raise CVEBeaconError(
                 "serve requires an inventory or watch mode; add [inventory] path "
                 "or set [watch] enabled = true"
@@ -1421,13 +1428,16 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         inventory_config = _inventory_for(config, args.path)
         if args.inventory_command == "inspect":
             if inventory_config.path is None:
-                raise CVEBeaconError("inventory inspect requires a file path; use inventory validate for web snapshots")
+                raise CVEBeaconError("inventory inspect requires a file path; use inventory validate to check the merged inventory")
             print(json.dumps(inspect_inventory(inventory_config.path, header_row=inventory_config.header_row, encoding=inventory_config.encoding, delimiter=inventory_config.delimiter), indent=2))
         else:
-            assets = _load_inventory(config, inventory_config); print(f"valid: {len(assets)} asset(s)")
+            managed_warnings: list[str] = []
+            assets = _load_inventory(config, inventory_config, managed_warnings=managed_warnings)
+            print(f"{'partial' if managed_warnings else 'valid'}: {len(assets)} asset(s)")
             if args.identities:
                 for asset in assets:
                     print(f"{asset.asset_id}: {asset.identity_path}" + (" (conflicting identities require review)" if identity_conflict(asset) else ""))
+            return 2 if managed_warnings else 0
         return 0
     if args.command == "asset":
         asset = next((item for item in _load_inventory(config) if item.asset_id.casefold() == args.asset_id.casefold()), None)
@@ -1444,11 +1454,15 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
     if args.command in {"scan", "export"}:
         inventory_config = _inventory_config(config)
-        assets = _load_inventory(config, inventory_config)
+        managed_warnings: list[str] = []
+        assets = _load_inventory(config, inventory_config, managed_warnings=managed_warnings)
         results = _run_query(config, assets, known_findings=store.latest_findings()) if args.command == "scan" else _run_query(config, assets)
         if args.command == "scan":
             channels = configured_channels(config)
-            run_id, events = store.record_scan(results, channels=channels, attempt_id=attempt_id)
+            run_id, events = store.record_scan(
+                results, channels=channels, attempt_id=attempt_id,
+                inventory_incomplete=bool(managed_warnings),
+            )
             failures = []
             with HttpClient(config.http) as http:
                 for channel in channels:
@@ -1466,9 +1480,9 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
             if failures:
                 for failure in failures: print(f"notification warning: {failure}", file=sys.stderr)
                 return 3
-            return 4 if warnings or degraded else 0
+            return 4 if warnings or degraded or managed_warnings else 0
         path = Path(args.output).resolve() if args.output else _report_path(config, args.format)
-        if path in {inventory_config.path, config.config_path, config.database_path}:
+        if path in {inventory_config.path, config.config_path, config.database_path} or path.is_relative_to(config.inventory_directory):
             raise CVEBeaconError("report output cannot overwrite inventory, configuration or state")
         (write_xlsx if args.format == "xlsx" else write_json)(results, path); print(path); return 0
     if args.command == "history":
@@ -1488,23 +1502,27 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         from .update_state import migrate
         migrate(config)
         inventory_config = _inventory_config(config)
-        assets = _load_inventory(config, inventory_config); store.initialize()
+        managed_warnings: list[str] = []
+        assets = _load_inventory(config, inventory_config, managed_warnings=managed_warnings)
+        store.initialize()
         checks = {"configuration": "ok", "inventory": f"ok ({len(assets)} assets)", "state": "ok", "teams_secret": "not required" if not config.teams.enabled else ("set" if config.secret(config.teams.webhook_env) else "missing"), "email_secrets": "not required" if not config.email.enabled else ("set" if all(config.secret(x) for x in (config.email.tenant_id_env, config.email.client_id_env, config.email.client_secret_env)) else "missing")}
+        if managed_warnings:
+            checks["managed_inventory"] = managed_warnings
         if args.local_state:
             checks["teams_secret"] = checks["email_secrets"] = "not checked (local state only)"
         if args.live:
             checks["live_sources"] = _live_source_checks(config)
         print(json.dumps(checks, indent=2))
         failed_live = any(value != "ok" for value in checks.get("live_sources", {}).values())
-        return 2 if "missing" in checks.values() or failed_live else 0
+        return 2 if "missing" in checks.values() or failed_live or managed_warnings else 0
     if args.command == "source-status": print(json.dumps(_source_status(store), indent=2)); return 0
     if args.command == "schedule":
         target = args.schedule_target or default_command(
-            inventory=config.inventory is not None, watch=config.watch.enabled
+            inventory=config.effective_inventory is not None, watch=config.watch.enabled
         )
         if target in {"watch", "both"} and not config.watch.enabled:
             raise CVEBeaconError("watch mode is disabled; set [watch] enabled = true")
-        if target in {"scan", "both"} and config.inventory is None:
+        if target in {"scan", "both"} and config.effective_inventory is None:
             raise CVEBeaconError("this configuration has no inventory; use --command watch")
         if args.times is not None and args.every is not None:
             raise CVEBeaconError("--times and --every are mutually exclusive")

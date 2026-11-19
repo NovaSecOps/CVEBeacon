@@ -56,6 +56,7 @@ class InventoryConfig:
         default_factory=lambda: {name: name for name in CANONICAL_FIELDS}
     )
     web_snapshots: bool = False
+    managed_directory: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +153,21 @@ class AppConfig:
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    managed_inventory: bool = True
+
+    @property
+    def inventory_directory(self) -> Path:
+        return self.database_path.parent / "inventories"
+
+    @property
+    def effective_inventory(self) -> InventoryConfig | None:
+        if self.inventory is not None:
+            return self.inventory
+        if self.managed_inventory:
+            from .managed_inventory import has_managed_inventory
+            if has_managed_inventory(self.inventory_directory):
+                return InventoryConfig(path=None, managed_directory=self.inventory_directory)
+        return None
 
     def secret(self, env_name: str, *, required: bool = False) -> str | None:
         value = os.environ.get(env_name)
@@ -278,6 +294,10 @@ def load_config(path: str | Path) -> AppConfig:
     web_snapshots = inv.get("web_snapshots", False)
     if type(web_snapshots) is not bool:
         raise ConfigurationError("inventory.web_snapshots must be a boolean")
+    managed = inv.get("managed", True)
+    if type(managed) is not bool:
+        raise ConfigurationError("inventory.managed must be a boolean")
+    managed_directory = state_database.parent / "inventories" if managed else None
     if inv.get("path") or web_snapshots:
         columns = inv.get("columns", {name: name for name in CANONICAL_FIELDS})
         if not isinstance(columns, dict):
@@ -303,6 +323,7 @@ def load_config(path: str | Path) -> AppConfig:
         inventory_config = InventoryConfig(
             path=_resolve(base, inv["path"]) if inv.get("path") else None,
             web_snapshots=web_snapshots,
+            managed_directory=managed_directory,
             format=inventory_format,
             worksheet=inv.get("worksheet"),
             header_row=header_row,
@@ -312,7 +333,9 @@ def load_config(path: str | Path) -> AppConfig:
             columns={name: str(value) for name, value in columns.items() if name in CANONICAL_FIELDS + OPTIONAL_FIELDS},
         )
     elif not watch_enabled:
-        raise ConfigurationError("inventory.path is required")
+        from .managed_inventory import has_managed_inventory
+        if managed_directory is None or not has_managed_inventory(managed_directory):
+            raise ConfigurationError("inventory.path is required")
 
     output = _table(data, "output")
     http_data = _table(data, "http")
@@ -409,6 +432,7 @@ def load_config(path: str | Path) -> AppConfig:
     return AppConfig(
         config_path=config_path,
         inventory=inventory_config,
+        managed_inventory=managed,
         database_path=state_database,
         output_dir=_resolve(base, output.get("directory", "reports")),
         http=HttpConfig(
