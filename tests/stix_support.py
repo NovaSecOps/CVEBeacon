@@ -47,10 +47,14 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
     """Assert the required properties, references, and ID forms of a bundle."""
     assert isinstance(bundle, dict)
     assert bundle["type"] == "bundle"
-    assert set(bundle) == {"type", "id", "objects"}
+    assert set(bundle) <= {"type", "id", "objects"}
+    assert {"type", "id"} <= set(bundle)
     _identifier(bundle["id"], "bundle")
-    objects = bundle["objects"]
-    assert isinstance(objects, list)
+    objects = bundle.get("objects")
+    if objects is not None:
+        assert isinstance(objects, list) and objects
+    else:
+        objects = []
     by_id: dict[str, dict[str, Any]] = {}
     for value in objects:
         assert isinstance(value, dict)
@@ -58,9 +62,11 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
         _identifier(value["id"], value["type"])
         assert value["id"] not in by_id
         by_id[value["id"]] = value
-        for key in value:
+        for key, custom in value.items():
             if key.startswith("x_"):
                 assert _CUSTOM.fullmatch(key), key
+                if isinstance(custom, list):
+                    assert custom, key
         if value["type"] in _SDO_OR_SRO:
             assert value["spec_version"] == "2.1"
             created = _timestamp(value["created"])
@@ -90,7 +96,12 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                 "affected",
                 "needs_review",
             }
-            assert isinstance(value["x_cvebeacon_sources"], list)
+            states = value["x_cvebeacon_states"]
+            assert isinstance(states, list) and states
+            assert set(states) <= {"affected", "needs_review"}
+            assert value["x_cvebeacon_applicability"] in states
+            if "x_cvebeacon_sources" in value:
+                assert isinstance(value["x_cvebeacon_sources"], list)
             _timestamp(value["x_cvebeacon_first_seen"])
         elif kind == "software":
             assert isinstance(value["name"], str) and value["name"]
@@ -108,6 +119,15 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                 "affected",
                 "needs_review",
             }
+            if "x_cvebeacon_sources" in value:
+                assert isinstance(value["x_cvebeacon_sources"], list)
+            if "x_cvebeacon_client_refs" in value:
+                references = value["x_cvebeacon_client_refs"]
+                assert isinstance(references, list) and references
+                assert all(
+                    by_id[reference]["type"] == "identity"
+                    for reference in references
+                )
             _timestamp(value["x_cvebeacon_first_seen"])
         elif kind == "identity":
             assert isinstance(value["name"], str) and value["name"]

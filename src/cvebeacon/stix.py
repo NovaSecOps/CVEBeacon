@@ -26,6 +26,7 @@ from .identity import (
     PURL_ECOSYSTEMS,
     package_name,
     parse_purl,
+    purl_string,
     validate_client_name,
 )
 
@@ -76,11 +77,11 @@ class ScanSnapshot:
 @dataclass
 class _Aggregate:
     states: set[str]
-    sources: set[str]
+    state_sources: dict[str, set[str]]
+    state_confidence: dict[str, str]
     first_seen: datetime
     last_seen: datetime
-    confidence: str = ""
-    clients: set[str] = field(default_factory=set)
+    clients: dict[str, str] = field(default_factory=dict)
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
@@ -134,7 +135,7 @@ def _fallback_rows(
                 "SELECT sf.asset_id,sf.advisory_id,cf.first_seen,cf.last_seen,"
                 "cf.payload_json FROM scan_findings sf "
                 "JOIN current_findings cf ON cf.asset_id=sf.asset_id "
-                "AND cf.cve_id=sf.advisory_id "
+                "AND cf.cve_id=sf.advisory_id COLLATE NOCASE "
                 "WHERE sf.run_id=? AND sf.identifier=sf.advisory_id "
                 "AND cf.last_seen=? ORDER BY sf.asset_id,sf.advisory_id",
                 (run_id, completed_at),
@@ -398,6 +399,10 @@ def _confidence_key(value: str) -> tuple[int, str]:
     return (_CONFIDENCE_RANK.get(text, 0), text)
 
 
+def _state_key(value: str) -> tuple[int, str]:
+    return (-_APPLICABILITY_RANK.get(value, 0), value)
+
+
 def _highest_applicability(states: Iterable[str]) -> str:
     return max(
         states,
@@ -412,67 +417,82 @@ def _object_id(kind: str, key: str) -> str:
     return f"{kind}--{uuid.uuid5(STIX_NAMESPACE, key)}"
 
 
-def _software_key(asset: Mapping[str, Any]) -> str:
-    version = _text(asset.get("version"))
-    purl = _text(asset.get("purl"))
-    if purl:
-        return "purl|" + purl + "|" + version
-    cpe = _text(asset.get("cpe"))
-    if cpe:
-        return "cpe|" + cpe + "|" + version
-    values = [
-        _text(asset.get("ecosystem")).casefold(),
-        _text(asset.get("vendor")).casefold(),
-        _text(asset.get("product")).casefold(),
-        version,
-    ]
-    return "product|" + "|".join(values)
+def _purl_coordinate(value: str):
+    """Return a sanitised package coordinate and its parsed form.
 
-
-def _parsed_purl(value: str):
+    Qualifiers and subpaths are intentionally dropped. They can carry
+    repository, download, VCS, or token-bearing values that must not appear in
+    an export, and they do not identify the package version itself.
+    """
     if not value:
-        return None
+        return "", None
     try:
-        return parse_purl(value)
+        parsed = parse_purl(value)
     except ValueError:
-        return None
+        return "", None
+    sanitised = purl_string(parsed._replace(qualifiers={}, subpath=None))
+    return sanitised, parsed
+
+
+def _software_fields(asset: Mapping[str, Any]) -> dict[str, str]:
+    purl, parsed = _purl_coordinate(_text(asset.get("purl")))
+    version = _text(asset.get("version")) or (
+        parsed.version if parsed is not None else ""
+    )
+    ecosystem = _text(asset.get("ecosystem")) or (
+        PURL_ECOSYSTEMS.get(parsed.type, "") if parsed is not None else ""
+    )
+    cpe = _text(asset.get("cpe"))
+    product = _text(asset.get("product")) or (
+        package_name(parsed) if parsed is not None else ""
+    )
+    return {
+        "name": product
+        or cpe
+        or version
+        or "unknown software",
+        "vendor": _text(asset.get("vendor")),
+        "version": version,
+        "cpe": cpe,
+        "purl": purl,
+        "ecosystem": ecosystem,
+    }
+
+
+def _software_key(asset: Mapping[str, Any]) -> str:
+    fields = _software_fields(asset)
+    if fields["purl"]:
+        return "purl|" + fields["purl"] + "|" + fields["version"]
+    if fields["cpe"]:
+        return "cpe|" + fields["cpe"] + "|" + fields["version"]
+    return "product|" + "|".join(
+        (
+            fields["ecosystem"].casefold(),
+            fields["vendor"].casefold(),
+            _text(asset.get("product")).casefold(),
+            fields["version"],
+        )
+    )
 
 
 def _software_object(asset: Mapping[str, Any]) -> dict[str, Any]:
-    purl = _text(asset.get("purl"))
-    parsed = _parsed_purl(purl)
-    name = (
-        _text(asset.get("product"))
-        or (package_name(parsed) if parsed is not None else "")
-        or purl
-        or _text(asset.get("cpe"))
-        or _text(asset.get("version"))
-        or "unknown software"
-    )
+    fields = _software_fields(asset)
     value: dict[str, Any] = {
         "type": "software",
         "spec_version": STIX_VERSION,
         "id": _object_id("software", "software|" + _software_key(asset)),
-        "name": name,
+        "name": fields["name"],
     }
-    vendor = _text(asset.get("vendor"))
-    version = _text(asset.get("version")) or (
-        parsed.version if parsed is not None else ""
-    )
-    cpe = _text(asset.get("cpe"))
-    ecosystem = _text(asset.get("ecosystem")) or (
-        PURL_ECOSYSTEMS.get(parsed.type, "") if parsed is not None else ""
-    )
-    if vendor:
-        value["vendor"] = vendor
-    if version:
-        value["version"] = version
-    if cpe.startswith("cpe:2.3:"):
-        value["cpe"] = cpe
-    if purl:
-        value["x_cvebeacon_purl"] = purl
-    if ecosystem:
-        value["x_cvebeacon_ecosystem"] = ecosystem
+    if fields["vendor"]:
+        value["vendor"] = fields["vendor"]
+    if fields["version"]:
+        value["version"] = fields["version"]
+    if fields["cpe"].startswith("cpe:2.3:"):
+        value["cpe"] = fields["cpe"]
+    if fields["purl"]:
+        value["x_cvebeacon_purl"] = fields["purl"]
+    if fields["ecosystem"]:
+        value["x_cvebeacon_ecosystem"] = fields["ecosystem"]
     return value
 
 
@@ -514,23 +534,31 @@ def _merge_aggregate(
     if aggregate is None:
         aggregate = _Aggregate(
             states={state},
-            sources=set(sources),
+            state_sources={state: set(sources)},
+            state_confidence={},
             first_seen=first_seen,
             last_seen=max(first_seen, last_seen),
         )
     else:
         aggregate.states.add(state)
-        aggregate.sources.update(sources)
+        aggregate.state_sources.setdefault(state, set()).update(sources)
         aggregate.first_seen = min(aggregate.first_seen, first_seen)
         aggregate.last_seen = max(aggregate.last_seen, last_seen)
     if confidence and (
-        not aggregate.confidence
+        not aggregate.state_confidence.get(state)
         or _confidence_key(confidence)
-        > _confidence_key(aggregate.confidence)
+        > _confidence_key(aggregate.state_confidence[state])
     ):
-        aggregate.confidence = confidence
+        aggregate.state_confidence[state] = confidence
     if include_clients and client.strip():
-        aggregate.clients.add(client.strip())
+        label = client.strip()
+        key = label.casefold()
+        current = aggregate.clients.get(key)
+        if current is None or (label.casefold(), label) < (
+            current.casefold(),
+            current,
+        ):
+            aggregate.clients[key] = label
     return aggregate
 
 
@@ -551,8 +579,10 @@ def build_bundle(
     vulnerability_aggregates: dict[str, _Aggregate] = {}
     relationship_aggregates: dict[str, _Aggregate] = {}
     vulnerability_names: dict[str, str] = {}
-    relationship_parts: dict[str, tuple[str, str]] = {}
-    included_clients: set[str] = set()
+    relationship_parts: dict[str, tuple[str, str, str]] = {}
+    identity_first_seen: dict[str, datetime] = {}
+    included_clients: dict[str, str] = {}
+    report_first_seen: datetime | None = None
     summaries: dict[str, str] = {}
 
     items = tuple(findings)
@@ -572,6 +602,11 @@ def build_bundle(
         last_seen = max(first_seen, _parse_timestamp(item.last_seen))
         sources = _sources(item.finding)
         confidence = _text(item.finding.get("confidence"))
+        report_first_seen = (
+            first_seen
+            if report_first_seen is None
+            else min(report_first_seen, first_seen)
+        )
 
         vulnerability_id = _object_id("vulnerability", "vulnerability|" + name.upper())
         vulnerability_aggregates[vulnerability_id] = _merge_aggregate(
@@ -581,8 +616,8 @@ def build_bundle(
             first_seen=first_seen,
             last_seen=last_seen,
             confidence=confidence,
-            client=item.client,
-            include_clients=include_clients,
+            client="",
+            include_clients=False,
         )
         current_name = vulnerability_names.get(vulnerability_id)
         if current_name is None or (
@@ -603,7 +638,12 @@ def build_bundle(
         software_id = _merge_software(software, item.asset)
         relationship_id = _object_id(
             "relationship",
-            "relationship|has|" + software_id + "|" + vulnerability_id,
+            "relationship|has|"
+            + software_id
+            + "|"
+            + vulnerability_id
+            + "|"
+            + state,
         )
         relationship_aggregates[relationship_id] = _merge_aggregate(
             relationship_aggregates.get(relationship_id),
@@ -618,12 +658,23 @@ def build_bundle(
         relationship_parts[relationship_id] = (
             software_id,
             vulnerability_id,
+            state,
         )
         if include_clients and item.client.strip():
             client = item.client.strip()
-            included_clients.add(client)
+            key = client.casefold()
+            current_label = included_clients.get(key)
+            if current_label is None or (key, client) < (
+                current_label.casefold(),
+                current_label,
+            ):
+                included_clients[key] = client
             identity_id = _object_id(
-                "identity", "identity|client|" + client.casefold()
+                "identity", "identity|client|" + key
+            )
+            identity_first_seen[identity_id] = min(
+                first_seen,
+                identity_first_seen.get(identity_id, first_seen),
             )
             current = identities.get(identity_id)
             if current is None or (
@@ -645,6 +696,9 @@ def build_bundle(
 
     for vulnerability_id, aggregate in vulnerability_aggregates.items():
         name = vulnerability_names[vulnerability_id]
+        highest = _highest_applicability(aggregate.states)
+        sources = aggregate.state_sources.get(highest, set())
+        confidence = aggregate.state_confidence.get(highest, "")
         value: dict[str, Any] = {
             "type": "vulnerability",
             "spec_version": STIX_VERSION,
@@ -653,24 +707,33 @@ def build_bundle(
             "modified": _format_timestamp(aggregate.last_seen),
             "name": name,
             "external_references": _external_references(name),
-            "x_cvebeacon_applicability": _highest_applicability(
-                aggregate.states
-            ),
-            "x_cvebeacon_sources": sorted(
-                aggregate.sources, key=lambda item: (item.casefold(), item)
+            "x_cvebeacon_applicability": highest,
+            "x_cvebeacon_states": sorted(
+                aggregate.states, key=_state_key
             ),
             "x_cvebeacon_first_seen": _format_timestamp(
                 aggregate.first_seen
             ),
         }
-        if aggregate.confidence:
-            value["x_cvebeacon_confidence"] = aggregate.confidence
+        if sources:
+            value["x_cvebeacon_sources"] = sorted(
+                sources, key=lambda item: (item.casefold(), item)
+            )
+        if confidence:
+            value["x_cvebeacon_confidence"] = confidence
         if vulnerability_id in summaries:
             value["description"] = summaries[vulnerability_id]
         vulnerabilities[vulnerability_id] = value
 
+    for identity_id, value in identities.items():
+        created = identity_first_seen[identity_id]
+        value["created"] = _format_timestamp(created)
+        value["modified"] = _format_timestamp(max(generated, created))
+
     for relationship_id, aggregate in relationship_aggregates.items():
-        source_ref, target_ref = relationship_parts[relationship_id]
+        source_ref, target_ref, state = relationship_parts[relationship_id]
+        sources = aggregate.state_sources.get(state, set())
+        confidence = aggregate.state_confidence.get(state, "")
         value = {
             "type": "relationship",
             "spec_version": STIX_VERSION,
@@ -680,22 +743,27 @@ def build_bundle(
             "relationship_type": "has",
             "source_ref": source_ref,
             "target_ref": target_ref,
-            "x_cvebeacon_applicability": _highest_applicability(
-                aggregate.states
-            ),
-            "x_cvebeacon_sources": sorted(
-                aggregate.sources, key=lambda item: (item.casefold(), item)
-            ),
+            "x_cvebeacon_applicability": state,
             "x_cvebeacon_first_seen": _format_timestamp(
                 aggregate.first_seen
             ),
         }
-        if aggregate.confidence:
-            value["x_cvebeacon_confidence"] = aggregate.confidence
-        if include_clients and aggregate.clients:
-            value["x_cvebeacon_clients"] = sorted(
-                aggregate.clients, key=lambda item: (item.casefold(), item)
+        if sources:
+            value["x_cvebeacon_sources"] = sorted(
+                sources, key=lambda item: (item.casefold(), item)
             )
+        if confidence:
+            value["x_cvebeacon_confidence"] = confidence
+        if include_clients and aggregate.clients:
+            labels = sorted(
+                aggregate.clients.values(),
+                key=lambda item: (item.casefold(), item),
+            )
+            value["x_cvebeacon_clients"] = labels
+            value["x_cvebeacon_client_refs"] = [
+                _object_id("identity", "identity|client|" + label.casefold())
+                for label in labels
+            ]
         relationships[relationship_id] = value
 
     objects = {**identities, **software, **vulnerabilities, **relationships}
@@ -704,7 +772,7 @@ def build_bundle(
     )
     if object_refs:
         clients = sorted(
-            included_clients,
+            included_clients.values(),
             key=lambda item: (item.casefold(), item),
         )
         if include_clients and clients:
@@ -715,13 +783,15 @@ def build_bundle(
         report_id = _object_id(
             "report", "report|" + "|".join(object_refs)
         )
+        report_created = report_first_seen or generated
+        report_modified = max(generated, report_created)
         objects[report_id] = {
             "type": "report",
             "spec_version": STIX_VERSION,
             "id": report_id,
-            "created": generated_text,
-            "modified": generated_text,
-            "published": generated_text,
+            "created": _format_timestamp(report_created),
+            "modified": _format_timestamp(report_modified),
+            "published": _format_timestamp(report_modified),
             "name": report_name,
             "report_types": ["vulnerability"],
             "description": (
@@ -739,9 +809,14 @@ def build_bundle(
         ),
     )
     bundle_id = _object_id(
-        "bundle", "bundle|" + "|".join(item["id"] for item in ordered)
+        "bundle",
+        "bundle|"
+        + ("|".join(item["id"] for item in ordered) if ordered else "empty"),
     )
-    return {"type": "bundle", "id": bundle_id, "objects": ordered}
+    bundle = {"type": "bundle", "id": bundle_id}
+    if ordered:
+        bundle["objects"] = ordered
+    return bundle
 
 
 def export_stix(

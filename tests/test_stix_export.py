@@ -247,6 +247,86 @@ def test_record_scan_stores_run_scoped_finding_details(tmp_path):
     assert json.loads(rows[0][4])["applicability"] == "needs_review"
 
 
+def test_old_details_are_pruned_but_latest_successful_is_kept(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.initialize()
+    payload = json.dumps(
+        {
+            "asset": {"asset_id": "legacy", "vendor": "Example",
+                      "product": "Widget", "version": "1.0"},
+            "applicability": "affected",
+            "confidence": "high",
+            "vulnerability": {"cve_id": "CVE-2026-0015"},
+            "evidence": [],
+        }
+    )
+    with store.transaction() as db:
+        db.execute(
+            "INSERT INTO runs VALUES (?,?,?,?,?,?,?)",
+            (
+                "old-success",
+                "2000-01-01T00:00:00+00:00",
+                "2000-01-01T00:00:00+00:00",
+                "completed",
+                1,
+                1,
+                0,
+            ),
+        )
+        db.execute(
+            "INSERT INTO runs VALUES (?,?,?,?,?,?,?)",
+            (
+                "old-failed",
+                "2001-01-01T00:00:00+00:00",
+                "2001-01-01T00:00:00+00:00",
+                "failed",
+                1,
+                1,
+                1,
+            ),
+        )
+        for run_id in ("old-success", "old-failed"):
+            db.execute(
+                "INSERT INTO scan_finding_details("
+                "run_id,asset_id,advisory_id,first_seen,last_seen,payload_json"
+                ") VALUES (?,?,?,?,?,?)",
+                (
+                    run_id,
+                    "legacy",
+                    "CVE-2026-0015",
+                    "2000-01-01T00:00:00+00:00",
+                    "2000-01-01T00:00:00+00:00",
+                    payload,
+                ),
+            )
+    asset = Asset("asset-new", "Example", "Widget", "1.0")
+    finding = _finding(
+        asset,
+        cve_id="CVE-2026-0016",
+        state=Applicability.AFFECTED,
+    )
+    store.record_scan(
+        [
+            QueryResult(
+                asset,
+                (finding,),
+                (),
+                Applicability.COVERAGE_UNKNOWN,
+                "synthetic incomplete coverage",
+            )
+        ]
+    )
+    with closing(sqlite3.connect(tmp_path / "state.db")) as db:
+        remaining = {
+            row[0]
+            for row in db.execute(
+                "SELECT run_id FROM scan_finding_details"
+            )
+        }
+    assert "old-success" in remaining
+    assert "old-failed" not in remaining
+
+
 def test_golden_bundle_from_fixture_state(tmp_path):
     build_fixture_database(tmp_path / "state.db")
     snapshot = read_latest_successful_scan(tmp_path / "state.db")
@@ -257,19 +337,86 @@ def test_golden_bundle_from_fixture_state(tmp_path):
     assert bundle == expected
 
 
+def test_needs_review_observation_remains_visible(tmp_path):
+    build_fixture_database(tmp_path / "state.db")
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    bundle = build_bundle(
+        select_findings(snapshot.findings), generated_at=FIXED
+    )
+    vulnerability = next(
+        value
+        for value in bundle["objects"]
+        if value["type"] == "vulnerability"
+        and value["name"] == "CVE-2026-0001"
+    )
+    assert vulnerability["x_cvebeacon_applicability"] == "affected"
+    assert vulnerability["x_cvebeacon_states"] == [
+        "affected",
+        "needs_review",
+    ]
+    edges = [
+        value
+        for value in bundle["objects"]
+        if value["type"] == "relationship"
+        and value["target_ref"] == vulnerability["id"]
+    ]
+    by_state = {
+        value["x_cvebeacon_applicability"]: value for value in edges
+    }
+    assert set(by_state) == {"affected", "needs_review"}
+    assert by_state["affected"]["x_cvebeacon_sources"] == ["nvd"]
+    assert by_state["affected"]["x_cvebeacon_confidence"] == "high"
+    assert by_state["needs_review"]["x_cvebeacon_sources"] == ["euvd"]
+    assert by_state["needs_review"]["x_cvebeacon_confidence"] == "limited"
+
+
+def test_finding_without_evidence_omits_empty_sources(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    asset = Asset("asset-1", "Example", "Widget", "1.0")
+    finding = Finding(
+        asset,
+        Vulnerability(cve_id="CVE-2026-0012"),
+        Applicability.AFFECTED,
+        "high",
+        "synthetic fixture reason",
+        (),
+    )
+    store.record_scan([QueryResult(asset, (finding,), ())])
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    bundle = build_bundle(
+        select_findings(snapshot.findings), generated_at=FIXED
+    )
+    validate_bundle(bundle)
+    for value in bundle["objects"]:
+        if value["type"] in {"vulnerability", "relationship"}:
+            assert "x_cvebeacon_sources" not in value
+
+
 def test_deterministic_ids_across_runs_and_timestamps(tmp_path):
     build_fixture_database(tmp_path / "state.db")
     snapshot = read_latest_successful_scan(tmp_path / "state.db")
     selected = select_findings(snapshot.findings)
-    first = build_bundle(selected, generated_at=FIXED)
+    first = build_bundle(
+        selected, generated_at=FIXED, include_clients=True
+    )
     second = build_bundle(
         selected,
         generated_at=datetime(2027, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+        include_clients=True,
     )
     assert [value["id"] for value in first["objects"]] == [
         value["id"] for value in second["objects"]
     ]
     assert first["id"] == second["id"]
+    assert {
+        value["id"]: value.get("created")
+        for value in first["objects"]
+        if "created" in value
+    } == {
+        value["id"]: value.get("created")
+        for value in second["objects"]
+        if "created" in value
+    }
 
 
 def test_export_uses_latest_successful_scan(tmp_path):
@@ -304,6 +451,84 @@ def test_export_uses_latest_successful_scan(tmp_path):
     assert names == {"CVE-2026-0001"}
 
 
+def _drop_tables(path: Path, *tables: str) -> None:
+    with closing(sqlite3.connect(path)) as db:
+        for table in tables:
+            db.execute(f"DROP TABLE {table}")
+        db.commit()
+
+
+def test_old_state_fallback_matches_primary_and_keeps_lowercase_advisory(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    advisory = Asset(
+        "asset-advisory",
+        "Example",
+        "Widget",
+        "1.0",
+        client="Acme",
+    )
+    cve = Asset(
+        "asset-cve",
+        "Example",
+        "Gadget",
+        "2.0",
+        client="Globex",
+    )
+    findings = [
+        _finding(
+            advisory,
+            advisory_id="ghsa-lower-case",
+            state=Applicability.AFFECTED,
+        ),
+        _finding(
+            cve,
+            cve_id="CVE-2026-0014",
+            state=Applicability.NEEDS_REVIEW,
+        ),
+    ]
+    store.record_scan(
+        [
+            QueryResult(advisory, (findings[0],), ()),
+            QueryResult(cve, (findings[1],), ()),
+        ]
+    )
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    primary = build_bundle(
+        select_findings(snapshot.findings),
+        generated_at=FIXED,
+        include_clients=True,
+    )
+    assert {
+        value["name"]
+        for value in primary["objects"]
+        if value["type"] == "vulnerability"
+    } == {"ghsa-lower-case", "CVE-2026-0014"}
+
+    _drop_tables(tmp_path / "state.db", "scan_finding_details")
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    scan_fallback = build_bundle(
+        select_findings(snapshot.findings),
+        generated_at=FIXED,
+        include_clients=True,
+    )
+    validate_bundle(scan_fallback)
+    assert scan_fallback == primary
+
+    _drop_tables(
+        tmp_path / "state.db",
+        "scan_findings",
+        "scan_asset_clients",
+    )
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    current_fallback = build_bundle(
+        select_findings(snapshot.findings),
+        generated_at=FIXED,
+        include_clients=True,
+    )
+    validate_bundle(current_fallback)
+    assert current_fallback == primary
+
+
 def test_client_labels_are_excluded_by_default(tmp_path):
     build_fixture_database(tmp_path / "state.db")
     bundle = _export(tmp_path)
@@ -330,7 +555,14 @@ def test_client_filter_and_opt_in_identities(tmp_path):
         if value["type"] == "vulnerability"
     }
     assert names == {"CVE-2026-0002"}
+    software_names = {
+        value["name"]
+        for value in filtered["objects"]
+        if value["type"] == "software"
+    }
+    assert software_names == {"Gadget"}
     assert "Globex" not in json.dumps(filtered)
+    assert "Widget" not in json.dumps(filtered)
 
     included = _export(
         tmp_path,
@@ -351,7 +583,13 @@ def test_client_filter_and_opt_in_identities(tmp_path):
         for value in included["objects"]
         if value["type"] == "relationship"
     ]
+    identity_ids = [
+        value["id"]
+        for value in included["objects"]
+        if value["type"] == "identity"
+    ]
     assert relationships[0]["x_cvebeacon_clients"] == ["Globex"]
+    assert relationships[0]["x_cvebeacon_client_refs"] == identity_ids
     assert "Acme" not in json.dumps(included)
 
 
@@ -365,6 +603,49 @@ def test_client_identities_include_only_exported_clients(tmp_path):
         if value["type"] == "identity"
     }
     assert identities == {"Acme", "Globex"}
+
+
+def test_client_label_case_variants_collapse_to_one_identity(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    assets = [
+        Asset("asset-1", "Example", "Widget", "1.0", client="Acme"),
+        Asset("asset-2", "Example", "Widget", "1.0", client="acme"),
+    ]
+    findings = [
+        _finding(
+            asset,
+            cve_id="CVE-2026-0017",
+            state=Applicability.AFFECTED,
+        )
+        for asset in assets
+    ]
+    store.record_scan(
+        [
+            QueryResult(asset, (finding,), ())
+            for asset, finding in zip(assets, findings)
+        ]
+    )
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    bundle = build_bundle(
+        select_findings(snapshot.findings),
+        generated_at=FIXED,
+        include_clients=True,
+    )
+    validate_bundle(bundle)
+    identities = [
+        value for value in bundle["objects"] if value["type"] == "identity"
+    ]
+    relationships = [
+        value
+        for value in bundle["objects"]
+        if value["type"] == "relationship"
+    ]
+    assert len(identities) == 1
+    assert len(relationships) == 1
+    assert relationships[0]["x_cvebeacon_clients"] == ["Acme"]
+    assert relationships[0]["x_cvebeacon_client_refs"] == [
+        identities[0]["id"]
+    ]
 
 
 def test_since_filters_by_first_seen_date(tmp_path):
@@ -427,14 +708,14 @@ def test_state_only_configuration_can_export(tmp_path):
     )
     bundle = json.loads(destination.read_text(encoding="utf-8"))
     validate_bundle(bundle)
-    assert len(bundle["objects"]) == 7
+    assert len(bundle["objects"]) == 8
 
 
 def test_empty_result_is_a_valid_bundle(tmp_path):
     StateStore(tmp_path / "state.db").initialize()
     bundle = _export(tmp_path)
     validate_bundle(bundle)
-    assert bundle["objects"] == []
+    assert set(bundle) == {"type", "id"}
 
 
 def test_missing_state_database_is_not_created(tmp_path):
@@ -457,11 +738,16 @@ def test_missing_state_database_is_not_created(tmp_path):
     assert not destination.exists()
 
 
-@pytest.mark.parametrize("target", ["config.toml", "inventory.csv", "state.db"])
+@pytest.mark.parametrize(
+    "target",
+    ["config.toml", "inventory.csv", "state.db", "cvebeacon-watch.db"],
+)
 def test_stix_export_cannot_overwrite_operational_files(tmp_path, target):
     build_fixture_database(tmp_path / "state.db")
     config = _config(tmp_path)
     path = tmp_path / target
+    if not path.exists():
+        path.write_bytes(b"preserved")
     original = path.read_bytes()
     assert (
         cli.main(
@@ -485,11 +771,16 @@ def test_export_does_not_write_state_or_emit_config_paths(tmp_path, monkeypatch)
     config = _config(tmp_path)
     secret = "https://example.invalid/hooks/private-token"
     monkeypatch.setenv("CVEBEACON_TEAMS_WEBHOOK_URL", secret)
+    before_files = {path.name for path in tmp_path.iterdir()}
     before = database.read_bytes()
     bundle = _export(tmp_path)
     text = json.dumps(bundle)
     validate_bundle(bundle)
     assert database.read_bytes() == before
+    new_files = {path.name for path in tmp_path.iterdir()} - before_files
+    # SQLite can create or refresh WAL sidecars for a read-only connection.
+    # No other directory effect is allowed.
+    assert new_files <= {"bundle.json", "state.db-shm", "state.db-wal"}
     assert secret not in text
     assert str(tmp_path) not in text
     assert str(config) not in text
@@ -568,14 +859,87 @@ def test_software_uses_purl_package_identity(tmp_path):
     assert software["x_cvebeacon_purl"] == "pkg:pypi/example-gadget@2.0"
 
 
-def test_repeated_cli_export_reuses_object_ids(tmp_path):
+def test_purl_qualifiers_do_not_leak_urls_or_tokens(tmp_path):
+    first = Asset(
+        "asset-1",
+        purl=(
+            "pkg:maven/org.example/private-lib@1.0"
+            "?repository_url=https://user:pass@internal.example/repo"
+            "&download_url=https://example.invalid/private/package"
+        ),
+    )
+    second = Asset(
+        "asset-2",
+        purl=(
+            "pkg:maven/org.example/private-lib@1.0"
+            "?token=private-token-value"
+        ),
+    )
+    findings = [
+        _finding(
+            first,
+            cve_id="CVE-2026-0011",
+            state=Applicability.AFFECTED,
+        ),
+        _finding(
+            second,
+            cve_id="CVE-2026-0011",
+            state=Applicability.AFFECTED,
+        ),
+    ]
+    store = StateStore(tmp_path / "state.db")
+    store.record_scan(
+        [
+            QueryResult(first, (findings[0],), ()),
+            QueryResult(second, (findings[1],), ()),
+        ]
+    )
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    bundle = build_bundle(
+        select_findings(snapshot.findings), generated_at=FIXED
+    )
+    validate_bundle(bundle)
+    text = json.dumps(bundle)
+    for leaked in (
+        "repository_url",
+        "download_url",
+        "token",
+        "private-token-value",
+        "user:pass",
+        "internal.example",
+        "example.invalid/private",
+    ):
+        assert leaked not in text
+    software = [
+        value for value in bundle["objects"] if value["type"] == "software"
+    ]
+    assert len(software) == 1
+    assert software[0]["x_cvebeacon_purl"] == (
+        "pkg:maven/org.example/private-lib@1.0"
+    )
+
+
+def test_repeated_cli_export_reuses_ids_and_created(tmp_path):
     build_fixture_database(tmp_path / "state.db")
-    first = _export(tmp_path, output="first.json")
-    second = _export(tmp_path, output="second.json")
+    first = _export(
+        tmp_path, "--include-clients", output="first.json"
+    )
+    second = _export(
+        tmp_path, "--include-clients", output="second.json"
+    )
     assert [value["id"] for value in first["objects"]] == [
         value["id"] for value in second["objects"]
     ]
     assert first["id"] == second["id"]
+    assert {
+        value["id"]: value.get("created")
+        for value in first["objects"]
+        if "created" in value
+    } == {
+        value["id"]: value.get("created")
+        for value in second["objects"]
+        if "created" in value
+    }
 
 
 def test_validator_rejects_a_missing_required_property(tmp_path):

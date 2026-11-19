@@ -16,10 +16,17 @@ cvebeacon --config cvebeacon.toml export stix --output clients.json --include-cl
 cvebeacon --config cvebeacon.toml export stix --output recent.json --since 2026-11-01
 ```
 
-`--output` is required. The command is read-only: it does not create the state
-database, change findings, deliver notifications, query public sources, or read
-the watch database. Only the configured state database is needed; an inventory
-path is not read, so a state-only configuration is sufficient for this command.
+`--output` is required. The command is read-only for database content: it does
+not create the state database, change findings, deliver notifications, query
+public sources, or read the watch database. Only the configured state database
+is needed; an inventory path is not read, so a state-only configuration is
+sufficient for this command.
+
+SQLite may create or refresh `-wal` and `-shm` sidecar files beside a
+write-ahead-logging state database while it is opened read-only. Those files are
+a SQLite read-side effect, not a CVEBeacon state change. On read-only media,
+copy the state database and any sidecar files to a writable location before
+exporting.
 
 | Option | Meaning |
 | --- | --- |
@@ -30,13 +37,19 @@ path is not read, so a state-only configuration is sufficient for this command.
 
 The source is the newest inventory run with `status='completed'` in the state
 database. A failed or degraded run does not replace the last successful run.
-An empty state or a filter that matches nothing still produces a valid bundle
-with an empty `objects` list.
+An empty state or a filter that matches nothing still produces a valid bundle:
+the `objects` member is omitted, because STIX 2.1 `objects` is an optional set
+of one or more objects rather than an empty list.
 
 ## What is exported
 
-Only `affected` and `needs_review` findings are included. The state is preserved
-in every relationship and vulnerability object.
+Only `affected` and `needs_review` findings are included. Relationships are
+emitted once per state, so a software/vulnerability pair with both an affected
+observation and a needs-review observation has two edges with their own sources
+and confidence. A vulnerability object shows the highest state in
+`x_cvebeacon_applicability` and lists every observed state in
+`x_cvebeacon_states`; its sources and confidence describe that highest state.
+The lower-state edge remains available for consumers that need it.
 
 | Applicability | Exported | `x_cvebeacon_applicability` | Interpretation |
 | --- | --- | --- | --- |
@@ -57,33 +70,37 @@ not infer that an absent object means an asset is unaffected.
 | Non-CVE advisory ID | The advisory ID becomes `vulnerability.name`; its external reference uses `source_name: advisory` |
 | Vulnerability summary | `vulnerability.description` when present |
 | Asset vendor, product, version, CPE | `software.name`, `software.vendor`, `software.version`, `software.cpe` |
-| Asset PURL and ecosystem | `x_cvebeacon_purl` and `x_cvebeacon_ecosystem` on `software` |
-| Finding applicability | `x_cvebeacon_applicability` on `vulnerability` and `relationship` |
+| Asset PURL and ecosystem | `x_cvebeacon_purl` and `x_cvebeacon_ecosystem` on `software`; the PURL is reduced to type, namespace, name, and version |
+| Finding applicability | `x_cvebeacon_applicability` on `vulnerability` and `relationship`; every state is in `x_cvebeacon_states` on `vulnerability` |
 | Finding confidence | `x_cvebeacon_confidence` on `vulnerability` and `relationship` |
 | Finding first-seen time | `created` on vulnerability and relationship; `x_cvebeacon_first_seen` |
 | Finding last-seen time | `modified` on vulnerability and relationship |
-| Evidence source names | `x_cvebeacon_sources` on vulnerability and relationship |
-| Client label (only with `--include-clients`) | An `identity` object, `x_cvebeacon_clients` on relationship, and the report name |
+| Evidence source names | `x_cvebeacon_sources` on vulnerability and relationship when at least one source exists |
+| Client label (only with `--include-clients`) | An `identity` object, `x_cvebeacon_clients` and `x_cvebeacon_client_refs` on relationship, and the report name |
 | Software-to-vulnerability match | `relationship` with `relationship_type: has` |
 | The selected export | One `report` object containing every exported object reference |
 
 The export deliberately omits asset IDs, system IDs, categories, repository
 URLs, commits, evidence statements, and source details. Those values are local
-operational data and are not needed for interoperability. The software object
-uses the public component identity, so two assets with the same vendor, product,
-version, and identity path produce one software object.
+operational data and are not needed for interoperability. PURL qualifiers and
+subpaths are also dropped before the PURL is used in the output or in an object
+key, so repository, download, VCS, and token-bearing qualifiers cannot leak. The
+software object uses the public component identity, so two assets with the same
+vendor, product, version, and identity path produce one software object. The
+software identity key uses the resolved version, including a version taken from
+the PURL when the inventory row has no separate version.
 
 ### The `has` relationship
 
-STIX 2.1 defines standard relationship types such as `targets`, `uses`, and
-`related-to`, but it does not define a standard software-to-vulnerability
-relationship type. The specification permits user-defined relationship types
-(section 5.1), so this exporter uses `has` to make the direction explicit:
-software `has` vulnerability.
+STIX 2.1 defines the name `has` only for Infrastructure -> Vulnerability and
+Tool -> Vulnerability. It does not define a standard software-to-vulnerability
+relationship type. The specification permits any relationship name for other
+source and target pairs (section 5.1), so this exporter reuses `has` from
+software to vulnerability to make the direction explicit.
 
-A consumer that accepts only specification-defined relationship types should map
-`has` to `related-to`. This exporter does not emit both because that would create
-two edges for one match.
+A consumer that enforces the specification's source/target table for `has`
+should treat this edge as an extension and may map it to `related-to`. This
+exporter does not emit both because that would create two edges for one match.
 
 ## Deterministic identifiers
 
@@ -92,21 +109,25 @@ Every object ID is a UUIDv5 under the fixed project namespace
 
 | Object | Stable key |
 | --- | --- |
-| `vulnerability` | `vulnerability\|<identifier>` |
-| `software` | `software\|purl\|<purl>\|<version>`, `software\|cpe\|<cpe>\|<version>`, or `software\|product\|<ecosystem>\|<vendor>\|<product>\|<version>` |
-| `relationship` | `relationship\|has\|<software id>\|<vulnerability id>` |
+| `vulnerability` | `vulnerability\|<upper-cased identifier>` |
+| `software` | `software\|purl\|<sanitised purl>\|<resolved version>`, `software\|cpe\|<cpe>\|<resolved version>`, or `software\|product\|<case-folded ecosystem>\|<case-folded vendor>\|<case-folded product>\|<resolved version>` |
+| `relationship` | `relationship\|has\|<software id>\|<vulnerability id>\|<state>` |
 | `identity` | `identity\|client\|<case-folded client label>` |
 | `report` | `report\|<sorted object IDs>` |
-| `bundle` | `bundle\|<sorted object IDs>` |
+| `bundle` | `bundle\|<sorted object IDs>`, or `bundle\|empty` when there are no objects |
 
 Re-exporting the same state produces the same IDs, so a consumer that updates by
 ID does not create duplicates. A new scan changes `modified` and can add or
 remove objects. Removed findings are not emitted as revoked objects: the bundle
 is a snapshot, not a tombstone feed.
 
-`created` and `modified` come from the stored finding timestamps. Identity and
-report objects use the export time; the report `published` value is the same
-time. All timestamps are UTC with millisecond precision and a `Z` suffix.
+Vulnerability and relationship `created` values come from the earliest stored
+first-seen finding for that object; `modified` is the latest stored observation.
+Report `created` is the earliest first-seen finding in the report, and identity
+`created` is the earliest first-seen finding for that client. Report
+`modified`/`published` and identity `modified` use the export time. This keeps
+`created` stable when the same state is exported again under the same fixed IDs.
+All timestamps are UTC with millisecond precision and a `Z` suffix.
 
 ## Privacy and client labels
 
@@ -117,8 +138,16 @@ not add the label to the output.
 
 `--include-clients` is an explicit disclosure decision. It creates one
 `identity` object per exported client, adds the labels to
-`x_cvebeacon_clients` on relationships, and names the report after the client or
-after "multiple clients". Review the result before sending it outside the team.
+`x_cvebeacon_clients` on relationships, adds the matching identity IDs to
+`x_cvebeacon_client_refs`, and names the report after the client or after
+"multiple clients". Review the result before sending it outside the team.
+
+Identity IDs are derived only from the client label and the fixed project
+namespace. Two independent deployments that both use a label such as `Acme`
+therefore mint the same identity ID for unrelated organisations. That is useful
+for stable re-exports but not a global identity guarantee; keep bundles from
+different deployments in separate namespaces or review identity collisions
+before merging them.
 
 ## Limits
 
@@ -131,6 +160,13 @@ after "multiple clients". Review the result before sending it outside the team.
 - Applicability evidence, reasons, CVSS, EPSS, and KEV details are not copied into
   this version of the bundle. The state and source names are preserved; inspect
   the normal report or history for the full evidence.
+- Only the newest successful run's finding snapshot is retained. Detail rows for
+  every other run are pruned by later scans, so the table stays bounded to one
+  run's findings; monitoring history and events are not pruned by this policy.
+- `created` values are derived from stored observations rather than a persistent
+  STIX object-version ledger. They are stable for repeated exports of the same
+  state, but removing the earliest observation for an object that otherwise keeps
+  the same ID can move its derived `created` value.
 - There are no STIX data markings. Handling rules are outside the bundle.
 - The exporter does not deliver anything, run continuously, or act as a TAXII
   server. Re-run the command to refresh the snapshot.
@@ -140,5 +176,7 @@ after "multiple clients". Review the result before sending it outside the team.
   checks required properties, ID formats, references, and timestamp forms with a
   small offline validator, not with a third-party schema implementation.
 - A state database written before run-scoped finding details existed is read
-  through a conservative fallback. Run a scan with the current version to store
-  exact per-run details.
+  through a conservative fallback. The fallback matches advisory identifiers
+  without case sensitivity and only accepts current-finding rows whose
+  `last_seen` is the selected successful run. Run a scan with the current
+  version to store exact per-run details.

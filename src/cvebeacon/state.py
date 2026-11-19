@@ -404,6 +404,17 @@ class StateStore:
                                     "INSERT INTO deliveries(event_id,channel,state,updated_at) VALUES (?,?,?,?)",
                                     (event_id, channel, "pending", completed),
                                 )
+                latest = db.execute(
+                    "SELECT run_id FROM runs WHERE status='completed' "
+                    "ORDER BY completed_at DESC, rowid DESC LIMIT 1"
+                ).fetchone()
+                # The export only reads the newest successful run. Keep that
+                # snapshot and drop detail rows for every other run so the
+                # table stays bounded to one run's findings.
+                db.execute(
+                    "DELETE FROM scan_finding_details WHERE run_id<>?",
+                    (str(latest[0]) if latest is not None else "",),
+                )
                 if attempt_id:
                     db.execute("UPDATE scan_attempts SET run_id=? WHERE attempt_id=?", (run_id, attempt_id))
         except (sqlite3.Error, OSError) as exc:

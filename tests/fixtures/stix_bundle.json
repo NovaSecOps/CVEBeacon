@@ -1,6 +1,6 @@
 {
   "type": "bundle",
-  "id": "bundle--5802a7c0-f304-5233-a28c-d7cc68234cfb",
+  "id": "bundle--f9fe082b-7e9e-5f07-beed-f147a460f708",
   "objects": [
     {
       "type": "software",
@@ -41,10 +41,13 @@
         }
       ],
       "x_cvebeacon_applicability": "needs_review",
+      "x_cvebeacon_states": [
+        "needs_review"
+      ],
+      "x_cvebeacon_first_seen": "2026-11-03T00:00:00.000Z",
       "x_cvebeacon_sources": [
         "osv"
       ],
-      "x_cvebeacon_first_seen": "2026-11-03T00:00:00.000Z",
       "x_cvebeacon_confidence": "limited",
       "description": "Gadget issue"
     },
@@ -68,52 +71,70 @@
         }
       ],
       "x_cvebeacon_applicability": "affected",
-      "x_cvebeacon_sources": [
-        "euvd",
-        "nvd"
+      "x_cvebeacon_states": [
+        "affected",
+        "needs_review"
       ],
       "x_cvebeacon_first_seen": "2026-11-01T00:00:00.000Z",
+      "x_cvebeacon_sources": [
+        "nvd"
+      ],
       "x_cvebeacon_confidence": "high",
       "description": "Widget issue"
     },
     {
       "type": "relationship",
       "spec_version": "2.1",
-      "id": "relationship--084db368-2431-5b56-8e1b-b50212b74e97",
+      "id": "relationship--788f4b65-9e25-50e9-bf8e-3fc3bc2a538e",
       "created": "2026-11-03T00:00:00.000Z",
       "modified": "2026-11-12T00:00:00.000Z",
       "relationship_type": "has",
       "source_ref": "software--a0d838da-8f83-57fe-ae65-6f508077cbb7",
       "target_ref": "vulnerability--013691e3-9c98-511e-87a5-b668b93f7958",
       "x_cvebeacon_applicability": "needs_review",
+      "x_cvebeacon_first_seen": "2026-11-03T00:00:00.000Z",
       "x_cvebeacon_sources": [
         "osv"
       ],
-      "x_cvebeacon_first_seen": "2026-11-03T00:00:00.000Z",
       "x_cvebeacon_confidence": "limited"
     },
     {
       "type": "relationship",
       "spec_version": "2.1",
-      "id": "relationship--5039ee91-3d7b-5915-82b1-693ea433d676",
+      "id": "relationship--a4ce312f-3e10-5aed-989c-0ed13473538c",
       "created": "2026-11-01T00:00:00.000Z",
-      "modified": "2026-11-11T00:00:00.000Z",
+      "modified": "2026-11-10T00:00:00.000Z",
       "relationship_type": "has",
       "source_ref": "software--882fd244-5c60-5e41-8860-a4c4c5a7737c",
       "target_ref": "vulnerability--0f9a6409-92ba-5d3e-a2d9-8f1eda5c056e",
       "x_cvebeacon_applicability": "affected",
+      "x_cvebeacon_first_seen": "2026-11-01T00:00:00.000Z",
       "x_cvebeacon_sources": [
-        "euvd",
         "nvd"
       ],
-      "x_cvebeacon_first_seen": "2026-11-01T00:00:00.000Z",
       "x_cvebeacon_confidence": "high"
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--f621e2d2-5660-5415-97e3-5ac009f8cde0",
+      "created": "2026-11-02T00:00:00.000Z",
+      "modified": "2026-11-11T00:00:00.000Z",
+      "relationship_type": "has",
+      "source_ref": "software--882fd244-5c60-5e41-8860-a4c4c5a7737c",
+      "target_ref": "vulnerability--0f9a6409-92ba-5d3e-a2d9-8f1eda5c056e",
+      "x_cvebeacon_applicability": "needs_review",
+      "x_cvebeacon_first_seen": "2026-11-02T00:00:00.000Z",
+      "x_cvebeacon_sources": [
+        "euvd"
+      ],
+      "x_cvebeacon_confidence": "limited"
     },
     {
       "type": "report",
       "spec_version": "2.1",
-      "id": "report--cb5c90f2-a7a3-549f-8203-c007b6ee16b3",
-      "created": "2026-11-19T12:00:00.000Z",
+      "id": "report--dc6b8f6f-e470-5b6b-8a68-17d9ae757e09",
+      "created": "2026-11-01T00:00:00.000Z",
       "modified": "2026-11-19T12:00:00.000Z",
       "published": "2026-11-19T12:00:00.000Z",
       "name": "CVEBeacon findings",
@@ -126,8 +147,9 @@
         "software--a0d838da-8f83-57fe-ae65-6f508077cbb7",
         "vulnerability--013691e3-9c98-511e-87a5-b668b93f7958",
         "vulnerability--0f9a6409-92ba-5d3e-a2d9-8f1eda5c056e",
-        "relationship--084db368-2431-5b56-8e1b-b50212b74e97",
-        "relationship--5039ee91-3d7b-5915-82b1-693ea433d676"
+        "relationship--788f4b65-9e25-50e9-bf8e-3fc3bc2a538e",
+        "relationship--a4ce312f-3e10-5aed-989c-0ed13473538c",
+        "relationship--f621e2d2-5660-5415-97e3-5ac009f8cde0"
       ]
     }
   ]
