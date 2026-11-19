@@ -62,7 +62,7 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -535,6 +535,7 @@ class WatchStore:
         if not rows:
             for statement in _SCHEMA:
                 db.execute(statement)
+            WatchStore._ensure_teams_bot_schema(db)
             db.execute(
                 "INSERT INTO watch_meta(key,value) VALUES ('schema_version',?)",
                 (str(SCHEMA_VERSION),),
@@ -545,9 +546,9 @@ class WatchStore:
             )
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5", "6", "7", "8"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5", "6", "7", "8", "9"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -599,11 +600,38 @@ class WatchStore:
                 )
         if version in {"1", "2", "3", "4", "5", "6"}:
             WatchStore._migrate_report_identity(db, version)
+        WatchStore._ensure_teams_bot_schema(db)
         if version != str(SCHEMA_VERSION):
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
             )
+
+    @staticmethod
+    def _ensure_teams_bot_schema(db: sqlite3.Connection) -> None:
+        """Converge bot storage by its layout, including either earlier schema 8.
+
+        Provider/search migrations belong to the preceding migration. Never
+        infer their presence from the version shared by pre-release layouts.
+        """
+        required = {
+            "conversation": {"tenant_id", "app_id", "recipient", "service_url", "conversation_id"},
+            "delivery": {"channel", "tenant_id", "app_id", "recipient", "message_key", "status",
+                         "attempts", "last_error", "not_before", "updated_at"},
+            "batch": {"channel", "tenant_id", "app_id", "batch_key", "event_ids_json", "messages_json"},
+        }
+        for suffix, expected in required.items():
+            table = "watch_teams_bot_" + suffix
+            columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+            if suffix == "delivery" and columns == expected - {"not_before"}:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN not_before REAL NOT NULL DEFAULT 0")
+                columns.add("not_before")
+            if not expected <= columns:
+                raise StateError("unsupported Teams bot storage layout; refusing to skip migration")
+        db.execute(
+            "INSERT INTO watch_meta(key,value) VALUES ('teams_bot_storage','durable-v1') "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+        )
 
     @staticmethod
     def _migrate_event_details(db: sqlite3.Connection) -> None:

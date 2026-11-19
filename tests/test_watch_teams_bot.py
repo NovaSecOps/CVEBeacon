@@ -368,7 +368,7 @@ def test_migrate_version_seven_preserves_existing_state(raw, tmp_path):
     reopened = WatchStore(store.path)
     reopened.initialize()
     reopened.initialize()
-    assert reopened.metadata()["schema_version"] == "8"
+    assert reopened.metadata()["schema_version"] == "9"
     assert rows(reopened) == before
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT * FROM watch_event").fetchall() == original_events
@@ -635,7 +635,6 @@ def test_service_url_allowlist_rejects_foreign_origins(raw, tmp_path, url, refer
         channel(raw, tmp_path)
 
 
-
 @pytest.mark.parametrize("reference", [False, True])
 def test_runtime_service_url_validation_precedes_token_requests(raw, tmp_path, reference):
     cfg = config(raw, tmp_path)
@@ -789,6 +788,63 @@ def test_recipient_summary_is_bounded_and_identifies_parts():
     assert "private-id" not in line and len(line) < 1500
 
 
+@pytest.mark.parametrize("fixture", ["watch_schema_v7.sql", "watch_schema_cve_v8.sql"])
+def test_authentic_layout_upgrade_preserves_all_existing_rows(tmp_path, fixture):
+    from pathlib import Path
+    from cvebeacon.watch.store import SCHEMA_VERSION
+
+    path = tmp_path / "watch.db"
+    with sqlite3.connect(path) as db:
+        db.executescript((Path(__file__).parent / "fixtures" / fixture).read_text())
+        db.execute("INSERT INTO watch_cve(cve_id,status,description,cvss_json,cwes_json,products_json,"
+                   "references_json,first_seen,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                   ("CVE-2026-0001", "published", "preserved description", "[]", "[]", "[]", "[]", NOW.isoformat(), NOW.isoformat()))
+        db.execute("INSERT INTO watch_event VALUES (1,'critical','CVE-2026-0001','new','[]','{}','one',0,?)", (NOW.isoformat(),))
+        db.execute("INSERT INTO watch_delivery VALUES (1,'bot','sent',2,NULL,?,?)", (NOW.isoformat(), NOW.isoformat()))
+        db.execute("INSERT INTO watch_report(cve_id,action,by,at,chain,chain_version) VALUES ('CVE-2026-0001','report','operator',?,'preserved-chain',1)", (NOW.isoformat(),))
+        if fixture == "watch_schema_cve_v8.sql":
+            db.execute("INSERT INTO watch_provider VALUES ('CVE-2026-0002','cve_list','{}','{}',NULL,?)", (NOW.isoformat(),))
+            db.execute("INSERT INTO watch_search VALUES ('CVE-2026-0002','cve_list','preserved search')")
+            db.execute("INSERT INTO watch_origin VALUES ('CVE-2026-0002','cve_list')")
+        names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name!='watch_meta'")]
+        before = {name: db.execute('SELECT * FROM ' + name).fetchall() for name in names}
+    store = WatchStore(path)
+    store.initialize()
+    store.initialize()
+    assert SCHEMA_VERSION == 9
+    assert store.metadata()["schema_version"] == "9"
+    assert store.metadata()["teams_bot_storage"] == "durable-v1"
+    with sqlite3.connect(path) as db:
+        assert {name: db.execute('SELECT * FROM ' + name).fetchall() for name in names} == before
+        assert db.execute("SELECT count(*) FROM watch_teams_bot_batch").fetchone() == (0,)
+        if fixture == "watch_schema_cve_v8.sql":
+            assert store.metadata()["provider_storage"] == "sparse-v1"
+            assert 'reserved' in db.execute("SELECT sql FROM sqlite_master WHERE name='watch_cve'").fetchone()[0]
+            assert {r[1] for r in db.execute("PRAGMA table_info(watch_search)")} == {"cve_id", "source", "text"}
+
+
+@pytest.mark.parametrize("version", ["8", "9"])
+def test_bot_layout_is_repaired_even_with_current_version(raw, tmp_path, version):
+    store = seed(config(raw, tmp_path))
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE watch_teams_bot_delivery DROP COLUMN not_before")
+        db.execute("UPDATE watch_meta SET value=? WHERE key='schema_version'", (version,))
+    store.initialize()
+    assert store.claim_teams_bot_recipient(("bot", TENANT, APP, USER, "key"),
+                                          retry_ambiguous=False, now=0) == "sending"
+
+
+def test_unknown_bot_layout_fails_without_advancing_schema(raw, tmp_path):
+    store = seed(config(raw, tmp_path))
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE watch_teams_bot_batch RENAME COLUMN messages_json TO invalid")
+        db.execute("UPDATE watch_meta SET value='8' WHERE key='schema_version'")
+    with pytest.raises(StateError, match="storage layout"):
+        store.initialize()
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone() == ("8",)
+
+
 @pytest.mark.parametrize("ok", [False, True])
 def test_cli_channel_test_prints_recipient_outcomes(raw, tmp_path, monkeypatch, capsys, ok):
     from cvebeacon import cli
@@ -814,6 +870,9 @@ def test_shared_workflow_and_bot_card_builder_preserves_wire_bytes():
     assert json.dumps(teams_adaptive_card(MESSAGE), separators=(",", ":")).encode() == expected
 
 
+
+
+
 def test_connector_request_rechecks_host_before_attaching_token(raw, tmp_path):
     session = _Session(channel(raw, tmp_path), mock_client(lambda _: pytest.fail("foreign request")),
                        30, 1000, lambda: 0, lambda _: None)
@@ -833,6 +892,7 @@ def test_multipart_results_keep_destination_and_part_identity(raw, tmp_path):
     assert [(r.destination_index, r.part_index) for r in (*first, *second)] == [(0,0),(1,0),(0,1),(1,1)]
 
 
+
 def test_pruning_preserves_an_ambiguous_destination(raw, tmp_path):
     cfg = config(raw, tmp_path)
     store = seed(cfg)
@@ -845,4 +905,3 @@ def test_pruning_preserves_an_ambiguous_destination(raw, tmp_path):
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT count(*) FROM watch_teams_bot_batch").fetchone() == (1,)
         assert db.execute("SELECT status FROM watch_teams_bot_delivery").fetchone() == ("ambiguous",)
-
