@@ -488,16 +488,24 @@ def _parse_graph(
     }
 
 
+# Public cloud only; sovereign clouds require a different token authority/scope.
+TEAMS_SERVICE_HOSTS = frozenset({"smba.trafficmanager.net"})
+
+
 def teams_service_url(value: str, label: str, *, allow_insecure: bool = False) -> str:
-    """Validate an explicitly trusted Connector endpoint, never a response URL."""
+    """Allow only the documented public-cloud Teams Connector origin."""
     _https_url(value, label, allow_http=allow_insecure)
     parts = urlsplit(value)
-    if parts.scheme == "http" and parts.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        _fail(label, "HTTP is allowed only for a local test endpoint")
     try:
-        parts.port
+        port = parts.port
     except ValueError:
         _fail(label, "has an invalid port")
+    if (
+        parts.scheme != "https"
+        or parts.hostname not in TEAMS_SERVICE_HOSTS
+        or port not in {None, 443}
+    ):
+        _fail(label, "must use an allowed Microsoft Bot Framework HTTPS service URL")
     if parts.query or parts.fragment or "\\" in value or "%" in parts.path or any(
         segment in {".", ".."} for segment in parts.path.split("/")
     ):

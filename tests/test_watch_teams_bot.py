@@ -615,3 +615,20 @@ def test_failed_explicit_retry_preserves_recipient_ambiguity(raw, tmp_path):
     assert report.channels[0].recipients[0].status == "ambiguous"
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT status FROM watch_teams_bot_delivery").fetchone() == ("ambiguous",)
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/", "https://smba.trafficmanager.net.example.com/",
+    "https://smba.trafficmanager.net:444/", "https://smba.trafficmanager.net./",
+    "http://smba.trafficmanager.net/", "http://127.0.0.1:1234/",
+])
+@pytest.mark.parametrize("reference", [False, True])
+def test_service_url_allowlist_rejects_foreign_origins(raw, tmp_path, url, reference):
+    raw["allow_insecure"] = True
+    if reference:
+        raw["conversation_references"] = [{"conversation_id": "id", "service_url": url}]
+    else:
+        raw["service_url"] = url
+    with pytest.raises(ConfigurationError):
+        channel(raw, tmp_path)
+

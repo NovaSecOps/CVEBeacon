@@ -1844,7 +1844,7 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                     "app_id": "Azure Bot application UUID",
                     "recipients": '["alerts@example.com"] or a list of Entra object UUIDs',
                     "conversation_references": '[{ conversation_id = "conversation-id", service_url = "https://smba.trafficmanager.net/teams/" }]',
-                    "service_url": "Trusted Bot Connector HTTPS URL; defaults to the public Teams endpoint",
+                    "service_url": "Microsoft Bot Connector HTTPS URL on smba.trafficmanager.net; defaults to the public Teams endpoint",
                     "format": "adaptive_card",
                     "client_secret_file": "Owner-only file containing the app secret",
                 }.get(key, "")
