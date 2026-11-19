@@ -94,10 +94,12 @@ one official end-of-day archive for each outstanding past day. There is no daily
 full-baseline download and no rolling-log repair. A first backfill/full history
 import, a missing archive or a gap longer than seven days can download one
 baseline (about 635 MiB in public metadata observed on 2026-11-19), requiring
-space for its cached archive, optional inner ZIP and new provider data. The
-archive cap is 1 GiB; a larger source fails visibly rather than buffering without
-a limit. Schema 7 → 8 adds empty tables/indexes without copying the historical
-NVD/EUVD database. See [source costs](docs/SOURCES.md#cve-list-watch-feed)
+space for its cached archive, optional inner ZIP and new provider data. Preflight
+reserves three times the expanded archive plus directory space, so a large
+baseline can need several GiB of free disk even though the final database is
+smaller. The archive cap is 1 GiB; a larger source fails visibly rather than
+buffering without a limit. Schema 7 → 8 adds empty tables/indexes without copying
+the historical NVD/EUVD database. See [source costs](docs/SOURCES.md#cve-list-watch-feed)
 and [upgrading](docs/UPGRADING.md) for limits, retry costs and the reproducible
 430,000-CVE migration check. The table's RAM, disk and timings are not updated
 measurements for this additional source.
@@ -133,7 +135,9 @@ for one JSON report per scan (about 8 MiB with five assets) and for backups.
 
 - **2 GB RAM and 1 GB free disk**: enough for inventory scans, a baseline, and a
   backfill of up to 30 days on a Raspberry Pi 4 or 5. The largest of these peaks
-  is 226 MiB; the largest database is 144 MiB.
+  is 226 MiB; the largest database is 144 MiB. These figures exclude a CVE List
+  full-baseline import, whose expanded-archive preflight can require several GiB
+  of free space.
 - **120-day backfill and full history are heavy first loads.** The 120-day load
   takes about an hour and leaves a 0.23 GB database. Full history took 98
   minutes for the first sync and leaves a database of about 0.7 GB while EUVD

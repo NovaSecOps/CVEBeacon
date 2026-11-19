@@ -24,8 +24,8 @@ archive. Full archives (about 635 MiB in metadata observed on 2026-11-19) are
 limited to initial history, a missing archive or a gap longer than seven days,
 not daily operation. See [source limits and costs](SOURCES.md#cve-list-watch-feed).
 The anonymous GitHub API normally permits 60 requests/hour per originating IP;
-conditional metadata avoids re-reading unchanged latest-release assets, and
-catch-up makes at most seven end-of-day tag lookups plus the current release.
+conditional metadata avoids re-reading an unchanged release list, and catch-up
+makes at most seven end-of-day tag lookups plus the current release list.
 Shared egress can consume that quota. Rate-limit failures remain degraded source
 coverage with retained progress. No GitHub token is required or sent.
 

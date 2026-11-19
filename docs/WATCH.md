@@ -1478,13 +1478,21 @@ completion open.
 Ordinary sync imports the newest hourly cumulative delta for the current day.
 At each day boundary it imports that day's official
 `cve_YYYY-MM-DD_at_end_of_day` cumulative archive, one per outstanding past day.
+The latest release is selected from a bounded release listing by hourly archive
+names and UTC date, never by trusting GitHub's `/latest` marker, because the
+end-of-day release can be the repository's latest.
 If a required archive is missing or more than seven days are outstanding, one
 full baseline is imported and catch-up continues from its midnight boundary.
 The CVE List cursor therefore records the last archive that was fully validated
 and committed; a failure leaves it in place and the next sync retries. Imports
 are idempotent and never replace a newer stored `dateUpdated` with an older one.
-There is no rolling-log repair queue and no per-ID feed repair. Manual
-`watch refresh` never changes these cursors or archive state. Both `.zip` and
+There is no rolling-log repair queue and no per-ID feed repair. In baseline
+initial mode, the first sync records the baseline midnight. Later archives still
+import every change after that boundary, including the interval before the saved
+start; records dated before the saved start are initial and do not create normal
+alerts, so no claimed interval is dropped. `watch status` and the dashboard
+overview show the cursor, initial mode and saved start. Manual `watch refresh`
+never changes these cursors or archive state. Both `.zip` and
 real `.zip.zip` baseline names and the previous-day baseline in the 00:00
 release are supported. See [feed limits and cost](SOURCES.md#cve-list-watch-feed).
 Only visible reserved IDs can be stored. Rejected/reserved records require an
@@ -1516,8 +1524,9 @@ cvebeacon watch refresh CVE-2026-12345
 
 This uses bounded single-record NVD, EUVD, CVE List and EPSS lookups for enabled
 sources. KEV catalogs have no per-ID endpoint: their small, bounded catalogs are
-read and only the requested CVE's rows are updated. Each reply is capped at
-8 MiB. A CVE found only in EUVD or KEV also creates a watch record, without
+read and only the requested CVE's rows are updated. CVE List targeted records
+are capped at 4 MiB; the other small replies are capped at 8 MiB. A CVE found
+only in EUVD or KEV also creates a watch record, without
 claiming NVD presence. EUVD scores remain in its enrichment table so later
 refreshes can lower as well as raise the stored score. Targeted EUVD evidence
 is scoped to the requested CVE, even for an advisory with multiple aliases. No full sync runs and no

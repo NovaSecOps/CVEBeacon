@@ -43,10 +43,13 @@ last archive that was fully imported.
   change since midnight. Imports are idempotent by CVE ID and `dateUpdated`, and
   never replace a newer stored revision with an older one.
 - **Each past day:** import that day's official closed-day cumulative delta from
-  the `cve_YYYY-MM-DD_at_end_of_day` release, asset
-  `YYYY-MM-DD_delta_CVEs_at_end_of_day.zip`. That release is published with the
-  following day's 00:00 release. Each archive is read independently, so an
-  omitted or stale upstream index cannot hide a record.
+  the separate `cve_YYYY-MM-DD_at_end_of_day` release, asset
+  `YYYY-MM-DD_delta_CVEs_at_end_of_day.zip`. It is published shortly after the
+  following day's 00:00 hourly release and can itself appear as GitHub's
+  `releases/latest`. The sync never trusts `/latest`: it lists a bounded set of
+  recent releases and selects the newest hourly release by its archive names and
+  UTC time. Each archive is read independently, so an omitted or stale upstream
+  index cannot hide a record.
 - **Missing archive or long gap:** if a required end-of-day archive is absent,
   or more than seven days are outstanding, import one full baseline archive
   instead. The baseline streams in bounded batches, then catch-up continues
@@ -57,16 +60,19 @@ last archive that was fully imported.
   previous cursor, and the next sync retries the same archives. Completed
   batches are replayed idempotently.
 - **Initial modes:** `baseline` records the current baseline midnight as the
-  cursor without importing history and without events; only changes after the
-  saved start are imported later. `backfill` and `full` import the baseline,
-  filtered by their start time where applicable. Adding this provider to an
-  existing installation defaults to baseline even when the old `watch.initial`
-  says `full` or `backfill`. History requires an explicit confirmed choice.
+  cursor without importing history on the first sync. Later archives are
+  imported normally, including changes between that midnight and the saved
+  start; records dated before the saved start are marked initial and do not
+  produce normal alerts. Nothing in the claimed interval is dropped. `backfill`
+  and `full` import the baseline, filtered by their start time where applicable.
+  Adding this provider to an existing installation defaults to baseline even
+  when the old `watch.initial` says `full` or `backfill`. History requires an
+  explicit confirmed choice.
 - **Manual refresh:** `watch refresh` never changes the feed cursor, archive
   token or initial state.
 
-Conditional requests avoid re-reading unchanged latest-release metadata, and an
-unchanged archive token is skipped. The real baseline may end in `.zip.zip` and
+Conditional requests avoid re-reading an unchanged release list, and an unchanged
+archive token is skipped. The real baseline may end in `.zip.zip` and
 wrap `cves.zip`; both published forms are supported. A 00:00 release with
 yesterday's baseline and today's empty delta is valid. Visible published,
 rejected and reserved records are stored.
@@ -97,12 +103,14 @@ and at most three hops. No archive paths are extracted.
 
 Archive caches, duplicate indexes and an optional inner ZIP live beside state,
 not in an implicit RAM-backed directory. Preflight checks compressed space,
-then the inner archive and expanded directory before import. It reserves eight
+then the inner archive and expanded directory before import. It reserves three
 times expanded bytes for provider/search/index/transaction growth, four times
 directory bytes for temporary indexes, plus 64 MiB. Space is rechecked for each
-batch. This is a conservative storage estimate, not a guarantee against another
-process filling the disk. Only one compressed cache is retained. A validation
-or parse failure discards it; the next bounded attempt downloads it again.
+batch. This is a storage estimate with a 2x margin over the expanded archive,
+not a guarantee against another process filling the disk; a large baseline can
+still require several GiB of free space. Only one compressed cache is retained.
+A validation or parse failure discards it; the next bounded attempt downloads
+it again.
 An interrupted body restarts without HTTP Range; pre-body retries use the shared
 bounded policy. The limit is **per archive**, not aggregate: an ordinary
 midnight sync can transfer the closed-day archive and current delta (up to

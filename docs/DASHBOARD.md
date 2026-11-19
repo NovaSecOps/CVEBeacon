@@ -148,10 +148,11 @@ The **Watch** pages read the watch database through the same store and status
 helpers as `cvebeacon watch status`. They never contact a source and do not
 change scan or delivery state.
 
-- **Watch overview:** database path and schema, NVD and EUVD cursors (including
-  EUVD page progress), the last sync per source with request counts, EPSS score
-  date, watched/KEV/SSVC counts, per-channel pending, sending, failed and
-  ambiguous deliveries, the reported-to-clients count, and initial-mode state.
+- **Watch overview:** database path and schema, NVD, EUVD and CVE List cursors
+  (including EUVD page progress and the CVE List initial mode/start), the last
+  sync per source with request counts, EPSS score date, watched/KEV/SSVC counts,
+  per-channel pending, sending, failed and ambiguous deliveries, the
+  reported-to-clients count, and initial-mode state.
   A database written before sync summaries were recorded shows the counts as not
   recorded until the next sync.
 - **Events:** filter by rule, kind, initial flag, date range, exact CVE, client
