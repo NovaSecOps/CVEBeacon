@@ -1458,9 +1458,11 @@ reports and EUVD resume progress. The new provider has its own initial mode,
 window and archive cursors; adding it does not reset an initial EUVD import.
 
 On a fresh deployment its initial mode follows `watch.initial`: `baseline`
-saves a starting point without importing history, `backfill` imports the recent
-modified window and `full` imports history. A provider added to an existing
-deployment **defaults to baseline regardless of the old `watch.initial`**.
+stores the newest archive boundary as the cursor without importing history,
+`backfill` imports the recent modified window as initial and non-alerting, and
+`full` imports history as initial and non-alerting. A provider added to an
+existing deployment **defaults to baseline regardless of the old
+`watch.initial`**. Initial modes apply only before the first cursor exists.
 To explicitly restart only this provider with history:
 
 ```console
@@ -1482,16 +1484,22 @@ The latest release is selected from a bounded release listing by hourly archive
 names and UTC date, never by trusting GitHub's `/latest` marker, because the
 end-of-day release can be the repository's latest.
 If a required archive is missing or more than seven days are outstanding, one
-full baseline is imported and catch-up continues from its midnight boundary.
+baseline archive is read; only records after the cursor are stored, and catch-up
+continues from its midnight boundary.
 The CVE List cursor therefore records the last archive that was fully validated
 and committed; a failure leaves it in place and the next sync retries. Imports
 are idempotent and never replace a newer stored `dateUpdated` with an older one.
-There is no rolling-log repair queue and no per-ID feed repair. In baseline
-initial mode, the first sync records the baseline midnight. Later archives still
-import every change after that boundary, including the interval before the saved
-start; records dated before the saved start are initial and do not create normal
-alerts, so no claimed interval is dropped. `watch status` and the dashboard
-overview show the cursor, initial mode and saved start. Manual `watch refresh`
+There is no rolling-log repair queue and no per-ID feed repair. After
+initialisation the initial mode is never consulted again: every hourly delta,
+end-of-day delta and gap-fallback baseline imports records whose `dateUpdated` is
+after the cursor as normal changes that can alert; records at or before the
+cursor are skipped as already known. Records with a missing or unparseable
+`dateUpdated` are imported and counted, never silently skipped. A gap-fallback
+baseline therefore fills the outstanding interval completely. Until the
+end-of-day tag is published shortly after 00:00, a sync that needs it fails
+closed with the cursor unchanged and retries; daily schedules should avoid the
+short 00:00–00:45 window. `watch status` and the dashboard overview show the
+cursor, initial mode and saved start. Manual `watch refresh`
 never changes these cursors or archive state. Both `.zip` and
 real `.zip.zip` baseline names and the previous-day baseline in the 00:00
 release are supported. See [feed limits and cost](SOURCES.md#cve-list-watch-feed).

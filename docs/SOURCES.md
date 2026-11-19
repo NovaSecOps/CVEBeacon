@@ -49,25 +49,35 @@ last archive that was fully imported.
   `releases/latest`. The sync never trusts `/latest`: it lists a bounded set of
   recent releases and selects the newest hourly release by its archive names and
   UTC time. Each archive is read independently, so an omitted or stale upstream
-  index cannot hide a record.
+  index cannot hide a record. A sync between the 00:00 release and the end-of-day
+  tag publication fails closed with the cursor unchanged and retries; daily
+  schedules should avoid the short 00:00–00:45 window.
 - **Missing archive or long gap:** if a required end-of-day archive is absent,
-  or more than seven days are outstanding, import one full baseline archive
-  instead. The baseline streams in bounded batches, then catch-up continues
-  from the baseline's published midnight time. A baseline that does not advance
-  past the cursor fails clearly and leaves the cursor in place.
+  or more than seven days are outstanding, read one baseline archive instead.
+  It streams in bounded batches; only records newer than the cursor are stored,
+  then catch-up continues from the baseline's published midnight time. A
+  baseline that does not advance past the cursor fails clearly and leaves the
+  cursor in place.
 - **Failure:** the cursor advances only after the whole archive has been
   validated and committed. Any download, integrity or record failure leaves the
   previous cursor, and the next sync retries the same archives. Completed
   batches are replayed idempotently.
-- **Initial modes:** `baseline` records the current baseline midnight as the
-  cursor without importing history on the first sync. Later archives are
-  imported normally, including changes between that midnight and the saved
-  start; records dated before the saved start are marked initial and do not
-  produce normal alerts. Nothing in the claimed interval is dropped. `backfill`
-  and `full` import the baseline, filtered by their start time where applicable.
-  Adding this provider to an existing installation defaults to baseline even
-  when the old `watch.initial` says `full` or `backfill`. History requires an
-  explicit confirmed choice.
+- **Initial modes** apply only to the first initialisation, before any cursor
+  exists. `baseline` stores the newest hourly archive boundary as the cursor
+  without importing or alerting on anything older. `backfill N` imports records
+  whose `dateUpdated` is inside the saved window, as initial and non-alerting,
+  then stores the newest boundary. `full` imports all records as initial and
+  non-alerting, then stores the newest boundary. Adding this provider to an
+  existing installation defaults to baseline even when the old
+  `watch.initial` says `full` or `backfill`. History requires an explicit
+  confirmed choice.
+- **After initialisation** the initial mode is never consulted again. Every
+  hourly delta, end-of-day delta and gap-fallback baseline imports records whose
+  `dateUpdated` is after the cursor as normal changes that can alert. Records at
+  or before the cursor are skipped as already known. Records with a missing or
+  unparseable `dateUpdated` are imported and counted, never silently skipped.
+  The fallback baseline therefore fills exactly the outstanding interval and is
+  complete by construction.
 - **Manual refresh:** `watch refresh` never changes the feed cursor, archive
   token or initial state.
 
