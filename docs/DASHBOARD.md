@@ -405,6 +405,8 @@ Failed attempts use per-origin exponential delays from 1 to 60 seconds. The boun
 
 Built-in password authentication does **not** protect passwords or session cookies from interception over plain HTTP. For remote authenticated use, terminate HTTPS at a trusted reverse proxy or provide an equivalent encrypted transport. Set `secure_cookie = true` when the browser-facing connection is HTTPS. This flag controls browser cookie transport; it does not enable TLS on the dashboard itself. Configure HSTS at the HTTPS proxy. Restrict direct backend access and protect any backend network hop. Password auth does not replace firewall or normal network security controls.
 
+Sample nginx and Caddy configurations are in the [HTTPS guide](HTTPS.md).
+
 Loopback bindings validate the requested host. Wildcard bindings accept numeric IP host headers and `localhost`, protecting against arbitrary hostname rebinding. For a reverse proxy, forward a numeric backend `Host` header and preserve the application at the URL root. Forwarded host, address and scheme headers are not trusted. A specific hostname binding accepts that hostname. Outbound TLS verification remains enabled. Password configuration affects only the dashboard; core monitoring continues to work without credentials.
 
 Forms use CSRF protection, output is escaped, errors omit sensitive details, and downloads cannot select filesystem paths. Credential values are not rendered. Report/query operations are synchronous; avoid submitting repeated requests while an investigation is running.

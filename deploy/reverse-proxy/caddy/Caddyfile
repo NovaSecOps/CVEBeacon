@@ -1,0 +1,85 @@
+# CVEBeacon dashboard behind Caddy.
+#
+# Install as /etc/caddy/Caddyfile, or import this file from an existing
+# Caddyfile. This sample has no global options block, so it can be imported
+# without a merge. For public ACME certificates, put the ACME account email in
+# the file's single global options block (add one at the top if absent) and
+# remove `tls internal` below.
+#
+# The dashboard listens on loopback only:
+#   cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml serve
+#
+# It trusts no forwarded host, address or scheme headers, does not support a
+# URL prefix, and checks the request Host header against the trusted hosts for
+# its bind address.
+
+# Caddy redirects HTTP to HTTPS automatically for site addresses with a host.
+# This explicit block replaces that automatic redirect for this host so the
+# target stays fixed.
+http://cvebeacon.example.com {
+	redir https://cvebeacon.example.com{uri} permanent
+}
+
+cvebeacon.example.com {
+	# A private certificate from Caddy's local CA. Remove this line for a
+	# publicly trusted Let's Encrypt certificate; public certificates use
+	# the ACME account email from the global options block, if configured.
+	tls internal
+
+	header {
+		# Add includeSubDomains only when every subdomain is HTTPS, and
+		# preload only after the domain meets the HSTS preload list rules.
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		# Append instead of replacing the dashboard's own policy.
+		+Content-Security-Policy "frame-ancestors 'none'"
+		-Server
+	}
+
+	# The dashboard accepts statement uploads up to 5 MiB. Six megabytes
+	# leaves room for multipart framing.
+	request_body {
+		max_size 6MB
+	}
+
+	# /bootstrap accepts only loopback peers, and every request through this
+	# proxy appears local. Create the first administrator with
+	# `cvebeacon users add NAME --admin` before exposing the dashboard.
+	respond /bootstrap 404
+
+	reverse_proxy 127.0.0.1:8787 {
+		# The dashboard validates this Host header and ignores forwarded
+		# headers. Send the backend address and clear client-supplied
+		# forwarding headers.
+		header_up Host {upstream_hostport}
+		header_up -X-Forwarded-*
+		header_up -X-Real-IP
+		header_up -Forwarded
+
+		# Flask builds canonical redirects from the backend Host and HTTP
+		# scheme. Rewrite them to a relative path, keeping the query string.
+		header_down Location "^http://127\.0\.0\.1:8787(/.*)?$" "$1"
+
+		# Manual queries and report generation can run for several minutes;
+		# background jobs return immediately.
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 300s
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	# Caddy generates some errors itself (body limit, unreachable backend)
+	# before the deferred header block runs. Repeat the policy here.
+	handle_errors {
+		header {
+			Strict-Transport-Security "max-age=31536000"
+			X-Content-Type-Options "nosniff"
+			Referrer-Policy "no-referrer"
+			+Content-Security-Policy "frame-ancestors 'none'"
+			-Server
+		}
+	}
+}
