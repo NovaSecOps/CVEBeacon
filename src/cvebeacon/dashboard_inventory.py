@@ -300,7 +300,9 @@ def create_blueprint(config):
         notices = {
             "saved": "Inventory saved.",
             "restored": "Inventory restored.",
-            "removed": "Inventory removed. Your next scan will use the remaining inventories.",
+            "removed": ("Inventory removed. Your next scan will use the remaining inventories."
+                        if config.effective_inventory is not None else
+                        "Inventory removed. You can upload or restore an inventory to run scans."),
         }
         return render_detail(key, profile, notice=notices.get(request.args.get("result")))
 

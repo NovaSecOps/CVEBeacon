@@ -126,3 +126,46 @@ def test_update_snapshot_restores_managed_files_and_audit_together(storage, tmp_
     assert users.audit_entries() == before
     assert current.read_bytes() == history.read_bytes() == previous
     assert profile.exists() and not other.exists() and unrelated.read_text() == "operator file"
+
+
+@pytest.mark.parametrize("platform", ("nt", "posix"))
+def test_directory_sync_works_without_unix_open_flags(tmp_path, monkeypatch, platform):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(journal, "os", SimpleNamespace(
+        name=platform, O_RDONLY=0, open=lambda *args: 7,
+        fsync=lambda fd: calls.append(("sync", fd)), close=lambda fd: calls.append(("close", fd)),
+    ))
+    journal.sync_directory(tmp_path)
+    assert calls == ([] if platform == "nt" else [("sync", 7), ("close", 7)])
+
+
+def test_recovery_removes_staging_files_left_before_the_marker(storage):
+    config, directory, users, _, label, _ = storage
+    orphan = directory / journal.PARTS["current"]
+    journal.replace_bytes(orphan, _data("orphan", label))
+    assert not journal.pending_exists(directory)
+    assert config.effective_inventory is None
+    assert not orphan.exists()
+    assert all(not entry.action.startswith("inventory_saved:") for entry in users.audit_entries())
+
+
+@pytest.mark.parametrize("entry", ([], "text", {}, {"name": "missing-fields"}, {"sha256": None}))
+def test_malformed_inventory_snapshot_has_a_clean_error(storage, tmp_path, entry):
+    from cvebeacon import update_state
+
+    config, *_ = storage
+    with pytest.raises(update_state.SnapshotError, match="invalid managed inventory snapshot"):
+        update_state._managed_entries(config, tmp_path, {"managed_inventories": [entry]})
+
+
+def test_snapshot_refuses_too_many_entries_before_copying(storage, tmp_path, monkeypatch):
+    from cvebeacon import update_state
+
+    config, directory, _, _, label, key = storage
+    journal.replace_bytes(directory / f"{key}.json", _data("sample", label))
+    monkeypatch.setattr(update_state, "MAX_MANAGED_FILES", 0, raising=False)
+    with pytest.raises(update_state.SnapshotError, match="managed inventory snapshot"):
+        update_state._managed_snapshot(config, tmp_path)
+    assert not list(tmp_path.glob("inventory-*.copy"))

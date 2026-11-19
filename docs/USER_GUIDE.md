@@ -85,6 +85,11 @@ cvebeacon inventory validate path/to/alternate.csv
 
 Validation reports source locations for malformed records, missing mapped columns, blank fields, duplicate IDs, invalid structure, and unreadable files.
 
+XLSX parts and total expanded data are limited to 32 MiB, and configured
+workbooks may describe up to 1,000,000 cells per worksheet. Use a smaller used
+range or split larger inventories. For YAML inventories, write each value
+directly. Aliases and merge keys are refused.
+
 ### Clients and inventories
 
 1. In the dashboard, open **Clients → Add client**. Enter the name and any

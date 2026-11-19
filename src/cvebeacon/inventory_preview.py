@@ -9,13 +9,11 @@ from tempfile import TemporaryDirectory
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
 
-import yaml
-
 from .config import CANONICAL_FIELDS, OPTIONAL_FIELDS, InventoryConfig
 from .errors import ConfigurationError, InventoryValidationError
 from .identity import identity_conflict
 from .inventory import (
-    FORMULA, MAX_CONTRACT_ROWS, MAX_CONTRACT_TEXT, PREVIEW_COLUMN_LIMIT, _validate_rows, inventory_rows,
+    FORMULA, MAX_CONTRACT_ROWS, MAX_CONTRACT_TEXT, PREVIEW_COLUMN_LIMIT, _validate_rows, decode_inventory_yaml, inventory_rows,
 )
 from .models import Asset
 from .web_inventory import decode_json
@@ -32,36 +30,8 @@ MAX_CELLS = 1_000_000
 MAX_LOGICAL_TEXT = 16 * 1024 * 1024
 
 
-class BoundedYAMLLoader(yaml.SafeLoader):
-    """Limit YAML parsing before the constructor allocates a large object tree."""
-
-    depth = 0
-    nodes = 0
-
-    def compose_node(self, parent, index):
-        if self.check_event(yaml.AliasEvent):
-            raise ConfigurationError("YAML aliases are not supported. Use a separate value for each field.")
-        if self.depth >= 32 or self.nodes >= 1_000_000:
-            raise ValueError("YAML upload is too complex")
-        self.depth += 1
-        self.nodes += 1
-        try:
-            return super().compose_node(parent, index)
-        finally:
-            self.depth -= 1
-
-    def construct_mapping(self, node, deep=False):
-        # YAML merges can expand a small file into a very large mapping.
-        if any(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value):
-            raise ValueError("YAML merge keys are not supported in uploads")
-        mapping = super().construct_mapping(node, deep=deep)
-        if len(mapping) != len(node.value):
-            raise ValueError("duplicate YAML key")
-        return mapping
-
-
 def decode_upload_records(text, kind):
-    root = decode_json(text.encode("utf-8"), max_items=MAX_CELLS + MAX_CONTRACT_ROWS) if kind == "json" else yaml.load(text, Loader=BoundedYAMLLoader)
+    root = decode_json(text.encode("utf-8"), max_items=MAX_CELLS + MAX_CONTRACT_ROWS) if kind == "json" else decode_inventory_yaml(text)
     if isinstance(root, dict):
         lists = [value for value in root.values() if isinstance(value, list)]
         if len(lists) == 1:
@@ -83,6 +53,10 @@ class Preview:
     first_error: tuple[int, int] | None
 
 
+UPLOAD_PARSE_MESSAGES = {
+    "configured records value must be a list": "Upload a list of inventory rows or a document containing one list.",
+}
+
 # Only messages generated from known input structure are safe for display.
 SAFE_PARSE_ERRORS = frozenset({
     "CSV has no header row", "CSV header contains duplicate column names",
@@ -90,7 +64,11 @@ SAFE_PARSE_ERRORS = frozenset({
     "CSV row has more fields than its header", "a CSV line is too long",
     "header row contains a blank column name", "header row contains duplicate column names",
     "a cell is missing a column name", "the worksheet is too large",
-    "the worksheet has too many columns", "configured records value must be a list",
+    "the worksheet has too many columns",
+    "YAML aliases are not supported. Use a separate value for each field.",
+    "The YAML is too complex. Split it into smaller files.",
+    "YAML merge keys are not supported. Use a separate value for each field.",
+    "The YAML contains duplicate field names.",
 })
 
 
@@ -117,6 +95,8 @@ def read_upload(data, suffix):
             return rows
         except InventoryValidationError as exc:
             issue = exc.issues[0]
+            if issue.message in UPLOAD_PARSE_MESSAGES:
+                raise ConfigurationError(UPLOAD_PARSE_MESSAGES[issue.message]) from None
             if issue.message in SAFE_PARSE_ERRORS or issue.message.startswith(("The workbook ", "A workbook ", "An XML part ", "XML declarations ")):
                 raise ConfigurationError(issue.message.capitalize() if issue.message.islower() else issue.message) from None
             raise ConfigurationError(_unreadable_message()) from None

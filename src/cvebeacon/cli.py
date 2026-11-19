@@ -1475,6 +1475,8 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         try:
             assets = _load_inventory(config, inventory_config, managed_warnings=managed_warnings)
         except InventoryValidationError:
+            if args.command == "scan" and managed_warnings and args.report:
+                print("Report not written because a client inventory is unreadable.", file=sys.stderr)
             if args.command != "export" or not managed_warnings:
                 raise
         if managed_warnings and args.command == "export":
@@ -1494,10 +1496,13 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
                         delivered = _notify_pending(config, store, http, channel)
                         LOG.info("%s channel accepted %d pending event(s)", channel, delivered)
                     except CVEBeaconError as exc: failures.append(str(exc))
-            if args.report and not managed_warnings:
-                path = _report_path(config, args.report)
-                (write_xlsx if args.report == "xlsx" else write_json)(results, path)
-                print(path)
+            if args.report:
+                if managed_warnings:
+                    print("Report not written because a client inventory is unreadable.", file=sys.stderr)
+                else:
+                    path = _report_path(config, args.report)
+                    (write_xlsx if args.report == "xlsx" else write_json)(results, path)
+                    print(path)
             warnings = sum(result.coverage is not None for result in results)
             degraded = any(health.status in {HealthStatus.DEGRADED, HealthStatus.FAILED} for result in results for health in result.source_health)
             print(f"run {run_id}: {len(assets)} assets, {sum(len(x.findings) for x in results)} findings, {len(events)} material changes, {warnings} coverage warnings")

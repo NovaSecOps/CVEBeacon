@@ -23,12 +23,14 @@ TARGETS = {
 
 
 def sync_directory(directory):
-    if os.name == "posix":
-        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def remove_file(path):
@@ -84,16 +86,24 @@ def _read_marker(directory):
 
 def recover(directory: Path, users_path: Path | None):
     """Resolve a pending change against its committed audit row before reading files."""
-    if not pending_exists(directory):
+    if directory.is_symlink():
+        return
+    parts = [directory / filename for filename in PARTS.values()]
+    marked = pending_exists(directory)
+    if not marked and not any(part.exists() or part.is_symlink() for part in parts):
         return
     private_directory(directory, owner_only=True)
     if users_path is None or not users_path.is_file():
-        raise StateError("The account database is required to recover a client inventory change.")
+        if marked:
+            raise StateError("The account database is required to recover a client inventory change.")
+        return
     from .watch.users import UserStore
 
     # Serializes with both an in-flight writer and another recovery process.
     with UserStore(users_path).transaction() as db:
         if not pending_exists(directory):
+            for part in parts:
+                remove_file(part)
             return
         row, chain, targets = _read_marker(directory)
         committed = db.execute("SELECT 1 FROM cb_user_audit WHERE id=? AND chain=?", (row, chain)).fetchone()
@@ -111,5 +121,5 @@ def recover(directory: Path, users_path: Path | None):
                 from .managed_inventory import prune
                 prune(directory / targets["current"][0])
         remove_file(directory / MARKER)
-        for part in PARTS.values():
-            (directory / part).unlink(missing_ok=True)
+        for part in parts:
+            remove_file(part)

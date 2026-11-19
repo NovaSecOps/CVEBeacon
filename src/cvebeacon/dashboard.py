@@ -15,15 +15,17 @@ from pathlib import Path
 import re
 import secrets
 import tempfile
+from threading import Lock
 
 from flask import Flask, abort, g, redirect, render_template, request, send_file, session, url_for
 from werkzeug.exceptions import HTTPException, SecurityError
 
 from .config import AppConfig
 from .dashboard_auth import AccountLoginThrottle, AccountSessions, DashboardAuth, password_hash
-from .errors import CVEBeaconError, ConfigurationError, InventoryValidationError, StateError
+from .errors import CVEBeaconError, ConfigurationError, StateError
 from .inventory import load_inventory
 from .identity import normalize_asset
+from .managed_inventory import ManagedInventoryCollision, inventory_files
 from .models import Applicability, Asset
 from .reporting import write_json, write_xlsx
 from .state import StateStore
@@ -73,6 +75,31 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
     asset = Asset(**item)
     current = assets.get(asset.asset_id)
     return current is not None and current.target_key == asset.target_key
+
+
+
+def _report_inventory_stamp(inventory, snapshot_directory):
+    """Identify inventory inputs without reading their contents."""
+    paths = []
+    if inventory.path is not None:
+        paths.append(inventory.path)
+    if inventory.managed_directory is not None:
+        paths.append(inventory.managed_directory)
+        for path in inventory_files(inventory.managed_directory, configured=inventory.path):
+            paths.extend((path, path.with_suffix(".client")))
+    if inventory.web_snapshots:
+        paths.append(snapshot_directory)
+        paths.extend(sorted(snapshot_directory.glob("*.json")))
+    stamps = []
+    for path in paths:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            stamps.append((path, None))
+        else:
+            stamps.append((path, info.st_ino, info.st_dev, info.st_mode, info.st_size,
+                           info.st_mtime_ns, info.st_ctime_ns, info.st_uid, info.st_nlink))
+    return tuple(stamps)
 
 
 def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session_app=None) -> Flask:
@@ -453,27 +480,52 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
                 health["asset_id"] = result["asset"]["asset_id"]
         return render_template("query.html", result=result, values=values, mode=mode)
 
+    report_cache = None
+    report_cache_lock = Lock()
+    report_snapshots = config.database_path.parent / "web-inventory"
+
+    def report_inventory(inventory):
+        warnings: list[str] = []
+        try:
+            assets = load_inventory(inventory, snapshot_directory=report_snapshots, managed_warnings=warnings)
+        except ManagedInventoryCollision as exc:
+            warnings.append(str(exc))
+        except (CVEBeaconError, OSError):
+            if not warnings:
+                warnings.append("The inventory could not be read. Check inventory settings and try again.")
+        return (None, warnings) if warnings else (assets, warnings)
+
     @app.route("/reports", methods=["GET", "POST"])
     @requires("run", post=("run", "view"))
     def reports():
+        nonlocal report_cache
         inventory = config.effective_inventory
         is_post = request.method == "POST"
         if inventory is None:
             return inventory_required("Report export", status=400 if is_post else 200)
-        warnings: list[str] = []
-        try:
-            assets = load_inventory(
-                inventory, snapshot_directory=config.database_path.parent / "web-inventory",
-                managed_warnings=warnings,
-            )
-        except (InventoryValidationError, OSError):
-            if not warnings and is_post:
-                raise
-        if warnings or not is_post:
-            return render_template("reports.html", inventory_warnings=warnings), 409 if warnings and is_post else 200
+        if not is_post:
+            # Static report pages do not need to parse a standalone configured file.
+            warnings = []
+            if inventory.managed_directory is not None:
+                with report_cache_lock:
+                    try:
+                        stamp = _report_inventory_stamp(inventory, report_snapshots)
+                        if report_cache is not None and report_cache[0] == stamp:
+                            warnings = report_cache[1]
+                        else:
+                            _, warnings = report_inventory(inventory)
+                            if stamp == _report_inventory_stamp(inventory, report_snapshots):
+                                report_cache = (stamp, warnings)
+                    except OSError:
+                        _, warnings = report_inventory(inventory)
+            return render_template("reports.html", inventory_warnings=warnings)
         kind = _text(request.form, "format", required=True)
         if kind not in {"json", "xlsx"}:
             abort(400)
+        # Always recheck the actual inputs before an export.
+        assets, warnings = report_inventory(inventory)
+        if warnings:
+            return render_template("reports.html", inventory_warnings=warnings), 409
         from .cli import _run_query
         results = _run_query(config, assets)
         with tempfile.TemporaryDirectory(prefix="cvebeacon-report-") as directory:

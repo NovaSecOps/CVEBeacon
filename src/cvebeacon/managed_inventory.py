@@ -39,12 +39,15 @@ def client_key(value):
 
 def _names(directory):
     try:
-        # Avoid following an unrelated legacy symlink.
-        if not directory.is_symlink():
-            return tuple(directory.iterdir())
-    except (FileNotFoundError, NotADirectoryError):
-        pass
-    return ()
+        if directory.is_symlink():
+            LOG.warning("Skipping managed inventory storage because it is a symbolic link.")
+            return ()
+        return tuple(directory.iterdir())
+    except FileNotFoundError:
+        return ()
+    except NotADirectoryError:
+        LOG.warning("Skipping managed inventory storage because the inventory storage is not a directory.")
+        return ()
 
 
 def is_managed_file(path):

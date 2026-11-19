@@ -157,3 +157,29 @@ def test_managed_keys_normalize_unicode_and_are_safe_for_reserved_labels():
 
     assert managed_key("Société") == managed_key(unicodedata.normalize("NFD", "SOCIÉTÉ"))
     assert KEY.fullmatch(managed_key("CON"))
+
+
+def test_unsafe_inventory_directory_is_reported(tmp_path, caplog):
+    path = tmp_path / "config.toml"
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    config = load_config(path)
+    config.inventory_directory.write_text("ordinary file")
+    assert config.effective_inventory is None
+    assert "inventory storage is not a directory" in caplog.text
+
+
+def test_scan_explains_missing_requested_report_when_inventory_is_partial(tmp_path, monkeypatch, capsys):
+    from cvebeacon import cli
+    from cvebeacon.models import QueryResult
+
+    path = tmp_path / "config.toml"
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    config = load_config(path)
+    write_managed(config.inventory_directory, "Good client", "asset-1")
+    write_managed(config.inventory_directory, "Bad client", "asset-2").write_text("invalid")
+    monkeypatch.setattr(cli, "_run_query", lambda config, assets, **kwargs: [
+        QueryResult(asset, (), ()) for asset in assets
+    ])
+    assert cli.main(["--config", str(path), "scan", "--report", "json"]) == 4
+    assert "Report not written because a client inventory is unreadable" in capsys.readouterr().err
+    assert not list(config.output_dir.glob("*.json"))

@@ -74,7 +74,7 @@ follows the configuration:
 
 `watch` runs `<executable> --config <path> watch run`. `scan` runs
 `<executable> --config <path> scan`. `both` runs the single command
-`<executable> --config <path> run`: `scan` when `[inventory]` is configured,
+`<executable> --config <path> run`: `scan` when a configured or uploaded inventory is available,
 then `watch run` when `[watch].enabled` is true, in that order in one process.
 It is one cron line or one Windows task action, never shell chaining.
 

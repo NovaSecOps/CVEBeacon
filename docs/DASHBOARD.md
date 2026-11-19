@@ -213,7 +213,7 @@ fields such as **Asset ID**, **Vendor**, **Product** and **Version**. Select
 **Replace this client's inventory** to switch to a new list, or **Add to it**
 to keep the current assets and add new IDs.
 
-The client page shows the asset count, the last upload and who saved it, and
+The client page shows the asset count, the last inventory change and who made it, and
 findings from the latest successful scan. Use it to download the current
 inventory, restore one of the five prior versions, or remove the upload. The JSON download
 contains the canonical inventory records and can be uploaded again. The

@@ -23,6 +23,9 @@ from .watch.store import WatchStore
 from .watch.users import UserStore
 
 
+MAX_MANAGED_FILES = 20_000
+
+
 class SnapshotError(CVEBeaconError):
     pass
 
@@ -137,8 +140,11 @@ def _managed_files(config):
 
 def _managed_snapshot(config, destination):
     recover(config.inventory_directory, config.watch.users_database)
+    files = _managed_files(config)
+    if len(files) > MAX_MANAGED_FILES:
+        raise SnapshotError("managed inventory snapshot exceeds the file count limit")
     items = []
-    for index, path in enumerate(_managed_files(config)):
+    for index, path in enumerate(files):
         saved = f"inventory-{index}.copy"
         payload = read_bytes(path)
         replace_bytes(destination / saved, payload)
@@ -147,23 +153,29 @@ def _managed_snapshot(config, destination):
 
 
 def _managed_entries(config, source, manifest):
-    items = manifest.get("managed_inventories")
-    if items is None:
+    if "managed_inventories" not in manifest:
         return None  # Snapshots written by earlier releases.
-    if not isinstance(items, list) or len(items) > 20000:
+    items = manifest["managed_inventories"]
+    if not isinstance(items, list) or len(items) > MAX_MANAGED_FILES:
         raise SnapshotError("invalid managed inventory snapshot")
     files = {}
+    blobs = set()
     for item in items:
-        name, saved = item["name"], item["backup"]
+        if not isinstance(item, dict) or item.keys() != {"name", "backup", "sha256"}:
+            raise SnapshotError("invalid managed inventory snapshot entry")
+        name, saved, checksum = item["name"], item["backup"], item["sha256"]
+        if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise SnapshotError("invalid managed inventory snapshot checksum")
         if (not isinstance(name, str) or Path(name).name != name or not is_managed_file(Path(name))
-                or name in files or not isinstance(saved, str) or not re.fullmatch(r"inventory-[0-9]+\.copy", saved)):
+                or name in files or not isinstance(saved, str) or not re.fullmatch(r"inventory-[0-9]+\.copy", saved)
+                or saved in blobs):
             raise SnapshotError("invalid managed inventory snapshot filename")
         target = config.inventory_directory / name
         if config.inventory is not None and target == config.inventory.path:
             raise SnapshotError("managed inventory snapshot overlaps the configured inventory")
-        expected = item["sha256"]
-        _verified_managed_bytes(source, saved, expected)
-        files[name] = (saved, expected)
+        _verified_managed_bytes(source, saved, checksum)
+        files[name] = (saved, checksum)
+        blobs.add(saved)
     return files
 
 
@@ -299,8 +311,8 @@ def verify_restore(config, data, source):
     if managed is not None:
         actual = {path.name: path for path in _managed_files(config)}
         if actual.keys() != managed.keys() or any(
-            hashlib.sha256(read_bytes(actual[name])).hexdigest() != expected
-            for name, (_, expected) in managed.items()
+            hashlib.sha256(read_bytes(actual[name])).hexdigest() != checksum
+            for name, (_, checksum) in managed.items()
         ):
             raise SnapshotError("restored managed inventories do not match their snapshot")
 

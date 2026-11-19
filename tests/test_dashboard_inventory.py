@@ -399,3 +399,45 @@ def test_combined_schedule_can_be_installed_before_the_first_upload(deployment, 
     rendered = scheduling._describe_cron_block(block)
     assert scheduling.installed_scan_state(rendered, config.config_path) == "scan"
     assert "watch run" not in block
+
+
+def test_reports_explain_collisions_and_cache_unchanged_inventory_checks(deployment, monkeypatch):
+    from cvebeacon import dashboard
+    from cvebeacon.managed_inventory import encode_records
+    from cvebeacon.models import Asset
+    from cvebeacon.web_assets import replace_bytes
+
+    config, _, app, browser = deployment
+    detail = add(browser, "First client")
+    assert submit(browser, detail, upload(browser, detail)).status_code == 303
+    add(browser, "Second client")
+    other = config.inventory_directory / f"{client_key('Second client')}.json"
+    admin = _admin(app)
+    load = dashboard.load_inventory
+    checks = []
+
+    def count(*args, **kwargs):
+        checks.append(True)
+        return load(*args, **kwargs)
+
+    monkeypatch.setattr(dashboard, "load_inventory", count)
+    path = "/reports"
+    assert "Generate and download" in admin.get(path).text
+    assert "Generate and download" in admin.get(path).text
+    assert len(checks) == 1
+    replace_bytes(other, encode_records([Asset("private-asset", "Example", "Widget", "1", client="Second client")]))
+    page = admin.get(path)
+    assert len(checks) == 2
+    assert "First client" in page.text and "Second client" in page.text
+    assert "Generate and download" not in page.text and "private-asset" not in page.text
+    assert admin.post(path, data={"csrf": csrf(admin, detail), "format": "json"}).status_code == 409
+    assert len(checks) == 3
+
+
+def test_removing_final_inventory_explains_why_scans_are_unavailable(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    assert submit(browser, detail, upload(browser, detail)).status_code == 303
+    removed = change(browser, detail, "remove", confirm="remove")
+    page = browser.get(removed.location)
+    assert "upload or restore an inventory to run scans" in page.text

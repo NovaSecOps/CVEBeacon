@@ -285,6 +285,38 @@ def _csv_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[tu
             ) from None
 
 
+class BoundedYAMLLoader(yaml.SafeLoader):
+    """Limit YAML parsing before the constructor allocates a large object tree."""
+
+    depth = 0
+    nodes = 0
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            raise InventoryValidationError([ValidationIssue("YAML aliases are not supported. Use a separate value for each field.")])
+        if self.depth >= 32 or self.nodes >= 1_000_000:
+            raise InventoryValidationError([ValidationIssue("The YAML is too complex. Split it into smaller files.")])
+        self.depth += 1
+        self.nodes += 1
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self.depth -= 1
+
+    def construct_mapping(self, node, deep=False):
+        # YAML merges can expand a small file into a very large mapping.
+        if any(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value):
+            raise InventoryValidationError([ValidationIssue("YAML merge keys are not supported. Use a separate value for each field.")])
+        mapping = super().construct_mapping(node, deep=deep)
+        if len(mapping) != len(node.value):
+            raise InventoryValidationError([ValidationIssue("The YAML contains duplicate field names.")])
+        return mapping
+
+
+def decode_inventory_yaml(text):
+    return yaml.load(text, Loader=BoundedYAMLLoader)
+
+
 def _structured_error(kind: str, error: BaseException) -> str:
     """Return a parser diagnostic without source text or parser excerpts."""
     if isinstance(error, json.JSONDecodeError):
@@ -304,7 +336,7 @@ def _structured_rows(config: InventoryConfig, kind: str, *, unmapped: bool = Fal
             from .inventory_preview import decode_upload_records
             root = decode_upload_records(text, kind)
         else:
-            root = json.loads(text) if kind == "json" else yaml.safe_load(text)
+            root = json.loads(text) if kind == "json" else decode_inventory_yaml(text)
         records = _resolve_records(root, config.records_path)
     except (OSError, LookupError, json.JSONDecodeError, yaml.YAMLError, KeyError) as exc:
         raise InventoryValidationError([ValidationIssue(_structured_error(kind, exc))]) from exc
@@ -386,7 +418,7 @@ def inspect_inventory(path: str | Path, *, header_row: int = 1, encoding: str = 
         return {"path": str(source), "format": kind, "headers": headers, "sample_rows": sample}
     try:
         text = source.read_text(encoding=encoding)
-        root = json.loads(text) if kind == "json" else yaml.safe_load(text)
+        root = json.loads(text) if kind == "json" else decode_inventory_yaml(text)
     except (OSError, LookupError, json.JSONDecodeError, yaml.YAMLError) as exc:
         raise InventoryValidationError([ValidationIssue(_structured_error(kind, exc))]) from exc
     result: dict[str, Any] = {"path": str(source), "format": kind, "root_type": type(root).__name__}

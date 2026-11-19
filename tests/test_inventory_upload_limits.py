@@ -124,3 +124,38 @@ def test_exact_cell_budget_is_checked_before_row_validation(monkeypatch):
     monkeypatch.setattr(inventory_preview, "MAX_CELLS", 3)
     with pytest.raises(ConfigurationError, match="too many cells"):
         preview_upload(payload, ".xlsx", "Example")
+
+
+def test_full_size_workbook_upload_reaches_the_row_limit():
+    from openpyxl import Workbook
+
+    workbook = Workbook(write_only=True)
+    sheet = workbook.create_sheet()
+    sheet.append(["asset_id", "vendor", "product", "version"])
+    for index in range(100_000):
+        sheet.append([f"asset-{index:06}", "Example", "Widget", "1"])
+    payload = BytesIO()
+    workbook.save(payload)
+    result = preview_upload(payload.getvalue(), ".xlsx", "Example")
+    assert len(result.assets) == 100_000 and result.errors == 0
+
+
+@pytest.mark.parametrize("suffix", (".json", ".yaml"))
+def test_upload_shape_error_asks_for_a_list_of_inventory_rows(suffix):
+    data = b'{"title": "private-marker"}'
+    with pytest.raises(ConfigurationError, match="list of inventory rows") as caught:
+        preview_upload(data, suffix, "Example")
+    assert "private-marker" not in str(caught.value)
+
+
+def test_yaml_complexity_and_configured_aliases_have_safe_errors(tmp_path):
+    data = b"[" * 35 + b'"private-marker"' + b"]" * 35
+    with pytest.raises(ConfigurationError, match="YAML is too complex") as caught:
+        preview_upload(data, ".yaml", "Example")
+    assert "private-marker" not in str(caught.value)
+    path = tmp_path / "inventory.yaml"
+    path.write_bytes(b"- {asset_id: a, vendor: &vendor Example, product: *vendor, version: '1'}")
+    with pytest.raises(InventoryValidationError, match="YAML aliases"):
+        inventory.load_inventory(InventoryConfig(path))
+    with pytest.raises(InventoryValidationError, match="YAML aliases"):
+        inventory.inspect_inventory(path)
