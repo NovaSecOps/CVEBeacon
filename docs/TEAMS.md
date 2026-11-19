@@ -114,12 +114,13 @@ See [conversation addressing](https://learn.microsoft.com/en-us/microsoftteams/p
 There must be 1–100 total destinations. Avoid listing the same person both by
 UPN and object ID or by an additional conversation reference.
 
-Service URLs must use HTTPS on the explicit public-cloud host allowlist:
+Service URLs must use HTTPS on the explicit public-cloud origin allowlist:
 `smba.trafficmanager.net`, with the default port or port 443. Foreign hosts,
 lookalike suffixes, nonstandard ports and HTTP URLs are refused before token
 acquisition, for both channel URLs and conversation references. This matches the
 [documented public Teams service URL](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/send-proactive-messages).
-Redirects are refused, and response-provided URLs are ignored.
+Regional base paths such as `/amer/`, `/emea/` and `/apac/` are preserved on
+that origin. Redirects are refused, and response-provided URLs are ignored.
 This release targets the public Microsoft cloud and single-tenant authority;
 changing the service URL alone does not enable sovereign cloud authentication.
 `allow_insecure` does not bypass the bot service URL policy. Local acceptance

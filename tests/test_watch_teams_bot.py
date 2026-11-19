@@ -926,6 +926,21 @@ def test_pruning_preserves_an_ambiguous_destination(raw, tmp_path):
 
 
 
+@pytest.mark.parametrize("prefix", ["/teams/", "/amer/", "/emea/", "/apac/", "/in/", "/jp/",
+                                    "/amer-client-ss.msg/", "/emea/11111111-1111-4111-8111-111111111111/"])
+@pytest.mark.parametrize("reference", [False, True])
+def test_approved_origin_preserves_regional_service_paths(raw, tmp_path, prefix, reference):
+    raw["service_url"] = "https://smba.trafficmanager.net" + prefix
+    if reference:
+        raw["recipients"] = []
+        raw["conversation_references"] = [{"conversation_id": "existing", "service_url": raw["service_url"]}]
+    cfg = config(raw, tmp_path)
+    connector = Connector()
+    outcome = send_test(cfg, mock_client(connector), "bot")
+    assert outcome.ok
+    assert all(request.url.path.startswith(prefix + "v3/") for request in connector.requests
+               if request.url.host == "smba.trafficmanager.net")
+    assert len(connector.matching("/activities")) == 1
 
 
 def test_upgrade_guide_covers_existing_custom_bot_urls_and_supported_schemas():
