@@ -1136,7 +1136,7 @@ class WatchStore:
         )
         return known
 
-    def _upsert_provider(self, source, records, *, meta=None, catalogs=(), initial=False, initial_before=None) -> StepCounts:
+    def _upsert_provider(self, source, records, *, meta=None, catalogs=(), initial=False) -> StepCounts:
         from .cve_list import description_text
         self.initialize()
         now = _timestamp(self._clock)
@@ -1166,7 +1166,7 @@ class WatchStore:
                 written.append(record.cve_id)
                 text = description_text(payload) if source == "cve_list" else payload.get("description") or ""
                 db.execute("INSERT INTO watch_search VALUES (?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET text=excluded.text", (record.cve_id, source, text))
-                if source == "cve_list" and (initial or (initial_before is not None and updated is not None and updated < initial_before)):
+                if source == "cve_list" and initial:
                     db.execute("INSERT OR IGNORE INTO watch_initial_cve VALUES (?,'cve_list')", (record.cve_id,))
             views = self._refresh_views(db, written, catalogs, now)
             queued = self._mark_touched(db, written, now)
@@ -1220,10 +1220,9 @@ class WatchStore:
         return StepCounts(new=views.new, changed=views.changed, unchanged=unchanged,
                           new_ids=tuple(new_ids), changed_ids=tuple(changed_ids), touched_ids=queued)
 
-    def upsert_cve_list(self, records, *, meta=None, catalogs=(), initial=False, initial_before=None) -> StepCounts:
+    def upsert_cve_list(self, records, *, meta=None, catalogs=(), initial=False) -> StepCounts:
         from .cve_list import parse_record
-        return self._upsert_provider("cve_list", ((parse_record(item), item) for item in records), meta=meta,
-                                     catalogs=catalogs, initial=initial, initial_before=initial_before)
+        return self._upsert_provider("cve_list", ((parse_record(item), item) for item in records), meta=meta, catalogs=catalogs, initial=initial)
 
     def upsert_discovered(self, source, record, *, payload, catalogs=()):
         """Keep a targeted EUVD/KEV discovery without inventing NVD presence.
@@ -1619,23 +1618,15 @@ class WatchStore:
         for identifier in identifiers:
             source_initial = db.execute("SELECT 1 FROM watch_initial_cve WHERE cve_id=?", (identifier,)).fetchone() is not None
             source_backlog = backlog_before
-            initial_event = False
             if source_initial:
                 meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('cve_list_start','cve_list_initial_mode')"))
                 if meta.get('cve_list_initial_mode') == 'full':
                     source_backlog = date(1999,1,1)
                 elif meta.get('cve_list_start'):
-                    start = self._parse_timestamp(meta['cve_list_start'])
-                    source_backlog = date.fromisoformat(meta['cve_list_start'][:10])
-                    if meta.get('cve_list_initial_mode') == 'baseline' and start is not None:
-                        row = db.execute("SELECT source_updated FROM watch_provider WHERE cve_id=? AND source='cve_list'", (identifier,)).fetchone()
-                        updated = self._parse_timestamp(row['source_updated']) if row else None
-                        if updated is not None and updated >= start:
-                            source_initial = False
-                            source_backlog = None
-                        else:
-                            source_initial = True
-                            initial_event = True
+                    try:
+                        source_backlog = date.fromisoformat(meta['cve_list_start'][:10])
+                    except ValueError:
+                        source_backlog = None
             view = self._view(db, identifier, catalogs)
             if view is None:
                 continue
@@ -1660,7 +1651,6 @@ class WatchStore:
                     rule,
                     now=now,
                     backlog_before=source_backlog,
-                    initial_event=initial_event,
                 )
                 if state is None:
                     continue

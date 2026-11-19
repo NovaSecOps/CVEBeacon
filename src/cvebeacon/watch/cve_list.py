@@ -67,6 +67,13 @@ def _record_date(value):
     return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _record_date_or_none(value):
+    try:
+        return _record_date(value)
+    except SourceError:
+        return None
+
+
 @source_payload("cve_list")
 def parse_record(payload):
     if not isinstance(payload, dict):
@@ -103,7 +110,7 @@ def parse_record(payload):
                 references.append(Reference(str(item["url"]), tuple(item.get("tags") or ())))
         for item in container.get("problemTypes") or []:
             cwes.extend(str(d["cweId"]) for d in item.get("descriptions") or [] if d.get("cweId"))
-    return WatchRecord(identifier, state.lower(), _record_date(metadata.get("datePublished")), _record_date(metadata.get("dateUpdated") or metadata.get("dateReserved")),
+    return WatchRecord(identifier, state.lower(), _record_date(metadata.get("datePublished")), _record_date_or_none(metadata.get("dateUpdated") or metadata.get("dateReserved")),
                        description_text(payload) or None,
                        str((cna.get("providerMetadata") or {}).get("shortName") or metadata.get("assignerShortName") or "") or None,
                        tuple(entries), tuple(cwes), tuple(products), tuple(references))
@@ -408,7 +415,7 @@ def end_of_day(http, day):
     return None
 
 
-def _import_archive(http, store, watch, asset, at, metadata, *, cutoff=None, initial_before=None):
+def _import_archive(http, store, watch, asset, at, metadata, *, initial=False, after=None, since=None):
     """Commit bounded batches; publish coverage only after validated EOF.
 
     Evaluation obligations already live in watch_touched. Do not accumulate a
@@ -423,9 +430,7 @@ def _import_archive(http, store, watch, asset, at, metadata, *, cutoff=None, ini
     def commit():
         nonlocal count, new, changed, batch_bytes
         _require_disk(directory, STORAGE_MULTIPLIER * batch_bytes)
-        result = store.upsert_cve_list(batch, catalogs=watch.sources,
-                                      initial=metadata.get("cve_list_initial_pending") == "1",
-                                      initial_before=initial_before)
+        result = store.upsert_cve_list(batch, catalogs=watch.sources, initial=initial)
         count += len(batch)
         new += result.new
         changed += result.changed
@@ -435,8 +440,12 @@ def _import_archive(http, store, watch, asset, at, metadata, *, cutoff=None, ini
     for payload in archive_records(http, asset, allow_empty="_all_CVEs_" not in asset["name"],
                                    cache_directory=directory):
         record = parse_record(payload)
-        if cutoff is not None and (not record.last_modified or _time(record.last_modified) < cutoff):
-            continue
+        stamp = _time(record.last_modified) if record.last_modified else None
+        if stamp is not None:
+            if after is not None and stamp <= after:
+                continue
+            if since is not None and stamp < since:
+                continue
         size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         if batch and (batch_bytes + size > BATCH_BYTES or len(batch) >= BATCH):
             commit()
@@ -476,45 +485,54 @@ def sync(http, store, watch, now, *, initial_mode=None):
     baseline_time = _time(baseline["name"][:10] + "T00:00:00Z")
     latest = _delta_time(delta)
     cursor = _time(metadata["cve_list_cursor"]) if metadata.get("cve_list_cursor") else None
-    start_time = _time(metadata["cve_list_start"]) if mode == "baseline" else None
-    cutoff = _time(metadata["cve_list_start"]) if mode == "backfill" else None
+    start_time = _time(metadata["cve_list_start"])
+    initialising = mode in ("full", "backfill") and (
+        cursor is None or metadata.get("cve_list_initial_pending") == "1")
     totals = [0, 0, 0]
 
-    def apply(asset, at, *, content_since=None):
+    def apply(asset, at, *, initial, after=None, since=None):
         nonlocal cursor
         counts = _import_archive(http, store, watch, asset, at, metadata,
-                                 cutoff=content_since, initial_before=start_time)
+                                 initial=initial, after=after, since=since)
         for index, value in enumerate(counts):
             totals[index] += value
         cursor = at
 
+    def filters():
+        if initialising:
+            return {"initial": True, "since": start_time if mode == "backfill" else None}
+        return {"initial": False, "after": cursor}
+
     if cursor is None:
         if mode == "baseline":
-            store.set_metadata({"cve_list_cursor": baseline_time.isoformat()})
+            store.set_metadata({"cve_list_cursor": latest.isoformat(),
+                                "cve_list_archive_asset": _asset_token(delta),
+                                "cve_list_initial_pending": "0"})
             return 0, 0, 0, ()
-        apply(baseline, baseline_time, content_since=cutoff)
+        apply(baseline, baseline_time, **filters())
 
     # A week of closed-day archives bounds ordinary catch-up work and API use.
     # Longer gaps, or a genuinely missing archive, use one full snapshot.
     used_baseline = False
-    if (latest.date() - cursor.date()).days > MAX_DELTA_DAYS:
+    if not initialising and (latest.date() - cursor.date()).days > MAX_DELTA_DAYS:
         if baseline_time <= cursor:
             raise SourceError("cve_list", "available baseline cannot cover the archive gap")
-        apply(baseline, baseline_time, content_since=baseline_time if mode == "baseline" else None)
+        apply(baseline, baseline_time, **filters())
         used_baseline = True
     while cursor.date() < latest.date():
         closed = end_of_day(http, cursor.date())
         if closed is None:
             if used_baseline or baseline_time <= cursor:
                 raise SourceError("cve_list", "required end-of-day archive is unavailable; baseline is too old")
-            apply(baseline, baseline_time, content_since=baseline_time if mode == "baseline" else None)
+            apply(baseline, baseline_time, **filters())
             used_baseline = True
             continue
         at = datetime.combine(cursor.date() + timedelta(days=1), datetime.min.time(), timezone.utc)
-        apply(closed, at)
+        apply(closed, at, **filters())
     current = store.metadata()
     if latest >= cursor and current.get("cve_list_archive_asset") != _asset_token(delta):
-        apply(delta, latest)
-    if metadata.get("cve_list_initial_pending") == "1":
-        store.set_metadata({"cve_list_initial_pending": "0", "cve_list_initial_sync_completed_at": now.isoformat()})
+        apply(delta, latest, **filters())
+    if initialising:
+        store.set_metadata({"cve_list_initial_pending": "0",
+                            "cve_list_initial_sync_completed_at": now.isoformat()})
     return *totals, ()

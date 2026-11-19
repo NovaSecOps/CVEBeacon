@@ -819,7 +819,6 @@ def evaluate(
     now: datetime,
     *,
     backlog_before: date | None = None,
-    initial_event: bool = False,
 ) -> tuple[AlertState | None, tuple[AlertEvent, ...]]:
     """Evaluate one rule against one view without reading state or the clock."""
     if not rule.enabled:
@@ -835,7 +834,7 @@ def evaluate(
         if not matched:
             return None, ()
         state = AlertState(timestamp, snapshot)
-        backlog = initial_event or _is_backlog(view, backlog_before)
+        backlog = _is_backlog(view, backlog_before)
         if backlog and rule.old_cves == "ignore":
             return state, ()
         if "match" not in rule.events:

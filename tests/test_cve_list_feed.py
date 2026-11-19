@@ -40,6 +40,7 @@ class Release:
     def __init__(self, baseline, delta=(), *, nested=False):
         self.baseline = zipped(baseline, nested=nested)
         self.delta = zipped(delta)
+        self.hour = 12
         self.fail_delta = False
         self.conditional = False
         self.requests = []
@@ -50,7 +51,7 @@ class Release:
              "size": len(body), "digest": 'sha256:' + hashlib.sha256(body).hexdigest()}
             for number, name, body in (
                 (1, "2026-11-03_all_CVEs_at_midnight.zip.zip", self.baseline),
-                (2, "2026-11-03_delta_CVEs_at_1200Z.zip", self.delta),
+                (2 + self.hour * 100, f"2026-11-03_delta_CVEs_at_{self.hour:02d}00Z.zip", self.delta),
             )
         ]
 
@@ -65,7 +66,7 @@ class Release:
             return httpx.Response(200, json=[release], headers={"etag": '"release"'})
         if request.url.path.endswith('midnight.zip.zip'):
             return httpx.Response(200, content=self.baseline)
-        if request.url.path.endswith('1200Z.zip'):
+        if request.url.path.endswith(f'{self.hour:02d}00Z.zip'):
             return httpx.Response(503) if self.fail_delta else httpx.Response(200, content=self.delta)
         if 'nvd.nist.gov' in request.url.host:
             return httpx.Response(200, json=nvd_page([]))
@@ -99,6 +100,8 @@ def test_baseline_reads_no_history_then_reads_cumulative_delta(tmp_path):
         assert cve_list.sync(http, store, config.watch, NOW)[:3] == (0, 0, 0)
         assert http.requests == 1
         assert not any('/download/' in request.url.path for request in fixture.requests)
+        assert store.metadata()['cve_list_cursor'] == NOW.isoformat()
+        fixture.hour = 13
         cve_list.sync(http, store, config.watch, NOW + timedelta(hours=1))
     assert store.view('CVE-2026-10001') is not None
     assert store.view('CVE-2026-10002') is None

@@ -29,8 +29,9 @@ def record(identifier=ID, *, updated=None, description='archive record'):
 
 
 class Archives:
-    def __init__(self, *, day=None, hour=12, baseline=(), delta=(), closed=None):
+    def __init__(self, *, day=None, hour=12, baseline=(), delta=(), closed=None, baseline_day=None):
         self.day=day or NOW.date()
+        self.baseline_day=baseline_day or self.day
         self.hour=hour
         self.baseline=list(baseline)
         self.delta=list(delta)
@@ -54,7 +55,7 @@ class Archives:
                     return httpx.Response(200,json={'assets':[self.asset(name,zipped(records),tag)]})
             return httpx.Response(404)
         if str(request.url).split('?',1)[0]==cve_list.RELEASE_URL:
-            assets=[self.asset(str(self.day)+'_all_CVEs_at_midnight.zip.zip',zipped(self.baseline,nested=True)),
+            assets=[self.asset(str(self.baseline_day)+'_all_CVEs_at_midnight.zip.zip',zipped(self.baseline,nested=True)),
                     self.asset(f'{self.day}_delta_CVEs_at_{self.hour:02d}00Z.zip',zipped(self.delta))]
             etag='"'+hashlib.sha256(json.dumps(assets).encode()).hexdigest()+'"'
             release={'tag_name':f'cve_{self.day}_{self.hour:02d}00Z','assets':assets}
@@ -89,9 +90,9 @@ def test_same_day_hourly_delta_advances_only_after_import(tmp_path):
 def test_missed_days_use_actual_end_of_day_archives(tmp_path):
     start=NOW-timedelta(days=2)
     config,store=started(tmp_path,start)
-    fixture=Archives(delta=[record('CVE-2026-10003')],closed={
+    fixture=Archives(delta=[record('CVE-2026-10003',updated=NOW.replace(hour=11).isoformat())],closed={
         start.date():[record(updated=start.replace(hour=23,minute=59).isoformat())],
-        (start+timedelta(days=1)).date():[record(OTHER)]})
+        (start+timedelta(days=1)).date():[record(OTHER,updated=(start+timedelta(days=1,hours=12)).isoformat())]})
     with mock_client(fixture) as http:
         cve_list.sync(http,store,config.watch,NOW)
     assert store.search().total==3
@@ -102,7 +103,7 @@ def test_missed_days_use_actual_end_of_day_archives(tmp_path):
 
 def test_missing_day_falls_back_to_one_baseline(tmp_path):
     config,store=started(tmp_path,NOW-timedelta(days=2))
-    fixture=Archives(baseline=[record()],delta=[record(OTHER)])
+    fixture=Archives(baseline=[record()],delta=[record(OTHER,updated=NOW.replace(hour=1).isoformat())])
     with mock_client(fixture) as http:
         cve_list.sync(http,store,config.watch,NOW)
     assert store.search().total==2
@@ -113,7 +114,7 @@ def test_missing_day_falls_back_to_one_baseline(tmp_path):
 def test_failed_archive_keeps_its_previous_cursor(tmp_path):
     config,store=started(tmp_path)
     before=store.metadata()['cve_list_cursor']
-    fixture=Archives(delta=[record()])
+    fixture=Archives(delta=[record(updated=NOW.replace(hour=11).isoformat())])
     fixture.fail.add(f'{fixture.day}_delta_CVEs_at_1200Z.zip')
     with mock_client(fixture) as http,pytest.raises(SourceError):
         cve_list.sync(http,store,config.watch,NOW)
@@ -125,42 +126,119 @@ def test_failed_archive_keeps_its_previous_cursor(tmp_path):
     assert store.metadata()['cve_list_cursor']==NOW.isoformat()
 
 
-def test_baseline_mode_imports_pre_start_changes_without_normal_alerts(tmp_path):
+def test_baseline_mode_defers_alerts_until_after_the_initial_boundary(tmp_path):
     config=write_config(tmp_path,sources=('nvd','cve_list'),initial='baseline')
     store=WatchStore(config.watch.database)
     old=record(updated=NOW.replace(hour=10).isoformat())
-    old['cveMetadata']['datePublished']=NOW.replace(hour=8).isoformat()
     fresh=record(OTHER,updated=(NOW+timedelta(minutes=30)).isoformat())
     fixture=Archives(baseline=[old],delta=[old])
     with mock_client(fixture) as http:
         cve_list.sync(http,store,config.watch,NOW)
         assert len(fixture.requests)==1  # metadata, never a history body
-        assert store.metadata()['cve_list_cursor']==NOW.replace(hour=0).isoformat()
+        assert store.metadata()['cve_list_cursor']==NOW.isoformat()
         fixture.hour=13
         fixture.delta=[old,fresh]
         cve_list.sync(http,store,config.watch,NOW+timedelta(hours=1))
     rules=parse_rules([{'name':'critical','condition':{'cvss_min':9},'channels':['sink']}])
     store.evaluate_touched(rules,catalogs=('cve_list',))
-    assert store.view(ID) is not None
+    assert store.view(ID) is None
     assert store.view(OTHER) is not None
     assert [event.cve_id for event in store.events() if not event.initial]==[OTHER]
 
 
-def test_baseline_mode_imports_pre_start_record_from_end_of_day(tmp_path):
+def test_baseline_mode_skips_end_of_day_records_at_or_before_cursor(tmp_path):
     config=write_config(tmp_path,sources=('nvd','cve_list'),initial='baseline')
     store=WatchStore(config.watch.database)
     fixture=Archives(baseline=[],delta=[])
     with mock_client(fixture) as http:
         cve_list.sync(http,store,config.watch,NOW)
     old=record(updated=NOW.replace(hour=10).isoformat())
-    old['cveMetadata']['datePublished']=NOW.replace(hour=8).isoformat()
-    next_day=Archives(day=NOW.date()+timedelta(days=1),hour=1,delta=[],closed={NOW.date():[old]})
+    fresh=record(OTHER,updated=NOW.replace(hour=13).isoformat())
+    next_day=Archives(day=NOW.date()+timedelta(days=1),hour=1,delta=[],closed={NOW.date():[old,fresh]})
     with mock_client(next_day) as http:
         cve_list.sync(http,store,config.watch,NOW+timedelta(days=1,hours=1))
     rules=parse_rules([{'name':'critical','condition':{'cvss_min':9},'channels':['sink']}])
     store.evaluate_touched(rules,catalogs=('cve_list',))
+    assert store.view(ID) is None
+    assert store.view(OTHER) is not None
+    assert [event.cve_id for event in store.events() if not event.initial]==[OTHER]
+
+
+@pytest.mark.parametrize('mode',['baseline','backfill','full'])
+def test_gap_fallback_imports_and_alerts_every_post_cursor_change(tmp_path,mode):
+    cursor=NOW-timedelta(days=9)
+    config=write_config(tmp_path,sources=('nvd','cve_list'),initial=mode)
+    store=WatchStore(config.watch.database)
+    store.set_metadata({'cve_list_initial_mode':mode,
+                        'cve_list_start':(NOW-timedelta(days=60)).isoformat(),
+                        'cve_list_cursor':cursor.isoformat(),
+                        'cve_list_initial_pending':'0'})
+    ancient=record('CVE-2026-19999',updated=(NOW-timedelta(days=90)).isoformat())
+    first=record('CVE-2026-10003',updated=(NOW-timedelta(days=6)).isoformat())
+    second=record('CVE-2026-10004',updated=(NOW-timedelta(days=3)).isoformat())
+    current=record(OTHER,updated=NOW.replace(hour=11).isoformat())
+    fixture=Archives(baseline=[ancient,first,second],delta=[current])
+    with mock_client(fixture) as http:
+        cve_list.sync(http,store,config.watch,NOW)
+    assert store.metadata()['cve_list_cursor']==NOW.isoformat()
+    assert store.view('CVE-2026-19999') is None
+    for identifier in ('CVE-2026-10003','CVE-2026-10004',OTHER):
+        assert store.view(identifier) is not None
+    rules=parse_rules([{'name':'critical','condition':{'cvss_min':9},'channels':['sink']}])
+    store.evaluate_touched(rules,catalogs=('cve_list',))
+    assert {event.cve_id for event in store.events() if not event.initial}=={
+        'CVE-2026-10003','CVE-2026-10004',OTHER}
+
+
+def test_fallback_failure_never_advances_the_cursor(tmp_path):
+    cursor=NOW-timedelta(days=9)
+    config,store=started(tmp_path,cursor)
+    gap=record(updated=(NOW-timedelta(days=4)).isoformat())
+    fixture=Archives(baseline=[gap])
+    fixture.fail.add('2026-11-03_all_CVEs_at_midnight.zip.zip')
+    with mock_client(fixture) as http,pytest.raises(SourceError):
+        cve_list.sync(http,store,config.watch,NOW)
+    assert store.metadata()['cve_list_cursor']==cursor.isoformat()
+    assert store.view(ID) is None
+    fixture.fail.clear()
+    with mock_client(fixture) as http:
+        cve_list.sync(http,store,config.watch,NOW)
     assert store.view(ID) is not None
-    assert not [event for event in store.events() if not event.initial]
+    assert store.metadata()['cve_list_cursor']==NOW.isoformat()
+
+
+def test_midnight_publication_window_holds_the_cursor_then_retries(tmp_path):
+    cursor=NOW.replace(hour=23)
+    config,store=started(tmp_path,cursor)
+    next_day=NOW.date()+timedelta(days=1)
+    early_at=datetime.combine(next_day,datetime.min.time(),timezone.utc)+timedelta(minutes=35)
+    early=Archives(day=next_day,hour=0,baseline_day=NOW.date(),delta=[])
+    with mock_client(early) as http,pytest.raises(SourceError,match='end-of-day'):
+        cve_list.sync(http,store,config.watch,early_at)
+    assert store.metadata()['cve_list_cursor']==cursor.isoformat()
+    late=record(updated=NOW.replace(hour=23,minute=30).isoformat())
+    retry=Archives(day=next_day,hour=1,baseline_day=NOW.date(),delta=[],closed={NOW.date():[late]})
+    with mock_client(retry) as http:
+        cve_list.sync(http,store,config.watch,early_at+timedelta(hours=1))
+    assert store.view(ID) is not None
+    assert store.metadata()['cve_list_cursor']==(
+        datetime.combine(next_day,datetime.min.time(),timezone.utc)+timedelta(hours=1)).isoformat()
+
+
+@pytest.mark.parametrize('broken',['missing','invalid'])
+def test_missing_or_invalid_date_after_initialisation_is_imported_and_counted(tmp_path,broken):
+    config,store=started(tmp_path)
+    payload=record(description='no usable date')
+    if broken=='missing':
+        del payload['cveMetadata']['dateUpdated']
+    else:
+        payload['cveMetadata']['dateUpdated']='not-a-date'
+    fixture=Archives(delta=[payload])
+    with mock_client(fixture) as http:
+        result=cve_list.sync(http,store,config.watch,NOW)
+    assert result[0]==1
+    assert store.view(ID) is not None
+    assert store.metadata()['cve_list_cursor']==NOW.isoformat()
 
 
 @pytest.mark.parametrize('status',[200,404,503])
