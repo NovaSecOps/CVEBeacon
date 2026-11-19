@@ -144,38 +144,19 @@ Use the line for the scheduler you installed; see [exit codes](DEVELOPMENT.md#ex
 
 ### Upgrade
 
-Stop the scheduler you actually use and wait for a running job to finish; run
-one line:
+Use [upgrading](UPGRADING.md) for manual signed-wheel upgrades, backups, rollback
+and adoption of the administrator-owned versioned layout. The original
+single-venv install above must be reviewed and made administrator-owned before
+using the privileged updater. New reference systemd units in `deploy/systemd/`
+call `/opt/cvebeacon/current/.venv/bin/cvebeacon`; the service account must never
+be able to modify the installed code.
+
+Account database backups contain password hashes. Keep them private from the
+moment they are created, including when replacing an older backup:
 
 ```console
-cb schedule remove --yes                                # built-in crontab
-sudo systemctl stop cvebeacon.timer cvebeacon.service   # systemd timer
-```
-
-Back up the watch database with SQLite's online backup (use the path
-`watch status` reports):
-
-```console
-sudo -u cvebeacon sqlite3 /var/lib/cvebeacon/cvebeacon-watch.db ".backup '/var/lib/cvebeacon/watch-backup.db'"
 sudo -u cvebeacon sh -c 'umask 077; install -m 600 /dev/null /var/lib/cvebeacon/users-backup.db; sqlite3 /var/lib/cvebeacon/cvebeacon-users.db ".backup /var/lib/cvebeacon/users-backup.db"'
 sudo -u cvebeacon chmod 600 /var/lib/cvebeacon/users-backup.db
-```
-
-The account file holds password hashes and is created `0600` on POSIX. Account
-backups need the same confidentiality as the live file: the `install -m 600`
-step resets an existing destination before SQLite copies credential data into
-it, and `chmod 600` is the final check. Verify with
-`stat -c '%a %n' /var/lib/cvebeacon/users-backup.db` (expect `600`). Keep both
-files inside the protected data directory.
-
-If you copy the database, `-wal` and `-shm` files instead, do so only while
-nothing runs. Then upgrade and restore the scheduler you removed:
-
-```console
-sudo -u cvebeacon git -C /opt/cvebeacon pull --ff-only
-sudo -u cvebeacon /opt/cvebeacon/.venv/bin/python -m pip install /opt/cvebeacon
-cb schedule install --times 07:00,19:00 --command watch --yes
-# or: sudo systemctl start cvebeacon.timer
 ```
 
 ### Windows data-directory ACLs

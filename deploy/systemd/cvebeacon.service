@@ -1,0 +1,20 @@
+[Unit]
+Description=CVEBeacon monitoring run
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=cvebeacon
+Group=cvebeacon
+WorkingDirectory=/var/lib/cvebeacon
+EnvironmentFile=-/var/lib/cvebeacon/cvebeacon.env
+ExecStartPre=/opt/cvebeacon/current/.venv/bin/cvebeacon update guard
+ExecStart=/opt/cvebeacon/current/.venv/bin/cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml run
+TimeoutStartSec=infinity
+TimeoutStopSec=infinity
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cvebeacon
+PrivateTmp=yes

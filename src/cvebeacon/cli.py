@@ -75,6 +75,21 @@ def _parser() -> argparse.ArgumentParser:
     notify_test.add_argument("--channel", choices=("teams", "email", "all"), default="all")
     doctor = commands.add_parser("doctor", help="validate configuration, inventory, and local state access")
     doctor.add_argument("--live", action="store_true", help="also test enabled public source connectivity")
+    doctor.add_argument("--allow-watch-only", action="store_true", help="validate local watch state when no inventory is configured")
+    doctor.add_argument("--local-state", action="store_true", help="validate local state without requiring notification environment variables")
+    commands.add_parser("migrate", help="migrate and integrity-check local databases without network access")
+    update = commands.add_parser("update", help="check or apply signed GitHub releases")
+    update_sub = update.add_subparsers(dest="update_command", required=True)
+    check_update = update_sub.add_parser("check")
+    check_update.add_argument("--daily", action="store_true", help="check only when daily checks are enabled and due")
+    guard_update = update_sub.add_parser("guard", help="refuse writer startup while update recovery is pending")
+    guard_update.add_argument("--role", choices=("writer", "serve"), default="writer")
+    apply_update = update_sub.add_parser("apply")
+    target = apply_update.add_mutually_exclusive_group()
+    target.add_argument("--version")
+    target.add_argument("--from-request", action="store_true")
+    for update_parser in (apply_update, update_sub.add_parser("adopt"), update_sub.add_parser("recover")):
+        update_parser.add_argument("--policy", default="/etc/cvebeacon/update.toml")
     commands.add_parser("source-status", help="show source health from the most recent scan")
     web = commands.add_parser("web-detect", help="observe a saved client web allowlist")
     web.add_argument("client")
@@ -968,6 +983,11 @@ def _lock_required(args: argparse.Namespace) -> bool:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.command == "update":
+        from .updater import cli as update_cli
+        return update_cli(args)
+    from .update_transaction import ensure_ready
+    ensure_ready(args.command)
     if args.command == "dashboard":
         from .dashboard_auth import hash_password
         print(hash_password())
@@ -1012,6 +1032,11 @@ def run(args: argparse.Namespace) -> int:
             return _run_watch(args, config)
         if args.command == "run":
             return _run_all(config, yes=args.yes)
+        if args.command == "migrate" or (args.command == "doctor" and config.inventory is None and args.allow_watch_only):
+            from .update_state import migrate
+            migrate(config)
+            print(json.dumps({"configuration": "ok", "state": "ok", "watch": "ok"}))
+            return 0
         if args.command == "doctor" and config.inventory is None:
             raise CVEBeaconError(
                 "doctor requires an inventory; add [inventory] path, or use "
@@ -1151,9 +1176,13 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
                 print(f"{channel}: accepted by remote service")
         return 0
     if args.command == "doctor":
+        from .update_state import migrate
+        migrate(config)
         inventory_config = _inventory_config(config)
         assets = _load_inventory(config, inventory_config); store.initialize()
         checks = {"configuration": "ok", "inventory": f"ok ({len(assets)} assets)", "state": "ok", "teams_secret": "not required" if not config.teams.enabled else ("set" if config.secret(config.teams.webhook_env) else "missing"), "email_secrets": "not required" if not config.email.enabled else ("set" if all(config.secret(x) for x in (config.email.tenant_id_env, config.email.client_id_env, config.email.client_secret_env)) else "missing")}
+        if args.local_state:
+            checks["teams_secret"] = checks["email_secrets"] = "not checked (local state only)"
         if args.live:
             checks["live_sources"] = _live_source_checks(config)
         print(json.dumps(checks, indent=2))
