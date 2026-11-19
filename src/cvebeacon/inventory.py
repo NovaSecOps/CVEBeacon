@@ -7,7 +7,9 @@ import json
 import unicodedata
 from zipfile import BadZipFile
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from datetime import date, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,7 @@ from .config import CANONICAL_FIELDS, OPTIONAL_FIELDS, InventoryConfig
 from .identity import normalize_asset
 from .errors import InventoryValidationError, ValidationIssue
 from .models import Asset
+from .xlsx_safety import MAX_ARCHIVE_BYTES, check_workbook
 
 SUPPORTED_FORMATS = {"xlsx", "csv", "json", "yaml"}
 PREVIEW_COLUMN_LIMIT = 256
@@ -138,14 +141,26 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
     return assets
 
 
+@contextmanager
+def _open_workbook(path, *, data_only=False, upload=False, header_row=1):
+    try:
+        with path.open("rb") as source:
+            raw = source.read(MAX_ARCHIVE_BYTES + 1)
+        with BytesIO(raw) as stream:
+            limits = ({"row_limit": MAX_CONTRACT_ROWS + header_row, "column_limit": PREVIEW_COLUMN_LIMIT}
+                      if upload else {})
+            check_workbook(stream, use_dimensions=not upload, **limits)
+            workbook = load_workbook(stream, read_only=True, data_only=data_only, keep_links=False)
+            try:
+                yield workbook
+            finally:
+                workbook.close()
+    except (OSError, ValueError, BadZipFile, InvalidFileException, KeyError, IndexError, SyntaxError, RuntimeError) as exc:
+        raise InventoryValidationError([ValidationIssue("The workbook could not be read.")]) from exc
+
+
 def _xlsx_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[tuple[str, Mapping[str, Any]]]:
-    try:
-        workbook = load_workbook(config.path, read_only=True, data_only=False)
-    except (OSError, ValueError, BadZipFile, InvalidFileException) as exc:
-        raise InventoryValidationError(
-            [ValidationIssue(f"cannot read XLSX workbook: {exc}")]
-        ) from exc
-    try:
+    with _open_workbook(config.path, upload=unmapped, header_row=config.header_row) as workbook:
         if config.worksheet:
             if config.worksheet not in workbook.sheetnames:
                 raise InventoryValidationError(
@@ -210,8 +225,6 @@ def _xlsx_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[t
                 configured: raw.get(header_lookup[configured.casefold()])
                 for configured in mapped.values() if configured.casefold() in header_lookup
             }
-    finally:
-        workbook.close()
 
 
 def _upload_csv_lines(handle):
@@ -228,15 +241,19 @@ def _csv_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[tu
         raise InventoryValidationError([ValidationIssue(f"cannot read CSV: {exc}")]) from exc
     with handle:
         try:
-            reader = csv.DictReader(_upload_csv_lines(handle) if unmapped else handle, delimiter=config.delimiter, strict=True)
-            if reader.fieldnames is None:
+            reader = csv.reader(_upload_csv_lines(handle) if unmapped else handle, delimiter=config.delimiter, strict=True)
+            fieldnames = next(reader, None)
+            if not fieldnames:
                 raise InventoryValidationError([ValidationIssue("CSV has no header row")])
-            headers = [_normalized(value) for value in reader.fieldnames]
+            headers = [_normalized(value) for value in fieldnames]
+            if unmapped and any(not name for name in headers):
+                raise InventoryValidationError([ValidationIssue("CSV header contains a blank column name")])
+            if unmapped and len(headers) > PREVIEW_COLUMN_LIMIT:
+                raise InventoryValidationError([ValidationIssue("CSV header contains too many columns")])
             if len({value.casefold() for value in headers}) != len(headers):
                 raise InventoryValidationError(
                     [ValidationIssue("CSV header contains duplicate column names")]
                 )
-            reader.fieldnames = headers
             header_lookup = {name.casefold(): name for name in headers}
             mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
             required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
@@ -245,9 +262,16 @@ def _csv_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[tu
                 raise InventoryValidationError(
                     [ValidationIssue("mapped columns not found: " + ", ".join(missing))]
                 )
-            for row_number, row in enumerate(reader, start=2):
-                if None in row:
+            while True:
+                row_number = reader.line_num + 1
+                values = next(reader, None)
+                if values is None:
+                    break
+                if not values:
+                    continue
+                if len(values) > len(headers):
                     raise InventoryValidationError([ValidationIssue("CSV row has more fields than its header", f"row {row_number}")])
+                row = dict(zip(headers, values))
                 if unmapped:
                     yield f"row {row_number}", row
                     continue
@@ -332,13 +356,7 @@ def inspect_inventory(path: str | Path, *, header_row: int = 1, encoding: str = 
     source = Path(path).expanduser().resolve()
     kind = detect_format(source)
     if kind == "xlsx":
-        try:
-            workbook = load_workbook(source, read_only=True, data_only=True)
-        except (OSError, ValueError, BadZipFile, InvalidFileException) as exc:
-            raise InventoryValidationError(
-                [ValidationIssue(f"cannot read XLSX workbook: {exc}")]
-            ) from exc
-        try:
+        with _open_workbook(source, data_only=True) as workbook:
             sheets: list[dict[str, Any]] = []
             for worksheet in workbook.worksheets:
                 headers = next(
@@ -356,8 +374,6 @@ def inspect_inventory(path: str | Path, *, header_row: int = 1, encoding: str = 
                     }
                 )
             return {"path": str(source), "format": kind, "sheets": sheets}
-        finally:
-            workbook.close()
     if kind == "csv":
         try:
             with source.open("r", encoding=encoding, newline="") as handle:
