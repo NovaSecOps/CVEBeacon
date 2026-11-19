@@ -345,14 +345,17 @@ def _end_of_day_entry(day):
                         'browser_download_url': cve_list.ASSET_PREFIX + 'fake/' + name}]}
 
 
-@pytest.mark.parametrize('first_kind', ['hourly', 'midnight', 'end_of_day'])
+@pytest.mark.parametrize('first_kind', ['hourly', 'midnight', 'end_of_day', 'prerelease'])
 def test_release_list_selects_newest_hourly_not_latest(first_kind):
     hourly = _release_entry('2026-11-19', 1)
     midnight = _release_entry('2026-11-19', 0, baseline_day='2026-11-18')
     end_of_day = _end_of_day_entry('2026-11-18')
+    prerelease = _release_entry('2026-11-19', 2)
+    prerelease['prerelease'] = True
     releases = {'hourly': [hourly, midnight, end_of_day],
                 'midnight': [midnight, hourly, end_of_day],
-                'end_of_day': [end_of_day, midnight, hourly]}[first_kind]
+                'end_of_day': [end_of_day, midnight, hourly],
+                'prerelease': [prerelease, hourly, midnight, end_of_day]}[first_kind]
     seen = []
     def handler(request):
         seen.append(str(request.url))

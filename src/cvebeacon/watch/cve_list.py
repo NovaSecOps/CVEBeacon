@@ -155,7 +155,7 @@ def _hourly_release(releases):
     """
     candidates = []
     for item in releases:
-        if not isinstance(item, dict) or item.get("draft"):
+        if not isinstance(item, dict) or item.get("draft") or item.get("prerelease"):
             continue
         selected = _select_assets(item.get("assets"))
         if "baseline" not in selected or "delta" not in selected:
@@ -176,10 +176,10 @@ def _hourly_release(releases):
 
 
 @source_payload("cve_list")
-def release(http, metadata, *, url=None):
+def release(http, metadata):
     headers = {"If-None-Match": metadata["cve_list_etag"]} if metadata.get("cve_list_etag") else {}
     response_headers = {}
-    payload = _json(http, url or RELEASE_URL + f"?per_page={RELEASE_LIST_LIMIT}",
+    payload = _json(http, RELEASE_URL + f"?per_page={RELEASE_LIST_LIMIT}",
                     headers=headers, response_headers=response_headers)
     if payload is None:
         try:
