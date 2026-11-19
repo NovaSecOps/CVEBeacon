@@ -1,12 +1,17 @@
 {% extends 'base.html' %}
 {% from 'macros.html' import inventory_notice %}
 {% block title %}Operations · CVEBeacon{% endblock %}
+{% block head %}{% if active or external_runs %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
 {% block content %}<h1>Operations</h1>
 {% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+{% for holder in external_runs %}<section class="panel"><h2>{{ 'Active run' if holder.state == 'active' else 'Run record · ' ~ holder.state }}</h2>
+<dl><dt>Command</dt><dd>{{ holder.command or 'Unavailable' }}</dd><dt>Account</dt><dd>{{ holder.account or 'unknown' }}</dd><dt>Host</dt><dd>{{ holder.host or 'unknown' }}</dd><dt>PID</dt><dd>{{ holder.pid or 'unknown' }}</dd><dt>Started (UTC)</dt><dd>{{ holder.started_at or 'unknown' }}</dd><dt>Elapsed</dt><dd>{{ holder.elapsed if holder.elapsed is not none else 'unknown' }} seconds</dd></dl>
+{% if holder.state == 'active' %}<p>Wait for this run to finish. External runs are managed by their command-line process or scheduler.</p>{% endif %}</section>{% endfor %}
+{% if schedule_summary %}<p>{{ schedule_summary }}</p>{% endif %}
 {% if not has_inventory %}{{ inventory_notice() }}{% endif %}
 {% if not accounts %}<p class="warning" role="alert">Operations require a CVEBeacon account. Create the first administrator with the local <a href="{{ url_for('bootstrap') }}">bootstrap form</a> or <code>cvebeacon users add NAME --admin</code>.</p>{% endif %}
 {% if full_history %}<p class="warning" role="alert">Watch is configured to start with <strong>full history</strong>. The first sync can download years of public records and take hours. It runs only from the confirmed form below, which supplies the same confirmation as the CLI's <code>--yes</code>.</p>{% endif %}
-<p>Operations run as separate <code>cvebeacon</code> processes. Operations that write the same storage share locks, so a scheduled or command-line run using that storage also blocks a new job here. Each job records its start and outcome in the account audit trail.</p>
+<p>Operations run as separate <code>cvebeacon</code> processes. Operations that write the same storage share locks. Manual jobs wait in the queue for scheduled or command-line runs to finish, for up to six hours from submission. Channel tests use a separate lane with one test at a time. Each job records its start and outcome in the account audit trail.</p>
 
 {% if accounts %}<h2>Run a job</h2><div class="table-wrap"><table><thead><tr><th>Operation</th><th>Action</th></tr></thead><tbody>
 {% for operation, label in operation_labels.items() %}{% if operation in ['scan', 'run'] or watch_enabled %}{% set available = has_inventory if operation in ['scan', 'run'] else watch_enabled %}<tr><td>{{ label }}</td><td>
@@ -27,6 +32,6 @@
 {% endif %}
 
 <h2>Current and recent jobs</h2>
-{% if active %}<ul>{% for job in active %}<li><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">Job {{ job.id }} · {{ job.label }}</a> · {{ job.status }} · started by {{ job.started_by }}</li>{% endfor %}</ul>{% else %}<p>No job is queued or running.</p>{% endif %}
+{% if active %}<ul>{% for job in active %}<li><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">Job {{ job.id }} · {{ job.label }}</a> · {{ job.status }} · started by {{ job.started_by }}{% if job.id in queue_details %} · {{ queue_details[job.id] }}{% endif %}</li>{% endfor %}</ul>{% elif not external_runs %}<p>No job is queued or running.</p>{% endif %}
 <p><a href="{{ url_for('operations.jobs') }}">Full job history</a>{% if accounts and 'manage_schedule' in permissions %} · <a href="{{ url_for('operations.schedule') }}">Schedule</a>{% endif %}</p>
 {% endblock %}

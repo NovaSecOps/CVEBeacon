@@ -96,8 +96,10 @@ TYPE_KEYS = {
         "header_value_file",
     },
 }
+SMTP_DEFAULT_PORTS = {"starttls": 587, "tls": 465, "none": 25}
 SMTP_SECURITY = ("starttls", "tls", "none")
 MESSAGE_FORMATS = ("text", "html")
+TEAMS_BOT_FORMATS = ("adaptive_card",)
 CREDENTIAL_FIELDS = {
     channel_type: frozenset(key for key in keys if key.endswith(("_env", "_file")))
     for channel_type, keys in TYPE_KEYS.items()
@@ -413,9 +415,10 @@ def _common(table: Mapping[str, Any], label: str, channel_type: str) -> dict[str
     else:
         message_format = "adaptive_card" if channel_type == "teams_bot" else "text"
     message_format = message_format.casefold()
-    if channel_type == "teams_bot" and message_format != "adaptive_card":
-        _fail(f"{label} format", "must be adaptive_card")
-    if channel_type != "teams_bot" and message_format not in MESSAGE_FORMATS:
+    if channel_type == "teams_bot":
+        if message_format not in TEAMS_BOT_FORMATS:
+            _fail(f"{label} format", "must be adaptive_card")
+    elif message_format not in MESSAGE_FORMATS:
         _fail(f"{label} format", "must be text or html")
     return {
         "enabled": enabled,
@@ -437,7 +440,7 @@ def _parse_smtp(
     security = (_string(table, "security", label, maximum=20) or "starttls").casefold()
     if security not in SMTP_SECURITY:
         _fail(f"{label} security", "must be starttls, tls or none")
-    default_port = {"starttls": 587, "tls": 465, "none": 25}[security]
+    default_port = SMTP_DEFAULT_PORTS[security]
     port = _integer(table, "port", label, default_port, 1, 65535)
     allow_insecure = bool(common["allow_insecure"])
     if security == "none" and not allow_insecure:

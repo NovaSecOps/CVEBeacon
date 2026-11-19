@@ -24,19 +24,21 @@ EVENT_KINDS = (
 DEFAULT_EVENTS = EVENT_KINDS
 SEVERITY_BANDS = ("none", "low", "medium", "high", "critical")
 EPSS_BAND_LABELS = ("none", "<0.1", "<0.5", "<0.9", ">=0.9")
-LEAF_KEYS = (
-    "cvss_min",
-    "cvss_max",
-    "epss_min",
-    "kev",
-    "exploitation",
-    "vendor",
-    "product",
-    "keyword",
-    "cwe",
-    "cna",
-    "status",
-)
+# The parser and configuration condition helper share this schema.
+CONDITION_SCHEMA = {
+    "cvss_min": {"kind": "number", "minimum": 0.0, "maximum": 10.0, "example": 9.0},
+    "cvss_max": {"kind": "number", "minimum": 0.0, "maximum": 10.0, "example": 10.0},
+    "epss_min": {"kind": "number", "minimum": 0.0, "maximum": 1.0, "example": 0.5},
+    "kev": {"kind": "enum", "choices": ("cisa", "eu", "any"), "example": "cisa"},
+    "exploitation": {"kind": "enum", "choices": ("poc", "active"), "example": "active"},
+    "vendor": {"kind": "strings", "example": ["Example"]},
+    "product": {"kind": "strings", "example": ["Widget"]},
+    "keyword": {"kind": "strings", "example": ["remote code execution"]},
+    "cwe": {"kind": "cwe", "example": ["CWE-79"]},
+    "cna": {"kind": "strings", "example": ["Example"]},
+    "status": {"kind": "enum", "choices": ("published", "rejected", "reserved"), "example": "published"},
+}
+LEAF_KEYS = tuple(CONDITION_SCHEMA)
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 # Notice events use this prefix. Configured rules may not start with it.
 RESERVED_RULE_PREFIX = "@"
@@ -261,20 +263,15 @@ def _cwe_values(value: Any, path: str) -> tuple[str, ...]:
 
 
 def _leaf_value(key: str, value: Any, path: str) -> Any:
-    if key in {"cvss_min", "cvss_max"}:
-        return _number(value, path, 0.0, 10.0)
-    if key == "epss_min":
-        return _number(value, path, 0.0, 1.0)
-    if key == "kev":
-        return _enum(value, path, ("cisa", "eu", "any"))
-    if key == "exploitation":
-        return _enum(value, path, ("poc", "active"))
-    if key == "cwe":
+    schema = CONDITION_SCHEMA.get(key, {})
+    if schema.get("kind") == "number":
+        return _number(value, path, schema["minimum"], schema["maximum"])
+    if schema.get("kind") == "enum":
+        return _enum(value, path, schema["choices"])
+    if schema.get("kind") == "cwe":
         return _cwe_values(value, path)
-    if key in {"vendor", "product", "keyword", "cna"}:
+    if schema.get("kind") == "strings":
         return _strings(value, path)
-    if key == "status":
-        return _enum(value, path, ("published", "rejected", "reserved"))
     _fail(path, "is not a known condition key")
     raise AssertionError("unreachable")
 

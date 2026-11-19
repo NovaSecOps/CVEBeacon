@@ -6,6 +6,8 @@ import os
 import json
 import shlex
 import subprocess
+import threading
+import time
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
 
 from . import scheduling
@@ -21,7 +23,7 @@ from .dashboard_jobs import (
     full_history_confirmation_required,
 )
 from .errors import CVEBeaconError, ConfigurationError
-from .locking import RunInProgress
+from .locking import OperationLock, RunInProgress
 from .launching import command_prefix
 
 
@@ -74,14 +76,48 @@ def _record(action: str, detail: str | None = None) -> None:
     _manager().audit_action(action, _actor(), detail)
 
 
+def _viewer_schedule_summary() -> str | None:
+    """Cache only a restricted installed-status label, never scheduler output."""
+    app = current_app
+    guard = app.extensions.setdefault("operations_schedule_guard", threading.Lock())
+    runner = _runner()
+    platform = scheduling.platform.system().casefold()
+    with guard:
+        cache = app.extensions.get("operations_schedule_summary")
+        if cache and cache[0] is runner and cache[1] == platform and time.monotonic() < cache[2]:
+            return cache[3]
+        summary = None
+        try:
+            def bounded_run(*args, **kwargs):
+                return runner(*args, **kwargs, timeout=2)
+            status = scheduling.status(run=bounded_run)
+            if status == "not installed":
+                summary = "Schedule not installed"
+            else:
+                summary = "Scheduled by cron" if platform == "linux" else "Scheduled by Windows Task Scheduler"
+        except (CVEBeaconError, OSError, subprocess.TimeoutExpired):
+            pass
+        app.extensions["operations_schedule_summary"] = (runner, platform, time.monotonic() + 30, summary)
+        return summary
+
+
 def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
     manager = _manager()
+    try:
+        external_runs = [record for record in OperationLock(config, "run").snapshots()
+                         if not record["dashboard"] or record["state"] != "active"]
+    except CVEBeaconError:
+        external_runs = [{"state": "unavailable", "dashboard": False, "elapsed": None}]
+    schedule = _viewer_schedule_summary()
     channels = tuple(
         channel.name for channel in config.watch.channels if channel.enabled
     )
     return {
         "error": error,
         "active": manager.store.active(),
+        "external_runs": external_runs,
+        "schedule_summary": schedule,
+        "queue_details": manager.queue_details(),
         "full_history": full_history_confirmation_required(config),
         "channels": channels,
         "watch_enabled": config.watch.enabled,
@@ -230,6 +266,7 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
             "jobs.html",
             jobs=_manager().store.recent(MAX_HISTORY),
             max_jobs=MAX_HISTORY,
+            queue_details=_manager().queue_details(),
         )
 
     @blueprint.get("/jobs/<int:job_id>")
@@ -241,7 +278,8 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
         if job is None:
             abort(404)
         return render_template(
-            "job.html", job=job, log=_manager().store.log_tail(job)
+            "job.html", job=job, log=_manager().store.log_tail(job),
+            queue_detail=_manager().queue_details().get(job.id),
         )
 
     @blueprint.post("/run")
@@ -414,6 +452,7 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
                 scheduling.install(plan, password=password, run=_runner())
             else:
                 scheduling.install(plan, run=_runner())
+            current_app.extensions.pop("operations_schedule_summary", None)
             _record("schedule_installed", detail)
         except (CVEBeaconError, OSError) as exc:
             detail = (
@@ -437,6 +476,7 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
         try:
             _record("schedule_remove_requested")
             removed = scheduling.remove(run=_runner())
+            current_app.extensions.pop("operations_schedule_summary", None)
             _record("schedule_removed" if removed else "schedule_remove_skipped")
         except (CVEBeaconError, OSError) as exc:
             return _render_schedule(config, error=str(exc), status=400)

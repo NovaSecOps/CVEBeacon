@@ -13,7 +13,7 @@ from cvebeacon.errors import InventoryValidationError
 
 def test_core_has_no_extension_import_or_dependency():
     root = Path(__file__).parents[1]
-    project = tomllib.loads((root / "pyproject.toml").read_text())
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     assert not any("extension" in item or "kubernetes" in item or "cyclonedx" in item or "spdx" in item
                    for item in project["project"]["dependencies"])
     for path in (root / "src" / "cvebeacon").rglob("*.py"):

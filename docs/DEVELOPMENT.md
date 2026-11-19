@@ -105,7 +105,10 @@ combinations have passed.
 
 ## Exit codes
 
-Core reports `0`, `1`, `2`, `3`, and `4`. Automation preserves those codes and adds
+Public Core commands report `0`, `1`, `2`, `3`, and `4`. A dashboard-supervised
+Core child uses internal exit `75` specifically for run-lock contention, so the
+dashboard can return it to the queue within its original deadline. Interactive
+and scheduled CLI lock conflicts still exit `2`. Automation preserves Core's public codes and adds
 `5` for degraded optional operations and `75` for a nonblocking resource-lock
 conflict. Container entrypoints translate SIGTERM into bounded cleanup and exit
 `143`.
@@ -118,7 +121,7 @@ conflict. Container entrypoints translate SIGTERM into bounded cleanup and exit
 | 3 | Core | Notification delivery failure (takes precedence over 4) |
 | 4 | Core, Automation | Uncertain coverage or degraded sources |
 | 5 | Automation | Completed with degraded optional operations |
-| 75 | Automation | Nonblocking resource-lock conflict |
+| 75 | Automation; dashboard-supervised Core child | Nonblocking resource-lock conflict; the dashboard requeues child contention within its original deadline |
 | 143 | Container entrypoint | SIGTERM handled and cleanup completed |
 
 Core codes are described in the [user guide](USER_GUIDE.md), pipeline behavior in

@@ -277,7 +277,7 @@ def test_cancel_sends_interrupt_and_cleanup_runs(ops, tmp_path):
     job = manager.wait(job.id, timeout=10)
     assert job.status == "cancelled"
     assert job.exit_code == 130
-    assert marker.read_text() == "cleaned"
+    assert marker.read_text(encoding="utf-8") == "cleaned"
     assert "cleanup" in client.get(f"/operations/jobs/{job.id}").text.lower()
 
 
@@ -323,14 +323,22 @@ def test_log_storage_and_tail_are_bounded(ops):
     assert page.status_code == 200
 
 
-def test_single_flight_blocks_a_cli_style_lock_holder(ops):
+def test_single_flight_queues_behind_a_cli_style_lock_holder(ops):
     config, _, app, client = ops
     login(client)
-    with RunLock(run_lock_path(config), command="watch sync"):
-        response = submit(client, "/operations/run", operation="watch-sync")
-    assert response.status_code == 409
-    assert b"another run is in progress" in response.data.lower()
-    assert app.extensions["dashboard_jobs"].store.recent() == ()
+    set_builder(app, lambda *a, **k: fake_job("print('after release')"))
+    manager = app.extensions["dashboard_jobs"]
+    try:
+        with RunLock(run_lock_path(config), command="watch sync"):
+            response = submit(client, "/operations/run", operation="watch-sync")
+            assert response.status_code == 303
+            identifier = job_id(response)
+            wait_for(lambda: manager.store.get(identifier).message)
+            assert manager.store.get(identifier).status == "queued"
+            assert "waiting for" in manager.store.get(identifier).message
+        assert manager.wait(identifier).status == "succeeded"
+    finally:
+        manager.shutdown()
 
 
 def test_cli_refuses_when_the_shared_lock_is_held(tmp_path, capsys):

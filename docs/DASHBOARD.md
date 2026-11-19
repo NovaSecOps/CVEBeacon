@@ -44,7 +44,15 @@ Operations run as short-lived children of the same `cvebeacon` executable with t
 | `watch report`, `watch unreport`, dashboard report/unreport | Watch storage |
 | `watch notify test` | None; sends a labelled test without changing delivery state |
 
-Configurations sharing either storage location therefore coordinate even when their other location differs. Channel tests are offered only when watch is enabled. On contention the CLI prints `another run is in progress` and exits `2`; the dashboard returns a conflict with holder details when available. Other lock failures are operational errors. Dashboard probes are advisory; the child takes the authoritative locks. The operating system releases locks on process exit.
+Configurations sharing either storage location therefore coordinate even when their other location differs. On contention an interactive or scheduled CLI command prints `another run is in progress`, names the holder when available, asks you to wait, and exits `2`. A dashboard-supervised child instead uses internal exit `75` to request a queue retry within its original deadline. Cancellation from the Operations page is offered only for a verified dashboard holder. Other lock failures are operational errors. Dashboard probes are advisory; the child takes the authoritative locks. The operating system releases locks on process exit.
+
+**External runs.** Anyone with `view` can see an **Active run** panel for a scheduled or command-line holder, including its account, host, PID, UTC start time, short command label and elapsed seconds. External runs have no dashboard cancel button. Holder records are published atomically in owner-only `cvebeacon-run.lock.owner.<token>.json` files beside each lock and removed before release; full command arguments and credentials are never recorded. An opaque acquisition token in the lock, the lock inode and a live record lease bind the private record to its holder. Only these verified records identify a contended holder. Before a new record is ready, including when an older version left tokenless inline metadata, Operations shows an active run with identity unavailable. Legacy records remain observable as stale or unknown only while the lock is free. Existing files are never replaced. When permissions, unsupported hard links or link limits prevent private publication, monitoring still runs with holder identity unavailable after rollback completes. Rollback attempts every owned file and handle, retries a transient cleanup refusal once, and stops the operation if fallback cleanup remains incomplete. A write failure remains an operational error even if cleanup also fails; refused deletion can leave private artifacts, but no successful fallback is reported. Other accounts may share the lock without being able to read private identity fields.
+
+Windows operational storage must support protected owner-only ACLs, such as NTFS. The hard-link fallback does not relax ACL validation; storage without those privacy guarantees is unsupported.
+
+Operations observes existing lock files without creating storage. Missing locks are omitted; an unsafe or inaccessible lock is shown as unavailable without hiding the page. Kernel contention always means an active run, even when its identity is unavailable. A free lock's record for a dead local PID is labelled stale. Windows and remote-host PID liveness can remain unknown. Operations shows only installed-schedule labels, “Scheduled by cron” or “Scheduled by Windows Task Scheduler”, cached for 30 seconds with a two-second command timeout. Full scheduler details remain on the Schedule page behind `manage_schedule`. Dashboard schedule changes invalidate the cache; next-execution times are not predicted.
+
+**Queues and channel tests.** Manual jobs that need a held storage lock remain queued and show “waiting for &lt;holder&gt; to finish”. They wait up to six hours from submission before failing with the holder conflict message, and can be cancelled while waiting. If another run acquires the lock between the dashboard probe and child launch, the job returns to waiting within its original deadline. Only the child's explicit lock-contention outcome is retried; validation failures remain failures. Queued jobs show their position within their lane and the job ahead of them on Operations, job history and job detail pages. State-changing jobs run serially. Watch channel tests use a separate lane with one test at a time, so they can complete during a long scan or watch run. They retain the same job history, cancellation and audit behavior. Channel tests are offered only when watch is enabled. Web detection, including `--plan`, still takes the inventory lock and uses the main lane.
 
 **Cancel.** Cancelling a running job sends the documented interrupt: `SIGINT` to the command's process group on Linux, or `Ctrl+Break` on Windows. The CLI handles both interrupts through its cleanup path. Windows jobs require a console and a separate process group; console-less operation is refused. After three seconds without exit, the dashboard terminates the child, waits another two seconds, then kills it if necessary. Forced termination is labelled explicitly because cleanup is not confirmed. An interrupt the dashboard did not request, such as an external break or a running-job dashboard shutdown, is reported as an external interrupt rather than a cancellation and its audit entry names no cancelling account. Capture failures and orderly dashboard shutdown also stop and reap the child, including when cancellation bookkeeping fails. Queued rows whose cancellation cannot be saved remain stored for restart recovery. A queued job can be cancelled before it starts; cancellation records the requesting account separately from the starter.
 
@@ -446,14 +454,36 @@ container layout.
 | State database and report output paths | `edit_system` (view; changes administrator-only) |
 
 Blank fields omit a setting and use the configuration loader's default. String
-fields accept plain text; arrays, column mappings and nested rule conditions
-accept TOML values. For example, use `["soc-email"]` for channels and
+fields accept plain text. Enumerated settings use selectors, boolean settings use
+checkboxes, and numeric settings show the validator's bounds. Required fields
+are marked; requirements on a blank final row apply only when that row is added.
+Defaults appear as placeholders and beneath the controls. Email `to`, `cc`,
+`bcc` and legacy `recipients` accept comma-separated addresses or TOML arrays;
+watch-channel lists are trimmed, deduplicated and validated per address. Existing
+items containing commas, including quoted display names, and lists whose joined
+text starts with `[` render as TOML arrays so an unchanged form preserves their
+meaning. Legacy `recipients` keeps the
+loader's nonempty-string rules, ordering and duplicates, including distribution
+names without `@`; it has no separate editor limit on recipient count. Other arrays,
+column mappings and nested rule conditions accept TOML values. For example,
+use `["soc-email"]` for channels and
 `{ any = [{ cvss_min = 9.0 }, { epss_min = 0.5 }] }` for a condition.
 The final blank row adds a rule, mapping or channel. Choose the new channel type
 before making other changes; choosing it reloads the form. Removal checkboxes
 remove existing rows. Every submitted document is validated by `load_config`,
-including channel references and source requirements. Invalid submissions show
-the loader's guidance with submitted values redacted and leave the file intact.
+including channel references and source requirements. Invalid submissions name
+the field and expected format, keep ordinary form
+values for correction, and leave the file intact. Secret contents are never
+redisplayed. Changed credential references, unvalidated row labels, rejected
+enum values and unsafe or malformed structured values retain their validated
+baseline instead of repeating potentially sensitive text. This policy does not
+read any reference target. Re-enter changed references and labels after correcting
+an error. Comments are removed from retained TOML values, while hashes inside
+quoted strings and ordinary correction text are preserved. Unreadable secret-file
+errors identify the setting without repeating the resolved target path. The
+condition editor lists valid leaves, values and examples from
+the parser's schema; for example, `kev` accepts `"cisa"`, `"eu"` or `"any"`, and
+`kev = true` reports the exact condition path and accepted values.
 Unrecognized configuration fields must be reviewed outside the editor before
 editing; they are never silently copied or discarded. Column mappings must use
 only the known canonical or optional inventory fields, so an unknown column is
@@ -510,8 +540,31 @@ contents before the live file changes. Validation, replacement preparation and
 handled write or audit failures leave the existing application and configuration
 in place, including restoring any secret contents already replaced. Post-commit
 temporary cleanup is best-effort maintenance and cannot turn a completed save
-into a failure. Successful saves reload the dashboard and end **all dashboard
-sessions**; log in again. Already-running non-configuration requests finish with
+into a failure. Successful saves reload the dashboard. Sessions end only for
+changes to:
+
+- any `[dashboard]` setting, including its password-hash environment reference,
+  session lifetimes and cookie settings;
+- `watch.database`, which determines the account database location;
+- `[watch.reporting]`, whose identity mode controls who may record reporting;
+- an unknown section or setting, including nested notification, channel or rule
+  settings, or recovery from an invalid or missing file.
+
+Session-preserving settings use a separately reviewed allowlist. Adding a field
+to presentation metadata does not classify its session behavior. Comparisons
+distinguish TOML booleans, integers and floats. A preview that required access
+confirmation continues to end sessions even if its original recovery condition
+clears before confirmation.
+
+Effective dashboard settings, account database locations and reporting identity
+are compared against both the valid current file and the running configuration.
+These changes require access confirmation and end **all dashboard sessions**;
+log in again. Other saves, including channel format, recipients, rules, sources,
+HTTP, inventory, output and state settings, preserve all existing sessions,
+their original expiry and CSRF tokens. A state-path change that indirectly
+changes the default account database also ends sessions. The editor shows
+**Saved; takes effect on the next run**. Other running commands must restart to
+use the new settings. Already-running non-configuration requests finish with
 their original configuration; a configuration request that reaches the old
 application during the swap is refused and can be retried after reloading. Other
 running commands retain their configuration until restarted. A reload reuses the
@@ -533,7 +586,8 @@ account-store administrator check. Operational watch, state and output paths
 must not alias the configuration file or its writer lock, the account, watch or
 state databases, any of their `-wal`, `-shm`, `-journal` or `.lock` sidecars,
 the private `dashboard-jobs` directory with its database and logs, both operation
-run-lock files, the backup or secret directories, every file inside the private
+run-lock files and their entire `cvebeacon-run.lock.owner.*` namespace (including
+legacy owner records, acquisition records and publication temporaries), the backup or secret directories, every file inside the private
 `dashboard-secrets` directory (whether or not it is still referenced), and every
 currently referenced `*_file`. Files outside that directory are the
 administrator's responsibility because only administrators can change paths.

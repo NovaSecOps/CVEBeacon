@@ -194,10 +194,10 @@ def test_scan_lock_blocks_jobs_and_edits(web, monkeypatch):
     try:
         assert operation_lock_paths(config, "web-detect") == operation_lock_paths(config, "scan")
         for operation in ("web-plan", "web-detect"):
-            with pytest.raises(RunInProgress):
-                manager.submit(operation, started_by="admin", argv=build_command(config, operation, client="Acme"))
+            job = manager.submit(operation, started_by="admin", argv=build_command(config, operation, client="Acme"))
+            assert manager.store.get(job.id).status == "queued"
             response = client.post("/web-assets/run", data={"csrf": csrf(client), "client": "Acme", "action": operation})
-            assert response.status_code == 409
+            assert response.status_code == 303
         assert save(client).status_code == 409
     finally:
         lock.release()
@@ -222,7 +222,12 @@ def test_private_atomic_storage_does_not_follow_links(web, monkeypatch):
     assert save(client).status_code == 303
     path, _ = paths(config, "Acme")
     before = path.read_bytes()
-    monkeypatch.setattr(web_assets.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("failure")))
+    original_replace = web_assets.os.replace
+    def fail_asset_replace(source, destination):
+        if Path(destination) == path:
+            raise OSError("failure")
+        return original_replace(source, destination)
+    monkeypatch.setattr(web_assets.os, "replace", fail_asset_replace)
     assert save(client, action="change", index="0", path="/updated").status_code == 400
     assert path.read_bytes() == before and not list(path.parent.glob(".web-assets-*.tmp"))
     monkeypatch.undo()

@@ -1,5 +1,7 @@
 """Teams bot controls inherit the channel editor's secret boundary."""
 
+import re
+
 from cvebeacon import dashboard
 from cvebeacon.config import load_config
 from cvebeacon.dashboard_config import groups_for
@@ -14,10 +16,10 @@ def test_teams_bot_field_metadata():
     controls = {field["key"]: field for field in groups[0]["controls"]}
     assert controls["recipients"]["kind"] == "toml"
     assert controls["conversation_references"]["kind"] == "toml"
-    assert controls["format"]["default"] == '"adaptive_card"'
+    assert controls["format"]["default"] == "adaptive_card"
     assert "UUID" in controls["app_id"]["help"]
     assert controls["app_id"]["default"] == ""
-    assert controls["recipients"]["default"] == ""
+    assert controls["recipients"]["default"] == "[]"
     assert controls["client_secret_file"]["secret"]
     assert controls["client_secret_file"]["allow_new_secret"]
     assert "client_secret_env" not in controls
@@ -44,7 +46,7 @@ recipients = ["{USER}"]
     login(client)
     page = client.get("/config/channels?new_type=teams_bot")
     assert page.status_code == 200 and "teams_bot" in page.text
-    assert 'name="g0_recipients" rows="3" cols="60" readonly' in page.text
+    assert re.search(r'<textarea name="g0_recipients"[^>]*\breadonly\b', page.text)
     assert 'name="g0_client_secret_file" value="teams-secret" readonly' in page.text
     assert SECRET not in page.text
     before = config.config_path.read_bytes()

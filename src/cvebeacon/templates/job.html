@@ -6,6 +6,7 @@
 {% if job.audit_pending %}<p class="warning" role="alert">The outcome audit is pending; it will be retried.</p>{% endif %}
 <dl>
 <dt>Status</dt><dd>{{ job.status }}</dd>
+{% if queue_detail %}<dt>Queue</dt><dd>{{ queue_detail }}</dd>{% endif %}
 <dt>Started by</dt><dd>{{ job.started_by }}</dd>
 <dt>Queued</dt><dd>{{ job.created_at }}</dd>
 <dt>Started</dt><dd>{{ job.started_at or 'Not started' }}</dd>
