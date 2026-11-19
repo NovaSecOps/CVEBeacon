@@ -18,6 +18,7 @@ def read_unit(name: str) -> configparser.ConfigParser:
 def test_systemd_dashboard_unit_has_expected_service_settings():
     unit = read_unit("cvebeacon-dashboard.service")
     assert unit["Unit"]["Description"] == "CVEBeacon dashboard"
+    assert unit["Unit"]["StartLimitIntervalSec"] == "0"
     service = unit["Service"]
     assert service["User"] == "cvebeacon"
     assert service["Group"] == "cvebeacon"
@@ -25,9 +26,13 @@ def test_systemd_dashboard_unit_has_expected_service_settings():
     assert service["NoNewPrivileges"] == "yes"
     assert service["ProtectSystem"] == "strict"
     assert "/var/lib/cvebeacon" in service["ReadWritePaths"]
+    assert service["ExecStartPre"].endswith(
+        "/opt/cvebeacon/current/.venv/bin/cvebeacon update guard --role serve"
+    )
     command = service["ExecStart"]
+    assert command.startswith("/opt/cvebeacon/current/.venv/bin/cvebeacon ")
     assert command.endswith(
-        "cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml "
+        "--config /var/lib/cvebeacon/cvebeacon.toml "
         "serve --host 127.0.0.1 --port 8787"
     )
     assert unit["Install"]["WantedBy"] == "multi-user.target"
@@ -44,46 +49,48 @@ def test_dashboard_docs_ship_a_complete_crontab_dropin_and_upgrade_sequence():
     assert "cvebeacon-dashboard.service.d/crontab.conf" in deploy
     assert "EnvironmentFile" in deploy
     assert "ProtectHome=yes" in deploy
-    assert "stop cvebeacon-dashboard.service" in deploy
-    assert "start cvebeacon-dashboard.service" in deploy
+    assert "/opt/cvebeacon/current/.venv/bin/cvebeacon" in deploy
+    assert "deploy/systemd/cvebeacon.timer" in deploy
+    assert (ROOT / "deploy" / "systemd" / "cvebeacon.timer").exists()
     assert "DEPLOY.md#schedule-it" in scheduling
-
-
-def test_dashboard_upgrade_sequence_drains_jobs_before_stopping_services():
-    deploy = (ROOT / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
     upgrade = deploy.split("### Upgrade", 1)[1].split("### Windows", 1)[0]
-    assert "run one line" not in upgrade
-    assert "when installed" not in upgrade
-    assert "sudo pgrep -u cvebeacon -af '[c]vebeacon'" in upgrade
-    assert "grep -F '/opt/cvebeacon'" in upgrade
-    assert "grep -vE '(^| )serve( |$)'" in upgrade
-    assert "systemctl is-active cvebeacon.service" in upgrade
-    assert "must print nothing" in upgrade
-    assert "no job is running or queued" in upgrade
-    disable_scheduler = upgrade.index("cb schedule remove --yes")
-    disable_timer = upgrade.index("sudo systemctl stop cvebeacon.timer")
-    wait_for_processes = upgrade.index("sudo pgrep -u cvebeacon")
-    stop_dashboard = upgrade.index(
-        "sudo systemctl stop cvebeacon-dashboard.service"
+    assert "[upgrading](UPGRADING.md)" in upgrade
+
+
+def test_upgrading_guide_drains_jobs_before_stopping_services():
+    upgrading = (ROOT / "docs" / "UPGRADING.md").read_text(encoding="utf-8")
+    manual = upgrading.split("## Manual upgrades", 1)[1].split("## Adopt", 1)[0]
+    manual = " ".join(manual.split())
+    assert "schedule remove --yes" in manual
+    assert "stop the systemd timer" in manual
+    assert "sudo pgrep -u cvebeacon -af '[c]vebeacon'" in manual
+    assert "grep -F '/opt/cvebeacon'" in manual
+    assert "grep -vE '(^| )serve( |$)'" in manual
+    assert "systemctl is-active cvebeacon.service" in manual
+    assert "must print nothing" in manual
+    assert "Change `/opt/cvebeacon` and the `-u` service account" in manual
+    disable_scheduler = manual.index("schedule remove --yes")
+    disable_timer = manual.index("stop the systemd timer")
+    wait_for_processes = manual.index("sudo pgrep -u cvebeacon")
+    stop_dashboard = manual.index(
+        "Stop the dashboard and other data writers"
     )
-    install_packages = upgrade.index("pip install")
-    start_dashboard = upgrade.index(
-        "sudo systemctl start cvebeacon-dashboard.service"
-    )
-    restore_scheduler = upgrade.index("cb schedule install")
+    backup = manual.index("SQLite's online backup")
+    install_packages = manual.index("pip --isolated install")
+    migrate = manual.index("cvebeacon --config CONFIG migrate")
+    restart = manual.index("restart the dashboard and re-enable")
+    check = manual.index("Check `doctor`")
     assert (
         disable_scheduler
         < wait_for_processes
         < stop_dashboard
+        < backup
         < install_packages
-        < start_dashboard
-        < restore_scheduler
+        < migrate
+        < restart
+        < check
     )
     assert disable_timer < wait_for_processes
-    assert restore_scheduler < upgrade.index("Then rerun the checks")
-    assert "[Check the result](#check-the-result)" in upgrade
-    for number in range(1, 8):
-        assert f"\n{number}. " in upgrade
 
 
 def test_watch_and_user_guides_list_the_state_directory_in_doctor_checks():

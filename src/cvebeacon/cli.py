@@ -1068,6 +1068,11 @@ def _watch_migration_problem(
                 "unreadable (watch database cannot be migrated from schema "
                 f"{version}: watch_report has no chain column)"
             )
+        if "chain_version" in report_columns:
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: watch_report has chain_version without chain)"
+            )
         if boundary is not None:
             return (
                 "unreadable (watch database cannot be migrated from schema "

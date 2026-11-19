@@ -591,6 +591,40 @@ def test_watch_only_doctor_rejects_an_incompatible_older_watch_schema(
     )
 
 
+def test_watch_only_doctor_rejects_chain_version_without_chain(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("ALTER TABLE watch_report DROP COLUMN chain")
+        db.execute("UPDATE watch_meta SET value='5' WHERE key='schema_version'")
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == (
+        "unreadable (watch database cannot be migrated from schema 5: "
+        "watch_report has chain_version without chain)"
+    )
+
+
+def test_watch_only_doctor_rejects_version_floor_damage(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("ALTER TABLE watch_event DROP COLUMN details_json")
+        db.execute("UPDATE watch_meta SET value='6' WHERE key='schema_version'")
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == (
+        "unreadable (watch database cannot be migrated from schema 6: "
+        "missing watch_event.details_json)"
+    )
+
+
 def test_watch_only_doctor_reports_a_pre_release_watch_schema(
     tmp_path, monkeypatch, capsys
 ):
