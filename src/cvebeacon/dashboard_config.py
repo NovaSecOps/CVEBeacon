@@ -27,7 +27,8 @@ from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
                      TeamsConfig, WatchConfig, load_config)
 from .errors import CVEBeaconError, ConfigurationError
-from .locking import LOCK_NAME, run_lock_path
+from .locking import (LOCK_NAME, run_lock_path, owner_storage_paths,
+                      is_owner_record_path, validate_lock_storage)
 from .watch.channels import (CREDENTIAL_FIELDS, ChannelConfig, COMMON_KEYS, TYPE_KEYS,
                              ENV_NAME_PATTERN, SECRET_FILE_LIMIT, SecretRef)
 from .watch.directories import ensure_private_directory
@@ -538,6 +539,8 @@ def _operation_storage_paths(config):
         pass
     files.add(Path(config.database_path).resolve().parent / LOCK_NAME)
     files.add(run_lock_path(config).resolve())
+    for lock_path in (Path(config.database_path).resolve().parent / LOCK_NAME, run_lock_path(config)):
+        files.update(owner_storage_paths(lock_path))
     return files, {job_directory, config.database_path.parent / "web-assets",
                    config.database_path.parent / "web-inventory"}
 
@@ -564,6 +567,7 @@ def _candidate_derived_paths(updated, configs):
         directories.update({updated.database_path.parent / "web-assets",
                             updated.database_path.parent / "web-inventory"})
         files.add(Path(updated.database_path).resolve().parent / LOCK_NAME)
+        files.update(owner_storage_paths(Path(updated.database_path).resolve().parent / LOCK_NAME))
         job_directory = (Path(updated.database_path).parent / "dashboard-jobs").resolve()
         directories.add(job_directory)
         files.add((job_directory / "dashboard-jobs.db").resolve())
@@ -580,6 +584,7 @@ def _candidate_derived_paths(updated, configs):
     if watch_parent_changed:
         files.update(path.resolve() for path in _database_paths(updated.watch.users_database))
         files.add(Path(updated.watch.database).resolve().parent / LOCK_NAME)
+        files.update(owner_storage_paths(run_lock_path(updated)))
     return files, directories
 
 
@@ -638,6 +643,8 @@ def secret_target(reference, base, configs, backup_dir, *, documents=()):
         target = raw.resolve()
     except (OSError, RuntimeError, ValueError):
         raise ConfigurationError("Secret file reference is not a valid path") from None
+    if is_owner_record_path(raw.absolute()) or is_owner_record_path(target):
+        raise ConfigurationError("Secret file reference must not alias operation holder storage")
     data_directory = configs[0].watch.users_database.parent.resolve()
     if target == data_directory or not _inside(target, data_directory):
         raise ConfigurationError(
@@ -1697,6 +1704,7 @@ def _inside(path, directory):
 
 def check_protected_paths(updated, config_path, backup_dir, configs, documents=()):
     """Reject settings that would place operational data in a protected store."""
+    validate_lock_storage(updated)
     protected_files, protected_dirs = _protected_paths(
         configs, backup_dir, documents, base=config_path.parent)
     existing_files = set(protected_files)

@@ -3,26 +3,73 @@
 The locks coordinate the dashboard's background jobs with scheduled and
 interactive command-line runs. Persistent lock files live in the storage
 directories; private sidecar records describe their holders. Locks may be
-shared with another service account; the operating system releases locks when a process exits, so a
-crashed run cannot block later work permanently.
+shared with another service account; the operating system releases locks when
+a process exits, so a crashed run cannot block later work permanently.
 """
 
 from __future__ import annotations
 
 import errno
+from dataclasses import fields, is_dataclass
 import getpass
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 import socket
+import stat
 import uuid
 
-from .errors import CVEBeaconError
+from .errors import CVEBeaconError, ConfigurationError
 from .private_storage import private_directory, private_file
 
 LOCK_NAME = "cvebeacon-run.lock"
 _METADATA_LIMIT = 4096
+DASHBOARD_LOCK_CONFLICT_EXIT = 75
+
+
+def owner_record_path(lock_path: Path, token: str | None = None) -> Path:
+    """Derive a sibling name; never accept a filename from stored metadata."""
+    suffix = ".owner.json" if token is None else f".owner.{token}.json"
+    return lock_path.with_name(lock_path.name + suffix)
+
+
+def is_owner_record_path(path: Path) -> bool:
+    # Reserve temporary and future acquisition records as well as legacy names.
+    return any(part.startswith(LOCK_NAME + ".owner.") for part in path.parts)
+
+
+def owner_storage_paths(lock_path: Path) -> set[Path]:
+    result = {owner_record_path(lock_path)}
+    try:
+        result.update(lock_path.parent.glob(lock_path.name + ".owner.*"))
+    except OSError:
+        pass
+    return result
+
+
+def validate_lock_storage(config) -> None:
+    """Keep configured data and secrets outside the reserved owner namespace."""
+    def paths(value):
+        if isinstance(value, Path):
+            yield value
+        elif is_dataclass(value):
+            for field in fields(value):
+                yield from paths(getattr(value, field.name))
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from paths(item)
+        elif isinstance(value, (tuple, list)):
+            for item in value:
+                yield from paths(item)
+    for path in (*paths(config), config.watch.users_database):
+        if is_owner_record_path(path.absolute()) or is_owner_record_path(path.resolve()):
+            raise ConfigurationError("configured paths must not alias operation holder storage")
+
+
+def dashboard_job_id() -> int | None:
+    value = os.environ.get("CVEBEACON_DASHBOARD_JOB", "")
+    return int(value) if value.isascii() and value.isdecimal() and 0 < len(value) <= 18 and int(value) > 0 else None
 
 
 class RunInProgress(CVEBeaconError):
@@ -54,6 +101,7 @@ class OperationLock:
     """Take each required resource once, releasing partial acquisitions."""
 
     def __init__(self, config, operation: str):
+        validate_lock_storage(config)
         label = operation.replace("watch-", "watch ", 1)
         if operation in {"watch-retry-failed", "watch-retry-ambiguous"}:
             label = "watch notify"
@@ -89,7 +137,15 @@ class OperationLock:
         return None
 
     def snapshots(self) -> list[dict]:
-        return [record for lock in self.locks if (record := lock.snapshot()) is not None]
+        records = []
+        for lock in self.locks:
+            try:
+                record = lock.snapshot()
+            except CVEBeaconError:
+                record = {"state": "unavailable", "dashboard": False, "elapsed": None}
+            if record is not None:
+                records.append(record)
+        return records
 
 
 def _contention(exc: OSError) -> bool:
@@ -176,13 +232,106 @@ class RunLock:
 
     def __init__(self, path: str | Path, *, command: str | None = None):
         self.path = Path(path)
-        self.owner_path = self.path.with_name(self.path.name + ".owner.json")
+        self._owner_path: Path | None = None
+        self._owner_identity: tuple[int, int] | None = None
+        self._owner_descriptor: int | None = None
         # Only fixed labels may enter the record, never user arguments.
         labels = {"scan", "run", "web-detect", "web-detect --plan", "web-assets"}
         labels.update(f"watch {name}" for name in ("sync", "run", "evaluate", "notify", "report", "unreport"))
         self.command = command if command in labels else "run"
         self.holder: str | None = None
         self._descriptor: int | None = None
+
+    @property
+    def owner_path(self) -> Path:
+        if self._owner_path is not None:
+            return self._owner_path
+        try:
+            descriptor = self._open(create=False)
+            try:
+                token = self._token(self._inline(descriptor))
+                if token is not None:
+                    self._owner_path = owner_record_path(self.path, token)
+            finally:
+                os.close(descriptor)
+        except (OSError, CVEBeaconError):
+            pass
+        return self._owner_path or owner_record_path(self.path)
+
+    @staticmethod
+    def _inline(descriptor: int) -> bytes:
+        os.lseek(descriptor, 1, os.SEEK_SET)
+        return os.read(descriptor, _METADATA_LIMIT)
+
+    @staticmethod
+    def _token(payload: bytes) -> str | None:
+        try:
+            token = json.loads(payload).get("owner_token")
+        except (ValueError, AttributeError):
+            return None
+        if isinstance(token, str) and len(token) == 32 and all(char in "0123456789abcdef" for char in token):
+            return token
+        return None
+
+    @staticmethod
+    def _write(descriptor: int, payload: bytes) -> None:
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if not count:
+                raise OSError(errno.EIO, "short metadata write")
+            written += count
+
+    def _publish(self, metadata: dict) -> None:
+        target = self.owner_path
+        temporary = target.with_name(target.name + ".tmp")
+        created = False
+        descriptor = None
+        try:
+            descriptor = private_file(temporary, create=True, exclusive=True)
+            created = True
+            self._owner_lock(descriptor)
+            self._write(descriptor, json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
+            details = os.fstat(descriptor)
+            identity = (details.st_dev, details.st_ino)
+            # Unlike replace/rename, link refuses any pre-existing destination.
+            # Only this acquisition's files are ever created or removed.
+            os.link(temporary, target)
+            self._owner_identity = identity
+            self._owner_descriptor = descriptor
+            descriptor = None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if created:
+                temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _owner_lock(descriptor: int, *, probe=False, unlock=False) -> None:
+        if os.name == "nt":  # pragma: no cover - exercised on Windows
+            import msvcrt
+            # Keep the lease outside the bounded JSON read range.
+            os.lseek(descriptor, _METADATA_LIMIT, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK if unlock else msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            kind = fcntl.LOCK_UN if unlock else fcntl.LOCK_SH if probe else fcntl.LOCK_EX
+            fcntl.flock(descriptor, kind | fcntl.LOCK_NB)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+
+    def _owner_is_live(self, descriptor: int) -> bool:
+        try:
+            self._owner_lock(descriptor, probe=True)
+        except OSError as exc:
+            return _contention(exc)
+        self._owner_lock(descriptor, unlock=True)
+        return False
+
+    def _close_owner(self) -> None:
+        if self._owner_descriptor is not None:
+            descriptor = self._owner_descriptor
+            self._owner_descriptor = None
+            os.close(descriptor)
 
     def _lock(self, descriptor: int) -> None:
         if os.name == "nt":  # pragma: no cover - exercised on Windows
@@ -210,6 +359,7 @@ class RunLock:
     def acquire(self) -> bool:
         if self._descriptor is not None:
             return True
+        self._owner_identity = None
         descriptor = self._open()
         try:
             try:
@@ -228,33 +378,33 @@ class RunLock:
                 .isoformat(timespec="seconds"),
             }
             metadata["command"] = self.command
-            job = os.environ.get("CVEBEACON_DASHBOARD_JOB", "")
-            if job.isascii() and job.isdecimal() and 0 < len(job) <= 18 and int(job) > 0:
-                metadata["dashboard_job"] = int(job)
-            payload = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+            job = dashboard_job_id()
+            if job is not None:
+                metadata["dashboard_job"] = job
             try:
-                # Keep the shared lock inode and Windows byte zero separate
-                # from the atomically published, owner-only holder record.
-                os.ftruncate(descriptor, 1)
-                temporary = self.owner_path.with_name(self.owner_path.name + "." + uuid.uuid4().hex)
+                token = uuid.uuid4().hex
+                self._owner_path = owner_record_path(self.path, token)
+                details = os.fstat(descriptor)
+                metadata.update(owner_token=token, lock_device=details.st_dev, lock_inode=details.st_ino)
+                # Invalidate a predecessor before publishing this acquisition.
+                # The shared inode contains only an opaque reference, no identity.
+                reference = json.dumps({"owner_token": token}).encode("ascii")
+                os.lseek(descriptor, 1, os.SEEK_SET)
+                self._write(descriptor, reference)
+                os.ftruncate(descriptor, len(reference) + 1)
                 try:
-                    owner_fd = private_file(temporary, create=True, exclusive=True)
-                    try:
-                        written = 0
-                        while written < len(payload):
-                            written += os.write(owner_fd, payload[written:])
-                    finally:
-                        os.close(owner_fd)
-                    os.replace(temporary, self.owner_path)
-                finally:
-                    temporary.unlink(missing_ok=True)
+                    self._publish(metadata)
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                        raise
+                    # Existing writable locks still work in shared/read-only
+                    # parents. Private identity is unavailable in that case.
             except OSError as exc:
-                raise CVEBeaconError(
-                    "cannot write the operation lock metadata"
-                ) from exc
+                raise CVEBeaconError("cannot write the operation lock metadata") from exc
             self._descriptor = descriptor
             return True
         except BaseException:
+            self._close_owner()
             try:
                 os.close(descriptor)
             except OSError:
@@ -270,76 +420,119 @@ class RunLock:
             # Byte zero is reserved for Windows locking. Never write it, and
             # clear metadata while still locked so a successor cannot be erased.
             os.ftruncate(descriptor, 1)
-            self.owner_path.unlink(missing_ok=True)
+            if self._owner_identity is not None:
+                details = self.owner_path.lstat()
+                if (details.st_dev, details.st_ino) == self._owner_identity:
+                    self.owner_path.unlink()
+            self._close_owner()
             self._unlock(descriptor)
         except OSError:
             pass
         finally:
+            # Drop the identity lease before the shared lock, including on
+            # cleanup errors. A dead/released owner can never verify a successor.
             try:
-                os.close(descriptor)
-            except OSError:
-                pass
+                self._close_owner()
+            finally:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
-    def _open(self) -> int:
+    def _open(self, *, create: bool = True) -> int:
         try:
-            private_directory(self.path.parent)
-            # The lock file carries no state. It may pre-exist from another
-            # service account, so do not require its owner or permissions.
-            return private_file(self.path, create=True, owner_only=False)
+            if create:
+                private_directory(self.path.parent)
+            else:
+                for parent in (self.path.parent, *self.path.parent.parents):
+                    details = parent.lstat()
+                    if not stat.S_ISDIR(details.st_mode) or getattr(details, "st_file_attributes", 0) & 0x400:
+                        raise CVEBeaconError("operation storage directory must not be a link")
+            # Windows byte-range probes require a writable descriptor, but
+            # never create or write files while observing dashboard state.
+            return private_file(self.path, create=create, readonly=not create and os.name != "nt", owner_only=False)
+        except FileNotFoundError:
+            if not create:
+                raise
+            raise CVEBeaconError("cannot open the run lock safely") from None
         except OSError as exc:
             raise CVEBeaconError("cannot open the run lock safely") from exc
 
-    def _holder(self, descriptor: int) -> str:
+    def _holder(self, descriptor: int, *, live=True) -> str:
         try:
-            owner_fd = private_file(self.owner_path, readonly=True)
+            inline = self._inline(descriptor)
+            token = self._token(inline)
+            if token is None:
+                # Legacy inline metadata is authoritative over obsolete siblings.
+                holder = describe_holder(inline)
+                if live and holder is not None and _dead_local_pid(holder.record):
+                    return "holder unavailable"
+                return holder or "holder unavailable"
+            path = owner_record_path(self.path, token)
+            owner_fd = private_file(path, readonly=os.name != "nt")
             try:
-                return describe_holder(os.read(owner_fd, _METADATA_LIMIT)) or "holder unavailable"
+                if live and not self._owner_is_live(owner_fd):
+                    return "holder unavailable"
+                os.lseek(owner_fd, 0, os.SEEK_SET)
+                holder = describe_holder(os.read(owner_fd, _METADATA_LIMIT))
             finally:
                 os.close(owner_fd)
-        except FileNotFoundError:
-            # Also recognise a holder from an older installation.
-            try:
-                os.lseek(descriptor, 1, os.SEEK_SET)
-                return describe_holder(os.read(descriptor, _METADATA_LIMIT)) or "holder unavailable"
-            except OSError:
-                return "holder unavailable"
+            details = os.fstat(descriptor)
+            if (holder is not None and holder.record.get("owner_token") == token
+                    and holder.record.get("lock_device") == details.st_dev
+                    and holder.record.get("lock_inode") == details.st_ino
+                    and self._inline(descriptor) == inline):
+                return holder
         except (OSError, CVEBeaconError):
-            return "holder unavailable"
+            pass
+        return "holder unavailable"
 
     def snapshot(self) -> dict | None:
-        """Report contention as active, and dead local records as stale."""
-        holder = self.probe()
-        if holder is None:
-            try:
-                descriptor = private_file(self.owner_path, readonly=True)
-                try:
-                    holder = describe_holder(os.read(descriptor, _METADATA_LIMIT))
-                finally:
-                    os.close(descriptor)
-            except (OSError, CVEBeaconError):
-                return None
-            if holder is None:
-                return None
-            state = "stale" if _dead_local_pid(holder.record) else "unknown"
-        else:
-            state = "active"
-        record = dict(getattr(holder, "record", {}))
-        if _dead_local_pid(record):
-            state = "stale"
-        elapsed = None
+        """Observe existing storage without creating files or trusting orphans."""
         try:
-            elapsed = max(0, int((datetime.now(timezone.utc) - datetime.fromisoformat(record["started_at"])).total_seconds()))
-        except (KeyError, TypeError, ValueError):
-            pass
-        return {**record, "state": state, "description": str(holder), "elapsed": elapsed,
-                "dashboard": getattr(holder, "dashboard", False)}
+            descriptor = self._open(create=False)
+        except FileNotFoundError:
+            return None
+        self._probing = True
+        acquired = False
+        try:
+            try:
+                self._lock(descriptor)
+                acquired = True
+            except OSError as exc:
+                if not _contention(exc):
+                    raise CVEBeaconError("cannot probe the operation lock") from exc
+            holder = self._holder(descriptor, live=not acquired)
+            if acquired and not isinstance(holder, Holder):
+                # A legacy private orphan may be shown only while the kernel
+                # lock is free. It can never identify a live acquisition.
+                try:
+                    owner_fd = private_file(owner_record_path(self.path), readonly=True)
+                    try:
+                        holder = describe_holder(os.read(owner_fd, _METADATA_LIMIT))
+                    finally:
+                        os.close(owner_fd)
+                except (OSError, CVEBeaconError):
+                    return None
+            if acquired and not isinstance(holder, Holder):
+                return None
+            record = dict(getattr(holder, "record", {}))
+            state = ("stale" if _dead_local_pid(record) else "unknown") if acquired else "active"
+            elapsed = None
+            try:
+                elapsed = max(0, int((datetime.now(timezone.utc) - datetime.fromisoformat(record["started_at"])).total_seconds()))
+            except (KeyError, TypeError, ValueError):
+                pass
+            return {**record, "state": state, "description": str(holder), "elapsed": elapsed,
+                    "dashboard": getattr(holder, "dashboard", False)}
+        finally:
+            if acquired:
+                self._unlock(descriptor)
+            self._probing = False
+            os.close(descriptor)
 
     def probe(self) -> str | None:
-        """Advisory contention check; the child always takes the real lock.
-
-        POSIX readers share a probe lock. Windows requires a brief nonblocking
-        byte-range attempt. Contention is busy even without readable metadata.
-        """
+        """Advisory nonblocking contention check; children take the real lock."""
         descriptor = self._open()
         self._probing = True
         try:

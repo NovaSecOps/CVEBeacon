@@ -132,7 +132,10 @@ def test_windows_lock_keeps_byte_zero_separate_and_clears_before_unlock(tmp_path
     monkeypatch.setattr(lock, "_lock", take)
     monkeypatch.setattr(lock, "_unlock", release)
     assert lock.acquire()
-    assert lock.path.read_bytes() == b"\0"
+    inline = lock.path.read_bytes()
+    assert inline.startswith(b"\0")
+    assert set(json.loads(inline[1:])) == {"owner_token"}
+    assert len(json.loads(inline[1:])["owner_token"]) == 32
     assert json.loads(lock.owner_path.read_bytes())["pid"] == os.getpid()
     lock.release()
     assert events == ["locked", "unlocked"]

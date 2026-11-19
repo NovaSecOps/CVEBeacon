@@ -214,8 +214,11 @@ def test_dead_local_holder_is_stale_on_operations(tmp_path, monkeypatch):
     lock = RunLock(run_lock_path(config), command="watch run")
     try:
         assert lock.acquire()
+        reference = lock.path.read_bytes()
         record = lock.owner_path.read_bytes()
         lock.release()
+        # Restore both crash artifacts; a sidecar alone cannot identify a run.
+        lock.path.write_bytes(reference)
         lock.owner_path.write_bytes(record)
         lock.owner_path.chmod(0o600)
         def dead(*args):
