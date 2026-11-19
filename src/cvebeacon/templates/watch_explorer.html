@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}CVE explorer · CVEBeacon{% endblock %}
+{% block content %}
+<h1>CVE explorer</h1>
+<form method="get">
+<label>CVE ID, keyword or alias<input name="q" value="{{ filters.q }}" maxlength="256"></label>
+<label>Source<select name="source"><option value="">All sources</option>{% for name in ['nvd','euvd','cve_list','cisa_kev','eu_kev','epss'] %}<option value="{{ name }}" {{ 'selected' if filters.source == name }}>{{ name }}</option>{% endfor %}</select></label>
+{% for name, label in [('kev','KEV'),('has_events','Has events'),('reported','Reported to clients')] %}<label>{{ label }}<select name="{{ name }}">{% for value, text in [('','All'),('yes','Yes'),('no','No')] %}<option value="{{ value }}" {{ 'selected' if filters[name] == value }}>{{ text }}</option>{% endfor %}</select></label>{% endfor %}
+<label>Severity<select name="severity"><option value="">All severities</option>{% for name in ['critical','high','medium','low','none','unknown'] %}<option {{ 'selected' if filters.severity == name }}>{{ name }}</option>{% endfor %}</select></label>
+<label>Published from<input type="date" name="since" value="{{ request.args.get('since','') }}"></label><label>Published through<input type="date" name="until" value="{{ request.args.get('until','') }}"></label>
+<label>Affected client<input name="client" value="{{ filters.client }}"></label>
+<label>Sort<select name="sort">{% for name, label in [('modified','Last modified'),('published','Published'),('cvss','CVSS'),('epss','EPSS'),('kev','KEV')] %}<option value="{{ name }}" {{ 'selected' if filters.sort == name }}>{{ label }}</option>{% endfor %}</select></label>
+<button>Search</button></form>
+{% if missing %}<h2>{{ missing }}</h2><p>Not in our database</p>{% include 'watch_presence.html' %}{% endif %}
+<p>{{ result.total }} CVEs · Page {{ page }}</p>
+<div class="table-wrap"><table><thead><tr><th>CVE</th><th>Description</th><th>Published</th><th>Modified</th><th>CVSS</th><th>EPSS</th><th>KEV</th></tr></thead><tbody>
+{% for item in result.records %}<tr><td><a href="{{ url_for('watch.cve', cve_id=item.cve_id) }}">{{ item.cve_id }}</a></td><td>{{ item.description or 'Not available' }}</td><td>{{ item.published or 'Not available' }}</td><td>{{ item.last_modified or 'Not available' }}</td><td>{{ item.cvss | map(attribute='score') | max if item.cvss else 'Not available' }}</td><td>{{ item.epss if item.epss is not none else 'Not available' }}</td><td>{{ 'Yes' if item.cisa_kev_added or item.eu_kev_added else 'No' }}</td></tr>{% else %}<tr><td colspan="7">No CVEs match these filters.</td></tr>{% endfor %}</tbody></table></div>
+<p>{% if previous_url %}<a href="{{ previous_url }}">Previous</a>{% endif %}{% if next_url %} <a href="{{ next_url }}">Next</a>{% endif %}</p>
+{% endblock %}

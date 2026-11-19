@@ -60,13 +60,14 @@ RUN_OPERATIONS = (
 )
 RETRY_OPERATIONS = ("watch-retry-failed", "watch-retry-ambiguous")
 FULL_HISTORY_OPERATIONS = frozenset({"watch-sync", "watch-run", "run"})
-WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:-1]) | frozenset(RETRY_OPERATIONS) | {"notify-test"}
+WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:-1]) | frozenset(RETRY_OPERATIONS) | {"notify-test", "watch-refresh"}
 
 OPERATION_LABELS = {
     "scan": "Scan inventory",
     "web-detect": "Detect client web technologies",
     "web-plan": "Show planned web requests",
     "watch-sync": "Synchronise watch data",
+    "watch-refresh": "Fetch or refresh a CVE",
     "watch-evaluate": "Evaluate every stored CVE",
     "watch-notify": "Deliver pending alerts",
     "watch-retry-failed": "Retry failed deliveries",
@@ -513,6 +514,7 @@ def build_command(
     backup_id: str | None = None,
     include_secrets: bool = False,
     created_by: str | None = None,
+    cve_id: str | None = None,
 ) -> list[str]:
     """Build the CLI child command without a shell or any secret value."""
     if operation not in OPERATION_LABELS:
@@ -555,6 +557,9 @@ def build_command(
         return [*base, "web-detect", label, *plan]
     if operation == "scan":
         return [*base, "scan"]
+    if operation == "watch-refresh":
+        from .watch.reported import normalize_cve_id
+        return [*base, "watch", "refresh", normalize_cve_id(cve_id)]
     if operation == "watch-sync":
         args = [*base, "watch", "sync"]
     elif operation == "watch-evaluate":
