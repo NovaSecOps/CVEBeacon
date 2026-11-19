@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .config import WATCH_INITIAL_MODES, WATCH_SOURCES, INVENTORY_FORMATS
 from .watch.catalog import SUPPORTED_LANGUAGES
-from .watch.channels import CHANNEL_TYPES, GROUPING_MODES, MESSAGE_FORMATS, SMTP_SECURITY, SMTP_DEFAULT_PORTS
+from .watch.channels import CHANNEL_TYPES, GROUPING_MODES, MESSAGE_FORMATS, SMTP_SECURITY, SMTP_DEFAULT_PORTS, TEAMS_BOT_FORMATS
 from .watch.records import CVSS_PROVIDERS
 from .watch.reported import IDENTITY_MODES
 from .watch.rules import EVENT_KINDS, OLD_CVES_MODES
@@ -53,6 +53,8 @@ BOUNDS = {
     "watch.overlap_minutes": (0, 1440, "1"),
     "dashboard.session_lifetime_seconds": (60, 86400, "1"),
     "dashboard.session_idle_seconds": (60, 86400, "1"),
+    "backup.retention_days": (1, 3650, "1"),
+    "backup.keep_min": (0, 1000, "1"),
     "channel.port": (1, 65535, "1"),
     "channel.max_items": (1, 100, "1"),
     "channel.timeout_seconds": (1, 300, "any"),
@@ -64,6 +66,7 @@ CHANNEL_DEFAULTS = {"allow_insecure": False, "security": "starttls", "port": SMT
 CHANNEL_REQUIRED = {
     "smtp": {"host", "from", "to"},
     "graph": {"tenant_id", "client_id", "sender", "to"},
+    "teams_bot": {"tenant_id", "app_id", "client_secret_file"},
     "telegram": {"chat_id"}, "matrix": {"homeserver", "room_id"},
     "ntfy": {"topic"}, "gotify": {"server"},
 }
@@ -127,6 +130,13 @@ def metadata(path, key, default, kind, *, channel_type=None):
         if key == "priority":
             choices = tuple(range(1, 6)) if channel_type == "ntfy" else tuple(range(-2, 11))
             default = 3 if channel_type == "ntfy" else 5
+        if channel_type == "teams_bot" and key == "format":
+            choices = TEAMS_BOT_FORMATS
+            default = "adaptive_card"
+        elif channel_type == "teams_bot" and key in {"recipients", "conversation_references"}:
+            default = ()
+        elif channel_type == "teams_bot" and key == "service_url":
+            default = "https://smba.trafficmanager.net/teams/"
     if isinstance(default, Path):
         default = str(default)
     if isinstance(default, tuple):
@@ -136,11 +146,22 @@ def metadata(path, key, default, kind, *, channel_type=None):
         minimum = 3
     if key in {"to", "cc", "bcc", "recipients"}:
         kind = "addresses"
+    if channel_type == "teams_bot" and key == "recipients":
+        # Bot recipients are object IDs or UPNs, not only email addresses.
+        kind = "toml"
     if choices:
         kind = "enum"
     help_text = HELP.get(key, "")
     if path == "dashboard" and key.endswith("_env"):
         help_text = "Environment variable name, never its secret contents. Dashboard changes require an administrator."
+    elif path == "backup" and key == "directory":
+        help_text = "Backup directory. Defaults to the backups directory beside the state database. Only administrators may change filesystem paths."
+    elif path == "backup" and key == "compress":
+        help_text = "Compress dashboard downloads. Stored backups stay as plain files."
+    elif path == "backup" and key == "retention_days":
+        help_text = "Delete backups older than this many days, keeping the retained minimum."
+    elif path == "backup" and key == "keep_min":
+        help_text = "Never delete the newest this many backups, even when they are past retention."
     elif key.endswith("_env"):
         help_text = "Environment variable name, never its secret contents. Changing references requires manage_secrets."
     elif key.endswith("_file"):
@@ -156,6 +177,8 @@ def metadata(path, key, default, kind, *, channel_type=None):
     if identity == "notifications.email.recipients":
         help_text = "Legacy recipient names or addresses, separated by commas or entered as a TOML array. Existing ordering and duplicates are retained."
     example = EXAMPLES.get(key, choices[0] if choices else default if default is not None else "example")
+    if path == "backup" and key == "directory":
+        example = "backups"
     if key.endswith("_env"):
         example = "EXAMPLE_SECRET"
     elif key.endswith("_file"):

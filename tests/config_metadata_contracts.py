@@ -24,7 +24,8 @@ def enum_contracts():
         for key, choices in common.items():
             contracts[f"watch.channels.{kind}.{key}"] = ("enum", choices)
         if "format" in keys:
-            contracts[f"watch.channels.{kind}.format"] = ("enum", channels.MESSAGE_FORMATS)
+            choices = channels.TEAMS_BOT_FORMATS if kind == "teams_bot" else channels.MESSAGE_FORMATS
+            contracts[f"watch.channels.{kind}.format"] = ("enum", choices)
         if "security" in keys:
             contracts[f"watch.channels.{kind}.security"] = ("enum", channels.SMTP_SECURITY)
         if "priority" in keys:
@@ -46,7 +47,8 @@ def test_discovered_enum_sites_have_field_contracts():
         ("config", "load_config", "IDENTITY_MODES"): ["watch.reporting.identity"],
         ("config", "load_config", "INVENTORY_FORMATS"): ["inventory.format"],
         ("channels", "_common", "GROUPING_MODES"): [f"watch.channels.{kind}.grouping" for kind in channels.CHANNEL_TYPES],
-        ("channels", "_common", "MESSAGE_FORMATS"): [f"watch.channels.{kind}.format" for kind, keys in channels.TYPE_KEYS.items() if "format" in keys],
+        ("channels", "_common", "MESSAGE_FORMATS"): [f"watch.channels.{kind}.format" for kind, keys in channels.TYPE_KEYS.items() if "format" in keys and kind != "teams_bot"],
+        ("channels", "_common", "TEAMS_BOT_FORMATS"): ["watch.channels.teams_bot.format"],
         ("channels", "_parse_smtp", "SMTP_SECURITY"): ["watch.channels.smtp.security"],
         ("channels", "parse_channels", "CHANNEL_TYPES"): [f"watch.channels.{kind}.type" for kind in channels.CHANNEL_TYPES],
         ("catalog", "canonical_language", "SUPPORTED_LANGUAGES"): ["watch.language", *[f"watch.channels.{kind}.language" for kind in channels.CHANNEL_TYPES]],
@@ -72,6 +74,7 @@ def test_discovered_enum_sites_have_field_contracts():
                         component_constraints = {
                             ("channels", "_matrix_homeserver", "parts.path"): {"", "/"},
                             ("channels", "_validate_webhook_host", "parts.hostname"): {"discord.com", "discordapp.com"},
+                            ("channels", "teams_service_url", "port"): {None, 443},
                         }
                         site = (module.__name__.rsplit(".", 1)[-1], name, ast.unparse(node.left))
                         assert site in component_constraints, "Export enum choices as a shared constant"

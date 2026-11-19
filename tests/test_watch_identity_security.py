@@ -249,7 +249,7 @@ def test_migration_never_rechains_a_downgraded_edited_row(tmp_path):
         by = db.execute("SELECT by FROM watch_report WHERE id=1").fetchone()[0]
     assert after == before
     assert by == "Mallory"
-    assert reopened.metadata()["schema_version"] == "9"
+    assert reopened.metadata()["schema_version"] == "10"
     assert reopened.verify_reports() == 1
 
 
@@ -276,7 +276,7 @@ def test_downgraded_pre_fix_v6_rows_are_not_rechained(tmp_path):
         db.execute("UPDATE watch_meta SET value='6' WHERE key='schema_version'")
     reopened = WatchStore(store.path, clock=lambda: NOW)
     reopened.initialize()
-    assert reopened.metadata()["schema_version"] == "9"
+    assert reopened.metadata()["schema_version"] == "10"
     assert reopened.verify_reports() == 1
 
 

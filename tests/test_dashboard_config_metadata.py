@@ -1,5 +1,6 @@
 """Per-field contracts checked against validator identities and loader output."""
 
+import os
 from dataclasses import replace
 
 import pytest
@@ -113,7 +114,12 @@ def test_defaults_match_minimal_loader_output(tmp_path):
 
 
 
-def channel_rows():
+def channel_rows(tmp_path):
+    secret = tmp_path / "teams-secret"
+    if not secret.exists():
+        secret.write_text("synthetic-private-secret", encoding="utf-8")
+        if os.name == "posix":
+            secret.chmod(0o600)
     return {
         "smtp": email_channel(),
         "graph": {"type": "graph", "tenant_id": "example", "client_id": "example", "sender": "alerts@example.com", "to": ["alerts@example.com"], "client_secret_env": "EXAMPLE_SECRET"},
@@ -123,6 +129,9 @@ def channel_rows():
         "ntfy": {"type": "ntfy", "topic": "example"},
         "gotify": {"type": "gotify", "server": "https://example.com", "app_token_env": "EXAMPLE_SECRET"},
         "webhook": {"type": "webhook", "url_env": "EXAMPLE_WEBHOOK"},
+        "teams_bot": {"type": "teams_bot", "tenant_id": "00000000-0000-0000-0000-000000000001",
+                      "app_id": "00000000-0000-0000-0000-000000000002",
+                      "client_secret_file": secret.name, "recipients": ["alerts@example.com"]},
     }
 
 
@@ -132,14 +141,14 @@ def test_channel_defaults_against_loader(tmp_path, kind, monkeypatch):
     monkeypatch.delenv("EXAMPLE_SECRET", raising=False)
     monkeypatch.delenv("EXAMPLE_WEBHOOK", raising=False)
     path = tmp_path / "config.toml"
-    path.write_text(dc.dumps({"inventory": {"path": "inventory.csv"}, "watch": {"channels": {"example": channel_rows()[kind]}}}))
+    path.write_text(dc.dumps({"inventory": {"path": "inventory.csv"}, "watch": {"channels": {"example": channel_rows(tmp_path)[kind]}}}))
     channel = load_config(path).watch.channels[0]
     for key in dc.COMMON_KEYS | dc.TYPE_KEYS[kind]:
         spec = dc.FIELD_METADATA[f"watch.channels.{kind}.{key}"]
         assert spec.help and spec.example is not None
-        if key == "url" and "url_env" in channel_rows()[kind]:
+        if key == "url" and "url_env" in channel_rows(tmp_path)[kind]:
             assert spec.default is None  # Resolved references are not a direct URL default.
-        elif key not in channel_rows()[kind]:
+        elif key not in channel_rows(tmp_path)[kind]:
             actual = getattr(channel, key, channel.options.get(key))
             if isinstance(actual, tuple):
                 actual = list(actual)
@@ -171,7 +180,7 @@ def test_channel_numeric_limits_against_loader(tmp_path, kind, key, monkeypatch)
     assert lower is not None and upper is not None
     path = tmp_path / "config.toml"
     for number, accepted in ((lower - 1, False), (lower, True), (upper, True), (upper + 1, False)):
-        row = {**channel_rows()[kind], key: number}
+        row = {**channel_rows(tmp_path)[kind], key: number}
         path.write_text(dc.dumps({"inventory": {"path": "inventory.csv"}, "watch": {"channels": {"example": row}}}))
         if accepted:
             load_config(path)

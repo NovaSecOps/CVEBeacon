@@ -1,10 +1,82 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}CVEBeacon{% endblock %}</title>{% block head %}{% endblock %}<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}"></head>
-<body><header class="site-header"><a class="brand" href="{{ url_for('overview') }}">CVEBeacon</a><span class="tagline">Vulnerability monitoring</span>
-{% if not auth_enabled or authenticated %}<nav class="main-nav" aria-label="Main navigation">{% for endpoint, label in [('overview','Overview'),('watch.overview','Watch'),('watch.explorer','CVEs'),('watch.clients','Clients'),('web.index','Web assets'),('findings','Findings'),('assets','Assets'),('history','History'),('query','Manual query'),('reports','Reports'),('sources','Sources')] %}{% if not accounts or ('run' in permissions if endpoint in ['query','reports'] else 'view' in permissions) %}<a href="{{ url_for(endpoint) }}" {% if request.endpoint == endpoint %}aria-current="page"{% endif %}>{{ label }}</a>{% endif %}{% endfor %}{% if not accounts or 'view' in permissions %}<a href="{{ url_for('operations.index') }}" {% if request.endpoint == 'operations.index' %}aria-current="page"{% endif %}>Operations</a>{% endif %}{% if accounts and 'manage_schedule' in permissions %}<a href="{{ url_for('operations.schedule') }}" {% if request.endpoint == 'operations.schedule' %}aria-current="page"{% endif %}>Schedule</a>{% endif %}</nav>{% endif %}
-<div class="header-actions">{% if accounts and authenticated %}<nav class="account-nav" aria-label="Account navigation"><a href="{{ url_for('account') }}">My account and sessions</a>{% if 'manage_users' in permissions %}<a href="{{ url_for('user_list') }}">Users</a>{% endif %}{% if current_user.is_admin %}<a href="{{ url_for('roles') }}">Roles</a>{% endif %}{% if 'view_audit' in permissions %}<a href="{{ url_for('audit') }}">Audit</a>{% endif %}</nav>{% endif %}
-{% if accounts and authenticated and 'view' in permissions %}<nav class="config-nav" aria-label="Configuration navigation"><a href="{{ url_for('config_editor.index') }}">Configuration</a></nav>{% endif %}
-{% if not accounts or 'view' in permissions %}<nav class="update-nav" aria-label="Update navigation"><a href="{{ url_for('updates.index') }}">Updates</a></nav>{% endif %}
-{% if authenticated %}<form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Log out</button></form>{% endif %}</div>
-</header><main>{% block content %}{% endblock %}</main><footer>Stored observations retain their original timestamps. Scheduled and dashboard operations run as separate short-lived processes.</footer></body></html>
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}CVEBeacon{% endblock %}</title>{% block head %}{% endblock %}<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}"><script src="{{ url_for('static', filename='ui.js') }}"></script></head>
+{#- Navigation visibility. Each rule reproduces the permission condition the former header used for that link. -#}
+{% set nav_visible = not auth_enabled or authenticated %}
+{% set nav_can = {
+  'view': not accounts or 'view' in permissions,
+  'run': not accounts or 'run' in permissions,
+  'schedule': accounts and 'manage_schedule' in permissions,
+  'users': accounts and authenticated and 'manage_users' in permissions,
+  'roles': accounts and authenticated and current_user.is_admin,
+  'audit': accounts and authenticated and 'view_audit' in permissions,
+  'config': accounts and authenticated and 'view' in permissions,
+  'account': accounts and authenticated,
+  'admin': accounts and authenticated and current_user.is_admin,
+} %}
+{% set nav_current = nav_active | default(request.endpoint) %}
+{% set nav_groups = [
+  ('', [('overview', 'Home', 'view', 'home')]),
+  ('Monitoring', [('watch.events', 'Alerts', 'view', 'bell'), ('watch.explorer', 'CVE explorer', 'view', 'search'), ('watch.overview', 'Watch overview', 'view', 'eye'), ('watch.reported', 'Reported to clients', 'view', 'flag')]),
+  ('Clients', [('watch.clients', 'Clients', 'view', 'users'), ('web.index', 'Web assets', 'view', 'globe')]),
+  ('Scans', [('findings', 'Findings', 'view', 'shield'), ('assets', 'Assets', 'view', 'box'), ('history', 'History', 'view', 'clock'), ('reports', 'Reports', 'run', 'file'), ('query', 'Manual query', 'run', 'terminal')]),
+  ('Activity', [('operations.index', 'Operations', 'view', 'activity')]),
+  ('Settings', [('operations.schedule', 'Schedule', 'schedule', 'calendar'), ('sources', 'Sources', 'view', 'database'), ('backups.index', 'Backups', 'view', 'archive'), ('updates.index', 'Updates', 'view', 'refresh'), ('user_list', 'Users', 'users', 'key'), ('roles', 'Roles', 'roles', 'lock'), ('audit', 'Audit', 'audit', 'list'), ('config_editor.index', 'Configuration', 'config', 'sliders'), ('account', 'My account', 'account', 'user')]),
+] %}
+<body>
+<svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 17V11a6 6 0 0112 0v6l2 2H4zM10 21h4"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4M5 4h12l-2 4 2 4H5"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-4 3-6 7-6s7 2 7 6M16 4.5a3.5 3.5 0 010 7M18 14c2.5.6 4 2.4 4 6"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></symbol>
+<symbol id="i-box" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4v10l-9 4-9-4zM3 7l9 4 9-4M12 11v10"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></symbol>
+<symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></symbol>
+<symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+<symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v12h14V8M10 12h4"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 00-14-4L4 9M4 4v5h5M4 13a8 8 0 0014 4l2-2M20 20v-5h-5"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M6 14v6"/></symbol>
+<symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.5 3.5-7 8-7s8 2.5 8 7"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14A8 8 0 0110 4a8 8 0 1010 10z"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3l10 18H2zM12 10v5M12 18v.01"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+<symbol id="i-inbox" viewBox="0 0 24 24"><path d="M3 13l3-8h12l3 8v6H3zM3 13h5l1 3h6l1-3h5"/></symbol>
+<symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+</defs></svg>
+<a class="skip-link" href="#content">Skip to main content</a>
+<header class="topbar">
+{% if nav_visible %}<button type="button" class="nav-toggle" aria-controls="sidebar" aria-expanded="false" aria-label="Menu"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-menu"/></svg></button>{% endif %}
+<a class="brand" href="{{ url_for('overview') }}"><svg class="icon brand-mark" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-shield"/></svg><span>CVEBeacon</span></a>
+{% if nav_visible and nav_can['view'] %}<form class="global-search" role="search" method="get" action="{% if has_endpoint('watch.explorer') %}{{ url_for('watch.explorer') }}{% else %}{{ url_for('watch.events') }}{% endif %}"><label class="visually-hidden" for="global-search-input">Search for a CVE</label><svg class="icon search-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg><input id="global-search-input" type="search" name="{% if has_endpoint('watch.explorer') %}q{% else %}cve{% endif %}" placeholder="Search CVE…" maxlength="200" autocomplete="off"><button type="submit" class="visually-hidden">Search</button></form>{% endif %}
+<div class="topbar-actions">
+<button type="button" class="theme-toggle" data-mode="light" aria-label="Switch colour theme" title="Switch colour theme"><svg class="icon i-moon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-moon"/></svg><svg class="icon i-sun" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sun"/></svg></button>
+{% if authenticated %}<details class="account-menu"><summary><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg><span class="account-name">{% if accounts %}{{ current_user.identity }}{% else %}Account{% endif %}</span><svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+<div class="account-panel">{% if accounts %}<a href="{{ url_for('account') }}">My account</a>{% endif %}<form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Log out</button></form></div></details>{% endif %}
+</div>
+</header>
+<div class="shell{% if not nav_visible %} no-sidebar{% endif %}">
+{% if nav_visible %}<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+{% for group, items in nav_groups %}{% set nav_shown = [] %}{% for endpoint, label, rule, icon in items %}{% if nav_can[rule] and has_endpoint(endpoint) %}{% set _ = nav_shown.append((endpoint, label, icon)) %}{% endif %}{% endfor %}
+{% if nav_shown %}<div class="nav-group">{% if group %}<p class="nav-heading">{{ group }}</p>{% endif %}<ul>{% for endpoint, label, icon in nav_shown %}<li><a href="{{ url_for(endpoint) }}"{% if nav_current == endpoint %} aria-current="page"{% endif %}><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-{{ icon }}"/></svg><span>{{ label }}</span></a></li>{% endfor %}</ul></div>{% endif %}{% endfor %}
+</nav>{% endif %}
+<div class="main-col">
+<main id="content" tabindex="-1">{% block content %}{% endblock %}</main>
+<footer>Stored observations retain their original timestamps. Scheduled and dashboard operations run as separate short-lived processes.</footer>
+</div>
+</div>
+</body></html>

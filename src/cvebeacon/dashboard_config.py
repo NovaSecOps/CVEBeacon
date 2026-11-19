@@ -24,7 +24,7 @@ import tomllib
 from flask import Blueprint, abort, g, redirect, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
 
-from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, DashboardConfig,
+from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, BackupConfig, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
                      TeamsConfig, WatchConfig, load_config, notification_recipients)
 from .dashboard_config_fields import metadata
@@ -203,6 +203,7 @@ SCHEMAS = {
     "dashboard": [("dashboard", defaults(DashboardConfig))],
     "http": [("http", defaults(HttpConfig))],
     "system": [("state", {"database": ".cvebeacon/state.db"}), ("output", {"directory": "reports"})],
+    "backup": [("backup", defaults(BackupConfig))],
     "notifications": [("notifications.teams", defaults(TeamsConfig)),
                       ("notifications.email", defaults(EmailConfig))],
 }
@@ -210,18 +211,18 @@ SECTIONS = {
     "watch": "edit_watch", "sources": "edit_sources", "rules": "edit_rules",
     "channels": "edit_channels", "reporting": "edit_reporting",
     "inventory": "edit_inventory", "dashboard": "edit_dashboard",
-    "http": "edit_http", "system": "edit_system",
+    "http": "edit_http", "system": "edit_system", "backup": "edit_system",
     "notifications": "edit_channels", "product-mappings": "edit_inventory",
 }
 RULE_FIELDS = defaults(Rule)
 MAPPING_FIELDS = dict.fromkeys(("vendor", "product", "cpe"))
-BOOLEAN_FIELDS = {"web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported"}
+BOOLEAN_FIELDS = {"web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported", "compress"}
 NUMBER_FIELDS = {"port", "max_items", "priority", "min_interval_seconds", "timeout_seconds",
                  "connect_timeout", "read_timeout", "retries", "backoff_seconds", "header_row",
                  "minimum_request_interval", "backfill_days", "overlap_minutes",
-                 "session_lifetime_seconds", "session_idle_seconds"}
+                 "session_lifetime_seconds", "session_idle_seconds", "retention_days", "keep_min"}
 COMPLEX_FIELDS = {"sources", "channels", "events", "cvss_providers", "condition", "columns",
-                  "to", "cc", "bcc", "recipients"}
+                  "to", "cc", "bcc", "recipients", "conversation_references"}
 
 
 # This security allowlist is deliberately independent of presentation metadata.
@@ -233,6 +234,7 @@ _SESSION_SAFE_TABLES = {
     "inventory": {"path", "format", "worksheet", "header_row", "records_path", "delimiter", "encoding", "web_snapshots"},
     "http": {"connect_timeout", "read_timeout", "retries", "backoff_seconds", "user_agent"},
     "state": {"database"}, "output": {"directory"},
+    "backup": {"directory", "retention_days", "keep_min", "compress"},
     "notifications.teams": {"enabled", "webhook_env"},
     "notifications.email": {"enabled", "tenant_id_env", "client_id_env", "client_secret_env", "sender", "recipients"},
     "rule": {"name", "condition", "channels", "events", "cvss_providers", "enabled", "old_cves"},
@@ -246,6 +248,8 @@ _SESSION_CHANNEL_TYPES = {
     "smtp": {"host", "port", "security", "username", "password_env", "password_file", "from", "to", "cc", "bcc", "format"},
     "graph": {"tenant_id", "client_id", "client_secret_env", "client_secret_file", "sender", "to", "cc", "bcc", "format"},
     "teams": {"webhook_url_env", "webhook_url_file"},
+    "teams_bot": {"tenant_id", "app_id", "client_secret_file", "recipients",
+                  "conversation_references", "service_url", "format"},
     "slack": {"webhook_url_env", "webhook_url_file"},
     "discord": {"webhook_url_env", "webhook_url_file"},
     "telegram": {"bot_token_env", "bot_token_file", "chat_id"},
@@ -384,6 +388,7 @@ def session_settings_changed(before, after):
     }
     for section in ("sources", "http", "state", "output"):
         nested[section] = lambda a, b, section=section: _session_table_changed(a, b, _SESSION_SAFE_TABLES[section])
+    nested["backup"] = lambda a, b: _session_table_changed(a, b, _SESSION_SAFE_TABLES["backup"])
     return _session_table_changed(before, after, set(), nested)
 
 
@@ -764,6 +769,13 @@ def _candidate_derived_paths(updated, configs):
         files.update(path.resolve() for path in _database_paths(updated.watch.users_database))
         files.add(Path(updated.watch.database).resolve().parent / LOCK_NAME)
         files.update(owner_storage_paths(run_lock_path(updated)))
+    candidate_backup = (updated.backup.directory
+                        or Path(updated.database_path).parent / "backups")
+    if not any(_same_path(candidate_backup.resolve(),
+                          (config.backup.directory
+                           or Path(config.database_path).parent / "backups").resolve())
+               for config in configs):
+        directories.add(candidate_backup.resolve())
     return files, directories
 
 
@@ -780,6 +792,7 @@ def _protected_paths(configs, backup_dir, documents=(), *, base=None, reference_
         files.update(path.resolve() for path in _database_paths(config.watch.database))
         files.update(path.resolve() for path in _database_paths(config.database_path))
         files.update(path.resolve() for path in _database_paths(config.watch.users_database))
+        directories.add((config.backup.directory or Path(config.database_path).parent / "backups").resolve())
         if config.inventory is not None and config.inventory.path is not None:
             files.add(config.inventory.path.resolve())
         secret_directory = _secret_directory(config).resolve()
@@ -1737,6 +1750,7 @@ def effective_paths(config):
         ("watch",): config.watch.database,
         ("users",): config.watch.users_database,
         ("output",): config.output_dir,
+        ("backup",): config.backup.directory or (Path(config.database_path).parent / "backups"),
     }
     if config.inventory is not None and config.inventory.path is not None:
         values[("inventory",)] = config.inventory.path
@@ -1924,9 +1938,17 @@ def check_protected_paths(updated, config_path, backup_dir, configs, documents=(
                   ("output.directory", updated.output_dir, output_unchanged)]
     if updated.inventory is not None and updated.inventory.path is not None:
         operations.append(("inventory.path", updated.inventory.path, inventory_unchanged))
+    backup_unchanged = {
+        (config.backup.directory or Path(config.database_path).parent / "backups").resolve()
+        for config in configs
+    }
+    if updated.backup.directory is not None:
+        operations.append(("backup.directory", updated.backup.directory, backup_unchanged))
     for label, path, unchanged in operations:
         if aliases_protected_file(path, unchanged):
             raise ConfigurationError(f"{label} must not alias the configuration, account, secret or operational store")
+        if label == "backup.directory" and any(_same_path(path.resolve(), item) for item in backup_unchanged):
+            continue
         if aliases_protected_directory(path):
             raise ConfigurationError(f"{label} must not alias a protected directory")
     for index, (label, path, _) in enumerate(operations):
@@ -2070,6 +2092,8 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
             common_defaults = defaults(ChannelConfig)
             if folded == "telegram":
                 common_defaults["min_interval_seconds"] = 3.0
+            if folded == "teams_bot":
+                common_defaults["format"] = "adaptive_card"
             schema = {key: common_defaults.get(key) for key in ["name", *sorted(COMMON_KEYS | TYPE_KEYS[folded])]}
             groups.append((f"{kind} channel {index + 1}", schema, data,
                            ("watch", "channels", name)))
@@ -2100,10 +2124,21 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                 hint = "cvebeacon-watch.db beside the state database"
             if direct_url and item is not None:
                 hint = "Existing endpoint is hidden and retained"
+            help_text = ""
+            if section == "channels" and data.get("type", "").casefold() == "teams_bot":
+                help_text = {
+                    "tenant_id": "Single-tenant Azure Bot directory UUID",
+                    "app_id": "Azure Bot application UUID",
+                    "recipients": '["alerts@example.com"] or a list of Entra object UUIDs',
+                    "conversation_references": '[{ conversation_id = "conversation-id", service_url = "https://smba.trafficmanager.net/teams/" }]',
+                    "service_url": "Microsoft Bot Connector HTTPS URL on smba.trafficmanager.net; defaults to the public Teams endpoint",
+                    "format": "adaptive_card",
+                    "client_secret_file": "Owner-only file containing the app secret",
+                }.get(key, "")
             path_value = key in {"database", "directory", "path"} or key.endswith("_file")
             controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
                              "kind": spec.kind, "choices": spec.choices, "required": spec.required,
-                             "help": spec.help, "example": _display(spec.example), "requirement": spec.requirement,
+                             "help": help_text or spec.help, "example": _display(spec.example), "requirement": spec.requirement,
                              "minimum": spec.minimum, "maximum": spec.maximum, "step": spec.step,
                              "checked": item is True or item is None and spec.default is True,
                              "identity": f"{path}.{key}", "spec": spec,

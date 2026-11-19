@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from .config import AppConfig, InventoryConfig, load_config
+from .config import AppConfig, ConfigurationError, InventoryConfig, load_config
 from .clients import affected_clients, format_affected_clients
 from .engine import QueryEngine
 from .errors import CVEBeaconError, SourceError
@@ -72,6 +72,12 @@ def _parser() -> argparse.ArgumentParser:
     export = commands.add_parser("export", help="run a current query and write a report without committing state")
     export.add_argument("--format", choices=("xlsx", "json"), default="xlsx")
     export.add_argument("--output")
+    export_sub = export.add_subparsers(dest="export_command")
+    stix = export_sub.add_parser("stix", help="export the latest successful scan as a STIX 2.1 bundle")
+    stix.add_argument("--output", required=True, help="bundle JSON file to write")
+    stix.add_argument("--client", help="only export findings for this client label")
+    stix.add_argument("--include-clients", action="store_true", help="include client identity objects and labels")
+    stix.add_argument("--since", help="only export findings first seen on or after this ISO date")
     notify = commands.add_parser("notify", help="test configured notification channels")
     notify_sub = notify.add_subparsers(dest="notify_command", required=True)
     notify_test = notify_sub.add_parser("test")
@@ -81,6 +87,18 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--allow-watch-only", action="store_true", help="validate local watch state when no inventory is configured")
     doctor.add_argument("--local-state", action="store_true", help="validate local state without requiring notification environment variables")
     commands.add_parser("migrate", help="migrate and integrity-check local databases without network access")
+    backup = commands.add_parser("backup", help="create, verify, download and restore local backups")
+    backup_sub = backup.add_subparsers(dest="backup_command", required=True)
+    backup_create = backup_sub.add_parser("create", help="take a verified backup of state and configuration")
+    backup_create.add_argument("--include-secrets", action="store_true", help="also copy referenced secret files")
+    backup_create.add_argument("--created-by", help="record who requested the backup")
+    backup_sub.add_parser("list", help="list retained backups")
+    backup_verify = backup_sub.add_parser("verify", help="check every file and manifest hash")
+    backup_verify.add_argument("backup_id")
+    backup_restore = backup_sub.add_parser("restore", help="replace state and configuration from a backup")
+    backup_restore.add_argument("backup_id")
+    backup_restore.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    backup_sub.add_parser("prune", help="apply backup retention while keeping the minimum")
     update = commands.add_parser("update", help="check or apply signed GitHub releases")
     update_sub = update.add_subparsers(dest="update_command", required=True)
     check_update = update_sub.add_parser("check")
@@ -697,12 +715,16 @@ def _run_watch(args, config: AppConfig) -> int:
         with HttpClient(config.http) as http:
             if getattr(args, "notify_command", None) == "test":
                 outcome = send_test(config, http, args.channel)
+                from .watch.delivery import format_recipient_results
+
+                recipient_line = format_recipient_results(outcome.recipients)
                 if outcome.ok:
-                    print(f"{outcome.channel} ({outcome.type}): test message sent")
+                    print(f"{outcome.channel} ({outcome.type}): test message sent" + recipient_line)
                     return 0
                 print(
                     f"{outcome.channel} ({outcome.type}): test message failed"
                     + (f"; {outcome.error}" if outcome.error else "")
+                    + recipient_line
                 )
                 return 3
             delivery = deliver_pending(
@@ -872,6 +894,43 @@ def _run_query(config: AppConfig, assets: list[Asset], *, known_findings=()):
 def _report_path(config: AppConfig, kind: str) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return config.output_dir / f"cvebeacon-{stamp}.{kind}"
+
+
+def _run_stix_export(args, config: AppConfig) -> int:
+    from .stix import export_stix
+
+    destination = Path(args.output).expanduser().resolve()
+    protected = {config.config_path}
+    for database in (
+        config.database_path,
+        config.watch.database,
+        config.watch.users_database,
+    ):
+        protected.add(database)
+        protected.update(
+            Path(str(database) + suffix)
+            for suffix in ("-wal", "-shm", "-journal")
+        )
+    if config.inventory is not None and config.inventory.path is not None:
+        protected.add(config.inventory.path)
+    if destination in protected:
+        raise CVEBeaconError(
+            "STIX output cannot overwrite the configuration, inventory or "
+            "local database, including SQLite sidecar files"
+        )
+    print(
+        export_stix(
+            config.database_path,
+            destination,
+            client=args.client,
+            include_clients=args.include_clients,
+            since=args.since,
+            warning=lambda message: print(
+                f"warning: {message}", file=sys.stderr
+            ),
+        )
+    )
+    return 0
 
 
 def _source_status(store: StateStore) -> list[dict[str, object]]:
@@ -1303,7 +1362,20 @@ def run(args: argparse.Namespace) -> int:
         if not args.yes and input("Remove the CVEBeacon schedule? [y/N] ").strip().casefold() not in {"y", "yes"}: print("cancelled"); return 1
         print("removed" if remove(system=args.platform) else "not installed")
         return 0
-    config = load_config(args.config)
+    stix_export = (
+        args.command == "export"
+        and getattr(args, "export_command", None) == "stix"
+    )
+    try:
+        config = load_config(args.config)
+    except ConfigurationError:
+        if not stix_export:
+            raise
+        # A state-only configuration is enough to read completed scan state;
+        # it needs no inventory path for this export.
+        config = load_config(args.config, allow_state_only=True)
+    if stix_export:
+        return _run_stix_export(args, config)
     lock = None
     if _lock_required(args):
         label = " ".join(
@@ -1324,6 +1396,9 @@ def run(args: argparse.Namespace) -> int:
         if args.command == "web-detect":
             from .web_assets import run_detection
             return run_detection(config, args.client, plan=args.plan)
+        if args.command == "backup":
+            from .backup import cli as backup_cli
+            return backup_cli(args, config)
         if args.command == "users":
             return _run_users(args, config)
         if args.command == "watch":

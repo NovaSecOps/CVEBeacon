@@ -248,7 +248,7 @@ def test_v1_database_migrates_in_place(tmp_path):
         )
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "9"
+    assert store.metadata()["schema_version"] == "10"
     with sqlite3.connect(path) as db:
         tables = {
             row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -311,8 +311,8 @@ def test_unknown_schema_version_still_fails_closed(tmp_path):
     store = WatchStore(path)
     store.initialize()
     with sqlite3.connect(path) as db:
-        db.execute("UPDATE watch_meta SET value='10' WHERE key='schema_version'")
-    with pytest.raises(StateError, match="unsupported watch schema version 10"):
+        db.execute("UPDATE watch_meta SET value='11' WHERE key='schema_version'")
+    with pytest.raises(StateError, match="unsupported watch schema version 11"):
         store.initialize()
 
 
@@ -367,7 +367,7 @@ def test_v2_database_keeps_deliveries_and_adds_statuses(tmp_path):
         )
     upgraded = WatchStore(path, clock=lambda: NOW)
     upgraded.initialize()
-    assert upgraded.metadata()["schema_version"] == "9"
+    assert upgraded.metadata()["schema_version"] == "10"
     assert upgraded.delivery_status()[0].pending == 1
     upgraded.mark_delivery([event_id], "soc-email", "ambiguous", error="test")
     assert upgraded.delivery_status()[0].ambiguous == 1
@@ -489,7 +489,7 @@ def test_v3_database_adds_first_attempt_at_and_keeps_rows(tmp_path):
         )
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "9"
+    assert store.metadata()["schema_version"] == "10"
     with sqlite3.connect(path) as db:
         columns = {
             row[1] for row in db.execute("PRAGMA table_info(watch_delivery)")
@@ -576,7 +576,7 @@ def test_p1a_queue_upgrade_drops_stale_obligations(tmp_path, initial_mode):
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
     metadata = store.metadata()
-    assert metadata["schema_version"] == "9"
+    assert metadata["schema_version"] == "10"
     assert metadata["initial_evaluated_at"] == NOW.isoformat()
     assert store.pending_evaluations(10) == ()
     assert store.status()["rows"] == 1

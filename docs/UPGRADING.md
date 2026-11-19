@@ -1,13 +1,19 @@
 # Upgrading CVEBeacon
 
 Old configuration files remain valid. The optional `[update]` section defaults
-to disabled. Database migrations run locally and preserve existing records.
-Back up before upgrading; do not run an older executable against newer schemas.
+to disabled and the optional `[backup]` section uses owner-only local defaults.
+Database migrations run locally and preserve existing records. Back up before
+upgrading with `cvebeacon backup create`; see [backup and restore](BACKUP.md).
+Do not run an older executable against newer schemas.
 
-## Watch schema 8 to 9
+## Watch schema 9 to 10
 
-The next watch write fills in CISA Vulnrichment SSVC exploitation from stored
-CVE List payloads in one transaction. Explicit `none` is stored for display and
+The first watch write applies any pending steps in order from schema 7 to 8
+to 9 to 10, in one transaction. Schema 10 preserves the Teams bot conversations,
+frozen batches and delivery records introduced in schema 9.
+
+The 9-to-10 step fills in CISA Vulnrichment SSVC exploitation from stored
+CVE List payloads. Explicit `none` is stored for display and
 filtering. Only recovered `poc` and `active` statuses enter the evaluation queue
 as initial evidence. Existing matches absorb the recovered status into their
 baseline without creating an `exploitation_active` event. New matches use the
@@ -84,6 +90,27 @@ The CVE List cursor records the last complete archive boundary. No delta-log
 queue or per-CVE repair table exists in schema 8. Read-only pages still do not
 migrate or take write locks.
 
+## Optional Teams bot channel (schema 8 to 9)
+
+Back up the watch database before upgrading. The schema 8 to 9 step runs
+after provider storage is ready and before the schema 10 backfill, preserving existing event, delivery and
+reporting history. The new tables store Teams bot conversation references,
+frozen message batches and per-recipient results. The schema-8 provider, search
+and CVE List storage is unchanged. Bot migration checks actual tables and
+columns even if an earlier build already wrote the version number. Read-only
+views do not migrate an existing database.
+
+Existing Teams Workflow webhook configuration remains unchanged. A pre-release
+`teams_bot` configuration with a custom HTTPS `service_url` outside the allowed
+Microsoft origin now fails validation. Replace the channel and conversation
+reference URLs with documented public-cloud service URLs, or remove the channel
+before upgrading. The allowlist checks the HTTPS origin and port; approved
+regional paths remain intact, rather than being limited to `/teams/`.
+
+The new `teams_bot` channel is opt-in and requires the Azure registration
+and Teams app installation described in [Teams bot setup](TEAMS.md). No schedules
+or notifications are created by the upgrade itself.
+
 ## Supported updater installations
 
 Applying updates is supported on native Linux systemd installations with
@@ -114,10 +141,14 @@ Never run the privileged updater inside a container.
    also confirm `systemctl is-active cvebeacon.service` reports `inactive`: a
    start already queued by the timer can otherwise begin after this check. Stop
    the dashboard and other data writers after work finishes.
-2. Use SQLite's online backup for **each** state database, including watch,
-   account, monitoring, dashboard job and automation ledgers. Keep backups and
-   configuration copies private. SQLite files may have live WAL contents: a
-   simple file copy is insufficient. Record all paths and ownership.
+2. Use the [backup command](BACKUP.md) (`cvebeacon --config CONFIG backup
+   create --include-secrets`) for SQLite's online backup of the core state
+   databases, including watch, account, monitoring, dashboard job and other
+   discovered stores under the data directory, plus the configuration. If
+   automation keeps a separate state directory or ledger, back it up with its
+   own documented procedure. Keep backups and configuration copies private.
+   SQLite files may have live WAL contents: a simple file copy is insufficient.
+   Record all paths and ownership.
 3. Obtain the release from the configured GitHub repository. Verify
    `SHA256SUMS.sig` against an independently pinned public key, then verify
    every artifact against `SHA256SUMS`:

@@ -75,7 +75,12 @@ OPERATION_LABELS = {
     "watch-run": "Watch run",
     "run": "Run scan and watch together",
     "notify-test": "Send channel test",
+    "backup-create": "Create backup",
+    "backup-verify": "Verify backup",
+    "backup-restore": "Restore backup",
 }
+
+BACKUP_OPERATIONS = frozenset({"backup-create", "backup-verify", "backup-restore"})
 
 DATA_CHANGING = frozenset(
     operation for operation in OPERATION_LABELS if operation != "notify-test"
@@ -506,6 +511,9 @@ def build_command(
     confirmed: bool = False,
     channel: str | None = None,
     client: str | None = None,
+    backup_id: str | None = None,
+    include_secrets: bool = False,
+    created_by: str | None = None,
     cve_id: str | None = None,
 ) -> list[str]:
     """Build the CLI child command without a shell or any secret value."""
@@ -527,6 +535,18 @@ def build_command(
         "--config",
         str(config.config_path),
     ]
+    if operation in BACKUP_OPERATIONS:
+        if operation == "backup-create":
+            args = [*base, "backup", "create"]
+            if include_secrets:
+                args.append("--include-secrets")
+            if created_by:
+                args.extend([f"--created-by={created_by}"])
+            return args
+        if not isinstance(backup_id, str) or not backup_id:
+            raise ConfigurationError("choose a retained backup")
+        action = "restore" if operation == "backup-restore" else "verify"
+        return [*base, "backup", action, backup_id, *(["--yes"] if operation == "backup-restore" else [])]
     if operation in {"web-detect", "web-plan"}:
         from .web_assets import client_label, require_companion
         require_companion()

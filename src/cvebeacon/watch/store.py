@@ -66,7 +66,7 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _CVE_LIST_SSVC = "CISA Vulnrichment (CVE List SSVC)"
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
@@ -133,7 +133,7 @@ _NVD_CONTENT_COLUMNS = (
     "cisa_ransomware",
 )
 
-_SCHEMA = (
+_SCHEMA_THROUGH_8 = (
     """CREATE TABLE IF NOT EXISTS watch_origin (
         cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
     )""",
@@ -142,9 +142,6 @@ _SCHEMA = (
     )""",
     """CREATE TABLE IF NOT EXISTS watch_initial_cve (
         cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
-    )""",
-    """CREATE TABLE IF NOT EXISTS watch_initial_ssvc (
-        cve_id TEXT PRIMARY KEY, status TEXT NOT NULL CHECK(status IN ('poc','active'))
     )""",
 
     """CREATE TABLE IF NOT EXISTS watch_source_check (
@@ -290,7 +287,43 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS watch_event_created ON watch_event(created_at, id)",
     "CREATE INDEX IF NOT EXISTS watch_delivery_status ON watch_delivery(status)",
     "CREATE INDEX IF NOT EXISTS watch_report_cve ON watch_report(cve_id, id)",
+)
+_SCHEMA_9 = (
+    """CREATE TABLE IF NOT EXISTS watch_teams_bot_conversation (
+        tenant_id TEXT NOT NULL, app_id TEXT NOT NULL, recipient TEXT NOT NULL,
+        service_url TEXT NOT NULL, conversation_id TEXT NOT NULL,
+        PRIMARY KEY(tenant_id, app_id, recipient, service_url)
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_teams_bot_delivery (
+        channel TEXT NOT NULL, tenant_id TEXT NOT NULL, app_id TEXT NOT NULL,
+        recipient TEXT NOT NULL, message_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','ambiguous')),
+        attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+        not_before REAL NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+        PRIMARY KEY(channel, tenant_id, app_id, recipient, message_key)
+    )""",
+    "CREATE INDEX IF NOT EXISTS watch_teams_bot_delivery_status ON watch_teams_bot_delivery(status, updated_at)",
+    """CREATE TABLE IF NOT EXISTS watch_teams_bot_batch (
+        channel TEXT NOT NULL, tenant_id TEXT NOT NULL, app_id TEXT NOT NULL,
+        batch_key TEXT NOT NULL, event_ids_json TEXT NOT NULL, messages_json TEXT NOT NULL,
+        PRIMARY KEY(channel, tenant_id, app_id, batch_key)
+    )""",
+    "CREATE INDEX IF NOT EXISTS watch_teams_bot_batch_scope ON watch_teams_bot_batch(channel, tenant_id, app_id)",
+)
+_SCHEMA_10 = (
+    """CREATE TABLE IF NOT EXISTS watch_initial_ssvc (
+        cve_id TEXT PRIMARY KEY, status TEXT NOT NULL CHECK(status IN ('poc','active'))
+    )""",
 ) + explorer_index.SCHEMA
+_SCHEMA = _SCHEMA_THROUGH_8 + _SCHEMA_9 + _SCHEMA_10
+
+
+_TEAMS_BOT_COLUMNS = {
+    "watch_teams_bot_conversation": {"tenant_id", "app_id", "recipient", "service_url", "conversation_id"},
+    "watch_teams_bot_delivery": {"channel", "tenant_id", "app_id", "recipient", "message_key", "status",
+                                "attempts", "last_error", "not_before", "updated_at"},
+    "watch_teams_bot_batch": {"channel", "tenant_id", "app_id", "batch_key", "event_ids_json", "messages_json"},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -583,12 +616,19 @@ class WatchStore:
         if self.path.is_file():
             with closing(self._connect_readonly()) as db:
                 try:
-                    meta = dict(db.execute("SELECT key,value FROM watch_meta "
-                                           "WHERE key IN ('schema_version','provider_storage','explorer_storage')"))
+                    meta = dict(db.execute(
+                        "SELECT key,value FROM watch_meta WHERE key IN "
+                        "('schema_version','provider_storage','teams_bot_storage','explorer_storage')"
+                    ))
                 except sqlite3.Error:
                     meta = {}
-                if (meta.get("schema_version") == str(SCHEMA_VERSION) and meta.get("provider_storage") == "sparse-v1"
-                        and meta.get("explorer_storage") == explorer_index.STORAGE):
+                if (
+                    meta.get("schema_version") == str(SCHEMA_VERSION)
+                    and meta.get("provider_storage") == "sparse-v1"
+                    and meta.get("teams_bot_storage") == "durable-v1"
+                    and meta.get("explorer_storage") == explorer_index.STORAGE
+                    and self._storage_columns_present(db, _TEAMS_BOT_COLUMNS)
+                ):
                     if not _alert_columns_current(db):
                         raise StateError("watch database was created by a pre-release build; delete it and run `watch sync` again")
                     return
@@ -607,6 +647,7 @@ class WatchStore:
         if not rows:
             for statement in _SCHEMA:
                 db.execute(statement)
+            cls._ensure_teams_bot_schema(db)
             db.execute(
                 "INSERT INTO watch_meta(key,value) VALUES ('schema_version',?)",
                 (str(SCHEMA_VERSION),),
@@ -620,7 +661,7 @@ class WatchStore:
             cls._set_meta(db, {"provider_storage": "sparse-v1"})
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
             raise StateError(f"unsupported watch schema version {version}")
         if version != "1" and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
@@ -646,7 +687,7 @@ class WatchStore:
                     "watch database cannot be migrated from schema "
                     f"{version}: missing {table}.{column}"
                 )
-        for statement in _SCHEMA:
+        for statement in _SCHEMA_THROUGH_8:
             db.execute(statement)
         if version == "1":
             columns = {
@@ -722,9 +763,14 @@ class WatchStore:
                 payload = json.loads(row["payload_json"])
                 text = description_text(payload) if row["source"] == "cve_list" else payload.get("description") or ""
                 db.execute("INSERT INTO watch_search VALUES (?,?,?)", (row["cve_id"], row["source"], text))
-        if version_number < 9:
-            cls._backfill_vulnrichment(db, now)
         cls._ensure_search(db)
+        for statement in _SCHEMA_9:
+            db.execute(statement)
+        cls._ensure_teams_bot_schema(db)
+        for statement in _SCHEMA_10:
+            db.execute(statement)
+        if version_number < 10:
+            cls._backfill_vulnrichment(db, now)
         explorer_index.initialize(db)
         cls._set_meta(db, {"schema_version": str(SCHEMA_VERSION), "provider_storage": "sparse-v1"})
 
@@ -769,6 +815,23 @@ class WatchStore:
             db.execute(f"CREATE TRIGGER IF NOT EXISTS watch_search_{name} AFTER {event} ON watch_search BEGIN {action} END")
         if not existed and db.execute("SELECT 1 FROM watch_search LIMIT 1").fetchone():
             db.execute("INSERT INTO watch_fts(watch_fts) VALUES ('rebuild')")
+
+    @staticmethod
+    def _storage_columns_present(db: sqlite3.Connection, required: Mapping[str, set[str]]) -> bool:
+        return all(
+            expected <= {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+            for table, expected in required.items()
+        )
+
+    @classmethod
+    def _ensure_teams_bot_schema(cls, db: sqlite3.Connection) -> None:
+        """Validate bot tables after the schema 8 to 9 migration."""
+        if not cls._storage_columns_present(db, _TEAMS_BOT_COLUMNS):
+            raise StateError("unsupported Teams bot storage layout; refusing to skip migration")
+        db.execute(
+            "INSERT INTO watch_meta(key,value) VALUES ('teams_bot_storage','durable-v1') "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+        )
 
     @staticmethod
     def _migrate_event_details(db: sqlite3.Connection) -> None:
@@ -2698,6 +2761,155 @@ class WatchStore:
             )
         )
 
+    def teams_bot_conversation(
+        self, tenant: str, app: str, recipient: str, service_url: str,
+        conversation_id: str | None = None,
+    ) -> str | None:
+        """Read or save a DM reference scoped to its tenant, bot and service."""
+        key = (tenant, app, recipient, service_url)
+        if conversation_id is None:
+            with closing(self._connect_readonly()) as db:
+                row = db.execute(
+                    "SELECT conversation_id FROM watch_teams_bot_conversation "
+                    "WHERE tenant_id=? AND app_id=? AND recipient=? AND service_url=?", key,
+                ).fetchone()
+                return row[0] if row else None
+        with self.transaction() as db:
+            db.execute(
+                "INSERT INTO watch_teams_bot_conversation VALUES (?,?,?,?,?) "
+                "ON CONFLICT(tenant_id,app_id,recipient,service_url) DO UPDATE "
+                "SET conversation_id=excluded.conversation_id",
+                (*key, conversation_id),
+            )
+            return conversation_id
+
+    def teams_bot_saved_messages(
+        self, channel: str, tenant: str, app: str, event_ids: Iterable[int],
+    ) -> tuple[Any, ...]:
+        """Restore immutable card batches so new pending events cannot merge into retries."""
+        from .messages import OutgoingMessage
+
+        selected = set(event_ids)
+        if not selected:
+            return ()
+        output = []
+        with closing(self._connect_readonly()) as db:
+            rows = db.execute(
+                "SELECT b.event_ids_json,b.messages_json FROM watch_teams_bot_batch b "
+                "WHERE b.channel=? AND b.tenant_id=? AND b.app_id=? AND EXISTS ("
+                "SELECT 1 FROM json_each(b.event_ids_json) ids JOIN watch_delivery d "
+                "ON d.event_id=ids.value WHERE d.channel=b.channel AND d.status!='sent') "
+                "ORDER BY b.rowid", (channel, tenant, app),
+            )
+            for row in rows:
+                identifiers = set(json.loads(row[0]))
+                values = json.loads(row[1])
+                initial = bool(values and values[0]["initial"])
+                if identifiers and (identifiers <= selected or (initial and identifiers & selected)):
+                    for value in values:
+                        value["event_ids"] = tuple(value["event_ids"])
+                        output.append(OutgoingMessage(**value))
+                    selected -= identifiers
+        return tuple(output)
+
+    def save_teams_bot_messages(
+        self, channel: str, tenant: str, app: str, messages: Sequence[Any],
+    ) -> None:
+        """Freeze every part before the first recipient receives any part."""
+        from dataclasses import asdict
+
+        groups: dict[tuple[int, ...], list] = {}
+        for message in messages:
+            groups.setdefault(message.event_ids, []).append(asdict(message))
+        with self.transaction() as db:
+            for identifiers, values in groups.items():
+                if values[0]["initial"]:
+                    db.execute(
+                        "UPDATE watch_teams_bot_batch SET messages_json=? "
+                        "WHERE channel=? AND tenant_id=? AND app_id=? AND batch_key LIKE 'initial:%' "
+                        "AND messages_json='[]' AND EXISTS (SELECT 1 FROM json_each(event_ids_json) WHERE value=?)",
+                        (json.dumps(values), channel, tenant, app, identifiers[0]),
+                    )
+                    continue
+                encoded_ids = json.dumps(sorted(identifiers))
+                db.execute(
+                    "INSERT OR IGNORE INTO watch_teams_bot_batch VALUES (?,?,?,?,?,?)",
+                    (channel, tenant, app, encoded_ids, encoded_ids, json.dumps(values)),
+                )
+
+    def prune_teams_bot_batches(self, channel: str, tenant: str, app: str) -> None:
+        """Discard card copies and destination outcomes once their events are sent."""
+        from .messages import OutgoingMessage
+        from .teams_bot import message_key
+
+        with self.transaction() as db:
+            batches = db.execute(
+                "SELECT batch_key,messages_json FROM watch_teams_bot_batch b "
+                "WHERE channel=? AND tenant_id=? AND app_id=? AND NOT EXISTS ("
+                "SELECT 1 FROM json_each(b.event_ids_json) ids LEFT JOIN watch_delivery d "
+                "ON d.event_id=ids.value AND d.channel=b.channel WHERE d.status IS NULL OR d.status!='sent')",
+                (channel, tenant, app),
+            ).fetchall()
+            for batch in batches:
+                keys = []
+                for value in json.loads(batch["messages_json"]):
+                    value["event_ids"] = tuple(value["event_ids"])
+                    keys.append(message_key(OutgoingMessage(**value)))
+                if any(db.execute(
+                    "SELECT 1 FROM watch_teams_bot_delivery WHERE channel=? AND tenant_id=? AND app_id=? "
+                    "AND message_key=? AND status!='sent' LIMIT 1", (channel, tenant, app, key),
+                ).fetchone() for key in keys):
+                    continue
+                for key in keys:
+                    db.execute(
+                        "DELETE FROM watch_teams_bot_delivery WHERE channel=? AND tenant_id=? AND app_id=? AND message_key=?",
+                        (channel, tenant, app, key),
+                    )
+                db.execute(
+                    "DELETE FROM watch_teams_bot_batch WHERE channel=? AND tenant_id=? AND app_id=? AND batch_key=?",
+                    (channel, tenant, app, batch["batch_key"]),
+                )
+
+    def claim_teams_bot_recipient(
+        self, key: tuple[str, str, str, str, str], *, retry_ambiguous: bool,
+        now: float,
+    ) -> str:
+        """Claim one rendered message for a destination before any activity send."""
+        with self.transaction() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO watch_teams_bot_delivery "
+                "(channel,tenant_id,app_id,recipient,message_key,status,updated_at) "
+                "VALUES (?,?,?,?,?,'pending',?)", (*key, _timestamp(self._clock)),
+            )
+            row = db.execute(
+                "SELECT status,not_before FROM watch_teams_bot_delivery WHERE "
+                "channel=? AND tenant_id=? AND app_id=? AND recipient=? AND message_key=?", key,
+            ).fetchone()
+            if row["status"] == "sent":
+                return "sent"
+            if row["status"] == "sending" or (row["status"] == "ambiguous" and not retry_ambiguous):
+                return "ambiguous"
+            if row["not_before"] > now:
+                return "deferred"
+            db.execute(
+                "UPDATE watch_teams_bot_delivery SET status='sending', attempts=attempts+1, "
+                "updated_at=? WHERE channel=? AND tenant_id=? AND app_id=? AND recipient=? "
+                "AND message_key=?", (_timestamp(self._clock), *key),
+            )
+            return "retrying_ambiguous" if row["status"] == "ambiguous" else "sending"
+
+    def finish_teams_bot_recipient(
+        self, key: tuple[str, str, str, str, str], status: str, *,
+        error: str | None = None, not_before: float = 0,
+    ) -> None:
+        with self.transaction() as db:
+            db.execute(
+                "UPDATE watch_teams_bot_delivery SET status=?,last_error=?,not_before=?,updated_at=? "
+                "WHERE channel=? AND tenant_id=? AND app_id=? AND recipient=? AND message_key=? "
+                "AND status='sending'",
+                (status, error, not_before, _timestamp(self._clock), *key),
+            )
+
     def recover_sending(
         self, *, older_than_seconds: float = DELIVERY_RECOVERY_SECONDS
     ) -> int:
@@ -2711,6 +2923,12 @@ class WatchStore:
             current - timedelta(seconds=max(0.0, older_than_seconds))
         ).isoformat()
         with self.transaction() as db:
+            db.execute(
+                "UPDATE watch_teams_bot_delivery SET status='ambiguous', "
+                "last_error='interrupted before confirmation', updated_at=? "
+                "WHERE status='sending' AND updated_at < ?",
+                (_timestamp(self._clock), cutoff),
+            )
             cursor = db.execute(
                 "UPDATE watch_delivery SET status='ambiguous', "
                 "first_attempt_at=COALESCE(first_attempt_at, updated_at), "
@@ -2923,6 +3141,7 @@ class WatchStore:
         now: datetime | None = None,
         max_items: int,
         include_ambiguous: bool = False,
+        bot_identity: tuple[str, str] | None = None,
     ) -> InitialDigest | None:
         """Count and claim every selected initial row, sampling only the top ones.
 
@@ -2940,6 +3159,26 @@ class WatchStore:
                 condition, parameters = self._initial_condition(
                     channel, include_ambiguous, stamp
                 )
+                frozen = None
+                if bot_identity is not None:
+                    frozen = db.execute(
+                        "SELECT batch_key,event_ids_json FROM watch_teams_bot_batch b "
+                        "WHERE channel=? AND tenant_id=? AND app_id=? AND batch_key LIKE 'initial:%' "
+                        "AND EXISTS (SELECT 1 FROM json_each(b.event_ids_json) ids "
+                        "JOIN watch_delivery d ON d.event_id=ids.value "
+                        "WHERE d.channel=b.channel AND d.status!='sent') ORDER BY b.rowid LIMIT 1",
+                        (channel, *bot_identity),
+                    ).fetchone()
+                    if frozen:
+                        condition += " AND e.id IN (SELECT value FROM json_each(?))"
+                        parameters = (*parameters, frozen["event_ids_json"])
+                        # Resume the complete obligation, never a subset of its members.
+                        ready = db.execute(
+                            "SELECT COUNT(*) FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id WHERE " + condition,
+                            parameters,
+                        ).fetchone()[0]
+                        if ready != db.execute("SELECT json_array_length(?)", (frozen["event_ids_json"],)).fetchone()[0]:
+                            return None
                 counts = db.execute(
                     "SELECT e.rule,e.kind,COUNT(*) AS count,"
                     "SUM(CASE WHEN d.status='ambiguous' THEN 1 ELSE 0 END) "
@@ -2989,6 +3228,14 @@ class WatchStore:
                     ", ".join(order),
                     (*parameters, *sampled_cves),
                 ).fetchall()
+                if bot_identity is not None and frozen is None:
+                    # SQL owns the full backlog; only the display sample becomes views.
+                    db.execute(
+                        "INSERT INTO watch_teams_bot_batch "
+                        "SELECT ?,?,?, 'initial:' || MIN(e.id), json_group_array(e.id), '[]' "
+                        "FROM watch_event e JOIN watch_delivery d ON d.event_id=e.id WHERE " + condition,
+                        (channel, *bot_identity, *parameters),
+                    )
                 cursor = db.execute(
                     "UPDATE watch_delivery SET status='sending', "
                     "first_attempt_at=COALESCE(first_attempt_at, ?), updated_at=?, "

@@ -46,6 +46,7 @@ CHANNEL_LIMITS = {
     "smtp": 1_000_000,
     "graph": 1_000_000,
     "teams": 24_000,
+    "teams_bot": 24_000,
     "slack": 3_800,
     "discord": 2_000,
     "telegram": 4_096,
@@ -81,7 +82,7 @@ def style_for(channel_type: str) -> str:
         return STYLE_SLACK
     if channel_type == "discord":
         return STYLE_DISCORD
-    if channel_type == "teams":
+    if channel_type in {"teams", "teams_bot"}:
         return STYLE_MARKDOWN
     return STYLE_PLAIN
 
@@ -1318,7 +1319,7 @@ def build_messages(
     catalog = catalog_for(language)
     style = style_for(channel_type)
     limit = CHANNEL_LIMITS.get(channel_type, 32_768)
-    byte_limit = channel_type in {"ntfy", "matrix", "teams"}
+    byte_limit = channel_type in {"ntfy", "matrix", "teams", "teams_bot"}
     chat = channel_type not in {"smtp", "graph", "webhook"}
     title_in_body = chat and channel_type not in {"ntfy", "gotify"}
     body_limit = limit - 300 if chat else limit
@@ -1633,3 +1634,23 @@ def webhook_payload(
 
 def rule_display_names(rules: Iterable[Rule]) -> dict[str, str]:
     return {rule.name.casefold(): rule.name for rule in rules}
+
+
+def teams_adaptive_card(message: OutgoingMessage) -> dict:
+    """Render the shared Teams Adaptive Card wire payload."""
+    return {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                        {"type": "TextBlock", "wrap": True, "text": message.text}
+                    ],
+                },
+            }
+        ],
+    }

@@ -89,12 +89,12 @@ while True:
     except URLError:
         if time.monotonic()>deadline: raise
         time.sleep(.1)
-assert ('Dashboard login' if auth else 'Monitoring overview') in body
+assert ('Dashboard login' if auth else 'Home · CVEBeacon') in body
 if auth:
     assert 'Dashboard login' in get('/findings')
     token=re.search(r'name="csrf" value="([^"]+)"', get('/login'))[1]
     with client.open(Request(base+'/login', data=urlencode(dict(csrf=token,password='Synthetic container smoke passphrase')).encode()), timeout=10) as reply:
-        assert 'Monitoring overview' in reply.read().decode()
+        assert 'Home · CVEBeacon' in reply.read().decode()
 for path in ['/findings','/history','/assets','/sources','/query','/reports','/static/dashboard.css']:
     get(path)
 print('dashboard loopback smoke passed; auth='+str(auth))

@@ -32,6 +32,10 @@ from a Markdown, plain-text, or Word template without syncing or delivering; see
 
 ## Configuration
 
+For optional Teams bot direct messages and existing team conversations, see
+[Teams bot setup](TEAMS.md). The existing Teams Workflow webhook channel remains
+available with its current configuration.
+
 Watch mode is disabled by default. Add a `[watch]` table to the existing
 configuration:
 
@@ -113,7 +117,7 @@ Every rule channel must name one of these tables.
 
 Common keys:
 
-- `type` (required): `smtp`, `graph`, `teams`, `slack`, `discord`, `telegram`,
+- `type` (required): `smtp`, `graph`, `teams`, `teams_bot`, `slack`, `discord`, `telegram`,
   `matrix`, `ntfy`, `gotify`, or `webhook`.
 - `enabled`: `true` by default. A disabled channel keeps its pending deliveries.
 - `grouping`: `"run"` (default) sends one message per channel per run that lists
@@ -187,6 +191,11 @@ application permission such as `Mail.Send` for the sender mailbox. `cc` and
 plain-text body is still generated from the same facts and is what
 `format = "text"` sends. Graph cannot send both parts; with `format = "html"`
 only the HTML body is sent.
+
+### Teams bot
+
+Use `type = "teams_bot"` for proactive messages with a protected
+`client_secret_file`; see [Teams bot setup](TEAMS.md).
 
 ### Teams
 
@@ -546,7 +555,7 @@ that stronger claim. `watch reported --verify` reports the first broken row and
 exits 2; when it succeeds it prints how many rows are chained and how many are
 legacy and unchained. The user audit table uses the same construction.
 
-The watch database schema is version 9. Rows written before the identity upgrade
+The watch database schema is version 10. Rows written before the identity upgrade
 have `chain_version = 0`, a null chain, and are reported as legacy unchained;
 the chain starts with the first report written after the upgrade. Migration
 records the highest legacy row id in `watch_meta` once. A legacy row must be at
@@ -1092,7 +1101,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 9. An unknown version still fails closed. The version 1
+place to schema version 10. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to
@@ -1116,9 +1125,11 @@ older. Later edits and middle deletions then fail `watch reported --verify`.
 The version 7 to 8 upgrade adds empty tables and a sparse FTS index for new
 provider descriptions. Existing NVD/EUVD data and extra legacy columns stay in
 place: there is no historical JSON validation, payload copy, description copy
-or `watch_cve` rebuild. Read-only pages use snapshots without writer locks and
-can browse schema-7 observations before the first mutating command upgrades
-it. See [upgrading](UPGRADING.md) and the synthetic migration benchmark.
+or `watch_cve` rebuild. The version 8 to 9 upgrade adds the Teams bot
+conversation, batch and delivery tables. Read-only pages use snapshots without
+writer locks and can browse pre-upgrade observations before the first mutating
+command upgrades them. See [upgrading](UPGRADING.md) and the synthetic migration
+benchmark.
 
 After the upgrade, run
 `cvebeacon watch evaluate --all --yes`
@@ -1504,7 +1515,7 @@ See [sources](SOURCES.md) for the full source roles and limitations.
 `cve_list` is enabled in new setup files and in the default source selection.
 Existing explicit `sources` lists keep their selection; add `"cve_list"` to opt
 in. Existing files with no source list receive the new default. The watch
-schema migrates transactionally to version 9, retaining CVEs, events, deliveries,
+schema migrates transactionally to version 10, retaining CVEs, events, deliveries,
 reports and EUVD resume progress. The new provider has its own initial mode,
 window and archive cursors; adding it does not reset an initial EUVD import.
 
