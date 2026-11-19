@@ -139,6 +139,12 @@ def test_caddy_sample_can_be_imported_into_an_existing_caddyfile():
     assert not re.search(r"(?m)^\{\s*$", caddy), "global options block prevents importing into an existing Caddyfile"
 
 
+def test_samples_block_proxy_bootstrap():
+    nginx = _block(_text(NGINX), "location = /bootstrap {")
+    assert "return 404;" in nginx
+    assert re.search(r"(?m)^\s*respond /bootstrap 404\s*$", _text(CADDY))
+
+
 def test_samples_set_security_headers():
     for path in SAMPLES:
         text = _text(path)

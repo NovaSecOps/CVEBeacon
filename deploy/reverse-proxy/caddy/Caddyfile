@@ -41,6 +41,11 @@ cvebeacon.example.com {
 		max_size 6MB
 	}
 
+	# /bootstrap accepts only loopback peers, and every request through this
+	# proxy appears local. Create the first administrator with
+	# `cvebeacon users add NAME --admin` before exposing the dashboard.
+	respond /bootstrap 404
+
 	reverse_proxy 127.0.0.1:8787 {
 		# The dashboard validates this Host header and ignores forwarded
 		# headers. Send the backend address and clear client-supplied

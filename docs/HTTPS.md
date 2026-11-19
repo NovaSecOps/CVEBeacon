@@ -93,7 +93,10 @@ The dashboard also decides whether `/bootstrap` is local from the directly
 connected peer address. A local reverse proxy makes every remote visitor appear
 local. Create the first administrator account from the console or over a
 trusted direct connection **before** exposing an empty account store through a
-proxy. Never publish a dashboard whose account store is still empty.
+proxy. Never publish a dashboard whose account store is still empty. The shipped
+samples return `404` for `/bootstrap` as an extra guard; create the first
+administrator with `cvebeacon users add NAME --admin`, or remove that guard
+temporarily while bootstrapping from a trusted local connection.
 
 ## Enable secure cookies
 
@@ -246,8 +249,9 @@ time out.
 - **Setting `secure_cookie = true` while still testing over HTTP.** The browser
   drops the cookie and login loops. Test through the HTTPS URL.
 - **Exposing an empty account store.** Bootstrap accepts only loopback peers, so
-  remote visitors appear local through the proxy. Create the first administrator
-  before opening the proxy.
+  remote visitors appear local through the proxy. The samples return `404` for
+  `/bootstrap` as defense in depth, but create the first administrator with
+  `cvebeacon users add NAME --admin` before opening the proxy.
 - **Trusting forwarded addresses.** The dashboard ignores them. Per-client login
   throttling behind one proxy is shared by design; do not weaken or bypass it.
 - **A proxy body limit below 5 MiB.** Statement uploads fail with `413`. The
