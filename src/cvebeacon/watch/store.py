@@ -671,11 +671,20 @@ class WatchStore:
         # Existing NVD and EUVD data stay in their original tables. No row
         # rebuild, JSON validation, provider copy or search backfill is needed.
         # Extra legacy columns are deliberately left untouched.
-        if version == "8":
+        storage = db.execute("SELECT value FROM watch_meta WHERE key='provider_storage'").fetchone()
+        if version == "8" and (storage is None or storage[0] != 'sparse-v1'):
             # Recover the pre-release provider-copy layout without retaining
             # duplicated NVD payloads. Normal schema-7 upgrades skip this path.
-            columns = ",".join(f"{name}=json_extract(p.record_json,'$.{name}')" for name in _NVD_CONTENT_COLUMNS)
-            db.execute(f"UPDATE watch_cve AS c SET {columns} FROM watch_provider p WHERE p.cve_id=c.cve_id AND p.source='nvd'")
+            for provider in db.execute("SELECT cve_id,record_json FROM watch_provider WHERE source='nvd'"):
+                identifier = provider['cve_id']
+                try:
+                    content = json.loads(provider['record_json'])
+                    record = cls._record({'cve_id': identifier, **content})
+                except (TypeError, ValueError, StateError) as exc:
+                    raise StateError(f"invalid pre-release NVD provider for {identifier}; restore or repair it before upgrading") from exc
+                restored = _nvd_content(record)
+                assignments = ','.join(name + '=?' for name in _NVD_CONTENT_COLUMNS)
+                db.execute(f"UPDATE watch_cve SET {assignments} WHERE cve_id=?", (*[restored[name] for name in _NVD_CONTENT_COLUMNS], identifier))
             db.execute("INSERT OR IGNORE INTO watch_origin SELECT c.cve_id,min(p.source) FROM watch_cve c JOIN watch_provider p ON p.cve_id=c.cve_id WHERE NOT EXISTS(SELECT 1 FROM watch_provider n WHERE n.cve_id=c.cve_id AND n.source='nvd') GROUP BY c.cve_id")
             db.execute("DELETE FROM watch_provider WHERE source='nvd'")
             db.execute("DELETE FROM watch_search WHERE cve_id NOT IN (SELECT cve_id FROM watch_provider)")
