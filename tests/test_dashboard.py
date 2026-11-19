@@ -115,8 +115,84 @@ def test_failed_or_degraded_refresh_retains_old_finding_visibly(setup, health):
     assert response.status_code == 200
     assert "coverage was incomplete" in response.text
     assert "Retained observation" in response.text
-    assert 'class="badge affected"' in response.text
-    assert 'class="badge not_affected"' not in response.text
+    assert 'class="badge badge-danger"' in response.text
+    assert 'class="badge badge-success"' not in response.text
+
+
+def test_findings_filter_disclosure_opens_when_filters_are_active(setup):
+    _, store, client = setup
+    store.record_scan([result()])
+    closed = client.get("/findings").text
+    assert '<details class="disclosure"><summary>Filter findings</summary>' in closed
+    opened = client.get("/findings?applicability=affected").text
+    assert '<details class="disclosure" open><summary>Filter findings</summary>' in opened
+
+
+def test_findings_safety_copy_and_retained_warning_styling(setup):
+    _, store, client = setup
+    store.record_scan([result()])
+    store.record_scan([result(status=A.NOT_AFFECTED, health=H.DEGRADED)])
+    text = client.get("/findings").text
+    assert "Findings recorded for your inventory, including retained observations from earlier scans." in text
+    assert "Every known vulnerability" not in text
+    assert "Stored observations, grouped by asset and advisory." in text
+    assert "newest evidence first" not in text
+    assert "Coverage warnings for current assets" in text
+    assert "Only assets with unresolved coverage are listed" in text
+    assert "This is not a complete list of assets" in text
+    assert "Retained observations are not proof of current coverage" in text
+    assert '<span class="badge badge-warning">Retained observation</span>' in text
+    assert "Not refreshed in the latest scan or over 24 hours old" in text
+
+
+def test_findings_historical_row_keeps_warning_badge(setup):
+    config, store, client = setup
+    store.record_scan([result()])
+    config.inventory.path.write_text(
+        "asset_id,vendor,product,version\na,Acme,Widget,2\n", encoding="utf-8"
+    )
+    text = client.get("/findings").text
+    assert "Inventory changed or asset removed" in text
+    assert '<span class="badge badge-warning">Historical observation</span>' in text
+
+
+def test_findings_severity_labels_match_route_boundaries(setup):
+    _, _, client = setup
+    text = client.get("/findings").text
+    for label in (
+        "Critical (9 and above)",
+        "High (7 to below 9)",
+        "Medium (4 to below 7)",
+        "Low (above 0 to below 4)",
+        "None (0)",
+    ):
+        assert label in text, label
+
+
+def test_assets_explains_coverage_and_asset_detail_marks_active_nav(setup):
+    _, store, client = setup
+    store.record_scan([result()])
+    assets = client.get("/assets").text
+    assert "Coverage means whether the last scan could check an item." in assets
+    assert "Unknown coverage is not the same as no vulnerabilities." in assets
+    asset = client.get("/asset?asset_id=a").text
+    assert '<a href="/assets" aria-current="page">' in asset
+
+
+def test_finding_without_evidence_keeps_warning_copy(setup):
+    _, store, client = setup
+    base = result()
+    finding = replace(base.findings[0], evidence=())
+    store.record_scan([replace(base, findings=(finding,))])
+    text = client.get("/findings").text
+    assert '<span class="badge badge-warning">No supporting evidence recorded</span>' in text
+    assert "Treat applicability with caution." in text
+
+
+def test_history_keeps_newest_events_link_when_empty(setup):
+    _, _, client = setup
+    text = client.get("/history").text
+    assert ">Newest events</a>" in text
 
 
 def test_stale_scan_and_source_cannot_appear_current(setup):

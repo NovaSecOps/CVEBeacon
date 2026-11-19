@@ -1,12 +1,15 @@
 {% extends 'base.html' %}
+{% from 'ui.html' import page_header, card, callout, field, button %}
 {% block title %}Log in · CVEBeacon{% endblock %}
 {% block content %}
-<h1>Dashboard login</h1>
-{% if failed %}<p role="alert">Login unsuccessful. Wait before trying again.</p>{% endif %}
-<form method="post" action="{{ url_for('login') }}">
+{{ page_header('Dashboard login', 'Sign in to see alerts, findings and reports.') }}
+{% if failed %}{% call callout('danger', 'Sign-in was refused') %}<p>The username or password was not accepted{% if accounts %}, or the account is temporarily locked after repeated failed attempts{% endif %}. Wait a few minutes and try again{% if accounts %}, or ask an administrator to unlock the account{% endif %}.</p>{% endcall %}{% endif %}
+{% call card('Sign in') %}
+<form method="post" action="{{ url_for('login') }}" class="stack">
 <input type="hidden" name="csrf" value="{{ csrf }}">
-{% if accounts %}<label>Username <input name="username" required maxlength="64" autocomplete="username"></label>{% endif %}
-<label>Password <input type="password" name="password" required maxlength="1024" autocomplete="current-password"></label>
-<button type="submit">Log in</button>
+{% if accounts %}{{ field('Username', 'username', required=true, maxlength=64, autocomplete='username', help='The name your administrator gave you.') }}{% endif %}
+{{ field('Password', 'password', type='password', required=true, maxlength=1024, autocomplete='current-password') }}
+<div class="form-actions">{{ button('Log in') }}</div>
 </form>
+{% endcall %}
 {% endblock %}

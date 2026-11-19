@@ -1,4 +1,24 @@
-{% extends 'base.html' %}{% block content %}<h1>Report export</h1><p>Run a fresh query for the current inventory and download a report using the shared reporting layer. This may take several minutes and requires access to enabled sources. Review coverage and source health in the report; missing results do not establish a clean inventory.</p><p>Exports do not change scheduled monitoring or notification state.</p>{% if inventory_warnings %}
-<p class="warning" role="alert">The report is unavailable until all client inventories can be read.</p>
+{% extends 'base.html' %}
+{% from 'ui.html' import page_header, card, callout, button %}
+{% block title %}Reports · CVEBeacon{% endblock %}
+{% block content %}
+{{ page_header('Reports', 'Download a report of your current inventory and its findings.') }}
+{% call callout('info', 'Before you start') %}
+<p>Generating a report runs a fresh query for the current inventory. This may take several minutes and needs access to enabled sources. Keep this page open until the download starts.</p>
+<p>Review coverage and source health in the report. Missing results do not establish a clean inventory.</p>
+<p>Exports do not change scheduled monitoring or notification state.</p>
+{% endcall %}
+{% if inventory_warnings %}
+{% call callout('warning', 'The report is unavailable until all client inventories can be read.') %}
 <ul>{% for warning in inventory_warnings %}<li>{{ warning }}</li>{% endfor %}</ul>
-{% else %}<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><label>Format<select name="format"><option value="xlsx">Excel workbook (.xlsx)</option><option value="json">JSON (.json)</option></select></label><button>Generate and download</button></form>{% endif %}{% endblock %}
+{% endcall %}
+{% else %}
+{% call card('Choose a format', 'Both formats contain the same findings. Choose the one that is easiest for you to open or share.') %}
+<form method="post" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="field"><label for="f-format">File format</label><select id="f-format" name="format"><option value="xlsx">Excel workbook (.xlsx)</option><option value="json">JSON data file (.json)</option></select><p class="help">Excel is best for reading and sharing. JSON is best for feeding another system.</p></div>
+<div class="form-actions">{{ button('Generate and download report') }}</div>
+</form>
+{% endcall %}
+{% endif %}
+{% endblock %}

@@ -206,7 +206,10 @@ def test_bad_files_sizes_collisions_and_paths_are_safe(deployment, tmp_path, mon
     assert "too large" in upload(browser, second).text
     monkeypatch.setattr(dashboard_inventory, "MAX_BYTES", 32 * 1024 * 1024)
     oversized = b"x" * dashboard_inventory.UPLOAD_REQUEST_BYTES
-    assert upload(browser, second, oversized).status_code == 413
+    rejected = upload(browser, second, oversized)
+    assert rejected.status_code == 413
+    assert "This request could not be completed" in rejected.text
+    assert "choose an inventory file up to 32 MiB" in rejected.text
     if os.name == "posix":
         target = tmp_path / "untouched.json"
         target.write_text("untouched", encoding="utf-8")
@@ -368,8 +371,14 @@ def test_corrupt_inventory_blocks_cli_export_and_dashboard_download(deployment, 
     monkeypatch.setattr(cli, "_run_query", lambda *a, **kw: pytest.fail("queried with incomplete inventory"))
 
     admin = _admin(app)
+    findings = admin.get("/findings")
+    assert findings.status_code == 200
+    assert "Unreadable client" in findings.text
+    assert "No scan results recorded" in findings.text
     reports = admin.get("/reports")
     assert "Unreadable client" in reports.text and "Generate and download" not in reports.text
+    assert "Missing results do not establish a clean inventory." in reports.text
+    assert 'name="format"' not in reports.text
     result = admin.post("/reports", data={"csrf": csrf(admin, healthy), "format": "json"})
     assert result.status_code == 409 and "Content-Disposition" not in result.headers
     assert "Unreadable client" in result.text
