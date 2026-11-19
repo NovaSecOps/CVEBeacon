@@ -12,9 +12,9 @@ Existing NVD rows and EUVD items remain in place, including extra legacy
 columns. The migration adds empty provider, origin, source-check, scoped EUVD,
 initial-evaluation and delta-progress tables. The same transaction adds the
 Teams bot conversation-reference, frozen-batch and per-destination delivery
-tables. It does not copy or parse existing
-NVD/EUVD records, backfill descriptions, rebuild `watch_cve`, or index the full
-historical database. Reserved CVE List state lives in its provider record;
+tables. It does not copy or parse existing NVD/EUVD records, backfill
+descriptions, rebuild `watch_cve`, or index the full historical database.
+Reserved CVE List state lives in its provider record;
 legacy identity placeholders do not require replacing the old status constraint.
 
 The FTS index contains only new provider descriptions. Existing NVD descriptions

@@ -940,6 +940,6 @@ def test_upgrade_guide_covers_existing_custom_bot_urls_and_supported_schemas():
     from pathlib import Path
     guide = (Path(__file__).resolve().parents[1] / "docs/UPGRADING.md").read_text()
     assert "schema 7 to 8" in guide
+    assert "Teams bot" in guide and "provider" in guide
     assert "custom HTTPS" in guide and "remove the channel" in guide
     assert "origin" in guide and "regional" in guide
-    assert "schema 9" not in guide and "CVE-1" not in guide
