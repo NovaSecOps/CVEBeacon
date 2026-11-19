@@ -183,6 +183,8 @@ def test_bad_lock_does_not_hide_operations(tmp_path):
     try:
         page = client.get("/operations/")
         assert page.status_code == 200 and "unavailable" in page.text.lower()
+        assert "Could not be read" in page.text
+        assert "Do not assume the storage is free" in page.text
         assert target.read_text(encoding="utf-8") == "preserve"
     finally:
         app.extensions["dashboard_jobs"].shutdown()

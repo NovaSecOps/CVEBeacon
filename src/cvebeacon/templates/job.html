@@ -1,23 +1,49 @@
 {% extends 'base.html' %}
+{% set nav_active = 'operations.index' %}
+{% from 'watch_macros.html' import stamp %}
+{% from 'ui.html' import page_header, card, callout, button, link_button, badge %}
 {% block title %}Job {{ job.id }} · CVEBeacon{% endblock %}
 {% block head %}{% if job.active %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
-{% block content %}<h1>Job {{ job.id }} · {{ job.label }}</h1>
-{% if job.active %}<p class="muted">This page refreshes every two seconds while the job is queued or running.</p>{% endif %}
-{% if job.audit_pending %}<p class="warning" role="alert">The outcome audit is pending; it will be retried.</p>{% endif %}
+{% block content %}
+{% set status_variants = {'queued': 'neutral', 'running': 'info', 'succeeded': 'success', 'failed': 'danger', 'cancelled': 'neutral'} %}
+{% set status_labels = {'queued': 'Queued', 'running': 'Running', 'succeeded': 'Succeeded', 'failed': 'Failed', 'cancelled': 'Cancelled'} %}
+{% call page_header('Job ' ~ job.id ~ ' · ' ~ job.label, 'What this job did, when it ran, and how it ended.') %}{{ link_button('Back to job history', url_for('operations.jobs'), kind='secondary') }}{% endcall %}
+{% if job.active %}{% call callout('info') %}<p>This page refreshes every two seconds while the job is queued or running.</p>{% endcall %}{% endif %}
+{% if job.audit_pending %}{% call callout('warning', 'The outcome audit is pending') %}<p>The audit entry will be retried.</p>{% endcall %}{% endif %}
+
+<div class="card-grid">
+{% call card('Result') %}
 <dl>
-<dt>Status</dt><dd>{{ job.status }}</dd>
-{% if queue_detail %}<dt>Queue</dt><dd>{{ queue_detail }}</dd>{% endif %}
+<dt>Status</dt><dd>{{ badge(status_labels.get(job.status, job.status), status_variants.get(job.status, 'neutral')) }}{% if queue_detail %} <span class="muted">{{ queue_detail }}</span>{% endif %}</dd>
 <dt>Started by</dt><dd>{{ job.started_by }}</dd>
-<dt>Queued</dt><dd>{{ job.created_at }}</dd>
-<dt>Started</dt><dd>{{ job.started_at or 'Not started' }}</dd>
-<dt>Ended</dt><dd>{{ job.ended_at or 'Not finished' }}</dd>
-<dt>Exit code</dt><dd>{{ job.exit_code if job.exit_code is not none else 'None' }}{% if job.exit_code is not none %} — {{ job.exit_meaning }}{% endif %}</dd>
-<dt>Detail</dt><dd>{{ job.message or '' }}</dd>
+<dt>Detail</dt><dd>{{ job.message or 'No detail recorded.' }}</dd>
 </dl>
-{% if job.active and 'run' in (permissions | default([])) %}<form method="post" action="{{ url_for('operations.cancel_job', job_id=job.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Cancel job</button></form>
-<p class="muted">Cancel sends the documented interrupt: SIGINT to the command's process group on Linux, or Ctrl+Break on Windows. The command gets three seconds for cleanup, followed by termination and a two-second grace period before a forced kill. Forced termination is shown in the result. A Windows console is required.</p>{% endif %}
-{% if job.operation == 'watch-refresh' %}<p>Refresh queues deliveries. They go out on the next watch notify or watch run.</p>{% if accounts and 'run' in permissions %}<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="watch-notify"><button>Deliver now</button></form>{% endif %}{% endif %}
-<h2>Log tail</h2><p class="muted">The last part of the job output is shown. Stored logs are bounded; older output is discarded.</p>
+{% endcall %}
+
+{% call card('Timing') %}
+<dl>
+<dt>Queued</dt><dd>{{ stamp(job.created_at) }}</dd>
+<dt>Started</dt><dd>{{ stamp(job.started_at) if job.started_at else 'Not started' }}</dd>
+<dt>Ended</dt><dd>{{ stamp(job.ended_at) if job.ended_at else 'Not finished' }}</dd>
+<dt>Exit code</dt><dd>{% if job.exit_code is not none %}<span class="num">{{ job.exit_code }}</span> — {{ job.exit_meaning }}{% elif job.active %}Not finished yet{% else %}Not recorded{% endif %}</dd>
+</dl>
+{% endcall %}
+</div>
+
+{% if job.active and 'run' in (permissions | default([])) %}
+{% call card('Cancel this job', 'Cancelling asks the command to stop. The result shows whether it had time to clean up.') %}
+<form method="post" action="{{ url_for('operations.cancel_job', job_id=job.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}">{{ button('Cancel job', kind='danger', confirm='Cancel this job? The command will be asked to stop.') }}</form>
+<p class="muted">Cancel sends the documented interrupt: SIGINT to the command's process group on Linux, or Ctrl+Break on Windows. The command gets three seconds for cleanup, followed by termination and a two-second grace period before a forced kill. Forced termination is shown in the result. A Windows console is required.</p>
+{% endcall %}
+{% endif %}
+
+{% if job.operation == 'watch-refresh' %}
+{% call card('Deliver queued alerts', 'A refresh only queues deliveries. They go out on the next watch notify or watch run.') %}
+{% if accounts and 'run' in permissions %}<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="watch-notify">{{ button('Deliver now') }}</form>{% endif %}
+{% endcall %}
+{% endif %}
+
+{% call card('Log output', 'The last part of the job output is shown. Stored logs are bounded, so older output is discarded.') %}
 <pre>{{ log or 'No output yet.' }}</pre>
-<p><a href="{{ url_for('operations.jobs') }}">Back to job history</a></p>
+{% endcall %}
 {% endblock %}
