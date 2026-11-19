@@ -44,15 +44,23 @@ path: its application permission is `Teamwork.Migrate.All`. See
 CVEBeacon is an outbound sender. It does not expose an inbound bot messaging
 endpoint or handle install activities, user replies, or card actions. If an
 existing bot host receives activities, use its authenticated conversation
-references. Do not point Azure Bot's messaging endpoint at the dashboard.
+references. Leave the Azure Bot messaging endpoint blank if the portal permits,
+or use a placeholder such as `https://example.com/api/messages` for this outbound-only
+configuration. Receiving activities requires a separate bot host. Do not point Azure Bot's messaging endpoint at the dashboard.
 
 For optional administrator-managed installation through Graph, use
 `POST /users/{user-id}/teamwork/installedApps` with
 `teamsApp@odata.bind` pointing to the **catalog-generated Teams app ID**. This
-catalog ID differs from the Azure app ID and can differ from the manifest ID.
+catalog ID is the Graph `teamsApp.id`; the developer's manifest ID is
+`teamsApp.externalId` for an organization catalog app. Store-distributed apps
+can use the manifest ID as their catalog ID. Neither is the Azure bot app ID.
+See [Teams app identifiers](https://learn.microsoft.com/en-us/graph/api/resources/teamsapp?view=graph-rest-1.0).
 The least application permission for installing the app itself is
 `TeamsAppInstallation.ReadWriteSelfForUser.All`, with administrator consent and
-the app identity linked in `webApplicationInfo`. Installation is a separate
+the app identity linked in `webApplicationInfo`. That optional installation
+flow requires adding `webApplicationInfo` to the manifest with the Azure app ID
+and the app registration's exposed resource URI; the notification-only template
+omits it because ordinary manual installation needs no SSO. Installation is a separate
 administrative step; CVEBeacon never installs applications automatically. See
 [Graph app installation](https://learn.microsoft.com/en-us/graph/api/userteamwork-post-installedapps?view=graph-rest-1.0).
 
@@ -85,8 +93,8 @@ Use Entra object UUIDs when possible: Connector delivery requires no Graph
 directory permissions for those recipients. A user principal name such as
 `alerts@example.com` is resolved with `GET /users/{UPN}?$select=id` using a
 separate Graph access token. That lookup requires the app's Graph application
-permission `User.Read.All` and administrator consent. UPNs must belong to the
-configured tenant. See [Get user permissions](https://learn.microsoft.com/en-us/graph/api/user-get?view=graph-rest-1.0).
+permission `User.Read.All` and administrator consent. Object IDs and UPNs must both belong to the
+configured tenant; cross-tenant recipients are unsupported. See [Get user permissions](https://learn.microsoft.com/en-us/graph/api/user-get?view=graph-rest-1.0).
 
 To send to an existing personal or team conversation, add references instead
 of, or alongside, `recipients`:
@@ -106,11 +114,16 @@ See [conversation addressing](https://learn.microsoft.com/en-us/microsoftteams/p
 There must be 1–100 total destinations. Avoid listing the same person both by
 UPN and object ID or by an additional conversation reference.
 
-Only configure trusted Microsoft Connector URLs: the bot bearer token is sent
-to that endpoint. Redirects are refused, and response-provided URLs are ignored.
+Service URLs must use HTTPS on the explicit public-cloud host allowlist:
+`smba.trafficmanager.net`, with the default port or port 443. Foreign hosts,
+lookalike suffixes, nonstandard ports and HTTP URLs are refused before token
+acquisition, for both channel URLs and conversation references. This matches the
+[documented public Teams service URL](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/send-proactive-messages).
+Redirects are refused, and response-provided URLs are ignored.
 This release targets the public Microsoft cloud and single-tenant authority;
 changing the service URL alone does not enable sovereign cloud authentication.
-`allow_insecure = true` permits HTTP only for loopback fake endpoints.
+`allow_insecure` does not bypass the bot service URL policy. Local acceptance
+checks map permitted URLs to disposable loopback endpoints inside their test transport.
 
 ## Delivery and testing
 
@@ -119,7 +132,7 @@ with early expiry refresh. DMs are created without a card using
 `POST {service_url}/v3/conversations`, then reused from the watch database.
 Cards go to `POST {service_url}/v3/conversations/{id}/activities`.
 
-The watch database migrates transactionally from schema 7 to 8. It stores
+The watch database migrates transactionally to schema 9, following the schema 8 provider migration. It stores
 conversation references, rendered card batches and per-destination delivery
 states; it never stores the client secret or access token. Failed card batches
 retain their original content so newly queued events cannot merge into a retry.
@@ -132,10 +145,14 @@ unconfirmed delivery, as with other watch channels.
 
 HTTP 401/403 use the existing bounded authentication-attempt limit. A 401 also
 invalidates the cached tokens. HTTP 429 honors `Retry-After` within the delivery
-budget; a longer wait is saved for a later run. Other rejected sends, including
+budget; a longer wait is saved for a later run. Waiting without a request
+does not consume the failure budget. Other rejected sends, including
 5xx, use the normal failed-delivery backoff. Errors contain safe categories and
 status codes, never upstream bodies, tokens or secrets. Per-recipient outcomes
-are available in delivery/test results and durable delivery states in SQLite.
+appear as bounded counts and destination/part numbers in notification and test
+output, including dashboard test job logs. Raw conversation IDs are omitted.
+Completed card copies and destination rows are removed after their events are
+confirmed sent; unresolved and ambiguous batches remain durable.
 
 The dashboard's channel editor includes `teams_bot` and its field descriptions.
 Editing any credential-bearing row, including changing its recipients, requires

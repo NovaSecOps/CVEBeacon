@@ -3,9 +3,12 @@
 ## Optional Teams bot channel
 
 Back up the watch database before upgrading. The first write-capable watch
-operation migrates schema 7 to 8 in a transaction, preserving existing event,
+operation migrates schema 8 to 9 in a transaction, preserving existing event,
 delivery and reporting history. The new tables store Teams bot conversation
-references, frozen message batches and per-recipient results. Read-only views
+references, frozen message batches and per-recipient results. Bot migration
+checks actual tables and columns even if an earlier build already wrote the
+version number. Upgrades from schema 7 run the preceding provider migration
+first when both features are installed. Read-only views
 of an older database may require a watch operation to migrate it first.
 
 Existing configuration files and the Teams Workflow webhook channel require no

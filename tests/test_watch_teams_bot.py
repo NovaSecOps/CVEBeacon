@@ -870,6 +870,25 @@ def test_shared_workflow_and_bot_card_builder_preserves_wire_bytes():
     assert json.dumps(teams_adaptive_card(MESSAGE), separators=(",", ":")).encode() == expected
 
 
+def test_bot_documentation_and_manifest_contract():
+    from pathlib import Path
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    guide = (root / "docs/TEAMS.md").read_text()
+    network = (root / "docs/NETWORK_REQUIREMENTS.md").read_text()
+    watch = (root / "docs/WATCH.md").read_text()
+    assert "smba.trafficmanager.net" in network and "Teams bot Connector" in network
+    assert "protected files" in network and "TEAMS.md" in network
+    assert "protected files" in (root / "README.md").read_text()
+    assert "schema is version 9" in watch and "`teams_bot`" in watch.split("Common keys:", 1)[1].split("- `enabled`", 1)[0]
+    assert "schema 8 to 9" in (root / "docs/UPGRADING.md").read_text()
+    assert "placeholder" in guide and "https://example.com/api/messages" in guide
+    assert "Object IDs and UPNs must both belong" in guide
+    assert "teamsApp.externalId" in guide and "teamsApp.id" in guide
+    manifest = json.loads((root / "deploy/teams/manifest.template.json").read_text())
+    assert "webApplicationInfo" not in manifest
+    assert subprocess.run(["git", "check-ignore", "deploy/teams/manifest.json"], cwd=root, capture_output=True).returncode == 0
 
 
 

@@ -66,8 +66,6 @@ def main() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     origin = f"http://127.0.0.1:{server.server_port}"
-    original_authority = teams_bot.AUTHORITY
-    teams_bot.AUTHORITY = origin
     try:
         with tempfile.TemporaryDirectory(prefix="cvebeacon-teams-") as directory:
             root = Path(directory)
@@ -88,8 +86,7 @@ tenant_id = "{TENANT}"
 app_id = "{APP}"
 client_secret_file = "bot-secret"
 recipients = ["{USER}"]
-service_url = "{origin}/teams/"
-allow_insecure = true
+service_url = "https://smba.trafficmanager.net/teams/"
 [[watch.rules]]
 name = "critical"
 condition = {{ cvss_min = 9 }}
@@ -105,9 +102,14 @@ channels = ["bot"]
             # Disable proxy environment variables and reject every nonlocal URL.
             class LocalTransport(httpx.HTTPTransport):
                 def handle_request(self, request):
-                    assert request.url.host == "127.0.0.1"
-                    assert request.url.port == server.server_port
-                    return super().handle_request(request)
+                    assert request.url.scheme == "https"
+                    assert request.url.host in {"login.microsoftonline.com", "smba.trafficmanager.net"}
+                    local = httpx.Request(
+                        request.method, origin + request.url.raw_path.decode("ascii"),
+                        headers=request.headers, content=request.read(),
+                    )
+                    assert local.url.host == "127.0.0.1" and local.url.port == server.server_port
+                    return super().handle_request(local)
 
             with httpx.Client(transport=LocalTransport(), trust_env=False) as client:
                 with HttpClient(config.http, client=client) as http:
@@ -119,7 +121,6 @@ channels = ["bot"]
             assert counts == {"token": 1, "conversation": 1, "activity": 3}, counts
             print("Teams bot loopback check passed: 1 token, 1 conversation, 3 cards; no external requests.")
     finally:
-        teams_bot.AUTHORITY = original_authority
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)

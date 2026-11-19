@@ -23,9 +23,5 @@
     "supportsFiles": false,
     "isNotificationOnly": true
   }],
-  "webApplicationInfo": {
-    "id": "{{BOT_APP_ID}}",
-    "resource": "api://botid-{{BOT_APP_ID}}"
-  },
   "validDomains": []
 }

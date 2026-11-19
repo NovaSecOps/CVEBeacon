@@ -107,7 +107,7 @@ Every rule channel must name one of these tables.
 
 Common keys:
 
-- `type` (required): `smtp`, `graph`, `teams`, `slack`, `discord`, `telegram`,
+- `type` (required): `smtp`, `graph`, `teams`, `teams_bot`, `slack`, `discord`, `telegram`,
   `matrix`, `ntfy`, `gotify`, or `webhook`.
 - `enabled`: `true` by default. A disabled channel keeps its pending deliveries.
 - `grouping`: `"run"` (default) sends one message per channel per run that lists
@@ -181,6 +181,11 @@ application permission such as `Mail.Send` for the sender mailbox. `cc` and
 plain-text body is still generated from the same facts and is what
 `format = "text"` sends. Graph cannot send both parts; with `format = "html"`
 only the HTML body is sent.
+
+### Teams bot
+
+Use `type = "teams_bot"` for proactive messages with a protected
+`client_secret_file`; see [Teams bot setup](TEAMS.md).
 
 ### Teams
 
@@ -540,7 +545,7 @@ that stronger claim. `watch reported --verify` reports the first broken row and
 exits 2; when it succeeds it prints how many rows are chained and how many are
 legacy and unchained. The user audit table uses the same construction.
 
-The watch database schema is version 7. Rows written before the identity upgrade
+The watch database schema is version 9. Rows written before the identity upgrade
 have `chain_version = 0`, a null chain, and are reported as legacy unchained;
 the chain starts with the first report written after the upgrade. Migration
 records the highest legacy row id in `watch_meta` once. A legacy row must be at
@@ -1045,7 +1050,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 7. An unknown version still fails closed. The version 1
+place to schema version 9. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to

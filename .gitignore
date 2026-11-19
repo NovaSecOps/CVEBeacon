@@ -64,3 +64,6 @@ deploy/container/state/
 deploy/container/reports/
 deploy/container/inventory/
 deploy/container/cvebeacon.toml
+
+# Local Teams application registration
+deploy/teams/manifest.json
