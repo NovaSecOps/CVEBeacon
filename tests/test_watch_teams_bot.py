@@ -794,7 +794,7 @@ def test_authentic_schema_seven_upgrade_preserves_all_existing_rows(tmp_path):
 
     path = tmp_path / "watch.db"
     with sqlite3.connect(path) as db:
-        db.executescript((Path(__file__).parent / "fixtures" / "watch_schema_v7.sql").read_text())
+        db.executescript((Path(__file__).parent / "fixtures" / "watch_schema_v7.sql").read_text(encoding="utf-8"))
         db.execute("INSERT INTO watch_cve(cve_id,status,description,cvss_json,cwes_json,products_json,"
                    "references_json,first_seen,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                    ("CVE-2026-0001", "published", "preserved description", "[]", "[]", "[]", "[]", NOW.isoformat(), NOW.isoformat()))
@@ -867,18 +867,18 @@ def test_bot_documentation_and_manifest_contract():
     import subprocess
 
     root = Path(__file__).resolve().parents[1]
-    guide = (root / "docs/TEAMS.md").read_text()
-    network = (root / "docs/NETWORK_REQUIREMENTS.md").read_text()
-    watch = (root / "docs/WATCH.md").read_text()
+    guide = (root / "docs/TEAMS.md").read_text(encoding="utf-8")
+    network = (root / "docs/NETWORK_REQUIREMENTS.md").read_text(encoding="utf-8")
+    watch = (root / "docs/WATCH.md").read_text(encoding="utf-8")
     assert "smba.trafficmanager.net" in network and "Teams bot Connector" in network
     assert "protected files" in network and "TEAMS.md" in network
-    assert "protected files" in (root / "README.md").read_text()
+    assert "protected files" in (root / "README.md").read_text(encoding="utf-8")
     assert "schema is version 9" in watch and "`teams_bot`" in watch.split("Common keys:", 1)[1].split("- `enabled`", 1)[0]
-    assert "schema 7 to 8" in (root / "docs/UPGRADING.md").read_text()
+    assert "schema 7 to 8" in (root / "docs/UPGRADING.md").read_text(encoding="utf-8")
     assert "placeholder" in guide and "https://example.com/api/messages" in guide
     assert "Object IDs and UPNs must both belong" in guide
     assert "teamsApp.externalId" in guide and "teamsApp.id" in guide
-    manifest = json.loads((root / "deploy/teams/manifest.template.json").read_text())
+    manifest = json.loads((root / "deploy/teams/manifest.template.json").read_text(encoding="utf-8"))
     assert "webApplicationInfo" not in manifest
     assert subprocess.run(["git", "check-ignore", "deploy/teams/manifest.json"], cwd=root, capture_output=True).returncode == 0
 
@@ -938,7 +938,7 @@ def test_approved_origin_preserves_regional_service_paths(raw, tmp_path, prefix,
 
 def test_upgrade_guide_covers_existing_custom_bot_urls_and_supported_schemas():
     from pathlib import Path
-    guide = (Path(__file__).resolve().parents[1] / "docs/UPGRADING.md").read_text()
+    guide = (Path(__file__).resolve().parents[1] / "docs/UPGRADING.md").read_text(encoding="utf-8")
     assert "schema 8 to 9" in guide
     assert "Teams bot" in guide and "provider" in guide
     assert "custom HTTPS" in guide and "remove the channel" in guide
