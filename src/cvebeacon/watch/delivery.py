@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -46,6 +46,9 @@ MAX_MESSAGES_PER_CHANNEL = 10
 AUTH_MAX_ATTEMPTS = 3
 INITIAL_WEBHOOK_CHUNK = 1000
 
+if TYPE_CHECKING:
+    from .teams_bot import RecipientResult
+
 
 class DeliveryFailure(Exception):
     """A channel did not accept a message.
@@ -61,10 +64,14 @@ class DeliveryFailure(Exception):
         *,
         ambiguous: bool = False,
         attempts_limit: int | None = None,
+        retry_after: float = 0,
+        deferred: bool = False,
     ) -> None:
         self.category = category
         self.ambiguous = ambiguous
         self.attempts_limit = attempts_limit
+        self.retry_after = retry_after
+        self.deferred = deferred
         super().__init__(category)
 
 
@@ -80,6 +87,7 @@ class ChannelSummary:
     given_up: int = 0
     error: str | None = None
     skipped: bool = False
+    recipients: tuple[RecipientResult, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -102,6 +110,7 @@ class TestOutcome:
     type: str
     ok: bool
     error: str | None = None
+    recipients: tuple[RecipientResult, ...] = ()
 
 
 def _utc_now() -> datetime:
@@ -124,7 +133,20 @@ def format_channel_line(summary: ChannelSummary) -> str:
         )
     if summary.error:
         line += f"; {summary.error}"
-    return line
+    return line + format_recipient_results(summary.recipients)
+
+
+def format_recipient_results(results: Sequence[RecipientResult]) -> str:
+    if not results:
+        return ""
+    from collections import Counter
+
+    counts = Counter(result.status for result in results)
+    total = ", ".join(f"{count} {status}" for status, count in sorted(counts.items()))
+    details = ", ".join(f"destination {result.destination_index + 1} part {result.part_index + 1}: {result.status}"
+                        for result in results[:10])
+    omitted = f", +{len(results) - 10} more" if len(results) > 10 else ""
+    return f"; recipients: {total} [{details}{omitted}]"
 
 
 def _http_call(
@@ -201,22 +223,9 @@ def _send_webhook_channel(
     except ConfigurationError as exc:
         raise DeliveryFailure(str(exc)) from None
     if channel.type == "teams":
-        body = {
-            "type": "message",
-            "attachments": [
-                {
-                    "contentType": "application/vnd.microsoft.card.adaptive",
-                    "content": {
-                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                        "type": "AdaptiveCard",
-                        "version": "1.4",
-                        "body": [
-                            {"type": "TextBlock", "wrap": True, "text": message.text}
-                        ],
-                    },
-                }
-            ],
-        }
+        from .messages import teams_adaptive_card
+
+        body = teams_adaptive_card(message)
         result = _http_call(http, "POST", url, json_body=body, timeout=timeout)
         _accepted(result, (200, 202), "Teams rejected the message")
         return
@@ -721,8 +730,36 @@ def _send(
     clients: Mapping[str, ClientImpacts] | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] | None = None,
+    store: WatchStore | None = None,
+    retry_ambiguous: bool = False,
+    recipient_results: list[RecipientResult] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    wall_time: Callable[[], float] = time.time,
 ) -> None:
-    if channel.type in {"teams", "slack", "discord"}:
+    if channel.type == "teams_bot":
+        from .teams_bot import send_bot
+
+        if store is None and (channel.options["recipients"] or message.event_ids or message.initial):
+            raise DeliveryFailure("Teams bot requires a watch database")
+        results = send_bot(
+            channel, message, http, timeout, store, deadline=deadline,
+            monotonic=monotonic or time.monotonic, sleep=sleep,
+            retry_ambiguous=retry_ambiguous, wall_time=wall_time,
+        )
+        if recipient_results is not None:
+            recipient_results.extend(results)
+        failures = [result for result in results if result.status != "sent"]
+        if failures:
+            raise DeliveryFailure(
+                failures[0].error or "Teams bot delivery failed",
+                deferred=all(result.status == "deferred" for result in failures),
+                ambiguous=any(result.status == "ambiguous" for result in failures),
+                attempts_limit=min(
+                    (result.attempts_limit for result in failures if result.attempts_limit),
+                    default=None,
+                ),
+            )
+    elif channel.type in {"teams", "slack", "discord"}:
         _send_webhook_channel(channel, message, http, timeout)
     elif channel.type == "telegram":
         _send_telegram(channel, message, http, timeout)
@@ -780,8 +817,17 @@ def _channel_messages(
     since: str | None,
     language: str,
     clients: Mapping[str, ClientImpacts] | None = None,
+    store: WatchStore | None = None,
 ) -> tuple[OutgoingMessage, ...]:
-    return build_messages(
+    saved = ()
+    if channel.type == "teams_bot" and store is not None:
+        saved = store.teams_bot_saved_messages(
+            channel.name, channel.options["tenant_id"], channel.options["app_id"],
+            (event.event_id for event in events),
+        )
+        covered = {identifier for message in saved for identifier in message.event_ids}
+        events = tuple(event for event in events if event.event_id not in covered)
+    return saved + build_messages(
         events,
         channel_type=channel.type,
         grouping=channel.grouping,
@@ -858,6 +904,7 @@ def deliver_pending(
         error: str | None = None
         pace_needed = False
         stop_channel = False
+        recipient_results = []
         interval = channel.min_interval_seconds
         language = channel.language or config.watch.language
 
@@ -868,6 +915,20 @@ def deliver_pending(
             pace: bool,
             client_impacts: Mapping[str, ClientImpacts] | None = None,
         ) -> tuple[int, int, DeliveryFailure | None, bool, bool]:
+            try:
+                if channel.type == "teams_bot":
+                    if messages and messages[0].initial:
+                        saved = store.teams_bot_saved_messages(
+                            channel.name, channel.options["tenant_id"], channel.options["app_id"],
+                            messages[0].event_ids,
+                        )
+                        if saved:
+                            messages = saved
+                    store.save_teams_bot_messages(
+                        channel.name, channel.options["tenant_id"], channel.options["app_id"], messages,
+                    )
+            except Exception:
+                return 0, sent, DeliveryFailure("Teams bot batch state could not be saved"), False, pace
             delivered = 0
             failure: DeliveryFailure | None = None
             expired = False
@@ -906,10 +967,15 @@ def deliver_pending(
                         clients=client_impacts,
                         deadline=deadline,
                         monotonic=monotonic,
+                        store=store,
+                        retry_ambiguous=retry_ambiguous,
+                        sleep=sleep,
+                        recipient_results=recipient_results,
+                        wall_time=lambda: now.timestamp(),
                     )
                 except DeliveryFailure as exc:
                     failure = exc
-                    if delivered:
+                    if delivered and not exc.deferred:
                         failure = DeliveryFailure(
                             exc.category,
                             ambiguous=True,
@@ -1013,6 +1079,8 @@ def deliver_pending(
                     now=now,
                     max_items=channel.max_items,
                     include_ambiguous=include_ambiguous,
+                    **({"bot_identity": (channel.options["tenant_id"], channel.options["app_id"])}
+                       if channel.type == "teams_bot" else {}),
                 )
                 if digest is not None:
                     digest_clients = affected_clients(
@@ -1062,6 +1130,10 @@ def deliver_pending(
                             )
                             if expired:
                                 store.release_initial(channel.name, now=now)
+                                stop_channel = True
+                            elif failure is not None and failure.deferred:
+                                store.release_initial(channel.name, now=now)
+                                error = failure.category
                                 stop_channel = True
                             elif failure is not None:
                                 store.mark_initial_failed(
@@ -1143,6 +1215,7 @@ def deliver_pending(
                         since=since,
                         language=language,
                         clients=batch_clients,
+                        store=store,
                     )
                 except MessageTooLarge:
                     identifiers = tuple(event.event_id for event in batch)
@@ -1240,6 +1313,12 @@ def deliver_pending(
                         )
                         stop_channel = True
                         break
+                    if failure is not None and failure.deferred:
+                        store.release_delivery(event_ids, channel.name,
+                                               status="ambiguous" if claim_statuses == ("ambiguous",) else "pending")
+                        error = failure.category
+                        stop_channel = True
+                        break
                     if failure is not None:
                         # A row that was ambiguous before this attempt may
                         # already have been delivered; a later failure cannot
@@ -1270,6 +1349,8 @@ def deliver_pending(
                         break
                     store.mark_delivery(event_ids, channel.name, "sent")
                     events_sent += len(event_ids)
+        if channel.type == "teams_bot":
+            store.prune_teams_bot_batches(channel.name, channel.options["tenant_id"], channel.options["app_id"])
         final_status = _channel_status(store, channel.name)
         summaries.append(
             ChannelSummary(
@@ -1282,6 +1363,7 @@ def deliver_pending(
                 ambiguous_total=final_status.ambiguous,
                 given_up=final_status.given_up,
                 error=error,
+                recipients=tuple(recipient_results),
             )
         )
     return DeliveryReport(tuple(summaries), recovered)
@@ -1317,6 +1399,7 @@ def send_test(
         html=html,
         content=body,
     )
+    recipient_results = []
     try:
         if channel.type == "webhook":
             headers: dict[str, str] = {}
@@ -1341,6 +1424,11 @@ def send_test(
                     f"webhook rejected the message: HTTP {result.status_code}"
                 )
         else:
+            store = None
+            if channel.type == "teams_bot":
+                if channel.options["recipients"]:
+                    store = WatchStore(config.watch.database)
+                    store.initialize()
             _send(
                 channel,
                 message,
@@ -1348,12 +1436,16 @@ def send_test(
                 http,
                 min(timeout_seconds, channel.timeout_seconds),
                 {},
+                store=store,
+                deadline=(time.monotonic() + max(1, timeout_seconds)
+                          if channel.type == "teams_bot" else None),
+                recipient_results=recipient_results,
             )
     except (DeliveryFailure, ConfigurationError) as exc:
         category = exc.category if isinstance(exc, DeliveryFailure) else str(exc)
-        return TestOutcome(channel.name, channel.type, False, category)
+        return TestOutcome(channel.name, channel.type, False, category, tuple(recipient_results))
     except Exception:
         return TestOutcome(
             channel.name, channel.type, False, "unexpected delivery failure"
         )
-    return TestOutcome(channel.name, channel.type, True)
+    return TestOutcome(channel.name, channel.type, True, recipients=tuple(recipient_results))
