@@ -184,7 +184,9 @@ def test_dashboard_check_handles_storage_oserrors(updates, monkeypatch):
     response = submit(client, "/updates/check")
     assert response.status_code == 400
     assert "Release check failed." in response.text
-    assert "Return to the form, check what you entered, and submit it again." in response.text
+    assert "The release feed or local storage may be unavailable" in response.text
+    assert "Return to the form, check what you entered" not in response.text
+    assert ">Status 400<" in response.text
 
 
 def test_tampered_snapshot_config_never_replaces_the_live_config(tmp_path):

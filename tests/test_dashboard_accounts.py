@@ -50,7 +50,11 @@ def test_local_bootstrap_is_one_time(setup):
     client = setup[2]
     assert client.get("/bootstrap", environ_overrides={"REMOTE_ADDR": "192.0.2.1"}).status_code == 403
     assert submit(client, "/bootstrap", username="admin", password=PASSWORD).status_code == 303
-    assert client.get("/bootstrap").status_code in {303, 403}
+    response = client.get("/bootstrap")
+    assert response.status_code in {303, 403}
+    if response.status_code == 403:
+        assert "closes it once an account exists" in response.text
+        assert "it accepts connections only from the computer running CVEBeacon" in response.text
 
 
 def login(client, username="reader"):
