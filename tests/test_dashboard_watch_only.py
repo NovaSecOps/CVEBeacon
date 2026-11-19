@@ -176,7 +176,7 @@ def test_shell_groups_main_and_account_navigation(watch_only_client):
         assert f"<span>{label}</span>" in sidebar, label
     # Registered optional features appear; unregistered ones produce no dead links.
     assert "<span>CVE explorer</span>" in sidebar
-    assert "Backups" not in sidebar
+    assert "<span>Backups</span>" in sidebar
     assert 'aria-current="page"' in sidebar
     assert '<main id="content"' in remainder
     # The shell is the only navigation; page bodies add none.
