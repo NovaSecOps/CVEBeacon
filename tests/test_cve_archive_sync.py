@@ -539,11 +539,30 @@ def test_dated_row_wins_after_an_undated_row_replaced_it(tmp_path):
     store.upsert_cve_list([later])
     assert store.view(ID).description=='dated ten fetched last'
 
-def test_asset_identity_is_stable_when_synthetic_digest_changes():
+def test_asset_identity_includes_a_different_digest():
     first={'id':1,'name':'2026-11-03_delta_CVEs_at_1200Z.zip','size':100,
            'digest':'sha256:'+'1'*64,'browser_download_url':cve_list.ASSET_PREFIX+'fake/one.zip'}
     second={**first,'digest':'sha256:'+'2'*64}
-    assert cve_list._asset_token(first)==cve_list._asset_token(second)
+    assert cve_list._asset_token(first)!=cve_list._asset_token(second)
     dated={**first,'updated_at':'2026-11-03T12:00:00Z'}
     changed={**dated,'updated_at':'2026-11-03T13:00:00Z'}
     assert cve_list._asset_token(dated)!=cve_list._asset_token(changed)
+
+
+def test_same_size_different_digest_asset_is_redownloaded(tmp_path):
+    config,store=started(tmp_path)
+    first_record=record(updated=NOW.isoformat(),description='first')
+    second_record=record(updated=NOW.isoformat(),description='other')
+    first=Archives(hour=12,delta=[first_record])
+    with mock_client(first) as http:
+        cve_list.sync(http,store,config.watch,NOW)
+    first_name=next(name for name in first.files if '_delta_' in name)
+    second=Archives(hour=12,delta=[second_record])
+    with mock_client(second) as http:
+        cve_list.sync(http,store,config.watch,NOW)
+    second_name=next(name for name in second.files if '_delta_' in name)
+    assert first_name==second_name
+    assert len(first.files[first_name])==len(second.files[second_name])
+    assert hashlib.sha256(first.files[first_name]).digest()!=hashlib.sha256(second.files[second_name]).digest()
+    assert sum('_delta_' in request.url.path and '/download/' in request.url.path for request in second.requests)==1
+    assert store.view(ID).description=='other'

@@ -395,17 +395,15 @@ def _time(value):
 def _asset_token(asset):
     """Stable identity for an unchanged release asset.
 
-    GitHub's asset id, name, size and updated_at are immutable release
-    metadata. The body digest is included when updated_at is available; older
-    or synthetic release metadata may omit updated_at and regenerate equivalent
-    bytes with a different digest, so identity falls back to name and size.
+    The asset id or URL, name, size and digest identify the bytes. A same-size
+    content change with a different digest is never treated as unchanged.
     """
     identity = str(asset.get("id") or asset["browser_download_url"])
     parts = [identity, str(asset.get("name", "")), str(asset.get("size", ""))]
     if asset.get("updated_at"):
         parts.append(str(asset["updated_at"]))
-        if asset.get("digest"):
-            parts.append(str(asset["digest"]))
+    if asset.get("digest"):
+        parts.append(str(asset["digest"]))
     return ":".join(parts)
 
 
