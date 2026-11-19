@@ -1,0 +1,31 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.19",
+  "version": "1.0.0",
+  "id": "{{TEAMS_APP_ID}}",
+  "packageName": "com.example.cvebeacon",
+  "developer": {
+    "name": "CVEBeacon",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com/privacy",
+    "termsOfUseUrl": "https://example.com/terms"
+  },
+  "name": {"short": "CVEBeacon", "full": "CVEBeacon watch alerts"},
+  "description": {
+    "short": "Receive vulnerability watch alerts.",
+    "full": "Receive CVEBeacon vulnerability watch alerts in personal chats and team channels."
+  },
+  "icons": {"color": "color.png", "outline": "outline.png"},
+  "accentColor": "#245B78",
+  "bots": [{
+    "botId": "{{BOT_APP_ID}}",
+    "scopes": ["personal", "team"],
+    "supportsFiles": false,
+    "isNotificationOnly": true
+  }],
+  "webApplicationInfo": {
+    "id": "{{BOT_APP_ID}}",
+    "resource": "api://botid-{{BOT_APP_ID}}"
+  },
+  "validDomains": []
+}

@@ -31,6 +31,10 @@ Markdown, plain-text, or Word template without syncing or delivering; see
 
 ## Configuration
 
+For optional Teams bot direct messages and existing team conversations, see
+[Teams bot setup](TEAMS.md). The existing Teams Workflow webhook channel remains
+available with its current configuration.
+
 Watch mode is disabled by default. Add a `[watch]` table to the existing
 configuration:
 
