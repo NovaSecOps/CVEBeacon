@@ -1,5 +1,34 @@
-{% extends 'base.html' %}{% from 'macros.html' import finding_detail, health_table %}{% block content %}<h1>Manual query</h1><p>Queries enabled public sources using the same assessment engine as the CLI. This may take several minutes. Manual investigation does not change scheduled findings, events, or notification delivery state.</p>
-<nav aria-label="Query mode">{% for value, label in [('product','Product'),('package','Package'),('purl','Explicit PURL')] %}<a href="{{ url_for('query', mode=value) }}" {% if mode == value %}aria-current="page"{% endif %}>{{ label }}</a> {% endfor %}</nav>
-<form method="post" class="filters"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="mode" value="{{ mode }}">{% for key in values %}<label>{{ 'Package name' if key == 'product' and mode == 'package' else 'PURL' if key == 'purl' else key | capitalize }}<input name="{{ key }}" value="{{ values[key] }}" maxlength="{{ 2048 if key == 'purl' else 256 }}" required></label>{% endfor %}<button>Query sources</button></form>
-<p>{{ 'Example: pkg:pypi/requests@2.31.0. Qualifiers and subpaths are preserved but may require review.' if mode == 'purl' else 'Use the source ecosystem name, such as PyPI, npm, Maven, Go, crates.io, or NuGet.' if mode == 'package' else 'Use the software vendor, product name, and installed version.' }}</p>
-{% if result %}<h2>Query results</h2>{% if result.coverage %}<p class="warning">{{ result.coverage }} · {{ result.coverage_reason }}</p>{% endif %}{% for f in result.findings %}<section class="finding"><h3>{{ f.vulnerability.advisory_id or f.vulnerability.cve_id }}</h3>{{ finding_detail(f) }}</section>{% else %}<p class="warning">No advisories returned. This is not proof of complete vulnerability coverage.</p>{% endfor %}<h2>Source observations for this query</h2>{{ health_table(result.source_health) }}{% endif %}{% endblock %}
+{% extends 'base.html' %}{% from 'macros.html' import finding_detail, health_table %}
+{% from 'ui.html' import page_header, card, callout, empty_state, field, button, applicability_badge %}
+{% block title %}Manual query · CVEBeacon{% endblock %}
+{% block content %}
+{{ page_header('Manual query', 'Check one product, package or package URL against enabled sources without changing your saved findings.') }}
+{% call callout('info', 'What this does') %}<p>Queries enabled public sources using the same assessment engine as a scan. This may take several minutes. Manual investigation does not change scheduled findings, events, or notification delivery state.</p>{% endcall %}
+<div class="pagination" role="group" aria-label="Query mode">
+{% for value, label in [('product','Product'),('package','Package'),('purl','Package URL (PURL)')] %}<a class="btn btn-secondary btn-small" href="{{ url_for('query', mode=value) }}"{% if mode == value %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+</div>
+{% set description = 'Use a package URL (PURL): a standard name for a software package. Example: pkg:pypi/requests@2.31.0. Qualifiers and subpaths are preserved but may require review.' if mode == 'purl' else 'Use the source ecosystem name, such as PyPI, npm, Maven, Go, crates.io or NuGet, together with the package and version.' if mode == 'package' else 'Use the software vendor, product name and installed version as they appear in your inventory.' %}
+{% call card('Describe what to check', description) %}
+<form method="post" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="mode" value="{{ mode }}">
+{% for key in values %}{% set labels = {'vendor': 'Vendor', 'product': 'Package name' if mode == 'package' else 'Product', 'version': 'Version', 'ecosystem': 'Ecosystem', 'purl': 'PURL'} %}{% set helps = {'vendor': 'Use the vendor name as printed by the software maker.', 'product': 'Use the package name, for example requests.' if mode == 'package' else 'Use the product name as it appears in the inventory.', 'version': 'Use the installed version. Write unknown if the version is not known.', 'ecosystem': 'For example PyPI, npm, Maven, Go, crates.io or NuGet.', 'purl': 'Example: pkg:pypi/requests@2.31.0. Qualifiers and subpaths are kept but may need review.'} %}{{ field(labels.get(key, key | capitalize), key, value=values[key], required=true, maxlength=2048 if key == 'purl' else 256, help=helps.get(key)) }}{% endfor %}
+<div class="form-actions">{{ button('Query sources') }}</div>
+</form>
+{% endcall %}
+{% if result %}
+{% call card('Query results', 'What the enabled sources returned for this query. Results are not saved and do not change your findings.') %}
+{% if result.coverage %}{% call callout('warning', 'Coverage was incomplete') %}<p>{{ applicability_badge(result.coverage) }}</p><p>{{ result.coverage_reason or 'Some sources could not be checked, so the coverage of this query is unknown.' }}</p><p>This is not proof that the software is unaffected.</p>{% endcall %}{% endif %}
+{% for f in result.findings %}<section>
+<h3>{{ f.vulnerability.advisory_id or f.vulnerability.cve_id }}</h3>
+{{ finding_detail(f) }}
+</section>{% if not loop.last %}<hr>{% endif %}{% else %}
+{{ empty_state('No advisories returned', 'This is not proof of complete vulnerability coverage. Check the source observations below and try again when more sources are available.') }}
+{% endfor %}
+{% if result.coverage %}<details class="disclosure"><summary>Technical details for this query</summary><dl><dt>Coverage state</dt><dd>{{ result.coverage }}</dd>{% if result.coverage_reason %}<dt>Coverage reason</dt><dd>{{ result.coverage_reason }}</dd>{% endif %}</dl></details>{% endif %}
+{% endcall %}
+{% call card('Source observations for this query', 'What each source reported during this query. A failed or disabled source provides no coverage.') %}
+{{ health_table(result.source_health) }}
+{% endcall %}
+{% endif %}
+{% endblock %}

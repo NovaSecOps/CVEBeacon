@@ -1,2 +1,36 @@
-{% extends 'base.html' %}{% block content %}<h1>Finding history</h1><p>Up to 200 matching material events per page. Opening an event shows its recorded evidence.</p><form method="get" class="filters"><label>Exact asset ID<input name="asset" value="{{ asset_id }}" maxlength="256"></label><label>Advisory / CVE alias<input name="cve" value="{{ cve_id }}" maxlength="256"></label><button>Filter</button></form><p><a href="{{ url_for('history', asset=asset_id, cve=cve_id) }}">Newest events</a>{% if next_cursor %} · <a href="{{ url_for('history', asset=asset_id, cve=cve_id, before=next_cursor) }}">Older events</a>{% endif %}</p>
-<div class="table-wrap"><table><thead><tr><th>Time</th><th>Asset</th><th>Advisory</th><th>Change</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ row.occurred_at }}</td><td>{{ row.asset_id }}</td><td>{{ row.cve_id }}</td><td><a href="{{ url_for('event', event_id=row.event_id) }}">{{ row.event_type }}</a></td></tr>{% else %}<tr><td colspan="4">No matching events.</td></tr>{% endfor %}</tbody></table></div>{% endblock %}
+{% extends 'base.html' %}
+{% from 'ui.html' import page_header, card, callout, empty_state, table_wrap, button, link_button %}
+{% block title %}History · CVEBeacon{% endblock %}
+{% block content %}
+{{ page_header('History', 'Every recorded change to your findings, newest first. Open an event to see the evidence stored at that moment.') }}
+{% call callout('info', 'How this page works') %}<p>History records what changed and when. Each event is a historical observation from its recorded time, not the current assessment. Current findings appear on the Findings page.</p>{% endcall %}
+{% call card('Filter history', 'Use the exact asset ID or advisory identifier to narrow the list. Both filters are optional.') %}
+<form method="get" class="filters">
+<label>Exact asset ID<input name="asset" value="{{ asset_id }}" maxlength="256"></label>
+<label>Advisory or CVE alias<input name="cve" value="{{ cve_id }}" maxlength="256"></label>
+{{ button('Apply filters') }} {{ link_button('Clear filters', url_for('history'), kind='secondary') }}
+</form>
+{% endcall %}
+{% if rows %}
+<p class="muted">{{ rows | length }} event{{ '' if rows | length == 1 else 's' }} on this page. Up to 200 matching events are shown per page, and each event keeps its original recorded time.</p>
+{% call card('Recorded events', 'Newest first. Select a change to see its evidence.') %}
+{% call table_wrap('Finding history') %}
+<table>
+<thead><tr><th>Recorded</th><th>Asset</th><th>Advisory</th><th>Change</th></tr></thead>
+<tbody>{% for row in rows %}<tr>
+<td>{{ watch_stamp(row.occurred_at) if row.occurred_at else 'Not recorded' }}</td>
+<td>{{ row.asset_id }}</td>
+<td>{{ row.cve_id }}</td>
+<td>{% set change_label = 'New finding' if row.event_type == 'new' else 'Finding changed' if row.event_type == 'changed' else row.event_type %}<a href="{{ url_for('event', event_id=row.event_id) }}">{{ change_label }}</a></td>
+</tr>{% endfor %}</tbody>
+</table>
+{% endcall %}
+<div class="pagination" role="group" aria-label="Pages of events">
+<a class="btn btn-secondary btn-small" href="{{ url_for('history', asset=asset_id or none, cve=cve_id or none) }}">Newest events</a>
+{% if next_cursor %}<a class="btn btn-secondary btn-small" href="{{ url_for('history', asset=asset_id or none, cve=cve_id or none, before=next_cursor) }}">Older events</a>{% endif %}
+</div>
+{% endcall %}
+{% else %}
+{% if asset_id or cve_id %}{{ empty_state('No matching events', 'No change matches these filters. Clear the filters to see all recorded events.', url_for('history'), 'Clear filters') }}{% else %}{{ empty_state('No events recorded yet', 'Events appear after a scan records a change to a finding. Run a scan, then return here to review what changed.') }}{% endif %}
+{% endif %}
+{% endblock %}
