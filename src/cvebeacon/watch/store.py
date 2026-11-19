@@ -62,7 +62,7 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -257,6 +257,24 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS watch_event_created ON watch_event(created_at, id)",
     "CREATE INDEX IF NOT EXISTS watch_delivery_status ON watch_delivery(status)",
     "CREATE INDEX IF NOT EXISTS watch_report_cve ON watch_report(cve_id, id)",
+    """CREATE TABLE IF NOT EXISTS watch_teams_bot_conversation (
+        tenant_id TEXT NOT NULL, app_id TEXT NOT NULL, recipient TEXT NOT NULL,
+        service_url TEXT NOT NULL, conversation_id TEXT NOT NULL,
+        PRIMARY KEY(tenant_id, app_id, recipient, service_url)
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_teams_bot_delivery (
+        channel TEXT NOT NULL, tenant_id TEXT NOT NULL, app_id TEXT NOT NULL,
+        recipient TEXT NOT NULL, message_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','ambiguous')),
+        attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+        not_before REAL NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+        PRIMARY KEY(channel, tenant_id, app_id, recipient, message_key)
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_teams_bot_batch (
+        channel TEXT NOT NULL, tenant_id TEXT NOT NULL, app_id TEXT NOT NULL,
+        batch_key TEXT NOT NULL, event_ids_json TEXT NOT NULL, messages_json TEXT NOT NULL,
+        PRIMARY KEY(channel, tenant_id, app_id, batch_key)
+    )""",
 )
 
 
@@ -525,9 +543,9 @@ class WatchStore:
             )
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5", "6", "7"} and not _alert_columns_current(db):
+        if version in {"2", "3", "4", "5", "6", "7", "8"} and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -2298,6 +2316,111 @@ class WatchStore:
             )
         )
 
+    def teams_bot_conversation(
+        self, tenant: str, app: str, recipient: str, service_url: str,
+        conversation_id: str | None = None,
+    ) -> str | None:
+        """Read or save a DM reference scoped to its tenant, bot and service."""
+        with self.transaction() as db:
+            key = (tenant, app, recipient, service_url)
+            if conversation_id is not None:
+                db.execute(
+                    "INSERT INTO watch_teams_bot_conversation VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(tenant_id,app_id,recipient,service_url) DO UPDATE "
+                    "SET conversation_id=excluded.conversation_id",
+                    (*key, conversation_id),
+                )
+                return conversation_id
+            row = db.execute(
+                "SELECT conversation_id FROM watch_teams_bot_conversation "
+                "WHERE tenant_id=? AND app_id=? AND recipient=? AND service_url=?", key,
+            ).fetchone()
+            return row[0] if row else None
+
+    def teams_bot_saved_messages(
+        self, channel: str, tenant: str, app: str, event_ids: Iterable[int],
+    ) -> tuple[Any, ...]:
+        """Restore immutable card batches so new pending events cannot merge into retries."""
+        from .messages import OutgoingMessage
+
+        selected = set(event_ids)
+        if not selected:
+            return ()
+        output = []
+        with closing(self._connect_readonly()) as db:
+            rows = db.execute(
+                "SELECT b.event_ids_json,b.messages_json FROM watch_teams_bot_batch b "
+                "WHERE b.channel=? AND b.tenant_id=? AND b.app_id=? AND EXISTS ("
+                "SELECT 1 FROM json_each(b.event_ids_json) ids JOIN watch_delivery d "
+                "ON d.event_id=ids.value WHERE d.channel=b.channel AND d.status!='sent') "
+                "ORDER BY b.rowid", (channel, tenant, app),
+            )
+            for row in rows:
+                identifiers = set(json.loads(row[0]))
+                if identifiers and identifiers <= selected:
+                    for value in json.loads(row[1]):
+                        value["event_ids"] = tuple(value["event_ids"])
+                        output.append(OutgoingMessage(**value))
+                    selected -= identifiers
+        return tuple(output)
+
+    def save_teams_bot_messages(
+        self, channel: str, tenant: str, app: str, messages: Sequence[Any],
+    ) -> None:
+        """Freeze every part before the first recipient receives any part."""
+        from dataclasses import asdict
+
+        groups: dict[tuple[int, ...], list] = {}
+        for message in messages:
+            groups.setdefault(message.event_ids, []).append(asdict(message))
+        with self.transaction() as db:
+            for identifiers, values in groups.items():
+                encoded_ids = json.dumps(sorted(identifiers))
+                db.execute(
+                    "INSERT OR IGNORE INTO watch_teams_bot_batch VALUES (?,?,?,?,?,?)",
+                    (channel, tenant, app, encoded_ids, encoded_ids, json.dumps(values)),
+                )
+
+    def claim_teams_bot_recipient(
+        self, key: tuple[str, str, str, str, str], *, retry_ambiguous: bool,
+        now: float,
+    ) -> str:
+        """Claim one rendered message for a destination before any activity send."""
+        with self.transaction() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO watch_teams_bot_delivery "
+                "(channel,tenant_id,app_id,recipient,message_key,status,updated_at) "
+                "VALUES (?,?,?,?,?,'pending',?)", (*key, _timestamp(self._clock)),
+            )
+            row = db.execute(
+                "SELECT status,not_before FROM watch_teams_bot_delivery WHERE "
+                "channel=? AND tenant_id=? AND app_id=? AND recipient=? AND message_key=?", key,
+            ).fetchone()
+            if row["status"] == "sent":
+                return "sent"
+            if row["status"] == "sending" or (row["status"] == "ambiguous" and not retry_ambiguous):
+                return "ambiguous"
+            if row["not_before"] > now:
+                return "deferred"
+            db.execute(
+                "UPDATE watch_teams_bot_delivery SET status='sending', attempts=attempts+1, "
+                "updated_at=? WHERE channel=? AND tenant_id=? AND app_id=? AND recipient=? "
+                "AND message_key=?", (_timestamp(self._clock), *key),
+            )
+            return "retrying_ambiguous" if row["status"] == "ambiguous" else "sending"
+
+    def finish_teams_bot_recipient(
+        self, key: tuple[str, str, str, str, str], status: str, *,
+        error: str | None = None, not_before: float = 0,
+    ) -> None:
+        with self.transaction() as db:
+            db.execute(
+                "UPDATE watch_teams_bot_delivery SET status=?,last_error=?,not_before=?,updated_at=? "
+                "WHERE channel=? AND tenant_id=? AND app_id=? AND recipient=? AND message_key=? "
+                "AND status='sending'",
+                (status, error, not_before, _timestamp(self._clock), *key),
+            )
+
     def recover_sending(
         self, *, older_than_seconds: float = DELIVERY_RECOVERY_SECONDS
     ) -> int:
@@ -2311,6 +2434,12 @@ class WatchStore:
             current - timedelta(seconds=max(0.0, older_than_seconds))
         ).isoformat()
         with self.transaction() as db:
+            db.execute(
+                "UPDATE watch_teams_bot_delivery SET status='ambiguous', "
+                "last_error='interrupted before confirmation', updated_at=? "
+                "WHERE status='sending' AND updated_at < ?",
+                (_timestamp(self._clock), cutoff),
+            )
             cursor = db.execute(
                 "UPDATE watch_delivery SET status='ambiguous', "
                 "first_attempt_at=COALESCE(first_attempt_at, updated_at), "
