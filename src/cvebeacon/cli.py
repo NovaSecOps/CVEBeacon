@@ -9,6 +9,7 @@ import logging
 import os
 import secrets
 import signal
+import sqlite3
 import stat
 import threading
 import sys
@@ -910,32 +911,39 @@ def _live_source_checks(
     return checks
 
 
-_WATCH_REQUIRED_SECRETS = {
-    "graph": ("client_secret",),
-    "teams": ("webhook_url",),
-    "slack": ("webhook_url",),
-    "discord": ("webhook_url",),
-    "telegram": ("bot_token",),
-    "matrix": ("access_token",),
-    "gotify": ("app_token",),
-    "webhook": ("url",),
-}
-
-
 def _watch_channel_check(config: AppConfig) -> str:
+    from .watch.channels import CREDENTIAL_FIELDS
+
     enabled = [channel for channel in config.watch.channels if channel.enabled]
     missing: list[str] = []
     for channel in enabled:
-        for key in _WATCH_REQUIRED_SECRETS.get(channel.type, ()):
+        keys = {
+            key[:-5] for key in CREDENTIAL_FIELDS.get(channel.type, ())
+        }
+        for key in sorted(keys):
+            if (
+                channel.type == "smtp"
+                and key == "password"
+                and not channel.options.get("username")
+            ):
+                continue
             reference = channel.secret(key)
-            if reference is None:
-                if key == "url" and channel.options.get("url"):
-                    continue
+            if reference is not None and reference.peek() is None:
                 missing.append(f"{channel.name} ({key.replace('_', ' ')})")
-            elif reference.peek() is None:
-                missing.append(f"{channel.name} ({key.replace('_', ' ')})")
+        if (
+            channel.type == "smtp"
+            and channel.options.get("username")
+            and channel.secret("password") is None
+        ):
+            missing.append(f"{channel.name} (password)")
+        if (
+            channel.type == "webhook"
+            and channel.options.get("header_name")
+            and channel.secret("header_value") is None
+        ):
+            missing.append(f"{channel.name} (header value)")
     if missing:
-        return "missing: " + ", ".join(missing)
+        return "missing: " + ", ".join(dict.fromkeys(missing))
     if not enabled:
         return "ok (no enabled channels)"
     names = ", ".join(channel.name for channel in enabled)
@@ -948,17 +956,49 @@ def _watch_source_check(config: AppConfig) -> str:
 
 
 def _data_directory_check(directory: Path) -> str:
+    target = directory
     try:
-        details = directory.stat()
+        while not target.exists():
+            parent = target.parent
+            if parent == target:
+                break
+            target = parent
+        details = target.stat()
     except OSError:
-        return f"missing ({directory})"
-    if not directory.is_dir():
-        return f"not a directory ({directory})"
+        return f"not writable ({directory})"
+    if not target.is_dir():
+        return f"not a directory ({target})"
+    mode = stat.S_IMODE(details.st_mode) if os.name == "posix" else 0
+    if target != directory:
+        if mode & 0o022 and not mode & stat.S_ISVTX:
+            return f"unsafe (parent {target} is group or other writable: {directory})"
+        if not os.access(target, os.W_OK | os.X_OK):
+            return f"not writable ({directory}; {target} cannot create it)"
+        return f"ok ({directory}; not created yet)"
     if not os.access(directory, os.W_OK | os.X_OK):
         return f"not writable ({directory})"
-    if os.name == "posix" and stat.S_IMODE(details.st_mode) & 0o022:
+    if os.name == "posix" and mode & 0o022:
         return f"unsafe (group or other writable: {directory})"
     return f"ok ({directory})"
+
+
+def _watch_database_check(config: AppConfig) -> str:
+    path = config.watch.database
+    if not path.exists():
+        return "not created yet"
+    try:
+        with closing(
+            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        ) as db:
+            schema = db.execute(
+                "SELECT value FROM watch_meta WHERE key='schema_version'"
+            ).fetchone()
+            if schema is None:
+                return "unreadable (watch database has no schema version)"
+            rows = db.execute("SELECT COUNT(*) FROM watch_cve").fetchone()[0]
+    except (sqlite3.Error, OSError):
+        return "unreadable (cannot read the watch database)"
+    return f"ok ({rows} CVEs, schema {schema[0]})"
 
 
 def _schedule_check() -> str:
@@ -966,7 +1006,10 @@ def _schedule_check() -> str:
         text = status().strip()
     except OSError:
         return "not checked (crontab is unavailable)"
-    except CVEBeaconError:
+    except CVEBeaconError as exc:
+        detail = str(exc).casefold()
+        if "malformed" in detail or "managed cron" in detail:
+            return "invalid (managed schedule is malformed)"
         return "not checked (schedule status failed)"
     if not text:
         return "not installed"
@@ -977,19 +1020,17 @@ def _schedule_check() -> str:
 
 
 def _watch_only_doctor_checks(config: AppConfig) -> dict[str, object]:
-    from .watch.directories import ensure_private_directory
-    from .watch.store import WatchStore
-
-    ensure_private_directory(config.watch.database.parent)
-    store = WatchStore(config.watch.database)
-    watch_status = store.status(catalogs=config.watch.sources)
+    directory = _data_directory_check(config.watch.database.parent)
+    state_directory = _data_directory_check(config.database_path.parent)
     checks: dict[str, object] = {
         "configuration": "ok",
         "inventory": "skipped (watch-only deployment; KEV, critical and rule alerting work without one)",
-        "data_directory": _data_directory_check(config.watch.database.parent),
+        "data_directory": directory,
+        "state_directory": state_directory,
         "watch_database": (
-            f"ok ({watch_status['rows']} CVEs, schema "
-            f"{watch_status['meta'].get('schema_version', 'unknown')})"
+            _watch_database_check(config)
+            if directory.startswith("ok")
+            else "skipped (the data directory is not usable)"
         ),
         "watch_channels": _watch_channel_check(config),
         "watch_sources": _watch_source_check(config),
@@ -1125,7 +1166,15 @@ def run(args: argparse.Namespace) -> int:
             failed_local = any(
                 isinstance(value, str)
                 and value.startswith(
-                    ("missing", "unsafe", "not writable", "not a directory")
+                    (
+                        "missing",
+                        "unsafe",
+                        "not writable",
+                        "not a directory",
+                        "unreadable",
+                        "invalid",
+                        "failed",
+                    )
                 )
                 for name, value in checks.items()
                 if name != "live_sources"

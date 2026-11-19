@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import timedelta
 
@@ -495,30 +497,118 @@ def test_watch_only_config_doctor_checks_watch_deployment(
     assert checks["configuration"] == "ok"
     assert checks["inventory"].startswith("skipped (watch-only deployment")
     assert checks["data_directory"].startswith("ok (")
-    assert checks["watch_database"] == "ok (0 CVEs, schema 7)"
+    assert checks["state_directory"].startswith("ok (")
+    assert checks["watch_database"] == "not created yet"
     assert checks["watch_channels"] == "ok (no enabled channels)"
     assert checks["watch_sources"] == "ok (nvd, epss; NVD API key not set (optional))"
     assert checks["schedule"] == "not installed"
-    assert (tmp_path / "watch.db").exists()
+    assert not (tmp_path / "watch.db").exists()
 
 
-def test_watch_only_doctor_fails_for_a_missing_channel_secret(
+def test_watch_only_doctor_checks_an_existing_watch_database(
     tmp_path, monkeypatch, capsys
 ):
-    config = write_config(
-        tmp_path,
-        inventory=False,
-        channels="""
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == "ok (0 CVEs, schema 7)"
+
+
+MISSING_WEBHOOK_URL = """
 [watch.channels.hook]
 type = "webhook"
 url_env = "CVEBEACON_TEST_MISSING_HOOK"
-""",
-    )
-    monkeypatch.delenv("CVEBEACON_TEST_MISSING_HOOK", raising=False)
+"""
+MISSING_SMTP_PASSWORD = """
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.invalid"
+username = "alerts@example.invalid"
+from = "alerts@example.invalid"
+to = ["soc@example.invalid"]
+"""
+MISSING_WEBHOOK_HEADER = """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.invalid/cvebeacon"
+header_name = "X-Auth"
+header_value_env = "CVEBEACON_TEST_MISSING_HEADER"
+"""
+MISSING_NTFY_TOKEN = """
+[watch.channels.alerts]
+type = "ntfy"
+topic = "cvebeacon-test"
+token_env = "CVEBEACON_TEST_MISSING_NTFY_TOKEN"
+"""
+
+
+@pytest.mark.parametrize(
+    "channels, expected",
+    [
+        (MISSING_WEBHOOK_URL, "hook (url)"),
+        (MISSING_SMTP_PASSWORD, "mail (password)"),
+        (MISSING_WEBHOOK_HEADER, "hook (header value)"),
+        (MISSING_NTFY_TOKEN, "alerts (token)"),
+    ],
+)
+def test_watch_only_doctor_fails_for_missing_channel_secrets(
+    tmp_path, monkeypatch, capsys, channels, expected
+):
+    config = write_config(tmp_path, inventory=False, channels=channels)
+    for name in (
+        "CVEBEACON_TEST_MISSING_HOOK",
+        "CVEBEACON_TEST_MISSING_HEADER",
+        "CVEBEACON_TEST_MISSING_NTFY_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
     assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
-    output = capsys.readouterr().out
-    assert '"watch_channels": "missing: hook (url)"' in output
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_channels"].startswith("missing:")
+    assert expected in checks["watch_channels"]
+
+
+ANONYMOUS_SMTP = """
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.invalid"
+from = "alerts@example.invalid"
+to = ["soc@example.invalid"]
+"""
+UNUSED_SMTP_PASSWORD = """
+[watch.channels.mail]
+type = "smtp"
+host = "smtp.example.invalid"
+password_env = "CVEBEACON_TEST_UNUSED_SMTP_PASSWORD"
+from = "alerts@example.invalid"
+to = ["soc@example.invalid"]
+"""
+PLAIN_NTFY = """
+[watch.channels.alerts]
+type = "ntfy"
+topic = "cvebeacon-test"
+"""
+DIRECT_WEBHOOK = """
+[watch.channels.hook]
+type = "webhook"
+url = "https://example.invalid/cvebeacon"
+"""
+
+
+@pytest.mark.parametrize(
+    "channels", [ANONYMOUS_SMTP, UNUSED_SMTP_PASSWORD, PLAIN_NTFY, DIRECT_WEBHOOK]
+)
+def test_watch_only_doctor_accepts_channels_without_optional_auth(
+    tmp_path, monkeypatch, capsys, channels
+):
+    config = write_config(tmp_path, inventory=False, channels=channels)
+    monkeypatch.delenv("CVEBEACON_TEST_UNUSED_SMTP_PASSWORD", raising=False)
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_channels"].startswith("ok (1 enabled:")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
@@ -534,6 +624,149 @@ def test_watch_only_doctor_reports_unsafe_data_directory(
         tmp_path.chmod(0o700)
     output = capsys.readouterr().out
     assert '"data_directory": "unsafe (group or other writable:' in output
+
+
+def test_watch_only_doctor_does_not_create_missing_watch_paths(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    target = tmp_path / "new-data"
+    config = replace(
+        config, watch=replace(config.watch, database=target / "watch.db")
+    )
+    monkeypatch.setattr(cli, "load_config", lambda _: config)
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["data_directory"].endswith("not created yet)")
+    assert checks["watch_database"] == "not created yet"
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+def test_watch_only_doctor_reports_unwritable_new_watch_directory(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    config = replace(
+        config, watch=replace(config.watch, database=blocked / "new" / "watch.db")
+    )
+    monkeypatch.setattr(cli, "load_config", lambda _: config)
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    try:
+        assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    finally:
+        blocked.chmod(0o700)
+    captured = capsys.readouterr()
+    checks = json.loads(captured.out)
+    assert checks["data_directory"].startswith("not writable")
+    assert checks["watch_database"].startswith("skipped")
+    assert not (blocked / "new").exists()
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+def test_watch_only_doctor_unwritable_directory_has_no_traceback(tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[state]
+database = "state.db"
+
+[output]
+directory = "reports"
+
+[watch]
+enabled = true
+database = "blocked/new/watch.db"
+sources = ["nvd"]
+initial = "baseline"
+""",
+        encoding="utf-8",
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "cvebeacon", "--config", str(config_path), "doctor"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        blocked.chmod(0o700)
+    assert result.returncode == 2, result.stderr
+    assert "Traceback" not in result.stderr
+    assert "not writable" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+def test_watch_only_doctor_reports_unwritable_state_directory(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    state_directory = tmp_path / "state"
+    state_directory.mkdir()
+    state_directory.chmod(0o500)
+    config = replace(config, database_path=state_directory / "state.db")
+    monkeypatch.setattr(cli, "load_config", lambda _: config)
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    try:
+        assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    finally:
+        state_directory.chmod(0o700)
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["state_directory"].startswith("not writable")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX crontab parsing")
+def test_watch_only_doctor_fails_for_a_malformed_managed_schedule(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    monkeypatch.setattr(
+        "cvebeacon.scheduling._read_crontab",
+        lambda run=None: "# BEGIN CVEBEACON MANAGED\n0 7 * * * /bin/true\n",
+    )
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["schedule"] == "invalid (managed schedule is malformed)"
+
+
+def test_watch_only_doctor_tolerates_an_unavailable_schedule(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+
+    def unavailable(**kwargs):
+        raise OSError("crontab is not installed")
+
+    monkeypatch.setattr(cli, "status", unavailable)
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["schedule"].startswith("not checked")
+
+
+def test_watch_only_doctor_live_checks_only_watch_sources(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False, sources=("nvd", "epss"))
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    calls = []
+
+    def live_checks(app_config, *, only=None):
+        calls.append(only)
+        return {name: "ok" for name in only}
+
+    monkeypatch.setattr(cli, "_live_source_checks", live_checks)
+    assert cli.main(["--config", str(config.config_path), "doctor", "--live"]) == 0
+    checks = json.loads(capsys.readouterr().out)
+    assert calls == [("nvd", "epss")]
+    assert checks["live_sources"] == {"nvd": "ok", "epss": "ok"}
 
 
 def test_watch_only_config_serves_dashboard(tmp_path, monkeypatch):
