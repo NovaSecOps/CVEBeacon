@@ -33,7 +33,10 @@ def test_v1_upgrade_preserves_existing_monitoring_data(tmp_path):
 def test_scan_attempt_failure_before_result_is_visible(tmp_path, monkeypatch, failure, expected):
     config = tmp_path / "config.toml"
     config.write_text("[inventory]\npath='inventory.csv'\n[state]\ndatabase='state.db'\n", encoding="utf-8")
-    def fail(*args): raise failure
+
+    def fail(_config, **_options):
+        raise failure
+
     monkeypatch.setattr(cli, "load_inventory", fail)
     assert cli.main(["--config", str(config), "scan"]) == expected
     store = StateStore(tmp_path / "state.db")
