@@ -400,6 +400,23 @@ class _RecordHTTP:
         return _json(self.http, url)
 
 
+def _queue_revisions(db, changes):
+    for identifier, (observed, revision) in changes.items():
+        queued = db.execute('SELECT fetch_time FROM watch_cve_list_queue WHERE cve_id=?', (identifier,)).fetchone()
+        if queued and _time(queued[0]) > observed:
+            continue
+        processed = db.execute(
+            "SELECT p.source_updated,o.snapshot_time FROM watch_provider p "
+            "JOIN watch_cve_list_observation o ON o.cve_id=p.cve_id "
+            "WHERE p.source='cve_list' AND p.cve_id=?", (identifier,)).fetchone()
+        if (revision and processed and processed['source_updated'] == revision
+                and _time(processed['snapshot_time']) >= observed):
+            db.execute('DELETE FROM watch_cve_list_queue WHERE cve_id=?', (identifier,))
+            continue
+        db.execute('INSERT OR REPLACE INTO watch_cve_list_queue(cve_id,fetch_time,expected_revision) VALUES (?,?,?)',
+                   (identifier, observed.isoformat(), revision))
+
+
 def sync(http, store, watch, now, *, initial_mode=None):
     """Import daily deltas independently; use the log only for revision hints.
 
@@ -431,7 +448,7 @@ def sync(http, store, watch, now, *, initial_mode=None):
                 'cve_list_cursor', 'cve_list_baseline_asset', 'cve_list_baseline_until',
                 'cve_list_pending_until', 'cve_list_repair_days', 'cve_list_pending_release',
                 'cve_list_delta_asset', 'cve_list_log_etag', 'cve_list_pending_etag',
-                'cve_list_coverage_gap',
+                'cve_list_coverage_gap', 'cve_list_retry_pending',
             )})
             with store.transaction() as db:
                 db.execute('DELETE FROM watch_cve_list_queue')
@@ -549,7 +566,7 @@ def sync(http, store, watch, now, *, initial_mode=None):
         delta_time = _delta_time(delta)
         coverage_gap = bool(metadata.get('cve_list_coverage_gap')) or cursor.date() < delta_time.date()
         same_day = cursor.date() == delta_time.date() == baseline_time.date()
-        if same_day and not initial_history and not coverage_gap:
+        if same_day and not initial_history and not coverage_gap and not metadata.get('cve_list_retry_pending'):
             if metadata.get('cve_list_delta_asset') != _asset_token(delta):
                 apply(archive_records(http, delta, allow_empty=True,
                                       cache_directory=cache_directory),
@@ -590,13 +607,10 @@ def sync(http, store, watch, now, *, initial_mode=None):
             day += timedelta(days=1)
         pending = max(cursor, min(until, delta_time)).isoformat()
         with store.transaction() as db:
-            db.executemany(
-                'INSERT OR REPLACE INTO watch_cve_list_queue'
-                '(cve_id,fetch_time,expected_revision) VALUES (?,?,?)',
-                ((identifier, observation.isoformat(), revision)
-                 for identifier, (observation, revision) in changes.items()))
+            _queue_revisions(db, changes)
             store._set_meta(db, {
                 'cve_list_pending_until': pending,
+                'cve_list_retry_pending': '',
                 'cve_list_coverage_gap': cursor.isoformat() if coverage_gap else '',
                 'cve_list_repair_days': json.dumps(days),
                 'cve_list_pending_release': json.dumps(assets),
@@ -636,6 +650,7 @@ def sync(http, store, watch, now, *, initial_mode=None):
     if days:
         return count, new, changed, tuple(sorted(touched))
     with store.read() as db:
+        before_lookup = db.execute('SELECT count(*) FROM watch_cve_list_queue').fetchone()[0]
         identifiers = [row[0] for row in db.execute(
             'SELECT cve_id FROM watch_cve_list_queue ORDER BY cve_id LIMIT ?', (MAX_LOOKUPS,))]
     failures = False
@@ -653,12 +668,18 @@ def sync(http, store, watch, now, *, initial_mode=None):
             'cve_list_cursor': metadata.get('cve_list_coverage_gap') or pending,
             'cve_list_pending_until': '',
             'cve_list_pending_release': '',
+            'cve_list_retry_pending': '',
         }
         if (metadata.get('cve_list_initial_pending') == '1'
                 and not metadata.get('cve_list_coverage_gap')):
             values.update(cve_list_initial_pending='0',
                           cve_list_initial_sync_completed_at=now.isoformat())
         store.set_metadata(values)
+    elif remaining == before_lookup or before_lookup <= MAX_LOOKUPS:
+        # The pinned snapshot could be stale or its revision corrected. Reload
+        # metadata next run while retaining every unresolved obligation. Already
+        # verified revisions are excluded when the new log is queued.
+        store.set_metadata({'cve_list_pending_until': '', 'cve_list_retry_pending': '1'})
     if failures:
         raise SourceError('cve_list', 'some targeted delta records could not be fetched; progress retained')
     return count, new, changed, tuple(sorted(touched))

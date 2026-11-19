@@ -281,3 +281,40 @@ def test_restored_pending_queue_does_not_require_cache_directory(tmp_path):
         cve_list.sync(http,store,config.watch,NOW)
     assert store.view(ID) is not None
     assert not store.metadata()['cve_list_pending_until']
+
+
+def test_unverified_retry_reloads_corrected_log_revision(tmp_path):
+    config,store,original,_=setup_repair(tmp_path)
+    with mock_client(original) as http:
+        cve_list.sync(http,store,config.watch,NOW)
+    corrected=official(description='later observed correction')
+    corrected['cveMetadata']['dateUpdated']='2026-11-03T09:00:00Z'
+    fixture=Release([official()],[corrected])
+    later=NOW+timedelta(hours=1)
+    groups=[{'fetchTime':later.isoformat(),'numberOfChanges':1,'new':[],'updated':[{'cveId':ID,'dateUpdated':corrected['cveMetadata']['dateUpdated']}],'error':[]},
+            {'fetchTime':(NOW-timedelta(days=30)).isoformat(),'numberOfChanges':0,'new':[],'updated':[],'error':[]}]
+    requests=[]
+    def updated(request):
+        requests.append(request)
+        if str(request.url)==cve_list.DELTA_LOG_URL:
+            return httpx.Response(200,json=groups)
+        return fixture(request)
+    with mock_client(updated) as http:
+        cve_list.sync(http,store,config.watch,later)
+    assert any(str(r.url)==cve_list.DELTA_LOG_URL for r in requests)
+    assert store.view(ID).description=='later observed correction'
+    with store.read() as db:
+        assert db.execute('SELECT count(*) FROM watch_cve_list_queue').fetchone()[0]==0
+
+
+def test_refreshing_log_does_not_requeue_verified_or_regress_newer_obligations(tmp_path):
+    store=WatchStore(tmp_path/'watch.db')
+    payload=official()
+    revision=cve_list._record_date(payload['cveMetadata']['dateUpdated'])
+    store.upsert_cve_list([payload])
+    with store.transaction() as db:
+        db.execute('INSERT INTO watch_cve_list_observation VALUES (?,?)',(ID,NOW.isoformat()))
+        db.execute('INSERT INTO watch_cve_list_queue VALUES (?,?,?)',(OTHER,(NOW+timedelta(hours=1)).isoformat(),'2026-11-01T00:00:00.000Z'))
+        cve_list._queue_revisions(db,{ID:(NOW,revision),OTHER:(NOW,'2026-11-02T00:00:00.000Z')})
+        rows=db.execute('SELECT cve_id,expected_revision FROM watch_cve_list_queue').fetchall()
+    assert [(row[0],row[1]) for row in rows]==[(OTHER,'2026-11-01T00:00:00.000Z')]
