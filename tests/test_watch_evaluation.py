@@ -310,8 +310,8 @@ def test_unknown_schema_version_still_fails_closed(tmp_path):
     store = WatchStore(path)
     store.initialize()
     with sqlite3.connect(path) as db:
-        db.execute("UPDATE watch_meta SET value='9' WHERE key='schema_version'")
-    with pytest.raises(Exception, match="unsupported watch schema version 9"):
+        db.execute("UPDATE watch_meta SET value='10' WHERE key='schema_version'")
+    with pytest.raises(StateError, match="unsupported watch schema version 10"):
         store.initialize()
 
 

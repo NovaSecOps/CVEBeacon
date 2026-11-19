@@ -1253,7 +1253,7 @@ def _notice_text(
     note = event.details.get("note")
     if isinstance(note, str) and note.strip():
         line += "\n  " + _dynamic(note, style, 500)
-    return line + "\n" + "\n".join(f"  {_dynamic(item, style)}" for item in _cvss_lines(event.view, catalog))
+    return line
 
 
 def _notice_html(
@@ -1280,7 +1280,6 @@ def _notice_html(
         parts.append(
             f'<p style="margin:0;{_HTML_MUTED}">{_h(_clean(note, 500))}</p>'
         )
-    parts.append(f'<p style="margin:8px 0;">{_html_cvss(_cvss_lines(event.view, catalog))}</p>')
     return "\n".join(parts)
 
 

@@ -229,7 +229,7 @@
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
           "text": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "content": "CVEBeacon: [REPORTED] CVE-2026-1234",
           "initial": false,
           "part_index": 0,
@@ -238,7 +238,7 @@
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
           "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
           "initial": false,
           "part_index": 0,
@@ -249,7 +249,7 @@
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
           "text": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "content": "CVEBeacon: [REPORTED] CVE-2026-1234",
           "initial": false,
           "part_index": 0,
@@ -258,7 +258,7 @@
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
           "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
           "initial": false,
           "part_index": 0,
@@ -268,18 +268,18 @@
       "teams": [
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "text": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "initial": false,
           "part_index": 0,
           "part_count": 1
         },
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "text": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "initial": false,
           "part_index": 0,
           "part_count": 1
@@ -288,18 +288,18 @@
       "slack": [
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "text": "*CVEBeacon: [REPORTED] CVE-2026-1234*\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "*CVEBeacon: [REPORTED] CVE-2026-1234*\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "*CVEBeacon: [REPORTED] CVE-2026-1234*\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "*CVEBeacon: [REPORTED] CVE-2026-1234*\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "initial": false,
           "part_index": 0,
           "part_count": 1
         },
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "text": "*CVEBeacon: [UNREPORTED] CVE-2026-1234*\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "*CVEBeacon: [UNREPORTED] CVE-2026-1234*\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "*CVEBeacon: [UNREPORTED] CVE-2026-1234*\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "*CVEBeacon: [UNREPORTED] CVE-2026-1234*\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "initial": false,
           "part_index": 0,
           "part_count": 1
@@ -308,18 +308,18 @@
       "discord": [
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "text": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "**CVEBeacon: [REPORTED] CVE-2026-1234**\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "initial": false,
           "part_index": 0,
           "part_count": 1
         },
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "text": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "**CVEBeacon: [UNREPORTED] CVE-2026-1234**\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "initial": false,
           "part_index": 0,
           "part_count": 1
@@ -328,18 +328,18 @@
       "telegram": [
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "text": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "initial": false,
           "part_index": 0,
           "part_count": 1
         },
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "initial": false,
           "part_index": 0,
           "part_count": 1
@@ -348,18 +348,18 @@
       "matrix": [
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "text": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "CVEBeacon: [REPORTED] CVE-2026-1234\n\n[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "initial": false,
           "part_index": 0,
           "part_count": 1
         },
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234\n\n[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "initial": false,
           "part_index": 0,
           "part_count": 1
@@ -368,18 +368,18 @@
       "ntfy": [
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "text": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "initial": false,
           "part_index": 0,
           "part_count": 1
         },
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "text": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "initial": false,
           "part_index": 0,
           "part_count": 1
@@ -388,18 +388,18 @@
       "gotify": [
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "text": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
+          "content": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "initial": false,
           "part_index": 0,
           "part_count": 1
         },
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "text": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
-          "content": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "text": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
+          "content": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "initial": false,
           "part_index": 0,
           "part_count": 1
@@ -409,7 +409,7 @@
         {
           "subject": "CVEBeacon: [REPORTED] CVE-2026-1234",
           "text": "CVEBeacon: [REPORTED] CVE-2026-1234",
-          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "body": "[REPORTED] CVE-2026-1234 reported to clients by alice at 2026-11-03 12:00 UTC\n  Sent in ticket OPS-42",
           "content": "CVEBeacon: [REPORTED] CVE-2026-1234",
           "initial": false,
           "part_index": 0,
@@ -418,7 +418,7 @@
         {
           "subject": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
           "text": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
-          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error\n  CVSS scores:\n  CVSS 9.8 v3.1 (CNA: acme.example) · critical",
+          "body": "[UNREPORTED] CVE-2026-1234 report withdrawn by alice at 2026-11-03 12:00 UTC\n  Sent in error",
           "content": "CVEBeacon: [UNREPORTED] CVE-2026-1234",
           "initial": false,
           "part_index": 0,
