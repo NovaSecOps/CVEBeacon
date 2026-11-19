@@ -24,8 +24,18 @@ Never run the privileged updater inside a container.
 
 1. Disable the scheduler you actually use. Remove a managed cron schedule with
    `cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml schedule remove --yes`,
-   or stop the systemd timer. Wait for running work to finish; do not terminate
-   a sync. Stop the dashboard and other data writers after work finishes.
+   or stop the systemd timer. Then wait for every running CVEBeacon process and
+   queued dashboard job to finish; do not terminate a sync or start a new job:
+
+   ```console
+   sudo pgrep -u cvebeacon -af '[c]vebeacon' | grep -F '/opt/cvebeacon' | grep -vE '(^| )serve( |$)' || true
+   ```
+
+   The command must print nothing before you continue. Change `/opt/cvebeacon`
+   and the `-u` service account if the checkout or account differ. With a timer,
+   also confirm `systemctl is-active cvebeacon.service` reports `inactive`: a
+   start already queued by the timer can otherwise begin after this check. Stop
+   the dashboard and other data writers after work finishes.
 2. Use the [backup command](BACKUP.md) (`cvebeacon --config CONFIG backup
    create --include-secrets`) for SQLite's online backup of the core state
    databases, including watch, account, monitoring, dashboard job and other

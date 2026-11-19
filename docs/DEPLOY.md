@@ -133,12 +133,65 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now cvebeacon.timer
 ```
 
+### Run the dashboard
+
+`deploy/systemd/cvebeacon-dashboard.service` is the reference dashboard unit for
+the administrator-owned versioned layout described in
+[upgrading](UPGRADING.md). It runs `cvebeacon serve` on `127.0.0.1:8787` as the
+`cvebeacon` user with the updater's `update guard --role serve` startup fence.
+It assumes the paths in this section; edit `WorkingDirectory`, `ExecStartPre`,
+`ExecStart`, `EnvironmentFile` and `ReadWritePaths` when the checkout, data
+directory, environment file or other writable output paths differ. For the
+original single-venv checkout before adoption, use
+`/opt/cvebeacon/.venv/bin/cvebeacon` in both `ExecStartPre` and `ExecStart`. If
+any of those paths is under a home directory, adjust or remove
+`ProtectHome=yes`.
+
+```console
+sudo install -m 0644 deploy/systemd/cvebeacon-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cvebeacon-dashboard.service
+```
+
+The unit sets `NoNewPrivileges=yes` and other hardening that keeps the service
+inside the data directory. That setting prevents `crontab` from using its setuid
+or setgid helper, so the dashboard's Schedule page cannot read or update the user
+crontab and shows a permission error. With this unit, install the schedule from
+the CLI as the service user (`sudo -u cvebeacon ... schedule install`) or use the
+shipped `deploy/systemd/cvebeacon.timer` and its service after adoption.
+
+To manage the schedule from the dashboard instead, add a complete drop-in at
+`/etc/systemd/system/cvebeacon-dashboard.service.d/crontab.conf`:
+
+```ini
+[Service]
+NoNewPrivileges=no
+ReadWritePaths=/var/spool/cron/crontabs
+```
+
+Use `ReadWritePaths=/var/spool/cron` on hosts whose crontab spool is directly
+under that directory. `NoNewPrivileges=no` restores the setuid or setgid
+transition for `crontab`, and the spool path makes it writable under
+`ProtectSystem=strict`; both are required for the Schedule page to read and
+update the crontab. Reload and restart after adding the drop-in:
+
+```console
+sudo systemctl daemon-reload
+sudo systemctl restart cvebeacon-dashboard.service
+```
+
+This trade-off lets the dashboard process gain privileges through setuid and
+setgid helpers such as `crontab`, and gives it write access to the cron spool.
+Enable it only where dashboard access is already equivalent to the service
+account.
+
 ### Check the result
 
 ```console
 cb watch status
 cb schedule status
 sudo systemctl list-timers cvebeacon.timer
+sudo systemctl status cvebeacon-dashboard.service
 ```
 
 Use the line for the scheduler you installed; see [exit codes](DEVELOPMENT.md#exit-codes).

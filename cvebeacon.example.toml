@@ -81,6 +81,8 @@ retention_days = 7
 keep_min = 3
 compress = true
 
+# Scan-report notifications (legacy; secrets come from the environment).
+# Watch alerts use the separate [watch.channels.*] tables above.
 [notifications.teams]
 enabled = false
 webhook_env = "CVEBEACON_TEAMS_WEBHOOK_URL"

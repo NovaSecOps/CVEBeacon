@@ -166,3 +166,33 @@ an account with read access to the inventory and configuration, write access to
 the state/output directories, and access to required environment variables.
 
 Linux user cron requires an installed, running cron service. It uses the host's local clock and does not recover runs missed while the host is off; daylight-saving transitions can skip or repeat executions. Its environment is usually smaller than an interactive shell, so provision notification credentials for the scheduled account. Percent characters and line breaks in schedule paths are rejected. Do not create a second scheduler that bypasses the shared single-flight lock. Windows task credentials and execution while logged out must be verified for the intended account through Task Scheduler; CVEBeacon passes the password to Task Scheduler and does not retain it.
+
+## Dashboard service unit
+
+The repository ships `deploy/systemd/cvebeacon-dashboard.service`, which runs the
+dashboard on `127.0.0.1` as the service user with `NoNewPrivileges=yes`. Under
+that setting `crontab` cannot use its setuid or setgid helper, so the dashboard
+Schedule page cannot read or update the user crontab and shows a permission
+error. Install the schedule from the CLI as the service user, or use the
+reference `deploy/systemd/cvebeacon.timer` and `cvebeacon.service` units (or the
+examples in the deployment guide's [Schedule it](DEPLOY.md#schedule-it)
+section).
+
+To manage the schedule from the dashboard instead, the drop-in must restore both
+the privilege transition and write access to the distribution's cron spool:
+
+```ini
+[Service]
+NoNewPrivileges=no
+ReadWritePaths=/var/spool/cron/crontabs
+```
+
+Use `ReadWritePaths=/var/spool/cron` on hosts whose spool is directly under that
+directory. `NoNewPrivileges=no` lets `crontab` switch to its privileged user or
+group, and the `ReadWritePaths` entry keeps that spool writable under
+`ProtectSystem=strict`.
+The dashboard process can then gain privileges through setuid and setgid helpers
+such as `crontab`, so accept that trade-off only where dashboard access is
+already equivalent to the service account. See the
+[deployment guide](DEPLOY.md#run-the-dashboard) for the complete drop-in and
+restart commands.
