@@ -134,6 +134,11 @@ def test_nginx_http_redirect_hides_the_server_version():
     assert "server_tokens off;" in http_server
 
 
+def test_caddy_sample_can_be_imported_into_an_existing_caddyfile():
+    caddy = _text(CADDY)
+    assert not re.search(r"(?m)^\{\s*$", caddy), "global options block prevents importing into an existing Caddyfile"
+
+
 def test_samples_set_security_headers():
     for path in SAMPLES:
         text = _text(path)

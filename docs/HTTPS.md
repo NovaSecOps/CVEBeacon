@@ -134,9 +134,13 @@ report generation.
 ### Caddy
 
 1. Copy `deploy/reverse-proxy/caddy/Caddyfile` to `/etc/caddy/Caddyfile`, or
-   import it from an existing Caddyfile.
-2. Replace `cvebeacon.example.com` and `admin@example.com`.
-3. Choose `tls internal` or remove it for a public certificate.
+   import the file from an existing Caddyfile. The sample has no global options
+   block, so it can be imported alongside one without a merge.
+2. Replace `cvebeacon.example.com`.
+3. Choose `tls internal` or remove it for a public certificate. For a public
+   certificate, put `email you@example.com` in the Caddyfile's global options
+   block. A Caddyfile has at most one global block and it must be first; if the
+   existing file has none, add one before the site blocks.
 4. Run `sudo caddy validate --config /etc/caddy/Caddyfile` and reload Caddy.
 
 Caddy's reverse proxy has no short default response timeout, and the sample sets

@@ -1,28 +1,27 @@
 # CVEBeacon dashboard behind Caddy.
 #
-# Install as /etc/caddy/Caddyfile (or import it from there), replace
-# cvebeacon.example.com and the ACME email, then run `caddy validate` and
-# reload Caddy.
+# Install as /etc/caddy/Caddyfile, or import this file from an existing
+# Caddyfile. This sample has no global options block, so it can be imported
+# without a merge. For public ACME certificates, put the ACME account email in
+# the existing single global options block and remove `tls internal` below.
 #
 # The dashboard listens on loopback only:
 #   cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml serve
 #
 # It trusts no forwarded host, address or scheme headers, does not support a
 # URL prefix, and checks the Host header against its bind address.
-{
-	email admin@example.com
-}
 
 # Caddy redirects HTTP to HTTPS automatically for site addresses with a host.
-# This explicit block makes the redirect visible and keeps the target fixed.
+# This explicit block replaces that automatic redirect for this host so the
+# target stays fixed.
 http://cvebeacon.example.com {
 	redir https://cvebeacon.example.com{uri} permanent
 }
 
 cvebeacon.example.com {
 	# A private certificate from Caddy's local CA. Remove this line for a
-	# publicly trusted Let's Encrypt certificate; the email above is then
-	# used for ACME account registration and expiry notices.
+	# publicly trusted Let's Encrypt certificate; public certificates use
+	# the ACME account email from the global options block, if configured.
 	tls internal
 
 	header {
