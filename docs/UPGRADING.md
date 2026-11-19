@@ -54,28 +54,48 @@ Never run the privileged updater inside a container.
 
 ## Adopt an existing single-venv install
 
-First install a release containing these updater commands manually. The old
-single-venv path must be `/opt/cvebeacon/.venv`, installed normally rather than
+First bootstrap a **fresh administrator-owned venv from verified release wheels**,
+using the manual procedure above and an independently authenticated public key.
+Never invoke a privileged updater from a potentially compromised service-writable
+venv. Changing ownership is not proof of provenance: after any possible service
+compromise, replace the code and venv from verified artifacts before adoption.
+Do not carry editable installs, unverified `.pth` files or an unverified packaged
+signer pin into the bootstrap. The old single-venv path must be `/opt/cvebeacon/.venv`, installed normally rather than
 editable. Preserve all state under `/var/lib/cvebeacon`, including state in
 subdirectories, and keep the runtime config directly there. Every writer of
 these directories must be trusted with the stored data.
 
 Remove any existing cron schedule before enabling systemd timers. The updater
-coordinates systemd units and the shared run locks; it does not manage cron or
-external schedulers. Add every installed monitoring timer/service to `units` in
+refuses a remaining service-account managed crontab and coordinates systemd
+units and the shared run locks; it does not rewrite cron or external schedules. Add every installed monitoring timer/service to `units` in
 the administrator policy. Persistent external data writers must be stopped
 before invoking updates.
 
-Make the code tree administrator-owned and non-writable by the service account.
-Do this only after reviewing the existing installation; ownership changes do
-not establish the provenance of previously writable code.
+Use the service account's **primary** group for the fresh code tree. The exact
+layout below is root ownership, service-group ownership, `0750` directories,
+`0640` non-executable files and `0750` executable files. This allows the service
+to read/traverse/execute, while denying it code writes. Supplementary groups are
+cleared by the updater and must not be needed for access.
+
+Apply these commands only to the fresh code tree **before** adoption, not to an
+already running versioned prefix containing service-owned snapshots:
 
 ```console
-sudo chown -R root:root /opt/cvebeacon
-sudo chmod -R go-w /opt/cvebeacon
+sudo chown -hR root:cvebeacon /opt/cvebeacon
+sudo find -P /opt/cvebeacon -type d -exec chmod 0750 {} +
+sudo find -P /opt/cvebeacon -type f ! -perm /111 -exec chmod 0640 {} +
+sudo find -P /opt/cvebeacon -type f -perm /111 -exec chmod 0750 {} +
 sudo install -d -m 0755 /etc/cvebeacon
 sudo install -m 0600 deploy/systemd/update-policy.example /etc/cvebeacon/update.toml
 ```
+
+Keep runtime config readable by the service (`0600` service-owned, or `0640`
+owned by root and the service primary group). A root-owned `0600` systemd
+environment file can remain private in the data directory: state discovery
+skips unreadable unrelated files. It does not loosen their permissions. Adoption
+and apply execute a read/execute/config preflight under the actual service UID,
+primary GID and no supplementary groups before changing layout or stopping units.
+Inventory inspection also runs without root privileges.
 
 Review that policy, set `enabled = true`, and pin the signing key (see below).
 Then run:
@@ -97,7 +117,10 @@ interruption happens during adoption itself. The updater never installs units
 or enables schedules automatically.
 
 After copying the reviewed units to `/etc/systemd/system`, reload systemd and
-explicitly enable the dashboard unit to start at boot. Enable
+explicitly enable the dashboard unit to start at boot. Keep the reference
+`ExecStartPre=... update guard` startup fence in every configured writer unit,
+including additional automation/ingest units; the dashboard uses `--role serve`.
+Manual Core invocations enforce the same fence. Enable
 `cvebeacon-update.path` only when requests should be processed, and the
 monitoring timer only when its schedule is wanted.
 
@@ -154,7 +177,13 @@ or writes code. Install `cvebeacon-update.path` and its one-shot service, and
 explicitly enable the path unit to process requests. The privileged process
 ignores the supplied identity and time, consumes the request, checks the version
 again, downloads the release again and verifies every artifact itself. Invalid
-requests are consumed and refused to prevent repeated path activation.
+requests are atomically renamed to a unique claimed name before reading, so
+consuming one request cannot unlink a later replacement. Invalid files are
+consumed, while malformed directories remain quarantined under their claimed
+name. A request arriving during a manual apply is consumed with an explicit
+`busy` audit/status result and can be submitted again. The request service exits
+cleanly for refusals and has no start-rate limit; contention cannot disable the
+path unit. PathExists is checked again after a triggered service exits.
 
 ## Transaction and rollback
 
@@ -173,9 +202,18 @@ configuration, inventory when present, and local databases. Notification
 environment variables are loaded by the restarted service units and are not
 passed through the privileged updater. This health check sends no test alerts.
 
+`dashboard_unit` explicitly names the persistent web unit and must be included
+in `units`; it can have a custom name. Its ExecStart must use `current`. Health
+requires that unit to be active, its MainPID to own the listening socket, and
+`/healthz` to report that PID and the expected running package version. A stale
+or unrelated listener cannot satisfy the probe. The endpoint caches the running
+version at process startup rather than rereading a switched metadata path.
+
 The verified wheelhouse installs offline into `releases/VERSION/.venv`, retaining
-the optional extensions/automation distributions already present. The new
-executable migrates state as the service account. The updater atomically replaces
+the optional extensions/automation distributions already present. The existing
+verified interpreter creates the new venv, preserving supported side-by-side
+Python installations instead of selecting a possibly older system default. The
+new executable migrates state as the service account. The updater atomically replaces
 `current`, restarts previously enabled timers and the dashboard, runs `doctor`
 and probes loopback `/healthz`. A migration, installation or health failure
 switches back, restores the snapshot (also removes newly created databases),
@@ -185,24 +223,59 @@ For repeatable local acceptance, prepare a binary dependency wheelhouse and run
 `.venv/bin/python tools/updater_smoke.py --wheelhouse /path/to/wheelhouse`.
 It builds three local versions, generates a scratch signing key, serves a fake
 release API on loopback, adopts a temporary prefix, applies an update and forces
-a later failure to verify rollback. Only the root-ownership guard is relaxed for
-this rootless scratch check; no systemd unit is started or installed and no
+an abrupt process exit between migration and switching, verifies blocked writers
+and recovery, then forces a later health failure to verify rollback. Only the
+administrator-owned path guard is relaxed for this rootless scratch check; no systemd unit is started or installed and no
 external release endpoint is contacted.
+For a separate real-credential check, run
+`sudo .venv/bin/python tools/updater_permissions_smoke.py --wheelhouse /path/to/wheelhouse`.
+It tests root/service ownership and modes, read-only execution, cleared groups
+and private config refusal entirely in a disposable prefix. It does not create
+accounts or inspect or install schedules.
 
-`/opt/cvebeacon/update-audit.jsonl` is the persistent administrator audit;
-`update-journal.json` contains the current transaction steps and
-`update-result.json` its result. The dashboard status file is advisory because
-the service account owns its directory. Backups are private, retain the most
-recent seven snapshots by default, and include password hashes. The policy's
-`retention` overrides that count. Retained venvs are not deleted automatically.
-An update to an existing release directory is refused; inspect a failed staging
-directory before removing it locally and retrying.
+Before stopping anything, the updater writes and fsyncs one active
+`/opt/cvebeacon/update-journal.json` record with the old/new releases, snapshot
+name, unit state and phase. Every subsequent phase is durable **before** its
+state change. Snapshot databases, config, completion manifest and directory
+entries are synced before migration is permitted. Audit and dashboard status
+publication are best effort and cannot skip recovery.
 
-If automatic rollback fails, writers remain stopped where possible and the
-result says `rollback-failed`. Recover locally from the recorded snapshot and
-old release. After power loss or forced process termination, inspect the journal
-and finish restoration before restarting writers; ordinary process exceptions
-are handled automatically. For a deliberate later rollback, stop writers, use
-the matching snapshot and previous venv together, restore state as the service
-account, atomically replace `current`, and restart. Do not switch code alone
-across a schema change.
+An active record fences normal CLI and unit writer startup and dashboard writes.
+Only the recorded version may start for migration or the updater's health
+phase. A subsequent apply recovers the pending transaction first, without
+checking another release or replacing the record. Explicit recovery is:
+
+```console
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update recover
+```
+
+Restore is idempotent and has no generic command timeout; neither do backup,
+local database verification and migration. It can be retried after interruption.
+The restored config hash, every snapshot hash, SQLite integrity and logical
+contents, absence of newly introduced databases, actual selected symlink, old
+`doctor`, old dashboard version and listener ownership must pass before a
+rollback is reported successful. Timers restart only after state and health
+verification; the startup fence stays until durable completion. If the journal or storage cannot be made durable, state restoration is still attempted
+using the last durable record and writers remain fenced until recovery succeeds.
+A completed-but-not-finalized record is finalized without restoring older data.
+
+Verified completed records are moved, with directory fsyncs, into
+`/opt/cvebeacon/transactions/`. The active record is never replaced by a fresh
+apply. An unrecognized legacy journal lacks recovery coordinates and is refused:
+an administrator must verify code/state and retained snapshots before archiving
+that legacy record. Do not delete an active record to bypass recovery.
+
+`update-audit.jsonl` records events; `update-result.json` is a convenience mirror
+of the authoritative completed transaction. The dashboard status is advisory
+and uses the resolved **config directory**, as does the privileged request
+consumer, regardless of where database subdirectories reside. The reference
+path unit watches that config directory; adjust its path and the service's
+`--config` together for a custom installation.
+
+Backups are private, retain the most recent seven snapshots by default, and
+include password hashes. The policy's `retention` overrides that count. A pending
+transaction's snapshot is never pruned. Retained venvs are not deleted
+automatically. A new apply refuses an existing staging release directory;
+recover and inspect it before removing only that failed staging directory.
+For a deliberate later rollback, stop writers and restore the matching snapshot
+and code together; never select older code against newer schemas.

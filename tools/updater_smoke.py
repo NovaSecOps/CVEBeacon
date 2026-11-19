@@ -71,6 +71,7 @@ class ScratchNative(u.Native):
         super().__init__(policy)
         self.port, self.log, self.dashboard = port, log, None
         self.force_failure = False
+        self.external_pid = None
 
     def active(self, unit):
         return True
@@ -79,19 +80,35 @@ class ScratchNative(u.Native):
         pass
 
     def freeze(self, units):
+        if self.external_pid is not None:
+            os.kill(self.external_pid, 15)
+            self.external_pid = None
         if self.dashboard is not None:
             self.dashboard.terminate()
             self.dashboard.wait(timeout=15)
             self.dashboard = None
 
     def start(self, units):
+        if self.policy.dashboard_unit not in units:
+            return
         binary = self.policy.prefix / "current/.venv/bin/cvebeacon"
         self.dashboard = subprocess.Popen([str(binary), "--config", str(self.policy.config), "serve", "--host", "127.0.0.1", "--port", str(self.port)],
                                           env=u.SAFE_ENV, cwd="/", stdout=self.log, stderr=self.log)
 
-    def probe(self):
-        super().probe()
-        if self.force_failure:
+    def managed_cron(self):
+        pass  # Never read or change a real schedule in scratch acceptance.
+
+    def dashboard_pid(self):
+        if self.external_pid is not None:
+            os.kill(self.external_pid, 0)
+            return self.external_pid
+        if self.dashboard is None or self.dashboard.poll() is not None:
+            raise u.UpdateError("scratch dashboard is not running")
+        return self.dashboard.pid
+
+    def probe(self, expected_version=None):
+        super().probe(expected_version)
+        if self.force_failure and expected_version == "0.1.2":
             self.force_failure = False
             # Real health succeeded first. Modify all state to prove restoration.
             with sqlite3.connect(self.policy.data / "ledger.sqlite3") as db:
@@ -182,13 +199,36 @@ def acceptance(wheelhouse):
         updater = u.Updater(policy, native, remote)
         assert updater.adopt()["version"] == "0.1.0"
         native.start(policy.units)
-        native.probe()
+        native.probe("0.1.0")
         state = u.check(config, http=http)
         assert state["available"] == "0.1.1"
         assert updater.apply("0.1.1")["result"] == "updated"
         assert updater.current().name == "0.1.1"
         print("Adopt, API check, signature verification, offline install, migration and HTTP health passed.", flush=True)
         advertised[0] = "0.1.2"
+        # A separate updater process dies after a real migration, before switch.
+        context = scratch / "interruption.json"
+        context.write_text(json.dumps({"prefix": str(prefix), "config": str(config_path), "data": str(data),
+                                       "user": policy.user, "signers": str(signers), "port": port,
+                                       "api_port": server.server_port, "dashboard_pid": native.dashboard.pid}))
+        interrupted = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--interrupt-context", str(context)], stdout=log, stderr=log)
+        if interrupted.returncode != 77:
+            raise AssertionError("interrupted update did not reach migration: " + (scratch / "dashboard.log").read_text()[-4000:])
+        if native.dashboard is not None:
+            native.dashboard.wait(timeout=15)
+            native.dashboard = None
+        pending = json.loads((prefix / "update-journal.json").read_text())
+        assert pending["phase"] == "migrating" and updater.current().name == "0.1.1"
+        blocked = subprocess.run([str(prefix / "current/.venv/bin/cvebeacon"), "--config", str(config_path), "watch", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=u.SAFE_ENV)
+        assert blocked.returncode == 2 and b"recovery" in blocked.stderr
+        assert u.Updater(policy, native, remote).recover()["result"] == "rolled-back"
+        with sqlite3.connect(data / "ledger.sqlite3") as db:
+            assert db.execute("SELECT value FROM sentinel").fetchone()[0] == "preserved"
+            assert [row[1] for row in db.execute("PRAGMA table_info(sentinel)")] == ["value"]
+        native.probe("0.1.1")
+        print("Forced process interruption after migration blocked writers and recovered the original schema, data and dashboard.", flush=True)
+        shutil.rmtree(prefix / "releases/0.1.2")  # Only the failed scratch staging directory.
+        updater = u.Updater(policy, native, remote)
         native.force_failure = True
         try:
             updater.apply("0.1.2")
@@ -199,13 +239,43 @@ def acceptance(wheelhouse):
         assert updater.current().name == "0.1.1"
         with sqlite3.connect(data / "ledger.sqlite3") as db:
             assert db.execute("SELECT value FROM sentinel").fetchone()[0] == "preserved"
-        native.probe()
+        native.probe("0.1.1")
         assert json.loads((prefix / "update-result.json").read_text())["result"] == "rolled-back"
         print("Forced failure restored the previous symlink, SQLite state and healthy dashboard.", flush=True)
 
 
+def interrupt_apply(context):
+    values = json.loads(context.read_text())
+    prefix, data, config = [Path(values[key]) for key in ("prefix", "data", "config")]
+    policy = u.Policy(prefix, config, data, values["user"], signers=Path(values["signers"]), probe=f"http://127.0.0.1:{values['port']}/healthz")
+    with ExitStack() as stack:
+        log = stack.enter_context((context.parent / "interrupted-dashboard.log").open("wb"))
+        native = ScratchNative(policy, values["port"], log)
+        native.external_pid = values["dashboard_pid"]
+        http = HttpClient(HttpConfig(retries=0), client=stack.enter_context(httpx.Client(transport=LocalTransport(values["api_port"]))))
+        stack.enter_context(patch.object(u, "protected", lambda path, **kwargs: Path(path)))
+        command = native.command
+        def interrupted(release, operation):
+            result = command(release, operation)
+            if operation == "migrate":
+                with sqlite3.connect(data / "ledger.sqlite3") as db:
+                    db.execute("UPDATE sentinel SET value='interrupted migration'")
+                    db.execute("ALTER TABLE sentinel ADD COLUMN introduced TEXT")
+                os._exit(77)
+            return result
+        native.command = interrupted
+        u.Updater(policy, native, u.Releases(UpdateConfig(enabled=True), http)).apply("0.1.2")
+        raise AssertionError("interruption was not reached")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--wheelhouse", type=Path, required=True)
+    parser.add_argument("--wheelhouse", type=Path)
+    parser.add_argument("--interrupt-context", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    acceptance(args.wheelhouse.resolve(strict=True))
+    if args.interrupt_context:
+        interrupt_apply(args.interrupt_context)
+    elif args.wheelhouse:
+        acceptance(args.wheelhouse.resolve(strict=True))
+    else:
+        parser.error("--wheelhouse is required")
