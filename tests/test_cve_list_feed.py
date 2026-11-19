@@ -49,7 +49,7 @@ class Release:
             {"id": number, "name": name, "browser_download_url": cve_list.ASSET_PREFIX + 'fake/' + name,
              "size": len(body), "digest": 'sha256:' + hashlib.sha256(body).hexdigest()}
             for number, name, body in (
-                (1, "2026-11-03_all_CVEs_at_midnight.zip", self.baseline),
+                (1, "2026-11-03_all_CVEs_at_midnight.zip.zip", self.baseline),
                 (2, "2026-11-03_delta_CVEs_at_1200Z.zip", self.delta),
             )
         ]
@@ -60,7 +60,20 @@ class Release:
             if self.conditional and request.headers.get('if-none-match') == '"release"':
                 return httpx.Response(304)
             return httpx.Response(200, json={"assets": self.assets()}, headers={"etag": '"release"'})
-        if request.url.path.endswith('midnight.zip'):
+        if str(request.url) == cve_list.DELTA_LOG_URL:
+            with zipfile.ZipFile(BytesIO(self.delta)) as archive:
+                records = [json.loads(archive.read(name)) for name in archive.namelist()]
+            group = {"fetchTime": NOW.isoformat(), "numberOfChanges": len(records),
+                     "new": [{"cveId": item["cveMetadata"]["cveId"], "dateUpdated": item["cveMetadata"].get("dateUpdated")} for item in records], "updated": [], "error": []}
+            return httpx.Response(200, json=[group,{"fetchTime":(NOW-timedelta(days=30)).isoformat(),"numberOfChanges":0,"new":[],"updated":[],"error":[]}])
+        if request.url.path.endswith('.json'):
+            with zipfile.ZipFile(BytesIO(self.delta)) as archive:
+                for name in archive.namelist():
+                    item = json.loads(archive.read(name))
+                    if request.url.path.endswith(item["cveMetadata"]["cveId"]+'.json'):
+                        return httpx.Response(200, json=item)
+            return httpx.Response(404)
+        if request.url.path.endswith('midnight.zip.zip'):
             return httpx.Response(200, content=self.baseline)
         if request.url.path.endswith('1200Z.zip'):
             return httpx.Response(503) if self.fail_delta else httpx.Response(200, content=self.delta)
@@ -125,7 +138,7 @@ def test_resume_after_delta_failure_keeps_completed_baseline(tmp_path):
         fixture.requests.clear()
         cve_list.sync(http, store, config.watch, NOW)
     assert store.search().total == 2
-    assert not any(r.url.path.endswith('midnight.zip') for r in fixture.requests)
+    assert not any(r.url.path.endswith('midnight.zip.zip') for r in fixture.requests)
 
 
 def test_conditionals_do_not_redownload_completed_archives(tmp_path):
@@ -201,7 +214,7 @@ def test_new_source_initializes_without_resetting_euvd_resume(tmp_path):
     cursor = '{"start":"2026-10-01","end":"2026-10-02","page":0,"total":0,"size":100,"phase":"scan","verify":0}'
     store.set_metadata({'euvd_page_cursor': cursor})
     with mock_client(Release([official()])) as http:
-        report = sync_watch(config, http, clock=lambda: NOW)
+        report = sync_watch(config, http, clock=lambda: NOW, cve_list_initial="backfill", assume_yes=True)
     assert not report.failures
     assert store.view('CVE-2026-10001') is not None
     assert store.metadata()['euvd_page_cursor'] == cursor
@@ -237,6 +250,7 @@ def test_partial_baseline_replays_committed_batch_after_failure(tmp_path, monkey
 @pytest.mark.parametrize('target,allowed', [
     ('https://release-assets.githubusercontent.com/fake/archive', True),
     ('https://example.com/archive', False),
+    ('https://release-assets.githubusercontent.com:8443/archive', False),
     ('http://release-assets.githubusercontent.com/archive', False),
     ('https://user@release-assets.githubusercontent.com/archive', False),
 ])

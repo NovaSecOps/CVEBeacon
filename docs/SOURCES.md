@@ -31,6 +31,68 @@ This product uses data from the NVD API but is not endorsed or certified by the 
 - Data used: CVE state, CNA and ADP containers, descriptions, affected products and versions, metrics, and references.
 - Limitations: records are supplied by many authorities and vary in completeness and version syntax. Unsupported or conflicting version semantics require review.
 
+### CVE List watch feed
+
+The `cve_list` provider uses the official
+[CVEProject/cvelistV5 release assets](https://github.com/CVEProject/cvelistV5#releases)
+and repository `cves/deltaLog.json`. Ordinary updates use the hourly cumulative
+delta ZIP, with conditional release metadata and unchanged-asset detection.
+**There is no daily full-baseline download.**
+
+Across midnight or a longer gap, the rolling log proves continuity from the
+cursor. A durable queue coalesces changed CVE IDs. Cheap daily delta archives
+cover most queued IDs before any remaining records are fetched individually.
+Archive size is compared with an 8 KiB-per-record lookup estimate; a large ZIP
+is skipped when targeted requests are cheaper. At most three archived-day
+metadata lookups and 100 remaining record lookups are processed per run, with
+progress retained between runs. Ordinary same-day syncs do not download the
+rolling log. This combines the small hourly archive with the log's complete
+cross-midnight coverage, without one lookup for every historical change.
+
+A full baseline is used only for an initial `backfill`/`full` import or when the
+stored cursor predates the log's retained coverage. A new provider on an existing
+installation defaults to no history; history requires an explicit confirmed
+choice. The real baseline name may end in `.zip.zip` and wrap `cves.zip`. The
+00:00 release may contain yesterday's baseline and today's empty delta. That
+combination is valid: the log repairs the intervening changes, and an empty
+midnight delta never advances the cursor past unprocessed records.
+
+For cost context, public metadata read on 2026-11-19 advertised a
+665,939,820-byte baseline (about 635 MiB), a 4,551,306-byte 23:00 delta
+(about 4.34 MiB), and a 30,777,380-byte rolling log (about 29.35 MiB).
+Only metadata was read to establish these figures. These sizes vary. A daily
+635 MiB baseline would cost about 226 GiB/year before deltas; this implementation
+does not incur that recurring baseline cost. A first history import or genuine
+retention gap can still require that one large download.
+
+Downloads use shared HTTP timeouts, retries and pacing. Release metadata is
+limited to 4 MiB, the rolling log to 64 MiB, a compressed archive to 1 GiB,
+expanded members to 8 GiB, a record to 4 MiB, and entries to one million. Before
+`ZipFile` allocates directory objects, an independent scan validates ZIP/ZIP64
+counts, each directory entry, the expanded-size sum and a 64 MiB central-directory
+cap. Bodies stream in batches of 100 records. Published size, SHA-256 when
+supplied, ZIP CRCs and record/file identities are checked. Redirects require
+HTTPS, an exact GitHub asset host, the default TLS port and at most three hops.
+No archive paths are extracted.
+
+Archive caches and the optional inner ZIP live beside the state database rather
+than in an implicit RAM-backed temporary directory. Preflight reserves two
+archive sizes plus 64 MiB of free space; allow additional space for new provider
+data and indexes. Only one compressed cache is retained. Completed downloads
+are reused for parsing retries. A partial network download restarts from zero,
+bounded to one archive of at most 1 GiB per sync; retries before any body arrives
+use the configured bounded HTTP policy. Database batches remain idempotent and
+no failed or unfinished repair advances its cursor.
+
+CNA/ADP records retain descriptions, affected products, metrics, references,
+dates and visible published/rejected/reserved states. NVD keeps status and
+description precedence and every populated NVD field. Active CVE List data fills
+missing fields or supplies a CVE List-only record. Disabling a provider removes
+its evidence from rules and filters while retaining it for provenance. Later
+NVD publication uses the existing CVE event identity, preventing a second initial
+match. CVE List initialization has independent progress and initial-digest marks;
+its failure is degraded coverage and cannot hold NVD/EUVD initialization open.
+
 ## ENISA European Vulnerability Database
 
 - Purpose: independent European vulnerability data, vendor/product evidence, enrichment, and EU Known Exploited Vulnerabilities status.
@@ -57,37 +119,3 @@ This product uses data from the NVD API but is not endorsed or certified by the 
 - Teams: [webhooks through Teams Workflows](https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook).
 - Email: [Microsoft Graph sendMail](https://learn.microsoft.com/en-us/graph/api/user-sendmail?view=graph-rest-1.0) with [app-only authentication](https://learn.microsoft.com/en-us/graph/auth-v2-service).
 - Limitations: an HTTP 202 from Graph means the request was accepted for processing, not that final mailbox delivery is proven.
-
-### CVE List watch feed
-
-The `cve_list` watch provider reads the official
-[CVEProject/cvelistV5 release assets](https://github.com/CVEProject/cvelistV5#releases):
-a daily baseline and an hourly delta cumulative since that baseline. Release
-metadata uses conditional ETag requests. An unchanged archive is not downloaded
-again. After a day change or a gap, the next daily baseline closes the gap before
-the current delta is applied. This avoids relying on the rolling retention of
-`deltaLog.json` or issuing a request for every historical CVE.
-
-Downloads use the shared HTTP timeouts, retries and pacing. Release metadata is
-limited to 4 MiB, each compressed archive to 1 GiB, total expanded members to
-8 GiB, individual records to 4 MiB, and archive entries to one million. Archives
-are spooled to temporary disk and records are imported in batches of 100. The
-published size and SHA-256 digest (when supplied by GitHub), ZIP CRCs and
-record/file identifiers are checked. The baseline's optional `cves.zip` wrapper
-is supported without extracting paths. Redirects are limited to GitHub's release
-asset hosts. Failures preserve committed batches and never advance the failed
-archive's cursor; retries replay those batches idempotently.
-
-The first `full` import and each new daily baseline may download hundreds of MiB
-(up to the 1 GiB cap), requiring temporary disk for the archive and possibly its
-inner ZIP, plus the watch database and indexes. `backfill` reads the same archive
-but imports only records modified in its configured window. `baseline` initially
-records a starting point without a download. Later imports keep changes since
-the cursor, with the configured overlap. This trades a daily archive download
-for complete recovery across gaps. A source failure remains visible; no partial
-archive is described as complete.
-
-CNA and ADP containers remain stored with their descriptions, affected products,
-metrics, references and dates. Published, rejected and visible reserved records
-are kept. CVE List-only records enter the same rule and event history as NVD
-records; later NVD enrichment does not create a second initial match.

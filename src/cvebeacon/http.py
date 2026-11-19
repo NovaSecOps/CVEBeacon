@@ -280,7 +280,11 @@ class HttpClient:
                         from urllib.parse import urljoin, urlsplit
                         target = urljoin(url, response.headers.get("location", ""))
                         parsed = urlsplit(target)
-                        if parsed.scheme != "https" or parsed.hostname not in redirect_hosts or parsed.username or parsed.password:
+                        try:
+                            port_ok = parsed.port in (None, 443)
+                        except ValueError:
+                            port_ok = False
+                        if parsed.scheme != "https" or parsed.hostname not in redirect_hosts or parsed.username or parsed.password or not port_ok:
                             raise SourceError(source, "source returned an unsafe redirect")
                         yield from self.stream_bytes(target, source=source, byte_cap=byte_cap,
                                                      headers=headers, counter=counter,
