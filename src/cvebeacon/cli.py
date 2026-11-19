@@ -994,14 +994,33 @@ def _watch_schema_tables() -> tuple[str, ...]:
     )
 
 
+def _watch_schema_columns() -> dict[str, frozenset[str]]:
+    from .watch.store import _SCHEMA
+
+    connection = sqlite3.connect(":memory:")
+    try:
+        for statement in _SCHEMA:
+            connection.execute(statement)
+        return {
+            table: frozenset(
+                row[1]
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            )
+            for table in _watch_schema_tables()
+        }
+    finally:
+        connection.close()
+
+
 def _watch_database_check(config: AppConfig) -> str:
-    from .watch.store import SCHEMA_VERSION, _alert_columns_current
+    from .watch.store import SCHEMA_VERSION
 
     path = config.watch.database
     if not path.exists():
         return "not created yet"
     if not os.access(path, os.W_OK):
         return f"not writable ({path})"
+    expected_version = str(SCHEMA_VERSION)
     try:
         with closing(
             sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
@@ -1015,31 +1034,37 @@ def _watch_database_check(config: AppConfig) -> str:
             }
             schema = db.execute(
                 "SELECT value FROM watch_meta WHERE key='schema_version'"
-            ).fetchone()
-            if schema is None:
+            ).fetchall()
+            if not schema:
                 return "unreadable (watch database has no schema version)"
-            version = str(schema[0])
-            supported = {str(value) for value in range(1, SCHEMA_VERSION + 1)}
-            if version not in supported:
-                return f"unreadable (unsupported watch schema version {version})"
-            if version == str(SCHEMA_VERSION):
-                missing = [name for name in _watch_schema_tables() if name not in tables]
-                if missing:
-                    return "unreadable (watch database is missing required tables)"
-            if (
-                version in {str(value) for value in range(2, SCHEMA_VERSION + 1)}
-                and not _alert_columns_current(db)
-            ):
-                return "unreadable (watch database was created by a pre-release build)"
+            if len(schema) > 1:
+                return (
+                    "unreadable (ambiguous watch schema metadata; expected one "
+                    "version row)"
+                )
+            version = str(schema[0][0])
+            if version != expected_version:
+                return (
+                    f"unreadable (unsupported watch schema version {version}; "
+                    f"expected {expected_version})"
+                )
+            missing = [name for name in _watch_schema_tables() if name not in tables]
+            if missing:
+                return "unreadable (watch database is missing required tables)"
+            for table, required in _watch_schema_columns().items():
+                actual = {
+                    row["name"]
+                    for row in db.execute(f"PRAGMA table_info({table})")
+                }
+                if not required <= actual:
+                    return (
+                        "unreadable (watch database is missing required columns "
+                        f"in {table})"
+                    )
             rows = db.execute("SELECT COUNT(*) FROM watch_cve").fetchone()[0]
     except (sqlite3.Error, OSError):
         return "unreadable (cannot read the watch database)"
-    migration = (
-        f"; will migrate to {SCHEMA_VERSION}"
-        if version != str(SCHEMA_VERSION)
-        else ""
-    )
-    return f"ok ({rows} CVEs, schema {version}{migration})"
+    return f"ok ({rows} CVEs, schema {version})"
 
 
 def _schedule_check() -> str:
