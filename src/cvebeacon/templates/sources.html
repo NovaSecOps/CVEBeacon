@@ -1,1 +1,18 @@
-{% extends 'base.html' %}{% from 'macros.html' import status, health_table %}{% block content %}<h1>Source status</h1>{{ status(data) }}<p>These are cached observations from the latest recorded scan, not live availability checks. “ok” means that check succeeded at its recorded time; observations older than 24 hours are labelled stale. Failed or degraded checks indicate unavailable or incomplete evidence. Disabled sources provide no coverage.</p>{{ health_table(data.health) }}{% endblock %}
+{% extends 'base.html' %}
+{% from 'ui.html' import page_header, callout, table_wrap, term %}
+{% from 'macros.html' import health_table %}
+{% block title %}Sources · CVEBeacon{% endblock %}
+{% block content %}
+{{ page_header('Source status', 'See when CVEBeacon last read each vulnerability source and whether that read succeeded.') }}
+{% call callout('info', 'How to read this page') %}<p>A <strong>source</strong> is a public vulnerability database that CVEBeacon reads, such as NVD or the {{ term('KEV', 'the list of flaws known to be actively exploited') }} catalogues. These are cached observations from the latest recorded scan, not live availability checks. “ok” means that check succeeded at its recorded time; observations older than 24 hours are labelled stale. Failed or degraded checks indicate unavailable or incomplete evidence. Disabled sources provide no coverage.</p>{% endcall %}
+{% if data.inventory_error %}{% call callout('warning', 'Inventory unavailable') %}<p>Current asset coverage cannot be established; inspect scanner configuration and logs.</p>{% endcall %}{% endif %}
+{% if not data.latest %}
+{% call callout('warning', 'No scan results recorded') %}<p>Coverage is unknown. Run a scan so the sources can be checked.</p>{% endcall %}
+{% elif data.stale %}
+{% call callout('warning', 'Stale scan data') %}<p>The last result is over 24 hours old or its timestamp cannot be trusted. Current coverage is unknown.</p>{% endcall %}
+{% endif %}
+{% if data.failed %}
+{% call callout('warning', 'The latest scan did not complete cleanly') %}<p>{% if data.unfinished %}A scan has no recorded completion. It may be running or interrupted; check the scanner process.{% else %}The latest scan or delivery failed, or coverage was incomplete.{% endif %} Retained observations are not proof of current coverage.</p>{% endcall %}
+{% endif %}
+{{ health_table(data.health) }}
+{% endblock %}

@@ -1,1 +1,16 @@
-{% extends 'base.html' %}{% block content %}<h1>Request could not be completed</h1><p class="warning">{% if code == 404 %}The requested record or page was not found.{% elif code in [400, 405, 413] %}The request was invalid or expired. Return to the form and check your input.{% else %}Data or an upstream service is unavailable. Existing observations may be stale. Check scanner configuration and logs, then retry.{% endif %}</p><p>Status {{ code }}</p>{% endblock %}
+{% extends 'base.html' %}
+{% from 'ui.html' import page_header, callout %}
+{% block title %}Error · CVEBeacon{% endblock %}
+{% block content %}
+{{ page_header('This request could not be completed') }}
+{% if code == 404 %}
+{% call callout('info', 'Page not found') %}<p>The page or record you asked for does not exist. Check the address, or go back and open it from the list again.</p>{% endcall %}
+{% elif code == 403 %}
+{% call callout('warning', 'You do not have access to this page') %}<p>Your account does not include the permission this page needs. Ask an administrator to give your role that permission, or sign in with an account that has it.</p>{% endcall %}
+{% elif code in [400, 405, 413] %}
+{% call callout('warning', 'The request was not accepted') %}<p>The form was invalid, expired or too large. Return to the form, check what you entered, and submit it again.</p>{% if message %}<p>{{ message }}</p>{% endif %}{% endcall %}
+{% else %}
+{% call callout('warning', 'Data is not available right now') %}<p>CVEBeacon could not read the data or a service it depends on failed. Existing observations may be stale. Check the scanner configuration and logs, then retry.</p>{% if message %}<p>{{ message }}</p>{% endif %}{% endcall %}
+{% endif %}
+<p class="muted">Status {{ code }}</p>
+{% endblock %}

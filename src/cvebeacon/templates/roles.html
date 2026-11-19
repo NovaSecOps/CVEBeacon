@@ -1,13 +1,60 @@
 {% extends 'base.html' %}
+{% from 'ui.html' import page_header, card, callout, table_wrap, badge, button %}
 {% block title %}Roles · CVEBeacon{% endblock %}
-{% block content %}<h1>Roles and permissions</h1>
-<p>Admin always has all permissions. Only administrators can create, edit or delete roles. A non-admin with manage_users can manage non-admin accounts and assign only roles whose permissions they hold themselves.</p>
-{% if error %}<p role="alert">{{ error }}</p>{% endif %}
-{% for name, selected in roles.items() %}<h2>{{ name }}</h2>
-{% if name == 'admin' %}<p>All permissions; this role cannot be edited or deleted.</p>{% else %}
-<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="name" value="{{ name }}">
-<table><thead><tr><th>Permission</th><th>Allowed</th></tr></thead><tbody>{% for capability in capabilities %}<tr><td>{{ capability }}</td><td><input type="checkbox" aria-label="{{ name }}: {{ capability }}" name="permission" value="{{ capability }}" {% if capability in selected %}checked{% endif %}></td></tr>{% endfor %}</tbody></table>
-<button name="action" value="save">Save role</button><button name="action" value="delete">Delete role</button></form>{% endif %}{% endfor %}
-<h2>Create role</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="save"><label>Name <input name="name" required maxlength="32" pattern="[a-z][a-z0-9_-]*"></label>
-{% for capability in capabilities %}<label><input type="checkbox" name="permission" value="{{ capability }}">{{ capability }}</label>{% endfor %}<button type="submit">Create role</button></form>
+{% set capability_help = {
+  'view': 'Open pages and read findings, alerts and reports',
+  'report': 'Mark a CVE as reported to clients',
+  'statement': 'Generate a written statement for a CVE',
+  'run': 'Start scans, syncs and other jobs; submit manual queries and report exports',
+  'retry': 'Retry failed message deliveries',
+  'test_channel': 'Send a labelled test message through a notification channel',
+  'edit_rules': 'Change watch rules',
+  'edit_channels': 'Change notification channels; credentials in them need an administrator',
+  'edit_sources': 'Change vulnerability source settings',
+  'edit_watch': 'Change watch settings',
+  'edit_reporting': 'Change reporting settings',
+  'edit_dashboard': 'See dashboard sign-in and session settings; changes need an administrator',
+  'edit_inventory': 'Change inventory settings',
+  'edit_http': 'Change HTTP connection settings',
+  'edit_system': 'See state database and report paths; changes need an administrator',
+  'manage_web_assets': 'Add, change and remove attested client web assets',
+  'manage_schedule': 'Install and remove the automatic schedule',
+  'manage_secrets': 'Change notification credentials and secret references',
+  'manage_users': 'Manage non-admin accounts and the roles they can be given',
+  'view_audit': 'See the account activity log',
+} %}
+{% block content %}
+{{ page_header('Roles and permissions', 'A role is a named bundle of permissions. Give a role to an account on the Users page; what the role allows is set here.') }}
+{% call callout('info', 'How roles work') %}<p>Admin always has all permissions and cannot be edited or deleted. Only administrators can create, edit or delete roles. A non-admin with manage_users can manage non-admin accounts only, and can assign only roles whose permissions they hold themselves.</p>{% endcall %}
+{% if error %}{% call callout('danger', 'The role was not saved') %}<p>{{ error }} Check the values and try again.</p>{% endcall %}{% endif %}
+{% for name, selected in roles.items() %}
+{% call card('Role: ' ~ name, 'Allowed permissions for every account holding the ' ~ name ~ ' role.' if name != 'admin' else none, id='role-' ~ name) %}
+{% if name == 'admin' %}<p>{{ badge('All permissions', 'success') }}</p><p class="muted">This role cannot be edited or deleted.</p>
+{% else %}
+<form method="post" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="name" value="{{ name }}">
+{% call table_wrap('Permissions of the ' ~ name ~ ' role') %}
+<table><thead><tr><th>Permission</th><th>What it allows</th><th>Allowed</th></tr></thead><tbody>
+{% for capability in capabilities %}<tr><td><code>{{ capability }}</code></td><td>{{ capability_help.get(capability, capability) }}</td><td><input type="checkbox" aria-label="{{ name }}: {{ capability }}" name="permission" value="{{ capability }}" {% if capability in selected %}checked{% endif %}></td></tr>{% endfor %}
+</tbody></table>
+{% endcall %}
+<div class="form-actions">{{ button('Save role', name='action', value='save') }}{{ button('Delete role', kind='danger', name='action', value='delete', confirm='Delete role ' ~ name ~ '? Accounts holding it must be moved to another role first.') }}</div>
+</form>
+{% endif %}
+{% endcall %}
+{% endfor %}
+{% call card('Create role', 'Add a new role and pick the permissions it starts with.', id='create') %}
+<form method="post" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="save">
+<div class="field"><label for="f-new-name">Name</label>
+<input id="f-new-name" name="name" required maxlength="32" pattern="[a-z][a-z0-9_-]*" autocomplete="off" aria-describedby="f-new-name-help">
+<p class="help" id="f-new-name-help">Lowercase letters, digits, dashes and underscores, starting with a letter. For example: reporting-team.</p></div>
+{% call table_wrap('Permissions for the new role') %}
+<table><thead><tr><th>Permission</th><th>What it allows</th><th>Allowed</th></tr></thead><tbody>
+{% for capability in capabilities %}<tr><td><code>{{ capability }}</code></td><td>{{ capability_help.get(capability, capability) }}</td><td><input type="checkbox" aria-label="new role: {{ capability }}" name="permission" value="{{ capability }}"></td></tr>{% endfor %}
+</tbody></table>
+{% endcall %}
+<div class="form-actions">{{ button('Create role') }}</div>
+</form>
+{% endcall %}
 {% endblock %}

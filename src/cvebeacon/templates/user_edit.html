@@ -1,12 +1,34 @@
 {% extends 'base.html' %}
-{% block title %}Edit user · CVEBeacon{% endblock %}
-{% block content %}<h1>Edit {{ target.username }}</h1>
-{% if error %}<p role="alert">{{ error }}</p>{% endif %}
-<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="save">
-<label>Display name <input name="display_name" maxlength="100" value="{{ target.display_name or '' }}"></label>
-<label>Email <input type="email" name="email" maxlength="254" value="{{ target.email or '' }}"></label>
-<label>Role <select name="role">{% for name in roles %}<option value="{{ name }}" {% if name == role %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
-<label><input type="checkbox" name="disabled" value="yes" {% if target.disabled %}checked{% endif %}>Disabled</label><button type="submit">Save user</button></form>
-<h2>Reset password</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="password"><label>New password <input type="password" name="password" minlength="12" maxlength="1024" required autocomplete="new-password"></label><button type="submit">Reset password</button></form>
-<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="unlock"><button type="submit">Unlock account</button></form>
+{% from 'ui.html' import page_header, card, callout, field, button, link_button %}
+{% block title %}Edit user {{ target.username }} · CVEBeacon{% endblock %}
+{% block content %}
+{% call page_header('Edit user ' ~ target.username, "Change this account's details, set a new password for it, or unlock it after failed sign-ins. Changes take effect immediately.") %}{{ link_button('Back to Users', url_for('user_list'), kind='secondary') }}{% endcall %}
+{% if error %}{% call callout('danger', 'The change was not saved') %}<p>{{ error }} Check the values and try again.</p>{% endcall %}{% endif %}
+{% if target.disabled %}{% call callout('warning', 'This account is disabled') %}<p>The person cannot sign in while the account is disabled. Untick Disabled below and save to restore access.</p>{% endcall %}{% endif %}
+{% call card('Profile', 'Display name, email address and role.') %}
+<form method="post" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="save">
+{{ field('Display name', 'display_name', maxlength=100, value=target.display_name or '', optional=true) }}
+{{ field('Email', 'email', type='email', maxlength=254, value=target.email or '', optional=true) }}
+<div class="field"><label for="f-role">Role</label>
+<p class="help" id="f-role-help">A role is a named bundle of permissions. Changing the role signs this account out everywhere.</p>
+<select id="f-role" name="role" aria-describedby="f-role-help">{% for name in roles %}<option value="{{ name }}" {% if name == role %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-disabled"><input id="f-disabled" type="checkbox" name="disabled" value="yes" {% if target.disabled %}checked{% endif %}> Disabled</label>
+<p class="help">A disabled account cannot sign in. Its details are kept unchanged.</p></div>
+<div class="form-actions">{{ button('Save user') }}{{ link_button('Cancel', url_for('user_list'), kind='secondary') }}</div>
+</form>
+{% endcall %}
+{% call card('Reset password', 'Set a new password for this person and share it privately. This signs their current sessions out.') %}
+<form method="post" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="password">
+{{ field('New password', 'password', type='password', minlength=12, maxlength=1024, required=true, autocomplete='new-password', help='At least 12 characters. A short sentence works well.') }}
+<div class="form-actions">{{ button('Reset password') }}</div>
+</form>
+{% endcall %}
+{% call card('Unlock account', 'Repeated failed sign-ins lock an account for a short time. Unlocking allows sign-in again immediately.') %}
+<form method="post" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="unlock">
+<div class="form-actions">{{ button('Unlock account') }}</div>
+</form>
+{% endcall %}
 {% endblock %}

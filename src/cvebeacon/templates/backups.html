@@ -1,49 +1,59 @@
-{% extends "base.html" %}
+{% extends 'base.html' %}
+{% from 'ui.html' import page_header, card, callout, empty_state, table_wrap, badge, button %}
 {% block title %}Backups · CVEBeacon{% endblock %}
 {% block content %}
-<h1>Backups</h1>
-{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
-<section class="panel">
-<h2>Status</h2>
+{{ page_header('Backups', 'Keep restorable copies of the CVEBeacon state databases and configuration so you can recover after a failure.') }}
+{% if error %}{% call callout('danger', 'The backup action was not completed') %}<p>{{ error }}</p>{% endcall %}{% endif %}
+{% call card('Status', 'How many backups are kept and when the last one was taken.') %}
 <dl><dt>Retained backups</dt><dd>{{ stats.count }}</dd><dt>Last backup (UTC)</dt><dd>{{ stats.last or 'Never' }}</dd>{% if can_admin %}<dt>Retention</dt><dd>{{ retention_days }} day(s), keeping at least {{ keep_min }}</dd>{% endif %}</dl>
-{% if not can_admin %}<p>Backups are managed by an administrator. This page shows when the last backup was taken and how many are retained.</p>{% endif %}
-</section>
+{% if not can_admin %}<p class="muted">Backups are managed by an administrator. This page shows when the last backup was taken and how many are retained.</p>{% endif %}
+{% endcall %}
 {% if can_admin %}
-<section class="panel">
-<h2>Create a backup</h2>
-<p>A backup contains every state database and the configuration file, taken with SQLite's online backup API and checked for integrity. Referenced secret files are excluded unless you include them.</p>
-<form method="post" action="{{ url_for('backups.create_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><label><input type="checkbox" name="include_secrets" value="yes"> Include referenced secret files</label><button type="submit">Create backup</button></form>
-</section>
-<section class="panel">
-<h2>Retention</h2>
-<p>Delete backups older than {{ retention_days }} day(s), keeping at least the newest {{ keep_min }}.</p>
-<form method="post" action="{{ url_for('backups.prune_backups') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Prune expired backups</button></form>
-</section>
+{% call card('Create a backup', 'Take a fresh copy now.') %}
+<p>A backup contains every state database and the configuration file, taken while the data stays in use and checked for integrity afterwards. Referenced secret files are excluded unless you include them.</p>
+<form method="post" action="{{ url_for('backups.create_backup') }}" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="field"><label for="f-include-secrets"><input id="f-include-secrets" type="checkbox" name="include_secrets" value="yes"> Include referenced secret files</label>
+<p class="help">Secret files used by the configuration are left out by default. Include them only if the backup is stored somewhere equally protected.</p></div>
+<div class="form-actions">{{ button('Create backup') }}</div>
+</form>
+{% endcall %}
+{% call card('Retention', 'How long old backups are kept.') %}
+<p>Backups older than {{ retention_days }} day(s) are removed, but the newest {{ keep_min }} are always kept.</p>
+<form method="post" action="{{ url_for('backups.prune_backups') }}" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="form-actions">{{ button('Prune expired backups', kind='secondary', confirm='Delete backups older than ' ~ retention_days ~ ' day(s)? The newest ' ~ keep_min ~ ' are always kept.') }}</div>
+</form>
+{% endcall %}
+{% if active %}{% call callout('warning', 'A backup job is running') %}<p>A job is queued or running; wait for it to finish before restoring.</p>{% endcall %}{% endif %}
 <h2>Retained backups</h2>
-{% if active %}<p class="muted">A job is queued or running; wait for it to finish before restoring.</p>{% endif %}
 {% if backups %}
-<div class="table-wrap"><table><thead><tr><th>Backup (UTC)</th><th>Created</th><th>Size</th><th>Databases</th><th>Secrets</th><th>Schema</th><th>State</th><th>Actions</th></tr></thead><tbody>
+{% call table_wrap('Retained backups') %}
+<table><thead><tr><th>Backup (UTC)</th><th>Created</th><th>Size</th><th>Databases</th><th>Secrets</th><th>Schema</th><th>State</th><th>Actions</th></tr></thead><tbody>
 {% for backup in backups %}
 <tr>
 <td><code>{{ backup.id }}</code></td>
 <td>{{ backup.created_at or 'unknown' }}{% if backup.created_by %}<br><span class="muted">{{ backup.created_by }}</span>{% endif %}</td>
 <td>{{ backup.size_label }}</td>
-<td>{{ backup.databases }}</td>
+<td class="num">{{ backup.databases }}</td>
 <td>{{ 'included' if backup.include_secrets else 'excluded' }}</td>
 <td>{% for name, value in backup.schema_versions.items()|sort %}{{ name }} {{ value }}{% if not loop.last %}, {% endif %}{% else %}{{ 'unknown' if backup.databases else 'no databases' }}{% endfor %}</td>
-<td>{{ 'ok' if backup.valid else 'invalid' }}{% if backup.error %}<br><span class="muted">{{ backup.error }}</span>{% endif %}</td>
+<td>{% if backup.valid %}{{ badge('Verified', 'success') }}{% else %}{{ badge('Invalid', 'danger') }}{% endif %}{% if backup.error %}<br><span class="muted">{{ backup.error }}</span>{% endif %}</td>
 <td>
 {% if backup.valid %}
-<form method="post" action="{{ url_for('backups.verify_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}"><button type="submit">Verify</button></form>
-<form method="post" action="{{ url_for('backups.download_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}"><button type="submit">Download</button></form>
-<form method="post" action="{{ url_for('backups.restore_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}"><label>Type {{ backup.id }} to restore <input type="text" name="confirm" required autocomplete="off" size="24"></label><button type="submit">Restore</button></form>
+<form method="post" action="{{ url_for('backups.verify_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}">{{ button('Verify', kind='secondary') }}</form>
+<form method="post" action="{{ url_for('backups.download_backup') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}">{{ button('Download', kind='secondary') }}</form>
+<form method="post" action="{{ url_for('backups.restore_backup') }}" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="backup_id" value="{{ backup.id }}"><label>Type {{ backup.id }} to restore <input type="text" name="confirm" required autocomplete="off" size="24"></label>{{ button('Restore', kind='danger') }}</form>
 <p class="muted">Restore verifies every hash, keeps a pre-restore safety backup, and is refused while dashboard jobs or another run are active.</p>
 {% endif %}
 </td>
 </tr>
 {% endfor %}
-</tbody></table></div>
-{% else %}<p>No backups have been taken yet.</p>{% endif %}
+</tbody></table>
+{% endcall %}
+{% else %}
+{{ empty_state('No backups have been taken yet', 'Use Create a backup above so a restorable copy exists before something goes wrong.') }}
+{% endif %}
 <p class="muted">Downloads are built on request and are not kept on disk. Pruning never removes the newest retained minimum. See the backup guide for cron and systemd-timer examples.</p>
 {% endif %}
 {% endblock %}

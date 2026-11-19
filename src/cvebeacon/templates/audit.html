@@ -1,6 +1,18 @@
 {% extends 'base.html' %}
+{% from 'ui.html' import page_header, callout, table_wrap, empty_state %}
 {% block title %}Account audit · CVEBeacon{% endblock %}
-{% block content %}<h1>Account audit</h1>
-{% if broken is none %}<p>Chain verified.</p>{% else %}<p role="alert">Chain verification failed at row {{ broken }}.</p>{% endif %}
-<table><thead><tr><th>Time</th><th>Action</th><th>Account</th><th>Actor</th></tr></thead><tbody>{% for entry in entries %}<tr><td>{{ entry.at }}</td><td>{{ entry.action }}</td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>{% endfor %}</tbody></table>
+{% block content %}
+{{ page_header('Account audit', 'A chronological log of who changed accounts, roles and sign-ins, with a check that the log itself was not altered.') }}
+{% if broken is none %}
+{% call callout('success', 'Record chain verified') %}<p>Chain verified: every row still matches its tamper-evident checksum, so the log below is complete as far as it goes.</p>{% endcall %}
+{% else %}
+{% call callout('danger', 'The log does not match its checksum') %}<p>Chain verification failed at row {{ broken }}. Rows were changed outside the normal recording process. Treat the log as untrustworthy and investigate before relying on it.</p>{% endcall %}
+{% endif %}
+{% call table_wrap('Account audit entries') %}
+<table><thead><tr><th>Time</th><th>Action</th><th>Account</th><th>Actor</th></tr></thead><tbody>
+{% for entry in entries %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{{ entry.action }}</td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
+{% else %}<tr><td colspan="4">No audit entries recorded yet. Entries appear when accounts are created, changed or used.</td></tr>{% endfor %}
+</tbody></table>
+{% endcall %}
+<p class="muted">Actions shown are the ones recorded by the dashboard itself. Changes made outside the dashboard are not logged here, which is what the chain check above is for.</p>
 {% endblock %}
