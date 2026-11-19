@@ -51,6 +51,10 @@ cvebeacon.example.com {
 		header_up -X-Real-IP
 		header_up -Forwarded
 
+		# Flask builds canonical redirects from the backend Host and HTTP
+		# scheme. Rewrite them to a relative path, keeping the query string.
+		header_down Location "^http://127\.0\.0\.1:8787(/.*)?$" "$1"
+
 		# Manual queries and report generation can run for several minutes;
 		# background jobs return immediately.
 		transport http {

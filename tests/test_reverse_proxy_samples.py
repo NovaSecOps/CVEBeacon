@@ -94,6 +94,26 @@ def test_samples_clear_all_client_forwarding_headers():
     assert "header_up -Forwarded" in caddy
 
 
+def test_samples_rewrite_backend_redirects_and_keep_the_query_string():
+    backend = "http://127.0.0.1:8787/operations/?probe=1"
+
+    nginx = _text(NGINX)
+    match = re.search(r"^\s*proxy_redirect\s+(\S+)\s+(\S+);", nginx, re.MULTILINE)
+    assert match, "nginx sample has no explicit proxy_redirect"
+    source, replacement = match.groups()
+    assert backend.startswith(source)
+    assert replacement == "/"
+    assert backend[len(source):] == "operations/?probe=1"
+
+    caddy = _text(CADDY)
+    match = re.search(r'header_down\s+Location\s+"([^"]+)"\s+"([^"]+)"', caddy)
+    assert match, "Caddy sample has no Location rewrite"
+    pattern, replacement = match.groups()
+    assert replacement == "$1"
+    assert re.sub(pattern, lambda match: match.group(1), backend) == "/operations/?probe=1"
+    assert re.sub(pattern, lambda match: match.group(1), "https://elsewhere.example/x?y=1") == "https://elsewhere.example/x?y=1"
+
+
 def test_samples_terminate_tls_and_redirect_http():
     nginx = _text(NGINX)
     caddy = _text(CADDY)
