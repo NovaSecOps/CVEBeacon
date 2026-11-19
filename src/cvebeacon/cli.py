@@ -874,17 +874,22 @@ def _run_stix_export(args, config: AppConfig) -> int:
     from .stix import export_stix
 
     destination = Path(args.output).expanduser().resolve()
-    protected = {
-        config.config_path,
+    protected = {config.config_path}
+    for database in (
         config.database_path,
         config.watch.database,
-    }
+        config.watch.users_database,
+    ):
+        protected.add(database)
+        protected.update(
+            Path(str(database) + suffix) for suffix in ("-wal", "-shm")
+        )
     if config.inventory is not None and config.inventory.path is not None:
         protected.add(config.inventory.path)
     if destination in protected:
         raise CVEBeaconError(
             "STIX output cannot overwrite the configuration, inventory or "
-            "local state database"
+            "local database, including SQLite sidecar files"
         )
     print(
         export_stix(

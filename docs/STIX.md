@@ -84,11 +84,14 @@ The export deliberately omits asset IDs, system IDs, categories, repository
 URLs, commits, evidence statements, and source details. Those values are local
 operational data and are not needed for interoperability. PURL qualifiers and
 subpaths are also dropped before the PURL is used in the output or in an object
-key, so repository, download, VCS, and token-bearing qualifiers cannot leak. The
-software object uses the public component identity, so two assets with the same
-vendor, product, version, and identity path produce one software object. The
-software identity key uses the resolved version, including a version taken from
-the PURL when the inventory row has no separate version.
+key, so repository, download, VCS, and token-bearing qualifiers cannot leak.
+PURL namespace and name components are treated as package identity and are
+intentionally retained; they must not contain credentials, tokens, or other
+secrets. Do not put a URL with user information or a token into a PURL
+namespace or name. The software object uses the public component identity, so
+two assets with the same vendor, product, version, and identity path produce one
+software object. The software identity key uses the resolved version, including
+a version taken from the PURL when the inventory row has no separate version.
 
 ### The `has` relationship
 
@@ -121,13 +124,17 @@ ID does not create duplicates. A new scan changes `modified` and can add or
 remove objects. Removed findings are not emitted as revoked objects: the bundle
 is a snapshot, not a tombstone feed.
 
-Vulnerability and relationship `created` values come from the earliest stored
-first-seen finding for that object; `modified` is the latest stored observation.
-Report `created` is the earliest first-seen finding in the report, and identity
-`created` is the earliest first-seen finding for that client. Report
-`modified`/`published` and identity `modified` use the export time. This keeps
-`created` stable when the same state is exported again under the same fixed IDs.
-All timestamps are UTC with millisecond precision and a `Z` suffix.
+Vulnerability and relationship `created` values come from the earliest
+first-seen observation in the full stored `current_findings` history for that
+object, including observations outside the selected run. `modified` is the
+latest observation in the selected run, clamped to be no earlier than
+`created`. Report `created` is the earliest such
+value in the report, and identity `created` is the earliest first-seen
+observation for that client in the full history. Report `modified`/`published`
+and identity `modified` use the export time, clamped to be no earlier than
+`created`. This keeps `created` stable when the same state is exported again
+under the same fixed IDs, including after an earlier observation drops out of a
+later scan. All timestamps are UTC with millisecond precision and a `Z` suffix.
 
 ## Privacy and client labels
 
@@ -163,10 +170,10 @@ before merging them.
 - Only the newest successful run's finding snapshot is retained. Detail rows for
   every other run are pruned by later scans, so the table stays bounded to one
   run's findings; monitoring history and events are not pruned by this policy.
-- `created` values are derived from stored observations rather than a persistent
-  STIX object-version ledger. They are stable for repeated exports of the same
-  state, but removing the earliest observation for an object that otherwise keeps
-  the same ID can move its derived `created` value.
+- `created` values are derived from the full stored current-findings history
+  rather than a separate STIX object-version ledger. They remain stable while
+  that history retains the earliest observation; deleting or replacing the
+  state database removes that history.
 - There are no STIX data markings. Handling rules are outside the bundle.
 - The exporter does not deliver anything, run continuously, or act as a TAXII
   server. Re-run the command to refresh the snapshot.

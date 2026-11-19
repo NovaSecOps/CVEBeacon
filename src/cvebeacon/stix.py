@@ -67,11 +67,12 @@ class ExportFinding:
 
 @dataclass(frozen=True, slots=True)
 class ScanSnapshot:
-    """The latest successful inventory run and its stored findings."""
+    """The latest successful run, its findings, and full current history."""
 
     run_id: str
     completed_at: str
     findings: tuple[ExportFinding, ...]
+    history: tuple[ExportFinding, ...] = ()
 
 
 @dataclass
@@ -159,6 +160,21 @@ def _fallback_rows(
         raise
 
 
+def _current_rows(db: sqlite3.Connection) -> list[sqlite3.Row]:
+    try:
+        return list(
+            db.execute(
+                "SELECT asset_id,cve_id AS advisory_id,first_seen,last_seen,"
+                "payload_json FROM current_findings "
+                "ORDER BY asset_id,cve_id",
+            )
+        )
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+
+
 def _run_clients(db: sqlite3.Connection, run_id: str) -> dict[str, str]:
     try:
         rows = db.execute(
@@ -229,10 +245,12 @@ def read_latest_successful_scan(path: str | Path) -> ScanSnapshot:
             if not rows:
                 rows = _fallback_rows(db, run_id, completed_at)
             clients = _run_clients(db, run_id)
+            history = _current_rows(db)
             return ScanSnapshot(
                 run_id,
                 completed_at,
                 _export_findings(rows or (), clients),
+                _export_findings(history, clients),
             )
     except sqlite3.Error as exc:
         raise StateError(f"cannot read state database for STIX export: {exc}") from exc
@@ -436,7 +454,7 @@ def _purl_coordinate(value: str):
 
 def _software_fields(asset: Mapping[str, Any]) -> dict[str, str]:
     purl, parsed = _purl_coordinate(_text(asset.get("purl")))
-    version = _text(asset.get("version")) or (
+    version = _text(asset.get("version")) or _text(
         parsed.version if parsed is not None else ""
     )
     ecosystem = _text(asset.get("ecosystem")) or (
@@ -562,15 +580,75 @@ def _merge_aggregate(
     return aggregate
 
 
+def _history_indexes(
+    history: Iterable[ExportFinding],
+) -> tuple[dict[str, datetime], dict[str, datetime], dict[str, datetime]]:
+    """Return earliest observations by vulnerability, relationship, and client.
+
+    ``current_findings`` keeps a row and its original first-seen time after a
+    finding disappears from a later scan. Using that full history keeps
+    ``created`` stable while the same object ID remains in an export.
+    """
+    vulnerability_first: dict[str, datetime] = {}
+    relationship_first: dict[str, datetime] = {}
+    client_first: dict[str, datetime] = {}
+    for item in history:
+        vulnerability = item.finding.get("vulnerability")
+        if not isinstance(vulnerability, Mapping):
+            continue
+        name = _vulnerability_name(vulnerability)
+        if not name:
+            continue
+        first_seen = _parse_timestamp(item.first_seen)
+        vulnerability_id = _object_id(
+            "vulnerability", "vulnerability|" + name.upper()
+        )
+        vulnerability_first[vulnerability_id] = min(
+            first_seen,
+            vulnerability_first.get(vulnerability_id, first_seen),
+        )
+        state = item.applicability
+        if state in EXPORTED_STATES:
+            software_id = _object_id(
+                "software", "software|" + _software_key(item.asset)
+            )
+            relationship_id = _object_id(
+                "relationship",
+                "relationship|has|"
+                + software_id
+                + "|"
+                + vulnerability_id
+                + "|"
+                + state,
+            )
+            relationship_first[relationship_id] = min(
+                first_seen,
+                relationship_first.get(relationship_id, first_seen),
+            )
+        client = item.client.strip()
+        if client:
+            client_first[client.casefold()] = min(
+                first_seen,
+                client_first.get(client.casefold(), first_seen),
+            )
+    return vulnerability_first, relationship_first, client_first
+
+
 def build_bundle(
     findings: Iterable[ExportFinding],
     *,
     generated_at: datetime | None = None,
     include_clients: bool = False,
+    history: Iterable[ExportFinding] = (),
 ) -> dict[str, Any]:
     """Build a deterministic STIX 2.1 bundle from selected inventory findings."""
     generated = _utc(generated_at)
     generated_text = _format_timestamp(generated)
+    (
+        history_vulnerability_first,
+        history_relationship_first,
+        history_client_first,
+    ) = _history_indexes(history)
 
     vulnerabilities: dict[str, dict[str, Any]] = {}
     software: dict[str, dict[str, Any]] = {}
@@ -582,7 +660,7 @@ def build_bundle(
     relationship_parts: dict[str, tuple[str, str, str]] = {}
     identity_first_seen: dict[str, datetime] = {}
     included_clients: dict[str, str] = {}
-    report_first_seen: datetime | None = None
+    report_created: datetime | None = None
     summaries: dict[str, str] = {}
 
     items = tuple(findings)
@@ -602,11 +680,6 @@ def build_bundle(
         last_seen = max(first_seen, _parse_timestamp(item.last_seen))
         sources = _sources(item.finding)
         confidence = _text(item.finding.get("confidence"))
-        report_first_seen = (
-            first_seen
-            if report_first_seen is None
-            else min(report_first_seen, first_seen)
-        )
 
         vulnerability_id = _object_id("vulnerability", "vulnerability|" + name.upper())
         vulnerability_aggregates[vulnerability_id] = _merge_aggregate(
@@ -699,21 +772,29 @@ def build_bundle(
         highest = _highest_applicability(aggregate.states)
         sources = aggregate.state_sources.get(highest, set())
         confidence = aggregate.state_confidence.get(highest, "")
+        created = history_vulnerability_first.get(
+            vulnerability_id, aggregate.first_seen
+        )
+        report_created = (
+            created
+            if report_created is None
+            else min(report_created, created)
+        )
         value: dict[str, Any] = {
             "type": "vulnerability",
             "spec_version": STIX_VERSION,
             "id": vulnerability_id,
-            "created": _format_timestamp(aggregate.first_seen),
-            "modified": _format_timestamp(aggregate.last_seen),
+            "created": _format_timestamp(created),
+            "modified": _format_timestamp(
+                max(aggregate.last_seen, created)
+            ),
             "name": name,
             "external_references": _external_references(name),
             "x_cvebeacon_applicability": highest,
             "x_cvebeacon_states": sorted(
                 aggregate.states, key=_state_key
             ),
-            "x_cvebeacon_first_seen": _format_timestamp(
-                aggregate.first_seen
-            ),
+            "x_cvebeacon_first_seen": _format_timestamp(created),
         }
         if sources:
             value["x_cvebeacon_sources"] = sorted(
@@ -726,7 +807,10 @@ def build_bundle(
         vulnerabilities[vulnerability_id] = value
 
     for identity_id, value in identities.items():
-        created = identity_first_seen[identity_id]
+        created = history_client_first.get(
+            _text(value["name"]).casefold(),
+            identity_first_seen[identity_id],
+        )
         value["created"] = _format_timestamp(created)
         value["modified"] = _format_timestamp(max(generated, created))
 
@@ -734,19 +818,27 @@ def build_bundle(
         source_ref, target_ref, state = relationship_parts[relationship_id]
         sources = aggregate.state_sources.get(state, set())
         confidence = aggregate.state_confidence.get(state, "")
+        created = history_relationship_first.get(
+            relationship_id, aggregate.first_seen
+        )
+        report_created = (
+            created
+            if report_created is None
+            else min(report_created, created)
+        )
         value = {
             "type": "relationship",
             "spec_version": STIX_VERSION,
             "id": relationship_id,
-            "created": _format_timestamp(aggregate.first_seen),
-            "modified": _format_timestamp(aggregate.last_seen),
+            "created": _format_timestamp(created),
+            "modified": _format_timestamp(
+                max(aggregate.last_seen, created)
+            ),
             "relationship_type": "has",
             "source_ref": source_ref,
             "target_ref": target_ref,
             "x_cvebeacon_applicability": state,
-            "x_cvebeacon_first_seen": _format_timestamp(
-                aggregate.first_seen
-            ),
+            "x_cvebeacon_first_seen": _format_timestamp(created),
         }
         if sources:
             value["x_cvebeacon_sources"] = sorted(
@@ -783,7 +875,7 @@ def build_bundle(
         report_id = _object_id(
             "report", "report|" + "|".join(object_refs)
         )
-        report_created = report_first_seen or generated
+        report_created = report_created or generated
         report_modified = max(generated, report_created)
         objects[report_id] = {
             "type": "report",
@@ -837,6 +929,7 @@ def export_stix(
         selected,
         generated_at=generated_at,
         include_clients=include_clients,
+        history=snapshot.history,
     )
     return write_bundle(bundle, output)
 

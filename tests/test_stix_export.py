@@ -86,6 +86,11 @@ def _record(
                 "WHERE run_id=? AND asset_id=? AND advisory_id=?",
                 (first_seen, last_seen, run_id, asset_id, advisory_id),
             )
+            db.execute(
+                "UPDATE current_findings SET first_seen=?,last_seen=? "
+                "WHERE asset_id=? AND cve_id=? COLLATE NOCASE",
+                (first_seen, last_seen, asset_id, advisory_id),
+            )
     return run_id
 
 
@@ -327,6 +332,37 @@ def test_old_details_are_pruned_but_latest_successful_is_kept(tmp_path):
     assert "old-failed" not in remaining
 
 
+def test_new_successful_run_replaces_previous_details(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    first = Asset("asset-1", "Example", "Widget", "1.0")
+    first_finding = _finding(
+        first,
+        cve_id="CVE-2026-0020",
+        state=Applicability.AFFECTED,
+    )
+    old_run, _ = store.record_scan(
+        [QueryResult(first, (first_finding,), ())]
+    )
+    second = Asset("asset-2", "Example", "Widget", "1.0")
+    second_finding = _finding(
+        second,
+        cve_id="CVE-2026-0021",
+        state=Applicability.AFFECTED,
+    )
+    new_run, _ = store.record_scan(
+        [QueryResult(second, (second_finding,), ())]
+    )
+    with closing(sqlite3.connect(tmp_path / "state.db")) as db:
+        remaining = {
+            row[0]
+            for row in db.execute(
+                "SELECT DISTINCT run_id FROM scan_finding_details"
+            )
+        }
+    assert remaining == {new_run}
+    assert old_run != new_run
+
+
 def test_golden_bundle_from_fixture_state(tmp_path):
     build_fixture_database(tmp_path / "state.db")
     snapshot = read_latest_successful_scan(tmp_path / "state.db")
@@ -415,6 +451,75 @@ def test_deterministic_ids_across_runs_and_timestamps(tmp_path):
     } == {
         value["id"]: value.get("created")
         for value in second["objects"]
+        if "created" in value
+    }
+
+
+def test_created_uses_full_history_when_earliest_observation_disappears(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    first = Asset(
+        "asset-1", "Example", "Widget", "1.0", client="Acme"
+    )
+    second = Asset(
+        "asset-2", "Example", "Widget", "1.0", client="Acme"
+    )
+    findings = [
+        _finding(
+            asset,
+            cve_id="CVE-2026-0019",
+            state=Applicability.AFFECTED,
+        )
+        for asset in (first, second)
+    ]
+    store.record_scan(
+        [
+            QueryResult(first, (findings[0],), ()),
+            QueryResult(second, (findings[1],), ()),
+        ]
+    )
+    with store.transaction() as db:
+        db.execute(
+            "UPDATE current_findings SET first_seen=? WHERE asset_id=?",
+            ("2026-11-01T00:00:00+00:00", "asset-1"),
+        )
+        db.execute(
+            "UPDATE current_findings SET first_seen=? WHERE asset_id=?",
+            ("2026-11-02T00:00:00+00:00", "asset-2"),
+        )
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    before = build_bundle(
+        select_findings(snapshot.findings),
+        generated_at=FIXED,
+        include_clients=True,
+        history=snapshot.history,
+    )
+    before_created = {
+        value["id"]: value.get("created")
+        for value in before["objects"]
+        if "created" in value
+    }
+    vulnerability = next(
+        value
+        for value in before["objects"]
+        if value["type"] == "vulnerability"
+    )
+    assert vulnerability["created"] == "2026-11-01T00:00:00.000Z"
+
+    store.record_scan([QueryResult(second, (findings[1],), ())])
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    after = build_bundle(
+        select_findings(snapshot.findings),
+        generated_at=FIXED,
+        include_clients=True,
+        history=snapshot.history,
+    )
+    validate_bundle(after)
+    assert [value["id"] for value in before["objects"]] == [
+        value["id"] for value in after["objects"]
+    ]
+    assert before_created == {
+        value["id"]: value.get("created")
+        for value in after["objects"]
         if "created" in value
     }
 
@@ -740,7 +845,17 @@ def test_missing_state_database_is_not_created(tmp_path):
 
 @pytest.mark.parametrize(
     "target",
-    ["config.toml", "inventory.csv", "state.db", "cvebeacon-watch.db"],
+    [
+        "config.toml",
+        "inventory.csv",
+        "state.db",
+        "state.db-wal",
+        "state.db-shm",
+        "cvebeacon-watch.db",
+        "cvebeacon-users.db",
+        "cvebeacon-users.db-wal",
+        "cvebeacon-users.db-shm",
+    ],
 )
 def test_stix_export_cannot_overwrite_operational_files(tmp_path, target):
     build_fixture_database(tmp_path / "state.db")
@@ -857,6 +972,41 @@ def test_software_uses_purl_package_identity(tmp_path):
     assert software["version"] == "2.0"
     assert software["x_cvebeacon_ecosystem"] == "PyPI"
     assert software["x_cvebeacon_purl"] == "pkg:pypi/example-gadget@2.0"
+
+
+@pytest.mark.parametrize(
+    ("purl", "name", "coordinate"),
+    [
+        ("pkg:pypi/requests", "requests", "pkg:pypi/requests"),
+        (
+            "pkg:deb/debian/openssl?arch=source&distro=bookworm",
+            "debian/openssl",
+            "pkg:deb/debian/openssl",
+        ),
+    ],
+)
+def test_versionless_purl_exports_without_a_version(
+    tmp_path, purl, name, coordinate
+):
+    store = StateStore(tmp_path / "state.db")
+    asset = Asset("asset-1", purl=purl)
+    finding = _finding(
+        asset,
+        cve_id="CVE-2026-0018",
+        state=Applicability.AFFECTED,
+    )
+    store.record_scan([QueryResult(asset, (finding,), ())])
+    snapshot = read_latest_successful_scan(tmp_path / "state.db")
+    bundle = build_bundle(
+        select_findings(snapshot.findings), generated_at=FIXED
+    )
+    validate_bundle(bundle)
+    software = next(
+        value for value in bundle["objects"] if value["type"] == "software"
+    )
+    assert software["name"] == name
+    assert "version" not in software
+    assert software["x_cvebeacon_purl"] == coordinate
 
 
 def test_purl_qualifiers_do_not_leak_urls_or_tokens(tmp_path):
