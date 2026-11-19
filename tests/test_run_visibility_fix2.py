@@ -13,7 +13,7 @@ from cvebeacon.locking import RunInProgress, RunLock, run_lock_path
 from test_dashboard_operations import fake_scheduler, login, make_config, new_accounts
 
 
-@pytest.mark.parametrize("emulate_sharing", [False, True])
+@pytest.mark.parametrize("emulate_sharing", [False, True, "close-before-unlink"])
 def test_holder_record_publication_and_cleanup_respect_windows_sharing(tmp_path, monkeypatch, emulate_sharing):
     handles = {}
     denied = []
@@ -33,7 +33,8 @@ def test_holder_record_publication_and_cleanup_respect_windows_sharing(tmp_path,
         if path.exists():
             details = path.stat()
             identity = (details.st_dev, details.st_ino)
-            if any(inode == identity and not share_delete for inode, share_delete in handles.values()):
+            if any(inode == identity and (not share_delete or emulate_sharing == "close-before-unlink")
+                   for inode, share_delete in handles.values()):
                 denied.append(path.name)
                 raise PermissionError(errno.EACCES, "synthetic Windows delete-sharing refusal")
         return original_unlink(path, *args, **kwargs)

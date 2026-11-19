@@ -298,13 +298,24 @@ class RunLock:
             # Only this acquisition's files are ever created or removed.
             os.link(temporary, target)
             self._owner_identity = identity
-            self._owner_descriptor = descriptor
-            descriptor = None
         finally:
             if descriptor is not None:
                 os.close(descriptor)
             if created:
                 temporary.unlink(missing_ok=True)
+        # Finish name cleanup with no writer handle open. Windows may defer
+        # deletion until handles close even when delete sharing is permitted.
+        descriptor = private_file(target, share_delete=True)
+        try:
+            details = os.fstat(descriptor)
+            if (details.st_dev, details.st_ino) != self._owner_identity:
+                raise CVEBeaconError("operation lock metadata changed during publication")
+            self._owner_lock(descriptor)
+            self._owner_descriptor = descriptor
+            descriptor = None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     @staticmethod
     def _owner_lock(descriptor: int, *, probe=False, unlock=False) -> None:
@@ -399,12 +410,10 @@ class RunLock:
                 self._owner_path = owner_record_path(self.path, token)
                 details = os.fstat(descriptor)
                 metadata.update(owner_token=token, lock_device=details.st_dev, lock_inode=details.st_ino)
-                # Invalidate a predecessor before publishing this acquisition.
-                # The shared inode contains only an opaque reference, no identity.
+                # Invalidate the old reference first. Reveal this acquisition
+                # only after its private record and live lease are ready.
                 reference = json.dumps({"owner_token": token}).encode("ascii")
-                os.lseek(descriptor, 1, os.SEEK_SET)
-                self._write(descriptor, reference)
-                os.ftruncate(descriptor, len(reference) + 1)
+                os.ftruncate(descriptor, 1)
                 try:
                     self._publish(metadata)
                 except OSError as exc:
@@ -419,6 +428,11 @@ class RunLock:
                         raise CVEBeaconError("cannot clean up the operation lock metadata") from cleanup
                     # Permissions or unsupported hard links must not block a
                     # normal run. No partial linked record may retain a lease.
+                else:
+                    # The shared inode contains only an opaque reference.
+                    os.lseek(descriptor, 1, os.SEEK_SET)
+                    self._write(descriptor, reference)
+                    os.ftruncate(descriptor, len(reference) + 1)
             except OSError as exc:
                 raise CVEBeaconError("cannot write the operation lock metadata") from exc
             self._descriptor = descriptor
@@ -440,11 +454,11 @@ class RunLock:
             # Byte zero is reserved for Windows locking. Never write it, and
             # clear metadata while still locked so a successor cannot be erased.
             os.ftruncate(descriptor, 1)
+            self._close_owner()
             if self._owner_identity is not None:
                 details = self.owner_path.lstat()
                 if (details.st_dev, details.st_ino) == self._owner_identity:
                     self.owner_path.unlink()
-            self._close_owner()
             self._unlock(descriptor)
         except OSError:
             pass
