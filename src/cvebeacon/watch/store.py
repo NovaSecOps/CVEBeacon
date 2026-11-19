@@ -544,7 +544,9 @@ class WatchStore:
             if missing:
                 self._ensure_schema(db, _timestamp(self._clock))
                 db.commit()
+                db.execute("BEGIN")
             else:
+                db.execute("BEGIN")
                 existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('schema_version','provider_storage')")) if 'watch_meta' in existing else {}
                 if meta.get('provider_storage') != 'sparse-v1':
@@ -555,7 +557,6 @@ class WatchStore:
                             name = statement.split()[5]
                             if name in overlays and name not in existing:
                                 db.execute(statement.replace("CREATE TABLE", "CREATE TEMP TABLE", 1))
-            db.execute("BEGIN")
             yield db
         except sqlite3.Error as exc:
             raise StateError(f"watch read failed: {exc}") from exc

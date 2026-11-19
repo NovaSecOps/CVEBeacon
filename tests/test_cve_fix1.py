@@ -184,3 +184,19 @@ def test_adding_an_empty_provider_does_not_requeue_existing_nvd(tmp_path):
     store.set_metadata({'view_policy':'euvd,epss'})
     assert store.apply_view_policy(('nvd','euvd','epss','cve_list'))==()
     assert store.pending_evaluations()==()
+
+
+def test_real_legacy_wide_columns_survive_version_one_upgrade(tmp_path):
+    path=tmp_path/'watch.db'
+    schema_seven(path)
+    extras={'eu_kev_added':'TEXT','euvd_id':'TEXT','euvd_exploited_since':'TEXT',
+            'epss':'REAL','epss_percentile':'REAL','epss_date':'TEXT','fingerprint':'TEXT'}
+    with sqlite3.connect(path) as db:
+        for name,kind in extras.items():
+            db.execute(f'ALTER TABLE watch_cve ADD COLUMN {name} {kind}')
+        db.execute("UPDATE watch_meta SET value='1' WHERE key='schema_version'")
+        db.execute("UPDATE watch_cve SET euvd_id='EUVD-2026-1',epss=0.5")
+    WatchStore(path).initialize()
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT description,euvd_id,epss FROM watch_cve').fetchone()==('retained','EUVD-2026-1',0.5)
+        assert db.execute('SELECT count(*) FROM watch_provider').fetchone()[0]==0
