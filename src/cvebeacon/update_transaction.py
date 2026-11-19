@@ -59,6 +59,14 @@ def ensure_ready(command, *, prefix=None, running_version=None):
         permitted = phase == "complete" or (command in {"doctor", "serve"} and phase in {"health", "rollback-health"})
         permitted = permitted or (command == "migrate" and phase == "migrating")
         if permitted and (running_version or version("cvebeacon")) == expected:
+            if phase == "complete":
+                # Replacement is visible before its parent fsync returns. A
+                # reader must establish that barrier too before admitting a
+                # write which recovery must never restore over after a crash.
+                from .updater import sync_directory
+                sync_directory(prefix)
+                if read_record(prefix) not in (None, record):
+                    raise CVEBeaconError("the update transaction changed during writer admission")
             return
     except (OSError, ValueError, CVEBeaconError):
         raise CVEBeaconError("update recovery is required before starting writers") from None
