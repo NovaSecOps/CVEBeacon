@@ -546,7 +546,7 @@ that stronger claim. `watch reported --verify` reports the first broken row and
 exits 2; when it succeeds it prints how many rows are chained and how many are
 legacy and unchained. The user audit table uses the same construction.
 
-The watch database schema is version 8. Rows written before the identity upgrade
+The watch database schema is version 9. Rows written before the identity upgrade
 have `chain_version = 0`, a null chain, and are reported as legacy unchained;
 the chain starts with the first report written after the upgrade. Migration
 records the highest legacy row id in `watch_meta` once. A legacy row must be at
@@ -616,12 +616,14 @@ counts in `watch status` to inspect their delivery state.
 
 All channels use the same formatter. Messages are short: one header line per
 CVE, a description cut to 160 characters, each matching rule, and links. When
-several rules match the same CVE under the same label, they share one block and
-a `Rule: a, b` line.
+several rules match the same CVE with the same label and score summary, they
+share one block and a `Rule: a, b` line.
 
 ```text
-[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active
+[NEW] CVE-2026-1234 · CVSS 9.8 v3.1 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active (NVD SSVC)
   Published 2026-10-30 · first seen 2026-11-04
+  CVSS scores:
+  CVSS 9.8 v3.1 (CNA: Acme) · critical
   Acme Widget before 4.2.1 allows unauthenticated remote code execution…
   Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234
 ```
@@ -640,7 +642,7 @@ Event labels:
 | `exploitation_active` | `[ACTIVELY EXPLOITED]` |
 | `severity_increase` | `[SEVERITY UP high->critical]` |
 | `epss_increase` | `[EPSS UP 0.08->0.61]` |
-| `nvd_score_added` | `[NVD SCORED 9.1]` |
+| `nvd_score_added` | `[NVD SCORED 9.1 v3.1]` |
 | `rejected` | `[REJECTED]` |
 | `reported` | `[REPORTED]` (notice, not an alert) |
 | `unreported` | `[UNREPORTED]` (notice, not an alert) |
@@ -668,8 +670,10 @@ CVEBeacon initial summary: 12 CVEs across 3 rules since 2026-10-27
 critical-or-likely: 8 matches, 1 KEV added
 kev-watch: 4 matches
 
-[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA – EU – · Exploitation: none
+[NEW] CVE-2026-1234 · CVSS 9.8 v3.1 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA – EU – · Exploitation: unknown
   Published 2026-10-30 · first seen 2026-11-04
+  CVSS scores:
+  CVSS 9.8 v3.1 (CNA: Acme) · critical
   Acme Widget before 4.2.1 allows unauthenticated remote code execution…
 and 8 more. Run `cvebeacon watch events` to list all.
 ```
@@ -725,8 +729,8 @@ score, version, severity, provider, and vector when supplied. Entries run from
 v4.0 through v2.0. Within each version they are ordered NVD, CNA, CISA ADP,
 EUVD, then other providers. Severity uses the provider's rating when available
 or the version's scale when it is missing. If severity differs across
-versions, the block includes a note. Exploitation lists the source beside the
-status. Missing evidence is shown as unknown.
+versions, the block includes a note. Exploitation lists available sources
+beside the strongest status. Missing evidence is shown as unknown.
 
 Every dynamic value is HTML-escaped, and links use only the fixed NVD, CVE.org,
 EUVD, and CISA KEV URL builders with percent-quoted identifiers. A CVE
@@ -824,6 +828,10 @@ is missing. It is empty for unscored CVEs. `view.cvss_note` is either
 contains a `status` of `active`, `poc`, `none`, or `unknown` and an
 array of supporting `sources`.
 
+Qualified rule events add `view.cvss_selected` with the score captured at
+evaluation time in the same shape as an entry in `view.cvss_scores`. The field
+is `null` when there is no qualifying score.
+
 An event carries `affected_clients` when the latest successful inventory scan
 records an affected or needs-review finding on a client's asset. Each item has
 `name`, `assets` (the number of matching assets), and `status` (`affected` or
@@ -915,7 +923,9 @@ Leaf keys:
   `providers` array. The leaf matches when any entry from a selected version
   and provider meets its threshold. `providers` overrides `cvss_providers`
   for that leaf. For example, `{ cvss_max = { score = 7.0, versions = ["4.0"], providers = ["cna"] } }`
-  matches a CNA v4.0 score at or below 7.0.
+  matches a CNA v4.0 score at or below 7.0. The highest score satisfying a
+  positive qualified CVSS leaf supplies the severity baseline and the alert
+  header. The score block still lists all available entries.
 - `epss_min` (0 to 1): EPSS is at least this value. A missing EPSS is false. A
   rule that uses `epss_min` requires `epss` in `watch.sources`.
 - `kev = "cisa" | "eu" | "any"`: the CVE is in that KEV catalog. A rule that
@@ -998,8 +1008,9 @@ After adding a rule, run `cvebeacon watch evaluate --all --yes` before the next
 
 Editing a rule's condition or `cvss_providers` keeps the existing matches. The
 next evaluation compares against the stored state as usual, so an escalation
-that arrives with the edit still alerts. A change to `cvss_providers` moves the
-severity baseline to the new providers without an event, so the change alone
+that arrives with the edit still alerts. Editing the providers for scalar
+scoring or the score selection in a qualified leaf moves the severity
+baseline without an event, so the change alone
 does not alert. Editing only channels or `events` does not reset state. A
 disabled rule is not evaluated until it is
 enabled again.
@@ -1081,7 +1092,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 8. An unknown version still fails closed. The version 1
+place to schema version 9. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to

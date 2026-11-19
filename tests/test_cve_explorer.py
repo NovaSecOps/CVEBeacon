@@ -199,7 +199,8 @@ def test_explorer_rejects_invalid_filter_bounds_and_tokens(tmp_path):
         {"epss_min": float("nan")}, {"epss_max": 1.1}, {"cvss_min": -1},
         {"cvss_min": 8, "cvss_max": 7}, {"cvss_version": "4.0') OR 1=1--"},
         {"cvss_provider": "nvd') OR 1=1--"}, {"source": ["nvd"] * 50},
-        {"exploitation": "other"}, {"kev": "x"},
+        {"exploitation": "other"}, {"kev": "x"}, {"reported": ("yes", "no")},
+        {"has_events": ("yes", "no")},
     ):
         with pytest.raises(StateError):
             store.search(**filters)
@@ -227,3 +228,95 @@ def test_euvd_qualified_filters_include_all_effective_advisory_scores(tmp_path):
     assert store.search(exploitation="active").total == 0
     assert store.search(exploitation="unknown", cvss_version="4.0", cvss_min=9).total == 1
     assert store.search(cvss_version="3.1").total == 0
+
+
+def test_upgraded_ssvc_is_initial_without_an_alert_burst(tmp_path):
+    from cvebeacon.watch.rules import parse_rules
+
+    catalogs = ("nvd", "cve_list")
+    store = WatchStore(tmp_path / "watch.db")
+    recovered = [f"CVE-2026-{index:05d}" for index in range(10000, 10120)]
+    no_exploitation, poc = "CVE-2026-11000", "CVE-2026-11001"
+    store.upsert_cve_list([
+        *(vulnrichment_record(identifier) for identifier in recovered),
+        vulnrichment_record(no_exploitation, "none"), vulnrichment_record(poc, "poc"),
+    ], catalogs=catalogs)
+
+    def create_rule(name, condition, events, old_cves="digest"):
+        return {"name": name, "condition": condition, "channels": ["sink"],
+                "events": events, "old_cves": old_cves}
+
+    rules = parse_rules([
+        create_rule("tracked", {"status": "published"}, ["exploitation_active"]),
+        *(create_rule(mode, {"exploitation": "active"}, ["match"], mode)
+          for mode in ("digest", "alert", "ignore")),
+    ])
+    with store.transaction() as db:
+        db.execute("UPDATE watch_provider SET record_json=json_set(record_json,'$.ssvc_exploitation',NULL)")
+    assert store.evaluate_touched(rules, catalogs=catalogs).events == 0
+    with store.transaction() as db:
+        db.execute("UPDATE watch_meta SET value='8' WHERE key='schema_version'")
+    store.initialize()
+    assert store.view(no_exploitation, catalogs=catalogs).ssvc_exploitation == "none"
+    with store.read() as db:
+        assert db.execute("SELECT COUNT(*) FROM watch_touched").fetchone()[0] == len(recovered) + 1
+    result = store.evaluate_touched(rules, catalogs=catalogs, limit=19)
+    assert result.by_kind == (("match", 2 * len(recovered)),)
+    assert not store.delivery_events("sink", catalogs=catalogs)
+    events = store.events(limit=300)
+    assert all(item.initial and item.rule in ("digest", "alert") for item in events)
+    assert not store.evaluate_touched(rules, catalogs=catalogs).events
+
+    store.upsert_cve_list([vulnrichment_record(poc, "active")], catalogs=catalogs)
+    assert dict(store.evaluate_touched(rules, catalogs=catalogs).by_kind)["exploitation_active"] == 1
+    assert any(event.kind == "exploitation_active" for event in store.delivery_events("sink", catalogs=catalogs))
+
+
+def test_exploitation_sources_and_overview_include_vulnrichment_and_nvd(tmp_path):
+    from cvebeacon.watch.records import EUVDUpdate
+    from cvebeacon.watch.rules import evaluate_condition, parse_rules
+
+    identifier = "CVE-2026-10001"
+    catalogs = ("nvd", "euvd", "cve_list")
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_nvd([WatchRecord(identifier, "published", ssvc_exploitation="poc")])
+    store.replace_euvd_items([EUVDUpdate((identifier,), "EUVD-2026-1", "2026-11-01")], catalogs=catalogs)
+    view = store.view(identifier, catalogs=catalogs)
+    assert view.exploitation == ("active", ("EUVD", "NVD SSVC"))
+    rule, = parse_rules([{"name": "track", "condition": {"exploitation": "active"}, "channels": ["sink"]}])
+    assert evaluate_condition(view, rule.condition, rule) == (True, ("exploitation active (NVD SSVC, euvd)",))
+    store.upsert_cve_list([vulnrichment_record()], catalogs=catalogs)
+    assert store.status(catalogs=catalogs)["active_ssvc"] == 1
+    assert store.status(catalogs=("nvd", "euvd"))["active_ssvc"] == 0
+
+
+def test_explorer_indexes_backfill_and_follow_source_updates(tmp_path):
+    from cvebeacon.watch.records import CVSSEntry
+
+    identifier = "CVE-2026-10001"
+    catalogs = ("nvd", "cve_list")
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_cve_list([vulnrichment_record()], catalogs=catalogs)
+    nvd = WatchRecord(identifier, "published", cvss=(CVSSEntry("nvd", "nvd", "2.0", 8.0),))
+    store.upsert_nvd([nvd], catalogs=catalogs)
+    filters = {"exploitation": "active", "cvss_version": "4.0", "cvss_min": 7,
+               "sort": "cvss", "severity": "critical"}
+    with store.transaction() as db:
+        db.execute("DELETE FROM watch_meta WHERE key='explorer_storage'")
+        db.execute("DELETE FROM watch_explorer_metrics")
+        db.execute("DELETE FROM watch_explorer_score")
+        db.execute("UPDATE watch_meta SET value='8' WHERE key='schema_version'")
+    legacy = store.search(catalogs=catalogs, **filters)
+    assert legacy.total == 1
+    store.initialize()
+    assert store.search(catalogs=catalogs, **filters) == legacy
+    assert store.search(catalogs=("nvd",), **filters).total == 0
+    assert store.search(cvss_version="2.0", cvss_provider="nvd").total == 1
+
+    updated = vulnrichment_record(exploitation="none")
+    updated["containers"]["adp"][0]["metrics"][1]["cvssV4_0"]["baseScore"] = 5.0
+    store.upsert_cve_list([updated], catalogs=catalogs)
+    assert store.search(catalogs=catalogs, **filters).total == 0
+    result = store.search(exploitation="none", cvss_version="4.0", cvss_max=5.0)
+    assert result.total == 1
+    assert store.search(cvss_version="2.0", cvss_provider="nvd").total == 1

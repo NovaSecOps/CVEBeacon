@@ -27,7 +27,7 @@
   <td>{{ row.created_at }}</td>
   <td>{{ row.rule }}</td>
   <td><a href="{{ url_for('watch.cve', cve_id=row.cve_id) }}">{{ row.cve_id }}</a></td>
-  <td>{{ cvss_scores(row.cvss_scores) }}</td>
+  <td>{{ cvss_scores(row.cvss_scores) }}{% if row.cvss_severity_differs %}<p>Severity differs between CVSS versions</p>{% endif %}</td>
   <td>{{ row.kind }}</td>
   <td>{{ 'yes' if row.initial else 'no' }}</td>
   <td>{{ day(row.published) }}</td>

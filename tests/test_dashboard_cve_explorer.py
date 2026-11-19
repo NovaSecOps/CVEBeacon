@@ -152,3 +152,32 @@ def test_explorer_combines_client_names_using_or(tmp_path):
         assert "1 CVEs · Page 1" in result.text
         assert "CVE-2026-0001" in result.text and "CVE-2026-0002" not in result.text
     app.extensions["dashboard_jobs"].shutdown()
+
+
+def test_event_list_and_detail_show_all_scores_and_version_disagreement(tmp_path, monkeypatch):
+    from cvebeacon.watch.records import CVSSEntry
+    from cvebeacon.watch.store import WatchStore
+    from test_dashboard_watch import seeded, login, record
+
+    config, _, store, app, client = seeded(tmp_path)
+    scores = (CVSSEntry("nvd", "nvd", "2.0", 8.5),
+              CVSSEntry("cna", "Example", "3.1", 7.0),
+              CVSSEntry("nvd", "nvd", "4.0", 9.6, "CVSS:4.0/AV:N"))
+    store.upsert_nvd([record(cvss=scores)], catalogs=config.watch.sources)
+    login(client, "reader")
+
+    def forbidden(*args):
+        raise AssertionError("the event page needs only scores")
+
+    with monkeypatch.context() as only_scores:
+        only_scores.setattr(WatchStore, "_view", forbidden)
+        events = client.get("/watch/events?cve=CVE-2026-0001")
+    assert events.status_code == 200
+    assert all(label in events.text for label in ("8.5 v2.0", "7 v3.1", "9.6 v4.0", "CVSS:4.0/AV:N"))
+    assert "Severity differs between CVSS versions" in events.text
+
+    detail = client.get("/watch/cve/CVE-2026-0001")
+    assert detail.status_code == 200
+    assert all(label in detail.text for label in ("v2.0</td>", "v3.1</td>", "v4.0</td>", "CVSS:4.0/AV:N"))
+    assert "Severity differs between CVSS versions" in detail.text
+    app.extensions["dashboard_jobs"].shutdown()
