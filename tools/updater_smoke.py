@@ -221,6 +221,8 @@ def acceptance(wheelhouse):
         assert pending["phase"] == "migrating" and updater.current().name == "0.1.1"
         blocked = subprocess.run([str(prefix / "current/.venv/bin/cvebeacon"), "--config", str(config_path), "watch", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=u.SAFE_ENV)
         assert blocked.returncode == 2 and b"recovery" in blocked.stderr
+        blocked_module = subprocess.run([str(prefix / "current/.venv/bin/python"), "-m", "cvebeacon", "--config", str(config_path), "watch", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=u.SAFE_ENV)
+        assert blocked_module.returncode == 2 and b"recovery" in blocked_module.stderr
         assert u.Updater(policy, native, remote).recover()["result"] == "rolled-back"
         with sqlite3.connect(data / "ledger.sqlite3") as db:
             assert db.execute("SELECT value FROM sentinel").fetchone()[0] == "preserved"

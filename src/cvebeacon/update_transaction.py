@@ -11,7 +11,7 @@ PHASES = {"adopting", "quiescing", "snapshot", "installing", "migrating", "switc
 
 
 def installation_prefix(venv=None):
-    venv = Path(venv or sys.prefix).absolute()
+    venv = Path(venv or sys.prefix).resolve()
     if venv.name != ".venv":
         return None
     if venv.parent.parent.name == "releases":

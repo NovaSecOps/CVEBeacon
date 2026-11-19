@@ -483,3 +483,18 @@ def test_startup_fence_is_readable_under_a_private_administrator_umask(transacti
     finally:
         os.umask(previous)
     assert (updater.policy.prefix / "update-journal.json").stat().st_mode & 0o777 == 0o644
+
+
+def test_recovery_fence_resolves_current_and_adopted_interpreter_aliases(transaction):
+    from cvebeacon.update_transaction import installation_prefix, ensure_ready
+    updater, _, _ = transaction
+    prefix = updater.policy.prefix
+    updater._begin("0.1.0", "0.1.1", updater.policy.units)
+    alias = prefix / "current/.venv"
+    assert installation_prefix(alias) == prefix
+    with pytest.raises(CVEBeaconError, match="recovery"):
+        ensure_ready("watch", prefix=installation_prefix(alias), running_version="0.1.0")
+    (prefix / "releases/0.1.0/.venv").rmdir()
+    (prefix / ".venv").mkdir()
+    (prefix / "releases/0.1.0/.venv").symlink_to(prefix / ".venv", target_is_directory=True)
+    assert installation_prefix(alias) == prefix
