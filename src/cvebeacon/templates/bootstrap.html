@@ -1,11 +1,16 @@
 {% extends 'base.html' %}
+{% from 'ui.html' import page_header, card, callout, field, button %}
 {% block title %}Create administrator · CVEBeacon{% endblock %}
 {% block content %}
-<h1>Create the first administrator</h1>
-<p role="alert">Only use this page from a trusted local computer. The first person to complete this form controls the dashboard. Do not expose an empty account store through a proxy.</p>
-{% if error %}<p role="alert">{{ error }}</p>{% endif %}
-<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
-<label>Username <input name="username" required maxlength="64" autocomplete="username"></label>
-<label>Password <input type="password" name="password" required minlength="12" maxlength="1024" autocomplete="new-password"></label>
-<button type="submit">Create administrator</button></form>
+{{ page_header('Create the first administrator', 'One-time setup for a fresh installation. This form creates the admin account that controls CVEBeacon.') }}
+{% call callout('warning', 'Use this page only once, from a trusted local computer') %}<p>CVEBeacon accepts this page only when the connection appears to come from this computer. A reverse proxy on this computer also appears local, so never make an empty account list reachable through one. The first person to complete this form controls the dashboard.</p>{% endcall %}
+{% if error %}{% call callout('danger', 'The administrator account was not created') %}<p>{{ error }}</p>{% endcall %}{% endif %}
+{% call card('Create the admin account', 'Choose the username and password for the first administrator.') %}
+<form method="post" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{{ field('Username', 'username', required=true, maxlength=64, autocomplete='username', help='You will type this at every sign-in.') }}
+{{ field('Password', 'password', type='password', required=true, minlength=12, maxlength=1024, autocomplete='new-password', help='At least 12 characters. A short sentence works well.') }}
+<div class="form-actions">{{ button('Create administrator') }}</div>
+</form>
+{% endcall %}
 {% endblock %}
