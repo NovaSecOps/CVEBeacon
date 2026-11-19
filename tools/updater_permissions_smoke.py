@@ -16,7 +16,7 @@ from unittest.mock import patch
 from cvebeacon import updater as u
 
 
-def acceptance(wheelhouse):
+def acceptance(wheelhouse, mask):
     if os.geteuid() != 0:
         raise SystemExit("run this scratch credential check as root")
     account = pwd.getpwnam("nobody")
@@ -69,9 +69,38 @@ def acceptance(wheelhouse):
                 os.chown(path, 0, account.pw_gid, follow_symlinks=False)
                 if not path.is_symlink() and path.is_file():
                     path.chmod(0o750 if path.stat().st_mode & 0o111 else 0o640)
-        assert u.Updater(policy, native).adopt()["result"] == "adopted"
+        previous = os.umask(mask)
+        try:
+            assert u.Updater(policy, native).adopt()["result"] == "adopted"
+        finally:
+            os.umask(previous)
+        created = (prefix / "releases", prefix / "releases/0.1.0", prefix / "transactions")
+        for path in created:
+            assert path.stat().st_uid == 0 and stat.S_IMODE(path.stat().st_mode) == 0o755
+        native.directory_access(prefix / "current/.venv", created)
+        native.service_access(prefix / "current/.venv")
         code = "import os,sys; assert os.access(sys.argv[1],os.R_OK|os.X_OK); assert not os.access(sys.argv[1],os.W_OK); assert not os.access(sys.argv[2],os.W_OK); assert os.geteuid()==int(sys.argv[3]); assert os.getgroups()==[]"
         native.run([prefix / "current/.venv/bin/python", "-I", "-c", code, prefix, prefix / "current/.venv/bin/cvebeacon", account.pw_uid], service=True)
+        # Check a generated release too: the outer mask must not affect access.
+        previous = os.umask(mask)
+        try:
+            generated = u.release_directory(prefix / "releases/0.1.1")
+            native.install(generated / ".venv", wheelhouse, ["cvebeacon"], "0.1.0")
+        finally:
+            os.umask(previous)
+        native.directory_access(generated / ".venv", (generated, generated / ".venv"))
+        native.service_access(generated / ".venv")
+        native.run([generated / ".venv/bin/python", "-I", "-c", code, prefix, generated / ".venv/bin/cvebeacon", account.pw_uid], service=True)
+        data.chmod(0o500)
+        try:
+            try:
+                native.preflight(prefix / "current/.venv")
+            except (u.UpdateError, OSError):
+                pass
+            else:
+                raise AssertionError("preflight accepted service-owned read-only data")
+        finally:
+            data.chmod(0o700)
         # A private config is rejected before quiescence too; secrets stay private.
         os.chown(config, 0, 0)
         config.chmod(0o600)
@@ -82,10 +111,12 @@ def acceptance(wheelhouse):
         else:
             raise AssertionError("preflight accepted a service-unreadable config")
         assert private.stat().st_uid == 0 and stat.S_IMODE(private.stat().st_mode) == 0o600
-        print("Adoption rejects root:root 0750, accepts root:service read-only access, clears supplementary groups, and preflights private config access.")
+        print(f"Umask {mask:03o}: adoption and generated releases allow service read/execute, deny code writes, clear groups, and reject read-only data/private config.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheelhouse", type=Path, required=True)
-    acceptance(parser.parse_args().wheelhouse.resolve(strict=True))
+    wheelhouse = parser.parse_args().wheelhouse.resolve(strict=True)
+    for mask in (0o077, 0o027):
+        acceptance(wheelhouse, mask)

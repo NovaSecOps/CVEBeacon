@@ -98,6 +98,11 @@ class ScratchNative(u.Native):
     def managed_cron(self):
         pass  # Never read or change a real schedule in scratch acceptance.
 
+    def directory_access(self, venv, directories):
+        # This rootless acceptance owns its code; real read-only credential
+        # enforcement is exercised separately by updater_permissions_smoke.py.
+        self.run([venv / "bin/python", "-I", "-c", "import os,sys; assert all(os.access(p,os.R_OK|os.X_OK) for p in sys.argv[1:])", *directories], service=True)
+
     def dashboard_pid(self):
         if self.external_pid is not None:
             os.kill(self.external_pid, 0)

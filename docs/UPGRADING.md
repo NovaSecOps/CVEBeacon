@@ -71,7 +71,7 @@ units and the shared run locks; it does not rewrite cron or external schedules. 
 the administrator policy. Persistent external data writers must be stopped
 before invoking updates.
 
-Use the service account's **primary** group for the fresh code tree. The exact
+Use the service account's **primary** group for the fresh bootstrap code tree. Its
 layout below is root ownership, service-group ownership, `0750` directories,
 `0640` non-executable files and `0750` executable files. This allows the service
 to read/traverse/execute, while denying it code writes. Supplementary groups are
@@ -95,6 +95,8 @@ environment file can remain private in the data directory: state discovery
 skips unreadable unrelated files. It does not loosen their permissions. Adoption
 and apply execute a read/execute/config preflight under the actual service UID,
 primary GID and no supplementary groups before changing layout or stopping units.
+They also create/remove a temporary file in each data/lock directory and probe
+the config and run locks, so inaccessible storage is refused before quiescence.
 Inventory inspection also runs without root privileges.
 
 Review that policy, set `enabled = true`, and pin the signing key (see below).
@@ -108,6 +110,14 @@ Adoption creates `releases/VERSION/.venv` pointing to the original venv and
 atomically creates `current`. Keeping the original venv in place preserves its
 absolute script shebangs. Do not delete it while that release is used or needed
 for rollback. Newly installed releases get their own real venv directories.
+Generated `releases`, version and `transactions` directories are root-owned
+`0755`, explicitly set regardless of the administrator's umask. New venvs use
+root ownership and umask `022` (normally `0755` directories/executables and
+`0644` non-executable files). The outer root:service `0750` prefix still limits
+traversal to that group. Every generated layout directory is checked under
+service credentials for read/traversal and denied write access; adoption also
+executes through `current/.venv` before completing. No recursive permission or
+ownership change is applied to existing snapshots.
 
 Use the reference units in `deploy/systemd/`: their executable path is
 `/opt/cvebeacon/current/.venv/bin/cvebeacon`. Choose `watch run` instead of `run`
@@ -120,6 +130,8 @@ After copying the reviewed units to `/etc/systemd/system`, reload systemd and
 explicitly enable the dashboard unit to start at boot. Keep the reference
 `ExecStartPre=... update guard` startup fence in every configured writer unit,
 including additional automation/ingest units; the dashboard uses `--role serve`.
+Keep `StartLimitIntervalSec=0` in fenced units so boot-time refusals cannot
+temporarily prevent the updater's recovery restart.
 Manual Core invocations enforce the same fence. Enable
 `cvebeacon-update.path` only when requests should be processed, and the
 monitoring timer only when its schedule is wanted.
@@ -208,14 +220,20 @@ requires that unit to be active, its MainPID to own the listening socket, and
 `/healthz` to report that PID and the expected running package version. A stale
 or unrelated listener cannot satisfy the probe. The endpoint caches the running
 version at process startup rather than rereading a switched metadata path.
+Listener ownership must match the probe's exact address family and address;
+a wildcard bind is accepted only within that same address family.
 
 The verified wheelhouse installs offline into `releases/VERSION/.venv`, retaining
 the optional extensions/automation distributions already present. The existing
 verified interpreter creates the new venv, preserving supported side-by-side
 Python installations instead of selecting a possibly older system default. The
+installed regular files, directories and the containing `releases` directory
+are fsynced before migration; adoption also syncs its original code tree. The
 new executable migrates state as the service account. The updater atomically replaces
-`current`, restarts previously enabled timers and the dashboard, runs `doctor`
-and probes loopback `/healthz`. A migration, installation or health failure
+`current`, restarts the dashboard, runs `doctor`
+and probes loopback `/healthz`. Only after durable completion and releasing
+resource locks does it resume previously active timers, allowing immediate
+persistent-timer catch-up. A migration, installation or health failure
 switches back, restores the snapshot (also removes newly created databases),
 restarts and records failure. A second concurrent updater is refused.
 
@@ -229,8 +247,9 @@ administrator-owned path guard is relaxed for this rootless scratch check; no sy
 external release endpoint is contacted.
 For a separate real-credential check, run
 `sudo .venv/bin/python tools/updater_permissions_smoke.py --wheelhouse /path/to/wheelhouse`.
-It tests root/service ownership and modes, read-only execution, cleared groups
-and private config refusal entirely in a disposable prefix. It does not create
+It tests adoption under administrator umasks `077` and `027`, all created
+directory modes, generated-release read-only execution, cleared groups,
+read-only data and private config refusal entirely in a disposable prefix. It does not create
 accounts or inspect or install schedules.
 
 Before stopping anything, the updater writes and fsyncs one active
@@ -242,7 +261,8 @@ publication are best effort and cannot skip recovery.
 
 An active record fences normal CLI and unit writer startup and dashboard writes.
 Only the recorded version may start for migration or the updater's health
-phase. A subsequent apply recovers the pending transaction first, without
+phase. A durable `complete` record permits ordinary writers only for the
+verified selected version. A subsequent apply recovers the pending transaction first, without
 checking another release or replacing the record. Explicit recovery is:
 
 ```console
@@ -254,13 +274,21 @@ local database verification and migration. It can be retried after interruption.
 The restored config hash, every snapshot hash, SQLite integrity and logical
 contents, absence of newly introduced databases, actual selected symlink, old
 `doctor`, old dashboard version and listener ownership must pass before a
-rollback is reported successful. Timers restart only after state and health
-verification; the startup fence stays until durable completion. If the journal or storage cannot be made durable, state restoration is still attempted
+rollback is reported successful. Snapshot config bytes are checked before
+replacing the live config, including a check of the copied temporary file;
+recovery installs that config as service-owned `0600`. Timers restart only after
+state and health verification, durable completion and resource-lock release.
+If the journal or storage cannot be made durable, state restoration is still attempted
 using the last durable record and writers remain fenced until recovery succeeds.
 A completed-but-not-finalized record is finalized without restoring older data.
 
-Verified completed records are moved, with directory fsyncs, into
-`/opt/cvebeacon/transactions/`. The active record is never replaced by a fresh
+Verified completed records are copied and fsynced into
+`/opt/cvebeacon/transactions/` while the active record remains. Only after timer
+restart and durable archival is the active name removed and its parent synced.
+A finalization failure retains a completed recovery entry and reports the
+committed outcome with a warning; recovery retries without restoring old data.
+Retention and advisory publication failures cannot change that outcome.
+The active record is never replaced by a fresh
 apply. An unrecognized legacy journal lacks recovery coordinates and is refused:
 an administrator must verify code/state and retained snapshots before archiving
 that legacy record. Do not delete an active record to bypass recovery.
@@ -271,6 +299,9 @@ and uses the resolved **config directory**, as does the privileged request
 consumer, regardless of where database subdirectories reside. The reference
 path unit watches that config directory; adjust its path and the service's
 `--config` together for a custom installation.
+Check-only deployments with a read-only config mount fall back to the watch
+database directory for advisory status. Checks still return release information
+if neither advisory location can be written.
 
 Backups are private, retain the most recent seven snapshots by default, and
 include password hashes. The policy's `retention` overrides that count. A pending
