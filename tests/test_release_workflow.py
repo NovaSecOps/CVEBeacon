@@ -115,19 +115,35 @@ def test_release_builds_optional_wheels_and_the_binary_runtime_closure(jobs):
 
 def test_publishing_requires_signing_key_and_verifies_namespace_and_pin(jobs):
     for job in ("release", "container-publish"):
-        gate = jobs[job]["steps"][0]
-        assert gate["env"]["RELEASE_SIGNING_KEY"] == "${{ secrets.RELEASE_SIGNING_KEY }}"
-        assert 'test -n "${RELEASE_SIGNING_KEY:-}"' in gate["run"]
-    steps = jobs["release"]["steps"]
+        assert "release-signing" in jobs[job]["needs"]
+        assert "RELEASE_SIGNING_KEY" not in str(jobs[job])
+    steps = jobs["release-signing"]["steps"]
     signing = step_with(steps, name="Sign and verify the checksum manifest")
+    assert signing["env"]["RELEASE_SIGNING_KEY"] == "${{ secrets.RELEASE_SIGNING_KEY }}"
+    assert 'test -n "${RELEASE_SIGNING_KEY:-}"' in signing["run"]
     assert "ssh-keygen -Y sign" in signing["run"]
     assert "-n cvebeacon-release" in signing["run"]
     assert "ssh-keygen -Y verify -f src/cvebeacon/release-allowed-signers" in signing["run"]
     assert "trap 'rm -f" in signing["run"]
-    assert steps.index(signing) < steps.index(step_with(steps, name="Create the draft release"))
+    assert steps.index(signing) < steps.index(step_with(steps, uses_prefix="actions/upload-artifact@"))
+    publish = jobs["release"]["steps"]
+    assert publish.index(step_with(publish, name="Verify signed release artifacts")) < publish.index(step_with(publish, name="Create the draft release"))
 
 
 def test_wheelhouse_smoke_resolves_only_compatible_runtime_wheels(jobs):
     smoke = step_with(jobs["python-dist"]["steps"], name="Install and smoke-test the wheel")["run"]
     assert "--no-index --only-binary=:all: --find-links dist cvebeacon cvebeacon-extensions cvebeacon-automation" in smoke
     assert "pip install dist/*.whl" not in smoke
+
+
+def test_windows_bundle_keeps_metadata_for_check_only_version_reporting():
+    script = (ROOT / "scripts" / "build-windows.ps1").read_text()
+    assert "--copy-metadata cvebeacon" in script
+
+
+def test_all_publication_jobs_wait_for_a_pin_validation_gate_without_container_key_access(jobs):
+    gate = jobs["release-signing"]
+    assert gate["environment"] == "release"
+    assert "release-signing" in jobs["container-publish"]["needs"]
+    assert "release-signing" in jobs["release"]["needs"]
+    assert "RELEASE_SIGNING_KEY" not in str(jobs["container-publish"])

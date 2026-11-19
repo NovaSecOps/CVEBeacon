@@ -198,8 +198,9 @@ ssh-keygen -lf release-signing-key.pub
 Keep a secure offline copy of the private key. Put its complete private-key text
 in the **environment** secret `RELEASE_SIGNING_KEY` on the existing protected
 `release` environment. Do not create a repository-wide secret or commit the
-private key. Publishing the container and drafting the release both refuse to
-run without this secret. The signing step writes it to a private temporary file
+private key. A protected `release-signing` gate signs and verifies the complete artifact set
+before either container publication or drafting the release can run. Only that
+job receives the signing secret; the container job never receives the key. The signing step writes it to a private temporary file
 and removes that file on exit.
 
 Replace the fail-closed placeholder in `src/cvebeacon/release-allowed-signers`
@@ -214,7 +215,8 @@ The release builds core, extensions and automation wheels and a binary runtime
 wheelhouse for the documented native targets. All artifacts, including dependency
 wheels, are hashed in `SHA256SUMS`. The workflow signs that exact manifest with
 `ssh-keygen -Y sign -n cvebeacon-release`, then verifies it against the packaged
-pin before creating the draft. Refuse publication if the pin or signature fails.
+pin before either publication job is eligible. The draft job verifies the
+signature and all checksums again after downloading the signed artifact set. Refuse publication if the pin or signature fails.
 An updater checks the signature before trusting hashes, verifies every artifact,
 and installs only from the verified wheel directory. A checksum file without
 its SSH signature is insufficient.
