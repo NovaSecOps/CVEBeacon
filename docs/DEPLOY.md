@@ -4,7 +4,8 @@ One Linux VM or one Windows host, installed from a source checkout or with
 Docker. Details are in the [setup guide](SETUP.md), [watch mode](WATCH.md), and
 [scheduling](SCHEDULING.md).
 
-For HTTPS, see the [reverse-proxy guide](HTTPS.md).
+For HTTPS, see the [reverse-proxy guide](HTTPS.md). For creating, verifying,
+retaining and restoring local backups, see [backup and restore](BACKUP.md).
 
 ## Storage trust
 
@@ -152,8 +153,15 @@ call `/opt/cvebeacon/current/.venv/bin/cvebeacon`; the service account must neve
 be able to modify the installed code.
 
 Account database backups contain password hashes. Keep them private from the
-moment they are created, including when replacing an older backup:
+moment they are created, including when replacing an older backup. The
+[backup command](BACKUP.md) takes consistent, verified copies of every state
+database and the configuration with owner-only permissions:
 
+```console
+cb backup create
+```
+
+For a one-off account database copy:
 ```console
 sudo -u cvebeacon sh -c 'umask 077; install -m 600 /dev/null /var/lib/cvebeacon/users-backup.db; sqlite3 /var/lib/cvebeacon/cvebeacon-users.db ".backup /var/lib/cvebeacon/users-backup.db"'
 sudo -u cvebeacon chmod 600 /var/lib/cvebeacon/users-backup.db

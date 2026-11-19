@@ -28,6 +28,7 @@ With no `[inventory] path`, `web_snapshots` disabled (the default), and watch mo
 - **Reports:** query the current inventory and download an XLSX or JSON report using the existing reporting functions. Exports do not commit monitoring state. Check the report's coverage and source-health fields even when the download succeeds.
 - **Sources:** view cached observations from the latest recorded scan, including check result, retrieval time and available source timestamp. Opening this page does not contact the sources.
 - **Operations:** start `scan`, `watch sync`, `watch evaluate --all`, `watch notify`, `watch run` or the combined `run` as a background job, retry failed or ambiguous deliveries, and send a labelled channel test. Each job has a status, timestamps, exit code and meaning, the account that started it, a bounded log tail, cancellation and an audit entry.
+- **Backups:** view the retained backup count and last backup time. Administrators can create, verify, download, prune and restore backups; create, verify and restore use the same background job and run-lock rules as other data-changing work. See [backup and restore](BACKUP.md).
 
 ## Operations and background jobs
 
@@ -452,6 +453,7 @@ container layout.
 | Dashboard sessions and cookies | `edit_dashboard` (view; changes administrator-only) |
 | HTTP client | `edit_http` |
 | State database and report output paths | `edit_system` (view; changes administrator-only) |
+| Backup directory and retention | `edit_system` (view; path changes administrator-only) |
 
 Blank fields omit a setting and use the configuration loader's default. String
 fields accept plain text. Enumerated settings use selectors, boolean settings use

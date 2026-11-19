@@ -1,8 +1,10 @@
 # Upgrading CVEBeacon
 
 Old configuration files remain valid. The optional `[update]` section defaults
-to disabled. Database migrations run locally and preserve existing records.
-Back up before upgrading; do not run an older executable against newer schemas.
+to disabled and the optional `[backup]` section uses owner-only local defaults.
+Database migrations run locally and preserve existing records. Back up before
+upgrading with `cvebeacon backup create`; see [backup and restore](BACKUP.md).
+Do not run an older executable against newer schemas.
 
 ## Supported updater installations
 
@@ -24,10 +26,14 @@ Never run the privileged updater inside a container.
    `cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml schedule remove --yes`,
    or stop the systemd timer. Wait for running work to finish; do not terminate
    a sync. Stop the dashboard and other data writers after work finishes.
-2. Use SQLite's online backup for **each** state database, including watch,
-   account, monitoring, dashboard job and automation ledgers. Keep backups and
-   configuration copies private. SQLite files may have live WAL contents: a
-   simple file copy is insufficient. Record all paths and ownership.
+2. Use the [backup command](BACKUP.md) (`cvebeacon --config CONFIG backup
+   create --include-secrets`) for SQLite's online backup of the core state
+   databases, including watch, account, monitoring, dashboard job and other
+   discovered stores under the data directory, plus the configuration. If
+   automation keeps a separate state directory or ledger, back it up with its
+   own documented procedure. Keep backups and configuration copies private.
+   SQLite files may have live WAL contents: a simple file copy is insufficient.
+   Record all paths and ownership.
 3. Obtain the release from the configured GitHub repository. Verify
    `SHA256SUMS.sig` against an independently pinned public key, then verify
    every artifact against `SHA256SUMS`:
