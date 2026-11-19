@@ -1,8 +1,9 @@
-"""Optional, read-only STIX 2.1 export of inventory findings.
+"""Optional STIX 2.1 export of inventory findings.
 
-The bundle is built from the latest successful inventory run. It deliberately
-does not read the watch database, query public sources, or write monitoring
-state. Only ``affected`` and ``needs_review`` findings are exported so that an
+The bundle is built from the latest successful inventory run. Findings are
+read-only: the exporter does not read the watch database, query public sources,
+or change monitoring state. It writes only the additive created-timestamp
+ledger. Only ``affected`` and ``needs_review`` findings are exported so that an
 unknown or excluded applicability is never presented as a confirmed match.
 """
 
@@ -76,6 +77,7 @@ class ScanSnapshot:
     findings: tuple[ExportFinding, ...]
     history: tuple[ExportFinding, ...] = ()
     history_skipped: int = 0
+    run_history: tuple[ExportFinding, ...] = ()
 
 
 @dataclass
@@ -178,6 +180,122 @@ def _current_rows(db: sqlite3.Connection) -> list[sqlite3.Row]:
         raise
 
 
+def _run_history(
+    db: sqlite3.Connection, current: Iterable[ExportFinding]
+) -> tuple[ExportFinding, ...]:
+    """Build immutable per-run observations for created-timestamp history.
+
+    The current-findings cache keeps an asset's first-seen time when the asset's
+    software identity changes in place. The run-scoped scan tables preserve the
+    identity that was actually observed in each run, so a newly introduced
+    software identity gets its own first observation time.
+    """
+    identifier_names: dict[str, str] = {}
+    for item in current:
+        vulnerability = item.finding.get("vulnerability")
+        if not isinstance(vulnerability, Mapping):
+            continue
+        name = _vulnerability_name(vulnerability)
+        if not name:
+            continue
+        candidates = (
+            vulnerability.get("cve_id"),
+            vulnerability.get("advisory_id"),
+            *_values(vulnerability.get("aliases")),
+            *_values(vulnerability.get("source_ids")),
+        )
+        for candidate in candidates:
+            text = _text(candidate).upper()
+            if text:
+                identifier_names.setdefault(text, name)
+    try:
+        assets = db.execute(
+            "SELECT r.run_id,r.completed_at,a.asset_id,a.payload_json "
+            "FROM runs r JOIN scan_assets a ON a.run_id=r.run_id "
+            "ORDER BY r.completed_at,r.run_id,a.asset_id"
+        ).fetchall()
+        findings = db.execute(
+            "SELECT run_id,asset_id,identifier,advisory_id,applicability "
+            "FROM scan_findings"
+        ).fetchall()
+        clients = {
+            (str(row["run_id"]), str(row["asset_id"])): str(row["client"])
+            for row in db.execute(
+                "SELECT run_id,asset_id,client FROM scan_asset_clients"
+            )
+        }
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return ()
+        raise
+    grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in findings:
+        grouped.setdefault(
+            (str(row["run_id"]), str(row["asset_id"])), []
+        ).append(row)
+    output: list[ExportFinding] = []
+    for row in assets:
+        run_id = str(row["run_id"])
+        asset_id = str(row["asset_id"])
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            continue
+        asset = payload.get("asset") if isinstance(payload, dict) else None
+        if not isinstance(asset, dict):
+            continue
+        try:
+            observed = _parse_timestamp(row["completed_at"])
+        except StateError:
+            continue
+        clean_asset = {
+            key: value for key, value in asset.items() if key != "client"
+        }
+        client = clients.get((run_id, asset_id), "") or str(
+            asset.get("client") or ""
+        )
+        by_advisory: dict[str, dict[str, object]] = {}
+        for item in grouped.get((run_id, asset_id), ()):
+            identifier = str(item["identifier"]).strip().upper()
+            advisory = str(item["advisory_id"]).strip().upper()
+            name = (
+                identifier_names.get(advisory)
+                or identifier_names.get(identifier)
+                or (identifier if _CVE_ID.fullmatch(identifier) else advisory)
+            )
+            if not name:
+                continue
+            entry = by_advisory.setdefault(
+                advisory,
+                {"name": name, "state": ""},
+            )
+            state = str(item["applicability"]).casefold()
+            if not entry["state"] or _APPLICABILITY_RANK.get(
+                state, 0
+            ) > _APPLICABILITY_RANK.get(str(entry["state"]), 0):
+                entry["state"] = state
+        for entry in by_advisory.values():
+            name = str(entry["name"])
+            vulnerability: dict[str, str] = (
+                {"cve_id": name}
+                if _CVE_ID.fullmatch(name)
+                else {"advisory_id": name}
+            )
+            output.append(
+                ExportFinding(
+                    asset=clean_asset,
+                    finding={
+                        "vulnerability": vulnerability,
+                        "applicability": str(entry["state"]),
+                    },
+                    first_seen=_format_timestamp(observed),
+                    last_seen=_format_timestamp(observed),
+                    client=client,
+                )
+            )
+    return tuple(output)
+
+
 def _run_clients(db: sqlite3.Connection, run_id: str) -> dict[str, str]:
     try:
         rows = db.execute(
@@ -275,6 +393,7 @@ def read_latest_successful_scan(path: str | Path) -> ScanSnapshot:
                 _export_findings(rows or (), clients),
                 history,
                 history_skipped,
+                _run_history(db, history),
             )
     except sqlite3.Error as exc:
         raise StateError(f"cannot read state database for STIX export: {exc}") from exc
@@ -661,21 +780,38 @@ def _history_indexes(
     return vulnerability_first, relationship_first, client_first
 
 
+def _merge_history_indexes(
+    primary: Mapping[str, datetime],
+    fallback: Mapping[str, datetime],
+) -> dict[str, datetime]:
+    merged = dict(primary)
+    for key, value in fallback.items():
+        merged.setdefault(key, value)
+    return merged
+
+
 def build_bundle(
     findings: Iterable[ExportFinding],
     *,
     generated_at: datetime | None = None,
     include_clients: bool = False,
     history: Iterable[ExportFinding] = (),
+    run_history: Iterable[ExportFinding] = (),
 ) -> dict[str, Any]:
     """Build a deterministic STIX 2.1 bundle from selected inventory findings."""
     generated = _utc(generated_at)
     generated_text = _format_timestamp(generated)
-    (
-        history_vulnerability_first,
-        history_relationship_first,
-        history_client_first,
-    ) = _history_indexes(history)
+    run_indexes = _history_indexes(run_history)
+    current_indexes = _history_indexes(history)
+    history_vulnerability_first = _merge_history_indexes(
+        current_indexes[0], run_indexes[0]
+    )
+    history_relationship_first = _merge_history_indexes(
+        run_indexes[1], current_indexes[1]
+    )
+    history_client_first = _merge_history_indexes(
+        run_indexes[2], current_indexes[2]
+    )
 
     vulnerabilities: dict[str, dict[str, Any]] = {}
     software: dict[str, dict[str, Any]] = {}
@@ -978,9 +1114,10 @@ def _apply_created_ledger(
     bundle: Mapping[str, Any], ledger: Mapping[str, str]
 ) -> dict[str, str]:
     """Apply stored created values and return first-created rows to add."""
+    objects = bundle.get("objects", ())
     pending: dict[str, str] = {}
-    for value in bundle.get("objects", ()):
-        if "created" not in value:
+    for value in objects:
+        if value.get("type") == "report" or "created" not in value:
             continue
         object_id = str(value["id"])
         stored = ledger.get(object_id)
@@ -988,6 +1125,30 @@ def _apply_created_ledger(
             pending[object_id] = str(value["created"])
         else:
             _clamp_created_timestamps(value, stored)
+
+    by_id = {str(value["id"]): value for value in objects}
+    for value in objects:
+        if value.get("type") != "report":
+            continue
+        created: datetime | None = None
+        for reference in value.get("object_refs", ()):
+            target = by_id.get(str(reference))
+            if not target or "created" not in target:
+                continue
+            try:
+                candidate = _parse_timestamp(target["created"])
+            except StateError:
+                continue
+            created = candidate if created is None else min(created, candidate)
+        if created is None:
+            continue
+        stored = ledger.get(str(value["id"]))
+        if stored is not None:
+            _clamp_created_timestamps(value, stored)
+        else:
+            value["created"] = _format_timestamp(created)
+            _clamp_created_timestamps(value, value["created"])
+            pending[str(value["id"])] = value["created"]
     return pending
 
 
@@ -1006,8 +1167,7 @@ def _write_created_ledger(
             )
             connection.executemany(
                 f"INSERT INTO {CREATED_TABLE}(object_id,created) "
-                "VALUES (?,?) ON CONFLICT(object_id) DO UPDATE SET "
-                "created=excluded.created",
+                "VALUES (?,?) ON CONFLICT(object_id) DO NOTHING",
                 sorted(pending.items()),
             )
             connection.commit()
@@ -1052,7 +1212,9 @@ def export_stix(
         generated_at=generated_at,
         include_clients=include_clients,
         history=snapshot.history,
+        run_history=snapshot.run_history,
     )
+    ledger_ready = True
     try:
         ledger = _read_created_ledger(database)
     except StateError:
@@ -1062,8 +1224,9 @@ def export_stix(
             "created timestamps",
         )
         ledger = {}
+        ledger_ready = False
     pending = _apply_created_ledger(bundle, ledger)
-    if not _write_created_ledger(database, pending):
+    if ledger_ready and not _write_created_ledger(database, pending):
         _warn(
             warning,
             "the STIX created ledger is read-only; using computed created "

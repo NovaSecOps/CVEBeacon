@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sqlite3
 from contextlib import closing
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from cvebeacon import cli
+from cvebeacon.errors import StateError
 from cvebeacon.models import (
     Applicability,
     Asset,
@@ -79,8 +82,15 @@ def _record(
         for item in by_asset.values()
     ]
     run_id, _ = store.record_scan(results)
+    by_key = {
+        (item.asset.asset_id, item.vulnerability.primary_id.casefold()): item
+        for item in findings
+    }
     with store.transaction() as db:
-        for (asset_id, advisory_id), (first_seen, last_seen) in times.items():
+        for index, (
+            (asset_id, advisory_id),
+            (first_seen, last_seen),
+        ) in enumerate(times.items()):
             db.execute(
                 "UPDATE scan_finding_details SET first_seen=?,last_seen=? "
                 "WHERE run_id=? AND asset_id=? AND advisory_id=?",
@@ -91,6 +101,55 @@ def _record(
                 "WHERE asset_id=? AND cve_id=? COLLATE NOCASE",
                 (first_seen, last_seen, asset_id, advisory_id),
             )
+            finding = by_key[(asset_id, advisory_id.casefold())]
+            history_run = f"history-{run_id}-{index}"
+            db.execute(
+                "INSERT INTO runs VALUES (?,?,?,?,?,?,?)",
+                (
+                    history_run,
+                    first_seen,
+                    first_seen,
+                    "completed",
+                    1,
+                    1,
+                    0,
+                ),
+            )
+            db.execute(
+                "INSERT INTO scan_assets VALUES (?,?,?)",
+                (
+                    history_run,
+                    asset_id,
+                    json.dumps(
+                        {
+                            "asset": asdict(finding.asset),
+                            "coverage": None,
+                            "coverage_reason": None,
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            db.execute(
+                "INSERT INTO scan_asset_clients VALUES (?,?,?,?)",
+                (
+                    history_run,
+                    asset_id,
+                    finding.asset.client,
+                    finding.asset.client.casefold(),
+                ),
+            )
+            for identifier in finding.vulnerability.identifiers:
+                db.execute(
+                    "INSERT INTO scan_findings VALUES (?,?,?,?,?)",
+                    (
+                        history_run,
+                        asset_id,
+                        identifier.upper(),
+                        finding.vulnerability.primary_id.upper(),
+                        finding.applicability.value,
+                    ),
+                )
     return run_id
 
 
@@ -367,7 +426,12 @@ def test_golden_bundle_from_fixture_state(tmp_path):
     build_fixture_database(tmp_path / "state.db")
     snapshot = read_latest_successful_scan(tmp_path / "state.db")
     selected = select_findings(snapshot.findings)
-    bundle = build_bundle(selected, generated_at=FIXED)
+    bundle = build_bundle(
+        selected,
+        generated_at=FIXED,
+        history=snapshot.history,
+        run_history=snapshot.run_history,
+    )
     validate_bundle(bundle)
     expected = json.loads(FIXTURE.read_text(encoding="utf-8"))
     assert bundle == expected
@@ -471,21 +535,20 @@ def test_created_uses_full_history_when_earliest_observation_disappears(tmp_path
         )
         for asset in (first, second)
     ]
-    store.record_scan(
-        [
-            QueryResult(first, (findings[0],), ()),
-            QueryResult(second, (findings[1],), ()),
-        ]
+    _record(
+        store,
+        findings,
+        {
+            ("asset-1", "CVE-2026-0019"): (
+                "2026-11-01T00:00:00+00:00",
+                "2026-11-01T00:00:00+00:00",
+            ),
+            ("asset-2", "CVE-2026-0019"): (
+                "2026-11-02T00:00:00+00:00",
+                "2026-11-02T00:00:00+00:00",
+            ),
+        },
     )
-    with store.transaction() as db:
-        db.execute(
-            "UPDATE current_findings SET first_seen=? WHERE asset_id=?",
-            ("2026-11-01T00:00:00+00:00", "asset-1"),
-        )
-        db.execute(
-            "UPDATE current_findings SET first_seen=? WHERE asset_id=?",
-            ("2026-11-02T00:00:00+00:00", "asset-2"),
-        )
     first_output = tmp_path / "before.json"
     export_stix(
         tmp_path / "state.db",
@@ -619,6 +682,97 @@ def test_created_ledger_freezes_existing_ids_across_asset_changes(tmp_path):
         if value["id"] == widget_relationship["id"]
     )
     assert repeated["created"] == first_created
+    second_software = {
+        value["id"]: value["name"]
+        for value in second["objects"]
+        if value["type"] == "software"
+    }
+    gadget_relationship = next(
+        value
+        for value in second["objects"]
+        if value["type"] == "relationship"
+        and second_software[value["source_ref"]] == "Gadget"
+    )
+    assert gadget_relationship["created"] != first_created
+    assert (
+        gadget_relationship["created"]
+        == gadget_relationship["x_cvebeacon_first_seen"]
+    )
+    with closing(sqlite3.connect(database)) as db:
+        ledger_after = dict(
+            db.execute("SELECT object_id,created FROM stix_object_created")
+        )
+    assert ledger_after[widget_relationship["id"]] == first_created
+    assert ledger_after[gadget_relationship["id"]] == (
+        gadget_relationship["created"]
+    )
+
+
+def test_report_created_is_recomputed_after_ledger_is_applied(tmp_path):
+    database = tmp_path / "state.db"
+    store = StateStore(database)
+    widget = Asset("asset-1", "Example", "Widget", "1.0", client="Acme")
+    widget_finding = _finding(
+        widget,
+        cve_id="CVE-2026-0023",
+        state=Applicability.AFFECTED,
+    )
+    store.record_scan([QueryResult(widget, (widget_finding,), ())])
+    with store.transaction() as db:
+        db.execute(
+            "UPDATE current_findings SET first_seen=? WHERE asset_id=?",
+            ("2026-11-01T00:00:00+00:00", "asset-1"),
+        )
+    first_output = tmp_path / "first.json"
+    export_stix(
+        database,
+        first_output,
+        generated_at=FIXED,
+        client="Acme",
+        include_clients=True,
+    )
+    first = json.loads(first_output.read_text(encoding="utf-8"))
+    identity = next(
+        value for value in first["objects"] if value["type"] == "identity"
+    )
+    with closing(sqlite3.connect(database)) as db:
+        db.execute(
+            "UPDATE stix_object_created SET created=? WHERE object_id=?",
+            ("2025-01-01T00:00:00.000Z", identity["id"]),
+        )
+        db.commit()
+
+    gadget = Asset("asset-2", "Example", "Gadget", "2.0", client="Acme")
+    gadget_finding = _finding(
+        gadget,
+        cve_id="CVE-2026-0023",
+        state=Applicability.AFFECTED,
+    )
+    store.record_scan(
+        [
+            QueryResult(widget, (widget_finding,), ()),
+            QueryResult(gadget, (gadget_finding,), ()),
+        ]
+    )
+    second_output = tmp_path / "second.json"
+    export_stix(
+        database,
+        second_output,
+        generated_at=FIXED,
+        client="Acme",
+        include_clients=True,
+    )
+    second = json.loads(second_output.read_text(encoding="utf-8"))
+    report = next(
+        value for value in second["objects"] if value["type"] == "report"
+    )
+    assert report["created"] == "2025-01-01T00:00:00.000Z"
+    with closing(sqlite3.connect(database)) as db:
+        stored = db.execute(
+            "SELECT created FROM stix_object_created WHERE object_id=?",
+            (report["id"],),
+        ).fetchone()
+    assert stored is not None and stored[0] == report["created"]
 
 
 def test_created_ledger_write_failure_warns_and_still_exports(tmp_path, monkeypatch):
@@ -638,6 +792,117 @@ def test_created_ledger_write_failure_warns_and_still_exports(tmp_path, monkeypa
     bundle = json.loads(destination.read_text(encoding="utf-8"))
     validate_bundle(bundle)
     assert any("ledger" in message for message in messages)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_read_only_database_file_falls_back_with_warning(
+    tmp_path, capsys
+):
+    if os.geteuid() == 0:
+        pytest.skip("root can write a mode-0444 file")
+    database = tmp_path / "state.db"
+    build_fixture_database(database)
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for suffix in ("-wal", "-shm"):
+        Path(str(database) + suffix).unlink(missing_ok=True)
+    before = database.read_bytes()
+    os.chmod(database, 0o444)
+    try:
+        code = cli.main(
+            [
+                "--config",
+                str(_config(tmp_path)),
+                "export",
+                "stix",
+                "--output",
+                str(tmp_path / "bundle.json"),
+            ]
+        )
+        captured = capsys.readouterr()
+    finally:
+        os.chmod(database, 0o644)
+    assert code == 0
+    assert "warning:" in captured.err
+    assert "ledger" in captured.err
+    assert database.read_bytes() == before
+    with closing(sqlite3.connect(database)) as db:
+        table = db.execute(
+            "SELECT name FROM sqlite_master WHERE name='stix_object_created'"
+        ).fetchone()
+    assert table is None
+
+
+def test_created_ledger_is_insert_only(tmp_path, monkeypatch):
+    database = tmp_path / "state.db"
+    store = StateStore(database)
+    asset = Asset("asset-1", "Example", "Widget", "1.0")
+    finding = _finding(
+        asset,
+        cve_id="CVE-2026-0024",
+        state=Applicability.AFFECTED,
+    )
+    run_id, _ = store.record_scan([QueryResult(asset, (finding,), ())])
+    first_output = tmp_path / "first.json"
+    export_stix(database, first_output, generated_at=FIXED)
+    with closing(sqlite3.connect(database)) as db:
+        before = dict(
+            db.execute("SELECT object_id,created FROM stix_object_created")
+        )
+    assert before
+
+    with store.transaction() as db:
+        db.execute(
+            "UPDATE runs SET completed_at=? WHERE run_id=?",
+            ("2026-12-01T00:00:00+00:00", run_id),
+        )
+        db.execute(
+            "UPDATE current_findings SET first_seen=? WHERE asset_id=?",
+            ("2026-12-01T00:00:00+00:00", "asset-1"),
+        )
+    monkeypatch.setattr(
+        "cvebeacon.stix._read_created_ledger", lambda database: {}
+    )
+    second_output = tmp_path / "second.json"
+    export_stix(database, second_output, generated_at=FIXED)
+    with closing(sqlite3.connect(database)) as db:
+        after = dict(
+            db.execute("SELECT object_id,created FROM stix_object_created")
+        )
+    assert after == before
+
+
+def test_created_ledger_read_failure_does_not_overwrite_rows(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "state.db"
+    build_fixture_database(database)
+    first_output = tmp_path / "first.json"
+    export_stix(database, first_output, generated_at=FIXED)
+    with closing(sqlite3.connect(database)) as db:
+        before = dict(
+            db.execute("SELECT object_id,created FROM stix_object_created")
+        )
+    assert before
+
+    def fail(_database):
+        raise StateError("transient ledger read failure")
+
+    messages: list[str] = []
+    monkeypatch.setattr("cvebeacon.stix._read_created_ledger", fail)
+    second_output = tmp_path / "second.json"
+    export_stix(
+        database,
+        second_output,
+        generated_at=FIXED,
+        warning=messages.append,
+    )
+    with closing(sqlite3.connect(database)) as db:
+        after = dict(
+            db.execute("SELECT object_id,created FROM stix_object_created")
+        )
+    assert after == before
+    assert any("could not be read" in message for message in messages)
 
 
 def test_invalid_unrelated_history_row_is_skipped_and_counted(tmp_path):
@@ -721,7 +986,7 @@ def test_export_uses_latest_successful_scan(tmp_path):
 def _drop_tables(path: Path, *tables: str) -> None:
     with closing(sqlite3.connect(path)) as db:
         for table in tables:
-            db.execute(f"DROP TABLE {table}")
+            db.execute(f"DROP TABLE IF EXISTS {table}")
         db.commit()
 
 
@@ -1021,7 +1286,9 @@ def test_missing_state_database_is_not_created(tmp_path):
         "cvebeacon-users.db-journal",
     ],
 )
-def test_stix_export_cannot_overwrite_operational_files(tmp_path, target):
+def test_stix_export_cannot_overwrite_operational_files(
+    tmp_path, target, capsys
+):
     build_fixture_database(tmp_path / "state.db")
     config = _config(tmp_path)
     path = tmp_path / target
@@ -1041,6 +1308,7 @@ def test_stix_export_cannot_overwrite_operational_files(tmp_path, target):
         )
         == 2
     )
+    assert "cannot overwrite" in capsys.readouterr().err
     assert path.read_bytes() == original
 
 

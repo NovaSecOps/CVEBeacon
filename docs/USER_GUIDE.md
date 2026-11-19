@@ -136,7 +136,7 @@ cvebeacon export --format json --output report.json
 
 XLSX reports contain Summary, Findings, Uncertainty, Evidence, Source Health, Identities, and Advisory Details sheets. They are generated on demand rather than maintained as a vulnerability mirror.
 
-An optional read-only STIX 2.1 export is also available for OpenCTI, a SIEM or a data lake:
+An optional STIX 2.1 export is also available for OpenCTI, a SIEM or a data lake. It reads findings without changing them; its created-timestamp ledger is the only state write:
 
 ```console
 cvebeacon export stix --output findings.json

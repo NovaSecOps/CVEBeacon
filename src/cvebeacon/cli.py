@@ -1346,7 +1346,7 @@ def run(args: argparse.Namespace) -> int:
         if not stix_export:
             raise
         # A state-only configuration is enough to read completed scan state;
-        # it needs no inventory path for this read-only export.
+        # it needs no inventory path for this export.
         config = load_config(args.config, allow_state_only=True)
     if stix_export:
         return _run_stix_export(args, config)

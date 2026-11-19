@@ -26,10 +26,12 @@ sufficient for this command.
 
 SQLite may create or refresh `-wal`, `-shm`, and `-journal` sidecar files
 beside a state database while it is opened. Those files are a SQLite effect,
-not a change to findings. If the state database is read-only, the export still
-runs but uses computed `created` timestamps and prints a warning. On read-only
-media, copy the state database and any sidecar files to a writable location to
-keep the ledger.
+not a change to findings. If the database file is read-only but its directory
+is writable, the export still runs; when a new ledger row needs writing it uses
+computed `created` timestamps and prints a warning. If all exported IDs are
+already in the ledger, no write or warning is needed. On read-only media, copy
+the state database and any sidecar files to a writable location to keep the
+ledger.
 
 | Option | Meaning |
 | --- | --- |
@@ -150,15 +152,19 @@ even if the underlying observation or asset identity changes.
 - Only object IDs that have a STIX `created` property are recorded:
   vulnerabilities, relationships, identities, and reports. Software SCOs are
   not versioned and are not recorded.
-- The ledger is created lazily on the first export; old state databases need no
-  migration and keep working. The table is additive and the state schema version
-  is unchanged.
+- The ledger is insert-only: an existing `object_id` row is never updated, so a
+  stored first-created value cannot be replaced by a later computed value. It is
+  created lazily on the first export; old state databases need no migration and
+  keep working. The table is additive and the state schema version is unchanged.
 - Findings, events, clients, and other monitoring state are not changed.
 - If the database cannot accept the write, the export proceeds with computed
-  values and prints a warning. Repeated exports against a read-only database can
-  therefore produce different `created` values.
-- Deleting the ledger or exporting from a different state database starts a new
-  first-created history.
+  values for the missing IDs and prints a warning. Existing ledger rows are
+  still reused. Repeated exports against a read-only database can therefore
+  produce different `created` values for objects that never got a ledger row.
+- The ledger has one row per distinct exported object ID. It therefore grows
+  with the number of distinct objects and report compositions, but each row is
+  only an ID and a timestamp, so the table stays small in normal use. There is
+  no automatic pruning; deleting the table starts a new first-created history.
 
 ## Privacy and client labels
 
@@ -199,8 +205,10 @@ before merging them.
   successful run remains a hard error because it is part of the exported
   finding data.
 - The created ledger's first values are computed from stored observations. If
-  the state database is read-only, those values are not persisted and later
-  writable exports start the ledger from then-current computed values.
+  the state database file cannot accept the write, new values are not persisted
+  and later writable exports start those rows from then-current computed values.
+  Values already present in the ledger are reused even when the database is
+  read-only.
 - There are no STIX data markings. Handling rules are outside the bundle.
 - The exporter does not deliver anything, run continuously, or act as a TAXII
   server. Re-run the command to refresh the snapshot.
