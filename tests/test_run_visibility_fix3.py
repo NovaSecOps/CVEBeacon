@@ -1,27 +1,14 @@
 """Publication rollback must preserve failures and attempt every owned name."""
 
-
 import errno
-
-
 import os
-
-
 from pathlib import Path
-
 
 import pytest
 
-
 from cvebeacon import cli, locking
-
-
 from cvebeacon.errors import CVEBeaconError
-
-
 from cvebeacon.locking import RunLock
-
-
 from test_dashboard_operations import make_config
 
 
@@ -259,3 +246,18 @@ def test_cli_never_runs_after_write_error_and_cleanup_refusal(tmp_path, monkeypa
     assert called == [] and list(tmp_path.glob("*.owner.*")) == []
     assert capsys.readouterr().err.startswith("error: cannot write the operation lock metadata")
 
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_link_limit_failure_keeps_the_shared_run_usable(tmp_path, monkeypatch, windows):
+    attempts = []
+    def link(source, target):
+        attempts.append(True)
+        error = OSError(errno.EINVAL if windows else errno.EMLINK, "synthetic hard-link limit")
+        if windows:
+            error.winerror = 1142
+        raise error
+    monkeypatch.setattr(locking.os, "link", link)
+    with RunLock(tmp_path / "run.lock") as lock:
+        assert RunLock(lock.path).snapshot()["description"] == "holder unavailable"
+        assert lock._owner_descriptor is None and list(tmp_path.glob("run.lock.owner.*")) == []
+    assert attempts == [True] and RunLock(lock.path).probe() is None

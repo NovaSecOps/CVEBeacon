@@ -438,10 +438,10 @@ class RunLock:
                 try:
                     self._publish(metadata)
                 except OSError as exc:
-                    optional = {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSYS,
+                    optional = {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSYS, errno.EMLINK,
                                 getattr(errno, "ENOTSUP", errno.ENOSYS),
                                 getattr(errno, "EOPNOTSUPP", errno.ENOSYS)}
-                    if exc.errno not in optional and getattr(exc, "winerror", None) not in {1, 50, 120}:
+                    if exc.errno not in optional and getattr(exc, "winerror", None) not in {1, 50, 120, 1142}:
                         raise
                     try:
                         self._discard_partial_publication()
