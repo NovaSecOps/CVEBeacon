@@ -346,11 +346,11 @@ def load_config(path: str | Path) -> AppConfig:
             details = nvd_api_key_file.stat()
         except OSError as exc:
             raise ConfigurationError(
-                f"sources.nvd_api_key_file cannot be read: {nvd_api_key_file}"
+                "sources.nvd_api_key_file cannot be read"
             ) from exc
         if not nvd_api_key_file.is_file():
             raise ConfigurationError(
-                f"sources.nvd_api_key_file must be a file: {nvd_api_key_file}"
+                "sources.nvd_api_key_file must be a file"
             )
         if details.st_size > 16 * 1024:
             raise ConfigurationError("sources.nvd_api_key_file must be at most 16384 bytes")
