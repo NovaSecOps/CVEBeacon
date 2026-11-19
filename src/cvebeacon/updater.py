@@ -187,11 +187,22 @@ def control_paths(config_path):
 
 
 def read_status(config):
-    try:
-        value = _json(read_bounded(control_paths(config.config_path)[1], 131072))
-        return value if isinstance(value, dict) else {}
-    except (OSError, CVEBeaconError):
-        return {}
+    candidates = []
+    for path in status_paths(config):
+        try:
+            value = _json(read_bounded(path, 131072))
+            if isinstance(value, dict):
+                candidates.append((path.stat().st_mtime_ns, value))
+        except (OSError, CVEBeaconError):
+            pass
+    return max(candidates, key=lambda item: item[0])[1] if candidates else {}
+
+
+def status_paths(config):
+    # Native control files stay beside the resolved config. Check-only layouts
+    # can mount that directory read-only and keep advisory state with watch data.
+    return tuple(dict.fromkeys((control_paths(config.config_path)[1],
+                               Path(config.watch.database).resolve().parent / STATUS)))
 
 
 def unsupported_reason():
@@ -371,7 +382,6 @@ class Releases:
 def check(config, *, daily=False, http=None):
     if not config.update.enabled or (daily and not config.update.daily):
         return read_status(config)
-    private_directory(control_paths(config.config_path)[1].parent)
     state = read_status(config)
     if daily and state.get("last_check"):
         try:
@@ -384,7 +394,13 @@ def check(config, *, daily=False, http=None):
         release = Releases(config.update, transport).check(installed_version("cvebeacon"))
     state.update(current=installed_version("cvebeacon"), available=release.version if release else None,
                  notes=release.notes if release else "", last_check=stamp())
-    atomic_json(control_paths(config.config_path)[1], state)
+    for path in status_paths(config):
+        try:
+            private_directory(path.parent)
+            atomic_json(path, state)
+            break
+        except (OSError, CVEBeaconError):
+            pass  # Advisory publication cannot fail a successful release check.
     return state
 
 

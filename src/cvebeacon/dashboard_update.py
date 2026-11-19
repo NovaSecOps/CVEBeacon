@@ -24,7 +24,7 @@ def create_blueprint(config):
         try:
             check(config)
             current_app.extensions["dashboard_users"].record_action("update_check", username=g.user.username)
-        except CVEBeaconError:
+        except (CVEBeaconError, OSError):
             return render_template("error.html", message="Release check failed."), 400
         return redirect(url_for("updates.index"), code=303)
 
@@ -37,7 +37,7 @@ def create_blueprint(config):
         try:
             request_update(config, _text(request.form, "version", required=True, limit=96), g.entry.proof,
                            current_app.extensions["dashboard_users"])
-        except CVEBeaconError:
+        except (CVEBeaconError, OSError):
             return render_template("error.html", message="Update request refused."), 400
         return redirect(url_for("updates.index"), code=303)
 
