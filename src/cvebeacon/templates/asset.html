@@ -1,1 +1,40 @@
-{% extends 'base.html' %}{% from 'macros.html' import status, findings_table %}{% block content %}<h1>Asset: {{ asset.asset_id }}</h1>{{ status(data) }}<p>{{ asset.vendor }} · {{ asset.product }} · Version {{ asset.version }}</p><dl><dt>Identity path</dt><dd>{{ asset.identity_path }}</dd>{% for key in ['category','system_id','ecosystem','purl','cpe','repository','commit'] %}{% if asset[key] %}<dt>{{ key }}</dt><dd class="break">{{ asset[key] }}</dd>{% endif %}{% endfor %}</dl><p>Coverage: {{ coverage.coverage or 'Evaluated at the last recorded scan' }} · {{ coverage.reason or 'Review findings and source health' }}</p>{{ findings_table(rows) }}{% endblock %}
+{% extends 'base.html' %}{% from 'macros.html' import status, findings_table %}
+{% from 'ui.html' import page_header, card, empty_state, badge, applicability_badge, term, link_button %}
+{% block title %}Asset {{ asset.asset_id }} · CVEBeacon{% endblock %}
+{% block content %}
+{% set subtitle = (asset.vendor ~ ' · ' if asset.vendor else '') ~ (asset.product ~ ' · ' if asset.product else '') ~ 'Version ' ~ (asset.version or 'unknown') ~ '. What is recorded for this asset, with coverage from the latest scan.' %}
+{% call page_header('Asset ' ~ asset.asset_id, subtitle) %}{{ link_button('Back to assets', url_for('assets'), kind='secondary') }}{% endcall %}
+{{ status(data) }}
+<div class="card-grid">
+{% call card('Summary', 'What this software or system is and how it is identified.') %}
+<dl>
+<dt>Vendor</dt><dd>{{ asset.vendor or 'Unknown' }}</dd>
+<dt>Product</dt><dd>{{ asset.product or 'Unknown' }}</dd>
+<dt>Version</dt><dd>{{ asset.version or 'Unknown' }}</dd>
+{% if asset.category %}<dt>Category</dt><dd>{{ asset.category }}</dd>{% endif %}
+{% if asset.system_id %}<dt>System</dt><dd>{{ asset.system_id }}</dd>{% endif %}
+{% if asset.ecosystem %}<dt>Ecosystem</dt><dd>{{ asset.ecosystem }}</dd>{% endif %}
+</dl>
+{% if asset.purl or asset.cpe or asset.repository or asset.commit %}<details class="disclosure"><summary>Package identities and source locations</summary><dl>
+{% if asset.purl %}<dt>{{ term('PURL', 'a standard name for a software package') }}</dt><dd class="break">{{ asset.purl }}</dd>{% endif %}
+{% if asset.cpe %}<dt>{{ term('CPE', 'a standard name for a product and version') }}</dt><dd class="break">{{ asset.cpe }}</dd>{% endif %}
+{% if asset.repository %}<dt>Repository</dt><dd class="break">{{ asset.repository }}</dd>{% endif %}
+{% if asset.commit %}<dt>Commit</dt><dd class="break">{{ asset.commit }}</dd>{% endif %}
+</dl></details>{% endif %}
+{% endcall %}
+{% call card('Coverage', 'Whether the latest scan could check this asset. Unknown coverage is not the same as no vulnerabilities.') %}
+{% if coverage.coverage %}{{ applicability_badge(coverage.coverage) }}{% else %}{{ badge('Evaluated at the last recorded scan') }}{% endif %}
+<p>{{ coverage.reason or 'Review findings and source health for more detail.' }}</p>
+{% endcall %}
+</div>
+{% call card('Findings for this asset', 'Vulnerabilities recorded against this asset. Open a row for the assessment and its supporting evidence.') %}
+{% if rows %}{{ findings_table(rows) }}{% else %}{{ empty_state('No findings recorded for this asset', 'No vulnerability was matched to this asset, or the scan has not checked it yet. This is not proof of complete vulnerability coverage; review coverage and source status above.') }}{% endif %}
+{% endcall %}
+<details class="disclosure"><summary>Technical details</summary>
+<dl>
+<dt>Identity path</dt><dd>{{ asset.identity_path }}</dd>
+<dt>Coverage state</dt><dd>{{ coverage.coverage or 'none recorded' }}</dd>
+<dt>Coverage reason</dt><dd>{{ coverage.reason or 'Not recorded' }}</dd>
+</dl>
+</details>
+{% endblock %}

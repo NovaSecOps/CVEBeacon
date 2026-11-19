@@ -1,2 +1,37 @@
-{% extends 'base.html' %}{% from 'macros.html' import status %}{% block content %}<h1>Inventory assets</h1>{{ status(data) }}<form method="get"><label>Find an asset<input name="q" value="{{ query }}" maxlength="256"></label><button>Search</button></form>
-<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Client</th><th>Vendor</th><th>Product</th><th>Version</th><th>Last scan coverage</th></tr></thead><tbody>{% for row in rows %}<tr><td><a href="{{ url_for('asset', asset_id=row.asset.asset_id) }}">{{ row.asset.asset_id }}</a><br>{{ row.asset.category }} · {{ row.asset.system_id }}</td><td>{{ row.asset.client }}</td><td>{{ row.asset.vendor }}</td><td>{{ row.asset.product }}<br>{{ row.asset.ecosystem }}</td><td>{{ row.asset.version }}</td><td>{{ row.coverage or 'Evaluated; review findings and source status' }}<br>{{ row.reason or '' }}</td></tr>{% else %}<tr><td colspan="6">No matching assets.</td></tr>{% endfor %}</tbody></table></div>{% endblock %}
+{% extends 'base.html' %}{% from 'macros.html' import status %}
+{% from 'ui.html' import page_header, card, empty_state, table_wrap, applicability_badge, button, link_button %}
+{% block title %}Assets · CVEBeacon{% endblock %}
+{% block content %}
+{{ page_header('Assets', 'The software and systems in your inventory, with the coverage recorded by the latest scan.') }}
+{{ status(data) }}
+{% call card('Find an asset', 'Search by asset ID, client, vendor, product, version, category, system, ecosystem or package name.') %}
+<form method="get" class="filters">
+<label>Search assets<input name="q" value="{{ query }}" maxlength="256" placeholder="For example a client or product name"></label>
+{{ button('Search') }} {% if query %}{{ link_button('Clear search', url_for('assets'), kind='secondary') }}{% endif %}
+</form>
+{% endcall %}
+<p class="muted">{{ rows | length }} asset{{ '' if rows | length == 1 else 's' }}{% if query %} matching “{{ query }}”{% endif %}.</p>
+{% if rows %}
+{% call card('Inventory assets', 'Each asset links to its findings, coverage, and recorded identities.') %}
+{% call table_wrap('Inventory assets') %}
+<table>
+<thead><tr><th>Asset</th><th>Client</th><th>Vendor</th><th>Product</th><th>Version</th><th>Last scan coverage</th></tr></thead>
+<tbody>{% for row in rows %}<tr>
+<td><a href="{{ url_for('asset', asset_id=row.asset.asset_id) }}">{{ row.asset.asset_id }}</a><br><span class="muted">{{ row.asset.category or 'No category' }} · {{ row.asset.system_id or 'No system' }}</span></td>
+<td>{{ row.asset.client or 'Unassigned' }}</td>
+<td>{{ row.asset.vendor }}</td>
+<td>{{ row.asset.product }}<br><span class="muted">{{ row.asset.ecosystem or 'No ecosystem' }}</span></td>
+<td>{{ row.asset.version }}</td>
+<td>{% if row.coverage %}{{ applicability_badge(row.coverage) }}{% else %}<span class="muted">Evaluated; review findings and source status</span>{% endif %}{% if row.reason %}<br><span class="muted">{{ row.reason }}</span>{% endif %}</td>
+</tr>{% endfor %}</tbody>
+</table>
+{% endcall %}
+{% endcall %}
+{% else %}
+{% if query %}
+{{ empty_state('No assets match this search', 'Try a shorter word or search by another value, such as the client or product name.', url_for('assets'), 'Clear search') }}
+{% else %}
+{{ empty_state('No assets in your inventory yet', 'Assets come from the inventory file. Add the software and systems you run, then run a scan. Missing scan results are not proof that the inventory is clean.') }}
+{% endif %}
+{% endif %}
+{% endblock %}
