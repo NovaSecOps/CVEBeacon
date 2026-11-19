@@ -60,6 +60,8 @@ class Release:
             if self.conditional and request.headers.get('if-none-match') == '"release"':
                 return httpx.Response(304)
             return httpx.Response(200, json={"assets": self.assets()}, headers={"etag": '"release"'})
+        if '/tags/' in request.url.path:
+            return httpx.Response(404)
         if str(request.url) == cve_list.DELTA_LOG_URL:
             with zipfile.ZipFile(BytesIO(self.delta)) as archive:
                 records = [json.loads(archive.read(name)) for name in archive.namelist()]

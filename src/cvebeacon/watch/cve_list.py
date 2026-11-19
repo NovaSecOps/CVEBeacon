@@ -1,7 +1,7 @@
 """CVE List release imports with bounded archives and independent cursors."""
 from __future__ import annotations
 
-from contextlib import closing, nullcontext
+from contextlib import closing
 
 import hashlib
 import json
@@ -10,6 +10,7 @@ import os
 import shutil
 import sqlite3
 import struct
+import sys
 import tempfile
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,8 @@ ARCHIVE_CAP = 1024 * 1024 * 1024
 EXPANDED_CAP = 8 * 1024 * 1024 * 1024
 MAX_MEMBERS = 1_000_000
 BATCH = 100
+BATCH_BYTES = 8 * 1024 * 1024
+TOUCHED_BYTES = 16 * 1024 * 1024
 DISK_RESERVE = 64 * 1024 * 1024
 STORAGE_MULTIPLIER = 8
 
@@ -340,9 +343,9 @@ def archive_records(http, asset, *, allow_empty=False, cache_directory=None):
 
 def _time(value):
     try:
-        parsed = datetime.fromisoformat(value.replace('Z','+00:00'))
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
         return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
-    except (ValueError,TypeError,AttributeError) as exc:
+    except (ValueError, TypeError, AttributeError) as exc:
         raise SourceError('cve_list','invalid delta timestamp') from exc
 
 
@@ -355,12 +358,12 @@ def _delta_time(asset):
 
 
 @source_payload('cve_list')
-def _log(http, since, *, headers=None):
+def _log(http, since, *, headers=None, minimum_until=None):
     response_headers = {}
     payload = _json(http, DELTA_LOG_URL, headers=headers, response_headers=response_headers, byte_cap=LOG_CAP)
     if payload is None:
-        return None, None, response_headers
-    if not isinstance(payload,list) or not payload:
+        raise SourceError('cve_list', 'unexpected conditional delta-log response')
+    if not isinstance(payload, list) or not payload:
         raise SourceError('cve_list','delta log omitted coverage')
     changes = {}
     times = []
@@ -376,197 +379,285 @@ def _log(http, since, *, headers=None):
             identifier = cve_id(item['cveId'])
             if not identifier:
                 raise SourceError('cve_list','invalid delta identifier')
-            changes[identifier] = max(changes.get(identifier,timestamp),timestamp)
+            revision = _record_date(item.get('dateUpdated'))
+            previous = changes.get(identifier)
+            if previous is not None and timestamp == previous[0] and revision != previous[1]:
+                raise SourceError('cve_list', 'conflicting delta revisions at one observation')
+            if previous is None or timestamp >= previous[0]:
+                changes[identifier] = (timestamp, revision)
+    if max(times) < (minimum_until or since):
+        raise SourceError('cve_list', 'delta log is older than the stored cursor')
     if min(times) > since:
         return {}, None, response_headers  # A genuine retention gap.
     return changes, max(times), response_headers
 
 
 class _RecordHTTP:
-    def __init__(self,http):
+    def __init__(self, http):
         self.http = http
 
-    def get_json(self,url,**_):
-        return _json(self.http,url)
+    def get_json(self, url, **_):
+        return _json(self.http, url)
 
 
 def sync(http, store, watch, now, *, initial_mode=None):
-    """Use hourly deltas normally and a durable log repair across date gaps.
+    """Import daily deltas independently; use the log only for revision hints.
 
-    A log repair first coalesces IDs through cheap daily delta archives. Only
-    remaining records need targeted requests, capped at MAX_LOOKUPS per run.
-    Full archives are reserved for initial history or a proven retention gap.
+    Unverified records and intervals remain durable obligations. Targeted
+    lookups are bounded per run; full snapshots repair initial history or
+    an uncovered retention gap without a recurring daily baseline download.
     """
     from ..sources.cve_list import CVEListSource
     store.initialize()
     metadata = store.metadata()
     mode = metadata.get('cve_list_initial_mode')
     start = metadata.get('cve_list_start')
-    if mode in ('full','backfill') and metadata.get('initialized_at') and 'cve_list_initial_pending' not in metadata and not metadata.get('cve_list_cursor') and not metadata.get('cve_list_baseline_asset'):
-        mode,start='baseline',None
+    if (mode in ('full', 'backfill') and metadata.get('initialized_at')
+            and 'cve_list_initial_pending' not in metadata
+            and not metadata.get('cve_list_cursor')
+            and not metadata.get('cve_list_baseline_asset')):
+        mode, start = 'baseline', None
     if initial_mode is not None:
         mode, start = initial_mode, None
     if start is None:
         mode = mode or ('baseline' if metadata.get('initialized_at') else watch.initial)
         start = (now-timedelta(days=watch.backfill_days)).isoformat() if mode == 'backfill' else now.isoformat()
-        values = {'cve_list_start':start,'cve_list_initial_mode':mode,
-                  'cve_list_initial_pending':'0' if mode=='baseline' else '1'}
+        values = {
+            'cve_list_start': start, 'cve_list_initial_mode': mode,
+            'cve_list_initial_pending': '0' if mode == 'baseline' else '1',
+        }
         if initial_mode is not None:
-            values.update({key:'' for key in ('cve_list_cursor','cve_list_baseline_asset','cve_list_baseline_until','cve_list_pending_until','cve_list_repair_days','cve_list_pending_release')})
+            values.update({key: '' for key in (
+                'cve_list_cursor', 'cve_list_baseline_asset', 'cve_list_baseline_until',
+                'cve_list_pending_until', 'cve_list_repair_days', 'cve_list_pending_release',
+                'cve_list_delta_asset', 'cve_list_log_etag', 'cve_list_pending_etag',
+                'cve_list_coverage_gap',
+            )})
             with store.transaction() as db:
                 db.execute('DELETE FROM watch_cve_list_queue')
         store.set_metadata(values)
         metadata.update(values)
         if mode == 'baseline':
-            store.set_metadata({'cve_list_baseline_day':now.date().isoformat()})
-            return 0,0,0,()
+            return 0, 0, 0, ()
     count = new = changed = 0
     touched = set()
+    touched_bytes = 0
     cache_directory = store.path.parent / (store.path.name + '.cve-list-cache')
 
-    def apply(records, *, cutoff=None, acknowledge=False, archive_time=None):
-        nonlocal count,new,changed
-        batch=[]
+    def apply(records, *, cutoff=None, acknowledge=False, archive_time=None, baseline=False):
+        nonlocal count, new, changed
+        batch = []
+        batch_bytes = 0
+        acknowledgments = []
+        observations = []
+
         def commit():
-            nonlocal count,new,changed
-            result=store.upsert_cve_list(batch,catalogs=watch.sources,initial=metadata.get('cve_list_initial_pending')=='1')
-            count+=len(batch)
-            new+=result.new
-            changed+=result.changed
-            touched.update(result.touched_ids)
-            if acknowledge:
-                with store.transaction() as db:
-                    db.executemany('DELETE FROM watch_cve_list_queue WHERE cve_id=?', ((cve_id(item['cveMetadata']['cveId']),) for item in batch))
-            batch.clear()
-        # A release cannot satisfy a change observed after its conservative
-        # snapshot boundary. Keep such IDs queued for a later archive/lookup.
-        with (store.read() if archive_time else nullcontext(None)) as evidence:
-            for payload in records:
-                record=parse_record(payload)
-                if archive_time is not None:
-                    if acknowledge:
-                        queued=evidence.execute('SELECT fetch_time FROM watch_cve_list_queue WHERE cve_id=?',(record.cve_id,)).fetchone()
-                        if queued is None or _time(queued[0])>archive_time:
-                            continue
-                    previous=evidence.execute("SELECT source_updated FROM watch_provider WHERE source='cve_list' AND cve_id=?",(record.cve_id,)).fetchone()
-                    checked=evidence.execute("SELECT checked_at FROM watch_source_check WHERE source='cve_list' AND cve_id=?",(record.cve_id,)).fetchone()
-                    if checked is not None and _time(checked[0])>archive_time:
-                        continue
-                    if previous is not None and previous[0] and record.last_modified and _time(previous[0])>_time(record.last_modified):
-                        continue
-                if cutoff is not None and (not record.last_modified or _time(record.last_modified)<cutoff):
-                    continue
-                batch.append(payload)
-                if len(batch)>=BATCH:
-                    commit()
+            nonlocal count, new, changed, batch_bytes, touched_bytes
             if batch:
+                _require_disk(cache_directory, STORAGE_MULTIPLIER * batch_bytes)
+                result = store.upsert_cve_list(batch, catalogs=watch.sources,
+                                               initial=metadata.get('cve_list_initial_pending') == '1')
+                count += len(batch)
+                new += result.new
+                changed += result.changed
+                for identifier in result.touched_ids:
+                    if identifier not in touched:
+                        touched_bytes += sys.getsizeof(identifier)
+                        touched.add(identifier)
+            with store.transaction() as db:
+                db.executemany('INSERT OR REPLACE INTO watch_cve_list_observation VALUES (?,?)', observations)
+                db.executemany('DELETE FROM watch_cve_list_queue WHERE cve_id=?', acknowledgments)
+            batch.clear()
+            observations.clear()
+            acknowledgments.clear()
+            batch_bytes = 0
+            if touched and touched_bytes + sys.getsizeof(touched) + 8 * len(touched) >= TOUCHED_BYTES:
+                raise SourceError('cve_list', 'per-run change memory budget reached; committed progress retained')
+
+        with store.read() as evidence:
+            for payload in records:
+                record = parse_record(payload)
+                queued = evidence.execute('SELECT fetch_time,expected_revision FROM watch_cve_list_queue WHERE cve_id=?', (record.cve_id,)).fetchone() if acknowledge else None
+                can_acknowledge = False
+                if queued is not None:
+                    # Dates are corrected backwards upstream. Equality with the
+                    # revision from the latest log observation is deliberate;
+                    # a larger content date is not proof of a newer revision.
+                    expected = queued['expected_revision']
+                    can_acknowledge = bool(expected and _record_date(record.last_modified) == expected
+                                           and (archive_time is None or _time(queued['fetch_time']) <= archive_time))
+                    if archive_time is None and not can_acknowledge:
+                        continue
+                    if archive_time is None:
+                        observed = evidence.execute("SELECT o.snapshot_time,p.source_updated FROM watch_cve_list_observation o JOIN watch_provider p ON p.cve_id=o.cve_id AND p.source='cve_list' WHERE o.cve_id=?", (record.cve_id,)).fetchone()
+                        if observed and _time(observed['snapshot_time']) >= _time(queued['fetch_time']) and _record_date(observed['source_updated']) != expected:
+                            continue
+                if archive_time is not None:
+                    previous = evidence.execute('SELECT snapshot_time FROM watch_cve_list_observation WHERE cve_id=?', (record.cve_id,)).fetchone()
+                    checked = evidence.execute("SELECT checked_at FROM watch_source_check WHERE source='cve_list' AND cve_id=?", (record.cve_id,)).fetchone()
+                    if (previous is not None and _time(previous[0]) > archive_time
+                            or checked is not None and _time(checked[0]) > archive_time):
+                        continue
+                    # A reset may encounter records imported before snapshot
+                    # ordering was tracked. Never replace those with midnight
+                    # data after they were observed later in the day.
+                    if baseline and previous is None:
+                        legacy = evidence.execute("SELECT checked_at FROM watch_provider WHERE cve_id=? AND source='cve_list'", (record.cve_id,)).fetchone()
+                        if legacy and _time(legacy[0]) > archive_time:
+                            continue
+                if cutoff is not None and (not record.last_modified or _time(record.last_modified) < cutoff):
+                    continue
+                payload_bytes = len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+                if batch and (batch_bytes + payload_bytes > BATCH_BYTES or len(batch) >= BATCH):
+                    commit()
+                batch.append(payload)
+                batch_bytes += payload_bytes
+                if archive_time is not None:
+                    observations.append((record.cve_id, archive_time.isoformat()))
+                elif can_acknowledge:
+                    observations.append((record.cve_id, queued['fetch_time']))
+                if can_acknowledge:
+                    acknowledgments.append((record.cve_id,))
+                if len(batch) >= BATCH or batch_bytes >= BATCH_BYTES:
+                    commit()
+            if batch or acknowledgments:
                 commit()
 
     pending = metadata.get('cve_list_pending_until')
-    assets, release_cache = (None,{})
     if not pending:
-        assets, release_cache = release(http,metadata)
-        baseline=assets['baseline']
-        baseline_time=_time(baseline['name'][:10]+'T00:00:00Z')
-        cursor=_time(metadata.get('cve_list_cursor') or metadata.get('cve_list_baseline_until') or start)
-        initial_history=mode in ('full','backfill') and not metadata.get('cve_list_baseline_asset') and not metadata.get('cve_list_cursor')
+        assets, release_cache = release(http, metadata)
+        baseline = assets['baseline']
+        baseline_time = _time(baseline['name'][:10] + 'T00:00:00Z')
+        cursor = _time(metadata.get('cve_list_cursor')
+                       or metadata.get('cve_list_baseline_until') or start)
+        initial_history = (mode in ('full', 'backfill')
+                           and not metadata.get('cve_list_baseline_asset')
+                           and not metadata.get('cve_list_cursor'))
         if initial_history:
-            apply(archive_records(http,baseline,cache_directory=cache_directory), cutoff=_time(start) if mode=='backfill' else None)
-            values={'cve_list_baseline_asset':_asset_token(baseline),'cve_list_baseline_until':baseline_time.isoformat(),'cve_list_baseline_day':baseline_time.date().isoformat()}
+            apply(archive_records(http, baseline, cache_directory=cache_directory),
+                  cutoff=_time(start) if mode == 'backfill' else None,
+                  archive_time=baseline_time, baseline=True)
+            values = {
+                'cve_list_baseline_asset': _asset_token(baseline),
+                'cve_list_baseline_until': baseline_time.isoformat(),
+            }
             store.set_metadata(values)
             metadata.update(values)
-            cursor=baseline_time
-        delta=assets['delta']
-        same_day=(cursor.date()==_delta_time(delta).date()==baseline_time.date())
-        if same_day and not initial_history:
+            cursor = baseline_time
+        delta = assets['delta']
+        delta_time = _delta_time(delta)
+        coverage_gap = bool(metadata.get('cve_list_coverage_gap')) or cursor.date() < delta_time.date()
+        same_day = cursor.date() == delta_time.date() == baseline_time.date()
+        if same_day and not initial_history and not coverage_gap:
             if metadata.get('cve_list_delta_asset') != _asset_token(delta):
-                apply(archive_records(http,delta,allow_empty=True,cache_directory=cache_directory),cutoff=_time(start) if mode=='baseline' else None,archive_time=_delta_time(delta))
-            values={**release_cache,'cve_list_delta_asset':_asset_token(delta),
-                    'cve_list_cursor':max(cursor,_delta_time(delta)).isoformat()}
-            if metadata.get('cve_list_initial_pending')=='1':
-                values.update({'cve_list_initial_pending':'0','cve_list_initial_sync_completed_at':now.isoformat()})
+                apply(archive_records(http, delta, allow_empty=True,
+                                      cache_directory=cache_directory),
+                      archive_time=delta_time)
+            values = {
+                **release_cache,
+                'cve_list_delta_asset': _asset_token(delta),
+                'cve_list_cursor': max(cursor, delta_time).isoformat(),
+            }
+            if metadata.get('cve_list_initial_pending') == '1':
+                values.update(cve_list_initial_pending='0',
+                              cve_list_initial_sync_completed_at=now.isoformat())
             store.set_metadata(values)
-            return count,new,changed,tuple(sorted(touched))
-        log_headers={'If-None-Match':metadata['cve_list_log_etag']} if metadata.get('cve_list_log_etag') and not initial_history else None
-        changes,until,headers=_log(http,cursor-timedelta(minutes=watch.overlap_minutes),headers=log_headers)
-        if changes is None:
-            return count,new,changed,tuple(sorted(touched))
+            return count, new, changed, tuple(sorted(touched))
+
+        changes, until, _ = _log(
+            http, cursor - timedelta(minutes=watch.overlap_minutes), minimum_until=cursor)
         if until is None:
-            # The rolling log cannot prove continuity. Import one baseline,
-            # then repair from its conservative midnight boundary.
+            # Retention has expired. A bounded full snapshot is the fallback;
+            # an apparently complete log alone cannot close an interval.
             if baseline_time <= cursor:
-                raise SourceError('cve_list','delta log cannot cover the stored cursor')
-            apply(archive_records(http,baseline,cache_directory=cache_directory),cutoff=cursor-timedelta(minutes=watch.overlap_minutes))
-            store.set_metadata({'cve_list_baseline_asset':_asset_token(baseline),'cve_list_baseline_until':baseline_time.isoformat()})
-            changes,until,headers=_log(http,baseline_time)
+                raise SourceError('cve_list', 'delta log cannot cover the stored cursor')
+            apply(archive_records(http, baseline, cache_directory=cache_directory),
+                  archive_time=baseline_time, baseline=True)
+            store.set_metadata({
+                'cve_list_baseline_asset': _asset_token(baseline),
+                'cve_list_baseline_until': baseline_time.isoformat(),
+            })
+            changes, until, _ = _log(http, baseline_time)
             if until is None:
-                raise SourceError('cve_list','baseline is older than delta-log coverage')
-            cursor=baseline_time
-        days=[]
-        day=cursor.date()
-        while day<baseline_time.date():
+                raise SourceError('cve_list', 'baseline is older than delta-log retention')
+            cursor = baseline_time
+            coverage_gap = False
+        days = []
+        day = cursor.date()
+        while day < baseline_time.date():
             days.append(day.isoformat())
-            day+=timedelta(days=1)
+            day += timedelta(days=1)
+        pending = max(cursor, min(until, delta_time)).isoformat()
         with store.transaction() as db:
-            db.executemany('INSERT OR REPLACE INTO watch_cve_list_queue VALUES (?,?)', ((identifier,timestamp.isoformat()) for identifier,timestamp in changes.items()))
-            store._set_meta(db,{'cve_list_pending_until':until.isoformat(),'cve_list_pending_etag':headers.get('etag',''),
-                               'cve_list_repair_days':json.dumps(days),'cve_list_pending_release':json.dumps(assets),
-                               **release_cache})
-        pending=until.isoformat()
-        metadata=store.metadata()
+            db.executemany(
+                'INSERT OR REPLACE INTO watch_cve_list_queue'
+                '(cve_id,fetch_time,expected_revision) VALUES (?,?,?)',
+                ((identifier, observation.isoformat(), revision)
+                 for identifier, (observation, revision) in changes.items()))
+            store._set_meta(db, {
+                'cve_list_pending_until': pending,
+                'cve_list_coverage_gap': cursor.isoformat() if coverage_gap else '',
+                'cve_list_repair_days': json.dumps(days),
+                'cve_list_pending_release': json.dumps(assets),
+                **release_cache,
+            })
+        metadata = store.metadata()
     else:
-        assets=json.loads(metadata['cve_list_pending_release'])
-    delta=assets['delta']
+        assets = json.loads(metadata['cve_list_pending_release'])
+    delta = assets['delta']
     if metadata.get('cve_list_delta_asset') != _asset_token(delta):
+        # The log is a hint, never a manifest. Every accepted archive is read
+        # independently, including IDs omitted by the log.
+        apply(archive_records(http, delta, allow_empty=True,
+                              cache_directory=cache_directory),
+              acknowledge=True, archive_time=_delta_time(delta))
         with store.read() as db:
-            remaining=db.execute('SELECT count(*) FROM watch_cve_list_queue').fetchone()[0]
-        if delta['size'] <= remaining*8192 or _delta_time(delta)>_time(pending):
-            apply(archive_records(http,delta,allow_empty=True,cache_directory=cache_directory),
-                  cutoff=_time(start) if mode!='full' else None, acknowledge=True,archive_time=_delta_time(delta))
-        # The log snapshot also proves coverage of this delta after its queue
-        # drains. A large archive need not be read for a handful of records.
-        if _delta_time(delta)<=_time(pending):
-            store.set_metadata({'cve_list_delta_asset':_asset_token(delta)})
-    days=json.loads(metadata.get('cve_list_repair_days') or '[]')
+            pending_records = db.execute('SELECT count(*) FROM watch_cve_list_queue').fetchone()[0]
+        if not pending_records:
+            store.set_metadata({'cve_list_delta_asset': _asset_token(delta)})
+    days = json.loads(metadata.get('cve_list_repair_days') or '[]')
     for _ in range(MAX_REPAIR_ARCHIVES):
         if not days:
             break
-        day=days[0]
-        with store.read() as db:
-            remaining=db.execute('SELECT count(*) FROM watch_cve_list_queue WHERE substr(fetch_time,1,10)=?',(day,)).fetchone()[0]
-        if remaining > MAX_LOOKUPS:
-            tag='cve_'+day+'_2300Z'
-            try:
-                daily,_=release(http,{},url=RELEASE_URL.rsplit('/',1)[0]+'/tags/'+tag)
-            except SourceError as exc:
-                if exc.status_code!=404:
-                    raise
-            else:
-                if daily['delta']['size']<remaining*8192:
-                    apply(archive_records(http,daily['delta'],allow_empty=True,cache_directory=cache_directory),
-                          cutoff=_time(start) if mode!='full' else None, acknowledge=True,archive_time=_delta_time(daily['delta']))
+        day = days[0]
+        tag = 'cve_' + day + '_2300Z'
+        try:
+            daily, _ = release(http, {}, url=RELEASE_URL.rsplit('/', 1)[0] + '/tags/' + tag)
+        except SourceError as exc:
+            if exc.status_code != 404:
+                raise
+        else:
+            apply(archive_records(http, daily['delta'], allow_empty=True,
+                                  cache_directory=cache_directory),
+                  acknowledge=True, archive_time=_delta_time(daily['delta']))
         days.pop(0)
-        store.set_metadata({'cve_list_repair_days':json.dumps(days)})
+        store.set_metadata({'cve_list_repair_days': json.dumps(days)})
     if days:
-        return count,new,changed,tuple(sorted(touched))
+        return count, new, changed, tuple(sorted(touched))
     with store.read() as db:
-        identifiers=[row[0] for row in db.execute('SELECT cve_id FROM watch_cve_list_queue ORDER BY cve_id LIMIT ?', (MAX_LOOKUPS,))]
-    failures=False
+        identifiers = [row[0] for row in db.execute(
+            'SELECT cve_id FROM watch_cve_list_queue ORDER BY cve_id LIMIT ?', (MAX_LOOKUPS,))]
+    failures = False
     for identifier in identifiers:
         try:
-            payload=CVEListSource(_RecordHTTP(http)).record(identifier)
+            payload = CVEListSource(_RecordHTTP(http)).record(identifier)
         except SourceError:
-            failures=True
+            failures = True
             continue
-        apply([payload],acknowledge=True)
+        apply([payload], acknowledge=True)
     with store.read() as db:
-        remaining=db.execute('SELECT count(*) FROM watch_cve_list_queue').fetchone()[0]
+        remaining = db.execute('SELECT count(*) FROM watch_cve_list_queue').fetchone()[0]
     if not remaining:
-        values={'cve_list_cursor':pending,'cve_list_pending_until':'','cve_list_pending_release':'',
-                'cve_list_log_etag':metadata.get('cve_list_pending_etag','')}
-        if metadata.get('cve_list_initial_pending')=='1':
-            values.update({'cve_list_initial_pending':'0','cve_list_initial_sync_completed_at':now.isoformat()})
+        values = {
+            'cve_list_cursor': metadata.get('cve_list_coverage_gap') or pending,
+            'cve_list_pending_until': '',
+            'cve_list_pending_release': '',
+        }
+        if (metadata.get('cve_list_initial_pending') == '1'
+                and not metadata.get('cve_list_coverage_gap')):
+            values.update(cve_list_initial_pending='0',
+                          cve_list_initial_sync_completed_at=now.isoformat())
         store.set_metadata(values)
     if failures:
-        raise SourceError('cve_list','some targeted delta records could not be fetched; progress retained')
-    return count,new,changed,tuple(sorted(touched))
+        raise SourceError('cve_list', 'some targeted delta records could not be fetched; progress retained')
+    return count, new, changed, tuple(sorted(touched))

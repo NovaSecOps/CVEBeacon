@@ -62,6 +62,8 @@ def test_day_change_uses_deltas_without_baseline_and_keeps_late_changes(tmp_path
     def handler(request):
         if str(request.url)==cve_list.RELEASE_URL:
             return httpx.Response(200,json=payload)
+        if '/tags/' in request.url.path:
+            return httpx.Response(404)
         if str(request.url)==LOG:
             return httpx.Response(200,json=snapshot)
         if request.url.path.endswith(late['cveMetadata']['cveId']+'.json'):
@@ -72,7 +74,8 @@ def test_day_change_uses_deltas_without_baseline_and_keeps_late_changes(tmp_path
     with mock_client(handler) as http:
         cve_list.sync(http,store,config.watch,datetime(2026,11,19,0,35,tzinfo=timezone.utc))
     assert store.view(late['cveMetadata']['cveId']) is not None
-    assert store.metadata()['cve_list_cursor'] >= '2026-11-19T00:01:00'
+    assert store.metadata()['cve_list_cursor'] == since.isoformat()
+    assert store.metadata()['cve_list_coverage_gap'] == since.isoformat()
 
 
 def test_zip_member_limit_precedes_zipfile_allocation(monkeypatch):
@@ -136,12 +139,14 @@ def test_log_record_budget_resumes_without_reloading_metadata(tmp_path,monkeypat
     start=(NOW-timedelta(days=1)).isoformat()
     store.set_metadata({'cve_list_start':start,'cve_list_cursor':start,'cve_list_initial_mode':'baseline'})
     records=[official(f'CVE-2026-{20000+i}') for i in range(3)]
-    group={'fetchTime':NOW.isoformat(),'numberOfChanges':3,'new':[{'cveId':r['cveMetadata']['cveId']} for r in records],'updated':[],'error':[]}
+    group={'fetchTime':NOW.isoformat(),'numberOfChanges':3,'new':[{'cveId':r['cveMetadata']['cveId'],'dateUpdated':r['cveMetadata']['dateUpdated']} for r in records],'updated':[],'error':[]}
     old={'fetchTime':(NOW-timedelta(days=30)).isoformat(),'numberOfChanges':0,'new':[],'updated':[],'error':[]}
     fixture=Release([official()])
     requests=[]
     def handler(request):
         requests.append(request)
+        if '/tags/' in request.url.path:
+            return httpx.Response(404)
         if str(request.url)==LOG:
             return httpx.Response(200,json=[group,old])
         for record in records:
@@ -199,9 +204,11 @@ def test_an_archive_cannot_ack_a_later_log_change(tmp_path):
     latest=official(description='later log version')
     latest['cveMetadata']['dateUpdated']=(NOW+timedelta(minutes=30)).isoformat()
     fixture=Release([previous],[previous])
-    group={'fetchTime':(NOW+timedelta(minutes=30)).isoformat(),'numberOfChanges':1,'new':[{'cveId':'CVE-2026-10001'}],'updated':[],'error':[]}
+    group={'fetchTime':(NOW+timedelta(minutes=30)).isoformat(),'numberOfChanges':1,'new':[{'cveId':'CVE-2026-10001','dateUpdated':latest['cveMetadata']['dateUpdated']}],'updated':[],'error':[]}
     old={'fetchTime':(NOW-timedelta(days=30)).isoformat(),'numberOfChanges':0,'new':[],'updated':[],'error':[]}
     def handler(request):
+        if '/tags/' in request.url.path:
+            return httpx.Response(404)
         if str(request.url)==LOG:
             return httpx.Response(200,json=[group,old])
         if request.url.path.endswith('CVE-2026-10001.json'):

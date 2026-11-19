@@ -136,7 +136,10 @@ _SCHEMA = (
         cve_id TEXT PRIMARY KEY, items_json TEXT NOT NULL, checked_at TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS watch_cve_list_queue (
-        cve_id TEXT PRIMARY KEY, fetch_time TEXT NOT NULL
+        cve_id TEXT PRIMARY KEY, fetch_time TEXT NOT NULL, expected_revision TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_cve_list_observation (
+        cve_id TEXT PRIMARY KEY, snapshot_time TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS watch_initial_cve (
         cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
@@ -563,7 +566,7 @@ class WatchStore:
                 meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('schema_version','provider_storage')")) if 'watch_meta' in existing else {}
                 if meta.get('provider_storage') != 'sparse-v1':
                     overlays = {'watch_origin','watch_provider','watch_search','watch_source_check',
-                                'watch_euvd_override','watch_cve_list_queue','watch_initial_cve'}
+                                'watch_euvd_override','watch_cve_list_queue','watch_cve_list_observation','watch_initial_cve'}
                     for statement in _SCHEMA:
                         if statement.startswith("CREATE TABLE IF NOT EXISTS "):
                             name = statement.split()[5]
@@ -586,7 +589,9 @@ class WatchStore:
                 if meta.get("schema_version") == str(SCHEMA_VERSION) and meta.get("provider_storage") == "sparse-v1":
                     if not _alert_columns_current(db):
                         raise StateError("watch database was created by a pre-release build; delete it and run `watch sync` again")
-                    return
+                    queue_columns = {row['name'] for row in db.execute('PRAGMA table_info(watch_cve_list_queue)')}
+                    if 'expected_revision' in queue_columns:
+                        return
         with self.transaction(create=create) as db:
             self._ensure_schema(db, _timestamp(self._clock))
 
@@ -671,6 +676,15 @@ class WatchStore:
         # Existing NVD and EUVD data stay in their original tables. No row
         # rebuild, JSON validation, provider copy or search backfill is needed.
         # Extra legacy columns are deliberately left untouched.
+        if 'expected_revision' not in {row['name'] for row in db.execute('PRAGMA table_info(watch_cve_list_queue)')}:
+            db.execute('ALTER TABLE watch_cve_list_queue ADD COLUMN expected_revision TEXT')
+            # Earlier builds could mark a delta covered using only the log.
+            # Re-read its asset and retain an explicit unproven interval; a
+            # confirmed history repair can establish a fresh snapshot boundary.
+            cursor = db.execute("SELECT value FROM watch_meta WHERE key='cve_list_cursor'").fetchone()
+            if cursor and cursor[0]:
+                cls._set_meta(db, {'cve_list_coverage_gap': cursor[0]})
+            db.execute("DELETE FROM watch_meta WHERE key IN ('cve_list_delta_asset','cve_list_log_etag')")
         storage = db.execute("SELECT value FROM watch_meta WHERE key='provider_storage'").fetchone()
         if version == "8" and (storage is None or storage[0] != 'sparse-v1'):
             # Recover the pre-release provider-copy layout without retaining
@@ -704,6 +718,7 @@ class WatchStore:
 
     @staticmethod
     def _ensure_search(db: sqlite3.Connection) -> None:
+        existed = db.execute("SELECT 1 FROM sqlite_master WHERE name='watch_fts'").fetchone() is not None
         try:
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS watch_fts USING fts5(cve_id UNINDEXED,text,content='watch_search',content_rowid='rowid')")
         except sqlite3.OperationalError as exc:
@@ -716,7 +731,7 @@ class WatchStore:
             ("update", "UPDATE", "INSERT INTO watch_fts(watch_fts,rowid,cve_id,text) VALUES ('delete',old.rowid,old.cve_id,old.text); INSERT INTO watch_fts(rowid,cve_id,text) VALUES (new.rowid,new.cve_id,new.text);"),
         ):
             db.execute(f"CREATE TRIGGER IF NOT EXISTS watch_search_{name} AFTER {event} ON watch_search BEGIN {action} END")
-        if db.execute("SELECT 1 FROM watch_search LIMIT 1").fetchone():
+        if not existed and db.execute("SELECT 1 FROM watch_search LIMIT 1").fetchone():
             db.execute("INSERT INTO watch_fts(watch_fts) VALUES ('rebuild')")
 
     @staticmethod
