@@ -523,8 +523,8 @@ class WatchStore:
         with self.transaction(create=False) as db:
             self._ensure_schema(db, _timestamp(self._clock))
 
-    @staticmethod
-    def _ensure_schema(db: sqlite3.Connection, now: str) -> None:
+    @classmethod
+    def _ensure_schema(cls, db: sqlite3.Connection, now: str) -> None:
         db.execute(
             "CREATE TABLE IF NOT EXISTS watch_meta ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -535,7 +535,7 @@ class WatchStore:
         if not rows:
             for statement in _SCHEMA:
                 db.execute(statement)
-            WatchStore._ensure_teams_bot_schema(db)
+            cls._ensure_teams_bot_schema(db)
             db.execute(
                 "INSERT INTO watch_meta(key,value) VALUES ('schema_version',?)",
                 (str(SCHEMA_VERSION),),
@@ -587,8 +587,8 @@ class WatchStore:
                     (meta["initial_window_start"],),
                 )
         if version in {"1", "2"}:
-            WatchStore._migrate_event_details(db)
-            WatchStore._migrate_delivery_statuses(db)
+            cls._migrate_event_details(db)
+            cls._migrate_delivery_statuses(db)
         elif version == "3":
             columns = {
                 row["name"]
@@ -599,8 +599,8 @@ class WatchStore:
                     "ALTER TABLE watch_delivery ADD COLUMN first_attempt_at TEXT"
                 )
         if version in {"1", "2", "3", "4", "5", "6"}:
-            WatchStore._migrate_report_identity(db, version)
-        WatchStore._ensure_teams_bot_schema(db)
+            cls._migrate_report_identity(db, version)
+        cls._ensure_teams_bot_schema(db)
         if version != str(SCHEMA_VERSION):
             db.execute(
                 "UPDATE watch_meta SET value=? WHERE key='schema_version'",
