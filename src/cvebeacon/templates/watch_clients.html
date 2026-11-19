@@ -21,9 +21,9 @@
 {% endif %}
 
 {% if scan %}
+<p class="muted">Latest successful inventory scan completed {{ stamp(scan.completed_at) }}. {{ total }} client{{ '' if total == 1 else 's' }}.</p>
 {% if clients %}
 {% call card('Clients in the latest scan') %}
-<p class="muted">Latest successful inventory scan completed {{ stamp(scan.completed_at) }}. {{ total }} client{{ '' if total == 1 else 's' }}.</p>
 {% call callout('info', 'How clients appear here') %}
 <p>Client names come from uploads or the client column of a configured inventory. Findings reflect the latest successful scan.</p>
 {% endcall %}
@@ -32,7 +32,7 @@
   <thead><tr><th scope="col">Client</th><th scope="col" class="num">Assets</th><th scope="col">Currently affected CVEs</th><th scope="col">Activity</th></tr></thead>
   <tbody>{% for client in clients %}
   <tr>
-    <th scope="row"><a href="{{ url_for('client_inventory.detail', key=client_links[client.name], name=client.name) }}">{{ client.name }}</a></th>
+    <td><a href="{{ url_for('client_inventory.detail', key=client_links[client.name], name=client.name) }}">{{ client.name }}</a></td>
     <td class="num">{{ client.assets }}</td>
     <td>{% for finding in client.findings %}
       {% if finding.is_cve %}<a href="{{ url_for('watch.cve', cve_id=finding.cve_id) }}">{{ finding.cve_id }}</a>{% else %}<span class="break">{{ finding.cve_id }}</span>{% endif %}
@@ -51,7 +51,7 @@
 {% else %}
 {{ empty_state('No clients in the latest scan', 'Add a client label to an inventory and run a scan to see findings here.') }}
 {% endif %}
-{% if clients or has_previous or has_next %}
+{% if has_previous or has_next %}
 {{ pagination(page, url_for('watch.clients', page=page - 1) if has_previous else none,
               url_for('watch.clients', page=page + 1) if has_next else none, 'clients') }}
 {% endif %}

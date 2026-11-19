@@ -88,7 +88,9 @@ def change(browser, detail, action, *, version=None, confirm=""):
 def test_guided_upload_to_watch_only_with_permissions_and_audit(deployment):
     config, users, app, manager = deployment
     assert config.effective_inventory is None
-    assert "Add client" in manager.get("/watch/clients").text
+    clients_page = manager.get("/watch/clients").text
+    assert '<a class="btn" href="/watch/clients/add">Add client</a>' in clients_page
+    assert clients_page.count("<h1>") == 1
     assert manager.post(ADD, data={"name": "Example client"}).status_code == 400
     invalid = manager.post(ADD, data={"name": "bad\u200fname", "csrf": csrf(manager, ADD)})
     assert invalid.status_code == 400
@@ -98,10 +100,17 @@ def test_guided_upload_to_watch_only_with_permissions_and_audit(deployment):
     path = config.inventory_directory / f"{client_key('Example client')}.json"
     assert not path.exists()
     assert "Example client" in manager.get("/watch/clients").text
-    assert "private-notes-marker" in manager.get(detail).text
+    client_page = manager.get(detail).text
+    assert "private-notes-marker" in client_page
+    assert 'href="/watch/clients" aria-current="page"' in client_page
+    assert 'aria-current="step">Choose a file' in client_page
+    assert client_page.count("<h1>") == 1
     preview = upload(manager, detail)
     assert preview.status_code == 200
     assert "wrong_title" in preview.text and "Product is missing" in preview.text
+    assert 'aria-current="step">Review and save' in preview.text
+    assert 'aria-label="Inventory row validation" tabindex="0"' in preview.text
+    assert 'name="action" value="save" disabled' in preview.text
     assert not path.exists()
     mapping = submit(manager, detail, preview, action="preview")
     assert mapping.status_code == 200 and "Ready to import" in mapping.text
