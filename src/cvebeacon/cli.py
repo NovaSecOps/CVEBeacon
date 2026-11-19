@@ -24,7 +24,7 @@ from .errors import CVEBeaconError, SourceError
 from .http import HttpClient
 from .inventory import inspect_inventory, load_inventory
 from .identity import normalize_asset, identity_conflict
-from .locking import OperationLock, RunInProgress
+from .locking import OperationLock, RunInProgress, DASHBOARD_LOCK_CONFLICT_EXIT, dashboard_job_id
 from .models import Asset, HealthStatus
 from .notifications import GraphMailNotifier, TeamsNotifier, alert_items, configured_channels
 from .reporting import write_json, write_xlsx
@@ -999,7 +999,9 @@ def run(args: argparse.Namespace) -> int:
         lock = OperationLock(config, label.replace(" ", "-"))
         if not lock.acquire():
             print(f"error: {RunInProgress(lock.holder)}", file=sys.stderr)
-            return 2
+            # A supervised child distinguishes contention from validation errors
+            # so its manager can preserve the original queued wait budget.
+            return DASHBOARD_LOCK_CONFLICT_EXIT if dashboard_job_id() is not None else 2
     try:
         if args.command == "web-detect":
             from .web_assets import run_detection

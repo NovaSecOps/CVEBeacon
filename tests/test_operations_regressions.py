@@ -234,10 +234,12 @@ def test_cancel_audits_requester_and_removes_queued_id(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     monkeypatch.setattr(manager, "start_thread", lambda: None)
     job = manager.submit("notify-test", started_by="admin", argv=fake_job("pass"))
+    assert job.id in manager._free_lane._queue
     assert manager.cancel(job.id, actor="runner")
     entry = next(e for e in manager.users.audit_entries() if e.action.startswith("job_cancel_requested"))
     assert entry.actor == "runner"
     assert str(job.id) in entry.action and job.operation in entry.action
+    assert job.id not in manager._free_lane._queue
     assert job.id not in manager._queue
     outcome = next(e for e in manager.users.audit_entries() if e.action.startswith("job_cancelled:"))
     assert outcome.actor == "runner" and outcome.username == "admin"

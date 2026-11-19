@@ -27,7 +27,7 @@ from typing import Callable, Iterable
 
 from .config import AppConfig
 from .errors import CVEBeaconError, ConfigurationError, StateError
-from .locking import OperationLock, RunInProgress
+from .locking import OperationLock, RunInProgress, DASHBOARD_LOCK_CONFLICT_EXIT
 from .private_storage import private_directory, private_file, validate_file
 from .launching import command_prefix, child_environment
 from .watch.users import _pin_database
@@ -344,6 +344,15 @@ class JobStore:
         with closing(self._connect()) as db, db:
             db.execute("UPDATE dashboard_job SET message=? WHERE id=? AND status='queued'",
                        (message, job_id))
+
+    def requeue_conflict(self, job_id: int) -> bool:
+        with closing(self._connect()) as db, db:
+            cursor = db.execute(
+                "UPDATE dashboard_job SET status='queued',started_at=NULL,message=? "
+                "WHERE id=? AND status='running' AND cancel_requested=0",
+                ("waiting for another run to finish", job_id),
+            )
+            return cursor.rowcount == 1
 
     def cancel_queued(self, job_id: int, actor: str | None = None) -> bool:
         with closing(self._connect()) as db, db:
@@ -900,9 +909,7 @@ class JobManager(_JobLane):
                     lane._cancel_deadline = None
                     self._condition.notify_all()
 
-    def _wait_for_lock(self, job: Job) -> bool:
-        age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(job.created_at)).total_seconds())
-        deadline = time.monotonic() + max(0, LOCK_WAIT_TIMEOUT_SECONDS - age)
+    def _wait_for_lock(self, job: Job, deadline: float) -> bool:
         previous = None
         while True:
             with self._condition:
@@ -910,12 +917,12 @@ class JobManager(_JobLane):
                 if self._stopping or current is None or current.status != "queued":
                     return False
                 holder = OperationLock(self.config, job.operation).probe()
-                if holder is None:
-                    return True
                 if time.monotonic() >= deadline:
                     self.store.finish(job.id, "failed", exit_code=None, message=str(RunInProgress(holder)))
                     self._audit_finished(self.store.get(job.id), "job_failed")
                     return False
+                if holder is None:
+                    return True
                 message = f"waiting for {holder} to finish"
                 if message != previous:
                     self.store.waiting(job.id, message)
@@ -923,27 +930,36 @@ class JobManager(_JobLane):
                 self._condition.wait(min(LOCK_WAIT_POLL_SECONDS, max(0, deadline - time.monotonic())))
 
     def _run_job(self, job: Job) -> None:
-        argv = list(job.argv)
-        if not argv:
-            self.store.finish(
-                job.id,
-                "failed",
-                exit_code=None,
-                message="The job has no command.",
-            )
-            self._audit_finished(self.store.get(job.id), "job_failed")
-            return
+        age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(job.created_at)).total_seconds())
+        deadline = time.monotonic() + max(0, LOCK_WAIT_TIMEOUT_SECONDS - age)
         lane = self._lane(job.operation)
-        with self._condition:
-            lane._running = job.id
-        if job.operation in DATA_CHANGING and not self._wait_for_lock(job):
-            return
+        log = None
+        try:
+            with self._condition:
+                lane._running = job.id
+            while True:
+                if job.operation in DATA_CHANGING and not self._wait_for_lock(job, deadline):
+                    return
+                if not job.argv:
+                    self.store.finish(job.id, "failed", exit_code=None, message="The job has no command.")
+                    self._audit_finished(self.store.get(job.id), "job_failed")
+                    return
+                if log is None:
+                    log = _JobLog(job.log_path)
+                if not self._run_attempt(job, log):
+                    return
+        finally:
+            if log is not None:
+                log.close()
+
+    def _run_attempt(self, job: Job, log) -> bool:
+        argv = list(job.argv)
+        lane = self._lane(job.operation)
         if not self.store.mark_running(job.id):
             # A queued cancel won the race before the worker started it.
-            return
+            return False
         with self._condition:
             lane._running = job.id
-        log = _JobLog(job.log_path)
         process = None
         reader = None
         forced = False
@@ -976,7 +992,7 @@ class JobManager(_JobLane):
                 raise ConfigurationError("background jobs require a Windows console for cooperative cancellation")
             with self._condition:
                 if self._stopping:
-                    return  # The queued row is retained for restart recovery.
+                    return False  # The row is retained for restart recovery.
                 process = subprocess.Popen(
                     argv,
                     cwd=sys.prefix,
@@ -1031,8 +1047,13 @@ class JobManager(_JobLane):
                 process.stdout.close()
             if reader is not None:
                 reader.join(timeout=1)
-            log.close()
-        current = self.store.get(job.id)
+        with self._condition:
+            lane._process = None
+            lane._cancel_deadline = None
+            if (code == DASHBOARD_LOCK_CONFLICT_EXIT and job.operation in DATA_CHANGING
+                    and not forced and not self._stopping and self.store.requeue_conflict(job.id)):
+                return True
+            current = self.store.get(job.id)
         requested = bool(current and current.cancel_requested)
         audit_action = None
         if requested:
@@ -1067,6 +1088,7 @@ class JobManager(_JobLane):
                 "cancelled": "job_cancelled",
             }[status],
         )
+        return False
 
     @classmethod
     def _stop_process(cls, process, *, interrupt=True) -> bool:

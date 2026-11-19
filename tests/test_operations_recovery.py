@@ -219,9 +219,10 @@ def test_worker_start_replaces_a_dead_thread_reference(tmp_path):
     dead = threading.Thread(target=lambda: None)
     dead.start()
     dead.join()
-    manager._thread = dead
+    manager._free_lane._thread = dead
     try:
         job = manager.submit('notify-test', started_by='admin', argv=fake_job('pass'))
+        assert manager._free_lane._thread is not dead
         assert manager.wait(job.id, timeout=3).status == 'succeeded'
     finally:
         manager.shutdown()

@@ -194,6 +194,25 @@ def test_bad_lock_does_not_hide_operations(tmp_path):
         app.extensions["dashboard_jobs"].shutdown()
 
 
+def test_real_channel_test_is_lock_free_and_does_not_change_watch_storage(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("CREATE TABLE sentinel(value TEXT)")
+        db.execute("INSERT INTO sentinel VALUES ('preserve')")
+    before = config.watch.database.read_bytes()
+    requests = []
+    def sink(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200)
+    monkeypatch.setattr(cli, "HttpClient", lambda _: mock_client(sink))
+    with RunLock(run_lock_path(config)) as lock:
+        inline, owner = lock.path.read_bytes(), lock.owner_path.read_bytes()
+        assert cli.main(["--config", str(config.config_path), "watch", "notify", "test", "sink"]) == 0
+        assert lock.path.read_bytes() == inline and lock.owner_path.read_bytes() == owner
+    assert config.watch.database.read_bytes() == before
+    assert len(requests) == 1 and requests[0]["test"] is True
+
+
 def test_previous_acquisition_with_reused_pid_cannot_describe_current_holder(tmp_path, monkeypatch):
     path = tmp_path / "run.lock"
     monkeypatch.setenv("CVEBEACON_DASHBOARD_JOB", "99")
@@ -227,4 +246,72 @@ def test_old_token_cannot_identify_holder_before_new_reference_is_written(tmp_pa
         pass
     assert observed[0]["state"] == "active" and not observed[0]["dashboard"]
     assert "watch run" not in observed[0]["description"]
+
+
+@pytest.mark.parametrize("outcome", ["release", "cancel", "timeout"])
+def test_cron_winning_child_admission_returns_job_to_waiting(tmp_path, monkeypatch, outcome):
+    config = make_config(tmp_path)
+    manager = jobs.JobManager(config, new_accounts(config))
+    first = RunLock(run_lock_path(config), command="watch run")
+    competitor = RunLock(run_lock_path(config), command="watch sync")
+    spawned = threading.Event()
+    children = []
+    original = jobs.subprocess.Popen
+    def spawn(*args, **kwargs):
+        if not spawned.is_set():
+            assert competitor.acquire()
+            spawned.set()
+        process = original(*args, **kwargs)
+        children.append(process)
+        return process
+    monkeypatch.setattr(jobs.subprocess, "Popen", spawn)
+    monkeypatch.setattr(jobs, "LOCK_WAIT_TIMEOUT_SECONDS", 2 if outcome == "timeout" else 10)
+    try:
+        assert first.acquire()
+        job = manager.submit("watch-evaluate", started_by="admin", argv=jobs.build_command(config, "watch-evaluate"))
+        wait_for(lambda: manager.store.get(job.id).message)
+        first.release()
+        assert spawned.wait(3)
+        wait_for(lambda: children and children[0].poll() is not None and
+                 manager.store.get(job.id).status in {"queued", "failed"})
+        assert manager.store.get(job.id).status == "queued"
+        assert manager.store.get(job.id).started_at is None
+        if outcome == "release":
+            competitor.release()
+            assert manager.wait(job.id).status == "succeeded"
+            assert len(children) == 2
+        elif outcome == "cancel":
+            assert manager.cancel(job.id, actor="runner")
+            assert manager.wait(job.id).status == "cancelled" and len(children) == 1
+        else:
+            result = manager.wait(job.id, timeout=3)
+            assert result.status == "failed" and "wait for it to finish" in result.message
+            assert result.exit_code is None and len(children) == 1
+        wait_for(lambda: manager.store.get(job.id).audit_pending is None)
+        actions = [entry.action for entry in manager.users.audit_entries()]
+        assert actions.count(f"job_started:{job.id}:watch-evaluate") == 1
+        if outcome != "timeout":
+            assert f"job_failed:{job.id}:watch-evaluate" not in actions
+    finally:
+        first.release()
+        competitor.release()
+        manager.shutdown()
+
+
+def test_validation_exit_is_never_retried(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    manager = jobs.JobManager(config, new_accounts(config))
+    launches = []
+    original = jobs.subprocess.Popen
+    def spawn(*args, **kwargs):
+        launches.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(jobs.subprocess, "Popen", spawn)
+    try:
+        job = manager.submit("watch-evaluate", started_by="admin", argv=fake_job("raise SystemExit(2)"))
+        result = manager.wait(job.id)
+        assert result.status == "failed" and result.exit_code == 2
+        assert len(launches) == 1
+    finally:
+        manager.shutdown()
 
