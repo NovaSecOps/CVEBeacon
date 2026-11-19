@@ -24,6 +24,7 @@ class FieldMetadata:
     step: str = "1"
     item_choices: tuple = ()
     requirement: str = ""
+    minimum_exclusive: bool = False
 
 
 ENUMS = {
@@ -58,6 +59,7 @@ BOUNDS = {
     "channel.min_interval_seconds": (0, 3600, "any"),
 }
 CHANNEL_DEFAULTS = {"allow_insecure": False, "security": "starttls", "port": SMTP_DEFAULT_PORTS["starttls"],
+                    "cc": (), "bcc": (),
                     "server": "https://ntfy.sh"}
 CHANNEL_REQUIRED = {
     "smtp": {"host", "from", "to"},
@@ -137,7 +139,9 @@ def metadata(path, key, default, kind, *, channel_type=None):
     if choices:
         kind = "enum"
     help_text = HELP.get(key, "")
-    if key.endswith("_env"):
+    if path == "dashboard" and key.endswith("_env"):
+        help_text = "Environment variable name, never its secret contents. Dashboard changes require an administrator."
+    elif key.endswith("_env"):
         help_text = "Environment variable name, never its secret contents. Changing references requires manage_secrets."
     elif key.endswith("_file"):
         help_text = "Protected secret file reference. Path changes require an administrator; contents are never displayed."
@@ -146,12 +150,15 @@ def metadata(path, key, default, kind, *, channel_type=None):
     elif not help_text:
         help_text = ("Number of seconds." if key.endswith(("_seconds", "_timeout"))
                      else "Enter " + key.replace("_", " ") + " as " + ("a TOML value." if kind == "toml" else "plain text."))
-    if identity in {"http.connect_timeout", "http.read_timeout", "http.backoff_seconds", "sources.minimum_request_interval"}:
+    minimum_exclusive = identity in {"http.connect_timeout", "http.read_timeout", "http.backoff_seconds", "sources.minimum_request_interval"}
+    if minimum_exclusive:
         help_text += " Must be greater than zero."
+    if identity == "notifications.email.recipients":
+        help_text = "Legacy recipient names or addresses, separated by commas or entered as a TOML array. Existing ordering and duplicates are retained."
     example = EXAMPLES.get(key, choices[0] if choices else default if default is not None else "example")
     if key.endswith("_env"):
         example = "EXAMPLE_SECRET"
     elif key.endswith("_file"):
         example = "secrets/channel.txt"
     return FieldMetadata(kind, default, choices, bool(required), help_text, example,
-                         minimum, maximum, step, LIST_ENUMS.get(identity, ()), requirement)
+                         minimum, maximum, step, LIST_ENUMS.get(identity, ()), requirement, minimum_exclusive)

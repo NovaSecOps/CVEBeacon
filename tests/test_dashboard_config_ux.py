@@ -118,7 +118,10 @@ def test_secret_input_never_retained(accounts):
 
 
 def test_enum_metadata_covers_validator_enums():
-    """Find enum validations in the loader rather than maintaining a UI-only list."""
+    """Find enum validations and check each field identity independently."""
+    from config_metadata_contracts import assert_enum_metadata, test_discovered_enum_sites_have_field_contracts
+    assert_enum_metadata()
+    test_discovered_enum_sites_have_field_contracts()
     import ast
     import inspect
     from cvebeacon import config
