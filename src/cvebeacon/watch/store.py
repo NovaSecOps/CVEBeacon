@@ -534,6 +534,23 @@ class WatchStore:
                 "watch database was created by a pre-release build; "
                 "delete it and run `watch sync` again"
             )
+        version_number = int(version)
+        for minimum, table, column in (
+            (2, "watch_euvd_item", "vendors_json"),
+            (3, "watch_event", "details_json"),
+            (4, "watch_delivery", "first_attempt_at"),
+        ):
+            if version_number < minimum:
+                continue
+            columns = {
+                row["name"]
+                for row in db.execute(f"PRAGMA table_info({table})")
+            }
+            if columns and column not in columns:
+                raise StateError(
+                    "watch database cannot be migrated from schema "
+                    f"{version}: missing {table}.{column}"
+                )
         for statement in _SCHEMA:
             db.execute(statement)
         if version == "1":

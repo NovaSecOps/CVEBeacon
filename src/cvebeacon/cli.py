@@ -6,8 +6,11 @@ import argparse
 import getpass
 import json
 import logging
+import os
 import secrets
 import signal
+import sqlite3
+import stat
 import threading
 import sys
 import warnings
@@ -164,7 +167,7 @@ def _parser() -> argparse.ArgumentParser:
         default="text",
         help="export format for --all",
     )
-    watch_evaluate = watch_sub.add_parser("evaluate", help="re-evaluate stored CVEs against the current rules")
+    watch_evaluate = watch_sub.add_parser("evaluate", help="re-evaluate stored CVEs against the current rules (creates events; deliver with watch notify or watch run)")
     watch_evaluate.add_argument("--all", action="store_true", required=True, dest="all_cves", help="evaluate every stored CVE")
     watch_evaluate.add_argument("--yes", action="store_true", help="skip the confirmation")
     watch_rules = watch_sub.add_parser("rules", help="inspect watch rules")
@@ -868,9 +871,16 @@ def _source_status(store: StateStore) -> list[dict[str, object]]:
         return [] if row is None else [dict(x) for x in db.execute("SELECT asset_id,source,status,checked_at,message,freshness_at FROM source_health WHERE run_id=? ORDER BY asset_id,source", (row[0],))]
 
 
-def _live_source_checks(config: AppConfig) -> dict[str, str]:
+def _live_source_checks(
+    config: AppConfig, *, only: tuple[str, ...] | None = None
+) -> dict[str, str]:
     target = "CVE-2021-44228"
     checks: dict[str, str] = {}
+    wanted = (
+        (lambda name, enabled: enabled)
+        if only is None
+        else (lambda name, enabled: name in only)
+    )
     with HttpClient(config.http) as http:
         def nvd_check():
             api_key = config.nvd_api_key()
@@ -886,7 +896,7 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
             return payload
 
         operations = []
-        if config.sources.osv_enabled:
+        if wanted("osv", config.sources.osv_enabled):
             from .sources.osv import OSVSource
             def osv_check():
                 asset = Asset("connectivity", ecosystem="PyPI", product="requests", version="2.31.0")
@@ -894,18 +904,18 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
                 if result.error:
                     raise SourceError("osv", result.error)
             operations.append(("osv", osv_check))
-        if config.sources.nvd_enabled:
+        if wanted("nvd", config.sources.nvd_enabled):
             operations.append(("nvd", nvd_check))
-        if config.sources.cve_enabled:
+        if wanted("cve_list", config.sources.cve_enabled):
             operations.append(("cve_list", lambda: CVEListSource(http).record(target)))
-        if config.sources.euvd_enabled:
+        if wanted("euvd", config.sources.euvd_enabled):
             operations.append(("euvd", euvd_check))
         kev = KEVSource(http)
-        if config.sources.cisa_kev_enabled:
+        if wanted("cisa_kev", config.sources.cisa_kev_enabled):
             operations.append(("cisa_kev", kev.cisa))
-        if config.sources.eu_kev_enabled:
+        if wanted("eu_kev", config.sources.eu_kev_enabled):
             operations.append(("eu_kev", kev.eu))
-        if config.sources.epss_enabled:
+        if wanted("epss", config.sources.epss_enabled):
             operations.append(("epss", lambda: EPSSSource(http).scores([target])))
         for name, operation in operations:
             try:
@@ -913,6 +923,284 @@ def _live_source_checks(config: AppConfig) -> dict[str, str]:
                 checks[name] = "ok"
             except CVEBeaconError as exc:
                 checks[name] = f"failed: {exc}"
+    return checks
+
+
+def _watch_channel_check(config: AppConfig) -> str:
+    from .watch.channels import CREDENTIAL_FIELDS
+
+    enabled = [channel for channel in config.watch.channels if channel.enabled]
+    missing: list[str] = []
+    for channel in enabled:
+        keys = {
+            key.removesuffix("_env").removesuffix("_file")
+            for key in CREDENTIAL_FIELDS.get(channel.type, ())
+        }
+        for key in sorted(keys):
+            if (
+                channel.type == "smtp"
+                and key == "password"
+                and not channel.options.get("username")
+            ):
+                continue
+            reference = channel.secret(key)
+            if reference is not None and reference.peek() is None:
+                missing.append(f"{channel.name} ({key.replace('_', ' ')})")
+        if (
+            channel.type == "smtp"
+            and channel.options.get("username")
+            and channel.secret("password") is None
+        ):
+            missing.append(f"{channel.name} (password)")
+        if (
+            channel.type == "webhook"
+            and channel.options.get("header_name")
+            and channel.secret("header_value") is None
+        ):
+            missing.append(f"{channel.name} (header value)")
+    if missing:
+        return "missing: " + ", ".join(dict.fromkeys(missing))
+    if not enabled:
+        return "ok (no enabled channels)"
+    names = ", ".join(channel.name for channel in enabled)
+    return f"ok ({len(enabled)} enabled: {names})"
+
+
+def _watch_source_check(config: AppConfig) -> str:
+    key = "set" if config.nvd_api_key() else "not set (optional)"
+    return f"ok ({', '.join(config.watch.sources)}; NVD API key {key})"
+
+
+def _data_directory_check(directory: Path) -> str:
+    target = directory
+    try:
+        while not target.exists():
+            parent = target.parent
+            if parent == target:
+                break
+            target = parent
+        details = target.stat()
+    except OSError:
+        return f"not writable ({directory})"
+    if not target.is_dir():
+        return f"not a directory ({target})"
+    mode = stat.S_IMODE(details.st_mode) if os.name == "posix" else 0
+    if target != directory:
+        if mode & 0o022 and not mode & stat.S_ISVTX:
+            return f"unsafe (parent {target} is group or other writable: {directory})"
+        if not os.access(target, os.W_OK | os.X_OK):
+            return f"not writable ({directory}; {target} cannot create it)"
+        return f"ok ({directory}; not created yet)"
+    if not os.access(directory, os.W_OK | os.X_OK):
+        return f"not writable ({directory})"
+    if os.name == "posix" and mode & 0o022:
+        return f"unsafe (group or other writable: {directory})"
+    return f"ok ({directory})"
+
+
+def _watch_schema_tables() -> tuple[str, ...]:
+    from .watch.store import _SCHEMA
+
+    prefix = "CREATE TABLE IF NOT EXISTS "
+    return tuple(
+        statement[len(prefix):].split("(", 1)[0].strip()
+        for statement in _SCHEMA
+        if statement.startswith(prefix)
+    )
+
+
+def _watch_schema_columns() -> dict[str, frozenset[str]]:
+    from .watch.store import _SCHEMA
+
+    connection = sqlite3.connect(":memory:")
+    try:
+        for statement in _SCHEMA:
+            connection.execute(statement)
+        return {
+            table: frozenset(
+                row[1]
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            )
+            for table in _watch_schema_tables()
+        }
+    finally:
+        connection.close()
+
+
+def _watch_table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+
+
+def _watch_migration_problem(
+    db: sqlite3.Connection, tables: set[str], version: int
+) -> str | None:
+    from .watch.store import _alert_columns_current
+
+    if version >= 2 and not _alert_columns_current(db):
+        return (
+            "unreadable (watch database was created by a pre-release build; "
+            "delete it and run `watch sync` again)"
+        )
+    for minimum, table, column in (
+        (2, "watch_euvd_item", "vendors_json"),
+        (3, "watch_event", "details_json"),
+        (4, "watch_delivery", "first_attempt_at"),
+    ):
+        if (
+            version >= minimum
+            and table in tables
+            and column not in _watch_table_columns(db, table)
+        ):
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: missing {table}.{column})"
+            )
+    if "watch_report" not in tables:
+        return None
+    report_columns = _watch_table_columns(db, "watch_report")
+    boundary_row = db.execute(
+        "SELECT value FROM watch_meta WHERE key='report_legacy_max_id' LIMIT 1"
+    ).fetchone()
+    boundary = None if boundary_row is None else boundary_row[0]
+    if "chain" not in report_columns:
+        if version != 5:
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: watch_report has no chain column)"
+            )
+        if "chain_version" in report_columns:
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: watch_report has chain_version without chain)"
+            )
+        if boundary is not None:
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: report legacy boundary exists but the chain "
+                "column is missing)"
+            )
+        return None
+    if "chain_version" in report_columns and boundary is None:
+        legacy = db.execute(
+            "SELECT COUNT(*) FROM watch_report WHERE chain_version=0"
+        ).fetchone()[0]
+        if legacy:
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: report legacy rows have no recorded boundary)"
+            )
+    return None
+
+
+def _watch_database_check(config: AppConfig) -> str:
+    from .watch.store import SCHEMA_VERSION
+
+    path = config.watch.database
+    if not path.exists():
+        return "not created yet"
+    if not os.access(path, os.W_OK):
+        return f"not writable ({path})"
+    expected_version = str(SCHEMA_VERSION)
+    try:
+        with closing(
+            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        ) as db:
+            db.row_factory = sqlite3.Row
+            tables = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            schema = db.execute(
+                "SELECT value FROM watch_meta WHERE key='schema_version' LIMIT 2"
+            ).fetchall()
+            if not schema:
+                return "unreadable (watch database has no schema version)"
+            if len(schema) > 1:
+                return (
+                    "unreadable (ambiguous watch schema metadata; expected one "
+                    "version row)"
+                )
+            version = str(schema[0][0])
+            try:
+                number = int(version)
+            except ValueError:
+                return (
+                    f"unreadable (unsupported watch schema version {version}; "
+                    f"expected {expected_version} or an older supported schema)"
+                )
+            if str(number) != version or not 1 <= number <= SCHEMA_VERSION:
+                return (
+                    f"unreadable (unsupported watch schema version {version}; "
+                    f"expected {expected_version} or an older supported schema)"
+                )
+            if number == SCHEMA_VERSION:
+                missing = [
+                    name for name in _watch_schema_tables() if name not in tables
+                ]
+                if missing:
+                    return "unreadable (watch database is missing required tables)"
+                for table, required in _watch_schema_columns().items():
+                    if not required <= _watch_table_columns(db, table):
+                        return (
+                            "unreadable (watch database is missing required "
+                            f"columns in {table})"
+                        )
+            else:
+                problem = _watch_migration_problem(db, tables, number)
+                if problem is not None:
+                    return problem
+            rows = (
+                db.execute("SELECT COUNT(*) FROM watch_cve").fetchone()[0]
+                if "watch_cve" in tables
+                else 0
+            )
+    except (sqlite3.Error, OSError):
+        return "unreadable (cannot read the watch database)"
+    if number != SCHEMA_VERSION:
+        return (
+            f"ok ({rows} CVEs, schema {version}; will migrate to "
+            f"{SCHEMA_VERSION} on the next write)"
+        )
+    return f"ok ({rows} CVEs, schema {version})"
+
+
+def _schedule_check() -> str:
+    try:
+        text = status().strip()
+    except OSError:
+        return "not checked (crontab is unavailable)"
+    except CVEBeaconError as exc:
+        detail = str(exc).casefold()
+        if "malformed" in detail or "managed cron" in detail:
+            return "invalid (managed schedule is malformed)"
+        return "not checked (schedule status failed)"
+    if not text:
+        return "not installed"
+    first = text.splitlines()[0]
+    if first.casefold().startswith("not installed"):
+        return "not installed"
+    return f"installed ({first})"
+
+
+def _watch_only_doctor_checks(config: AppConfig) -> dict[str, object]:
+    directory = _data_directory_check(config.watch.database.parent)
+    state_directory = _data_directory_check(config.database_path.parent)
+    checks: dict[str, object] = {
+        "configuration": "ok",
+        "inventory": "skipped (watch-only deployment; KEV, critical and rule alerting work without one)",
+        "data_directory": directory,
+        "state_directory": state_directory,
+        "watch_database": (
+            _watch_database_check(config)
+            if directory.startswith("ok")
+            else "skipped (the data directory is not usable)"
+        ),
+        "watch_channels": _watch_channel_check(config),
+        "watch_sources": _watch_source_check(config),
+        "schedule": _schedule_check(),
+    }
     return checks
 
 
@@ -1038,11 +1326,32 @@ def run(args: argparse.Namespace) -> int:
             print(json.dumps({"configuration": "ok", "state": "ok", "watch": "ok"}))
             return 0
         if args.command == "doctor" and config.inventory is None:
-            raise CVEBeaconError(
-                "doctor requires an inventory; add [inventory] path, or use "
-                f"'cvebeacon --config {config.config_path} watch run' from cron or "
-                "Task Scheduler"
+            checks = _watch_only_doctor_checks(config)
+            if args.live:
+                checks["live_sources"] = _live_source_checks(
+                    config, only=config.watch.sources
+                )
+            print(json.dumps(checks, indent=2))
+            failed_live = any(
+                value != "ok" for value in checks.get("live_sources", {}).values()
             )
+            failed_local = any(
+                isinstance(value, str)
+                and value.startswith(
+                    (
+                        "missing",
+                        "unsafe",
+                        "not writable",
+                        "not a directory",
+                        "unreadable",
+                        "invalid",
+                        "failed",
+                    )
+                )
+                for name, value in checks.items()
+                if name != "live_sources"
+            )
+            return 2 if failed_local or failed_live else 0
         if args.command == "serve" and config.inventory is None and not config.watch.enabled:
             raise CVEBeaconError(
                 "serve requires an inventory or watch mode; add [inventory] path "
