@@ -23,7 +23,10 @@ def _text(path: Path) -> str:
 
 
 def _block(text: str, marker: str) -> str:
-    start = text.index(marker)
+    try:
+        start = text.index(marker)
+    except ValueError:
+        raise AssertionError(f"missing block: {marker!r}") from None
     depth = 0
     for index in range(start, len(text)):
         if text[index] == "{":
@@ -138,6 +141,15 @@ def test_samples_set_security_headers():
         assert "X-Content-Type-Options" in text
         assert "Referrer-Policy" in text
         assert "frame-ancestors 'none'" in text
+
+
+def test_caddy_applies_security_headers_to_its_own_errors():
+    block = _block(_text(CADDY), "handle_errors {")
+    assert "Strict-Transport-Security" in block
+    assert "X-Content-Type-Options" in block
+    assert "Referrer-Policy" in block
+    assert "frame-ancestors 'none'" in block
+    assert "-Server" in block
 
 
 def test_samples_allow_dashboard_uploads_and_slow_queries():
