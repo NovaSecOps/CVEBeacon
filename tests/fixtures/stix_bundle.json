@@ -1,0 +1,134 @@
+{
+  "type": "bundle",
+  "id": "bundle--5802a7c0-f304-5233-a28c-d7cc68234cfb",
+  "objects": [
+    {
+      "type": "software",
+      "spec_version": "2.1",
+      "id": "software--882fd244-5c60-5e41-8860-a4c4c5a7737c",
+      "name": "Widget",
+      "vendor": "Example",
+      "version": "1.0",
+      "cpe": "cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*"
+    },
+    {
+      "type": "software",
+      "spec_version": "2.1",
+      "id": "software--a0d838da-8f83-57fe-ae65-6f508077cbb7",
+      "name": "Gadget",
+      "vendor": "Example",
+      "version": "2.0",
+      "x_cvebeacon_purl": "pkg:pypi/example-gadget@2.0",
+      "x_cvebeacon_ecosystem": "PyPI"
+    },
+    {
+      "type": "vulnerability",
+      "spec_version": "2.1",
+      "id": "vulnerability--013691e3-9c98-511e-87a5-b668b93f7958",
+      "created": "2026-11-03T00:00:00.000Z",
+      "modified": "2026-11-12T00:00:00.000Z",
+      "name": "CVE-2026-0002",
+      "external_references": [
+        {
+          "source_name": "nvd",
+          "external_id": "CVE-2026-0002",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-0002"
+        },
+        {
+          "source_name": "cve",
+          "external_id": "CVE-2026-0002",
+          "url": "https://www.cve.org/CVERecord?id=CVE-2026-0002"
+        }
+      ],
+      "x_cvebeacon_applicability": "needs_review",
+      "x_cvebeacon_sources": [
+        "osv"
+      ],
+      "x_cvebeacon_first_seen": "2026-11-03T00:00:00.000Z",
+      "x_cvebeacon_confidence": "limited",
+      "description": "Gadget issue"
+    },
+    {
+      "type": "vulnerability",
+      "spec_version": "2.1",
+      "id": "vulnerability--0f9a6409-92ba-5d3e-a2d9-8f1eda5c056e",
+      "created": "2026-11-01T00:00:00.000Z",
+      "modified": "2026-11-11T00:00:00.000Z",
+      "name": "CVE-2026-0001",
+      "external_references": [
+        {
+          "source_name": "nvd",
+          "external_id": "CVE-2026-0001",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-0001"
+        },
+        {
+          "source_name": "cve",
+          "external_id": "CVE-2026-0001",
+          "url": "https://www.cve.org/CVERecord?id=CVE-2026-0001"
+        }
+      ],
+      "x_cvebeacon_applicability": "affected",
+      "x_cvebeacon_sources": [
+        "euvd",
+        "nvd"
+      ],
+      "x_cvebeacon_first_seen": "2026-11-01T00:00:00.000Z",
+      "x_cvebeacon_confidence": "high",
+      "description": "Widget issue"
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--084db368-2431-5b56-8e1b-b50212b74e97",
+      "created": "2026-11-03T00:00:00.000Z",
+      "modified": "2026-11-12T00:00:00.000Z",
+      "relationship_type": "has",
+      "source_ref": "software--a0d838da-8f83-57fe-ae65-6f508077cbb7",
+      "target_ref": "vulnerability--013691e3-9c98-511e-87a5-b668b93f7958",
+      "x_cvebeacon_applicability": "needs_review",
+      "x_cvebeacon_sources": [
+        "osv"
+      ],
+      "x_cvebeacon_first_seen": "2026-11-03T00:00:00.000Z",
+      "x_cvebeacon_confidence": "limited"
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--5039ee91-3d7b-5915-82b1-693ea433d676",
+      "created": "2026-11-01T00:00:00.000Z",
+      "modified": "2026-11-11T00:00:00.000Z",
+      "relationship_type": "has",
+      "source_ref": "software--882fd244-5c60-5e41-8860-a4c4c5a7737c",
+      "target_ref": "vulnerability--0f9a6409-92ba-5d3e-a2d9-8f1eda5c056e",
+      "x_cvebeacon_applicability": "affected",
+      "x_cvebeacon_sources": [
+        "euvd",
+        "nvd"
+      ],
+      "x_cvebeacon_first_seen": "2026-11-01T00:00:00.000Z",
+      "x_cvebeacon_confidence": "high"
+    },
+    {
+      "type": "report",
+      "spec_version": "2.1",
+      "id": "report--cb5c90f2-a7a3-549f-8203-c007b6ee16b3",
+      "created": "2026-11-19T12:00:00.000Z",
+      "modified": "2026-11-19T12:00:00.000Z",
+      "published": "2026-11-19T12:00:00.000Z",
+      "name": "CVEBeacon findings",
+      "report_types": [
+        "vulnerability"
+      ],
+      "description": "Inventory-derived vulnerability applicability export. Review access and handling rules before sharing.",
+      "object_refs": [
+        "software--882fd244-5c60-5e41-8860-a4c4c5a7737c",
+        "software--a0d838da-8f83-57fe-ae65-6f508077cbb7",
+        "vulnerability--013691e3-9c98-511e-87a5-b668b93f7958",
+        "vulnerability--0f9a6409-92ba-5d3e-a2d9-8f1eda5c056e",
+        "relationship--084db368-2431-5b56-8e1b-b50212b74e97",
+        "relationship--5039ee91-3d7b-5915-82b1-693ea433d676"
+      ]
+    }
+  ]
+}

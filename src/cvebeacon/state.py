@@ -189,6 +189,15 @@ class StateStore:
                     applicability TEXT NOT NULL,
                     PRIMARY KEY(run_id, asset_id, identifier)
                 );
+                CREATE TABLE IF NOT EXISTS scan_finding_details (
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    asset_id TEXT NOT NULL,
+                    advisory_id TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY(run_id, asset_id, advisory_id)
+                );
                 CREATE INDEX IF NOT EXISTS runs_successful ON runs(status, completed_at);
                 CREATE INDEX IF NOT EXISTS advisory_aliases_alias ON advisory_aliases(alias, asset_id);
                 CREATE INDEX IF NOT EXISTS advisory_aliases_primary ON advisory_aliases(asset_id, primary_id, alias);
@@ -375,6 +384,13 @@ class StateStore:
                                ON CONFLICT(asset_id,cve_id) DO UPDATE SET
                                  last_seen=excluded.last_seen, fingerprint=excluded.fingerprint, payload_json=excluded.payload_json""",
                             (finding.asset.asset_id, primary, first_seen, completed, fingerprint, payload),
+                        )
+                        db.execute(
+                            """INSERT INTO scan_finding_details(run_id,asset_id,advisory_id,first_seen,last_seen,payload_json)
+                               VALUES (?,?,?,?,?,?)
+                               ON CONFLICT(run_id,asset_id,advisory_id) DO UPDATE SET
+                                 last_seen=excluded.last_seen, payload_json=excluded.payload_json""",
+                            (run_id, finding.asset.asset_id, primary, first_seen, completed, payload),
                         )
                         if event_type:
                             cursor = db.execute(

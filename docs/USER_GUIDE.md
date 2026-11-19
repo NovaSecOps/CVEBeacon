@@ -134,6 +134,14 @@ cvebeacon export --format json --output report.json
 
 XLSX reports contain Summary, Findings, Uncertainty, Evidence, Source Health, Identities, and Advisory Details sheets. They are generated on demand rather than maintained as a vulnerability mirror.
 
+An optional read-only STIX 2.1 export is also available for OpenCTI, a SIEM or a data lake:
+
+```console
+cvebeacon export stix --output findings.json
+```
+
+It exports only affected or needs-review findings from the latest successful inventory scan, keeps client labels out by default, and uses deterministic UUIDv5 identifiers. See the [STIX export guide](STIX.md) for the mapping, `--client`, `--include-clients`, `--since`, and the limits of the bundle.
+
 ## 8. Applicability and coverage states
 
 - `affected`: affirmative exact-version evidence supports applicability.

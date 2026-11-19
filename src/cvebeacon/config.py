@@ -211,7 +211,9 @@ def notification_recipients(value):
     return tuple(item.strip() for item in value)
 
 
-def load_config(path: str | Path) -> AppConfig:
+def load_config(
+    path: str | Path, *, allow_state_only: bool = False
+) -> AppConfig:
     config_path = Path(path).expanduser().resolve()
     try:
         with config_path.open("rb") as handle:
@@ -311,7 +313,7 @@ def load_config(path: str | Path) -> AppConfig:
             encoding=str(inv.get("encoding", "utf-8-sig")),
             columns={name: str(value) for name, value in columns.items() if name in CANONICAL_FIELDS + OPTIONAL_FIELDS},
         )
-    elif not watch_enabled:
+    elif not watch_enabled and not allow_state_only:
         raise ConfigurationError("inventory.path is required")
 
     output = _table(data, "output")
