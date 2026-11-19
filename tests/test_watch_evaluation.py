@@ -436,6 +436,33 @@ V3_SCHEMA = (
 )
 
 
+@pytest.mark.parametrize(
+    "version, table, column",
+    [
+        (6, "watch_event", "details_json"),
+        (6, "watch_delivery", "first_attempt_at"),
+        (6, "watch_euvd_item", "vendors_json"),
+        (7, "watch_event", "details_json"),
+    ],
+)
+def test_version_floor_damage_fails_migration(tmp_path, version, table, column):
+    path = tmp_path / "watch.db"
+    WatchStore(path).initialize()
+    with sqlite3.connect(path) as db:
+        db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        db.execute(
+            "UPDATE watch_meta SET value=? WHERE key='schema_version'", (version,)
+        )
+    with pytest.raises(
+        StateError,
+        match=(
+            f"watch database cannot be migrated from schema {version}: "
+            f"missing {table}\\.{column}"
+        ),
+    ):
+        WatchStore(path).initialize()
+
+
 def test_v3_database_adds_first_attempt_at_and_keeps_rows(tmp_path):
     path = tmp_path / "watch.db"
     with sqlite3.connect(path) as db:

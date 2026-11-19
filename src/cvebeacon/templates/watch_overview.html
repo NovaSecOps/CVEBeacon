@@ -2,6 +2,7 @@
 {% block title %}Watch overview · CVEBeacon{% endblock %}
 {% block content %}
 <h1>Watch overview</h1>
+<p class="muted">Rule evaluation creates alert events; delivery happens on <code>watch notify</code> or the next <code>watch run</code>.</p>
 {% if not watch_enabled %}<p class="warning" role="alert">Watch mode is disabled in the configuration. Stored data is shown as it is; new syncs will not run.</p>{% endif %}
 {% if failures %}<p class="warning" role="alert">The last sync failed for: {{ failures }}.</p>{% endif %}
 <div class="metrics">
