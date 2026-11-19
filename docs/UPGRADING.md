@@ -64,6 +64,28 @@ The CVE List cursor records the last complete archive boundary. No delta-log
 queue or per-CVE repair table exists in schema 8. Read-only pages still do not
 migrate or take write locks.
 
+## Optional Teams bot channel (schema 8 to 9)
+
+Back up the watch database before upgrading. The first write-capable watch
+operation applies the released schema 7 to 8 migration and then migrates schema
+8 to 9 in the same transaction, preserving existing event, delivery and
+reporting history. The new tables store Teams bot conversation references,
+frozen message batches and per-recipient results. The schema-8 provider, search
+and CVE List storage is unchanged. Bot migration checks actual tables and
+columns even if an earlier build already wrote the version number. Read-only
+views do not migrate an existing database.
+
+Existing Teams Workflow webhook configuration remains unchanged. A pre-release
+`teams_bot` configuration with a custom HTTPS `service_url` outside the allowed
+Microsoft origin now fails validation. Replace the channel and conversation
+reference URLs with documented public-cloud service URLs, or remove the channel
+before upgrading. The allowlist checks the HTTPS origin and port; approved
+regional paths remain intact, rather than being limited to `/teams/`.
+
+The new `teams_bot` channel is opt-in and requires the Azure registration
+and Teams app installation described in [Teams bot setup](TEAMS.md). No schedules
+or notifications are created by the upgrade itself.
+
 ## Supported updater installations
 
 Applying updates is supported on native Linux systemd installations with
