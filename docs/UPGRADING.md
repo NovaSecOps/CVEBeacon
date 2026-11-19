@@ -35,9 +35,9 @@ untouched. No row is silently skipped or described as unaffected.
 Adding `cve_list` to an existing installation starts its independent baseline,
 even if `watch.initial` still says `full` or `backfill`. The first sync stores
 the newest archive boundary without importing history. After that, the initial
-mode is not consulted again: every archive imports records newer than the cursor
-normally. Importing source history requires an explicit confirmed command; see
-[watch](WATCH.md).
+mode is not consulted again: every archive imports records at or after the
+cursor normally, including records with no usable date. Importing source history
+requires an explicit confirmed command; see [watch](WATCH.md).
 Its pending or failed initialization is degraded source coverage and does not
 hold the existing NVD/EUVD initial window open.
 

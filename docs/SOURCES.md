@@ -36,7 +36,8 @@ This product uses data from the NVD API but is not endorsed or certified by the 
 The `cve_list` provider uses only the official
 [CVEProject/cvelistV5 release assets](https://github.com/CVEProject/cvelistV5#releases).
 It does not read `cves/deltaLog.json`. The cursor is the UTC boundary of the
-last archive that was fully imported.
+last archive that was fully imported, except during baseline initialisation,
+where the newest available boundary is stored without importing an archive.
 
 - **Same day:** import the newest hourly cumulative delta archive for the
   current release (`YYYY-MM-DD_delta_CVEs_at_HHMMZ.zip`). It contains every
@@ -48,8 +49,9 @@ last archive that was fully imported.
   following day's 00:00 hourly release and can itself appear as GitHub's
   `releases/latest`. The sync never trusts `/latest`: it lists a bounded set of
   recent releases and selects the newest hourly release by its archive names and
-  UTC time. Each archive is read independently, so an omitted or stale upstream
-  index cannot hide a record. A sync between the 00:00 release and the end-of-day
+  UTC time; draft and prerelease entries are ignored. Each archive is read
+  independently, so an omitted or stale upstream index cannot hide a record. A
+  sync between the 00:00 release and the end-of-day
   tag publication fails closed with the cursor unchanged and retries; daily
   schedules should avoid the short 00:00–00:45 window.
 - **Missing archive or long gap:** if a required end-of-day archive is absent,
@@ -65,19 +67,22 @@ last archive that was fully imported.
 - **Initial modes** apply only to the first initialisation, before any cursor
   exists. `baseline` stores the newest hourly archive boundary as the cursor
   without importing or alerting on anything older. `backfill N` imports records
-  whose `dateUpdated` is inside the saved window, as initial and non-alerting,
-  then stores the newest boundary. `full` imports all records as initial and
+  whose `dateUpdated` is inside the saved window, as initial and non-alerting;
+  records with no usable `dateUpdated` are also imported as initial. It then
+  stores the newest boundary. `full` imports all records as initial and
   non-alerting, then stores the newest boundary. Adding this provider to an
   existing installation defaults to baseline even when the old
   `watch.initial` says `full` or `backfill`. History requires an explicit
   confirmed choice.
 - **After initialisation** the initial mode is never consulted again. Every
   hourly delta, end-of-day delta and gap-fallback baseline imports records whose
-  `dateUpdated` is after the cursor as normal changes that can alert. Records at
-  or before the cursor are skipped as already known. Records with a missing or
-  unparseable `dateUpdated` are imported and counted, never silently skipped.
-  The fallback baseline therefore fills exactly the outstanding interval and is
-  complete by construction.
+  `dateUpdated` is at or after the cursor as normal changes that can alert.
+  Records before the cursor are skipped as already known; a record stamped
+  exactly on the boundary is re-offered idempotently, so it is neither lost nor
+  alerted twice. Records with a missing or unparseable `dateUpdated` are always
+  imported and counted, regardless of `dateReserved` or `datePublished`; they
+  are never silently skipped. The fallback baseline therefore fills exactly the
+  outstanding interval and is complete by construction.
 - **Manual refresh:** `watch refresh` never changes the feed cursor, archive
   token or initial state.
 

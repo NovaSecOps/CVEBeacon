@@ -1497,14 +1497,18 @@ If a required archive is missing or more than seven days are outstanding, one
 baseline archive is read; only records after the cursor are stored, and catch-up
 continues from its midnight boundary.
 The CVE List cursor therefore records the last archive that was fully validated
-and committed; a failure leaves it in place and the next sync retries. Imports
+and committed, except for the baseline start marker, which is stored without an
+archive import. A failure leaves the cursor in place and the next sync retries.
+Imports
 are idempotent and never replace a newer stored `dateUpdated` with an older one.
 There is no rolling-log repair queue and no per-ID feed repair. After
 initialisation the initial mode is never consulted again: every hourly delta,
 end-of-day delta and gap-fallback baseline imports records whose `dateUpdated` is
-after the cursor as normal changes that can alert; records at or before the
-cursor are skipped as already known. Records with a missing or unparseable
-`dateUpdated` are imported and counted, never silently skipped. A gap-fallback
+at or after the cursor as normal changes that can alert; records before the
+cursor are skipped as already known, and a boundary record is re-offered
+idempotently so it is neither lost nor alerted twice. Records with a missing or
+unparseable `dateUpdated` are always imported and counted, regardless of
+`dateReserved` or `datePublished`, never silently skipped. A gap-fallback
 baseline therefore fills the outstanding interval completely. Until the
 end-of-day tag is published shortly after 00:00, a sync that needs it fails
 closed with the cursor unchanged and retries; daily schedules should avoid the
