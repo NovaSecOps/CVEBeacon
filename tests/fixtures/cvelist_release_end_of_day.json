@@ -1,0 +1,19 @@
+{
+  "tag_name": "cve_2026-11-18_at_end_of_day",
+  "assets": [
+    {
+      "id": 765615033,
+      "name": "2026-11-18_delta_CVEs_at_end_of_day.zip",
+      "size": 4624472,
+      "digest": "sha256:549e0c8bd5b5b381d7d34dc3c739d58cf5712ee705630c3d68b4138dd7b9e7f2",
+      "browser_download_url": "https://github.com/CVEProject/cvelistV5/releases/download/cve_2026-11-18_at_end_of_day/2026-11-18_delta_CVEs_at_end_of_day.zip"
+    },
+    {
+      "id": 765615032,
+      "name": "release_notes.md",
+      "size": 44214,
+      "digest": "sha256:ac9740fb559624870357a4ac73052875ff2ff00a5632cb7d7c8d24ccefde0601",
+      "browser_download_url": "https://github.com/CVEProject/cvelistV5/releases/download/cve_2026-11-18_at_end_of_day/release_notes.md"
+    }
+  ]
+}

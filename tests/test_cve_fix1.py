@@ -104,6 +104,9 @@ def test_migration_adds_no_copies_and_tolerates_legacy_rows(tmp_path, corrupt, e
         assert db.execute('SELECT count(*) FROM watch_search').fetchone()[0] == 0
         assert db.execute('SELECT description FROM watch_cve').fetchone()[0] == 'retained'
         assert db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone()[0] == '8'
+        names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert 'watch_cve_list_queue' not in names
+        assert 'watch_cve_list_observation' not in names
     if corrupt:
         with pytest.raises(StateError, match=ID):
             store.view(ID)

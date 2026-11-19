@@ -62,19 +62,6 @@ class Release:
             return httpx.Response(200, json={"assets": self.assets()}, headers={"etag": '"release"'})
         if '/tags/' in request.url.path:
             return httpx.Response(404)
-        if str(request.url) == cve_list.DELTA_LOG_URL:
-            with zipfile.ZipFile(BytesIO(self.delta)) as archive:
-                records = [json.loads(archive.read(name)) for name in archive.namelist()]
-            group = {"fetchTime": NOW.isoformat(), "numberOfChanges": len(records),
-                     "new": [{"cveId": item["cveMetadata"]["cveId"], "dateUpdated": item["cveMetadata"].get("dateUpdated")} for item in records], "updated": [], "error": []}
-            return httpx.Response(200, json=[group,{"fetchTime":(NOW-timedelta(days=30)).isoformat(),"numberOfChanges":0,"new":[],"updated":[],"error":[]}])
-        if request.url.path.endswith('.json'):
-            with zipfile.ZipFile(BytesIO(self.delta)) as archive:
-                for name in archive.namelist():
-                    item = json.loads(archive.read(name))
-                    if request.url.path.endswith(item["cveMetadata"]["cveId"]+'.json'):
-                        return httpx.Response(200, json=item)
-            return httpx.Response(404)
         if request.url.path.endswith('midnight.zip.zip'):
             return httpx.Response(200, content=self.baseline)
         if request.url.path.endswith('1200Z.zip'):
@@ -101,7 +88,7 @@ def test_full_baseline_and_hourly_delta(nested, tmp_path):
     assert not fixture.requests[0].headers.get('authorization')
 
 
-def test_baseline_makes_no_requests_then_reads_cumulative_delta(tmp_path):
+def test_baseline_reads_no_history_then_reads_cumulative_delta(tmp_path):
     fresh = official()
     fresh['cveMetadata']['dateUpdated'] = (NOW + timedelta(minutes=30)).isoformat()
     config = write_config(tmp_path, sources=('nvd', 'cve_list'))
@@ -109,11 +96,12 @@ def test_baseline_makes_no_requests_then_reads_cumulative_delta(tmp_path):
     fixture = Release([official('CVE-2026-10002')], [fresh])
     with mock_client(fixture) as http:
         assert cve_list.sync(http, store, config.watch, NOW)[:3] == (0, 0, 0)
-        assert http.requests == 0
+        assert http.requests == 1
+        assert not any('/download/' in request.url.path for request in fixture.requests)
         cve_list.sync(http, store, config.watch, NOW + timedelta(hours=1))
     assert store.view('CVE-2026-10001') is not None
     assert store.view('CVE-2026-10002') is None
-    assert len(fixture.requests) == 2
+    assert sum('/download/' in request.url.path for request in fixture.requests) == 1
 
 
 def test_backfill_filters_baseline_by_modified_date(tmp_path):
@@ -134,8 +122,7 @@ def test_resume_after_delta_failure_keeps_completed_baseline(tmp_path):
     with mock_client(fixture) as http:
         with pytest.raises(SourceError):
             cve_list.sync(http, store, config.watch, NOW)
-        assert 'cve_list_baseline_asset' in store.metadata()
-        assert 'cve_list_cursor' not in store.metadata()
+        assert store.metadata()['cve_list_cursor'] == '2026-11-03T00:00:00+00:00'
         fixture.fail_delta = False
         fixture.requests.clear()
         cve_list.sync(http, store, config.watch, NOW)
@@ -241,8 +228,7 @@ def test_partial_baseline_replays_committed_batch_after_failure(tmp_path, monkey
         with pytest.raises(SourceError):
             cve_list.sync(http, store, config.watch, NOW)
         assert store.search().total == 4
-        assert 'cve_list_baseline_asset' not in store.metadata()
-        assert 'cve_list_cursor' not in store.metadata()
+        assert not store.metadata().get('cve_list_cursor')
         fixture.baseline = zipped(payloads)
         cve_list.sync(http, store, config.watch, NOW)
     assert store.search().total == 4

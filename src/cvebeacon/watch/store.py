@@ -135,12 +135,6 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS watch_euvd_override (
         cve_id TEXT PRIMARY KEY, items_json TEXT NOT NULL, checked_at TEXT NOT NULL
     )""",
-    """CREATE TABLE IF NOT EXISTS watch_cve_list_queue (
-        cve_id TEXT PRIMARY KEY, fetch_time TEXT NOT NULL, expected_revision TEXT
-    )""",
-    """CREATE TABLE IF NOT EXISTS watch_cve_list_observation (
-        cve_id TEXT PRIMARY KEY, snapshot_time TEXT NOT NULL
-    )""",
     """CREATE TABLE IF NOT EXISTS watch_initial_cve (
         cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
     )""",
@@ -566,7 +560,7 @@ class WatchStore:
                 meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('schema_version','provider_storage')")) if 'watch_meta' in existing else {}
                 if meta.get('provider_storage') != 'sparse-v1':
                     overlays = {'watch_origin','watch_provider','watch_search','watch_source_check',
-                                'watch_euvd_override','watch_cve_list_queue','watch_cve_list_observation','watch_initial_cve'}
+                                'watch_euvd_override','watch_initial_cve'}
                     for statement in _SCHEMA:
                         if statement.startswith("CREATE TABLE IF NOT EXISTS "):
                             name = statement.split()[5]
@@ -589,9 +583,7 @@ class WatchStore:
                 if meta.get("schema_version") == str(SCHEMA_VERSION) and meta.get("provider_storage") == "sparse-v1":
                     if not _alert_columns_current(db):
                         raise StateError("watch database was created by a pre-release build; delete it and run `watch sync` again")
-                    queue_columns = {row['name'] for row in db.execute('PRAGMA table_info(watch_cve_list_queue)')}
-                    if 'expected_revision' in queue_columns:
-                        return
+                    return
         with self.transaction(create=create) as db:
             self._ensure_schema(db, _timestamp(self._clock))
 
@@ -676,15 +668,6 @@ class WatchStore:
         # Existing NVD and EUVD data stay in their original tables. No row
         # rebuild, JSON validation, provider copy or search backfill is needed.
         # Extra legacy columns are deliberately left untouched.
-        if 'expected_revision' not in {row['name'] for row in db.execute('PRAGMA table_info(watch_cve_list_queue)')}:
-            db.execute('ALTER TABLE watch_cve_list_queue ADD COLUMN expected_revision TEXT')
-            # Earlier builds could mark a delta covered using only the log.
-            # Re-read its asset and retain an explicit unproven interval; a
-            # confirmed history repair can establish a fresh snapshot boundary.
-            cursor = db.execute("SELECT value FROM watch_meta WHERE key='cve_list_cursor'").fetchone()
-            if cursor and cursor[0]:
-                cls._set_meta(db, {'cve_list_coverage_gap': cursor[0]})
-            db.execute("DELETE FROM watch_meta WHERE key IN ('cve_list_delta_asset','cve_list_log_etag')")
         storage = db.execute("SELECT value FROM watch_meta WHERE key='provider_storage'").fetchone()
         if version == "8" and (storage is None or storage[0] != 'sparse-v1'):
             # Recover the pre-release provider-copy layout without retaining
@@ -1161,8 +1144,13 @@ class WatchStore:
         with self.transaction() as db:
             for record, payload in records:
                 content, raw = canonical_json(_nvd_content(record)), canonical_json(payload)
-                previous = db.execute("SELECT record_json,payload_json FROM watch_provider WHERE cve_id=? AND source=?",
+                previous = db.execute("SELECT record_json,payload_json,source_updated FROM watch_provider WHERE cve_id=? AND source=?",
                                       (record.cve_id, source)).fetchone()
+                if source == "cve_list" and previous and previous['source_updated']:
+                    from .cve_list import _time
+                    if not record.last_modified or _time(record.last_modified) < _time(previous['source_updated']):
+                        unchanged += 1
+                        continue
                 db.execute("INSERT INTO watch_provider VALUES (?,?,?,?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET record_json=excluded.record_json,payload_json=excluded.payload_json,source_updated=excluded.source_updated,checked_at=excluded.checked_at",
                            (record.cve_id, source, content, raw, record.last_modified, now))
                 if previous and previous["record_json"] == content and previous["payload_json"] == raw:

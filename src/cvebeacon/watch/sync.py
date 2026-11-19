@@ -294,15 +294,8 @@ def _sync_cve_list(config, http, store, now, initial_mode=None):
         records, new, changed, identifiers = cve_list.sync(http, store, config.watch, now, initial_mode=initial_mode)
     except SourceError as exc:
         return SourceSummary("cve_list", http.requests - before, error=str(exc)), ()
-    metadata = store.metadata()
-    pending = bool(metadata.get("cve_list_pending_until") or metadata.get("cve_list_coverage_gap") or metadata.get("cve_list_retry_pending"))
-    error = None
-    if metadata.get("cve_list_coverage_gap"):
-        error = "cross-midnight completeness unproven; progress retained; confirmed --cve-list-initial full repairs the gap"
-    elif pending:
-        error = "bounded delta catch-up pending; progress retained"
-    return SourceSummary("cve_list", http.requests - before, records, new, changed,
-                        error=error), identifiers
+    return SourceSummary("cve_list", http.requests - before, records, new, changed), identifiers
+
 
 
 def sync_watch(
