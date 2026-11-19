@@ -71,12 +71,10 @@ CVEBeacon is agentless and network-isolated from monitored assets: it reads supp
 ## System requirements
 
 CVEBeacon runs on Linux and Windows with Python 3.11 or newer; see the
-[validation matrix](docs/VALIDATION.md). The figures below were measured on one
-x86_64 host (Ryzen 9 5900X, Python 3.13, no NVD API key, default pacing) with a
-five-asset inventory. RAM is the process peak; database size is the watch
-database after the run. ARM devices are expected to take longer in wall time
-and to need about the same RAM (estimate; not measured on ARM). Figures are
-rounded.
+[validation matrix](docs/VALIDATION.md). The historical figures below were
+measured with a five-asset inventory, no NVD API key and default pacing. RAM is
+the process peak; database size is the watch database after the run. Resource
+needs vary by environment; these rounded measurements are not system minima.
 
 The historical measurements below **exclude `cve_list`** and do not describe
 the complete new default source selection.
