@@ -1,6 +1,7 @@
 {% macro inventory_notice() %}
 <section class="warning" role="status">
 <p><strong>No inventory is configured.</strong> Inventory views and inventory scan operations are unavailable in watch-only mode.</p>
+<p>KEV, critical-severity and custom rule alerting still work without an inventory, so <code>[inventory]</code> is optional for watch mode.</p>
 <p>Add an <code>[inventory]</code> section to the configuration:</p>
 <pre>[inventory]
 path = "inventory.csv"</pre>

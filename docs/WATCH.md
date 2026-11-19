@@ -25,8 +25,9 @@ cvebeacon --config cvebeacon.toml users list
 `watch run` syncs the sources, evaluates the CVEs touched by that sync, and
 delivers pending alerts. `watch sync` only syncs; the durable touch queue keeps
 the evaluation for the next `watch run`. `watch notify` delivers pending alerts
-without syncing or evaluating. `watch statement` renders one stored CVE from a
-Markdown, plain-text, or Word template without syncing or delivering; see
+without syncing or evaluating. Evaluation creates events; delivery happens on
+`watch notify` or the next `watch run`. `watch statement` renders one stored CVE
+from a Markdown, plain-text, or Word template without syncing or delivering; see
 [statements](STATEMENTS.md).
 
 ## Configuration
@@ -80,12 +81,17 @@ identity = "open"   # open, registered, or authenticated
   [reported to clients](#reported-to-clients).
 
 When `[watch].enabled = true`, `[inventory]` is optional. Commands that need an
-inventory (`scan`, `export`, `asset`, `inventory ...`, `doctor`) fail with a
-clear message until `[inventory] path` is added. The dashboard still starts in
-watch-only mode: inventory views show a configuration notice, client allocation
-stays empty, and Operations offers watch operations only. A configuration with
-neither watch mode nor an inventory is rejected, so existing configurations
-keep their behavior.
+inventory (`scan`, `export`, `asset`, `inventory ...`) fail with a clear message
+until `[inventory] path` is added. `doctor` still runs: it checks the
+configuration, the watch and state data directories, the watch database,
+channels, sources and the native schedule, reports the inventory checks as
+skipped, and exits nonzero only when one of those checks fails. A watch schema
+that this release migrates automatically is reported as `ok` with a migration
+note; a schema newer than this release, ambiguous metadata, or an incompatible
+layout fails. The dashboard still starts in watch-only mode: inventory views
+show a configuration notice, client allocation stays empty, and Operations
+offers watch operations only. A configuration with neither watch mode nor an
+inventory is rejected, so existing configurations keep their behavior.
 `schedule install` supports watch-only and combined configurations: it runs
 `watch run` by default when no inventory is configured, and the ordered `run`
 command (scan, then watch run) when both are configured. See
@@ -97,7 +103,11 @@ pacing follows `sources.minimum_request_interval`.
 
 ## Channels
 
-Each channel is a `[watch.channels.<name>]` table. Names start with a letter or
+Each channel is a `[watch.channels.<name>]` table; these are the watch alert
+channels. The legacy `[notifications.*]` tables are scan-report notifications
+and are not used by watch mode; secrets there come from the environment. See
+[notification sections](USER_GUIDE.md#11-teams-notifications) for that legacy
+configuration. Names start with a letter or
 digit and contain at most 64 letters, digits, underscores, dots, or hyphens.
 Every rule channel must name one of these tables.
 
