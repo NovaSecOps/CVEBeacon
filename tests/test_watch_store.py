@@ -526,8 +526,8 @@ def test_schema_version_guard_and_ambiguous_metadata_fail_closed(tmp_path):
     store = WatchStore(tmp_path / "watch.db")
     store.initialize()
     with sqlite3.connect(store.path) as db:
-        db.execute("UPDATE watch_meta SET value='9' WHERE key='schema_version'")
-    with pytest.raises(StateError, match="unsupported watch schema version 9"):
+        db.execute("UPDATE watch_meta SET value='10' WHERE key='schema_version'")
+    with pytest.raises(StateError, match="unsupported watch schema version 10"):
         store.initialize()
 
     path = tmp_path / "ambiguous.db"

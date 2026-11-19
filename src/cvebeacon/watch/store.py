@@ -37,6 +37,7 @@ from .records import (
     WatchRecord,
     build_view,
     canonical_json,
+    normalized_cvss,
 )
 from .reported import (
     NOTICE_KINDS,
@@ -62,7 +63,7 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -334,6 +335,7 @@ class WatchEventRow:
     details: Mapping[str, Any] = field(default_factory=dict)
     published: str | None = None
     first_seen: str | None = None
+    cvss_scores: tuple[CVSSEntry, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,12 +471,6 @@ def _alert_columns_current(db: sqlite3.Connection) -> bool:
     return {"rule_hash", "providers_hash"} <= alert and "occurrence" in event
 
 
-def _euvd_sql_rank(exploited, updated, identifier):
-    rank = EUVDUpdate((), identifier, exploited, date_updated=updated).rank()
-    numeric = "".join(f"{len(str(value)):08d}:{value}" for value in rank[2])
-    return f"{rank[0]}\0{rank[1]}\0{numeric}"
-
-
 def _euvd_covers_observation(updated, scoped_updated, checked_at):
     if not updated:
         return False
@@ -548,7 +544,6 @@ class WatchStore:
         missing = not self.path.exists()
         db = sqlite3.connect(":memory:") if missing else self._connect_readonly()
         db.row_factory = sqlite3.Row
-        db.create_function("watch_euvd_rank", 3, _euvd_sql_rank, deterministic=True)
         try:
             if missing:
                 self._ensure_schema(db, _timestamp(self._clock))
@@ -611,9 +606,9 @@ class WatchStore:
             cls._set_meta(db, {"provider_storage": "sparse-v1"})
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5", "6", "7", "8"} and not _alert_columns_current(db):
+        if version != "1" and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -713,8 +708,30 @@ class WatchStore:
                 payload = json.loads(row["payload_json"])
                 text = description_text(payload) if row["source"] == "cve_list" else payload.get("description") or ""
                 db.execute("INSERT INTO watch_search VALUES (?,?,?)", (row["cve_id"], row["source"], text))
+        if version_number < 9:
+            cls._backfill_vulnrichment(db, now)
         cls._ensure_search(db)
         cls._set_meta(db, {"schema_version": str(SCHEMA_VERSION), "provider_storage": "sparse-v1"})
+
+    @staticmethod
+    def _backfill_vulnrichment(db, now):
+        from .cve_list import vulnrichment_exploitation
+
+        for row in db.execute(
+            "SELECT cve_id,payload_json FROM watch_provider WHERE source='cve_list' "
+            "AND json_extract(record_json,'$.ssvc_exploitation') IS NULL "
+            "AND instr(lower(payload_json), '\"ssvc\"') > 0 ORDER BY cve_id"
+        ):
+            status = vulnrichment_exploitation(json.loads(row["payload_json"]))
+            if status is None:
+                continue
+            db.execute(
+                "UPDATE watch_provider SET record_json=json_set(record_json,'$.ssvc_exploitation',?) "
+                "WHERE cve_id=? AND source='cve_list'",
+                (status, row["cve_id"]),
+            )
+            db.execute("INSERT OR IGNORE INTO watch_touched(cve_id,touched_at) VALUES (?,?)",
+                       (row["cve_id"], now))
 
     @staticmethod
     def _ensure_search(db: sqlite3.Connection) -> None:
@@ -1015,21 +1032,17 @@ class WatchStore:
         return "changed"
 
     @staticmethod
-    def _best_euvd(db: sqlite3.Connection, identifier: str) -> EUVDUpdate | None:
+    def _euvd_candidates(db: sqlite3.Connection, identifier: str) -> tuple[EUVDUpdate, ...]:
         override = db.execute("SELECT items_json FROM watch_euvd_override WHERE cve_id=?", (identifier,)).fetchone()
         if override is not None:
-            candidates = [_euvd_from_row(item) for item in json.loads(override[0])]
-            return max(candidates, key=lambda item: item.rank()) if candidates else None
+            return tuple(_euvd_from_row(item) for item in json.loads(override[0]))
         rows = db.execute(
             "SELECT i.* FROM watch_euvd_item i "
             "JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id "
             "WHERE a.cve_id=?",
             (identifier,),
         ).fetchall()
-        if not rows:
-            return None
-        candidates = [_euvd_from_row(row) for row in rows]
-        return max(candidates, key=lambda item: item.rank())
+        return tuple(_euvd_from_row(row) for row in rows)
 
     @staticmethod
     def _kev_row(
@@ -1067,8 +1080,11 @@ class WatchStore:
         row = self._row(db, identifier)
         if row is None:
             return None
-        record = self._merged_record(db, identifier, catalogs)
-        euvd = self._best_euvd(db, identifier) if "euvd" in catalogs else None
+        record, additional_cvss, ssvc_source = self._merged_record(db, identifier, catalogs)
+        euvd_candidates = self._euvd_candidates(db, identifier) if "euvd" in catalogs else ()
+        euvd = max(euvd_candidates, key=EUVDUpdate.rank, default=None)
+        extra_euvd = tuple(item.cvss for item in euvd_candidates
+                           if item.cvss is not None and item is not euvd and item.cvss != euvd.cvss)
         return build_view(
             record,
             euvd=euvd,
@@ -1078,6 +1094,8 @@ class WatchStore:
             eu_catalog="eu_kev" in catalogs,
             epss=self._epss_row(db, identifier) if "epss" in catalogs else None,
             first_seen=row["first_seen"],
+            additional_cvss=normalized_cvss((*additional_cvss, *extra_euvd)),
+            ssvc_source=ssvc_source,
         )
 
     def _refresh_views(
@@ -1223,21 +1241,29 @@ class WatchStore:
         providers = {item["source"]: self._record({"cve_id": identifier, **json.loads(item["record_json"])})
                      for item in db.execute("SELECT source,record_json FROM watch_provider WHERE cve_id=?", (identifier,))
                      if item["source"] in allowed}
-        if origin is not None:
-            return next((providers[name] for name in ("cve_list", "euvd", "cisa_kev", "eu_kev") if name in providers), WatchRecord(identifier, "reserved"))
-        primary = self._record(row)
         official = providers.get("cve_list")
+        cisa_ssvc = "CISA Vulnrichment (CVE List SSVC)"
+        if origin is not None:
+            record = next((providers[name] for name in ("cve_list", "euvd", "cisa_kev", "eu_kev") if name in providers), WatchRecord(identifier, "reserved"))
+            return record, (), cisa_ssvc if official and official.ssvc_exploitation else None
+        primary = self._record(row)
+        nvd_ssvc = "NVD SSVC" if primary.ssvc_exploitation else None
         if official is None:
-            return primary
-        # NVD status and every populated NVD field retain their old meaning.
-        return replace(primary,
+            return primary, (), nvd_ssvc
+        additional_cvss = tuple(entry for entry in official.cvss if primary.cvss and entry not in primary.cvss)
+        strengths = {None: 0, "none": 1, "poc": 2, "active": 3}
+        use_official_ssvc = strengths[official.ssvc_exploitation] > strengths[primary.ssvc_exploitation]
+        # Keep NVD precedence for legacy scoring and stable descriptive fields.
+        merged = replace(primary,
                        published=primary.published or official.published,
                        last_modified=primary.last_modified or official.last_modified,
                        description=primary.description or official.description,
                        source_identifier=primary.source_identifier or official.source_identifier,
                        cvss=primary.cvss or official.cvss, cwes=primary.cwes or official.cwes,
                        products=primary.products or official.products,
-                       references=primary.references or official.references)
+                       references=primary.references or official.references,
+                       ssvc_exploitation=official.ssvc_exploitation if use_official_ssvc else primary.ssvc_exploitation)
+        return merged, additional_cvss, cisa_ssvc if use_official_ssvc else nvd_ssvc
 
     def upsert_nvd(self, records, *, meta=None, catalogs=()) -> StepCounts:
         self.initialize()
@@ -1891,6 +1917,7 @@ class WatchStore:
         since: date | None = None,
         until: date | None = None,
         offset: int = 0,
+        catalogs: Sequence[str] | None = None,
     ) -> tuple[WatchEventRow, ...]:
         if limit < 1:
             raise StateError("event limit must be positive")
@@ -1958,8 +1985,11 @@ class WatchStore:
                 + " ORDER BY e.created_at DESC, e.id DESC LIMIT ? OFFSET ?",
                 parameters,
             ).fetchall()
+            views = {identifier: self._view(db, identifier, catalogs)
+                     for identifier in dict.fromkeys(row["cve_id"] for row in rows)} if catalogs is not None else {}
         output: list[WatchEventRow] = []
         for row in rows:
+            view = views.get(row["cve_id"])
             try:
                 reasons = tuple(str(item) for item in json.loads(row["reasons_json"]))
                 details = json.loads(row["details_json"] or "{}")
@@ -1979,6 +2009,7 @@ class WatchStore:
                     details,
                     row["published"],
                     row["first_seen"],
+                    view.cvss_scores if view else (),
                 )
             )
         return tuple(output)

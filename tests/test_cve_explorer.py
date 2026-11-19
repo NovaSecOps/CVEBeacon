@@ -94,7 +94,7 @@ def test_schema_seven_upgrade_preserves_records_events_and_resume(tmp_path):
         db.execute("INSERT INTO watch_meta VALUES ('euvd_page_cursor','unchanged cursor')")
     store = WatchStore(path)
     store.initialize()
-    assert store.metadata()['schema_version'] == '8'
+    assert store.metadata()['schema_version'] == '9'
     assert store.metadata()['euvd_page_cursor'] == 'unchanged cursor'
     assert store.search(query='Stored').total == 1
     assert store.view('CVE-2026-10001').first_seen == '2026-11-01'
@@ -104,3 +104,126 @@ def test_schema_seven_upgrade_preserves_records_events_and_resume(tmp_path):
     assert store.source_presence('CVE-2026-10001')[0]['state'] == 'present'
     store.upsert_cve_list([official('CVE-2026-10002', state='RESERVED')])
     assert store.view('CVE-2026-10002').status == 'reserved'
+
+
+def vulnrichment_record(identifier="CVE-2026-10001", exploitation="active"):
+    payload = official(identifier)
+    payload["containers"]["adp"] = [{
+        "providerMetadata": {"shortName": "CISA-ADP"},
+        "metrics": [
+            {"other": {"type": "ssvc", "content": {"options": [
+                {"Exploitation": exploitation}, {"Automatable": "no"},
+            ]}}},
+            {"cvssV4_0": {"baseScore": 7.5, "vectorString": "CVSS:4.0/AV:N"}},
+        ],
+    }]
+    return payload
+
+
+def test_vulnrichment_exploitation_and_scores_survive_nvd_precedence(tmp_path):
+    from cvebeacon.watch.records import CVSSEntry
+    from cvebeacon.watch.rules import evaluate_condition, parse_rules
+
+    identifier = "CVE-2026-10001"
+    catalogs = ("nvd", "cve_list")
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_nvd([WatchRecord(identifier, "published", cvss=(CVSSEntry("nvd", "nvd", "2.0", 6.0),))])
+    store.upsert_cve_list([vulnrichment_record()], catalogs=catalogs)
+    view = store.view(identifier, catalogs=catalogs)
+    assert view.exploitation == ("active", ("CISA Vulnrichment (CVE List SSVC)",))
+    assert [entry.version for entry in view.cvss_scores] == ["4.0", "3.1", "2.0"]
+    base = {"name": "test", "channels": ["sink"]}
+    for condition, expected in [
+        ({"cvss_min": 9.0}, False),
+        ({"cvss_min": {"score": 9.0, "versions": ["3.1"]}}, True),
+    ]:
+        rule = parse_rules([{**base, "condition": condition}])[0]
+        assert evaluate_condition(view, rule.condition, rule)[0] is expected
+
+
+def test_schema_eight_upgrade_backfills_vulnrichment_and_queues_only_changed_rows(tmp_path):
+    from cvebeacon.watch.records import canonical_json
+
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_cve_list([vulnrichment_record(), official("CVE-2026-10002")])
+    with store.transaction() as db:
+        db.execute("UPDATE watch_meta SET value='8' WHERE key='schema_version'")
+        db.execute("UPDATE watch_provider SET record_json=json_set(record_json,'$.ssvc_exploitation',NULL)")
+        db.execute("DELETE FROM watch_touched")
+        db.execute("INSERT INTO watch_meta VALUES ('euvd_page_cursor',?)", (canonical_json(["cursor"]),))
+    for _ in range(2):
+        store.initialize()
+    assert store.metadata()["schema_version"] == "9"
+    assert store.metadata()["euvd_page_cursor"] == '["cursor"]'
+    assert store.view("CVE-2026-10001").exploitation == ("active", ("CISA Vulnrichment (CVE List SSVC)",))
+    with store.read() as db:
+        assert [row[0] for row in db.execute("SELECT cve_id FROM watch_touched")] == ["CVE-2026-10001"]
+
+
+def test_explorer_combines_filters_and_matches_score_and_selectors_on_same_entry(tmp_path):
+    from datetime import date
+    from cvebeacon.watch.records import CVSSEntry, KEVFields
+
+    first, second, third = ("CVE-2026-10001", "CVE-2026-10002", "CVE-2026-10003")
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_nvd([WatchRecord(first, "published", cvss=(CVSSEntry("nvd", "nvd", "2.0", 10.0),))])
+    store.upsert_cve_list([vulnrichment_record(first), vulnrichment_record(second, "none"), official(third)])
+    store.replace_kev("eu", {first: KEVFields("2026-11-02")})
+    with store.transaction() as db:
+        db.execute("INSERT INTO watch_epss(cve_id,epss,percentile,score_date) VALUES (?,?,?,?)",
+                   (first, .4, .9, "2026-11-02"))
+        db.execute("INSERT INTO watch_event(rule,cve_id,kind,reasons_json,details_json,occurrence,initial,created_at) "
+                   "VALUES ('rule',?,'match','[]','{}','match',0,'2026-11-02')", (first,))
+    result = store.search(
+        source=("cve_list", "euvd"), kev=("eu", "cisa"), exploitation=("active", "poc"),
+        epss_min=.4, epss_max=.5, cvss_min=7.5, cvss_max=8,
+        cvss_version=("4.0", "3.0"), cvss_provider=("cisa-adp", "other"),
+        severity=("critical", "high"), since=date(2026, 11, 1), until=date(2026, 11, 1),
+        modified_since=date(2026, 11, 2), modified_until=date(2026, 11, 2),
+        has_events="yes", reported="no", client_ids=[first, third],
+    )
+    assert [item.cve_id for item in result.records] == [first]
+    assert store.search(cvss_min=9, cvss_version="4.0", cvss_provider="nvd").total == 0
+    assert store.search(cvss_max=8, cvss_version="4.0", cvss_provider="cisa-adp").total == 2
+    assert store.search(exploitation="none", kev="neither").records[0].cve_id == second
+    assert store.search(exploitation="unknown", kev="neither").records[0].cve_id == third
+    assert store.search(source=("nvd", "cve_list")).total == 3
+
+
+def test_explorer_rejects_invalid_filter_bounds_and_tokens(tmp_path):
+    import pytest
+    from cvebeacon.errors import StateError
+
+    store = WatchStore(tmp_path / "watch.db")
+    for filters in (
+        {"epss_min": float("nan")}, {"epss_max": 1.1}, {"cvss_min": -1},
+        {"cvss_min": 8, "cvss_max": 7}, {"cvss_version": "4.0') OR 1=1--"},
+        {"cvss_provider": "nvd') OR 1=1--"}, {"source": ["nvd"] * 50},
+        {"exploitation": "other"}, {"kev": "x"},
+    ):
+        with pytest.raises(StateError):
+            store.search(**filters)
+
+
+def test_euvd_qualified_filters_include_all_effective_advisory_scores(tmp_path):
+    from cvebeacon.watch.records import CVSSEntry, EUVDUpdate
+
+    identifier = "CVE-2026-10001"
+    catalogs = ("nvd", "euvd")
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_nvd([WatchRecord(identifier, "published")])
+    active = EUVDUpdate((identifier,), "EUVD-2026-1", "2026-11-01",
+                        CVSSEntry("euvd", "euvd", "3.1", 8.0))
+    recent = EUVDUpdate((identifier,), "EUVD-2026-2", None,
+                        CVSSEntry("euvd", "euvd", "4.0", 9.8), "2026-11-02")
+    store.replace_euvd_items([active, recent], catalogs=catalogs)
+    result = store.search(exploitation="active", cvss_version="4.0", cvss_provider="euvd", cvss_min=9)
+    assert result.total == 1
+    assert result.records[0].exploitation == ("active", ("EUVD",))
+    assert [entry.version for entry in result.records[0].cvss_scores] == ["4.0", "3.1"]
+    assert [entry.version for entry in result.records[0].cvss] == ["3.1"]
+
+    store.upsert_euvd_cve(identifier, [recent], catalogs=catalogs)
+    assert store.search(exploitation="active").total == 0
+    assert store.search(exploitation="unknown", cvss_version="4.0", cvss_min=9).total == 1
+    assert store.search(cvss_version="3.1").total == 0

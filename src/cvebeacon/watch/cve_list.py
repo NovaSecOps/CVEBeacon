@@ -20,7 +20,8 @@ from ..errors import SourceError
 from ..private_storage import private_file
 from .directories import ensure_private_directory
 from ..sources.common import cve_id, source_payload
-from .records import CVSSEntry, Product, Reference, WatchRecord
+from .feeds import _option_value
+from .records import CVSSEntry, Product, Reference, SSVC_EXPLOITATION, WatchRecord
 
 RELEASE_URL = "https://api.github.com/repos/CVEProject/cvelistV5/releases"
 ASSET_PREFIX = "https://github.com/CVEProject/cvelistV5/releases/download/"
@@ -75,6 +76,29 @@ def _record_date_or_none(value):
 
 
 @source_payload("cve_list")
+def _cisa_adp(provider):
+    name = str(provider.get("shortName") or "").casefold()
+    return ("cisa" in name or name == "vulnrichment"
+            or provider.get("orgId") == "134c704f-9b21-4f2e-91b3-4a467353bcc0")
+
+
+def vulnrichment_exploitation(payload):
+    statuses = set()
+    for container in (payload.get("containers") or {}).get("adp") or []:
+        if not _cisa_adp(container.get("providerMetadata") or {}):
+            continue
+        for metric in container.get("metrics") or []:
+            other = metric.get("other")
+            if not isinstance(other, dict) or str(other.get("type")).casefold() != "ssvc":
+                continue
+            content = other.get("content")
+            if isinstance(content, dict):
+                value = _option_value(content.get("options"))
+                if isinstance(value, str):
+                    statuses.add(value.strip().casefold())
+    return next((status for status in reversed(SSVC_EXPLOITATION) if status in statuses), None)
+
+
 def parse_record(payload):
     if not isinstance(payload, dict):
         raise SourceError("cve_list", "record is not an object")
@@ -93,7 +117,7 @@ def parse_record(payload):
     for role, container in [("cna", cna), *(("other", item) for item in containers.get("adp") or [])]:
         provider = container.get("providerMetadata") or {}
         name = str(provider.get("shortName") or provider.get("orgId") or role)
-        if role != "cna" and ("cisa" in name.casefold() or provider.get("orgId") == "134c704f-9b21-4f2e-91b3-4a467353bcc0"):
+        if role != "cna" and _cisa_adp(provider):
             role = "cisa-adp"
         for metric in container.get("metrics") or []:
             for key, version in (("cvssV2_0", "2.0"), ("cvssV3_0", "3.0"), ("cvssV3_1", "3.1"), ("cvssV4_0", "4.0")):
@@ -102,7 +126,10 @@ def parse_record(payload):
                     score = data.get("baseScore")
                     if isinstance(score, bool) or not isinstance(score, (float, int)) or not 0 <= score <= 10:
                         raise SourceError("cve_list", "invalid CVSS score")
-                    entries.append(CVSSEntry(role, name, version, float(score), data.get("vectorString"), data.get("baseSeverity")))
+                    vector, severity = data.get("vectorString"), data.get("baseSeverity")
+                    entries.append(CVSSEntry(role, name, version, float(score),
+                                             vector if isinstance(vector, str) else None,
+                                             severity if isinstance(severity, str) else None))
         for item in container.get("affected") or []:
             products.append(Product(str(item.get("vendor") or ""), str(item.get("product") or "")))
         for item in container.get("references") or []:
@@ -113,7 +140,8 @@ def parse_record(payload):
     return WatchRecord(identifier, state.lower(), _record_date(metadata.get("datePublished")), _record_date_or_none(metadata.get("dateUpdated") or metadata.get("dateReserved")),
                        description_text(payload) or None,
                        str((cna.get("providerMetadata") or {}).get("shortName") or metadata.get("assignerShortName") or "") or None,
-                       tuple(entries), tuple(cwes), tuple(products), tuple(references))
+                       tuple(entries), tuple(cwes), tuple(products), tuple(references),
+                       ssvc_exploitation=vulnrichment_exploitation(payload))
 
 
 def _json(http, url, *, headers=None, response_headers=None, byte_cap=None):

@@ -4,6 +4,19 @@ Old configuration files remain valid. The optional `[update]` section defaults
 to disabled. Database migrations run locally and preserve existing records.
 Back up before upgrading; do not run an older executable against newer schemas.
 
+## Watch schema 8 to 9
+
+The next watch write fills in CISA Vulnrichment SSVC exploitation from previously
+stored CVE List payloads in one transaction. CVEs with recovered evidence are
+queued for normal evaluation. The migration preserves records, events, delivery
+history, cursors and report history. It uses local data and requires neither
+a resync nor a configuration edit. Read-only pages remain available during the
+upgrade and show the recovered statuses after the first watch write.
+
+Scalar CVSS conditions retain their matching behavior and rule identity. The
+optional version-qualified form is available through the same rule and editor
+interfaces. Version 2 webhook documents gain the complete score list and
+exploitation details alongside the original CVSS field.
 
 ## Watch schema 7 to 8
 
