@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% from 'ui.html' import page_header, card, callout, button, badge %}
+{% from 'ui.html' import page_header, card, callout, button %}
 {% block title %}Updates · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Updates', 'Check whether a newer CVEBeacon release is available and, as an administrator, request an update.') }}
@@ -9,9 +9,9 @@
 {% call card('Current status', 'The version this installation runs and what the last release check found.') %}
 <p>Current version: <strong>{{ current }}</strong></p>
 <p>Available version: {{ status.available or 'No newer release checked' }}</p>
-<p>Last check: {{ status.last_check or 'Never' }}</p>
-{% if status.last_request %}<p class="muted">Last request: {{ status.last_request.result }} ({{ status.last_request.version or 'unspecified version' }}) at {{ status.last_request.time }}</p>{% endif %}
-{% if status.last_update %}<p class="muted">Last update: {{ status.last_update.result }} ({{ status.last_update.version }}) at {{ status.last_update.time }}</p>{% endif %}
+<p>Last check: {{ watch_stamp(status.last_check) or 'Never' }}</p>
+{% if status.last_request %}<p class="muted">Last request: {{ status.last_request.result }} ({{ status.last_request.version or 'unspecified version' }}) at {{ watch_stamp(status.last_request.time) }}</p>{% endif %}
+{% if status.last_update %}<p class="muted">Last update: {{ status.last_update.result }} ({{ status.last_update.version }}) at {{ watch_stamp(status.last_update.time) }}</p>{% endif %}
 {% if status.last_update and status.last_update.warning %}{% call callout('danger', 'The last update needs attention') %}<p>{{ status.last_update.warning }}</p>{% endcall %}{% endif %}
 {% endcall %}
 {% if status.notes %}

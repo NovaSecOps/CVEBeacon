@@ -1,4 +1,4 @@
-{% extends 'base.html' %}
+{% extends 'base.html' %}{% set nav_active = 'user_list' %}
 {% from 'ui.html' import page_header, card, callout, field, button, link_button %}
 {% block title %}Edit user {{ target.username }} · CVEBeacon{% endblock %}
 {% block content %}
@@ -13,8 +13,8 @@
 <div class="field"><label for="f-role">Role</label>
 <p class="help" id="f-role-help">A role is a named bundle of permissions. Changing the role signs this account out everywhere.</p>
 <select id="f-role" name="role" aria-describedby="f-role-help">{% for name in roles %}<option value="{{ name }}" {% if name == role %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
-<div class="field"><label for="f-disabled"><input id="f-disabled" type="checkbox" name="disabled" value="yes" {% if target.disabled %}checked{% endif %}> Disabled</label>
-<p class="help">A disabled account cannot sign in. Its details are kept unchanged.</p></div>
+<div class="field"><label for="f-disabled"><input id="f-disabled" type="checkbox" name="disabled" value="yes" aria-describedby="f-disabled-help" {% if target.disabled %}checked{% endif %}> Disabled</label>
+<p class="help" id="f-disabled-help">A disabled account cannot sign in. Its details are kept unchanged.</p></div>
 <div class="form-actions">{{ button('Save user') }}{{ link_button('Cancel', url_for('user_list'), kind='secondary') }}</div>
 </form>
 {% endcall %}

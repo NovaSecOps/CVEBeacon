@@ -12,7 +12,7 @@
 <td>{{ user.display_name or '' }}</td>
 <td>{{ user.email or '' }}</td>
 <td>{{ user_roles.get(user.id, '') }}</td>
-<td>{% if user.disabled %}{{ badge('Disabled', 'neutral') }}{% else %}{{ badge('Enabled', 'success') }}{% endif %}{% if user.locked_until %}<br><span class="muted">Sign-in lock recorded until {{ user.locked_until }} after failed attempts</span>{% endif %}</td>
+<td>{% if user.disabled %}{{ badge('Disabled', 'neutral') }}{% else %}{{ badge('Enabled', 'success') }}{% endif %}{% if user.locked_until %}<br><span class="muted">Sign-in lock recorded until {{ watch_stamp(user.locked_until) }} after failed attempts</span>{% endif %}</td>
 </tr>{% else %}<tr><td colspan="5">No accounts yet. Add the first account with the form below.</td></tr>{% endfor %}
 </tbody></table>
 {% endcall %}
@@ -21,12 +21,12 @@
 {% call card('Add user', 'Set a strong password and share it privately with the person. They can change it later in My account.', id='add') %}
 <form method="post" class="stack">
 <input type="hidden" name="csrf" value="{{ csrf }}">
-{{ field('Username', 'username', required=true, maxlength=64, autocomplete='off', help='Used at every sign-in. Lowercase letters, digits, dashes and underscores.') }}
+{{ field('Username', 'username', required=true, maxlength=64, autocomplete='off', help='Used at every sign-in. Letters, digits, dots, underscores, at signs and dashes, up to 64 characters.') }}
 {{ field('Display name', 'display_name', maxlength=100, optional=true, help='Shown in place of the username where a friendlier name helps.') }}
 {{ field('Email', 'email', type='email', maxlength=254, optional=true, help='Optional. For contacting the person about their account.') }}
 {{ field('Password', 'password', type='password', required=true, minlength=12, maxlength=1024, autocomplete='new-password', help='At least 12 characters. A short sentence works well. Share it privately, not by group chat.') }}
 <div class="field"><label for="f-role">Role</label>
-<p class="help" id="f-role-help">A role is a named bundle of permissions. Viewer can read everything; Operator can also run jobs. Create more roles on the Roles page.</p>
+<p class="help" id="f-role-help">A role is a named bundle of permissions. Viewer can read everything; Operator can also run jobs. An administrator can create more roles on the Roles page.</p>
 <select id="f-role" name="role" required aria-describedby="f-role-help">{% if 'viewer' not in roles %}<option value="" selected>Choose a role</option>{% endif %}{% for name in roles %}<option value="{{ name }}" {% if name == 'viewer' %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
 <div class="form-actions">{{ button('Add user') }}</div>
 </form>
