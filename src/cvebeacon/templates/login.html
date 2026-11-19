@@ -3,7 +3,7 @@
 {% block title %}Log in · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Dashboard login', 'Sign in to see alerts, findings and reports.') }}
-{% if failed %}{% call callout('danger', 'Sign-in was refused') %}<p>The username or password was not accepted{% if accounts %}, or the account is temporarily locked after repeated failed attempts{% endif %}. Wait a few minutes and try again, or ask an administrator to unlock the account.</p>{% endcall %}{% endif %}
+{% if failed %}{% call callout('danger', 'Sign-in was refused') %}<p>The username or password was not accepted{% if accounts %}, or the account is temporarily locked after repeated failed attempts{% endif %}. Wait a few minutes and try again{% if accounts %}, or ask an administrator to unlock the account{% endif %}.</p>{% endcall %}{% endif %}
 {% call card('Sign in') %}
 <form method="post" action="{{ url_for('login') }}" class="stack">
 <input type="hidden" name="csrf" value="{{ csrf }}">
