@@ -1,13 +1,14 @@
 """CVE List release imports with bounded archives and independent cursors."""
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 
 import hashlib
 import json
 import re
 import os
 import shutil
+import sqlite3
 import struct
 import tempfile
 import zipfile
@@ -34,6 +35,8 @@ ARCHIVE_CAP = 1024 * 1024 * 1024
 EXPANDED_CAP = 8 * 1024 * 1024 * 1024
 MAX_MEMBERS = 1_000_000
 BATCH = 100
+DISK_RESERVE = 64 * 1024 * 1024
+STORAGE_MULTIPLIER = 8
 
 
 def description_text(payload):
@@ -157,8 +160,13 @@ def release(http, metadata, *, url=None):
     return selected, {"cve_list_release": cache, "cve_list_etag": response_headers.get("etag", metadata.get("cve_list_etag", ""))}
 
 
+def _require_disk(directory, needed):
+    if directory is not None and shutil.disk_usage(directory).free < needed + DISK_RESERVE:
+        raise SourceError("cve_list", "insufficient disk for archive and provider storage")
+
+
 def _directory_limits(file):
-    """Validate ZIP metadata before ZipFile allocates its directory objects."""
+    """Check the exact directory range; reject ambiguous/prefixed layouts."""
     file.seek(0, 2)
     length = file.tell()
     file.seek(max(0, length - 65557))
@@ -167,70 +175,100 @@ def _directory_limits(file):
     if position < 0 or len(tail) - position < 22:
         raise SourceError("cve_list", "invalid ZIP directory")
     end = struct.unpack("<4s4H2LH", tail[position:position + 22])
-    if position + 22 + end[7] != len(tail) or end[1] or end[2]:
+    if position + 22 + end[7] != len(tail) or end[1] or end[2] or end[3] != end[4]:
         raise SourceError("cve_list", "invalid ZIP directory")
-    count, size, offset = end[4], end[5], end[6]
-    end_position = length - len(tail) + position
+    count, size, offset = end[4:7]
+    directory_end = length - len(tail) + position
     if count == 65535 or size == 0xffffffff or offset == 0xffffffff:
-        file.seek(end_position - 20)
+        file.seek(directory_end - 20)
         locator = struct.unpack("<4sLQL", file.read(20))
         if locator[0] != b"PK\x06\x07" or locator[1] or locator[3] != 1:
             raise SourceError("cve_list", "invalid ZIP64 directory")
         file.seek(locator[2])
         extended = struct.unpack("<4sQ2H2L4Q", file.read(56))
-        if extended[0] != b"PK\x06\x06" or not 44 <= extended[1] <= 1024 or extended[4] or extended[5] or extended[6] != extended[7]:
+        if (extended[0] != b"PK\x06\x06" or extended[1] != 44
+                or extended[4] or extended[5] or extended[6] != extended[7]
+                or locator[2] + 56 + 20 != directory_end):
             raise SourceError("cve_list", "invalid ZIP64 directory")
-        count, size, offset = extended[7], extended[8], extended[9]
-    if count > MAX_MEMBERS or size > DIRECTORY_CAP or offset + size > end_position:
-        raise SourceError("cve_list", "ZIP directory exceeds member or size limit")
-    file.seek(offset)
+        count, size, offset = extended[7:10]
+        directory_end = locator[2]
+    if count > MAX_MEMBERS or size > DIRECTORY_CAP or offset + size != directory_end:
+        raise SourceError("cve_list", "invalid ZIP directory range or size limit")
     actual = expanded = 0
-    boundary = offset + size
-    while file.tell() < boundary:
+    for info in _directory_entries(file, offset, size):
+        actual += 1
+        expanded += info.file_size
+        if actual > MAX_MEMBERS or expanded > EXPANDED_CAP:
+            raise SourceError("cve_list", "ZIP directory exceeds member or expanded size limit")
+    if actual != count:
+        raise SourceError("cve_list", "ZIP directory member count mismatch")
+    return offset, size, count, expanded
+
+
+def _directory_entries(file, offset, size):
+    """Yield one ZipInfo at a time, never allocate ZipFile's complete index."""
+    position = offset
+    while position < offset + size:
+        file.seek(position)
         header = file.read(46)
         if len(header) != 46 or header[:4] != b"PK\x01\x02":
             raise SourceError("cve_list", "invalid ZIP directory entry")
         fields = struct.unpack("<4s6H3L5H2L", header)
-        actual += 1
-        expanded += fields[9]
-        if actual > MAX_MEMBERS or expanded > EXPANDED_CAP or fields[9] == 0xffffffff or fields[10] > 4096:
-            raise SourceError("cve_list", "ZIP directory exceeds member or expanded size limit")
-        file.seek(sum(fields[10:13]), 1)
-        if file.tell() > boundary:
-            raise SourceError("cve_list", "invalid ZIP directory size")
-    if actual != count:
-        raise SourceError("cve_list", "ZIP directory member count mismatch")
-    file.seek(0)
+        position += 46 + sum(fields[10:13])
+        if (position > offset + size or fields[10] > 4096 or fields[13]
+                or fields[8] == 0xffffffff or fields[9] == 0xffffffff
+                or fields[16] >= offset or fields[2] > zipfile.MAX_EXTRACT_VERSION):
+            raise SourceError("cve_list", "invalid ZIP directory member")
+        name = file.read(fields[10]).decode("utf-8" if fields[3] & 0x800 else "cp437")
+        info = zipfile.ZipInfo(name)
+        info.flag_bits, info.compress_type = fields[3:5]
+        info.CRC, info.compress_size, info.file_size = fields[7:10]
+        info.header_offset = fields[16]
+        info._end_offset = offset
+        yield info
+
+
+class _StreamingZip(zipfile.ZipFile):
+    """Use stdlib CRC/decompression without its all-members directory index."""
+    def __init__(self, file, directory_start):
+        self._directory_start = directory_start
+        super().__init__(file)
+
+    def _RealGetContents(self):
+        self.start_dir = self._directory_start
 
 
 def _members(file, *, allow_empty=False, nested=False, temporary_directory=None):
-    _directory_limits(file)
-    with zipfile.ZipFile(file) as archive:
-        infos = archive.infolist()
-        if len(infos) > MAX_MEMBERS or sum(info.file_size for info in infos) > EXPANDED_CAP:
-            raise SourceError("cve_list", "expanded archive exceeds limit")
-        wrapped = [info for info in infos if PurePosixPath(info.filename).name == "cves.zip"]
-        if wrapped:
-            if nested or len(wrapped) != 1 or len(infos) != 1 or wrapped[0].file_size > ARCHIVE_CAP:
-                raise SourceError("cve_list", "invalid nested baseline archive")
-            with tempfile.TemporaryFile(dir=temporary_directory) as inner, archive.open(wrapped[0]) as member:
-                size = 0
-                while chunk := member.read(65536):
-                    size += len(chunk)
-                    if size > ARCHIVE_CAP:
-                        raise SourceError("cve_list", "nested archive exceeds limit")
-                    inner.write(chunk)
-                inner.seek(0)
-                yield from _members(inner, allow_empty=allow_empty, nested=True, temporary_directory=temporary_directory)
-            return
-        seen = set()
-        for info in infos:
+    offset, size, count, expanded = _directory_limits(file)
+    # Expanded JSON is stored as raw + normalized + search text, with room for
+    # indexes and a transaction/WAL. Recheck per batch as actual storage grows.
+    _require_disk(temporary_directory, STORAGE_MULTIPLIER * expanded + 4 * size)
+    with (_StreamingZip(file, offset) as archive,
+          tempfile.TemporaryDirectory(dir=temporary_directory) as seen_directory,
+          closing(sqlite3.connect(str(Path(seen_directory) / 'seen.sqlite'))) as seen):
+        seen.execute("PRAGMA cache_size=-1024")
+        seen.execute("CREATE TABLE seen(name TEXT PRIMARY KEY)")
+        found = False
+        for info in _directory_entries(file, offset, size):
             name = PurePosixPath(info.filename).name
+            if name == "cves.zip":
+                if nested or count != 1 or info.file_size > ARCHIVE_CAP:
+                    raise SourceError("cve_list", "invalid nested baseline archive")
+                _require_disk(temporary_directory, info.file_size)
+                with tempfile.TemporaryFile(dir=temporary_directory) as inner, archive.open(info) as member:
+                    shutil.copyfileobj(member, inner, 65536)
+                    inner.seek(0)
+                    yield from _members(inner, allow_empty=allow_empty, nested=True, temporary_directory=temporary_directory)
+                return
             if not re.fullmatch(r"CVE-\d{4}-\d{4,}\.json", name):
                 continue
-            if info.file_size > JSON_CAP or info.flag_bits & 1 or name in seen:
+            if info.file_size > JSON_CAP or info.flag_bits & 1:
                 raise SourceError("cve_list", "invalid archive member")
-            seen.add(name)
+            try:
+                seen.execute("INSERT INTO seen VALUES (?)", (name,))
+            except sqlite3.IntegrityError as exc:
+                raise SourceError("cve_list", "duplicate archive member") from exc
+            found = True
             with archive.open(info) as member:
                 raw = member.read(JSON_CAP + 1)
             if len(raw) > JSON_CAP:
@@ -240,7 +278,7 @@ def _members(file, *, allow_empty=False, nested=False, temporary_directory=None)
             if record.cve_id != name[:-5]:
                 raise SourceError("cve_list", "archive member identifier mismatch")
             yield payload
-        if not seen and not allow_empty:
+        if not found and not allow_empty:
             raise SourceError("cve_list", "archive contains no CVE records")
 
 
@@ -248,16 +286,15 @@ def archive_records(http, asset, *, allow_empty=False, cache_directory=None):
     """Keep a verified download for parse retries; bound disk, directory and body.
 
     Full imports use disk adjacent to the state DB rather than an implicit tmpfs.
-    A failed partial download restarts at most one capped archive per sync; a
-    complete download is reused for all subsequent record-import retries.
+    An interrupted body restarts on the next attempt. Completed bodies may be
+    reused; any archive validation failure evicts the cache before raising.
     """
     path = None
     try:
         if cache_directory is not None:
             directory = Path(cache_directory)
             ensure_private_directory(directory)
-            if shutil.disk_usage(directory).free < 2 * asset["size"] + 64 * 1024 * 1024:
-                raise SourceError("cve_list", "insufficient temporary disk for archive")
+            _require_disk(directory, asset["size"])
             token = hashlib.sha256(json.dumps(asset, sort_keys=True).encode()).hexdigest()[:24]
             path = directory / ("cve-list-" + token + ".zip")
             for old in directory.glob("cve-list-*.zip"):
@@ -291,7 +328,13 @@ def archive_records(http, asset, *, allow_empty=False, cache_directory=None):
             file.seek(0)
             yield from _members(file, allow_empty=allow_empty,
                                 temporary_directory=str(path.parent) if path else None)
+    except SourceError:
+        if path is not None:
+            path.unlink(missing_ok=True)
+        raise
     except (zipfile.BadZipFile, RuntimeError, ValueError, UnicodeError, OSError, EOFError, NotImplementedError, struct.error) as exc:
+        if path is not None:
+            path.unlink(missing_ok=True)
         raise SourceError("cve_list", "invalid or incomplete CVE archive") from exc
 
 
