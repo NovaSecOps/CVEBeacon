@@ -12,10 +12,11 @@ import re
 import sqlite3
 import stat
 import tarfile
+from types import SimpleNamespace
 
 import pytest
 
-from cvebeacon import backup, cli, dashboard
+from cvebeacon import backup, cli, dashboard, snapshot
 from cvebeacon.config import BackupConfig
 from cvebeacon.dashboard_jobs import JobStore, build_command
 from cvebeacon.locking import LOCK_NAME, RunLock
@@ -511,6 +512,22 @@ def test_old_config_without_backup_section_keeps_working(tmp_path):
     assert backup.backup_root(config) == tmp_path / "backups"
     seed(config)
     assert backup.create(config).valid
+
+
+def test_windows_file_sync_uses_a_writable_handle(tmp_path, monkeypatch):
+    path = tmp_path / "snapshot"
+    path.write_bytes(b"data")
+    modes = []
+    real_open = Path.open
+
+    def recording_open(self, mode="r", *args, **kwargs):
+        modes.append(mode)
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", recording_open)
+    monkeypatch.setattr(snapshot, "os", SimpleNamespace(name="nt", fsync=os.fsync))
+    snapshot.sync_file(path)
+    assert modes == ["rb+"]
 
 
 def test_corrupt_database_returns_a_backup_error(tmp_path):
