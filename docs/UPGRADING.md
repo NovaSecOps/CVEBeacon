@@ -135,6 +135,9 @@ dashboard-managed schedule, or update the managed service command to
 `cvebeacon --config CONFIG run`. The combined command runs watch jobs before the
 first upload and includes scans once an inventory is available.
 
+Expand YAML aliases and merge keys into individual values before upgrading.
+The inventory loader now requires explicit values in configured YAML files.
+
 ## Adopt an existing single-venv install
 
 First bootstrap a **fresh administrator-owned venv from verified release wheels**,
