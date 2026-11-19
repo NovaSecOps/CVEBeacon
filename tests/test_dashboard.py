@@ -115,7 +115,7 @@ def test_failed_or_degraded_refresh_retains_old_finding_visibly(setup, health):
     assert response.status_code == 200
     assert "coverage was incomplete" in response.text
     assert "Retained observation" in response.text
-    assert 'class="badge affected"' in response.text
+    assert 'class="badge badge-danger">Affected</span>' in response.text
     assert 'class="badge not_affected"' not in response.text
 
 

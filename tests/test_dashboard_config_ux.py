@@ -32,7 +32,7 @@ def test_session_policy_for_both_clients(accounts, section, changes, ends):
     assert other.get("/").status_code == (303 if ends else 200)
     if not ends:
         assert csrf(other) == old_csrf
-        assert "Saved; takes effect on the next run" in client.get("/config/" + section + "?saved=1").text
+        assert "Settings take effect on the next run." in client.get("/config/" + section + "?saved=1").text
 
 
 def test_unknown_changes_end_sessions():

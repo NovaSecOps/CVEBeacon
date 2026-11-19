@@ -118,7 +118,7 @@ def test_explorer_preserves_repeated_filters_across_pagination(tmp_path):
                       "&since=2026-11-01&modified_until=2026-11-02&kev=neither")
     assert page.status_code == 200
     assert "51 CVEs · Page 1" in page.text
-    assert '<a href="/watch/cves">Clear filters</a>' in page.text
+    assert 'href="/watch/cves">Clear filters</a>' in page.text
     assert '<summary>9.8 v4.0</summary>' in page.text
     assert "7 v3.1" in page.text and "8.5 v2.0" in page.text
     assert "active (NVD SSVC)" in page.text

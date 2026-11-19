@@ -1,3 +1,4 @@
+{% from 'ui.html' import severity_badge %}
 {% macro value(item, fallback='Unknown') %}{{ item if item is not none and item != '' else fallback }}{% endmacro %}
 {% macro day(item) %}{{ item[:10] if item else 'Unknown' }}{% endmacro %}
 {% macro stamp(item) %}{{ watch_stamp(item) if item else 'Not recorded' }}{% endmacro %}
@@ -9,8 +10,8 @@
 
 {% macro cvss_scores(scores) -%}
 {% if scores %}
-<ul>{% for entry in scores %}
-  <li>{{ '%g'|format(entry.score) }} v{{ entry.version }} · {{ entry.severity_band }} · {{ entry.provider }}{% if entry.source and entry.source != entry.provider %} ({{ entry.source }}){% endif %}{% if entry.vector %} · <span class="break">{{ entry.vector }}</span>{% endif %}</li>
+<ul class="cvss-score-list">{% for entry in scores %}
+  <li>{{ '%g'|format(entry.score) }} v{{ entry.version }} · {{ severity_badge(entry.severity_band) }} · {{ entry.provider }}{% if entry.source and entry.source != entry.provider %} ({{ entry.source }}){% endif %}{% if entry.vector %} · <span class="break">{{ entry.vector }}</span>{% endif %}</li>
 {% endfor %}</ul>
 {% else %}Not scored{% endif %}
 {%- endmacro %}
