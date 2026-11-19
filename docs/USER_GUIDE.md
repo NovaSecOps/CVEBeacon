@@ -171,7 +171,7 @@ cvebeacon doctor --live
 cvebeacon source-status
 ```
 
-`doctor --live` also performs a bounded query against enabled public sources without committing scan state and returns a nonzero status if any check fails. Without an inventory, `doctor` checks the watch deployment instead: configuration, the watch data directory, watch database, channels, sources and the native schedule; it says that inventory checks are skipped and exits nonzero only for a real problem. `source-status` reports the latest persisted scan’s per-asset source outcome, including failed refreshes. An incomplete scan is recorded with run status `failed` and retains its source-health evidence and useful partial findings. Use `--verbose` for additional local diagnostics. Secrets and full webhook URLs are not printed.
+`doctor --live` also performs a bounded query against enabled public sources without committing scan state and returns a nonzero status if any check fails. Without an inventory, `doctor` checks the watch deployment instead: configuration, the watch and state data directories, watch database, channels, sources and the native schedule; it says that inventory checks are skipped and exits nonzero only for a real problem. `source-status` reports the latest persisted scan’s per-asset source outcome, including failed refreshes. An incomplete scan is recorded with run status `failed` and retains its source-health evidence and useful partial findings. Use `--verbose` for additional local diagnostics. Secrets and full webhook URLs are not printed.
 
 Common failures:
 

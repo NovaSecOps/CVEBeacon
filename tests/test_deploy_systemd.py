@@ -54,17 +54,36 @@ def test_dashboard_upgrade_sequence_drains_jobs_before_stopping_services():
     upgrade = deploy.split("### Upgrade", 1)[1].split("### Windows", 1)[0]
     assert "run one line" not in upgrade
     assert "when installed" not in upgrade
-    assert "wait for any running job" in upgrade
-    drain = upgrade.index("wait for any running job")
+    assert "pgrep -af '[c]vebeacon'" in upgrade
+    assert "must print nothing" in upgrade
+    assert "no job is running or queued" in upgrade
+    disable_scheduler = upgrade.index("cb schedule remove --yes")
+    disable_timer = upgrade.index("sudo systemctl stop cvebeacon.timer")
+    wait_for_processes = upgrade.index("pgrep -af '[c]vebeacon'")
     stop_dashboard = upgrade.index(
         "sudo systemctl stop cvebeacon-dashboard.service"
     )
-    stop_scheduler = upgrade.index("cb schedule remove --yes")
-    assert drain < stop_dashboard < stop_scheduler
+    install_packages = upgrade.index("pip install")
+    start_dashboard = upgrade.index(
+        "sudo systemctl start cvebeacon-dashboard.service"
+    )
+    restore_scheduler = upgrade.index("cb schedule install")
+    assert (
+        disable_scheduler
+        < wait_for_processes
+        < stop_dashboard
+        < install_packages
+        < start_dashboard
+        < restore_scheduler
+    )
+    assert disable_timer < wait_for_processes
+    assert "[Check the result](#check-the-result)" in upgrade
     for number in range(1, 8):
         assert f"\n{number}. " in upgrade
 
 
-def test_watch_docs_list_the_state_directory_in_doctor_checks():
+def test_watch_and_user_guides_list_the_state_directory_in_doctor_checks():
     watch = (ROOT / "docs" / "WATCH.md").read_text(encoding="utf-8")
+    user_guide = (ROOT / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
     assert "watch and state data directories" in watch
+    assert "watch and state data directories" in user_guide

@@ -193,21 +193,28 @@ Use the line for the scheduler you installed; see [exit codes](DEVELOPMENT.md#ex
 
 Perform the upgrade in this order.
 
-1. Check the dashboard's Operations page and wait for any running job to
-   finish. Do not start another dashboard job: stopping the service terminates
-   its child job processes.
-
-2. Stop the dashboard service:
-
-   ```console
-   sudo systemctl stop cvebeacon-dashboard.service
-   ```
-
-3. Stop the scheduler you use:
+1. Disable the scheduler so it cannot start a new run:
 
    ```console
    cb schedule remove --yes                                # built-in crontab
-   # or: sudo systemctl stop cvebeacon.timer cvebeacon.service   # systemd timer
+   # or: sudo systemctl stop cvebeacon.timer               # systemd timer
+   ```
+
+2. Wait for any running CVEBeacon process to finish. The dashboard service
+   itself keeps running at this point, so exclude its `serve` process, and also
+   check the dashboard's Operations page until no job is running or queued. Do
+   not start another dashboard job:
+
+   ```console
+   pgrep -af '[c]vebeacon' | grep -v ' serve ' || true
+   ```
+
+   The command must print nothing before you continue.
+
+3. Stop the dashboard service:
+
+   ```console
+   sudo systemctl stop cvebeacon-dashboard.service
    ```
 
 4. Back up the watch database with SQLite's online backup (use the path
@@ -236,17 +243,18 @@ Perform the upgrade in this order.
    sudo -u cvebeacon /opt/cvebeacon/.venv/bin/python -m pip install /opt/cvebeacon
    ```
 
-6. Restore the scheduler you removed:
+6. Start the dashboard service:
+
+   ```console
+   sudo systemctl start cvebeacon-dashboard.service
+   ```
+
+7. Restore the scheduler you removed, then rerun the checks in
+   [Check the result](#check-the-result):
 
    ```console
    cb schedule install --times 07:00,19:00 --command watch --yes
    # or: sudo systemctl start cvebeacon.timer
-   ```
-
-7. Start the dashboard service and run the checks below:
-
-   ```console
-   sudo systemctl start cvebeacon-dashboard.service
    ```
 
 ### Windows data-directory ACLs
