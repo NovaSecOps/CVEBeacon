@@ -137,8 +137,8 @@ def _schema_version(path: Path, role: str | None) -> int | None:
                 value = row[0] if row else None
             if value is None:
                 value = db.execute("PRAGMA user_version").fetchone()[0] or None
-    except (sqlite3.Error, OSError, ValueError):
-        raise BackupError("cannot read a state database schema version") from None
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        raise BackupError(f"cannot read a state database schema version ({type(exc).__name__})") from None
     if value is None:
         return None
     try:
@@ -398,8 +398,8 @@ def _normalize_sqlite_copy(path: Path) -> None:
     try:
         with closing(sqlite3.connect(path)) as db:
             mode = db.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
-    except sqlite3.Error:
-        raise BackupError("cannot finalize a SQLite snapshot") from None
+    except sqlite3.Error as exc:
+        raise BackupError(f"cannot finalize a SQLite snapshot ({type(exc).__name__})") from None
     if str(mode).casefold() != "delete":
         raise BackupError("cannot finalize a SQLite snapshot")
     for suffix in ("-wal", "-shm", "-journal"):
@@ -702,10 +702,10 @@ def _active_jobs(config: AppConfig) -> list[dict]:
                 "SELECT id, operation, status FROM dashboard_job "
                 "WHERE status IN ('queued','running') ORDER BY id"
             ).fetchall()
-    except (sqlite3.Error, OSError, ValueError):
+    except (sqlite3.Error, OSError, ValueError) as exc:
         raise BackupError(
             "cannot confirm that dashboard jobs are idle; stop the dashboard "
-            "service before restoring"
+            f"service before restoring ({type(exc).__name__})"
         ) from None
     return [dict(row) for row in rows]
 
@@ -840,8 +840,8 @@ def _validate_restore(config: AppConfig, restored: AppConfig, manifest: dict,
 def _stage_file(source: Path, target: Path, expected: str, *, prefix: str) -> Path:
     try:
         private_directory(target.parent)
-    except (CVEBeaconError, OSError):
-        raise BackupError("cannot create a restore directory") from None
+    except (CVEBeaconError, OSError) as exc:
+        raise BackupError(f"cannot create a restore directory ({type(exc).__name__})") from None
     descriptor, name = tempfile.mkstemp(prefix=prefix, dir=target.parent)
     temporary = Path(name)
     try:
