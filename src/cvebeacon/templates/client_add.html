@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block title %}Add client · CVEBeacon{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('watch.clients') }}">Clients</a></p>
+<h1>Add client</h1>
+{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+<p>After you add the client, you can upload the list of software you want to monitor for them.</p>
+<form method="post">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p><label for="name">Client name</label> <input id="name" name="name" required maxlength="120" value="{{ profile.name if profile else '' }}"></p>
+  <p><label for="contact">Contact (optional)</label> <input id="contact" name="contact" maxlength="200" value="{{ profile.contact if profile else '' }}"></p>
+  <p><label for="notes">Notes (optional)</label><br><textarea id="notes" name="notes" maxlength="1000" rows="3">{{ profile.notes if profile else '' }}</textarea></p>
+  <button type="submit">Add client</button>
+</form>
+{% endblock %}

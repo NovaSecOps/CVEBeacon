@@ -276,7 +276,7 @@ def _client_page_rows(
 
 
 def client_page(
-    path: str | Path, *, limit: int = 50, offset: int = 0
+    path: str | Path, *, limit: int = 50, offset: int = 0, name: str | None = None
 ) -> tuple[ScanInfo | None, tuple[ClientSummary, ...], int]:
     """Return one bounded page of clients with counts and current findings."""
     if limit < 1 or limit > 1000:
@@ -288,18 +288,19 @@ def client_page(
         scan = _latest_successful_scan(db)
         if scan is None:
             return None, (), 0
+        condition = "run_id=? AND client_key=? " if name is not None else "run_id=? AND client_key<>'' "
+        parameters = (scan.run_id, name.strip().casefold()) if name is not None else (scan.run_id,)
         total = int(
             db.execute(
-                "SELECT COUNT(DISTINCT client_key) FROM scan_asset_clients "
-                "WHERE run_id=? AND client_key<>''",
-                (scan.run_id,),
+                "SELECT COUNT(DISTINCT client_key) FROM scan_asset_clients WHERE " + condition,
+                parameters,
             ).fetchone()[0]
         )
         rows = db.execute(
             "SELECT client_key, MIN(client) AS client, COUNT(*) AS assets "
-            "FROM scan_asset_clients WHERE run_id=? AND client_key<>'' "
+            "FROM scan_asset_clients WHERE " + condition +
             "GROUP BY client_key ORDER BY client_key LIMIT ? OFFSET ?",
-            (scan.run_id, limit, offset),
+            (*parameters, limit, offset),
         ).fetchall()
         keys = [str(row["client_key"]) for row in rows]
         findings: dict[str, list[sqlite3.Row]] = defaultdict(list)
@@ -311,7 +312,7 @@ def client_page(
         clients = []
         for row in rows:
             key = str(row["client_key"])
-            name = str(row["client"])
+            label = str(row["client"])
             values = findings.get(key, [])
             items = tuple(
                 ClientFinding(
@@ -323,7 +324,7 @@ def client_page(
             )
             clients.append(
                 ClientSummary(
-                    name,
+                    label,
                     int(row["assets"]),
                     items,
                     max(0, totals.get(key, len(items)) - len(items)),

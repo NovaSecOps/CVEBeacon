@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block title %}Preview inventory · CVEBeacon{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('client_inventory.detail', key=key, name=profile.name) }}">Back to {{ profile.name }}</a></p>
+<h1>Preview inventory for {{ profile.name }}</h1>
+{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+{% if preview.sample %}
+<h2>First rows in your file</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th scope="col">Row</th>{% for header in preview.headers %}<th scope="col">{{ header }}</th>{% endfor %}</tr></thead>
+  <tbody>{% for number, cells in preview.sample %}
+    <tr><th scope="row">{{ number }}</th>{% for cell in cells %}<td>{{ cell }}</td>{% endfor %}</tr>
+  {% endfor %}</tbody>
+</table></div>
+{% endif %}
+<form method="post" action="{{ url_for('client_inventory.review', key=key, name=profile.name) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <input type="hidden" name="page" value="{{ preview.page }}">
+  <h2>Match your columns</h2>
+  <p>Choose the column that contains each field. Use a unique Asset ID for each row. For most software, match Vendor, Product and Version too.</p>
+  {% for field, label in fields.items() %}
+  <p><label for="column-{{ field }}">{{ label }}</label>
+  <select id="column-{{ field }}" name="{{ field }}">
+    <option value="">Skip this field</option>
+    {% for header in preview.headers %}<option value="{{ loop.index0 }}"{% if preview.mapping[field] == header %} selected{% endif %}>{{ header }}</option>{% endfor %}
+  </select></p>
+  {% endfor %}
+  <button type="submit" name="action" value="preview">Check column mapping</button>
+  <h2>Row validation</h2>
+  <p>{{ preview.assets|length }} ready to import · {{ preview.warnings }} warnings · {{ preview.errors }} errors.</p>
+  {% if preview.validation %}
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">Row</th><th scope="col">Status</th><th scope="col">Details</th></tr></thead>
+    <tbody>{% for number, status, message in preview.validation %}
+    <tr><th scope="row">{{ number }}</th><td>{{ status }}</td><td>{{ message }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  {% if preview.pages > 1 %}
+  <p>Page {{ preview.page }} of {{ preview.pages }}
+    {% if preview.page > 1 %}<button type="submit" name="action" value="previous">Previous rows</button>{% endif %}
+    {% if preview.page < preview.pages %}<button type="submit" name="action" value="next">More rows</button>{% endif %}
+  </p>
+  {% endif %}
+  {% else %}<p>No rows were found. Add at least one asset to the file and upload it again.</p>{% endif %}
+  <fieldset>
+    <legend>How should we save these assets?</legend>
+    <label><input type="radio" name="mode" value="replace"{% if mode == 'replace' %} checked{% endif %}> Replace this client's inventory</label>
+    <label><input type="radio" name="mode" value="add"{% if mode == 'add' %} checked{% endif %}> Add to it</label>
+  </fieldset>
+  <button type="submit" name="action" value="save"{% if not preview.assets or preview.errors %} disabled{% endif %}>Save inventory</button>
+</form>
+{% endblock %}

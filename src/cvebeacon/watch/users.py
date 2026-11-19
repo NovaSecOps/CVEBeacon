@@ -1550,6 +1550,15 @@ class UserStore:
         )
         return row_id
 
+    def latest_inventory_upload(self, client_key: str) -> tuple[str, str] | None:
+        """Read the actor and time of the last published inventory for a client."""
+        with closing(self._connect(create=False)) as db:
+            row = db.execute(
+                "SELECT actor, at FROM cb_user_audit WHERE action GLOB ? ORDER BY id DESC LIMIT 1",
+                ("inventory_saved:" + client_key + ":*",),
+            ).fetchone()
+        return (row["actor"], row["at"]) if row else None
+
     def audit_entries(self) -> tuple[UserAuditEntry, ...]:
         self.initialize()
         with closing(self._connect()) as db:

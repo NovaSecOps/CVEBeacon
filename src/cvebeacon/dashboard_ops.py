@@ -121,7 +121,7 @@ def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
         "full_history": full_history_confirmation_required(config),
         "channels": channels,
         "watch_enabled": config.watch.enabled,
-        "has_inventory": config.inventory is not None,
+        "has_inventory": config.effective_inventory is not None,
         "operation_labels": {
             operation: _operation_label(operation) for operation in RUN_OPERATIONS
         },
@@ -151,7 +151,7 @@ def _fallback_install_command(
     account: str | None = None,
 ) -> str:
     target = command or scheduling.default_command(
-        inventory=config.inventory is not None, watch=config.watch.enabled
+        inventory=config.effective_inventory is not None, watch=config.watch.enabled
     )
     parts = [
         *command_prefix(),
@@ -221,9 +221,9 @@ def _schedule_context(
         "fallback_command": fallback_command or _fallback_install_command(config),
         "block_reason": _install_block_reason(),
         "default_command": scheduling.default_command(
-            inventory=config.inventory is not None, watch=config.watch.enabled
+            inventory=config.effective_inventory is not None, watch=config.watch.enabled
         ),
-        "has_inventory": config.inventory is not None,
+        "has_inventory": config.effective_inventory is not None,
         "watch_enabled": config.watch.enabled,
     }
 
@@ -393,7 +393,7 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
             return _render_schedule(
                 config, error="watch mode is disabled; set [watch] enabled = true", status=400
             )
-        if command in {"scan", "both"} and config.inventory is None:
+        if command in {"scan", "both"} and config.effective_inventory is None:
             return _render_schedule(
                 config, error="this configuration has no inventory; choose watch", status=400
             )

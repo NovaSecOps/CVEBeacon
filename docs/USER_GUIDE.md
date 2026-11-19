@@ -47,9 +47,9 @@ version = "version"
 
 The legacy product path requires `asset_id`, `vendor`, `product`, and `version` as nonblank text. Explicit package/PURL/CPE/commit identities may omit generic fields; see [identity rules and optional mappings](IDENTITY.md). Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
 
-An inventory is optional in watch-only mode. Set `[watch] enabled = true` and no `[inventory] path` to keep KEV, critical-severity and custom-rule alerting; those alerts work without an inventory. Add `[inventory]` later to enable asset applicability, findings and reports. See [watch mode](WATCH.md#configuration).
+An inventory is optional in watch-only mode. Set `[watch] enabled = true` and no `[inventory] path` to keep KEV, critical-severity and custom-rule alerting; those alerts work without an inventory. Upload a client inventory in the dashboard or add an `[inventory] path` later to enable asset applicability, findings and reports. See [watch mode](WATCH.md#configuration).
 
-An optional `client` column labels the client that owns an asset. The value under `[inventory.columns]` is the source column name, not a client name: use `client = "Account"` for a column named `Account`, or `client = "client"` for the default `client` header. A row can then contain `Acme` in that column. Client names are internal, limited to 120 characters, and cannot contain control or format characters. Assets without a client belong to no client. Use one inventory file with a `client` column when several clients share a format; separate inventory files per client are not supported yet.
+An optional `client` column labels the client that owns an asset. The value under `[inventory.columns]` is the source column name, not a client name: use `client = "Account"` for a column named `Account`, or `client = "client"` for the default `client` header. A row can then contain `Acme` in that column. Client names are internal, limited to 120 characters, and cannot contain control or format characters. Assets without a client belong to no client. You can keep a shared file with a `client` column and also upload separate client inventories through the dashboard.
 
 Source controls, retry/timeouts, output paths, optional exact CPE mappings, and notification settings are illustrated in the example configuration. A configured product CPE must be a complete CPE 2.3 name with a wildcard version; verify it against NVD before use.
 
@@ -84,6 +84,38 @@ cvebeacon inventory validate path/to/alternate.csv
 ```
 
 Validation reports source locations for malformed records, missing mapped columns, blank fields, duplicate IDs, invalid structure, and unreadable files.
+
+### Clients and inventories
+
+1. In the dashboard, open **Clients → Add client**. Enter the name and any
+   notes or contact details you want to keep with it.
+2. On the client page, choose **Upload inventory** and select a CSV, XLSX, JSON
+   or YAML file up to 32 MiB. For CSV, use UTF-8 and comma-separated columns.
+   Excel uses the first sheet, with column names in the first row. For JSON
+   and YAML, use a list of records or put one list under a top-level field
+   such as `assets`. Use text for versions, including in Excel.
+3. Check the first rows and choose the matching column for each field. For
+   example, match **Product** to a column called **Application**. Select
+   **Check column mapping** to see which rows are ready and which need a fix.
+   Each asset needs a unique Asset ID across all inventories. The client you
+   selected is assigned to every row.
+4. Select **Replace this client's inventory** or **Add to it**, then choose
+   **Save inventory**. You can download the saved JSON, restore one of the five
+   previous versions, or remove the current upload from the client page.
+5. Choose **Run a scan now** if you have permission to start scans. Scheduled
+   scans pick up saved changes automatically. If your schedule runs only
+   watch jobs, use **Operations → Schedule** to select a schedule that includes
+   scans. The watchlist and client findings use the latest successful scan.
+
+Uploads live in the private `inventories` folder next to the state database.
+CVEBeacon merges current uploads with the configured inventory and any enabled
+web snapshots. With no configured inventory, the first upload enables scanning.
+New configurations set `[inventory] managed = true`. Older configurations use
+uploads automatically when the folder contains a current inventory. Set
+`managed = false` under `[inventory]` to exclude dashboard uploads. Archived
+versions are used only when restored. Run `cvebeacon inventory validate` or
+`cvebeacon doctor` to check the merged inventory. A corrupt upload is skipped
+with a warning and a duplicate asset ID across inventories prevents the scan.
 
 ## 5. First scan
 

@@ -77,7 +77,7 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
 
 def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session_app=None) -> Flask:
     running_version = package_version("cvebeacon")
-    if config.inventory is None and not config.watch.enabled:
+    if config.effective_inventory is None and not config.watch.enabled:
         raise CVEBeaconError(
             "the dashboard requires an inventory or watch mode; add [inventory] path or set [watch] enabled = true"
         )
@@ -152,6 +152,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
                 if not auth.valid(session.get("auth_id")):
                     session.clear()
                     return redirect(url_for("login"), code=303)
+        if request.endpoint == "client_inventory.upload" and (
+            not g.accounts or "manage_inventory" not in g.permissions
+        ):
+            abort(403)
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             token = _text(request.form, "csrf", required=True)
             if account_mode:
@@ -190,7 +194,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
 
     @app.context_processor
     def inventory_state():
-        return {"inventory_configured": config.inventory is not None}
+        return {"inventory_configured": config.effective_inventory is not None}
 
     @app.get("/healthz")
     @requires("public")
@@ -280,9 +284,14 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     def snapshot():
         data = store.dashboard_snapshot()
         now = datetime.now(timezone.utc)
-        if config.inventory is not None:
+        inventory = config.effective_inventory
+        data["inventory_warnings"] = []
+        if inventory is not None:
             try:
-                assets = {asset.asset_id: asset for asset in load_inventory(config.inventory, snapshot_directory=config.database_path.parent / "web-inventory")}
+                assets = {asset.asset_id: asset for asset in load_inventory(
+                    inventory, snapshot_directory=config.database_path.parent / "web-inventory",
+                    managed_warnings=data["inventory_warnings"],
+                )}
                 data["inventory_error"] = False
             except CVEBeaconError:
                 assets = {}
@@ -326,7 +335,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/findings")
     @requires("view")
     def findings():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Findings")
         data = snapshot()
         filters = {key: _text(request.args, key) for key in ("q", "asset", "vendor", "product", "version", "category", "system_id", "ecosystem", "purl", "advisory", "cve", "applicability", "cvss", "severity", "cisa", "eu")}
@@ -378,7 +387,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/history")
     @requires("view")
     def history():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Finding history")
         asset_id, cve_id = _text(request.args, "asset"), _text(request.args, "cve")
         cursor = _text(request.args, "before")
@@ -401,7 +410,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/assets")
     @requires("view")
     def assets():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Inventory assets")
         data = snapshot()
         query = _text(request.args, "q")
@@ -411,7 +420,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/asset")
     @requires("view")
     def asset():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Inventory asset")
         identifier = _text(request.args, "asset_id", required=True)
         data = snapshot()
@@ -424,7 +433,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.route("/query", methods=["GET", "POST"])
     @requires("run", post=("run", "view"))
     def query():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Manual query", status=400 if request.method == "POST" else 200)
         result = None
         mode = _text(request.form if request.method == "POST" else request.args, "mode") or "product"
@@ -447,7 +456,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.route("/reports", methods=["GET", "POST"])
     @requires("run", post=("run", "view"))
     def reports():
-        if config.inventory is None:
+        if config.effective_inventory is None:
             return inventory_required("Report export", status=400 if request.method == "POST" else 200)
         if request.method == "GET":
             return render_template("reports.html")
@@ -455,7 +464,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
         if kind not in {"json", "xlsx"}:
             abort(400)
         from .cli import _run_query
-        results = _run_query(config, load_inventory(config.inventory, snapshot_directory=config.database_path.parent / "web-inventory"))
+        results = _run_query(config, load_inventory(config.effective_inventory, snapshot_directory=config.database_path.parent / "web-inventory"))
         with tempfile.TemporaryDirectory(prefix="cvebeacon-report-") as directory:
             path = Path(directory) / f"report.{kind}"
             (write_xlsx if kind == "xlsx" else write_json)(results, path)
@@ -614,6 +623,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     register_config(app, config, host=host)
     from .dashboard_web import create_web_blueprint
     app.register_blueprint(create_web_blueprint(config))
+    from .dashboard_inventory import create_blueprint as create_inventory_blueprint
+    app.register_blueprint(create_inventory_blueprint(config))
     from .dashboard_update import create_blueprint as create_update_blueprint
     app.register_blueprint(create_update_blueprint(config))
     return app

@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+{% from 'watch_macros.html' import stamp %}
+{% block title %}{{ profile.name }} · CVEBeacon{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('watch.clients') }}">Clients</a></p>
+<h1>{{ profile.name }}</h1>
+{% if profile.contact or profile.notes %}
+<dl>
+  {% if profile.contact %}<dt>Contact</dt><dd>{{ profile.contact }}</dd>{% endif %}
+  {% if profile.notes %}<dt>Notes</dt><dd>{{ profile.notes }}</dd>{% endif %}
+</dl>
+{% endif %}
+{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+{% if warning %}<p class="warning" role="alert">{{ warning }}</p>{% endif %}
+{% if notice %}<p role="status">{{ notice }}</p>{% endif %}
+<h2>Inventory</h2>
+{% if count is not none %}
+<dl>
+  <dt>Assets in the uploaded inventory</dt><dd>{{ count }}</dd>
+  {% if upload %}<dt>Last upload</dt><dd>{{ stamp(upload[1]) }} by {{ upload[0] }}</dd>{% endif %}
+</dl>
+<p><a href="{{ url_for('client_inventory.download', key=key, name=profile.name) }}">Download current inventory</a></p>
+{% if enabled %}
+<p>Scheduled scans include this inventory. The watchlist uses the latest successful scan to show affected clients.</p>
+{% if accounts and 'run' in permissions %}
+<form method="post" action="{{ url_for('operations.run_job') }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="operation" value="scan">
+  <button type="submit">Run a scan now</button>
+</form>
+{% endif %}
+{% endif %}
+{% elif not warning %}
+<p>No inventory has been uploaded for this client.</p>
+{% endif %}
+{% if not enabled %}<p class="warning">Dashboard-managed inventories are disabled in settings.</p>{% endif %}
+{% if enabled and accounts and 'manage_inventory' in permissions %}
+<section>
+<h2>Upload inventory</h2>
+<p>Choose a CSV, Excel (.xlsx), JSON or YAML file up to 32 MiB. Check the rows and match the columns on the next screen before saving.</p>
+<form method="post" enctype="multipart/form-data" action="{{ url_for('client_inventory.upload', key=key, name=profile.name) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="inventory">Inventory file</label>
+  <input type="file" id="inventory" name="inventory" accept=".csv,.xlsx,.json,.yaml,.yml" required>
+  <button type="submit">Preview inventory</button>
+</form>
+</section>
+{% endif %}
+{% if history %}
+<section>
+<h2>Version history</h2>
+<ul>
+{% for version in history %}
+  <li>
+  {% if enabled and accounts and 'manage_inventory' in permissions %}
+  <form method="post" action="{{ url_for('client_inventory.change', key=key, name=profile.name) }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="revision" value="{{ revision }}">
+    <input type="hidden" name="version" value="{{ version }}">
+    <time>{{ version_stamp(version) }}</time>
+    <button type="submit" name="action" value="restore">Restore this version</button>
+  </form>
+  {% else %}<time>{{ version_stamp(version) }}</time>{% endif %}
+  </li>
+{% endfor %}
+</ul>
+</section>
+{% endif %}
+{% if present and accounts and 'manage_inventory' in permissions %}
+<details>
+<summary>Remove inventory</summary>
+<form method="post" action="{{ url_for('client_inventory.change', key=key, name=profile.name) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="revision" value="{{ revision }}">
+  <p>The next scan will skip this upload. You can restore it from version history.</p>
+  <label><input type="checkbox" name="confirm" value="remove" required> Remove this client's current upload</label>
+  <button type="submit" name="action" value="remove">Remove inventory</button>
+</form>
+</details>
+{% endif %}
+<section>
+<h2>Latest findings for {{ profile.name }}</h2>
+{% if summary %}
+<p>{{ summary.assets }} assets in the latest successful scan, completed {{ stamp(scan.completed_at) }}.</p>
+<ul>{% for finding in summary.findings %}
+  <li>{% if finding.is_cve %}<a href="{{ url_for('watch.cve', cve_id=finding.cve_id) }}">{{ finding.cve_id }}</a>{% else %}{{ finding.cve_id }}{% endif %}
+  <span class="badge {{ finding.status }}">{{ 'Needs review' if finding.status == 'needs_review' else 'Affected' }}</span></li>
+{% else %}<li>No affected or needs-review findings in that scan.</li>{% endfor %}</ul>
+{% if summary.omitted_findings %}<p>{{ summary.omitted_findings }} more findings.</p>{% endif %}
+<p><a href="{{ url_for('watch.events', client=summary.name) }}">View watch events for this client</a></p>
+{% else %}
+<p>Run a successful inventory scan to see findings for this client.</p>
+{% endif %}
+</section>
+{% endblock %}

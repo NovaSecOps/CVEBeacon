@@ -74,8 +74,10 @@ bp = Blueprint("watch", __name__, url_prefix="/watch")
 
 def register_watch(app, config: AppConfig) -> None:
     """Attach the watch blueprint and its per-application state."""
+    from .dashboard_inventory import UPLOAD_REQUEST_BYTES
+
     app.config["MAX_CONTENT_LENGTH"] = max(
-        int(app.config.get("MAX_CONTENT_LENGTH") or 0), MAX_REQUEST_BYTES
+        int(app.config.get("MAX_CONTENT_LENGTH") or 0), MAX_REQUEST_BYTES, UPLOAD_REQUEST_BYTES
     )
 
     def limit_request_body():
@@ -87,6 +89,10 @@ def register_watch(app, config: AppConfig) -> None:
         if request.endpoint == "watch.statement":
             request.max_content_length = MAX_REQUEST_BYTES
             request.max_form_memory_size = MAX_REQUEST_BYTES
+        elif request.endpoint == "client_inventory.upload":
+            request.max_content_length = UPLOAD_REQUEST_BYTES
+            request.max_form_memory_size = 128 * 1024
+            request.max_form_parts = 4
         else:
             request.max_content_length = 8192
             request.max_form_memory_size = 8192
@@ -408,10 +414,15 @@ def clients():
         limit=limit,
         offset=(page - 1) * limit,
     )
+    from .managed_inventory import normalized_client, profiles
+    from .web_assets import client_key
+    managed = {client_key(item["name"]): item for item in profiles(config.inventory_directory)}
     return render_template(
         "watch_clients.html",
         scan=scan,
         clients=summaries,
+        managed_clients=managed if page == 1 else {},
+        client_links={client.name: client_key(normalized_client(client.name)) for client in summaries},
         page=page,
         has_previous=page > 1,
         has_next=page * limit < total,

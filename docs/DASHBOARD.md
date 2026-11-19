@@ -16,7 +16,7 @@ cvebeacon serve --host 0.0.0.0 --port 8787
 
 The dashboard is optional. Scheduled scans and watches remain separate short-lived processes. An authenticated account with the `run` permission can start the same `cvebeacon` commands as background jobs from the **Operations** page; every data-changing job shares a single-flight lock with the command line and scheduled runs.
 
-With no `[inventory] path`, `web_snapshots` disabled (the default), and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
+With no configured file or dashboard inventory, `web_snapshots` disabled (the default), and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
 
 ## Views and investigation
 
@@ -203,6 +203,30 @@ still runs through `cvebeacon watch notify` or `watch run`. The shared-password
 compatibility mode can browse watch pages and generate statements, but cannot
 record a client report because there is no CVEBeacon account identity.
 
+### Clients and inventories
+
+Open **Clients → Add client**, enter a name and optional notes and contact, then
+open **Upload inventory** on the new client page. Choose a CSV, Excel (.xlsx),
+JSON or YAML file up to 32 MiB. On the preview, match your column names to
+fields such as **Asset ID**, **Vendor**, **Product** and **Version**. Select
+**Check column mapping** to review row warnings and errors before saving. Use
+**Replace this client's inventory** to switch to a new list, or **Add to it**
+to keep the current assets and add new IDs.
+
+The client page shows the asset count, the last upload and who saved it, and
+findings from the latest successful scan. Use it to download the current
+inventory, restore one of the five prior versions, or remove the upload. All
+changes are audited with the account and client. Inventory changes record the
+row count and the action. Uploaded rows, contact details and notes stay out of
+the audit.
+
+Administrators can manage inventories. To delegate this workflow, assign
+`view` and `manage_inventory` to a role. Add `run` if that person should also
+be able to choose **Run a scan now**. Scheduled scans use the uploads
+automatically, and **Affected clients** on the CVE page reflects the latest
+successful scan. For format details and how uploads interact with older
+configurations, see the [user guide](USER_GUIDE.md#clients-and-inventories).
+
 ## Freshness and failures
 
 Stored data is not live source availability. A successful check is labelled as a cached observation and becomes stale after 24 hours. Old scan data, failed/degraded scans, and scan attempts without recorded completion receive prominent warnings. An unfinished attempt may represent a running or interrupted scanner; check the actual process and logs.
@@ -323,6 +347,7 @@ logout, even if its role has no permissions.
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
 | `edit_system` | View state database and report output paths; changes are administrator-only |
+| `manage_inventory` | Add clients and upload, restore or remove their inventories |
 | `manage_web_assets` | Add, change and remove attested client web assets |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
 | `manage_secrets` | Change any credential-bearing channel, add/change/remove environment references, and stage file-secret contents; `*_file` paths are administrator-only |
