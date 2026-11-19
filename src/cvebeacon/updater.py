@@ -5,7 +5,7 @@ wheels, backups and the transaction journal belong to the administrator.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.parser import BytesParser
@@ -20,6 +20,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
@@ -38,6 +39,8 @@ from .errors import CVEBeaconError
 from .http import HttpClient
 from .locking import LOCK_NAME, RunLock
 from .private_storage import private_directory, private_file
+from .release_repository import valid_repository
+from .update_transaction import JOURNAL, read_record
 
 LOG = logging.getLogger(__name__)
 REQUEST = "update-request.json"
@@ -63,6 +66,13 @@ class ConfigLock(RunLock):
 
 def stamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def log_warning(message):
+    try:
+        LOG.warning(message)
+    except Exception:
+        pass  # Logging must never interrupt state recovery.
 
 
 def release_version(value):
@@ -123,6 +133,7 @@ def atomic_json(path, value, *, mode=0o644):
     try:
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), mode)
             json.dump(value, stream, ensure_ascii=True)
             stream.flush()
             os.fsync(stream.fileno())
@@ -161,12 +172,23 @@ def request_update(config, target, proof, users):
         request = {"version": target, "user": actor.username, "time": stamp()}
         users._append_audit(db, "update_request:" + target, actor.username, request["time"], actor=actor.username)
     # Authorization and its audit are durable before the path unit can run.
-    atomic_json(config.watch.database.parent / REQUEST, request, mode=0o600)
+    path, _ = control_paths(config.config_path)
+    try:
+        private_directory(path.parent)
+        atomic_json(path, request, mode=0o600)
+    except OSError:
+        raise UpdateError("cannot publish the update request") from None
+
+
+def control_paths(config_path):
+    """Runtime and privileged commands share the resolved config directory."""
+    directory = Path(config_path).parent.resolve()
+    return directory / REQUEST, directory / STATUS
 
 
 def read_status(config):
     try:
-        value = _json(read_bounded(config.watch.database.parent / STATUS, 131072))
+        value = _json(read_bounded(control_paths(config.config_path)[1], 131072))
         return value if isinstance(value, dict) else {}
     except (OSError, CVEBeaconError):
         return {}
@@ -213,7 +235,7 @@ class Releases:
     """One anonymous API request per check; URLs never contain local identity."""
     def __init__(self, settings, http):
         self.settings, self.http = settings, http
-        if not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", settings.repository):
+        if not valid_repository(settings.repository):
             raise UpdateError("invalid release repository")
 
     def _api(self, target):
@@ -349,7 +371,7 @@ class Releases:
 def check(config, *, daily=False, http=None):
     if not config.update.enabled or (daily and not config.update.daily):
         return read_status(config)
-    private_directory(config.watch.database.parent)
+    private_directory(control_paths(config.config_path)[1].parent)
     state = read_status(config)
     if daily and state.get("last_check"):
         try:
@@ -362,7 +384,7 @@ def check(config, *, daily=False, http=None):
         release = Releases(config.update, transport).check(installed_version("cvebeacon"))
     state.update(current=installed_version("cvebeacon"), available=release.version if release else None,
                  notes=release.notes if release else "", last_check=stamp())
-    atomic_json(config.watch.database.parent / STATUS, state)
+    atomic_json(control_paths(config.config_path)[1], state)
     return state
 
 
@@ -405,6 +427,7 @@ class Policy:
     probe: str = "http://127.0.0.1:8787/healthz"
     retention: int = 7
     wait_seconds: int = 86400
+    dashboard_unit: str = "cvebeacon-dashboard.service"
 
     @classmethod
     def read(cls, path):
@@ -427,13 +450,15 @@ class Policy:
                 raise UpdateError("invalid update units")
             value["units"] = tuple(value["units"])
         policy = cls(**value)
-        if not isinstance(policy.allow_prereleases, bool) or not isinstance(policy.repository, str) or not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", policy.repository):
+        if not isinstance(policy.allow_prereleases, bool) or not valid_repository(policy.repository):
             raise UpdateError("invalid release policy")
         for key, lo, hi in (("retention", 1, 100), ("wait_seconds", 1, 86400)):
             if type(getattr(policy, key)) is not int or not lo <= getattr(policy, key) <= hi:
                 raise UpdateError("invalid update policy limit")
         if not policy.units or len(set(policy.units)) != len(policy.units) or any(not isinstance(u, str) or not re.fullmatch(r"cvebeacon[\w@.-]*\.(service|timer)", u) or u.startswith("cvebeacon-update") for u in policy.units):
             raise UpdateError("invalid update unit name")
+        if policy.dashboard_unit not in policy.units or not policy.dashboard_unit.endswith(".service"):
+            raise UpdateError("the explicit dashboard unit must be included in units")
         parsed = urlsplit(policy.probe)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1"} or parsed.username or parsed.password or parsed.path != "/healthz" or parsed.query or parsed.fragment:
             raise UpdateError("health probe must use the loopback /healthz endpoint")
@@ -453,6 +478,9 @@ class Policy:
             raise UpdateError("data must be separate from code and writable only by its service account")
         if policy.config.parent != policy.data:
             raise UpdateError("runtime config must be directly inside the data directory")
+        pending = read_record(policy.prefix)
+        if pending is not None and pending.get("config") == str(policy.config.parent.resolve() / policy.config.name):
+            return policy  # Recovery may need to replace a missing or corrupt runtime config.
         info = policy.config.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid not in {0, account.pw_uid} or info.st_mode & 0o022:
             raise UpdateError("runtime config must be a regular administrator- or service-owned file")
@@ -484,15 +512,15 @@ class Native:
         import pwd
         self.account = pwd.getpwnam(policy.user)
 
-    def run(self, args, *, service=False, **kwargs):
+    def run(self, args, *, service=False, timeout=600, accepted=(0,), completed=False, **kwargs):
         options = {}
         if service and os.geteuid() == 0:
             options.update(user=self.account.pw_uid, group=self.account.pw_gid, extra_groups=())
         result = subprocess.run([str(a) for a in args], env=SAFE_ENV, cwd="/", stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, umask=0o022, **options, **kwargs)
-        if result.returncode:
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, umask=0o022, **options, **kwargs)
+        if result.returncode not in accepted:
             raise UpdateError("update subprocess failed (details withheld); inspect the transaction journal")
-        return result.stdout
+        return result if completed else result.stdout
 
     def active(self, unit):
         result = subprocess.run(["systemctl", "show", "--property=ActiveState", "--value", unit], env=SAFE_ENV,
@@ -507,30 +535,51 @@ class Native:
         if timers:
             self.run(["systemctl", "stop", *timers])
         deadline = time.monotonic() + self.policy.wait_seconds
-        while any(self.active(u) for u in units if u.endswith(".service") and "dashboard" not in u):
+        while any(self.active(u) for u in units if u.endswith(".service") and u != self.policy.dashboard_unit):
             if time.monotonic() >= deadline:
                 raise UpdateError("timed out waiting for running services; no process was killed")
             time.sleep(1)
 
     def freeze(self, units):
         # Only after all run locks are held: systemd also stops dashboard children.
-        dashboards = [u for u in units if "dashboard" in u]
+        dashboards = [u for u in units if u == self.policy.dashboard_unit]
         if dashboards:
             self.run(["systemctl", "stop", *dashboards])
 
     def start(self, units):
         # Starting a timer is safe while the resource locks are held. Do not
         # synchronously launch oneshot work that needs those same locks.
-        selected = [u for u in units if u.endswith(".timer") or "dashboard" in u]
+        selected = [u for u in units if u.endswith(".timer") or u == self.policy.dashboard_unit]
         if selected:
             self.run(["systemctl", "start", *selected])
 
     def inventory(self, venv):
         code = "import importlib.metadata as m,json; ds=list(m.distributions()); assert not any(json.loads(d.read_text('direct_url.json') or '{}').get('dir_info',{}).get('editable') for d in ds), 'editable installs cannot be adopted'; print(json.dumps({d.metadata['Name'].lower():d.version for d in ds}))"
-        return _json(self.run([venv / "bin/python", "-I", "-c", code]))
+        return _json(self.run([venv / "bin/python", "-I", "-c", code], service=True))
 
-    def lock_paths(self, python):
-        raw = self.run([python, "-I", "-m", "cvebeacon.update_state", "paths", self.policy.config, self.policy.data, "-"], service=True)
+    def service_access(self, venv):
+        code = "import os,sys; assert os.access(sys.argv[1],os.R_OK|os.X_OK); open(sys.argv[2],'rb').read(1)"
+        self.run([venv / "bin/python", "-I", "-c", code, venv / "bin/cvebeacon", self.policy.config], service=True)
+        self.run([venv / "bin/cvebeacon", "--help"], service=True)
+
+    def managed_cron(self):
+        if shutil.which("crontab", path=SAFE_ENV["PATH"]) is not None:
+            result = self.run(["crontab", "-l"], service=True, accepted=(0, 1), completed=True)
+            raw = result.stdout
+            if result.returncode and b"no crontab" not in (raw + result.stderr).lower():
+                raise UpdateError("cannot verify the service account's managed crontab")
+            if b"# BEGIN CVEBEACON MANAGED" in raw:
+                raise UpdateError("remove the service account's managed cron schedule before adopting or applying updates")
+
+    def preflight(self, venv):
+        self.service_access(venv)
+        self.managed_cron()
+        self.lock_paths(venv / "bin/python")
+
+    def lock_paths(self, python, backup=None, manifest_hash=None):
+        action = "recovery-paths" if backup else "paths"
+        arguments = [python, "-I", "-m", "cvebeacon.update_state", action, self.policy.config, self.policy.data, backup or "-"]
+        raw = self.run([*arguments, *([manifest_hash] if manifest_hash else [])], service=True, timeout=None)
         paths = _json(raw)
         if not isinstance(paths, list) or len(paths) > 20000 or any(not isinstance(p, str) or not Path(p).is_relative_to(self.policy.data) or Path(p).name != LOCK_NAME for p in paths):
             raise UpdateError("invalid run lock paths")
@@ -552,32 +601,64 @@ class Native:
             os.setegid(gid)
             os.setgroups(groups)
 
-    def install(self, venv, artifacts, packages, target):
-        self.run(["/usr/bin/python3", "-I", "-m", "venv", venv])
+    def install(self, venv, artifacts, packages, target, *, python=None):
+        self.run([python or sys.executable, "-I", "-S", "-m", "venv", venv])
         self.run([venv / "bin/python", "-I", "-m", "pip", "--isolated", "install", "--no-index", "--only-binary=:all:",
                   "--find-links", artifacts, *[name + "==" + target for name in packages]])
         self.run([venv / "bin/python", "-I", "-m", "pip", "--isolated", "check"])
 
     def command(self, release, command):
         options = ["--allow-watch-only", "--local-state"] if command == "doctor" else []
-        return self.run([release / ".venv/bin/cvebeacon", "--config", self.policy.config, command, *options], service=True)
+        return self.run([release / ".venv/bin/cvebeacon", "--config", self.policy.config, command, *options], service=True, timeout=None)
 
-    def state(self, python, action, backup):
+    def state(self, python, action, backup, manifest_hash=None):
         # SQLite and config I/O runs with service privileges, even on rollback.
-        self.run([python, "-I", "-m", "cvebeacon.update_state", action, self.policy.config, self.policy.data, backup], service=True)
+        return self.run([python, "-I", "-m", "cvebeacon.update_state", action, self.policy.config, self.policy.data, backup,
+                         *([manifest_hash] if manifest_hash else [])], service=True, timeout=None)
 
     def backup_directory(self, path):
         path.mkdir(mode=0o700)
         if os.geteuid() == 0:
             os.chown(path, self.account.pw_uid, self.account.pw_gid)
+        sync_directory(path.parent)
 
-    def probe(self):
-        with HttpClient(HttpConfig(retries=0)) as http:
+    def dashboard_pid(self):
+        raw = self.run(["systemctl", "show", self.policy.dashboard_unit, "--property=ActiveState,MainPID,ExecStart"])
+        values = dict(line.split("=", 1) for line in raw.decode("utf-8").splitlines() if "=" in line)
+        match = re.search(r"(?:^|[ {])path=([^ ;}]+)\s*;", values.get("ExecStart", ""))
+        executable = str(self.policy.prefix / "current/.venv/bin/cvebeacon")
+        if (values.get("ActiveState") != "active" or not values.get("MainPID", "").isdigit()
+                or int(values["MainPID"]) <= 0 or not match or match[1] != executable):
+            raise UpdateError("the configured dashboard unit must run the current executable")
+        return int(values["MainPID"])
+
+    def owns_listener(self, pid):
+        """Associate the loopback listener with the selected unit's process."""
+        sockets = {os.readlink(path)[8:-1] for path in Path(f"/proc/{pid}/fd").iterdir()
+                   if os.readlink(path).startswith("socket:[")}
+        port = urlsplit(self.policy.probe).port or 80
+        for protocol in ("tcp", "tcp6"):
+            try:
+                rows = Path(f"/proc/{pid}/net/{protocol}").read_text().splitlines()[1:]
+            except FileNotFoundError:
+                continue
+            for line in rows:
+                fields = line.split()
+                if len(fields) >= 10 and fields[3] == "0A" and int(fields[1].rsplit(":", 1)[1], 16) == port and fields[9] in sockets:
+                    return True
+        return False
+
+    def probe(self, expected_version=None):
+        expected_version = expected_version or (self.policy.prefix / "current").resolve().name
+        with httpx.Client(trust_env=False) as client, HttpClient(HttpConfig(retries=0), client=client) as http:
             deadline = time.monotonic() + 30
             while True:
                 try:
+                    pid = self.dashboard_pid()
+                    if not self.owns_listener(pid):
+                        raise UpdateError("the dashboard unit does not own the health listener")
                     result = http.request_once("GET", self.policy.probe, body_limit=1024, timeout=2)
-                    if result.status_code == 200 and _json(result.body) == {"status": "ok"}:
+                    if result.status_code == 200 and _json(result.body) == {"status": "ok", "version": expected_version, "pid": pid}:
                         return
                 except (OSError, ValueError, CVEBeaconError, httpx.HTTPError):
                     pass
@@ -586,23 +667,55 @@ class Native:
                 time.sleep(0.5)
 
 
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def consume_request(config_path):
+    request, _ = control_paths(config_path)
+    claimed = request.with_name(".claimed-update-" + uuid.uuid4().hex)
+    try:
+        os.rename(request, claimed)
+    except FileNotFoundError:
+        return None
+    try:
+        return read_request(claimed)
+    finally:
+        try:
+            claimed.unlink()
+        except IsADirectoryError:
+            pass  # Quarantine malformed directories; never recursively delete input.
+
+
 class Updater:
     def __init__(self, policy, native=None, releases=None):
         self.policy = policy
         self.native = native or Native(policy)
         self.releases = releases
         self.events = []
+        self.record = None
 
     def event(self, step, result="ok"):
         entry = {"time": stamp(), "step": step, "result": result, "version": getattr(self, "target", None)}
         self.events.append(entry)
-        LOG.info("update %s: %s", step, result)
-        atomic_json(self.policy.prefix / "update-journal.json", {"events": self.events}, mode=0o600)
-        fd = private_file(self.policy.prefix / "update-audit.jsonl", create=True)
-        with os.fdopen(fd, "ab") as stream:
-            stream.write(json.dumps(entry).encode("ascii") + b"\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        try:
+            LOG.info("update %s: %s", step, result)
+        except Exception:
+            pass
+        try:
+            import fcntl
+            fd = private_file(self.policy.prefix / "update-audit.jsonl", create=True)
+            with os.fdopen(fd, "ab") as stream:
+                fcntl.fcntl(stream.fileno(), fcntl.F_SETFL, os.O_APPEND)
+                stream.write(json.dumps(entry).encode("ascii") + b"\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except (OSError, CVEBeaconError):
+            log_warning("update audit is unavailable")
 
     def current(self):
         link = self.policy.prefix / "current"
@@ -615,48 +728,136 @@ class Updater:
         protected(target, directory=True)
         return target
 
-    def apply(self, target=None, *, from_request=False):
-        with RunLock(self.policy.prefix / "update.lock", command="update"):
-            self.recorded = False
-            try:
-                return self._apply(target, from_request=from_request)
-            except BaseException:
-                if not self.recorded:
-                    self.event("refuse", "failed")
-                    self._result(None, "refused")
-                raise
+    def _checkpoint(self, phase, **fields):
+        record = {**self.record, **fields, "phase": phase}
+        atomic_json(self.policy.prefix / JOURNAL, record, mode=0o644)
+        self.record = record
 
-    def _apply(self, target=None, *, from_request=False):
+    def _begin(self, old, target, active, *, kind="apply"):
+        if read_record(self.policy.prefix) is not None:
+            raise UpdateError("finish recovery before beginning another update")
+        self.record = {"format": 1, "id": uuid.uuid4().hex, "kind": kind,
+                       "old": old, "new": target, "active": list(active),
+                       "config": str(self.policy.config.parent.resolve() / self.policy.config.name), "data": str(self.policy.data.resolve()),
+                       "user": self.policy.user, "dashboard_unit": self.policy.dashboard_unit,
+                       "backup": None if kind == "adopt" else datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex,
+                       "snapshot_ready": False, "time": stamp()}
+        self._checkpoint("adopting" if kind == "adopt" else "quiescing")
+
+    def _validate_recovery(self, record):
         p = self.policy
+        if (record.get("config") != str(p.config.parent.resolve() / p.config.name) or record.get("data") != str(p.data.resolve())
+                or record.get("user") != p.user or record.get("dashboard_unit") != p.dashboard_unit
+                or not isinstance(record.get("active"), list) or not set(record["active"]) <= set(p.units)):
+            raise UpdateError("restore the original administrator policy before recovering this transaction")
+        self.record = record
+        self.target, self.previous_version = record["new"], record["old"]
+
+    @contextmanager
+    def _locks(self, record):
+        p = self.policy
+        locks = []
+        deadline = time.monotonic() + p.wait_seconds
+        def acquire(lock):
+            locks.append(lock)
+            while not self.native.acquire_lock(lock):
+                if time.monotonic() >= deadline:
+                    raise UpdateError("timed out waiting for the run lock; no process was killed")
+                time.sleep(0.1)
+        try:
+            acquire(ConfigLock(p.config.with_name(".config-" + p.config.name + ".lock"), command="update"))
+            backup = p.prefix / "backups" / record["backup"] if record["snapshot_ready"] else None
+            python = p.prefix / "releases" / record["old"] / ".venv/bin/python"
+            arguments = {"backup": backup, "manifest_hash": record.get("manifest_sha256")} if backup else {}
+            for path in self.native.lock_paths(python, **arguments):
+                acquire(RunLock(path, command="update"))
+            yield
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+
+    def _archive(self):
+        # A complete record is durable before its startup fence is removed.
+        archive = self.policy.prefix / "transactions"
+        archive.mkdir(mode=0o755, exist_ok=True)
+        protected(archive, directory=True)
+        sync_directory(self.policy.prefix)
+        os.replace(self.policy.prefix / JOURNAL, archive / (self.record["id"] + ".json"))
+        sync_directory(archive)
+        sync_directory(self.policy.prefix)
+
+    def _finish(self, result):
+        self._checkpoint("complete", result=result)
+        self._archive()
+        self._result(self.record["new"], result)
+
+    def _resume_timers(self, record):
+        timers = tuple(unit for unit in record["active"] if unit.endswith(".timer"))
+        if timers:
+            self.native.start(timers)
+
+    def apply(self, target=None, *, from_request=False, _requested=False):
+        requested = from_request or _requested
         if from_request:
             if target:
                 raise UpdateError("--version and --from-request are mutually exclusive")
-            # The request is consumed before work so a failure cannot loop
-            # under a PathExists unit. Every check below runs again.
+            target = consume_request(self.policy.config)
+            if target is None:
+                return {"result": "no-request"}
+        lock = RunLock(self.policy.prefix / "update.lock", command="update")
+        if not lock.acquire():
+            if not requested:
+                from .locking import RunInProgress
+                raise RunInProgress(lock.holder)
+            self.target = target
+            self.event("request_busy", "refused")
+            self._request_result(target, "busy")
+            return {"result": "busy", "version": target}
+        try:
+            pending = read_record(self.policy.prefix)
+            if pending:
+                result = self._recover(pending)
+                if requested:
+                    self._request_result(target, "recovered; request again")
+                return result
             try:
-                target = read_request(p.data / REQUEST)
-            finally:
-                (p.data / REQUEST).unlink(missing_ok=True)
+                return self._apply(target)
+            except BaseException:
+                # Never let audit/status writes prevent restoration. A completed
+                # transaction may only need finalization, not another DB restore.
+                pending = read_record(self.policy.prefix)
+                if pending:
+                    result = self._recover(pending)
+                    if result["result"] == "updated":
+                        return result
+                    raise UpdateError("update failed; previous release and state restored") from None
+                self.event("refuse", "failed")
+                self._result(target, "refused")
+                raise
+        finally:
+            lock.release()
+
+    def _apply(self, target):
+        p = self.policy
         old = self.current()
         protected_tree(old / ".venv")
+        self.native.preflight(old / ".venv")
         packages = self.native.inventory(old / ".venv")
-        current = packages.get("cvebeacon")
-        if current != old.name:
+        if packages.get("cvebeacon") != old.name:
             raise UpdateError("installed version differs from the current release directory")
-        self.previous_version = current
+        self.previous_version = old.name
         settings = UpdateConfig(True, False, p.repository, p.allow_prereleases)
         with ExitStack() as stack:
             remote = self.releases or Releases(settings, stack.enter_context(HttpClient(HttpConfig(retries=0))))
-            release = remote.check(current, target)
-            self.target = release.version if release else current
-            self.checked = {"last_check": stamp(), "available": release.version if release else None,
-                            "notes": release.notes if release else ""}
+            release = remote.check(old.name, target)
+            self.target = release.version if release else old.name
+            self.checked = {"last_check": stamp(), "available": release.version if release else None, "notes": release.notes if release else ""}
             self.event("check")
             if release is None:
-                self._result(current, "up-to-date")
-                return {"result": "up-to-date", "version": current}
+                self._result(old.name, "up-to-date")
+                return {"result": "up-to-date", "version": old.name}
             release_version(release.version)
-            if Version(release.version) <= Version(current):
+            if Version(release.version) <= Version(old.name):
                 raise UpdateError("release must be strictly newer")
             destination = p.prefix / "releases" / release.version
             if destination.exists() or destination.is_symlink():
@@ -664,128 +865,214 @@ class Updater:
             artifacts = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=".verified-", dir=p.prefix)))
             remote.verify(release, artifacts, p.signers)
             self.event("verify")
-            active = tuple(u for u in p.units if self.native.active(u))
-            locks = []
-            backup = None
-            switched = False
-            try:
-                self.native.stop(p.units)
-                self.event("quiesce")
-                deadline = time.monotonic() + p.wait_seconds
-                def wait_for(lock):
-                    while not self.native.acquire_lock(lock):
-                        if time.monotonic() >= deadline:
-                            raise UpdateError("timed out waiting for the run lock; no process was killed")
-                        time.sleep(0.1)
-                config_lock = ConfigLock(p.config.with_name(".config-" + p.config.name + ".lock"), command="update")
-                locks.append(config_lock)
-                wait_for(config_lock)
-                # Freeze configuration paths before discovering resource locks.
-                locks.extend(RunLock(path, command="update") for path in self.native.lock_paths(old / ".venv/bin/python"))
-                for lock in locks[1:]:
-                    wait_for(lock)
+            active = tuple(unit for unit in p.units if self.native.active(unit))
+            if p.dashboard_unit not in active:
+                raise UpdateError("the configured dashboard must be running before applying an update")
+            self.native.probe(old.name)
+            self._begin(old.name, release.version, active)
+            self.native.stop(p.units)
+            self.event("quiesce")
+            with self._locks(self.record):
                 self.event("lock")
                 self.native.freeze(p.units)
                 self.event("freeze")
+                self._checkpoint("snapshot")
                 backup_root = p.prefix / "backups"
                 backup_root.mkdir(mode=0o711, exist_ok=True)
                 protected(backup_root, directory=True)
-                backup = backup_root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex)
+                backup = backup_root / self.record["backup"]
                 self.native.backup_directory(backup)
                 self.native.state(old / ".venv/bin/python", "backup", backup)
+                manifest_hash = hashlib.sha256(read_bounded(backup / "manifest.json", 8 * 1024 * 1024)).hexdigest()
+                self._checkpoint("installing", snapshot_ready=True, manifest_sha256=manifest_hash)
                 self.event("backup")
                 destination.mkdir(mode=0o755)
-                self.native.install(destination / ".venv", artifacts, [n for n in PACKAGES if n in packages], release.version)
+                self.native.install(destination / ".venv", artifacts, [name for name in PACKAGES if name in packages], release.version, python=old / ".venv/bin/python")
                 protected_tree(destination / ".venv")
+                self.native.service_access(destination / ".venv")
                 self.event("install")
+                self._checkpoint("migrating")
                 self.native.command(destination, "migrate")
                 self.event("migrate")
+                self._checkpoint("switching")
                 switch(p.prefix, destination)
-                switched = True
                 self.event("switch")
-                self.native.start(active)
+                self._checkpoint("health")
+                self.native.start((p.dashboard_unit,))
                 self.event("start")
                 self.native.command(destination, "doctor")
-                self.native.probe()
+                self.native.probe(release.version)
                 self.event("health")
-            except BaseException:
-                self.event("failure", "failed")
-                try:
-                    # Quiesce a partially started new dashboard before state restore.
-                    self.native.stop(p.units)
-                    if backup is not None:
-                        self.native.freeze(p.units)
-                    if switched:
-                        switch(p.prefix, old)
-                    if backup and (backup / "manifest.json").is_file():
-                        self.native.state(old / ".venv/bin/python", "restore", backup)
-                    self.native.start(active)
-                    self.event("rollback")
-                    self._result(release.version, "rolled-back")
-                    self._retain()
-                except BaseException:
-                    self.event("rollback", "failed")
-                    self._result(release.version, "rollback-failed")
-                    raise UpdateError("update failed and rollback needs administrator recovery") from None
-                raise UpdateError("update failed; previous release and state restored") from None
-            finally:
-                for lock in reversed(locks):
-                    lock.release()
-            self._result(release.version, "updated")
-            self._retain()
+                self._resume_timers(self.record)
+                self._finish("updated")
+            self._retain_best_effort()
             return {"result": "updated", "version": release.version}
 
-    def _result(self, target, result):
-        self.recorded = True
-        value = {"version": target, "result": result, "time": stamp()}
-        # Administrator journal is authoritative; dashboard status is advisory.
-        atomic_json(self.policy.prefix / "update-result.json", value, mode=0o600)
+    def recover(self):
+        with RunLock(self.policy.prefix / "update.lock", command="recover"):
+            pending = read_record(self.policy.prefix)
+            return self._recover(pending) if pending else {"result": "no-recovery-required"}
+
+    def _recover(self, record):
+        self._validate_recovery(record)
+        if record["kind"] == "adopt":
+            return self._complete_adopt()
+        p = self.policy
+        old = p.prefix / "releases" / record["old"]
+        protected(old, directory=True)
+        protected_tree(old / ".venv")
+        self.native.stop(p.units)
         try:
-            status = _json(read_bounded(self.policy.data / STATUS, 131072))
-        except (OSError, CVEBeaconError):
-            status = {}
-        if not isinstance(status, dict):
-            status = {}
-        status.update(getattr(self, "checked", {}))
-        status["last_update"] = value
-        status["current"] = target if result == "updated" else getattr(self, "previous_version", None)
-        if result == "updated":
-            status["available"] = None
-        atomic_json(self.policy.data / STATUS, status)
+            with self._locks(record):
+                self.native.freeze(p.units)
+                if record["phase"] == "complete":
+                    selected = record["new"] if record["result"] == "updated" else record["old"]
+                    if self.current().name != selected:
+                        raise UpdateError("completed transaction does not match the selected release")
+                    release = p.prefix / "releases" / selected
+                else:
+                    try:
+                        self._checkpoint("restoring")
+                    except OSError:
+                        log_warning("recovery is using the last durable transaction record")
+                    errors = []
+                    try:
+                        if (p.prefix / "current").resolve() != old:
+                            switch(p.prefix, old)
+                        sync_directory(p.prefix)
+                    except OSError as exc:
+                        errors.append(exc)
+                    if record["snapshot_ready"]:
+                        backup = p.prefix / "backups" / record["backup"]
+                        try:
+                            self.native.state(old / ".venv/bin/python", "restore", backup, record["manifest_sha256"])
+                            self.native.state(old / ".venv/bin/python", "verify_restore", backup, record["manifest_sha256"])
+                        except BaseException as exc:
+                            errors.append(exc)
+                    if errors:
+                        raise UpdateError("restoration is incomplete")
+                    self._checkpoint("rollback-health")
+                    selected, release = record["old"], old
+                self.native.start((p.dashboard_unit,))
+                self.native.command(release, "doctor")
+                self.native.probe(selected)
+                if self.current().name != selected:
+                    raise UpdateError("restored release selection could not be verified")
+                self.event("rollback")
+                result = record.get("result", "rolled-back") if record["phase"] == "complete" else "rolled-back"
+                self._resume_timers(record)
+                self._finish(result)
+            self._retain_best_effort()
+            return {"result": result, "version": selected}
+        except BaseException:
+            try:
+                self.native.freeze(p.units)
+            except BaseException:
+                pass
+            self.event("rollback", "failed")
+            self._result(record["new"], "rollback-failed")
+            raise UpdateError("update recovery remains incomplete; writers are blocked until recovery succeeds") from None
+
+    def _request_result(self, target, result):
+        try:
+            path = control_paths(self.policy.config)[1]
+            try:
+                status = _json(read_bounded(path, 131072))
+            except (OSError, CVEBeaconError):
+                status = {}
+            if not isinstance(status, dict):
+                status = {}
+            status["last_request"] = {"version": target, "result": result, "time": stamp()}
+            atomic_json(path, status)
+        except OSError:
+            log_warning("update request status is unavailable")
+
+    def _result(self, target, result):
+        value = {"version": target, "result": result, "time": stamp()}
+        try:
+            atomic_json(self.policy.prefix / "update-result.json", value, mode=0o600)
+        except OSError:
+            log_warning("update result mirror is unavailable; retain the transaction record")
+        try:
+            path = control_paths(self.policy.config)[1]
+            try:
+                status = _json(read_bounded(path, 131072))
+            except (OSError, CVEBeaconError):
+                status = {}
+            if not isinstance(status, dict):
+                status = {}
+            status.update(getattr(self, "checked", {}))
+            status["last_update"] = value
+            status["current"] = target if result == "updated" else getattr(self, "previous_version", None)
+            if result == "updated":
+                status["available"] = None
+            atomic_json(path, status)
+        except OSError:
+            log_warning("advisory update status is unavailable")
+
+    def _retain_best_effort(self):
+        try:
+            self._retain()
+        except OSError:
+            log_warning("backup retention needs administrator review")
 
     def _retain(self):
         root = self.policy.prefix / "backups"
         if not root.exists() and not root.is_symlink():
             return
         protected(root, directory=True)
-        backups = sorted((p for p in root.iterdir() if p.is_dir() and not p.is_symlink()), reverse=True)
+        pinned = self.record.get("backup") if self.record else None
+        backups = sorted((path for path in root.iterdir() if path.is_dir() and not path.is_symlink()), reverse=True)
         for path in backups[self.policy.retention:]:
-            shutil.rmtree(path)
+            if path.name != pinned:
+                shutil.rmtree(path)
+
+    def _complete_adopt(self):
+        p = self.policy
+        venv = p.prefix / ".venv"
+        protected_tree(venv)
+        self.native.preflight(venv)
+        releases = p.prefix / "releases"
+        releases.mkdir(mode=0o755, exist_ok=True)
+        protected(releases, directory=True)
+        destination = releases / self.record["old"]
+        destination.mkdir(mode=0o755, exist_ok=True)
+        protected(destination, directory=True)
+        link = destination / ".venv"
+        if not link.is_symlink():
+            link.symlink_to(venv, target_is_directory=True)
+        if link.resolve() != venv:
+            raise UpdateError("adopted virtual environment does not match its original path")
+        sync_directory(destination)
+        if not (p.prefix / "current").is_symlink() or (p.prefix / "current").resolve() != destination:
+            switch(p.prefix, destination)
+        self.event("adopt")
+        self._finish("adopted")
+        return {"result": "adopted", "version": self.record["old"]}
 
     def adopt(self):
         p = self.policy
         with RunLock(p.prefix / "update.lock", command="adopt"):
+            pending = read_record(p.prefix)
+            if pending:
+                return self._recover(pending)
             if (p.prefix / "current").exists() or (p.prefix / "current").is_symlink():
                 raise UpdateError("installation already has a current link")
             venv = p.prefix / ".venv"
             protected_tree(venv)
-            packages = self.native.inventory(venv)
-            current = packages.get("cvebeacon", "")
+            self.native.preflight(venv)
+            current = self.native.inventory(venv).get("cvebeacon", "")
             release_version(current)
-            releases = p.prefix / "releases"
-            releases.mkdir(mode=0o755, exist_ok=True)
-            protected(releases, directory=True)
-            destination = releases / current
-            destination.mkdir(mode=0o755)
-            # Keeping the original path preserves absolute venv script shebangs.
-            (destination / ".venv").symlink_to(venv, target_is_directory=True)
-            switch(p.prefix, destination)
-            self.event("adopt")
-            return {"result": "adopted", "version": current}
+            self._begin(current, current, (), kind="adopt")
+            return self._complete_adopt()
 
 
 def _cli(args, config=None):
     action = args.update_command
+    if action == "guard":
+        from .update_transaction import ensure_ready
+        ensure_ready(args.role)
+        return 0
     if action == "check":
         config = config or load_config(args.config)
         result = check(config, daily=args.daily)
@@ -796,9 +1083,36 @@ def _cli(args, config=None):
     reason = unsupported_reason()
     if reason:
         raise UpdateError(reason)
-    policy = Policy.read(args.policy)
+    try:
+        policy = Policy.read(args.policy)
+    except (CVEBeaconError, OSError, ValueError, TypeError, KeyError):
+        if action != "apply" or not args.from_request:
+            raise
+        if os.geteuid() != 0:
+            raise UpdateError("request processing requires an administrator") from None
+        config_path = Path(args.config) if Path(args.config).is_absolute() else Path("/var/lib/cvebeacon/cvebeacon.toml")
+        try:
+            consume_request(config_path)
+        except (CVEBeaconError, OSError):
+            pass
+        log_warning("update request refused: administrator policy needs review")
+        return 0
     updater = Updater(policy)
-    result = updater.adopt() if action == "adopt" else updater.apply(args.version, from_request=args.from_request)
+    if action == "adopt":
+        result = updater.adopt()
+    elif action == "recover":
+        result = updater.recover()
+    else:
+        try:
+            result = updater.apply(args.version, from_request=args.from_request)
+        except (CVEBeaconError, OSError):
+            if not args.from_request:
+                raise
+            updater.event("request_refused", "failed")
+            updater._request_result(None, "refused; administrator review required")
+            log_warning("update request refused; inspect the transaction record")
+            return 0
+
     print(json.dumps(result, indent=2))
     return 0
 

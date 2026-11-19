@@ -192,6 +192,12 @@ class FakeNative:
     def inventory(self, venv):
         return self.versions
 
+    def preflight(self, venv):
+        pass
+
+    def service_access(self, venv):
+        pass
+
     def active(self, unit):
         return True
 
@@ -204,7 +210,7 @@ class FakeNative:
     def freeze(self, units):
         self.calls.append("freeze")
 
-    def lock_paths(self, python):
+    def lock_paths(self, python, backup=None, manifest_hash=None):
         return (self.config.watch.database.parent / u.LOCK_NAME,)
 
     def acquire_lock(self, lock):
@@ -213,11 +219,13 @@ class FakeNative:
     def backup_directory(self, path):
         path.mkdir(mode=0o700)
 
-    def state(self, python, action, directory):
+    def state(self, python, action, directory, manifest_hash=None):
         self.calls.append(action)
+        if manifest_hash:
+            assert hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() == manifest_hash
         getattr(update_state, action)(self.config, self.config.config_path.parent, directory)
 
-    def install(self, venv, artifacts, packages, target):
+    def install(self, venv, artifacts, packages, target, *, python=None):
         assert packages == list(u.PACKAGES)
         assert any(artifacts.glob("*.whl"))
         self.calls.append("install")
@@ -235,9 +243,10 @@ class FakeNative:
             self.fail_once = False
             raise u.UpdateError("synthetic migration failure")
 
-    def probe(self):
+    def probe(self, expected_version=None):
         self.calls.append("probe")
-        if self.failure == "health":
+        if self.failure == "health" and expected_version != "0.1.0" and self.fail_once:
+            self.fail_once = False
             raise u.UpdateError("synthetic probe failure")
 
 
@@ -270,7 +279,7 @@ def test_apply_verifies_backs_up_migrates_switches_and_health_checks(transaction
     assert updater.apply("0.1.1") == {"result": "updated", "version": "0.1.1"}
     assert updater.current().name == "0.1.1"
     assert value(config.watch.database) == "new"
-    assert native.calls == ["stop", "freeze", "backup", "install", "migrate", "start", "doctor", "probe"]
+    assert native.calls == ["probe", "stop", "freeze", "backup", "install", "migrate", "start", "doctor", "probe", "start"]
     assert [row["step"] for row in updater.events] == ["check", "verify", "quiesce", "lock", "freeze", "backup", "install", "migrate", "switch", "start", "health"]
     assert json.loads((updater.policy.data / u.STATUS).read_text())["last_update"]["result"] == "updated"
     assert json.loads((updater.policy.data / u.STATUS).read_text())["last_check"]
@@ -289,7 +298,7 @@ def test_failure_restores_all_databases_config_and_old_link(transaction, failure
     for path in (config.watch.database, config.database_path, config.watch.users_database, config.config_path.parent / "extra.sqlite3"):
         assert value(path) == "old"
     assert not (config.config_path.parent / "new.sqlite3").exists()
-    assert native.calls[-2:] == ["restore", "start"]
+    assert native.calls[-5:] == ["verify_restore", "start", "doctor", "probe", "start"]
     assert json.loads((updater.policy.prefix / "update-result.json").read_text())["result"] == "rolled-back"
 
 

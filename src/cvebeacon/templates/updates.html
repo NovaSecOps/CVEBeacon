@@ -7,6 +7,7 @@
 {% if notice %}<p>{{ notice }} <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">Upgrade instructions</a></p>{% endif %}
 <p>Available version: {{ status.available or 'No newer release checked' }}</p>
 <p>Last check: {{ status.last_check or 'Never' }}</p>
+{% if status.last_request %}<p>Last request: {{ status.last_request.result }} ({{ status.last_request.version or 'unspecified version' }}) at {{ status.last_request.time }}</p>{% endif %}
 {% if status.notes %}<h2>Release notes</h2><pre>{{ status.notes }}</pre>{% endif %}
 {% if status.last_update %}<p>Last update: {{ status.last_update.result }} ({{ status.last_update.version }}) at {{ status.last_update.time }}</p>{% endif %}
 {% if accounts and current_user.is_admin and enabled %}

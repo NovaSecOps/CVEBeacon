@@ -8,6 +8,7 @@ User=cvebeacon
 Group=cvebeacon
 WorkingDirectory=/var/lib/cvebeacon
 EnvironmentFile=-/var/lib/cvebeacon/cvebeacon.env
+ExecStartPre=/opt/cvebeacon/current/.venv/bin/cvebeacon update guard --role serve
 ExecStart=/opt/cvebeacon/current/.venv/bin/cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml serve --host 127.0.0.1 --port 8787
 Restart=on-failure
 NoNewPrivileges=yes

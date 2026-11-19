@@ -9,6 +9,7 @@ User=cvebeacon
 Group=cvebeacon
 WorkingDirectory=/var/lib/cvebeacon
 EnvironmentFile=-/var/lib/cvebeacon/cvebeacon.env
+ExecStartPre=/opt/cvebeacon/current/.venv/bin/cvebeacon update guard
 ExecStart=/opt/cvebeacon/current/.venv/bin/cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml run
 TimeoutStartSec=infinity
 TimeoutStopSec=infinity

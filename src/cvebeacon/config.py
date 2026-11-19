@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import math
-import re
 import stat
 import tomllib
 from dataclasses import dataclass, field
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
+from .release_repository import valid_repository
 from .watch.catalog import DEFAULT_LANGUAGE, canonical_language
 from .watch.channels import ChannelConfig, parse_channels, validate_rule_channels
 from .watch.reported import IDENTITY_MODES
@@ -314,7 +314,7 @@ def load_config(path: str | Path) -> AppConfig:
     if set(update_data) - {"enabled", "daily", "repository", "allow_prereleases"}:
         raise ConfigurationError("unknown update setting; privileged policy belongs in the administrator-owned update policy")
     repository = update_data.get("repository", "NovaSecOps/CVEBeacon")
-    if not isinstance(repository, str) or not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", repository):
+    if not valid_repository(repository):
         raise ConfigurationError("update.repository must be an owner/repository name")
     if set(dashboard_data) - {"password_hash_env", "session_lifetime_seconds", "secure_cookie", "session_idle_seconds"}:
         raise ConfigurationError("unknown dashboard setting; supply the password hash only through its environment variable")

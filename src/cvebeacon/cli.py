@@ -82,11 +82,13 @@ def _parser() -> argparse.ArgumentParser:
     update_sub = update.add_subparsers(dest="update_command", required=True)
     check_update = update_sub.add_parser("check")
     check_update.add_argument("--daily", action="store_true", help="check only when daily checks are enabled and due")
+    guard_update = update_sub.add_parser("guard", help="refuse writer startup while update recovery is pending")
+    guard_update.add_argument("--role", choices=("writer", "serve"), default="writer")
     apply_update = update_sub.add_parser("apply")
     target = apply_update.add_mutually_exclusive_group()
     target.add_argument("--version")
     target.add_argument("--from-request", action="store_true")
-    for update_parser in (apply_update, update_sub.add_parser("adopt")):
+    for update_parser in (apply_update, update_sub.add_parser("adopt"), update_sub.add_parser("recover")):
         update_parser.add_argument("--policy", default="/etc/cvebeacon/update.toml")
     commands.add_parser("source-status", help="show source health from the most recent scan")
     web = commands.add_parser("web-detect", help="observe a saved client web allowlist")
@@ -984,6 +986,8 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "update":
         from .updater import cli as update_cli
         return update_cli(args)
+    from .update_transaction import ensure_ready
+    ensure_ready(args.command)
     if args.command == "dashboard":
         from .dashboard_auth import hash_password
         print(hash_password())

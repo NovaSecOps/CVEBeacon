@@ -63,7 +63,9 @@ def test_shared_password_or_unauthenticated_dashboard_cannot_request(tmp_path):
 
 def test_loopback_health_probe_needs_no_account_and_blocks_remote(updates):
     _, _, client = updates
-    assert client.get("/healthz").json == {"status": "ok"}
+    from importlib.metadata import version
+    import os
+    assert client.get("/healthz").json == {"status": "ok", "version": version("cvebeacon"), "pid": os.getpid()}
     assert client.get("/healthz", environ_base={"REMOTE_ADDR": "203.0.113.10"}).status_code == 403
 
 
