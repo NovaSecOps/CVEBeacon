@@ -56,12 +56,13 @@ class Release:
 
     def __call__(self, request):
         self.requests.append(request)
-        if str(request.url) == cve_list.RELEASE_URL:
-            if self.conditional and request.headers.get('if-none-match') == '"release"':
-                return httpx.Response(304)
-            return httpx.Response(200, json={"assets": self.assets()}, headers={"etag": '"release"'})
         if '/tags/' in request.url.path:
             return httpx.Response(404)
+        if str(request.url).split('?', 1)[0] == cve_list.RELEASE_URL:
+            if self.conditional and request.headers.get('if-none-match') == '"release"':
+                return httpx.Response(304)
+            release = {"tag_name": "cve_2026-11-03_1200Z", "assets": self.assets()}
+            return httpx.Response(200, json=[release], headers={"etag": '"release"'})
         if request.url.path.endswith('midnight.zip.zip'):
             return httpx.Response(200, content=self.baseline)
         if request.url.path.endswith('1200Z.zip'):
@@ -269,5 +270,5 @@ def test_release_rejects_oversize_metadata_and_asset_size(monkeypatch):
     monkeypatch.setattr(cve_list, 'JSON_CAP', 4 * 1024 * 1024)
     assets = fixture.assets()
     assets[0]['size'] = cve_list.ARCHIVE_CAP + 1
-    with mock_client(lambda _: httpx.Response(200, json={'assets': assets})) as http, pytest.raises(SourceError, match='size limit'):
+    with mock_client(lambda _: httpx.Response(200, json=[{'assets': assets}])) as http, pytest.raises(SourceError, match='size limit'):
         cve_list.release(http, {})

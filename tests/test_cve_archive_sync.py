@@ -46,11 +46,6 @@ class Archives:
 
     def __call__(self,request):
         self.requests.append(request)
-        if str(request.url)==cve_list.RELEASE_URL:
-            assets=[self.asset(str(self.day)+'_all_CVEs_at_midnight.zip.zip',zipped(self.baseline,nested=True)),
-                    self.asset(f'{self.day}_delta_CVEs_at_{self.hour:02d}00Z.zip',zipped(self.delta))]
-            etag='"'+hashlib.sha256(json.dumps(assets).encode()).hexdigest()+'"'
-            return httpx.Response(304) if request.headers.get('if-none-match')==etag else httpx.Response(200,json={'assets':assets},headers={'etag':etag})
         if '/tags/' in request.url.path:
             tag=request.url.path.rsplit('/',1)[1]
             for day,records in self.closed.items():
@@ -58,6 +53,12 @@ class Archives:
                     name=str(day)+'_delta_CVEs_at_end_of_day.zip'
                     return httpx.Response(200,json={'assets':[self.asset(name,zipped(records),tag)]})
             return httpx.Response(404)
+        if str(request.url).split('?',1)[0]==cve_list.RELEASE_URL:
+            assets=[self.asset(str(self.day)+'_all_CVEs_at_midnight.zip.zip',zipped(self.baseline,nested=True)),
+                    self.asset(f'{self.day}_delta_CVEs_at_{self.hour:02d}00Z.zip',zipped(self.delta))]
+            etag='"'+hashlib.sha256(json.dumps(assets).encode()).hexdigest()+'"'
+            release={'tag_name':f'cve_{self.day}_{self.hour:02d}00Z','assets':assets}
+            return httpx.Response(304) if request.headers.get('if-none-match')==etag else httpx.Response(200,json=[release],headers={'etag':etag})
         name=request.url.path.rsplit('/',1)[1]
         if name in self.files:
             return httpx.Response(503) if name in self.fail else httpx.Response(200,content=self.files[name])
@@ -124,10 +125,11 @@ def test_failed_archive_keeps_its_previous_cursor(tmp_path):
     assert store.metadata()['cve_list_cursor']==NOW.isoformat()
 
 
-def test_baseline_mode_never_alerts_on_pre_start_history(tmp_path):
+def test_baseline_mode_imports_pre_start_changes_without_normal_alerts(tmp_path):
     config=write_config(tmp_path,sources=('nvd','cve_list'),initial='baseline')
     store=WatchStore(config.watch.database)
     old=record(updated=NOW.replace(hour=10).isoformat())
+    old['cveMetadata']['datePublished']=NOW.replace(hour=8).isoformat()
     fresh=record(OTHER,updated=(NOW+timedelta(minutes=30)).isoformat())
     fixture=Archives(baseline=[old],delta=[old])
     with mock_client(fixture) as http:
@@ -139,9 +141,26 @@ def test_baseline_mode_never_alerts_on_pre_start_history(tmp_path):
         cve_list.sync(http,store,config.watch,NOW+timedelta(hours=1))
     rules=parse_rules([{'name':'critical','condition':{'cvss_min':9},'channels':['sink']}])
     store.evaluate_touched(rules,catalogs=('cve_list',))
-    assert store.view(ID) is None
+    assert store.view(ID) is not None
     assert store.view(OTHER) is not None
-    assert [event.cve_id for event in store.events()]==[OTHER]
+    assert [event.cve_id for event in store.events() if not event.initial]==[OTHER]
+
+
+def test_baseline_mode_imports_pre_start_record_from_end_of_day(tmp_path):
+    config=write_config(tmp_path,sources=('nvd','cve_list'),initial='baseline')
+    store=WatchStore(config.watch.database)
+    fixture=Archives(baseline=[],delta=[])
+    with mock_client(fixture) as http:
+        cve_list.sync(http,store,config.watch,NOW)
+    old=record(updated=NOW.replace(hour=10).isoformat())
+    old['cveMetadata']['datePublished']=NOW.replace(hour=8).isoformat()
+    next_day=Archives(day=NOW.date()+timedelta(days=1),hour=1,delta=[],closed={NOW.date():[old]})
+    with mock_client(next_day) as http:
+        cve_list.sync(http,store,config.watch,NOW+timedelta(days=1,hours=1))
+    rules=parse_rules([{'name':'critical','condition':{'cvss_min':9},'channels':['sink']}])
+    store.evaluate_touched(rules,catalogs=('cve_list',))
+    assert store.view(ID) is not None
+    assert not [event for event in store.events() if not event.initial]
 
 
 @pytest.mark.parametrize('status',[200,404,503])
@@ -227,3 +246,93 @@ def test_full_sized_baseline_finishes_in_one_call_with_bounded_batches(tmp_path,
     assert consumed==count and largest<=cve_list.BATCH
     assert store.metadata()['cve_list_cursor']==NOW.isoformat()
     assert store.metadata()['cve_list_initial_pending']=='0'
+
+
+def _release_entry(day, hour, *, baseline_day=None):
+    baseline = f'{baseline_day or day}_all_CVEs_at_midnight.zip.zip'
+    delta = f'{day}_delta_CVEs_at_{hour:02d}00Z.zip'
+    assets = []
+    for name in (baseline, delta):
+        body = name.encode()
+        assets.append({'name': name, 'size': len(body), 'digest': 'sha256:' + hashlib.sha256(body).hexdigest(),
+                       'browser_download_url': cve_list.ASSET_PREFIX + 'fake/' + name})
+    return {'tag_name': f'cve_{day}_{hour:02d}00Z', 'assets': assets}
+
+
+def _end_of_day_entry(day):
+    name = f'{day}_delta_CVEs_at_end_of_day.zip'
+    body = name.encode()
+    return {'tag_name': f'cve_{day}_at_end_of_day',
+            'assets': [{'name': name, 'size': len(body), 'digest': 'sha256:' + hashlib.sha256(body).hexdigest(),
+                        'browser_download_url': cve_list.ASSET_PREFIX + 'fake/' + name}]}
+
+
+@pytest.mark.parametrize('first_kind', ['hourly', 'midnight', 'end_of_day'])
+def test_release_list_selects_newest_hourly_not_latest(first_kind):
+    hourly = _release_entry('2026-11-19', 1)
+    midnight = _release_entry('2026-11-19', 0, baseline_day='2026-11-18')
+    end_of_day = _end_of_day_entry('2026-11-18')
+    releases = {'hourly': [hourly, midnight, end_of_day],
+                'midnight': [midnight, hourly, end_of_day],
+                'end_of_day': [end_of_day, midnight, hourly]}[first_kind]
+    seen = []
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json=releases)
+    with mock_client(handler) as http:
+        assets, cache = cve_list.release(http, {})
+    assert assets['delta']['name'] == '2026-11-19_delta_CVEs_at_0100Z.zip'
+    assert assets['baseline']['name'] == '2026-11-19_all_CVEs_at_midnight.zip.zip'
+    assert not any(url.endswith('/latest') for url in seen)
+    assert 'per_page=' in seen[0]
+    assert json.loads(cache['cve_list_release'])['assets'][:2]
+
+
+def test_end_of_day_latest_falls_back_to_the_midnight_release():
+    releases = [_end_of_day_entry('2026-11-18'), _release_entry('2026-11-19', 0, baseline_day='2026-11-18')]
+    with mock_client(lambda _: httpx.Response(200, json=releases)) as http:
+        assets, _ = cve_list.release(http, {})
+    assert assets['delta']['name'] == '2026-11-19_delta_CVEs_at_0000Z.zip'
+    assert assets['baseline']['name'] == '2026-11-18_all_CVEs_at_midnight.zip.zip'
+
+
+def test_baseline_disk_preflight_accepts_expanded_archive_plus_margin(tmp_path, monkeypatch):
+    from collections import namedtuple
+    usage = namedtuple('usage', 'total used free')
+    payload = official(description='x' * 200_000)
+    fixture = Archives(baseline=[payload])
+    asset = fixture.asset('2026-11-03_all_CVEs_at_midnight.zip.zip', zipped([payload], nested=True))
+    # Three times the expanded archive plus the fixed reserve fits. The former
+    # eight-times rule rejected this realistic free-space level.
+    monkeypatch.setattr(cve_list.shutil, 'disk_usage', lambda _: usage(10**9, 0, 64*1024*1024 + 1_000_000))
+    with mock_client(fixture) as http:
+        assert len(list(cve_list.archive_records(http, asset, cache_directory=tmp_path/'cache'))) == 1
+
+
+def test_watch_status_and_dashboard_show_cve_list_feed_state(tmp_path):
+    from cvebeacon import dashboard
+    from cvebeacon.watch.users import UserStore
+    from cvebeacon.watch.sync import watch_status
+    from test_dashboard_watch import PASSWORD, login
+    config=write_config(tmp_path,sources=('nvd','cve_list'),initial='baseline')
+    store=WatchStore(config.watch.database)
+    store.set_metadata({'cve_list_cursor':'2026-11-03T12:00:00+00:00',
+                        'cve_list_initial_mode':'baseline',
+                        'cve_list_start':'2026-11-03T09:00:00+00:00',
+                        'cve_list_initial_pending':'0'})
+    output=watch_status(config.watch)
+    assert 'cve_list cursor: 2026-11-03T12:00:00+00:00' in output
+    assert 'initial baseline' in output and 'start 2026-11-03T09:00:00+00:00' in output
+    users=UserStore(config.watch.users_database)
+    users.add('admin',password=PASSWORD,is_admin=True)
+    app=dashboard.create_app(config)
+    try:
+        client=app.test_client()
+        login(client,'admin')
+        page=client.get('/watch')
+        assert 'CVE List cursor' in page.text
+        assert '2026-11-03T12:00:00+00:00' in page.text
+        assert 'CVE List initial mode' in page.text
+        assert 'baseline' in page.text
+    finally:
+        app.extensions['dashboard_jobs'].shutdown()

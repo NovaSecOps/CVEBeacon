@@ -16,7 +16,7 @@ from watch_support import NOW, mock_client, nvd_page, write_config
 
 def test_observed_midnight_release_names_are_accepted():
     payload = json.loads((Path(__file__).parent/'fixtures/cvelist_release_midnight.json').read_text())
-    with mock_client(lambda _: httpx.Response(200,json=payload)) as http:
+    with mock_client(lambda _: httpx.Response(200,json=[payload])) as http:
         assets,_ = cve_list.release(http,{})
     assert assets['baseline']['name'].endswith('.zip.zip')
     assert assets['delta']['size'] == 22
@@ -95,7 +95,9 @@ def test_retention_gap_uses_one_baseline_then_returns_to_deltas(tmp_path):
     store=WatchStore(config.watch.database)
     start=(NOW-timedelta(days=60)).isoformat()
     store.set_metadata({'cve_list_start':start,'cve_list_cursor':start,'cve_list_initial_mode':'baseline'})
-    fixture=Release([official()])
+    payload=official()
+    payload['cveMetadata']['dateUpdated']=NOW.replace(hour=1).isoformat()
+    fixture=Release([payload])
     with mock_client(fixture) as http:
         cve_list.sync(http,store,config.watch,NOW)
         cve_list.sync(http,store,config.watch,NOW+timedelta(hours=1))

@@ -22,7 +22,7 @@ from .directories import ensure_private_directory
 from ..sources.common import cve_id, source_payload
 from .records import CVSSEntry, Product, Reference, WatchRecord
 
-RELEASE_URL = "https://api.github.com/repos/CVEProject/cvelistV5/releases/latest"
+RELEASE_URL = "https://api.github.com/repos/CVEProject/cvelistV5/releases"
 ASSET_PREFIX = "https://github.com/CVEProject/cvelistV5/releases/download/"
 REDIRECT_HOSTS = ("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
 DIRECTORY_CAP = 64 * 1024 * 1024
@@ -31,10 +31,11 @@ ARCHIVE_CAP = 1024 * 1024 * 1024
 EXPANDED_CAP = 8 * 1024 * 1024 * 1024
 MAX_MEMBERS = 1_000_000
 MAX_DELTA_DAYS = 7
+RELEASE_LIST_LIMIT = 100
 BATCH = 100
 BATCH_BYTES = 8 * 1024 * 1024
 DISK_RESERVE = 64 * 1024 * 1024
-STORAGE_MULTIPLIER = 8
+STORAGE_MULTIPLIER = 3
 
 
 def description_text(payload):
@@ -128,36 +129,66 @@ def _validate_asset(asset):
         raise SourceError("cve_list", "archive exceeds size limit")
 
 
+def _select_assets(assets):
+    selected = {}
+    for asset in assets if isinstance(assets, list) else ():
+        name = asset.get("name", "") if isinstance(asset, dict) else ""
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}_all_CVEs_at_midnight\.zip(?:\.zip)?", name):
+            selected["baseline"] = asset
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}_delta_CVEs_at_\d{4}Z\.zip", name):
+            selected["delta"] = asset
+    return selected
+
+
+def _hourly_release(releases):
+    """Choose the newest hourly release from a bounded release listing.
+
+    GitHub's ``/releases/latest`` can point at the separate end-of-day release.
+    Select explicitly by the hourly archive names and their UTC date instead.
+    """
+    candidates = []
+    for item in releases:
+        if not isinstance(item, dict) or item.get("draft"):
+            continue
+        selected = _select_assets(item.get("assets"))
+        if "baseline" not in selected or "delta" not in selected:
+            continue
+        try:
+            for asset in selected.values():
+                _validate_asset(asset)
+            delta_time = datetime.strptime(selected["delta"]["name"][:10] + selected["delta"]["name"][-9:-5], "%Y-%m-%d%H%M")
+            baseline_day = datetime.strptime(selected["baseline"]["name"][:10], "%Y-%m-%d")
+            if not timedelta(0) <= delta_time - baseline_day < timedelta(days=2):
+                raise ValueError("incoherent release")
+        except (KeyError, TypeError, ValueError):
+            continue
+        candidates.append((delta_time, selected))
+    if not candidates:
+        raise SourceError("cve_list", "release list omitted a coherent hourly baseline and delta archive")
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 @source_payload("cve_list")
 def release(http, metadata, *, url=None):
     headers = {"If-None-Match": metadata["cve_list_etag"]} if metadata.get("cve_list_etag") else {}
     response_headers = {}
-    payload = _json(http, url or RELEASE_URL, headers=headers, response_headers=response_headers)
+    payload = _json(http, url or RELEASE_URL + f"?per_page={RELEASE_LIST_LIMIT}",
+                    headers=headers, response_headers=response_headers)
     if payload is None:
         try:
             payload = json.loads(metadata["cve_list_release"])
         except (KeyError, ValueError) as exc:
             raise SourceError("cve_list", "conditional response has no cached release") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("assets"), list):
-        raise SourceError("cve_list", "invalid release envelope")
-    selected = {}
-    for asset in payload["assets"]:
-        name = asset.get("name", "")
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}_all_CVEs_at_midnight\.zip(?:\.zip)?", name):
-            selected["baseline"] = asset
-        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}_delta_CVEs_at_\d{4}Z\.zip", name):
-            selected["delta"] = asset
-    if "baseline" not in selected or "delta" not in selected:
-        raise SourceError("cve_list", "release omitted baseline or delta archive")
-    for asset in selected.values():
-        _validate_asset(asset)
-    try:
-        delta_time = datetime.strptime(selected["delta"]["name"][:10] + selected["delta"]["name"][-9:-5], "%Y-%m-%d%H%M")
-        baseline_day = datetime.strptime(selected["baseline"]["name"][:10], "%Y-%m-%d")
-        if not timedelta(0) <= delta_time - baseline_day < timedelta(days=2):
-            raise ValueError("incoherent release")
-    except ValueError as exc:
-        raise SourceError("cve_list", "invalid release date") from exc
+        selected = _select_assets(payload.get("assets") if isinstance(payload, dict) else None)
+        if "baseline" not in selected or "delta" not in selected:
+            raise SourceError("cve_list", "cached release is invalid")
+        return selected, {
+            "cve_list_release": metadata["cve_list_release"],
+            "cve_list_etag": metadata.get("cve_list_etag", ""),
+        }
+    if not isinstance(payload, list):
+        raise SourceError("cve_list", "invalid release list")
+    selected = _hourly_release(payload)
     cache = json.dumps({"assets": list(selected.values())}, separators=(",", ":"))
     return selected, {"cve_list_release": cache, "cve_list_etag": response_headers.get("etag", metadata.get("cve_list_etag", ""))}
 
@@ -360,7 +391,7 @@ def _delta_time(asset):
 def end_of_day(http, day):
     """The official closed-day release has its own tag, not the 23:00 tag."""
     tag = "cve_" + day.isoformat() + "_at_end_of_day"
-    url = RELEASE_URL.rsplit("/", 1)[0] + "/tags/" + tag
+    url = RELEASE_URL + "/tags/" + tag
     try:
         payload = _json(http, url)
     except SourceError as exc:
@@ -377,7 +408,7 @@ def end_of_day(http, day):
     return None
 
 
-def _import_archive(http, store, watch, asset, at, metadata, *, cutoff=None):
+def _import_archive(http, store, watch, asset, at, metadata, *, cutoff=None, initial_before=None):
     """Commit bounded batches; publish coverage only after validated EOF.
 
     Evaluation obligations already live in watch_touched. Do not accumulate a
@@ -393,7 +424,8 @@ def _import_archive(http, store, watch, asset, at, metadata, *, cutoff=None):
         nonlocal count, new, changed, batch_bytes
         _require_disk(directory, STORAGE_MULTIPLIER * batch_bytes)
         result = store.upsert_cve_list(batch, catalogs=watch.sources,
-                                      initial=metadata.get("cve_list_initial_pending") == "1")
+                                      initial=metadata.get("cve_list_initial_pending") == "1",
+                                      initial_before=initial_before)
         count += len(batch)
         new += result.new
         changed += result.changed
@@ -444,12 +476,14 @@ def sync(http, store, watch, now, *, initial_mode=None):
     baseline_time = _time(baseline["name"][:10] + "T00:00:00Z")
     latest = _delta_time(delta)
     cursor = _time(metadata["cve_list_cursor"]) if metadata.get("cve_list_cursor") else None
-    cutoff = _time(metadata["cve_list_start"]) if mode in ("baseline", "backfill") else None
+    start_time = _time(metadata["cve_list_start"]) if mode == "baseline" else None
+    cutoff = _time(metadata["cve_list_start"]) if mode == "backfill" else None
     totals = [0, 0, 0]
 
-    def apply(asset, at):
+    def apply(asset, at, *, content_since=None):
         nonlocal cursor
-        counts = _import_archive(http, store, watch, asset, at, metadata, cutoff=cutoff)
+        counts = _import_archive(http, store, watch, asset, at, metadata,
+                                 cutoff=content_since, initial_before=start_time)
         for index, value in enumerate(counts):
             totals[index] += value
         cursor = at
@@ -458,7 +492,7 @@ def sync(http, store, watch, now, *, initial_mode=None):
         if mode == "baseline":
             store.set_metadata({"cve_list_cursor": baseline_time.isoformat()})
             return 0, 0, 0, ()
-        apply(baseline, baseline_time)
+        apply(baseline, baseline_time, content_since=cutoff)
 
     # A week of closed-day archives bounds ordinary catch-up work and API use.
     # Longer gaps, or a genuinely missing archive, use one full snapshot.
@@ -466,14 +500,14 @@ def sync(http, store, watch, now, *, initial_mode=None):
     if (latest.date() - cursor.date()).days > MAX_DELTA_DAYS:
         if baseline_time <= cursor:
             raise SourceError("cve_list", "available baseline cannot cover the archive gap")
-        apply(baseline, baseline_time)
+        apply(baseline, baseline_time, content_since=baseline_time if mode == "baseline" else None)
         used_baseline = True
     while cursor.date() < latest.date():
         closed = end_of_day(http, cursor.date())
         if closed is None:
             if used_baseline or baseline_time <= cursor:
                 raise SourceError("cve_list", "required end-of-day archive is unavailable; baseline is too old")
-            apply(baseline, baseline_time)
+            apply(baseline, baseline_time, content_since=baseline_time if mode == "baseline" else None)
             used_baseline = True
             continue
         at = datetime.combine(cursor.date() + timedelta(days=1), datetime.min.time(), timezone.utc)
