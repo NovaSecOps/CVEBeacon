@@ -128,7 +128,7 @@ def test_preview_does_not_write_then_atomic_save_backup_audit_and_reload(account
     monkeypatch.setattr(editor_module.os, "replace", record)
     assert confirm(client, response).status_code == 303
     assert load_config(config.config_path).http.retries == 4
-    assert client.get("/").status_code == 303
+    assert client.get("/").status_code == 200
     editor = app.extensions["dashboard_config"]
     assert editor.target != saved_wsgi and editor.config.http.retries == 4
     after = config.config_path.stat()

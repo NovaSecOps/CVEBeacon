@@ -444,14 +444,27 @@ container layout.
 | State database and report output paths | `edit_system` (view; changes administrator-only) |
 
 Blank fields omit a setting and use the configuration loader's default. String
-fields accept plain text; arrays, column mappings and nested rule conditions
-accept TOML values. For example, use `["soc-email"]` for channels and
+fields accept plain text. Enumerated settings use selectors, boolean settings use
+checkboxes, and numeric settings show the validator's bounds. Required fields
+are marked; requirements on a blank final row apply only when that row is added.
+Defaults appear as placeholders and beneath the controls. Email `to`, `cc`,
+`bcc` and legacy `recipients` accept comma-separated addresses or TOML arrays;
+the editor trims and deduplicates them and validates every address. Other arrays,
+column mappings and nested rule conditions accept TOML values. For example,
+use `["soc-email"]` for channels and
 `{ any = [{ cvss_min = 9.0 }, { epss_min = 0.5 }] }` for a condition.
 The final blank row adds a rule, mapping or channel. Choose the new channel type
 before making other changes; choosing it reloads the form. Removal checkboxes
 remove existing rows. Every submitted document is validated by `load_config`,
-including channel references and source requirements. Invalid submissions show
-the loader's guidance with submitted values redacted and leave the file intact.
+including channel references and source requirements. Invalid submissions name
+the field and expected format, keep ordinary form
+values for correction, and leave the file intact. Secret contents are never
+redisplayed. Unvalidated row labels, invalid enum lists and invalid credential
+references retain their validated baseline instead of repeating potentially
+sensitive text; re-enter changed labels after correcting an error. The condition
+editor lists valid leaves, values and examples from
+the parser's schema; for example, `kev` accepts `"cisa"`, `"eu"` or `"any"`, and
+`kev = true` reports the exact condition path and accepted values.
 Unrecognized configuration fields must be reviewed outside the editor before
 editing; they are never silently copied or discarded. Column mappings must use
 only the known canonical or optional inventory fields, so an unknown column is
@@ -508,8 +521,24 @@ contents before the live file changes. Validation, replacement preparation and
 handled write or audit failures leave the existing application and configuration
 in place, including restoring any secret contents already replaced. Post-commit
 temporary cleanup is best-effort maintenance and cannot turn a completed save
-into a failure. Successful saves reload the dashboard and end **all dashboard
-sessions**; log in again. Already-running non-configuration requests finish with
+into a failure. Successful saves reload the dashboard. Sessions end only for
+changes to:
+
+- any `[dashboard]` setting, including its password-hash environment reference,
+  session lifetimes and cookie settings;
+- `watch.database`, which determines the account database location;
+- `[watch.reporting]`, whose identity mode controls who may record reporting;
+- an unknown section or setting, or recovery from an invalid or missing file.
+
+Effective dashboard settings, account database locations and reporting identity
+are compared against both the valid current file and the running configuration.
+These changes require access confirmation and end **all dashboard sessions**;
+log in again. Other saves, including channel format, recipients, rules, sources,
+HTTP, inventory, output and state settings, preserve all existing sessions,
+their original expiry and CSRF tokens. A state-path change that indirectly
+changes the default account database also ends sessions. The editor shows
+**Saved; takes effect on the next run**. Other running commands must restart to
+use the new settings. Already-running non-configuration requests finish with
 their original configuration; a configuration request that reaches the old
 application during the swap is refused and can be retried after reloading. Other
 running commands retain their configuration until restarted. A reload reuses the

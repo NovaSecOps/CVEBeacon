@@ -26,12 +26,13 @@ from werkzeug.exceptions import HTTPException
 from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
                      TeamsConfig, WatchConfig, load_config)
+from .dashboard_config_fields import metadata
 from .errors import CVEBeaconError, ConfigurationError
 from .locking import LOCK_NAME, run_lock_path
 from .watch.channels import (CREDENTIAL_FIELDS, ChannelConfig, COMMON_KEYS, TYPE_KEYS,
-                             ENV_NAME_PATTERN, SECRET_FILE_LIMIT, SecretRef)
+                             ENV_NAME_PATTERN, SECRET_FILE_LIMIT, SecretRef, SMTP_DEFAULT_PORTS, _email_addresses)
 from .watch.directories import ensure_private_directory
-from .watch.rules import Rule, EVENT_KINDS, LEAF_KEYS
+from .watch.rules import Rule, EVENT_KINDS, LEAF_KEYS, CONDITION_SCHEMA
 from .watch.users import UserStore
 
 MAX_CONFIG = 256 * 1024
@@ -219,6 +220,45 @@ NUMBER_FIELDS = {"port", "max_items", "priority", "min_interval_seconds", "timeo
                  "session_lifetime_seconds", "session_idle_seconds"}
 COMPLEX_FIELDS = {"sources", "channels", "events", "cvss_providers", "condition", "columns",
                   "to", "cc", "bcc", "recipients"}
+
+
+def session_settings_changed(before, after):
+    """Unknown settings fail closed; reporting identity controls reporting access."""
+    safe_sections = {"watch", "sources", "inventory", "http", "state", "output",
+                     "notifications", "product_mappings"}
+    for section in set(before) | set(after):
+        old, new = before.get(section), after.get(section)
+        if old == new:
+            continue
+        if section not in safe_sections:
+            return True
+        if section == "product_mappings":
+            continue
+        if not isinstance(old or {}, dict) or not isinstance(new or {}, dict):
+            return True
+        if section == "watch":
+            for key in set(old or {}) | set(new or {}):
+                if (old or {}).get(key) == (new or {}).get(key):
+                    continue
+                if key in {"database", "reporting"} or key not in {*WATCH_FIELDS, "rules", "channels"}:
+                    return True
+        elif section == "notifications":
+            if (set(old or {}) | set(new or {})) - {"email", "teams"}:
+                return True
+        else:
+            schema = next(schema for specs in SCHEMAS.values() for path, schema in specs if path == section)
+            if (set(old or {}) | set(new or {})) - set(schema):
+                return True
+    return False
+
+
+def access_settings_changed(before, after, updated, baseline, running):
+    return (before is None or session_settings_changed(before, after)
+            or updated.dashboard != baseline.dashboard or updated.dashboard != running.dashboard
+            or updated.watch.users_database != baseline.watch.users_database
+            or updated.watch.users_database != running.watch.users_database
+            or updated.watch.reporting_identity != baseline.watch.reporting_identity
+            or updated.watch.reporting_identity != running.watch.reporting_identity)
 
 
 def get_table(document, path):
@@ -978,11 +1018,8 @@ class Editor:
                               [checks_config, self.config],
                               [document] if invalid_current else
                               [item for item in (current_document, document) if item is not None])
-        lockout = (invalid_current or
-                   updated.dashboard != self.config.dashboard or
-                   updated.dashboard != checks_config.dashboard or
-                   updated.watch.users_database != self.config.watch.users_database or
-                   updated.watch.users_database != checks_config.watch.users_database)
+        lockout = invalid_current or access_settings_changed(
+            current_document, document, updated, checks_config, self.config)
         if lockout:
             if updated.watch.users_database != self.config.watch.users_database or \
                     updated.watch.users_database != checks_config.watch.users_database:
@@ -1108,7 +1145,10 @@ class Editor:
             from .dashboard import create_app
             token = _RELOADING.set(self)
             try:
-                replacement_app = create_app(updated, host=self.host, jobs=self.jobs)
+                end_sessions = invalid_current or access_settings_changed(
+                    old, pending.document, updated, checks_config, self.config)
+                replacement_app = create_app(updated, host=self.host, jobs=self.jobs,
+                                             session_app=None if end_sessions else self.active_app)
             finally:
                 _RELOADING.reset(token)
             destination_users = replacement_app.extensions["dashboard_users"]
@@ -1140,11 +1180,8 @@ class Editor:
                     abort(403)
                 if old is not None:
                     self._check_direct_urls(old, pending.document, rollback=section == "rollback")
-                lockout = (pending.lockout or invalid_current or
-                           updated.dashboard != self.config.dashboard or
-                           updated.dashboard != checks_config.dashboard or
-                           updated.watch.users_database != self.config.watch.users_database or
-                           updated.watch.users_database != checks_config.watch.users_database)
+                lockout = pending.lockout or invalid_current or access_settings_changed(
+                    old, pending.document, updated, checks_config, self.config)
                 if lockout and not confirmed:
                     raise ConfigurationError("Confirm the access and session changes before saving")
                 if (updated.watch.users_database != self.config.watch.users_database or
@@ -1261,6 +1298,8 @@ class Editor:
             self.discard(identifier, committed=True)
         except OSError:
             logging.getLogger("cvebeacon").warning("Configuration saved; staged secret cleanup failed")
+
+        return end_sessions
 
 
 def _backup_name(name):
@@ -1783,6 +1822,34 @@ def _kind(key):
     return "string"
 
 
+def _field_metadata():
+    result = {}
+    for specs in SCHEMAS.values():
+        for path, schema in specs:
+            for key, default in schema.items():
+                result[f"{path}.{key}"] = metadata(path, key, default, _kind(key))
+    for path, schema in (("watch.rules", RULE_FIELDS), ("product_mappings", MAPPING_FIELDS)):
+        for key, default in schema.items():
+            result[f"{path}.{key}"] = metadata(path, key, default, _kind(key))
+    for kind, keys in TYPE_KEYS.items():
+        common = defaults(ChannelConfig)
+        if kind == "telegram":
+            common["min_interval_seconds"] = 3.0
+        for key in {"name", *COMMON_KEYS, *keys}:
+            result[f"watch.channels.{kind}.{key}"] = metadata(
+                "channel", key, common.get(key), _kind(key), channel_type=kind)
+    return result
+
+
+FIELD_METADATA = _field_metadata()
+
+
+def _display(item):
+    if item is None:
+        return ""
+    return item if isinstance(item, str) else value(item)
+
+
 def _secret_directory(config):
     return config.watch.users_database.parent / "dashboard-secrets"
 
@@ -1826,18 +1893,29 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
             item = data.get(key)
             reference = key.endswith(("_env", "_file"))
             direct_url = key == "url"
-            text = "" if item is None or direct_url else str(item) if _kind(key) == "string" else value(item)
-            default = schema[key]
-            if isinstance(default, tuple):
-                default = list(default)
-            hint = ("" if default is None else str(default) if isinstance(default, Path) else value(default))
+            path = ("watch.channels." + label.split(" channel ", 1)[0].strip().casefold() if section == "channels" else
+                    "watch.rules" if section == "rules" else
+                    "product_mappings" if section == "product-mappings" else label)
+            spec = FIELD_METADATA[f"{path}.{key}"]
+            text = ("" if item is None or direct_url else
+                    ", ".join(item) if spec.kind == "addresses" and isinstance(item, list) else
+                    str(item) if spec.kind in {"string", "enum"} else value(item))
+            hint = _display(spec.default)
+            if section == "channels" and path == "watch.channels.smtp" and key == "port":
+                security = data.get("security", "starttls")
+                hint = str(SMTP_DEFAULT_PORTS.get(str(security).strip().casefold(), 587))
             if label == "watch" and key == "database":
                 hint = "cvebeacon-watch.db beside the state database"
             if direct_url and item is not None:
                 hint = "Existing endpoint is hidden and retained"
             path_value = key in {"database", "directory", "path"} or key.endswith("_file")
             controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
-                             "kind": _kind(key), "secret": key.endswith("_file"),
+                             "kind": spec.kind, "choices": spec.choices, "required": spec.required,
+                             "help": spec.help, "example": _display(spec.example), "requirement": spec.requirement,
+                             "minimum": spec.minimum, "maximum": spec.maximum, "step": spec.step,
+                             "checked": item is True or item is None and spec.default is True,
+                             "identity": f"{path}.{key}", "spec": spec,
+                             "secret": key.endswith("_file"),
                              "existing": bool(item),
                              "readonly": (readonly_channel or readonly_dashboard
                                           or readonly_notifications or direct_url) or
@@ -1883,16 +1961,45 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 expected.add(name)
                 text = request.form.get(name, "")
                 if not remove and (text != "" if control["kind"] == "string" else text.strip() != ""):
-                    if control["kind"] == "string":
+                    if control["kind"] in {"string", "enum"}:
                         row[key] = text
+                        if control["kind"] == "enum":
+                            choices = control["choices"]
+                            if choices and isinstance(choices[0], int):
+                                try:
+                                    row[key] = int(text)
+                                except ValueError:
+                                    raise ConfigurationError(control["identity"] + " must be one of " + ", ".join(map(str, choices))) from None
+                            normalized = row[key].strip().casefold() if isinstance(row[key], str) else row[key]
+                            if normalized not in [choice.casefold() if isinstance(choice, str) else choice for choice in choices]:
+                                # Preserve the loader's legacy inventory format aliases.
+                                if control["identity"] != "inventory.format" or normalized.lstrip(".") not in {*choices, "yml"}:
+                                    raise ConfigurationError(control["identity"] + " must be one of " + ", ".join(map(str, choices)))
+                    elif control["kind"] == "addresses":
+                        try:
+                            if text.lstrip().startswith("["):
+                                parsed = tomllib.loads("value = " + text)
+                                if set(parsed) != {"value"}:
+                                    raise ValueError
+                                addresses = parsed["value"]
+                            else:
+                                addresses = [address.strip() for address in text.split(",")]
+                            row[key] = list(_email_addresses({key: addresses}, key, control["identity"].rsplit(".", 1)[0], required=control["required"]))
+                        except (ValueError, RecursionError, ConfigurationError):
+                            raise ConfigurationError(control["identity"] + " must be comma-separated email addresses or a TOML array of email addresses") from None
                     else:
                         try:
                             parsed = tomllib.loads("value = " + text)
                             if set(parsed) != {"value"}:
                                 raise ValueError
                             row[key] = parsed["value"]
+                            if control["kind"] == "boolean" and not isinstance(row[key], bool):
+                                raise ValueError
+                            if control["kind"] == "number" and (isinstance(row[key], bool) or not isinstance(row[key], (int, float))):
+                                raise ValueError
                         except (ValueError, RecursionError):
-                            raise ConfigurationError("Enter a valid TOML value in numeric, boolean and structured fields") from None
+                            expected_format = {"number": "a TOML number", "boolean": "true or false", "toml": "a valid TOML array or table"}[control["kind"]]
+                            raise ConfigurationError(control["identity"] + " must be " + expected_format) from None
                 if control["secret"]:
                     secret_name = name + "_new"
                     expected.add(secret_name)
@@ -1909,6 +2016,27 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             rows.append(None if remove else row)
         if set(request.form) - expected or any(len(request.form.getlist(key)) != 1 for key in request.form):
             abort(400)
+        for group, row in zip(groups, rows):
+            active = row is not None and (section not in {"rules", "channels", "product-mappings"}
+                                         or row.get("vendor" if section == "product-mappings" else "name"))
+            if active:
+                for control in group["controls"]:
+                    if control["required"] and not row.get(control["key"]):
+                        expected_format = {"toml": "a nonempty TOML array or table", "addresses": "at least one email address"}.get(control["kind"], "nonempty plain text")
+                        raise ConfigurationError(control["identity"] + " is required; expected " + expected_format)
+        if section == "notifications" and rows[1] is not None and rows[1].get("enabled"):
+            for key in ("sender", "recipients"):
+                if not rows[1].get(key):
+                    raise ConfigurationError(f"notifications.email.{key} is required when enabled; expected an email address" + (" list" if key == "recipients" else ""))
+        if section == "rules":
+            from .watch.rules import parse_condition
+            for index, row in enumerate(rows):
+                if row is not None and row.get("name"):
+                    try:
+                        parse_condition(row.get("condition"), path=f"watch.rules[{index}].condition")
+                    except ConfigurationError as error:
+                        raise ConfigurationError(safe_error(
+                            error, {"condition": row.get("condition")}, editor.path)) from None
         directory = None
         for index, data, row, key, secret, prefix in secret_requests:
             if row is None:
@@ -2047,6 +2175,8 @@ def register_config(app, config, *, host):
     def page(section, permission):
         error, preview, diff, lockout, staged = None, None, None, False, []
         document = None
+        groups = None
+        version = None
         status = 400
         try:
             document, _, _, version, current_config = editor.read()
@@ -2057,13 +2187,20 @@ def register_config(app, config, *, host):
                         "editing for the dashboard service, then reload this page.")
                 action = request.form.get("action")
                 if action == "confirm":
-                    editor.commit(request.form.get("preview"), section, app.extensions["dashboard_users"],
-                                  {permission}, request.form.get("lockout") == "yes")
-                    return redirect(url_for("login"), code=303)
+                    ended = editor.commit(request.form.get("preview"), section, app.extensions["dashboard_users"],
+                                          {permission}, request.form.get("lockout") == "yes")
+                    return redirect(url_for("login") if ended else
+                                    url_for("config_editor." + section, saved=1), code=303)
                 if action != "preview":
                     abort(400, "Unsupported configuration action; reload the form")
                 if request.form.get("version") != version:
                     abort(409, "Configuration changed; reload the form")
+                count = int(request.form.get("row_count", "1")) if request.form.get("row_count", "1").isdigit() else 0
+                if not 1 <= count <= 101:
+                    abort(400)
+                row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
+                groups = groups_for(section, document, count=count, row_types=row_types,
+                                    can_manage="manage_secrets" in g.permissions, can_admin=g.user.is_admin)
                 candidate, staged, replacements = parse_form(editor, section, document, current_config,
                                                              g.permissions, can_admin=g.user.is_admin)
                 preview, lockout = editor.preview(
@@ -2082,6 +2219,8 @@ def register_config(app, config, *, host):
                                                      can_admin=g.user.is_admin),
                                    version=version, preview=preview, diff=diff, lockout=lockout,
                                    channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS, leaves=LEAF_KEYS,
+                                   condition_schema=CONDITION_SCHEMA, toml_value=value,
+                                   saved=request.args.get("saved") == "1",
                                    read_only=editor.read_only())
         except ConfigurationError as exc:
             error = safe_error(exc, document or {}, editor.path)
@@ -2092,6 +2231,40 @@ def register_config(app, config, *, host):
         finally:
             for path in staged:
                 path.unlink(missing_ok=True)
+        if groups is not None and status == 400 and request.form.get("action") == "preview":
+            for index, group in enumerate(groups):
+                group["removed"] = request.form.get(f"remove{index}") == "yes"
+                for control in group["controls"]:
+                    key = control["key"]
+                    submitted = request.form.get(control["id"], control["value"])
+                    # Unvalidated labels and credential assignments were never
+                    # safe error output. Retain their validated baseline instead.
+                    if (control["readonly"] or key in {"url", "name"}
+                            or section == "product-mappings"):
+                        continue
+                    if key.endswith("_env") and submitted.strip() and ENV_NAME_PATTERN.fullmatch(submitted.strip()) is None:
+                        continue
+                    if control["spec"].item_choices and submitted.strip():
+                        try:
+                            items = tomllib.loads("value = " + submitted)["value"]
+                            if not isinstance(items, list) or any(not isinstance(item, str) or item.strip().casefold() not in control["spec"].item_choices for item in items):
+                                continue
+                        except (ValueError, RecursionError):
+                            continue
+                    if key == "condition" and submitted.strip():
+                        try:
+                            condition = tomllib.loads("value = " + submitted)["value"]
+                            if any(isinstance(part, str) and part not in {*LEAF_KEYS, "any", "all", "not"}
+                                   for identity, _ in _walk(condition) for part in identity if not isinstance(part, int)):
+                                continue
+                        except (ValueError, RecursionError):
+                            pass
+                    control["value"] = submitted
+                    control["checked"] = submitted == "true" or submitted == "" and control["spec"].default is True
+            return render_template("config_section.html", section=section, groups=groups,
+                                   version=version, error=error, events=EVENT_KINDS,
+                                   leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA, toml_value=value,
+                                   channel_types=sorted(TYPE_KEYS), read_only=editor.read_only()), status
         return render_template("config_error.html", error=error,
                                read_only=editor.read_only()), status
 
@@ -2114,9 +2287,10 @@ def register_config(app, config, *, host):
                         "The configuration directory is read-only, so rollback is disabled. "
                         "Ask the operator to enable editing for the dashboard service.")
                 if request.form.get("action") == "confirm":
-                    editor.commit(request.form.get("preview"), "rollback", app.extensions["dashboard_users"],
-                                  set(SECTIONS.values()), request.form.get("lockout") == "yes")
-                    return redirect(url_for("login"), code=303)
+                    ended = editor.commit(request.form.get("preview"), "rollback", app.extensions["dashboard_users"],
+                                          set(SECTIONS.values()), request.form.get("lockout") == "yes")
+                    return redirect(url_for("login") if ended else
+                                    url_for("config_editor.backups", saved=1), code=303)
                 if request.form.get("action") != "preview":
                     abort(400, "Unsupported rollback action; reload the form")
                 if request.form.get("version") != version:
