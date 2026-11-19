@@ -52,7 +52,7 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
                 values.append(identifier)
             else:
                 tokens = re.findall(r"\w+", query, re.UNICODE)[:32]
-                legacy = db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone()[0] not in {'8', '9'}
+                legacy = int(db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone()[0]) < 8
                 fts = bool(use_fts and tokens and (legacy or db.execute("SELECT 1 FROM sqlite_master WHERE name='watch_fts'").fetchone()))
                 if fts:
                     try:
