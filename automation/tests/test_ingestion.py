@@ -103,7 +103,7 @@ def test_receiver_config_has_no_core_or_notifier(tmp_path):
     filename.write_text('[ingestion]\nversion=1\n[[sources]]\nid="host-a"\ncredential={env="TOKEN"}\n')
     config = load_ingest_config(filename)
     assert config.host == "127.0.0.1"
-    filename.write_text(filename.read_text() + '[notifications]\ntoken="canary"\n')
+    filename.write_text(filename.read_text(encoding="utf-8") + '[notifications]\ntoken="canary"\n')
     with pytest.raises(AutomationError):
         load_ingest_config(filename)
 

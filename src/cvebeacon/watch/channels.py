@@ -90,6 +90,7 @@ TYPE_KEYS = {
         "header_value_file",
     },
 }
+SMTP_DEFAULT_PORTS = {"starttls": 587, "tls": 465, "none": 25}
 SMTP_SECURITY = ("starttls", "tls", "none")
 MESSAGE_FORMATS = ("text", "html")
 CREDENTIAL_FIELDS = {
@@ -429,7 +430,7 @@ def _parse_smtp(
     security = (_string(table, "security", label, maximum=20) or "starttls").casefold()
     if security not in SMTP_SECURITY:
         _fail(f"{label} security", "must be starttls, tls or none")
-    default_port = {"starttls": 587, "tls": 465, "none": 25}[security]
+    default_port = SMTP_DEFAULT_PORTS[security]
     port = _integer(table, "port", label, default_port, 1, 65535)
     allow_insecure = bool(common["allow_insecure"])
     if security == "none" and not allow_insecure:

@@ -128,7 +128,7 @@ def test_preview_does_not_write_then_atomic_save_backup_audit_and_reload(account
     monkeypatch.setattr(editor_module.os, "replace", record)
     assert confirm(client, response).status_code == 303
     assert load_config(config.config_path).http.retries == 4
-    assert client.get("/").status_code == 303
+    assert client.get("/").status_code == 200
     editor = app.extensions["dashboard_config"]
     assert editor.target != saved_wsgi and editor.config.http.retries == 4
     after = config.config_path.stat()
@@ -166,7 +166,7 @@ def test_concurrent_change_refused(accounts, phase):
     config, users, _, client = accounts
     login(client, "admin")
     response = preview(client, g0_retries="4") if phase == "preview" else client.get("/config/http")
-    config.config_path.write_text(config.config_path.read_text() + "\n# External edit\n")
+    config.config_path.write_text(config.config_path.read_text(encoding="utf-8") + "\n# External edit\n")
     changed = config.config_path.read_bytes()
     data = form(response.text, "confirm" if phase == "preview" else "preview")
     assert client.post("/config/http", data=data).status_code == 409
@@ -224,14 +224,14 @@ def test_lockout_change_requires_additional_confirmation(accounts):
 def test_rollback_validates_previews_backs_up_and_reloads(accounts):
     config, users, app, client = accounts
     login(client, "admin")
-    original = tomllib.loads(config.config_path.read_text())
+    original = tomllib.loads(config.config_path.read_text(encoding="utf-8"))
     assert confirm(client, preview(client, g0_retries="4")).status_code == 303
     login(client, "admin")
     before = config.config_path.read_bytes()
     response = preview(client, "backups")
     assert config.config_path.read_bytes() == before
     assert confirm(client, response, "backups").status_code == 303
-    assert tomllib.loads(config.config_path.read_text()) == original
+    assert tomllib.loads(config.config_path.read_text(encoding="utf-8")) == original
     assert len(app.extensions["dashboard_config"].backups()) == 2
     assert users.audit_entries()[-1].action.startswith("config_save:rollback:")
 
@@ -248,7 +248,7 @@ def test_backup_retention_is_bounded_and_other_files_preserved(accounts, monkeyp
     unrelated = editor.backup_dir / "keep.txt"
     unrelated.write_text("retained")
     assert confirm(client, preview(client, g0_retries="4")).status_code == 303
-    assert unrelated.read_text() == "retained"
+    assert unrelated.read_text(encoding="utf-8") == "retained"
 
 
 @pytest.mark.parametrize("failure", ["replace", "audit", "reload", "commit"])
@@ -302,7 +302,7 @@ def test_file_secret_never_round_trips_and_rule_can_use_channel(accounts, monkey
     channel = load_config(config.config_path).watch.channels[0]
     secret_path = channel.secret("password").file
     assert secret_path.parent == app.extensions["dashboard_config"].secret_dir
-    assert secret_path.read_text() == secret
+    assert secret_path.read_text(encoding="utf-8") == secret
     assert channel.secret("password").peek() == secret
     if os.name == "posix":
         assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
@@ -313,10 +313,10 @@ def test_file_secret_never_round_trips_and_rule_can_use_channel(accounts, monkey
     assert confirm(client, preview(client, "rules", g0_name="critical", g0_condition="{ cvss_min = 9.0 }",
                                    g0_channels='["soc"]', g0_events='["match"]'), "rules").status_code == 303
     assert load_config(config.config_path).watch.rules[0].channels == ("soc",)
-    assert secret not in config.config_path.read_text()
+    assert secret not in config.config_path.read_text(encoding="utf-8")
     assert secret not in str(users.audit_entries()) and secret not in caplog.text
     for backup in app.extensions["dashboard_config"].backup_dir.iterdir():
-        assert secret not in backup.read_text()
+        assert secret not in backup.read_text(encoding="utf-8")
 
 
 def test_invalid_preview_removes_temporary_and_expiration_retains_generated_secret(accounts):
@@ -371,7 +371,7 @@ def test_write_new_secret_ignores_user_selected_destination(accounts, tmp_path):
                        g0_nvd_api_key_file_new="Synthetic secret")
     assert response.status_code == 200
     assert confirm(client, response, "sources").status_code == 303
-    assert destination.read_text() == "unchanged"
+    assert destination.read_text(encoding="utf-8") == "unchanged"
     assert load_config(config.config_path).sources.nvd_api_key_file != destination
 
 
@@ -390,7 +390,7 @@ def test_unknown_inline_credentials_never_render_or_rewrite(accounts):
     config, _, _, client = accounts
     login(client, "admin")
     secret = "INLINE-SYNTHETIC-SECRET"
-    config.config_path.write_text(config.config_path.read_text() + f'\npassword="{secret}"\n')
+    config.config_path.write_text(config.config_path.read_text(encoding="utf-8") + f'\npassword="{secret}"\n')
     original = config.config_path.read_bytes()
     response = client.get("/config/sources")
     assert response.status_code == 400 and secret not in response.text
@@ -439,8 +439,8 @@ def test_all_core_examples_load_equal_after_serialization(tmp_path):
     for index, path in enumerate(paths):
         original = tmp_path / f"original{index}.toml"
         rewritten = tmp_path / f"rewritten{index}.toml"
-        original.write_text(path.read_text())
-        rewritten.write_text(dumps(tomllib.loads(path.read_text())))
+        original.write_text(path.read_text(encoding="utf-8"))
+        rewritten.write_text(dumps(tomllib.loads(path.read_text(encoding="utf-8"))))
         assert replace(load_config(original), config_path=rewritten) == load_config(rewritten), path
 
 
@@ -526,7 +526,7 @@ def test_webhook_endpoint_is_redacted_and_blank_retains_it(accounts, monkeypatch
     assert confirm(client, preview(client, "channels"), "channels").status_code == 303
     channel = load_config(config.config_path).watch.channels[0]
     assert channel.secret("url").peek() == secret_endpoint
-    assert secret_endpoint not in config.config_path.read_text()
+    assert secret_endpoint not in config.config_path.read_text(encoding="utf-8")
     assert secret_endpoint not in str(users.audit_entries())
 
 
@@ -546,7 +546,7 @@ def test_invalid_current_nested_secret_is_not_rendered(accounts, caplog):
     config, _, _, client = accounts
     login(client, "admin")
     secret = "SyntheticNestedSecretNeverDisplay"
-    config.config_path.write_text(config.config_path.read_text() +
+    config.config_path.write_text(config.config_path.read_text(encoding="utf-8") +
                                 '\n[[watch.rules]]\nname="broken"\nchannels=[]\ncondition={password="' + secret + '"}\n')
     response = client.get("/config/rules")
     assert response.status_code == 400 and secret not in response.text and secret not in caplog.text

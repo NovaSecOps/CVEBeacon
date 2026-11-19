@@ -4,6 +4,8 @@ One Linux VM or one Windows host, installed from a source checkout or with
 Docker. Details are in the [setup guide](SETUP.md), [watch mode](WATCH.md), and
 [scheduling](SCHEDULING.md).
 
+For HTTPS, see the [reverse-proxy guide](HTTPS.md).
+
 ## Storage trust
 
 Every account that can write a state directory is trusted with the SQLite

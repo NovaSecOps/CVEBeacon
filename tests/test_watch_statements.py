@@ -1030,7 +1030,7 @@ else:
 peak = None
 if sys.platform == "linux":
     from pathlib import Path
-    peak = int(next(line.split()[1] for line in Path("/proc/self/status").read_text().splitlines()
+    peak = int(next(line.split()[1] for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines()
                     if line.startswith("VmHWM:")))
 print(json.dumps({"error": error, "seconds": time.monotonic() - started, "peak_kib": peak}))
 '''
@@ -1637,7 +1637,7 @@ cli.run = exhaust
 code = cli.main(["watch", "statement", "CVE-2026-0001", "--out", "unused.md"])
 peak = None
 if sys.platform == "linux":
-    peak = int(next(line.split()[1] for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("VmHWM:")))
+    peak = int(next(line.split()[1] for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines() if line.startswith("VmHWM:")))
 print(json.dumps({"code": code, "peak": peak}))
 '''
     completed = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=5)
@@ -1732,17 +1732,17 @@ def test_statement_uses_current_report_mark_after_rebase(tmp_path, capsys):
     out = tmp_path / 'statement.md'
     arguments = ['--config', str(config.config_path), 'watch', 'statement', 'CVE-2026-0001', '--out', str(out), '--force']
     assert cli.main(arguments) == 0
-    assert 'Reported to clients: not reported' in out.read_text()
+    assert 'Reported to clients: not reported' in out.read_text(encoding="utf-8")
     reporter = ReportService(store, None, 'open')
     mark = reporter.report_cve('CVE-2026-0001', by='operator@example.invalid').entry
     assert cli.main(arguments) == 0
-    text = out.read_text()
+    text = out.read_text(encoding="utf-8")
     assert 'Reported to clients: yes' in text
     assert 'Reported by: operator@example.invalid' in text
     assert f'Reported at: {mark.at}' in text
     reporter.unreport_cve('CVE-2026-0001', by='operator@example.invalid')
     assert cli.main(arguments) == 0
-    text = out.read_text()
+    text = out.read_text(encoding="utf-8")
     assert 'Reported to clients: not reported' in text
     assert 'Reported by: not reported' in text
     assert 'Reported at: not reported' in text
@@ -1761,4 +1761,4 @@ def test_statement_reads_first_seen_from_the_stored_view(tmp_path, monkeypatch):
     template.write_text('${first_seen}|${first_seen_date}')
     out = tmp_path / 'statement.md'
     statements.write_statement(store, view.cve_id, catalogs=SOURCES, template=template, out=out, now=NOW)
-    assert out.read_text() == '2026-11-04T00:30:00+02:00|2026-11-03'
+    assert out.read_text(encoding="utf-8") == '2026-11-04T00:30:00+02:00|2026-11-03'

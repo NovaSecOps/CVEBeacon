@@ -2,8 +2,8 @@
 
 Dashboard operations run as short-lived children of the same ``cvebeacon``
 command line, using the same configuration and exit codes. The child takes the
-required storage locks itself; the dashboard probes them first to refuse a job
-quickly when a scheduled or interactive run is already active.
+required storage locks itself; the dashboard waits for scheduled or interactive
+runs before starting it. Channel tests have a separate, single-job lane.
 """
 
 from __future__ import annotations
@@ -27,13 +27,16 @@ from typing import Callable, Iterable
 
 from .config import AppConfig
 from .errors import CVEBeaconError, ConfigurationError, StateError
-from .locking import OperationLock, RunInProgress
+from .locking import OperationLock, RunInProgress, DASHBOARD_LOCK_CONFLICT_EXIT
 from .private_storage import private_directory, private_file, validate_file
 from .launching import command_prefix, child_environment
 from .watch.users import _pin_database
 
 LOG = logging.getLogger(__name__)
 WORKER_RETRY_MAX_SECONDS = 5.0
+LOCK_WAIT_TIMEOUT_SECONDS = 6 * 60 * 60
+LOCK_WAIT_POLL_SECONDS = 0.25
+LOCK_FREE_OPERATIONS = frozenset({"notify-test"})
 
 JOB_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
 ACTIVE_STATUSES = frozenset({"queued", "running"})
@@ -331,9 +334,23 @@ class JobStore:
     def mark_running(self, job_id: int) -> bool:
         with closing(self._connect()) as db, db:
             cursor = db.execute(
-                "UPDATE dashboard_job SET status='running',started_at=? "
+                "UPDATE dashboard_job SET status='running',started_at=?,message=NULL "
                 "WHERE id=? AND status='queued'",
                 (_utc_now(), job_id),
+            )
+            return cursor.rowcount == 1
+
+    def waiting(self, job_id: int, message: str) -> None:
+        with closing(self._connect()) as db, db:
+            db.execute("UPDATE dashboard_job SET message=? WHERE id=? AND status='queued'",
+                       (message, job_id))
+
+    def requeue_conflict(self, job_id: int) -> bool:
+        with closing(self._connect()) as db, db:
+            cursor = db.execute(
+                "UPDATE dashboard_job SET status='queued',started_at=NULL,message=? "
+                "WHERE id=? AND status='running' AND cancel_requested=0",
+                ("waiting for another run to finish", job_id),
             )
             return cursor.rowcount == 1
 
@@ -572,8 +589,17 @@ class _JobStorageTransition:
         self.manager._abort_reconfigure()
 
 
-class JobManager:
-    """Serialize dashboard jobs and keep their persistent state current."""
+class _JobLane:
+    def __init__(self):
+        self._queue: list[int] = []
+        self._thread: threading.Thread | None = None
+        self._process: subprocess.Popen | None = None
+        self._running: int | None = None
+        self._cancel_deadline: float | None = None
+
+
+class JobManager(_JobLane):
+    """Serialize state-changing jobs and independently serialize channel tests."""
 
     def __init__(
         self,
@@ -596,14 +622,11 @@ class JobManager:
             # operations page or job is requested.
             pass
         self._condition = threading.Condition()
-        self._queue: list[int] = []
-        self._thread: threading.Thread | None = None
-        self._process: subprocess.Popen | None = None
-        self._running: int | None = None
+        super().__init__()
+        self._free_lane = _JobLane()
         self._audit_lock = threading.RLock()
         self._stopping = False
         self._reserved = False
-        self._cancel_deadline: float | None = None
         try:
             if self.store.pending_audits() or self.store.pending_actions():
                 self.start_thread()
@@ -624,9 +647,9 @@ class JobManager:
                 raise ConfigurationError(
                     "A dashboard job configuration change is already in progress")
             if changed and (
-                self._queue
-                or self._running is not None
-                or (self._thread is not None and self._thread.is_alive())
+                any(lane._queue or lane._running is not None
+                    or (lane._thread is not None and lane._thread.is_alive())
+                    for lane in self._lanes())
             ):
                 raise ConfigurationError(
                     "Cannot change dashboard job storage while a job or pending job audit is active"
@@ -671,15 +694,44 @@ class JobManager:
 
     def start_thread(self) -> None:
         with self._condition:
-            if self._stopping or (self._thread is not None and self._thread.is_alive()):
+            if self._stopping:
                 return
-            self._thread = threading.Thread(
-                target=self._loop,
-                name="cvebeacon-dashboard-jobs",
-                daemon=True,
-            )
-            self._thread.start()
+            for lane in self._lanes():
+                if lane is self._free_lane and not lane._queue:
+                    continue
+                if lane._thread is not None and lane._thread.is_alive():
+                    continue
+                lane._thread = threading.Thread(
+                    target=self._loop, args=(lane,),
+                    name="cvebeacon-channel-tests" if lane is self._free_lane else "cvebeacon-dashboard-jobs",
+                    daemon=True,
+                )
+                lane._thread.start()
             atexit.register(self.shutdown)
+
+    def _lanes(self):
+        return (self, self._free_lane)
+
+    def _lane(self, operation: str):
+        return self._free_lane if operation in LOCK_FREE_OPERATIONS else self
+
+    def queue_details(self) -> dict[int, str]:
+        """Compute positions from durable rows, including a worker waiting for a lock."""
+        active = self.store.active()
+        details = {}
+        for lane in self._lanes():
+            ahead = None
+            position = 0
+            for job in active:
+                if self._lane(job.operation) is not lane:
+                    continue
+                if job.status == "queued":
+                    position += 1
+                    reason = (f"behind job {ahead.id} ({ahead.label})" if ahead else
+                              job.message or "waiting for the worker to start")
+                    details[job.id] = f"Queue position {position}: {reason}"
+                ahead = job
+        return details
 
     def submit(
         self,
@@ -691,10 +743,6 @@ class JobManager:
     ) -> Job:
         if operation not in OPERATION_LABELS:
             raise ConfigurationError("unknown operation")
-        if operation in DATA_CHANGING:
-            holder = OperationLock(self.config, operation).probe()
-            if holder is not None:
-                raise RunInProgress(holder)
         with self._condition:
             if self._stopping:
                 raise ConfigurationError("the dashboard is stopping")
@@ -716,7 +764,7 @@ class JobManager:
                     message="The job audit entry could not be recorded.",
                 )
                 raise
-            self._queue.append(job.id)
+            self._lane(operation)._queue.append(job.id)
             self._condition.notify_all()
         self.start_thread()
         return job
@@ -732,16 +780,18 @@ class JobManager:
                     actor=actor or job.started_by, detail=f"{job.id}:{job.operation}",
                 )
                 if self.store.cancel_queued(job_id, actor or job.started_by):
-                    if job_id in self._queue:
-                        self._queue.remove(job_id)
+                    lane = self._lane(job.operation)
+                    if job_id in lane._queue:
+                        lane._queue.remove(job_id)
                     self._audit_finished(self.store.get(job_id), "job_cancelled")
                     self._condition.notify_all()
                     return True
                 self.store.request_cancel(job_id, actor or job.started_by)
-                process = self._process
-                if self._running == job_id and process is not None and process.poll() is None:
-                    if self._cancel_deadline is None:
-                        self._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+                lane = self._lane(job.operation)
+                process = lane._process
+                if lane._running == job_id and process is not None and process.poll() is None:
+                    if lane._cancel_deadline is None:
+                        lane._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
                         try:
                             self._interrupt(process)
                         except OSError:
@@ -752,7 +802,7 @@ class JobManager:
             # An unavailable cancellation row must not prevent supervision of
             # an already running child. Preserve the error for the requester.
             with self._condition:
-                process = self._process if self._running == job_id else None
+                process = next((lane._process for lane in self._lanes() if lane._running == job_id), None)
             if process is not None:
                 self._stop_process(process)
             raise
@@ -785,40 +835,42 @@ class JobManager:
             with self._condition:
                 self._condition.wait(min(0.05, remaining))
 
-    def _loop(self) -> None:
+    def _loop(self, lane) -> None:
         try:
-            self._work_loop()
+            self._work_loop(lane)
         finally:
             with self._condition:
-                if self._thread is threading.current_thread():
-                    self._thread = None
-                    atexit.unregister(self.shutdown)
+                if lane._thread is threading.current_thread():
+                    lane._thread = None
+                    if all(item._thread is None for item in self._lanes()):
+                        atexit.unregister(self.shutdown)
                     self._condition.notify_all()
 
-    def _work_loop(self) -> None:
+    def _work_loop(self, lane) -> None:
         backoff = 0.5
         while True:
             with self._condition:
-                if not self._queue and not self._stopping:
+                if not lane._queue and not self._stopping:
                     self._condition.wait(backoff)
                 if self._stopping:
                     return
             try:
                 audited = self.retry_audits()
                 with self._condition:
-                    if not self._queue:
+                    if not lane._queue:
                         if not self.store.pending_audits() and not self.store.pending_actions():
-                            self._thread = None
-                            atexit.unregister(self.shutdown)
+                            lane._thread = None
+                            if all(item._thread is None for item in self._lanes()):
+                                atexit.unregister(self.shutdown)
                             return
                         backoff = 0.5 if audited else min(backoff * 2, WORKER_RETRY_MAX_SECONDS)
                         continue
                     if self._stopping:
                         return
                     # Keep the identifier queued until its initial read succeeds.
-                    job_id = self._queue[0]
+                    job_id = lane._queue[0]
                     job = self.store.get(job_id)
-                    self._queue.pop(0)
+                    lane._queue.pop(0)
                 backoff = 0.5
             except Exception:
                 LOG.warning("Dashboard job storage is unavailable; retrying.")
@@ -852,39 +904,62 @@ class JobManager:
                     LOG.warning("Job outcome storage is unavailable; restart recovery is required.")
             finally:
                 with self._condition:
-                    self._running = None
-                    self._process = None
-                    self._cancel_deadline = None
+                    lane._running = None
+                    lane._process = None
+                    lane._cancel_deadline = None
                     self._condition.notify_all()
 
+    def _wait_for_lock(self, job: Job, deadline: float) -> bool:
+        previous = None
+        while True:
+            with self._condition:
+                current = self.store.get(job.id)
+                if self._stopping or current is None or current.status != "queued":
+                    return False
+                holder = OperationLock(self.config, job.operation).probe()
+                if time.monotonic() >= deadline:
+                    self.store.finish(job.id, "failed", exit_code=None, message=str(RunInProgress(holder)))
+                    self._audit_finished(self.store.get(job.id), "job_failed")
+                    return False
+                if holder is None:
+                    return True
+                message = f"waiting for {holder} to finish"
+                if message != previous:
+                    self.store.waiting(job.id, message)
+                    previous = message
+                self._condition.wait(min(LOCK_WAIT_POLL_SECONDS, max(0, deadline - time.monotonic())))
+
     def _run_job(self, job: Job) -> None:
+        age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(job.created_at)).total_seconds())
+        deadline = time.monotonic() + max(0, LOCK_WAIT_TIMEOUT_SECONDS - age)
+        lane = self._lane(job.operation)
+        log = None
+        try:
+            with self._condition:
+                lane._running = job.id
+            while True:
+                if job.operation in DATA_CHANGING and not self._wait_for_lock(job, deadline):
+                    return
+                if not job.argv:
+                    self.store.finish(job.id, "failed", exit_code=None, message="The job has no command.")
+                    self._audit_finished(self.store.get(job.id), "job_failed")
+                    return
+                if log is None:
+                    log = _JobLog(job.log_path)
+                if not self._run_attempt(job, log):
+                    return
+        finally:
+            if log is not None:
+                log.close()
+
+    def _run_attempt(self, job: Job, log) -> bool:
         argv = list(job.argv)
-        if not argv:
-            self.store.finish(
-                job.id,
-                "failed",
-                exit_code=None,
-                message="The job has no command.",
-            )
-            self._audit_finished(self.store.get(job.id), "job_failed")
-            return
-        if job.operation in DATA_CHANGING:
-            holder = OperationLock(self.config, job.operation).probe()
-            if holder is not None:
-                self.store.finish(
-                    job.id,
-                    "failed",
-                    exit_code=None,
-                    message=f"Another run is in progress ({holder}).",
-                )
-                self._audit_finished(self.store.get(job.id), "job_failed")
-                return
+        lane = self._lane(job.operation)
         if not self.store.mark_running(job.id):
             # A queued cancel won the race before the worker started it.
-            return
+            return False
         with self._condition:
-            self._running = job.id
-        log = _JobLog(job.log_path)
+            lane._running = job.id
         process = None
         reader = None
         forced = False
@@ -917,11 +992,11 @@ class JobManager:
                 raise ConfigurationError("background jobs require a Windows console for cooperative cancellation")
             with self._condition:
                 if self._stopping:
-                    return  # The queued row is retained for restart recovery.
+                    return False  # The row is retained for restart recovery.
                 process = subprocess.Popen(
                     argv,
                     cwd=sys.prefix,
-                    env=child_environment(self.config),
+                    env={**child_environment(self.config), "CVEBEACON_DASHBOARD_JOB": str(job.id)},
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -929,20 +1004,20 @@ class JobManager:
                     start_new_session=os.name != "nt",
                     creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
                 )
-                self._process = process
+                lane._process = process
             reader = threading.Thread(target=capture, daemon=True)
             reader.start()
             output_done = False
             while True:
                 current = self.store.get(job.id)
                 with self._condition:
-                    if (self._stopping or (current and current.cancel_requested)) and self._cancel_deadline is None:
-                        self._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+                    if (self._stopping or (current and current.cancel_requested)) and lane._cancel_deadline is None:
+                        lane._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
                         try:
                             self._interrupt(process)
                         except OSError:
                             pass
-                    deadline = self._cancel_deadline
+                    deadline = lane._cancel_deadline
                 if deadline is not None and time.monotonic() >= deadline and process.poll() is None:
                     forced = self._stop_process(process, interrupt=False)
                 if output_done:
@@ -972,8 +1047,13 @@ class JobManager:
                 process.stdout.close()
             if reader is not None:
                 reader.join(timeout=1)
-            log.close()
-        current = self.store.get(job.id)
+        with self._condition:
+            lane._process = None
+            lane._cancel_deadline = None
+            if (code == DASHBOARD_LOCK_CONFLICT_EXIT and job.operation in DATA_CHANGING
+                    and not forced and not self._stopping and self.store.requeue_conflict(job.id)):
+                return True
+            current = self.store.get(job.id)
         requested = bool(current and current.cancel_requested)
         audit_action = None
         if requested:
@@ -1008,6 +1088,7 @@ class JobManager:
                 "cancelled": "job_cancelled",
             }[status],
         )
+        return False
 
     @classmethod
     def _stop_process(cls, process, *, interrupt=True) -> bool:
@@ -1043,10 +1124,14 @@ class JobManager:
         """
         with self._condition:
             self._stopping = True
-            queued = self._queue[:]
-            self._queue.clear()
+            queued = []
+            for lane in self._lanes():
+                queued.extend(lane._queue)
+                if lane._running is not None:
+                    queued.append(lane._running)
+                lane._queue.clear()
             self._condition.notify_all()
-            thread = self._thread
+            threads = [lane._thread for lane in self._lanes()]
         try:
             for job_id in queued:
                 try:
@@ -1056,18 +1141,21 @@ class JobManager:
         finally:
             # No bookkeeping or worker read is allowed to bypass supervision.
             with self._condition:
-                process = self._process
-                if process is not None and process.poll() is None:
-                    if self._cancel_deadline is None:
-                        self._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+                processes = [lane._process for lane in self._lanes()]
+                for lane in self._lanes():
+                    process = lane._process
+                    if process is not None and process.poll() is None and lane._cancel_deadline is None:
+                        lane._cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
                         try:
                             self._interrupt(process)
                         except OSError:
                             pass
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=CANCEL_GRACE_SECONDS + TERMINATE_GRACE_SECONDS + 2)
-            if process is not None and process.poll() is None:
-                self._stop_process(process, interrupt=False)
+            for thread in threads:
+                if thread is not None and thread is not threading.current_thread():
+                    thread.join(timeout=CANCEL_GRACE_SECONDS + TERMINATE_GRACE_SECONDS + 2)
+            for process in processes:
+                if process is not None and process.poll() is None:
+                    self._stop_process(process, interrupt=False)
             self.retry_audits()
 
     def _audit_finished(self, job: Job | None, action: str) -> bool:
