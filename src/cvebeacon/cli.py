@@ -87,6 +87,18 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--allow-watch-only", action="store_true", help="validate local watch state when no inventory is configured")
     doctor.add_argument("--local-state", action="store_true", help="validate local state without requiring notification environment variables")
     commands.add_parser("migrate", help="migrate and integrity-check local databases without network access")
+    backup = commands.add_parser("backup", help="create, verify, download and restore local backups")
+    backup_sub = backup.add_subparsers(dest="backup_command", required=True)
+    backup_create = backup_sub.add_parser("create", help="take a verified backup of state and configuration")
+    backup_create.add_argument("--include-secrets", action="store_true", help="also copy referenced secret files")
+    backup_create.add_argument("--created-by", help="record who requested the backup")
+    backup_sub.add_parser("list", help="list retained backups")
+    backup_verify = backup_sub.add_parser("verify", help="check every file and manifest hash")
+    backup_verify.add_argument("backup_id")
+    backup_restore = backup_sub.add_parser("restore", help="replace state and configuration from a backup")
+    backup_restore.add_argument("backup_id")
+    backup_restore.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    backup_sub.add_parser("prune", help="apply backup retention while keeping the minimum")
     update = commands.add_parser("update", help="check or apply signed GitHub releases")
     update_sub = update.add_subparsers(dest="update_command", required=True)
     check_update = update_sub.add_parser("check")
@@ -1380,6 +1392,9 @@ def run(args: argparse.Namespace) -> int:
         if args.command == "web-detect":
             from .web_assets import run_detection
             return run_detection(config, args.client, plan=args.plan)
+        if args.command == "backup":
+            from .backup import cli as backup_cli
+            return backup_cli(args, config)
         if args.command == "users":
             return _run_users(args, config)
         if args.command == "watch":
