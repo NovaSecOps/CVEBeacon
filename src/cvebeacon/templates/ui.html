@@ -1,0 +1,81 @@
+{#- CVEBeacon UI components. Import with: {% from 'ui.html' import page_header, card, stat %}
+    Components never use inline styles or scripts (the dashboard CSP forbids both).
+    See the design guide for usage rules. -#}
+
+{#- Page header: title, one plain sentence, and at most one primary action.
+    Use {% call page_header(...) %}...{% endcall %} to supply the action markup yourself. -#}
+{% macro page_header(title, description=none, primary_url=none, primary_label=none, eyebrow=none) %}
+<div class="page-header"><div class="page-header-text">{% if eyebrow %}<p class="eyebrow">{{ eyebrow }}</p>{% endif %}<h1>{{ title }}</h1>{% if description %}<p class="lead">{{ description }}</p>{% endif %}</div>
+{% if primary_url and primary_label or caller %}<div class="page-actions">{% if primary_url and primary_label %}<a class="btn" href="{{ primary_url }}">{{ primary_label }}</a>{% endif %}{% if caller %}{{ caller() }}{% endif %}</div>{% endif %}</div>
+{% endmacro %}
+
+{#- Card. tone: none or 'danger'. Body is the call block. -#}
+{% macro card(title=none, description=none, tone=none, id=none) %}
+<section class="card{% if tone %} card-{{ tone }}{% endif %}"{% if id %} id="{{ id }}"{% endif %}{% if title and id %} aria-labelledby="{{ id }}-title"{% endif %}>{% if title %}<div class="card-head"><h2 class="card-title"{% if id %} id="{{ id }}-title"{% endif %}>{{ title }}</h2>{% if description %}<p class="card-description">{{ description }}</p>{% endif %}</div>{% endif %}{{ caller() if caller else '' }}</section>
+{% endmacro %}
+
+{#- Grid wrapper for stat tiles: {% call stat_grid() %}{{ stat(...) }}{% endcall %} -#}
+{% macro stat_grid() %}<div class="stat-grid">{{ caller() }}</div>{% endmacro %}
+
+{#- Stat tile. tone: none, 'critical', 'warning' or 'success'. href makes the tile a link. -#}
+{% macro stat(value, label, help=none, tone=none, href=none) %}
+{% if href %}<a class="stat{% if tone %} stat-{{ tone }}{% endif %}" href="{{ href }}">{% else %}<div class="stat{% if tone %} stat-{{ tone }}{% endif %}">{% endif %}<span class="stat-value">{{ value }}</span><span class="stat-label">{{ label }}</span>{% if help %}<span class="stat-help">{{ help }}</span>{% endif %}{% if href %}</a>{% else %}</div>{% endif %}
+{% endmacro %}
+
+{#- Badges. variant: neutral, critical, high, medium, low, kev, exploited, info, success, warning, danger. -#}
+{% macro badge(text, variant='neutral') %}<span class="badge badge-{{ variant }}">{{ text }}</span>{% endmacro %}
+
+{% macro severity_badge(level) %}{% set key = (level or 'unknown') | lower %}<span class="badge badge-{{ key if key in ['critical', 'high', 'medium', 'low'] else 'neutral' }}">{{ key | capitalize }}</span>{% endmacro %}
+
+{% macro kev_badge(label='Known exploited (KEV)') %}<span class="badge badge-kev">{{ label }}</span>{% endmacro %}
+
+{% macro exploited_badge(label='Actively exploited') %}<span class="badge badge-exploited">{{ label }}</span>{% endmacro %}
+
+{#- Applicability states used by findings. -#}
+{% macro applicability_badge(value) %}{% set labels = {'affected': ('danger', 'Affected'), 'needs_review': ('warning', 'Needs review'), 'coverage_unknown': ('warning', 'Coverage unknown'), 'not_affected': ('success', 'Not affected')} %}{% set item = labels.get(value, ('neutral', value or 'Unknown')) %}<span class="badge badge-{{ item[0] }}">{{ item[1] }}</span>{% endmacro %}
+
+{#- Callout. kind: info, success, warning or danger. Optional bold title; body is the call block. -#}
+{% macro callout(kind='info', title=none) %}
+<div class="callout callout-{{ kind }}" role="{{ 'alert' if kind in ['danger', 'warning'] else 'status' }}"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-{{ {'info': 'info', 'success': 'check', 'warning': 'alert', 'danger': 'x'}[kind] }}"/></svg><div class="callout-body">{% if title %}<p class="callout-title">{{ title }}</p>{% endif %}{{ caller() }}</div></div>
+{% endmacro %}
+
+{#- Empty state: what is missing, why, and the one thing to do next. -#}
+{% macro empty_state(title, text, action_url=none, action_label=none) %}
+<div class="empty-state"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-inbox"/></svg><h2>{{ title }}</h2><p>{{ text }}</p>{% if action_url and action_label %}<a class="btn" href="{{ action_url }}">{{ action_label }}</a>{% endif %}</div>
+{% endmacro %}
+
+{#- Steps for a multi-step flow. labels is a list; current is 1-based. -#}
+{% macro steps(labels, current=1) %}
+<ol class="steps" aria-label="Progress">{% for label in labels %}<li class="{{ 'is-done' if loop.index < current else 'is-current' if loop.index == current else '' }}"{% if loop.index == current %} aria-current="step"{% endif %}>{{ label }}{% if loop.index < current %}<span class="visually-hidden"> (done)</span>{% endif %}</li>{% endfor %}</ol>
+{% endmacro %}
+
+{#- Definition list. items: list of (term, value) or (term, value, help) tuples. -#}
+{% macro definition_list(items) %}
+<dl>{% for item in items %}<dt>{{ item[0] }}{% if item[2] %}<span class="help">{{ item[2] }}</span>{% endif %}</dt><dd>{{ item[1] }}</dd>{% endfor %}</dl>
+{% endmacro %}
+
+{#- Scrollable table wrapper. label names the table for screen readers. Body is the call block. -#}
+{% macro table_wrap(label) %}<div class="table-wrap" role="region" aria-label="{{ label }}" tabindex="0">{{ caller() }}</div>{% endmacro %}
+
+{#- Jargon with an inline plain-language meaning: CPE, PURL, EPSS, KEV ... -#}
+{% macro term(word, meaning) %}<span class="term">{{ word }}</span> <span class="term-help">({{ meaning }})</span>{% endmacro %}
+
+{#- Short helper text under a field or heading. -#}
+{% macro help(text) %}<p class="help">{{ text }}</p>{% endmacro %}
+
+{#- Buttons. kind: primary, secondary, danger. confirm adds a data-confirm prompt (needs script, optional). -#}
+{% macro button(label, kind='primary', confirm=none, type='submit', name=none, value=none) %}<button type="{{ type }}" class="btn{% if kind != 'primary' %} btn-{{ kind }}{% endif %}"{% if confirm %} data-confirm="{{ confirm }}"{% endif %}{% if name %} name="{{ name }}" value="{{ value }}"{% endif %}>{{ label }}</button>{% endmacro %}
+
+{% macro link_button(label, url, kind='primary') %}<a class="btn{% if kind != 'primary' %} btn-{{ kind }}{% endif %}" href="{{ url }}">{{ label }}</a>{% endmacro %}
+
+{#- Form field: label, control, help text and an error. -#}
+{% macro field(label, name, type='text', value=none, help=none, error=none, required=false, autocomplete=none, minlength=none, maxlength=none, placeholder=none, optional=false) %}
+<div class="field"><label for="f-{{ name }}">{{ label }}{% if optional %} <span class="optional">(optional)</span>{% endif %}</label>
+<input id="f-{{ name }}" name="{{ name }}" type="{{ type }}"{% if value is not none %} value="{{ value }}"{% endif %}{% if required %} required{% endif %}{% if autocomplete %} autocomplete="{{ autocomplete }}"{% endif %}{% if minlength %} minlength="{{ minlength }}"{% endif %}{% if maxlength %} maxlength="{{ maxlength }}"{% endif %}{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if help or error %} aria-describedby="{% if help %}f-{{ name }}-help{% endif %}{% if help and error %} {% endif %}{% if error %}f-{{ name }}-error{% endif %}"{% endif %}{% if error %} aria-invalid="true"{% endif %}>
+{% if help %}<p class="help" id="f-{{ name }}-help">{{ help }}</p>{% endif %}{% if error %}<p class="field-error" id="f-{{ name }}-error">{{ error }}</p>{% endif %}</div>
+{% endmacro %}
+
+{#- Previous / next links for paged lists. Pass None for a missing direction. -#}
+{% macro pagination(page, previous_url=none, next_url=none, noun='results') %}
+<div class="pagination" role="group" aria-label="Pages of {{ noun }}">{% if previous_url %}<a class="btn btn-secondary btn-small" href="{{ previous_url }}">Previous</a>{% endif %}<span>Page {{ page }}</span>{% if next_url %}<a class="btn btn-secondary btn-small" href="{{ next_url }}">Next</a>{% endif %}</div>
+{% endmacro %}

@@ -102,7 +102,7 @@ def serve_smoke(directory, prefix, common, env, password=None):
             while True:
                 assert process.poll() is None, "dashboard exited before readiness"
                 try:
-                    assert ("Dashboard login" if password else "Monitoring overview") in get("/")
+                    assert ("Dashboard login" if password else "Home · CVEBeacon") in get("/")
                     break
                 except URLError:
                     if time.monotonic() >= deadline:
@@ -113,7 +113,7 @@ def serve_smoke(directory, prefix, common, env, password=None):
                     assert "Dashboard login" in get(path)
                 token = re.search(r'name="csrf" value="([^"]+)"', get("/login"))[1]
                 with opener.open(Request(base + "/login", data=urlencode({"csrf": token, "password": password}).encode("ascii")), timeout=15) as response:
-                    assert "Monitoring overview" in response.read().decode("utf-8")
+                    assert "Home · CVEBeacon" in response.read().decode("utf-8")
             for path in ("/findings", "/history", "/assets", "/query", "/reports", "/sources", "/static/dashboard.css"):
                 get(path)
             before = state()
