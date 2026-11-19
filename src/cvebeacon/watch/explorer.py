@@ -27,8 +27,20 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
     query = query.strip()
     limit = max(1, min(int(limit), 100))
     offset = max(0, min(int(offset), 5_000_000))
-    store.initialize()
-    with store.transaction() as db:
+    with store.read() as db:
+        active = tuple(name for name in SOURCES if name in catalogs)
+        enabled = "(" + ",".join("'" + name + "'" for name in active) + ")" if active else "('')"
+        fallback = f"(SELECT p.record_json FROM watch_provider p WHERE p.cve_id=b.cve_id AND p.source IN {enabled} ORDER BY CASE p.source WHEN 'cve_list' THEN 0 WHEN 'euvd' THEN 1 ELSE 2 END LIMIT 1)"
+        official = "(SELECT p.record_json FROM watch_provider p WHERE p.cve_id=b.cve_id AND p.source='cve_list')" if "cve_list" in active else "NULL"
+        def base_field(name, empty="NULL"):
+            fallback_value = f"json_extract({fallback},'$.{name}')"
+            primary = f"b.{name}"
+            if name != "status":
+                missing = "'[]'" if name == "cvss_json" else "''"
+                primary = f"COALESCE(NULLIF(b.{name},{missing}),json_extract({official},'$.{name}'),b.{name})"
+            return f"CASE WHEN o.cve_id IS NOT NULL THEN COALESCE({fallback_value},{empty}) ELSE {primary} END AS effective_{name}"
+        fields = [base_field(name, "'[]'" if name == "cvss_json" else "'reserved'" if name == "status" else "NULL") for name in ("description", "published", "last_modified", "cvss_json", "status")]
+        cte = "WITH base AS (SELECT b.*," + ",".join(fields) + " FROM watch_cve b LEFT JOIN watch_origin o ON o.cve_id=b.cve_id) "
         where, values = [], []
         identifier = cve_id(query)
         fts = False
@@ -40,15 +52,17 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
                 tokens = re.findall(r"\w+", query, re.UNICODE)[:32]
                 fts = bool(use_fts and tokens and db.execute("SELECT 1 FROM sqlite_master WHERE name='watch_fts'").fetchone())
                 if fts:
-                    where.append("c.cve_id IN (SELECT cve_id FROM watch_fts WHERE watch_fts MATCH ?)")
+                    provider_query = f"c.cve_id IN (SELECT s.cve_id FROM watch_fts JOIN watch_search s ON s.rowid=watch_fts.rowid WHERE watch_fts MATCH ? AND s.source IN {enabled})"
                     values.append(' AND '.join('"' + token + '"*' for token in tokens))
                 else:
-                    where.append("c.cve_id IN (SELECT cve_id FROM watch_search WHERE text LIKE ? ESCAPE '\\')")
+                    provider_query = f"c.cve_id IN (SELECT cve_id FROM watch_search WHERE text LIKE ? ESCAPE '\\' AND source IN {enabled})"
                     values.append('%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
+                where.append("(" + provider_query + " OR (NOT EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=c.cve_id) AND c.description LIKE ? ESCAPE '\\'))")
+                values.append('%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
         presence = {
-            "nvd": "EXISTS(SELECT 1 FROM watch_provider p WHERE p.cve_id=c.cve_id AND p.source='nvd')",
+            "nvd": "NOT EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=c.cve_id)",
             "cve_list": "EXISTS(SELECT 1 FROM watch_provider p WHERE p.cve_id=c.cve_id AND p.source='cve_list')",
-            "euvd": "EXISTS(SELECT 1 FROM watch_euvd_alias a WHERE a.cve_id=c.cve_id)",
+            "euvd": "(EXISTS(SELECT 1 FROM watch_euvd_override ov WHERE ov.cve_id=c.cve_id AND json_array_length(ov.items_json)>0) OR (NOT EXISTS(SELECT 1 FROM watch_euvd_override ov WHERE ov.cve_id=c.cve_id) AND EXISTS(SELECT 1 FROM watch_euvd_alias a WHERE a.cve_id=c.cve_id)))",
             "epss": "EXISTS(SELECT 1 FROM watch_epss e WHERE e.cve_id=c.cve_id)",
             "cisa_kev": "EXISTS(SELECT 1 FROM watch_kev k WHERE k.cve_id=c.cve_id AND k.catalog='cisa')",
             "eu_kev": "EXISTS(SELECT 1 FROM watch_kev k WHERE k.cve_id=c.cve_id AND k.catalog='eu')",
@@ -56,9 +70,15 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
         if source:
             if source not in presence:
                 raise StateError("Unknown source filter")
-            where.append(presence[source])
-        kev_sql = "(" + presence['cisa_kev'] + " OR " + presence['eu_kev'] + " OR c.cisa_kev_added IS NOT NULL)"
-        score = "max(COALESCE((SELECT max(json_extract(j.value,'$.score')) FROM json_each(c.cvss_json) j),-1),COALESCE((SELECT max(i.score) FROM watch_euvd_item i JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id WHERE a.cve_id=c.cve_id),-1))"
+            where.append(presence[source] if source in active else "0")
+        cisa = presence['cisa_kev'] if 'cisa_kev' in active else "c.cisa_kev_added IS NOT NULL"
+        eu = presence['eu_kev'] if 'eu_kev' in active else "0"
+        kev_sql = f"({cisa} OR {eu})"
+        base_score = "COALESCE((SELECT max(json_extract(j.value,'$.score')) FROM json_each(CASE WHEN json_valid(c.effective_cvss_json) THEN c.effective_cvss_json ELSE '[]' END) j),-1)"
+        shared_score = "(SELECT i.score FROM watch_euvd_item i JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id WHERE a.cve_id=c.cve_id ORDER BY watch_euvd_rank(i.exploited_since,i.date_updated,i.euvd_id) DESC LIMIT 1)"
+        override_score = "(SELECT json_extract(j.value,'$.score') FROM watch_euvd_override ov,json_each(ov.items_json) j WHERE ov.cve_id=c.cve_id ORDER BY watch_euvd_rank(json_extract(j.value,'$.exploited_since'),json_extract(j.value,'$.date_updated'),json_extract(j.value,'$.euvd_id')) DESC LIMIT 1)"
+        euvd_score = f"CASE WHEN EXISTS(SELECT 1 FROM watch_euvd_override ov WHERE ov.cve_id=c.cve_id) THEN {override_score} ELSE {shared_score} END" if 'euvd' in active else "NULL"
+        score = f"max({base_score},COALESCE({euvd_score},-1))"
         if kev in ("yes", "no"):
             where.append(("NOT " if kev == "no" else "") + kev_sql)
         if severity:
@@ -70,7 +90,7 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
             values.extend((low, high))
         for bound, operator in ((since, ">="), (until, "<=")):
             if bound:
-                where.append(f"substr(c.published,1,10) {operator} ?")
+                where.append(f"substr(c.effective_published,1,10) {operator} ?")
                 values.append(bound.isoformat())
         for value, sql in ((has_events, "EXISTS(SELECT 1 FROM watch_event e WHERE e.cve_id=c.cve_id)"),
                            (reported, "EXISTS(SELECT 1 FROM watch_report r WHERE r.cve_id=c.cve_id AND r.action='report' AND NOT EXISTS(SELECT 1 FROM watch_report newer WHERE newer.cve_id=r.cve_id AND newer.id>r.id))")):
@@ -82,27 +102,31 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
             db.execute("CREATE TEMP TABLE selected_cves(cve_id TEXT PRIMARY KEY)")
             db.executemany("INSERT OR IGNORE INTO selected_cves VALUES (?)", ((i,) for i in client_ids))
             where.append("c.cve_id IN (SELECT cve_id FROM selected_cves)")
-        orders = {"published": "c.published", "modified": "c.last_modified", "cvss": score,
-                  "epss": "(SELECT epss FROM watch_epss e WHERE e.cve_id=c.cve_id)", "kev": kev_sql}
+        orders = {"published": "c.effective_published", "modified": "c.effective_last_modified", "cvss": score,
+                  "epss": "(SELECT epss FROM watch_epss e WHERE e.cve_id=c.cve_id)" if "epss" in active else "NULL", "kev": kev_sql}
         if sort not in orders:
             raise StateError("Unknown sort order")
         condition = " WHERE " + " AND ".join(where) if where else ""
-        total = db.execute("SELECT count(*) FROM watch_cve c" + condition, values).fetchone()[0]
-        rows = db.execute("SELECT c.cve_id FROM watch_cve c" + condition + " ORDER BY " + orders[sort] + " DESC,c.cve_id DESC LIMIT ? OFFSET ?", (*values, limit, offset)).fetchall()
+        total = db.execute(cte + "SELECT count(*) FROM base c" + condition, values).fetchone()[0]
+        rows = db.execute(cte + "SELECT c.cve_id FROM base c" + condition + " ORDER BY " + orders[sort] + " DESC,c.cve_id DESC LIMIT ? OFFSET ?", (*values, limit, offset)).fetchall()
         return SearchResult(tuple(store._view(db, row[0], catalogs) for row in rows), total, fts)
 
 
 def source_presence(store, identifier):
-    store.initialize()
-    with store.transaction() as db:
+    with store.read() as db:
         meta = {row[0]: row[1] for row in db.execute("SELECT key,value FROM watch_meta")}
-        providers = {row['source']: row for row in db.execute("SELECT * FROM watch_provider WHERE cve_id=?", (identifier,))}
+        providers = {row['source']: row for row in db.execute("SELECT source,source_updated,checked_at FROM watch_provider WHERE cve_id=?", (identifier,))}
         checks = {row["source"]: row for row in db.execute("SELECT * FROM watch_source_check WHERE cve_id=?", (identifier,))}
         output = []
         for source in SOURCES:
             updated = None
             checked = meta.get(f"sync_{source}_at") or meta.get(f"sync_{source}_success_at")
-            if source in ("nvd", "cve_list"):
+            if source == "nvd":
+                row = db.execute("SELECT c.last_modified,c.updated_at FROM watch_cve c WHERE c.cve_id=? AND NOT EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=c.cve_id)", (identifier,)).fetchone()
+                present = row is not None
+                if row:
+                    updated, checked = row
+            elif source == "cve_list":
                 row = providers.get(source)
                 present = row is not None
                 if row:
@@ -112,6 +136,12 @@ def source_presence(store, identifier):
                 present = row[1] is not None
                 if present:
                     updated, checked = row
+                override = db.execute("SELECT items_json,checked_at FROM watch_euvd_override WHERE cve_id=?", (identifier,)).fetchone()
+                if override is not None:
+                    items = json.loads(override[0])
+                    present = present or bool(items)
+                    checked = override[1]
+                    updated = max((item.get("date_updated") or "" for item in items), default=None)
             elif source == "epss":
                 row = db.execute("SELECT score_date FROM watch_epss WHERE cve_id=?", (identifier,)).fetchone()
                 present = row is not None
@@ -122,9 +152,11 @@ def source_presence(store, identifier):
                 updated = row[0] if row else None
             # A failed or zero-request baseline run is not evidence of absence.
             check = checks.get(source)
-            if check is not None and (not checked or check["checked_at"] > checked):
+            check_is_latest = check is not None and (not checked or check["checked_at"] >= checked)
+            if check_is_latest:
                 checked = check["checked_at"]
             synced = bool(meta.get(f"sync_{source}_success_at")) or bool(meta.get(f"sync_{source}_requests", "0") != "0" and not meta.get(f"sync_{source}_error"))
-            output.append({"source": source, "state": "present" if present else "absent" if synced or (check is not None and check["present"] == 0) else "not synced",
-                           "updated": updated, "checked": checked, "error": bool(check["error"] if check is not None else meta.get(f"sync_{source}_error"))})
+            state = "present (last check absent)" if present and check_is_latest and check["present"] == 0 else "present" if present else "absent" if synced or (check is not None and check["present"] == 0) else "not synced"
+            output.append({"source": source, "state": state,
+                           "updated": updated, "checked": checked, "error": bool(check["error"] if check_is_latest else meta.get(f"sync_{source}_error"))})
         return tuple(output)

@@ -129,6 +129,19 @@ _NVD_CONTENT_COLUMNS = (
 )
 
 _SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS watch_origin (
+        cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_euvd_override (
+        cve_id TEXT PRIMARY KEY, items_json TEXT NOT NULL, checked_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_cve_list_queue (
+        cve_id TEXT PRIMARY KEY, fetch_time TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS watch_initial_cve (
+        cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
+    )""",
+
     """CREATE TABLE IF NOT EXISTS watch_source_check (
         cve_id TEXT NOT NULL, source TEXT NOT NULL, present INTEGER,
         checked_at TEXT NOT NULL, error TEXT,
@@ -141,7 +154,8 @@ _SCHEMA = (
         PRIMARY KEY(cve_id,source)
     )""",
     """CREATE TABLE IF NOT EXISTS watch_search (
-        cve_id TEXT PRIMARY KEY, text TEXT NOT NULL
+        cve_id TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL,
+        PRIMARY KEY(cve_id,source)
     )""",
     """CREATE TABLE IF NOT EXISTS watch_meta (
         key TEXT PRIMARY KEY,
@@ -458,6 +472,12 @@ def _alert_columns_current(db: sqlite3.Connection) -> bool:
     return {"rule_hash", "providers_hash"} <= alert and "occurrence" in event
 
 
+def _euvd_sql_rank(exploited, updated, identifier):
+    rank = EUVDUpdate((), identifier, exploited, date_updated=updated).rank()
+    numeric = "".join(f"{len(str(value)):08d}:{value}" for value in rank[2])
+    return f"{rank[0]}\0{rank[1]}\0{numeric}"
+
+
 class WatchStore:
     def __init__(self, path: str | Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self.path = Path(path)
@@ -509,12 +529,52 @@ class WatchStore:
         finally:
             connection.close()
 
-    def initialize(self, *, create: bool = True) -> None:
-        if create:
-            with self.transaction() as db:
+    @contextmanager
+    def read(self) -> Iterator[sqlite3.Connection]:
+        """Read a snapshot without migration, disk creation or a writer lock.
+
+        Schema-7 reads get empty TEMP overlays for the newly added tables.
+        Existing tables and data are never shadowed or repaired by a page.
+        """
+        missing = not self.path.exists()
+        db = sqlite3.connect(":memory:") if missing else self._connect_readonly()
+        db.row_factory = sqlite3.Row
+        db.create_function("watch_euvd_rank", 3, _euvd_sql_rank, deterministic=True)
+        try:
+            if missing:
                 self._ensure_schema(db, _timestamp(self._clock))
-            return
-        with self.transaction(create=False) as db:
+                db.commit()
+            else:
+                existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('schema_version','provider_storage')")) if 'watch_meta' in existing else {}
+                if meta.get('provider_storage') != 'sparse-v1':
+                    overlays = {'watch_origin','watch_provider','watch_search','watch_source_check',
+                                'watch_euvd_override','watch_cve_list_queue','watch_initial_cve'}
+                    for statement in _SCHEMA:
+                        if statement.startswith("CREATE TABLE IF NOT EXISTS "):
+                            name = statement.split()[5]
+                            if name in overlays and name not in existing:
+                                db.execute(statement.replace("CREATE TABLE", "CREATE TEMP TABLE", 1))
+            db.execute("BEGIN")
+            yield db
+        except sqlite3.Error as exc:
+            raise StateError(f"watch read failed: {exc}") from exc
+        finally:
+            db.rollback()
+            db.close()
+
+    def initialize(self, *, create: bool = True) -> None:
+        if self.path.is_file():
+            with closing(self._connect_readonly()) as db:
+                try:
+                    meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('schema_version','provider_storage')"))
+                except sqlite3.Error:
+                    meta = {}
+                if meta.get("schema_version") == str(SCHEMA_VERSION) and meta.get("provider_storage") == "sparse-v1":
+                    if not _alert_columns_current(db):
+                        raise StateError("watch database was created by a pre-release build; delete it and run `watch sync` again")
+                    return
+        with self.transaction(create=create) as db:
             self._ensure_schema(db, _timestamp(self._clock))
 
     @classmethod
@@ -538,6 +598,7 @@ class WatchStore:
                 "('report_legacy_max_id','0')"
             )
             cls._ensure_search(db)
+            cls._set_meta(db, {"provider_storage": "sparse-v1"})
             return
         version = rows[0]["value"]
         if version not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
@@ -594,28 +655,30 @@ class WatchStore:
                 )
         if version in {"1", "2", "3", "4", "5", "6"}:
             cls._migrate_report_identity(db, version)
-        if version != str(SCHEMA_VERSION):
-            # No table references watch_cve; rebuild its status constraint in
-            # the same transaction as the provider and search backfill.
-            statement = next(item for item in _SCHEMA if "CREATE TABLE IF NOT EXISTS watch_cve (" in item)
-            db.execute(statement.replace("IF NOT EXISTS watch_cve", "watch_cve_v8"))
-            db.execute("INSERT INTO watch_cve_v8 SELECT * FROM watch_cve")
-            db.execute("DROP TABLE watch_cve")
-            db.execute("ALTER TABLE watch_cve_v8 RENAME TO watch_cve")
-            db.execute("CREATE INDEX watch_cve_ssvc ON watch_cve(ssvc_exploitation)")
-            for row in db.execute("SELECT * FROM watch_cve"):
-                content = canonical_json(_nvd_content(cls._record(row)))
-                db.execute(
-                    "INSERT OR IGNORE INTO watch_provider VALUES (?,'nvd',?,?,?,?)",
-                    (row["cve_id"], content, content, row["last_modified"], row["updated_at"]),
-                )
-                db.execute("INSERT OR REPLACE INTO watch_search VALUES (?,?)",
-                           (row["cve_id"], row["description"] or ""))
-            cls._ensure_search(db)
-            db.execute(
-                "UPDATE watch_meta SET value=? WHERE key='schema_version'",
-                (str(SCHEMA_VERSION),),
-            )
+        # Existing NVD and EUVD data stay in their original tables. No row
+        # rebuild, JSON validation, provider copy or search backfill is needed.
+        # Extra legacy columns are deliberately left untouched.
+        if version == "8":
+            # Recover the pre-release provider-copy layout without retaining
+            # duplicated NVD payloads. Normal schema-7 upgrades skip this path.
+            columns = ",".join(f"{name}=json_extract(p.record_json,'$.{name}')" for name in _NVD_CONTENT_COLUMNS)
+            db.execute(f"UPDATE watch_cve AS c SET {columns} FROM watch_provider p WHERE p.cve_id=c.cve_id AND p.source='nvd'")
+            db.execute("INSERT OR IGNORE INTO watch_origin SELECT c.cve_id,min(p.source) FROM watch_cve c JOIN watch_provider p ON p.cve_id=c.cve_id WHERE NOT EXISTS(SELECT 1 FROM watch_provider n WHERE n.cve_id=c.cve_id AND n.source='nvd') GROUP BY c.cve_id")
+            db.execute("DELETE FROM watch_provider WHERE source='nvd'")
+            db.execute("DELETE FROM watch_search WHERE cve_id NOT IN (SELECT cve_id FROM watch_provider)")
+        if "source" not in {row["name"] for row in db.execute("PRAGMA table_info(watch_search)")}:
+            for name in ("insert", "delete", "update"):
+                db.execute(f"DROP TRIGGER IF EXISTS watch_search_{name}")
+            db.execute("DROP TABLE IF EXISTS watch_fts")
+            db.execute("DROP TABLE watch_search")
+            db.execute(next(item for item in _SCHEMA if "CREATE TABLE IF NOT EXISTS watch_search (" in item))
+            from .cve_list import description_text
+            for row in db.execute("SELECT cve_id,source,payload_json FROM watch_provider"):
+                payload = json.loads(row["payload_json"])
+                text = description_text(payload) if row["source"] == "cve_list" else payload.get("description") or ""
+                db.execute("INSERT INTO watch_search VALUES (?,?,?)", (row["cve_id"], row["source"], text))
+        cls._ensure_search(db)
+        cls._set_meta(db, {"schema_version": str(SCHEMA_VERSION), "provider_storage": "sparse-v1"})
 
     @staticmethod
     def _ensure_search(db: sqlite3.Connection) -> None:
@@ -631,7 +694,8 @@ class WatchStore:
             ("update", "UPDATE", "INSERT INTO watch_fts(watch_fts,rowid,cve_id,text) VALUES ('delete',old.rowid,old.cve_id,old.text); INSERT INTO watch_fts(rowid,cve_id,text) VALUES (new.rowid,new.cve_id,new.text);"),
         ):
             db.execute(f"CREATE TRIGGER IF NOT EXISTS watch_search_{name} AFTER {event} ON watch_search BEGIN {action} END")
-        db.execute("INSERT INTO watch_fts(watch_fts) VALUES ('rebuild')")
+        if db.execute("SELECT 1 FROM watch_search LIMIT 1").fetchone():
+            db.execute("INSERT INTO watch_fts(watch_fts) VALUES ('rebuild')")
 
     @staticmethod
     def _migrate_event_details(db: sqlite3.Connection) -> None:
@@ -749,8 +813,7 @@ class WatchStore:
             )
 
     def metadata(self) -> dict[str, str]:
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             return {row["key"]: row["value"] for row in db.execute("SELECT key,value FROM watch_meta")}
 
     @staticmethod
@@ -791,8 +854,7 @@ class WatchStore:
 
     def euvd_scan_ids(self) -> set[str]:
         """Return every identifier accepted so far in the active EUVD scan."""
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             return {
                 row["euvd_id"]
                 for row in db.execute("SELECT euvd_id FROM watch_euvd_scan")
@@ -800,8 +862,7 @@ class WatchStore:
 
     def euvd_scan_page_ids(self, page: int) -> set[str]:
         """Return the identifiers accepted for one page of the active scan."""
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             return {
                 row["euvd_id"]
                 for row in db.execute(
@@ -817,8 +878,7 @@ class WatchStore:
 
     def pending_evaluations(self, limit: int = 1000) -> tuple[str, ...]:
         """Return queued CVE ids in the order they were first touched."""
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             rows = db.execute(
                 "SELECT cve_id FROM watch_touched "
                 "ORDER BY touched_at, cve_id LIMIT ?",
@@ -850,11 +910,13 @@ class WatchStore:
             current = row["value"] if row is not None else None
             if current == policy:
                 return ()
+            changed_policy = set((current or "").split(",")) ^ set(policy.split(","))
+            cve_only = current is not None and changed_policy == {"cve_list"}
             last = ""
             while True:
                 rows = db.execute(
-                    "SELECT cve_id FROM watch_cve WHERE cve_id > ? "
-                    "ORDER BY cve_id LIMIT ?",
+                    ("SELECT p.cve_id FROM watch_provider p JOIN watch_cve c ON c.cve_id=p.cve_id WHERE p.source='cve_list' AND p.cve_id > ? ORDER BY p.cve_id LIMIT ?"
+                     if cve_only else "SELECT cve_id FROM watch_cve WHERE cve_id > ? ORDER BY cve_id LIMIT ?"),
                     (last, VIEW_POLICY_BATCH),
                 ).fetchall()
                 if not rows:
@@ -874,7 +936,7 @@ class WatchStore:
         try:
             return WatchRecord.from_row(row)
         except (TypeError, ValueError, KeyError) as exc:
-            raise StateError("watch database contains an invalid CVE record") from exc
+            raise StateError(f"watch database contains an invalid CVE record: {row['cve_id']}") from exc
 
     @staticmethod
     def _row(db: sqlite3.Connection, identifier: str) -> sqlite3.Row | None:
@@ -917,6 +979,10 @@ class WatchStore:
 
     @staticmethod
     def _best_euvd(db: sqlite3.Connection, identifier: str) -> EUVDUpdate | None:
+        override = db.execute("SELECT items_json FROM watch_euvd_override WHERE cve_id=?", (identifier,)).fetchone()
+        if override is not None:
+            candidates = [_euvd_from_row(item) for item in json.loads(override[0])]
+            return max(candidates, key=lambda item: item.rank()) if candidates else None
         rows = db.execute(
             "SELECT i.* FROM watch_euvd_item i "
             "JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id "
@@ -964,7 +1030,7 @@ class WatchStore:
         row = self._row(db, identifier)
         if row is None:
             return None
-        record = self._record(row)
+        record = self._merged_record(db, identifier, catalogs)
         euvd = self._best_euvd(db, identifier) if "euvd" in catalogs else None
         return build_view(
             record,
@@ -1050,17 +1116,14 @@ class WatchStore:
         )
         return known
 
-    def _upsert_provider(
-        self, source: str, records, *, meta=None, catalogs=(),
-    ) -> StepCounts:
+    def _upsert_provider(self, source, records, *, meta=None, catalogs=(), initial=False) -> StepCounts:
         self.initialize()
         now = _timestamp(self._clock)
-        outcomes = []
+        written = []
         unchanged = 0
         with self.transaction() as db:
             for record, payload in records:
-                content = canonical_json(_nvd_content(record))
-                raw = canonical_json(payload)
+                content, raw = canonical_json(_nvd_content(record)), canonical_json(payload)
                 previous = db.execute("SELECT record_json,payload_json FROM watch_provider WHERE cve_id=? AND source=?",
                                       (record.cve_id, source)).fetchone()
                 db.execute("INSERT INTO watch_provider VALUES (?,?,?,?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET record_json=excluded.record_json,payload_json=excluded.payload_json,source_updated=excluded.source_updated,checked_at=excluded.checked_at",
@@ -1068,55 +1131,72 @@ class WatchStore:
                 if previous and previous["record_json"] == content and previous["payload_json"] == raw:
                     unchanged += 1
                     continue
-                merged = self._merged_record(db, record.cve_id)
-                outcome = self._write_nvd(db, merged, now)
-                outcomes.append((record.cve_id, outcome))
-                # Search all provider descriptions, including text beyond the
-                # bounded alert preview. Raw containers remain separately held.
-                texts = [merged.description or ""]
+                if self._row(db, record.cve_id) is None:
+                    # Identity/first-seen placeholder only. Provider fields stay
+                    # independent; legacy status constraints need no rebuild.
+                    self._write_nvd(db, WatchRecord(record.cve_id, "published"), now)
+                    db.execute("INSERT INTO watch_origin VALUES (?,?)", (record.cve_id, source))
+                written.append(record.cve_id)
                 from .cve_list import description_text
-                for row in db.execute("SELECT source,payload_json FROM watch_provider WHERE cve_id=?", (record.cve_id,)):
-                    payload = json.loads(row["payload_json"])
-                    texts.append(description_text(payload) if row["source"] == "cve_list" else payload.get("description") or "")
-                db.execute("INSERT INTO watch_search VALUES (?,?) ON CONFLICT(cve_id) DO UPDATE SET text=excluded.text",
-                           (record.cve_id, "\n".join(texts)))
-                if source == "nvd":
-                    db.execute("DELETE FROM watch_lookup WHERE cve_id=?", (record.cve_id,))
-            written = [identifier for identifier, _ in outcomes]
+                text = description_text(payload) if source == "cve_list" else payload.get("description") or ""
+                db.execute("INSERT INTO watch_search VALUES (?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET text=excluded.text", (record.cve_id, source, text))
+                if source == "cve_list" and initial:
+                    db.execute("INSERT OR IGNORE INTO watch_initial_cve VALUES (?,'cve_list')", (record.cve_id,))
             views = self._refresh_views(db, written, catalogs, now)
             queued = self._mark_touched(db, written, now)
             if meta:
                 self._set_meta(db, meta)
         return StepCounts(new=views.new, changed=views.changed, unchanged=unchanged,
-                          new_ids=views.new_ids, changed_ids=views.changed_ids,
-                          touched_ids=queued)
+                          new_ids=views.new_ids, changed_ids=views.changed_ids, touched_ids=queued)
 
-    def _merged_record(self, db, identifier):
-        providers = {row["source"]: self._record({"cve_id": identifier, **json.loads(row["record_json"])})
-                     for row in db.execute("SELECT source,record_json FROM watch_provider WHERE cve_id=?", (identifier,))}
-        primary = (providers.get("nvd") or providers.get("cve_list")
-                   or providers.get("euvd") or next(iter(providers.values())))
+    def _merged_record(self, db, identifier, catalogs=()):
+        row = self._row(db, identifier)
+        origin = db.execute("SELECT source FROM watch_origin WHERE cve_id=?", (identifier,)).fetchone()
+        allowed = set(catalogs) if catalogs else {"nvd", "cve_list", origin[0] if origin else "nvd"}
+        providers = {item["source"]: self._record({"cve_id": identifier, **json.loads(item["record_json"])})
+                     for item in db.execute("SELECT source,record_json FROM watch_provider WHERE cve_id=?", (identifier,))
+                     if item["source"] in allowed}
+        if origin is not None:
+            return next((providers[name] for name in ("cve_list", "euvd", "cisa_kev", "eu_kev") if name in providers), WatchRecord(identifier, "reserved"))
+        primary = self._record(row)
         official = providers.get("cve_list")
         if official is None:
             return primary
-        records = list(providers.values())
+        # NVD status and every populated NVD field retain their old meaning.
         return replace(primary,
-                       status=official.status,
                        published=primary.published or official.published,
-                       last_modified=max((item.last_modified for item in records if item.last_modified), default=None),
-                       description="\n".join(dict.fromkeys(item.description for item in records if item.description)) or None,
+                       last_modified=primary.last_modified or official.last_modified,
+                       description=primary.description or official.description,
                        source_identifier=primary.source_identifier or official.source_identifier,
-                       cvss=tuple(entry for item in records for entry in item.cvss),
-                       cwes=tuple(value for item in records for value in item.cwes),
-                       products=tuple(value for item in records for value in item.products),
-                       references=tuple(value for item in records for value in item.references))
+                       cvss=primary.cvss or official.cvss, cwes=primary.cwes or official.cwes,
+                       products=primary.products or official.products,
+                       references=primary.references or official.references)
 
     def upsert_nvd(self, records, *, meta=None, catalogs=()) -> StepCounts:
-        return self._upsert_provider("nvd", ((item, _nvd_content(item)) for item in records), meta=meta, catalogs=catalogs)
+        self.initialize()
+        now = _timestamp(self._clock)
+        written, new_ids, changed_ids, unchanged = [], [], [], 0
+        with self.transaction() as db:
+            for record in records:
+                origin = db.execute("DELETE FROM watch_origin WHERE cve_id=?", (record.cve_id,)).rowcount
+                outcome = self._write_nvd(db, record, now)
+                db.execute("DELETE FROM watch_lookup WHERE cve_id=?", (record.cve_id,))
+                db.execute("DELETE FROM watch_source_check WHERE cve_id=? AND source='nvd'", (record.cve_id,))
+                if outcome == "unchanged" and not origin:
+                    unchanged += 1
+                    continue
+                written.append(record.cve_id)
+                (new_ids if outcome == "new" else changed_ids).append(record.cve_id)
+            views = self._refresh_views(db, written, catalogs, now)
+            queued = self._mark_touched(db, written, now)
+            if meta:
+                self._set_meta(db, meta)
+        return StepCounts(new=views.new, changed=views.changed, unchanged=unchanged,
+                          new_ids=tuple(new_ids), changed_ids=tuple(changed_ids), touched_ids=queued)
 
-    def upsert_cve_list(self, records, *, meta=None, catalogs=()) -> StepCounts:
+    def upsert_cve_list(self, records, *, meta=None, catalogs=(), initial=False) -> StepCounts:
         from .cve_list import parse_record
-        return self._upsert_provider("cve_list", ((parse_record(item), item) for item in records), meta=meta, catalogs=catalogs)
+        return self._upsert_provider("cve_list", ((parse_record(item), item) for item in records), meta=meta, catalogs=catalogs, initial=initial)
 
     def upsert_discovered(self, source, record, *, payload, catalogs=()):
         """Keep a targeted EUVD/KEV discovery without inventing NVD presence.
@@ -1133,10 +1213,20 @@ class WatchStore:
         return search(self, **kwargs)
 
     def provider_records(self, identifier):
-        self.initialize()
-        with self.transaction() as db:
-            return tuple({"source": row["source"], "payload": json.loads(row["payload_json"])}
-                         for row in db.execute("SELECT source,payload_json FROM watch_provider WHERE cve_id=? ORDER BY source", (identifier,)))
+        """Bound the disclosure before decoding or pretty-printing payloads."""
+        cap = 65536
+        with self.read() as db:
+            rows = [dict(item) for item in db.execute("SELECT source,substr(payload_json,1,?) AS raw,length(payload_json)>? AS truncated FROM watch_provider WHERE cve_id=? ORDER BY source", (cap, cap, identifier))]
+            row = self._row(db, identifier)
+            if row is not None and not db.execute("SELECT 1 FROM watch_origin WHERE cve_id=?", (identifier,)).fetchone():
+                raw = canonical_json(_nvd_content(self._record(row)))
+                rows.append({"source": "nvd", "raw": raw[:cap], "truncated": len(raw) > cap})
+        output = []
+        for item in rows:
+            payload = None if item["truncated"] else json.loads(item["raw"])
+            output.append({"source": item["source"], "payload": payload,
+                           "display": item["raw"], "truncated": bool(item["truncated"])})
+        return tuple(sorted(output, key=lambda item: item["source"]))
 
     def source_presence(self, identifier):
         from .explorer import source_presence
@@ -1152,6 +1242,21 @@ class WatchStore:
                                           _clock_value(self._clock), False)
             db.execute("DELETE FROM watch_touched WHERE cve_id=?", (identifier,))
         return self._evaluation_result(int(present), counts)
+
+    def upsert_euvd_cve(self, identifier, updates, *, catalogs=()):
+        self.initialize()
+        now = _timestamp(self._clock)
+        items = [{"euvd_id": item.euvd_id, "cve_ids_json": canonical_json([identifier]),
+                  "date_updated": item.date_updated, "exploited_since": item.exploited_since,
+                  "vendors_json": _vendors_json(item.vendors),
+                  "score": item.cvss.score if item.cvss else None,
+                  "version": item.cvss.version if item.cvss else None,
+                  "vector": item.cvss.vector if item.cvss else None} for item in updates]
+        with self.transaction() as db:
+            db.execute("INSERT OR REPLACE INTO watch_euvd_override VALUES (?,?,?)", (identifier, canonical_json(items), now))
+            counts = self._refresh_views(db, [identifier], catalogs, now)
+            queued = self._mark_touched(db, [identifier], now)
+        return StepCounts(new=counts.new, changed=counts.changed, touched_ids=queued)
 
     def replace_euvd_items(
         self,
@@ -1178,6 +1283,9 @@ class WatchStore:
             for euvd_id in sorted(by_id):
                 update = by_id[euvd_id]
                 cve_ids = tuple(sorted(set(update.cve_ids)))
+                for value in cve_ids:
+                    if db.execute("DELETE FROM watch_euvd_override WHERE cve_id=? AND checked_at<=?", (value, now)).rowcount:
+                        touched.add(value)
                 cve_ids_json = canonical_json(list(cve_ids))
                 vendors_json = _vendors_json(update.vendors)
                 score = update.cvss.score if update.cvss is not None else None
@@ -1465,6 +1573,14 @@ class WatchStore:
         stamp = _timestamp(lambda: now)
         backlog_before = self._backlog_before(db)
         for identifier in identifiers:
+            source_initial = db.execute("SELECT 1 FROM watch_initial_cve WHERE cve_id=?", (identifier,)).fetchone() is not None
+            source_backlog = backlog_before
+            if source_initial:
+                meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('cve_list_start','cve_list_initial_mode')"))
+                if meta.get('cve_list_initial_mode') == 'full':
+                    source_backlog = date(1999,1,1)
+                elif meta.get('cve_list_start'):
+                    source_backlog = date.fromisoformat(meta['cve_list_start'][:10])
             view = self._view(db, identifier, catalogs)
             if view is None:
                 continue
@@ -1488,7 +1604,7 @@ class WatchStore:
                     previous,
                     rule,
                     now=now,
-                    backlog_before=backlog_before,
+                    backlog_before=source_backlog,
                 )
                 if state is None:
                     continue
@@ -1524,7 +1640,7 @@ class WatchStore:
                             reasons_json,
                             details_json,
                             event.occurrence,
-                            1 if event.initial or (initial and event.kind == "match") else 0,
+                            1 if event.initial or ((initial or source_initial) and event.kind == "match") else 0,
                             stamp,
                         ),
                     )
@@ -1538,6 +1654,7 @@ class WatchStore:
                         ((event_id, channel, stamp) for channel in rule.channels),
                     )
                     created[event.kind] = created.get(event.kind, 0) + 1
+        db.executemany("DELETE FROM watch_initial_cve WHERE cve_id=?", ((value,) for value in identifiers))
         return created
 
     @staticmethod
@@ -1597,10 +1714,15 @@ class WatchStore:
                     ((identifier,) for identifier in identifiers),
                 )
                 evaluated += len(identifiers)
-        if initial and complete:
+        metadata = self.metadata()
+        only_cve_failure = metadata.get("last_sync_failures") == "cve_list" and metadata.get("initial_sync_completed_at")
+        if initial and (complete or only_cve_failure):
             self.set_metadata(
                 {"initial_evaluated_at": _timestamp(self._clock)}
             )
+        with self.transaction() as db:
+            if metadata.get("cve_list_initial_sync_completed_at") and not db.execute("SELECT 1 FROM watch_initial_cve LIMIT 1").fetchone():
+                self._set_meta(db, {"cve_list_initial_evaluated_at": _timestamp(self._clock)})
         return self._evaluation_result(evaluated, created)
 
     def evaluate_all(
@@ -1689,7 +1811,6 @@ class WatchStore:
             raise StateError("event offset must not be negative")
         if kind is not None and kind not in EVENT_KINDS:
             raise StateError("unknown watch event kind")
-        self.initialize()
         clauses = [
             "e.kind NOT IN (" + ",".join("?" for _ in NOTICE_KINDS) + ")"
         ]
@@ -1740,7 +1861,7 @@ class WatchStore:
             parameters.append(upper)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         parameters.extend((limit, offset))
-        with closing(self._connect()) as db:
+        with self.read() as db:
             rows = db.execute(
                 "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,"
                 "e.details_json,e.initial,e.created_at,"
@@ -1792,8 +1913,7 @@ class WatchStore:
         if len(identifiers) > 500:
             raise StateError("too many delivery events selected")
         marks = ",".join("?" for _ in identifiers)
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             rows = db.execute(
                 "SELECT event_id,channel,status,attempts,last_error,updated_at,"
                 "row_number FROM ("
@@ -1846,8 +1966,7 @@ class WatchStore:
         if len(values) > 500:
             raise StateError("too many notice occurrences selected")
         marks = ",".join("?" for _ in values)
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             rows = db.execute(
                 "SELECT id,kind,occurrence FROM watch_event "
                 "WHERE rule=? AND cve_id=? AND occurrence IN (" + marks + ")",
@@ -2114,7 +2233,6 @@ class WatchStore:
             raise StateError("a report offset requires a limit")
         if limit is not None and limit < 1:
             raise StateError("report limit must be positive")
-        self.initialize()
         sql = (
             "SELECT id,cve_id,action,by,note,at,user_id,username,"
             "identity_mode,os_account,host,chain,chain_version "
@@ -2124,7 +2242,7 @@ class WatchStore:
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             parameters = (limit, offset)
-        with closing(self._connect()) as db:
+        with self.read() as db:
             db.text_factory = decode_text
             rows = db.execute(sql, parameters).fetchall()
         return tuple(self._report_entry(row) for row in rows)
@@ -2137,8 +2255,7 @@ class WatchStore:
             raise StateError("report limit must be positive")
         if offset < 0:
             raise StateError("report offset must not be negative")
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             db.text_factory = decode_text
             rows = db.execute(
                 "SELECT id,cve_id,action,by,note,at,user_id,username,"
@@ -2289,13 +2406,12 @@ class WatchStore:
             raise StateError("a report offset requires a limit")
         if limit is not None and limit < 1:
             raise StateError("report limit must be positive")
-        self.initialize()
         sql = _LATEST_REPORT_SQL + " ORDER BY r.at, r.id"
         parameters: tuple[Any, ...] = ()
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             parameters = (limit, offset)
-        with closing(self._connect()) as db:
+        with self.read() as db:
             db.text_factory = decode_text
             rows = db.execute(sql, parameters).fetchall()
         return tuple(self._report_entry(row) for row in rows)
@@ -2332,8 +2448,7 @@ class WatchStore:
         self, identifiers: Iterable[str]
     ) -> dict[str, ReportedMark]:
         """Return the current mark for each of ``identifiers`` that has one."""
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             db.text_factory = decode_text
             return self._reported_marks_in(db, identifiers)
 
@@ -2341,7 +2456,6 @@ class WatchStore:
         self, *, cve_id: str | None = None
     ) -> dict[tuple[str, int], tuple[NoticeDelivery, ...]]:
         """Return notice delivery states keyed by (action, report id)."""
-        self.initialize()
         sql = (
             "SELECT e.kind,e.occurrence,d.channel,d.status,d.attempts,"
             "d.last_error FROM watch_event e "
@@ -2352,7 +2466,7 @@ class WatchStore:
         if cve_id is not None:
             sql += " AND e.cve_id=?"
             parameters = (NOTICE_RULE, cve_id)
-        with closing(self._connect()) as db:
+        with self.read() as db:
             rows = db.execute(
                 sql + " ORDER BY e.id, d.channel",
                 parameters,
@@ -2591,7 +2705,6 @@ class WatchStore:
                 return ()
             if len(selected) > DELIVERY_SELECT_LIMIT:
                 raise StateError("too many delivery events selected")
-        self.initialize()
         current = _clock_value(lambda: now) if now is not None else _clock_value(self._clock)
         base = (
             "SELECT e.id,e.rule,e.cve_id,e.kind,e.reasons_json,e.details_json,"
@@ -2610,7 +2723,7 @@ class WatchStore:
         if selected is not None:
             base += " AND e.id IN (" + ",".join("?" for _ in selected) + ")"
             parameters.extend(selected)
-        with closing(self._connect()) as db:
+        with self.read() as db:
             found = db.execute(
                 base + " ORDER BY e.created_at, e.id LIMIT ?",
                 (*parameters, limit),
@@ -3096,8 +3209,7 @@ class WatchStore:
         self, channels: Iterable[str] = ()
     ) -> tuple[DeliveryStatusRow, ...]:
         """Return per-channel delivery counts for status output."""
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             rows = db.execute(
                 "SELECT channel,status,COUNT(*) AS count,"
                 "MAX(CASE WHEN status='sent' THEN updated_at END) AS last_success,"
@@ -3223,9 +3335,8 @@ class WatchStore:
             return len(candidates)
 
     def due_lookups(self, *, now: datetime, limit: int = 25) -> tuple[LookupRow, ...]:
-        self.initialize()
         stamp = _timestamp(lambda: now)
-        with closing(self._connect()) as db:
+        with self.read() as db:
             rows = db.execute(
                 "SELECT cve_id,attempts,next_attempt_at,last_error FROM watch_lookup "
                 "WHERE next_attempt_at <= ? ORDER BY next_attempt_at, cve_id LIMIT ?",
@@ -3260,14 +3371,11 @@ class WatchStore:
             )
 
     def view(self, identifier: str, *, catalogs: Sequence[str] = ()) -> Any | None:
-        self.initialize()
-        with closing(self._connect()) as db:
+        with self.read() as db:
             return self._view(db, identifier, catalogs)
 
     def status(self, *, catalogs: Sequence[str] = ()) -> dict[str, Any]:
-        self.initialize()
-        with closing(self._connect()) as db:
-            db.execute("BEGIN")
+        with self.read() as db:
             try:
                 meta = {
                     row["key"]: row["value"]

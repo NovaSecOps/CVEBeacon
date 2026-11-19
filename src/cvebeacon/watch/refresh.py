@@ -76,7 +76,7 @@ def refresh_watch(config, http, identifier):
             elif source == "euvd":
                 payload = http.get_json(SEARCH_URL, source="euvd", params={"text": identifier, "page": 0, "size": 100}, minimum_interval=feeds.EUVD_MIN_INTERVAL)
                 updates = _euvd_updates(payload, identifier)
-                counts = store.replace_euvd_items(updates, catalogs=catalogs)
+                counts = store.upsert_euvd_cve(identifier, updates, catalogs=catalogs)
                 new, changed = counts.new, counts.changed
                 records = len(updates)
                 if updates:
