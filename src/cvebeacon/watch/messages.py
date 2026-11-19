@@ -210,7 +210,7 @@ def _best_by_provider(entries: Iterable[CVSSEntry]) -> dict[str, CVSSEntry]:
                 entry.score,
                 entry.source,
                 entry.version,
-                entry.vector or "",
+                entry.vector if isinstance(entry.vector, str) else "",
             ),
         )
     return output
@@ -274,6 +274,17 @@ def _cvss_field(
     if "nvd" not in best and view.status != "rejected":
         parts.append(catalog["nvd_pending"])
     return ", ".join(parts)
+
+
+def _event_cvss(event: DeliveryEvent, catalog: Mapping[str, str]) -> str:
+    if "cvss_selected" not in event.details:
+        return _cvss_field(event.view, STYLE_PLAIN, catalog)
+    data = event.details["cvss_selected"]
+    if data is None:
+        return catalog["cvss_no_qualifying_score"]
+    entry = CVSSEntry(**data)
+    return translate(catalog, "cvss_score", score=f"{entry.score:g}", version=entry.version,
+                     provider=_provider_label(entry.provider, entry, event.view, catalog))
 
 
 def _cvss_lines(view: WatchView, catalog: Mapping[str, str]) -> tuple[str, ...]:
@@ -427,9 +438,9 @@ def _group_events(
     catalog: Mapping[str, str],
 ) -> list[list[DeliveryEvent]]:
     """Merge events that render the same CVE line under the same label."""
-    grouped: dict[tuple[str, str], list[DeliveryEvent]] = {}
+    grouped: dict[tuple[str, str, str], list[DeliveryEvent]] = {}
     for event in events:
-        key = (event.cve_id, _kind_label(event, style, catalog))
+        key = (event.cve_id, _kind_label(event, style, catalog), _event_cvss(event, catalog))
         grouped.setdefault(key, []).append(event)
     return list(grouped.values())
 
@@ -481,7 +492,7 @@ def _event_facts(
     return _EventFacts(
         label=_kind_label(event, STYLE_PLAIN, catalog),
         cve_id=str(event.cve_id),
-        cvss=_cvss_field(view, STYLE_PLAIN, catalog),
+        cvss=_event_cvss(event, catalog),
         cvss_lines=_cvss_lines(view, catalog),
         epss=_epss_field(view),
         kev=translate(
@@ -1519,6 +1530,8 @@ def webhook_payload(
                         {**entry.as_dict(), "severity": entry.severity_band}
                         for entry in view.cvss_scores
                     ],
+                    **({"cvss_selected": event.details["cvss_selected"]}
+                       if "cvss_selected" in event.details else {}),
                     "cvss_note": (
                         catalog_for(DEFAULT_LANGUAGE)["cvss_severity_differs"] if view.cvss_severity_differs else None
                     ),

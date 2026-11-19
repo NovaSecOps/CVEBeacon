@@ -273,7 +273,7 @@ def _known_cvss_condition(key, value):
     return (
         qualifiers is not None
         and value.keys() <= {"score", *qualifiers}
-        and isinstance(value.get("score"), (int, float))
+        and type(value.get("score")) in (int, float)
         and all(isinstance(value[name], list)
                 and all(isinstance(entry, str) and entry.strip().casefold() in choices
                         for entry in value[name])

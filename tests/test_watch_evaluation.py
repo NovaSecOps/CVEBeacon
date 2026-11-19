@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -913,3 +914,24 @@ def test_pt_pt_epss_transition_without_a_previous_score(tmp_path):
     )[0]
     assert "[EPSS AUMENTOU nenhuma-><0.9]" in message.body
     assert "none" not in message.body.splitlines()[0]
+
+
+def test_qualified_provider_override_rebases_severity_and_reports_its_score(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    identifier = "CVE-2026-0001"
+    cna = CVSSEntry("cna", "Example", "4.0", 9.6)
+    nvd = CVSSEntry("nvd", "nvd", "3.1", 7.0)
+
+    def scoped(provider, version):
+        return rule(condition={"cvss_min": {"score": 7, "versions": [version], "providers": [provider]}})
+
+    store.upsert_nvd([record(cvss=(cna, nvd))])
+    assert store.evaluate_touched((scoped("cna", "4.0"),), catalogs=("nvd",)).by_kind == (("match", 1),)
+    touch(store, identifier)
+    only_nvd = scoped("nvd", "3.1")
+    assert store.evaluate_touched((only_nvd,), catalogs=("nvd",)).events == 0
+    store.upsert_nvd([record(cvss=(cna, replace(nvd, score=9.8)))])
+    assert store.evaluate_touched((only_nvd,), catalogs=("nvd",)).by_kind == (("severity_increase", 1),)
+    latest = next(event for event in store.events() if event.kind == "severity_increase")
+    assert latest.reasons == ("severity high -> critical",)
+    assert latest.details["cvss_selected"]["version"] == "3.1"

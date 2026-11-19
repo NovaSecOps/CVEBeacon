@@ -307,7 +307,7 @@ def test_no_previous_state_and_no_match_stores_nothing():
         (
             {"ssvc_exploitation": "active"},
             "exploitation_active",
-            "exploitation none -> active (cisa-adp)",
+            "exploitation none -> active (SSVC)",
             "active",
         ),
         (
@@ -645,7 +645,7 @@ def test_exploitation_poc_also_matches_euvd_active_evidence():
         "exploitation active (euvd)",
     )
     assert assert_match({"exploitation": "poc"}, view(ssvc_exploitation="poc")) == (
-        "exploitation poc (cisa-adp)",
+        "exploitation poc (SSVC)",
     )
     matched, _ = evaluate_condition(
         view(ssvc_exploitation="none"),
@@ -658,7 +658,7 @@ def test_exploitation_poc_also_matches_euvd_active_evidence():
 def test_exploitation_active_uses_ssvc_or_euvd_with_source_names():
     ssvc = view(ssvc_exploitation="active")
     assert assert_match({"exploitation": "active"}, ssvc) == (
-        "exploitation active (cisa-adp)",
+        "exploitation active (SSVC)",
     )
     euvd = view(euvd_exploited_since="2026-11-01")
     assert assert_match({"exploitation": "active"}, euvd) == (
@@ -668,7 +668,7 @@ def test_exploitation_active_uses_ssvc_or_euvd_with_source_names():
         ssvc_exploitation="active", euvd_exploited_since="2026-11-01"
     )
     assert assert_match({"exploitation": "active"}, both) == (
-        "exploitation active (cisa-adp, euvd)",
+        "exploitation active (SSVC, euvd)",
     )
     assert_match({"exploitation": "poc"}, view(ssvc_exploitation="poc"))
     # "poc" also matches EUVD-only evidence (see the poc test below), so the
@@ -827,3 +827,53 @@ def test_qualified_cvss_checks_each_entry(key, score, versions, providers, expec
 def test_invalid_qualified_cvss_is_field_specific(leaf):
     with pytest.raises(ConfigurationError, match=r"condition\.cvss_min"):
         parse_condition({"cvss_min": leaf})
+
+
+def test_qualified_snapshot_ignores_out_of_scope_score_increase():
+    selected = rule({"condition": {"cvss_min": {"score": 7, "versions": ["3.1"]}}})
+    modern = CVSSEntry("nvd", "nvd", "3.1", 7.0)
+    current = view(cvss=(modern, CVSSEntry("cna", "Example", "2.0", 5.0)))
+    state, _ = evaluate(current, None, selected, NOW)
+    current = replace(current, cvss=(modern, CVSSEntry("cna", "Example", "2.0", 10.0)))
+    updated, events = evaluate(current, state, selected, NOW)
+    assert events == ()
+    assert updated.snapshot.severity == 7.0
+    assert updated.snapshot.max_severity_band == "high"
+
+
+def test_qualified_cvss_max_uses_a_matching_supplemental_score():
+    from cvebeacon.watch.rules import providers_hash
+
+    selected = rule({"condition": {"cvss_max": {"score": 7, "versions": ["4.0"],
+                                                "providers": ["cisa-adp"]}}})
+    maximum = CVSSEntry("cisa-adp", "CISA", "4.0", 6.9)
+    current = view(additional_cvss=(maximum, CVSSEntry("cisa-adp", "CISA", "4.0", 9.8)))
+    state, events = evaluate(current, None, selected, NOW)
+    assert state.snapshot.severity == 6.9
+    assert state.snapshot.severity_band == "medium"
+    assert events[0].details["cvss_selected"] == {**maximum.as_dict(), "severity": "medium"}
+    changed = rule({"condition": {"cvss_max": {"score": 7, "versions": ["4.0"],
+                                               "providers": ["nvd"]}}})
+    assert providers_hash(changed) != providers_hash(selected)
+
+
+def test_qualified_cvss_min_prefers_supplemental_matching_score():
+    selected = rule({"condition": {"cvss_min": {"score": 9, "versions": ["4.0"],
+                                                "providers": ["cisa-adp"]}}})
+    match = CVSSEntry("cisa-adp", "CISA", "4.0", 9.6)
+    current = view(cvss=(CVSSEntry("nvd", "nvd", "3.1", 7.0),), additional_cvss=(match,))
+    state, events = evaluate(current, None, selected, NOW)
+    assert state.snapshot.severity == 9.6
+    assert events[0].details["cvss_selected"] == {**match.as_dict(), "severity": "critical"}
+
+
+def test_qualified_snapshot_uses_only_branches_that_support_the_match():
+    selected = rule({"condition": {"any": [
+        {"all": [{"cvss_min": {"score": 9, "versions": ["4.0"]}}, {"kev": "cisa"}]},
+        {"cvss_min": {"score": 7, "versions": ["3.1"]}},
+    ]}})
+    current = view(cvss=(CVSSEntry("nvd", "nvd", "3.1", 7.0),
+                         CVSSEntry("nvd", "nvd", "4.0", 9.8)))
+    state, events = evaluate(current, None, selected, NOW)
+    assert state.snapshot.severity == 7.0
+    assert events[0].details["cvss_selected"]["version"] == "3.1"

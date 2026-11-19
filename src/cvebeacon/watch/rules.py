@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..errors import ConfigurationError
-from .records import CVSS_PROVIDERS, CVSS_VERSIONS, WatchView, canonical_json, euvd_datetime
+from .records import CVSS_PROVIDERS, CVSS_VERSIONS, CVSSEntry, WatchView, canonical_json, euvd_datetime
 
 EVENT_KINDS = (
     "match",
@@ -545,7 +545,7 @@ def _provider_best(entries: Iterable[Any]) -> list[Any]:
                     entry.score,
                     entry.source,
                     entry.version,
-                    entry.vector or "",
+                    entry.vector if isinstance(entry.vector, str) else "",
                 ),
             )
         )
@@ -603,17 +603,59 @@ def _exploitation_level(view: WatchView) -> str:
 
 def _exploitation_sources(view: WatchView) -> tuple[str, ...]:
     sources: list[str] = []
-    if view.ssvc_exploitation in {"poc", "active"}:
-        sources.append("cisa-adp")
+    if view.ssvc_exploitation is not None:
+        sources.append(view.ssvc_source or "SSVC")
     if view.euvd_exploited_since:
         sources.append("euvd")
-    return tuple(sources)
+    return tuple(dict.fromkeys(sources))
+
+
+def _qualified_leaves(condition: Condition):
+    if condition.kind == "leaf":
+        yield from ((key, value) for key, value in condition.leaves if isinstance(value, CVSSCondition))
+    else:
+        for child in condition.children:
+            yield from _qualified_leaves(child)
+
+
+def _qualified_entry(view: WatchView, key: str, value: CVSSCondition, rule: Rule) -> CVSSEntry | None:
+    providers = value.providers or rule.cvss_providers
+    return max(
+        (entry for entry in view.cvss_scores
+         if entry.version in value.versions and entry.provider in providers
+         and (entry.score >= value.score if key == "cvss_min" else entry.score <= value.score)),
+        key=lambda entry: entry.score, default=None,
+    )
+
+
+def _qualified_rule_score(view: WatchView, rule: Rule) -> CVSSEntry | None:
+    def matching_scores(condition, *, negated=False):
+        matched, _ = evaluate_condition(view, condition, rule)
+        if matched == negated:
+            return
+        if condition.kind == "not":
+            yield from matching_scores(condition.children[0], negated=not negated)
+        elif condition.kind == "leaf":
+            if not negated:
+                for key, value in _qualified_leaves(condition):
+                    entry = _qualified_entry(view, key, value, rule)
+                    if entry is not None:
+                        yield entry
+        else:
+            for child in condition.children:
+                yield from matching_scores(child, negated=negated)
+
+    return max(
+        matching_scores(rule.condition),
+        key=lambda entry: entry.score, default=None,
+    )
 
 
 def snapshot_for(view: WatchView, rule: Rule) -> AlertSnapshot:
-    highest = highest_cvss(view, rule.cvss_providers)
+    qualified = any(_qualified_leaves(rule.condition))
+    highest = _qualified_rule_score(view, rule) if qualified else highest_cvss(view, rule.cvss_providers)
     severity = highest.score if highest is not None else None
-    severity_band = _severity_band(severity)
+    severity_band = highest.severity_band if qualified and highest is not None else _severity_band(severity)
     epss_band = _epss_band(view.epss)
     return AlertSnapshot(
         cisa_kev=view.cisa_kev_added is not None,
@@ -677,8 +719,13 @@ def rule_hash(rule: Rule) -> str:
 
 
 def providers_hash(rule: Rule) -> str:
-    """Hash the CVSS providers alone, since they decide the severity band."""
+    """Hash the score selection used for stored severity marks."""
     value = list(rule.cvss_providers)
+    if any(_qualified_leaves(rule.condition)):
+        scopes = sorted({canonical_json([key, leaf.score, leaf.versions,
+                                        sorted(leaf.providers or rule.cvss_providers)])
+                         for key, leaf in _qualified_leaves(rule.condition)})
+        value = {"qualified_cvss": scopes}
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()[:16]
 
 
@@ -688,8 +735,9 @@ def rebase_severity(previous: AlertState, view: WatchView, rule: Rule) -> AlertS
     Used when ``cvss_providers`` changed. The stored marks came from other scores,
     so keeping them would alert on the edit itself or hide a later real rise.
     """
-    band = snapshot_for(view, rule).severity_band
-    snapshot = replace(previous.snapshot, severity_band=band, max_severity_band=band)
+    current = snapshot_for(view, rule)
+    snapshot = replace(previous.snapshot, severity=current.severity, severity_band=current.severity_band,
+                       max_severity_band=current.severity_band)
     return AlertState(previous.first_matched_at, snapshot)
 
 
@@ -714,13 +762,7 @@ def _keyword_match(values: Iterable[str], description: str | None) -> str | None
 def _matches_leaf(view: WatchView, key: str, value: Any, rule: Rule) -> tuple[bool, str | None]:
     if key in {"cvss_min", "cvss_max"}:
         if isinstance(value, CVSSCondition):
-            qualifying = (
-                entry for entry in view.all_cvss
-                if entry.version in value.versions
-                and entry.provider in (value.providers or rule.cvss_providers)
-                and (entry.score >= value.score if key == "cvss_min" else entry.score <= value.score)
-            )
-            entry = max(qualifying, key=lambda item: item.score, default=None)
+            entry = _qualified_entry(view, key, value, rule)
             if entry is None:
                 return False, None
             return True, f"cvss {_format_number(entry.score)} v{entry.version} ({entry.provider})"
@@ -838,6 +880,12 @@ def _event(
     initial: bool = False,
     details: Mapping[str, Any] | None = None,
 ) -> AlertEvent:
+    event_details = dict(details or {})
+    if any(_qualified_leaves(rule.condition)):
+        entry = _qualified_rule_score(view, rule)
+        event_details["cvss_selected"] = (
+            {**entry.as_dict(), "severity": entry.severity_band} if entry is not None else None
+        )
     return AlertEvent(
         rule.name,
         view.cve_id,
@@ -845,7 +893,7 @@ def _event(
         tuple(reasons),
         occurrence,
         initial,
-        dict(details or {}),
+        event_details,
     )
 
 
@@ -862,6 +910,7 @@ def evaluate(
     now: datetime,
     *,
     backlog_before: date | None = None,
+    initial_exploitation: bool = False,
 ) -> tuple[AlertState | None, tuple[AlertEvent, ...]]:
     """Evaluate one rule against one view without reading state or the clock."""
     if not rule.enabled:
@@ -877,7 +926,7 @@ def evaluate(
         if not matched:
             return None, ()
         state = AlertState(timestamp, snapshot)
-        backlog = _is_backlog(view, backlog_before)
+        backlog = initial_exploitation or _is_backlog(view, backlog_before)
         if backlog and rule.old_cves == "ignore":
             return state, ()
         if "match" not in rule.events:
@@ -889,7 +938,7 @@ def evaluate(
                 "match",
                 reasons,
                 "match",
-                initial=backlog and rule.old_cves == "digest",
+                initial=initial_exploitation or (backlog and rule.old_cves == "digest"),
             ),
         )
 
@@ -922,6 +971,7 @@ def evaluate(
         "exploitation_active" in rule.events
         and old.exploitation != "active"
         and snapshot.exploitation == "active"
+        and not (initial_exploitation and not view.euvd_exploited_since)
     ):
         sources = _exploitation_sources(view)
         suffix = f" ({', '.join(sources)})" if sources else ""

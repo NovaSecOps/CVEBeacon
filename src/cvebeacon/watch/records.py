@@ -50,7 +50,7 @@ class CVSSEntry:
 
     @property
     def severity_band(self) -> str:
-        supplied = (self.severity or "").strip().lower()
+        supplied = self.severity.strip().lower() if isinstance(self.severity, str) else ""
         if supplied in {"none", "low", "medium", "high", "critical"}:
             return supplied
         if self.version != "2.0" and self.score >= 9:
@@ -77,8 +77,8 @@ class CVSSEntry:
             self.source,
             self.version,
             self.score,
-            self.vector or "",
-            self.severity or "",
+            self.vector if isinstance(self.vector, str) else "",
+            self.severity if isinstance(self.severity, str) else "",
         )
 
 
@@ -95,6 +95,13 @@ def display_cvss(entries: Iterable[CVSSEntry]) -> tuple[CVSSEntry, ...]:
         providers.get(entry.provider, len(providers)),
         entry.sort_key(),
     )))
+
+
+def cvss_severity_differs(entries: Iterable[CVSSEntry]) -> bool:
+    bands = {}
+    for entry in entries:
+        bands.setdefault(entry.version, set()).add(entry.severity_band)
+    return len({frozenset(values) for values in bands.values()}) > 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,20 +289,17 @@ class WatchView:
 
     @property
     def cvss_severity_differs(self) -> bool:
-        bands = {}
-        for entry in self.all_cvss:
-            bands.setdefault(entry.version, set()).add(entry.severity_band)
-        return len(bands) > 1 and len(set().union(*bands.values())) > 1
+        return cvss_severity_differs(self.all_cvss)
 
     @property
     def exploitation(self) -> tuple[str, tuple[str, ...]]:
         sources = []
         if self.euvd_exploited_since:
             sources.append("EUVD")
-        if self.ssvc_exploitation == "active" or (self.ssvc_exploitation and not sources):
+        if self.ssvc_exploitation is not None:
             sources.append(self.ssvc_source or "SSVC")
         status = "active" if self.euvd_exploited_since else self.ssvc_exploitation or "unknown"
-        return status, tuple(sources)
+        return status, tuple(dict.fromkeys(sources))
 
     @property
     def epss_band(self) -> int:

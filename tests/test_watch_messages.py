@@ -738,3 +738,32 @@ def test_webhook_keeps_legacy_scores_and_adds_full_versioned_scores():
          "score": 9.8, "vector": None, "severity": "high"},
     ]
     assert result["cvss_note"] == "Severity differs between CVSS versions"
+
+
+def test_qualified_alert_title_and_webhook_use_the_stored_matching_score():
+    selected = CVSSEntry("nvd", "nvd", "3.1", 7.0)
+    newer = CVSSEntry("nvd", "nvd", "4.0", 9.9)
+    current = view(cvss=(selected, newer))
+    item = event(current=current, details={"cvss_selected": selected.as_dict()})
+    second = event(current=current, details={"cvss_selected": newer.as_dict()},
+                   event_id=2, rule="another")
+    message, = build_messages((item, second), channel_type="smtp", grouping="run",
+                              max_items=20, names={}, format="html")
+    headers = [line for line in message.body.splitlines() if line.startswith("[NEW]")]
+    assert len(headers) == 2
+    assert "CVSS 7 v3.1 (NVD) · EPSS" in headers[0]
+    assert "CVSS 9.9 v4.0 (NVD) · EPSS" in headers[1]
+    assert "CVSS 7 v3.1 (NVD) · EPSS" in message.html
+    assert "CVSS 9.9 v4.0 (NVD) · critical" in message.body
+    document = webhook_payload((item,), {})
+    assert document["events"][0]["view"]["cvss_selected"] == selected.as_dict()
+
+
+def test_version_disagreement_compares_band_sets_and_handles_legacy_severity():
+    current = view(cvss=tuple(
+        CVSSEntry(provider, provider, version, score, severity=123)
+        for version in ("3.1", "4.0")
+        for provider, score in (("nvd", 9.8), ("cna", 7.0))
+    ))
+    assert [entry.severity_band for entry in current.cvss_scores] == ["critical", "high"] * 2
+    assert "Severity differs between CVSS versions" not in body_for(event(current=current))

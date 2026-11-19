@@ -305,3 +305,8 @@ def test_qualified_cvss_condition_helper_validation_and_preview(accounts):
     assert response.status_code == 400
     assert "condition.cvss_min.score must be a number from 0 to 10" in html.unescape(response.text)
     assert form(response.text)["g0_condition"] == invalid
+
+
+def test_editor_rejects_boolean_qualified_cvss_scores():
+    assert not editor_module._known_cvss_condition("cvss_min", {"score": True, "versions": ["4.0"]})
+    assert editor_module._known_cvss_condition("cvss_min", {"score": 1, "versions": ["4.0"]})
