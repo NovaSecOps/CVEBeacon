@@ -1,50 +1,23 @@
 """Acquisition identity, protected paths and queued admission regressions."""
 
-
 from dataclasses import replace
-
-
 import errno
-
-
 import json
-
-
 import os
-
-
 from pathlib import Path
-
-
 import sqlite3
-
-
 import threading
-
-
 import uuid
 
-
 import httpx
-
-
 import pytest
 
-
 from cvebeacon import cli, dashboard, dashboard_config as dc, dashboard_jobs as jobs, locking, scheduling
-
-
 from cvebeacon.errors import CVEBeaconError, ConfigurationError
-
-
 from cvebeacon.locking import LOCK_NAME, OperationLock, RunLock, run_lock_path
-
-
 from test_dashboard_operations import (
     _Result, fake_job, fake_scheduler, login, make_config, new_accounts, wait_for,
 )
-
-
 from watch_support import mock_client
 
 
@@ -194,6 +167,37 @@ def test_bad_lock_does_not_hide_operations(tmp_path):
         app.extensions["dashboard_jobs"].shutdown()
 
 
+@pytest.mark.parametrize("xml", [
+    '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal>'
+    '<UserId>synthetic-private-account</UserId></Principal></Principals><Actions><Exec>'
+    '<Command>/opt/private/cvebeacon</Command><Arguments>SYNTHETIC_SCHEDULE_SECRET</Arguments>'
+    '</Exec></Actions></Task>',
+    '<Task broken SYNTHETIC_SCHEDULE_SECRET /opt/private/cvebeacon synthetic-private-account',
+])
+def test_windows_operations_schedule_is_restricted_and_cached(tmp_path, monkeypatch, xml):
+    config = make_config(tmp_path)
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    calls = []
+    def scheduler(*args, **kwargs):
+        calls.append(args)
+        return _Result(stdout=xml)
+    app.extensions["dashboard_schedule_runner"] = scheduler
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Windows")
+    client = app.test_client()
+    login(client, "viewer")
+    try:
+        assert client.get("/operations/schedule").status_code == 403
+        for _ in range(2):
+            text = client.get("/operations/").text
+            assert "Scheduled by Windows Task Scheduler" in text
+            assert "SYNTHETIC_SCHEDULE_SECRET" not in text
+            assert "/opt/private" not in text and "synthetic-private-account" not in text
+        assert len(calls) == 1
+    finally:
+        app.extensions["dashboard_jobs"].shutdown()
+
+
 def test_real_channel_test_is_lock_free_and_does_not_change_watch_storage(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     with sqlite3.connect(config.watch.database) as db:
@@ -314,4 +318,3 @@ def test_validation_exit_is_never_retried(tmp_path, monkeypatch):
         assert len(launches) == 1
     finally:
         manager.shutdown()
-

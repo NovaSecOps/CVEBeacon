@@ -103,17 +103,25 @@ variants) lock the watch storage beside `[watch] database`. Channel tests do
 not take the lock because they do not change delivery state.
 
 Each locked storage location uses a persistent `cvebeacon-run.lock` file in its
-directory. The lock file carries no state, so a shared storage directory and a
+directory. The lock file carries an opaque holder reference, not monitoring state, so a shared storage directory and a
 lock file created by another service account remain usable. A new POSIX lock
 file is created under the process umask rather than a forced mode, so in a
-cross-account setup both accounts need write access to the lock file. `run`
+cross-account setup both accounts need write access to the lock file. Each
+acquisition publishes an owner-only `cvebeacon-run.lock.owner.<token>.json`
+beside it when directory permissions allow. This private record is bound to
+the acquisition and removed before release. Successors never replace another
+account's orphan record, including in sticky shared directories. If permissions
+prevent private publication, the run continues with identity unavailable; the
+shared lock still excludes concurrent writers. Other accounts may see an active
+run without its private account, host or command details. `run`
 takes both required locks in sorted canonical path order, takes a
 shared-directory lock only once, and releases any partial acquisition if a
 later lock is busy. Inventory-only or watch-only runs take only the applicable
 lock. Configurations sharing either storage location therefore coordinate even
 when their other location differs. The dashboard's background jobs take the
-same locks. A second run fails immediately with `another run is in progress`
-and exit code `2`; it does not wait and never changes state concurrently. The
+same locks. A second interactive CLI or scheduled run fails immediately with
+`another run is in progress` and exit code `2`; it does not wait. Dashboard
+manual jobs queue instead (see below). No run changes state concurrently. The
 operating system releases the lock when a process exits, including after a
 crash.
 
