@@ -80,8 +80,11 @@ def main():
                 names = ["2026-11-18_all_CVEs_at_midnight.zip.zip" if phase[0] < 2 else "2026-11-19_all_CVEs_at_midnight.zip.zip",
                          ["2026-11-18_delta_CVEs_at_2300Z.zip", "2026-11-19_delta_CVEs_at_0000Z.zip", "2026-11-19_delta_CVEs_at_0100Z.zip"][phase[0]]]
                 assets = [{"name": name, "size": len(bodies[name]), "digest": 'sha256:' + hashlib.sha256(bodies[name]).hexdigest(), "browser_download_url": base + '/assets/' + name} for name in names]
-                body = json.dumps({'assets': assets}).encode()
-            elif parsed.path == '/tags/cve_2026-11-18_at_end_of_day':
+                end_name = '2026-11-18_delta_CVEs_at_end_of_day.zip'
+                end_asset = {"name": end_name, "size": len(bodies[end_name]), "digest": 'sha256:' + hashlib.sha256(bodies[end_name]).hexdigest(), "browser_download_url": base + '/assets/' + end_name}
+                body = json.dumps([{'tag_name': 'cve_2026-11-18_at_end_of_day', 'assets': [end_asset]},
+                                   {'tag_name': 'cve_2026-11-18_2300Z' if phase[0] == 0 else 'cve_2026-11-19_' + ('0000Z' if phase[0] == 1 else '0100Z'), 'assets': assets}]).encode()
+            elif parsed.path == '/release/tags/cve_2026-11-18_at_end_of_day':
                 name = '2026-11-18_delta_CVEs_at_end_of_day.zip'
                 assets = [{"name": name, "size": len(bodies[name]), "digest": 'sha256:' + hashlib.sha256(bodies[name]).hexdigest(), "browser_download_url": base + '/assets/' + name}]
                 body = json.dumps({'assets': assets}).encode()
@@ -157,6 +160,7 @@ channels = ["sink"]
                 assert store.view('CVE-2026-10004', catalogs=config.watch.sources).description == fourth['containers']['cna']['descriptions'][0]['value']
                 assert store.view('CVE-2026-10003', catalogs=config.watch.sources).description == next_day['containers']['cna']['descriptions'][0]['value']
                 assert sum('_all_CVEs_' in path for path in seen) == 1
+                assert not any(path.endswith('/latest') for path in seen)
                 before_refresh = store.metadata()['cve_list_cursor']
                 app = dashboard.create_app(config)
                 client = app.test_client()
