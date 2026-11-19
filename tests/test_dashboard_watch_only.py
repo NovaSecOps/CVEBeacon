@@ -150,36 +150,135 @@ def test_overview_explains_watch_alerting_without_inventory(watch_only_client):
     assert "<code>[inventory]</code> is optional for watch mode" in text
 
 
-def test_header_groups_main_and_account_navigation(watch_only_client):
+def test_shell_groups_main_and_account_navigation(watch_only_client):
     _, _, client = watch_only_client
     text = client.get("/watch").text
     header, remainder = text.split("</header>", 1)
-    assert 'class="main-nav"' in header
-    assert 'class="header-actions"' in header
-    assert ">Overview<" in header
-    assert ">Watch<" in header
-    assert "My account and sessions" in header
-    assert ">Configuration<" in header
-    assert ">Updates<" in header
+    sidebar = remainder.split("</nav>", 1)[0]
+    assert 'class="topbar"' in header
+    assert 'class="skip-link" href="#content"' in text
+    assert 'role="search"' in header and 'placeholder="Search CVE' in header
+    # No CVE explorer endpoint exists here, so search falls back to the alert filter.
+    assert 'action="/watch/events"' in header and 'name="cve"' in header
+    assert "My account" in header
     assert ">Log out<" in header
     assert 'name="csrf"' in header
-    assert header.index('class="main-nav"') < header.index('class="header-actions"')
-    assert "<nav" not in remainder
+    assert 'class="theme-toggle"' in header
+    assert '<nav class="sidebar" id="sidebar" aria-label="Main navigation">' in sidebar
+    for heading in ("Monitoring", "Clients", "Scans", "Activity", "Settings"):
+        assert f">{heading}<" in sidebar
+    for label in (
+        "Home", "Alerts", "Watch overview", "Reported to clients", "Clients",
+        "Web assets", "Findings", "Assets", "History", "Reports", "Manual query",
+        "Operations", "Schedule", "Sources", "Updates", "Users", "Roles", "Audit",
+        "Configuration", "My account",
+    ):
+        assert f"<span>{label}</span>" in sidebar, label
+    # Features that are not registered here must not produce dead links.
+    assert "CVE explorer" not in sidebar and "Backups" not in sidebar
+    assert 'aria-current="page"' in sidebar
+    assert '<main id="content"' in remainder
+    # The shell is the only navigation; page bodies add none.
+    main = remainder.split('<main id="content"', 1)[1]
+    assert "<nav" not in main
+    assert text.count("<nav") == 1
 
 
-def test_header_navigation_contrast_and_narrow_layout(watch_only_client):
+def test_navigation_respects_permissions(watch_only_client):
+    config, _, _ = watch_only_client
+    users = UserStore(config.watch.users_database)
+    users.add("viewer", password=PASSWORD, role="viewer")
+    client = dashboard.create_app(config).test_client()
+    response = client.post(
+        "/login",
+        data={"csrf": csrf(client), "username": "viewer", "password": PASSWORD},
+    )
+    assert response.status_code == 303
+    sidebar = client.get("/watch").text.split('id="sidebar"', 1)[1].split("</nav>", 1)[0]
+    assert "<span>Alerts</span>" in sidebar
+    for label in ("Roles", "Users", "Audit", "Schedule"):
+        assert f"<span>{label}</span>" not in sidebar, label
+
+
+def test_shell_helper_reports_registered_endpoints(watch_only_client):
+    _, app, _ = watch_only_client
+    helper = app.jinja_env.globals["has_endpoint"]
+    assert helper("watch.events") is True
+    assert helper("watch.explorer") is False
+
+
+def test_navigation_contrast_and_narrow_layout(watch_only_client):
     _, _, client = watch_only_client
     css = client.get("/static/dashboard.css").text
-    containers = re.search(
-        r"\.main-nav,\.account-nav,\.config-nav,\.update-nav\{([^}]*)\}", css
-    )
-    assert containers is not None
-    declarations = containers.group(1)
-    assert "background:transparent" in declarations
-    assert "border:0" in declarations
-    assert "padding:0" in declarations
-    assert ".update-nav a" in css
-    assert ".main-nav{order:3;width:100%" in css
+    for token in ("--nav-bg", "--nav-text", "--nav-active-bg", "--nav-active-text", "--focus"):
+        assert css.count(f"{token}:") >= 3  # light, system dark, manual dark
+    assert ':root[data-theme="dark"]' in css and ':root[data-theme="light"]' in css
+    assert "prefers-color-scheme: dark" in css
+    assert "@media (max-width: 900px)" in css and ".js .sidebar { display: none; }" in css
+    assert ".table-wrap {\n  overflow-x: auto" in css
+    assert ":focus-visible" in css
+    blocks = {
+        "light": css.split(":root {", 1)[1].split("}", 1)[0],
+        "dark": css.split(':root[data-theme="dark"] {', 1)[1].split("}", 1)[0],
+    }
+    system_dark = css.split(':root:not([data-theme="light"]) {', 1)[1].split("}", 1)[0]
+    assert system_dark.split() == blocks["dark"].split()  # the two dark blocks must not drift
+    for name, block in blocks.items():
+        tokens = dict(re.findall(r"--([a-z0-9-]+):\s*(#[0-9a-f]{6})", block))
+        pairs = [
+            ("nav-text", "nav-bg"), ("nav-active-text", "nav-active-bg"),
+            ("nav-heading", "nav-bg"), ("text", "bg"), ("text", "surface"),
+            ("text-muted", "surface"), ("link", "surface"), ("accent-text", "accent"),
+            ("critical-text", "critical-bg"), ("high-text", "high-bg"),
+            ("medium-text", "medium-bg"), ("low-text", "low-bg"),
+            ("kev-text", "kev-bg"), ("exploited-text", "exploited-bg"),
+            ("info-text", "info-bg"), ("success-text", "success-bg"),
+            ("warning-text", "warning-bg"), ("danger-text", "danger-bg"),
+        ]
+        for foreground, background in pairs:
+            ratio = _contrast(tokens[foreground], tokens[background])
+            assert ratio >= 4.5, (name, foreground, background, ratio)
+
+
+def _contrast(first: str, second: str) -> float:
+    def luminance(colour: str) -> float:
+        channels = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    light, dark = sorted((luminance(first), luminance(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def test_stylesheet_has_no_external_urls():
+    from pathlib import Path
+
+    static = Path(dashboard.__file__).parent / "static"
+    css = (static / "dashboard.css").read_text()
+    assert not re.search(r"(?i)(https?:)?//|@import|url\(", css)
+    assert not re.search(r"(?i)https?://|\bimport\b|\beval\(", (static / "ui.js").read_text())
+
+
+def test_templates_use_no_inline_styles_or_scripts():
+    from pathlib import Path
+
+    templates = Path(dashboard.__file__).parent / "templates"
+    for path in sorted(templates.glob("*.html")):
+        text = path.read_text()
+        assert not re.search(r"(?i)\sstyle\s*=", text), path.name
+        assert not re.search(r"(?i)\son[a-z]+\s*=", text), path.name
+        assert not re.search(r"(?is)<script\b(?![^>]*\bsrc=)[^>]*>", text), path.name
+        assert not re.search(r"(?is)<style\b", text), path.name
+
+
+def test_rendered_pages_load_ui_script_without_inline_code(watch_only_client):
+    _, _, client = watch_only_client
+    for path in ("/", "/watch", "/watch/clients", "/account"):
+        text = client.get(path).text
+        assert 'src="/static/ui.js"' in text, path
+        assert not re.search(r"(?i)\sstyle\s*=", text), path
+        assert not re.search(r"(?is)<script\b(?![^>]*\bsrc=)", text), path
+    assert client.get("/static/ui.js").status_code == 200
 
 
 @pytest.mark.parametrize("operation", ["scan", "run"])
