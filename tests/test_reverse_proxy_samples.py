@@ -22,6 +22,19 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _block(text: str, marker: str) -> str:
+    start = text.index(marker)
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    raise AssertionError(f"unclosed block: {marker!r}")
+
+
 def test_samples_exist():
     for path in SAMPLES:
         assert path.is_file(), path
@@ -90,6 +103,12 @@ def test_samples_terminate_tls_and_redirect_http():
     assert "return 301 https://cvebeacon.example.com$request_uri;" in nginx
     assert "tls internal" in caddy
     assert "redir https://cvebeacon.example.com{uri} permanent" in caddy
+
+
+def test_nginx_http_redirect_hides_the_server_version():
+    http_server = _block(_text(NGINX), "server {")
+    assert "listen 80;" in http_server
+    assert "server_tokens off;" in http_server
 
 
 def test_samples_set_security_headers():
