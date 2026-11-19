@@ -1012,6 +1012,66 @@ def _watch_schema_columns() -> dict[str, frozenset[str]]:
         connection.close()
 
 
+def _watch_table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+
+
+def _watch_migration_problem(
+    db: sqlite3.Connection, tables: set[str], version: int
+) -> str | None:
+    from .watch.store import _alert_columns_current
+
+    if version >= 2 and not _alert_columns_current(db):
+        return (
+            "unreadable (watch database was created by a pre-release build; "
+            "delete it and run `watch sync` again)"
+        )
+    for minimum, table, column in (
+        (2, "watch_euvd_item", "vendors_json"),
+        (3, "watch_event", "details_json"),
+        (4, "watch_delivery", "first_attempt_at"),
+    ):
+        if (
+            version >= minimum
+            and table in tables
+            and column not in _watch_table_columns(db, table)
+        ):
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: missing {table}.{column})"
+            )
+    if "watch_report" not in tables:
+        return None
+    report_columns = _watch_table_columns(db, "watch_report")
+    boundary_row = db.execute(
+        "SELECT value FROM watch_meta WHERE key='report_legacy_max_id' LIMIT 1"
+    ).fetchone()
+    boundary = None if boundary_row is None else boundary_row[0]
+    if "chain" not in report_columns:
+        if version != 5:
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: watch_report has no chain column)"
+            )
+        if boundary is not None:
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: report legacy boundary exists but the chain "
+                "column is missing)"
+            )
+        return None
+    if "chain_version" in report_columns and boundary is None:
+        legacy = db.execute(
+            "SELECT COUNT(*) FROM watch_report WHERE chain_version=0"
+        ).fetchone()[0]
+        if legacy:
+            return (
+                "unreadable (watch database cannot be migrated from schema "
+                f"{version}: report legacy rows have no recorded boundary)"
+            )
+    return None
+
+
 def _watch_database_check(config: AppConfig) -> str:
     from .watch.store import SCHEMA_VERSION
 
@@ -1033,7 +1093,7 @@ def _watch_database_check(config: AppConfig) -> str:
                 )
             }
             schema = db.execute(
-                "SELECT value FROM watch_meta WHERE key='schema_version'"
+                "SELECT value FROM watch_meta WHERE key='schema_version' LIMIT 2"
             ).fetchall()
             if not schema:
                 return "unreadable (watch database has no schema version)"
@@ -1043,27 +1103,46 @@ def _watch_database_check(config: AppConfig) -> str:
                     "version row)"
                 )
             version = str(schema[0][0])
-            if version != expected_version:
+            try:
+                number = int(version)
+            except ValueError:
                 return (
                     f"unreadable (unsupported watch schema version {version}; "
-                    f"expected {expected_version})"
+                    f"expected {expected_version} or an older supported schema)"
                 )
-            missing = [name for name in _watch_schema_tables() if name not in tables]
-            if missing:
-                return "unreadable (watch database is missing required tables)"
-            for table, required in _watch_schema_columns().items():
-                actual = {
-                    row["name"]
-                    for row in db.execute(f"PRAGMA table_info({table})")
-                }
-                if not required <= actual:
-                    return (
-                        "unreadable (watch database is missing required columns "
-                        f"in {table})"
-                    )
-            rows = db.execute("SELECT COUNT(*) FROM watch_cve").fetchone()[0]
+            if str(number) != version or not 1 <= number <= SCHEMA_VERSION:
+                return (
+                    f"unreadable (unsupported watch schema version {version}; "
+                    f"expected {expected_version} or an older supported schema)"
+                )
+            if number == SCHEMA_VERSION:
+                missing = [
+                    name for name in _watch_schema_tables() if name not in tables
+                ]
+                if missing:
+                    return "unreadable (watch database is missing required tables)"
+                for table, required in _watch_schema_columns().items():
+                    if not required <= _watch_table_columns(db, table):
+                        return (
+                            "unreadable (watch database is missing required "
+                            f"columns in {table})"
+                        )
+            else:
+                problem = _watch_migration_problem(db, tables, number)
+                if problem is not None:
+                    return problem
+            rows = (
+                db.execute("SELECT COUNT(*) FROM watch_cve").fetchone()[0]
+                if "watch_cve" in tables
+                else 0
+            )
     except (sqlite3.Error, OSError):
         return "unreadable (cannot read the watch database)"
+    if number != SCHEMA_VERSION:
+        return (
+            f"ok ({rows} CVEs, schema {version}; will migrate to "
+            f"{SCHEMA_VERSION} on the next write)"
+        )
     return f"ok ({rows} CVEs, schema {version})"
 
 

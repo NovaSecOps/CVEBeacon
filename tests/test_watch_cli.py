@@ -516,23 +516,8 @@ def test_watch_only_doctor_checks_an_existing_watch_database(
     assert checks["watch_database"] == "ok (0 CVEs, schema 7)"
 
 
+@pytest.mark.parametrize("version", ["8", "999", "not-a-version"])
 def test_watch_only_doctor_rejects_an_unsupported_watch_schema(
-    tmp_path, monkeypatch, capsys
-):
-    config = write_config(tmp_path, inventory=False)
-    WatchStore(config.watch.database).initialize()
-    with sqlite3.connect(config.watch.database) as db:
-        db.execute("UPDATE watch_meta SET value='999' WHERE key='schema_version'")
-    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
-    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
-    checks = json.loads(capsys.readouterr().out)
-    assert checks["watch_database"] == (
-        "unreadable (unsupported watch schema version 999; expected 7)"
-    )
-
-
-@pytest.mark.parametrize("version", ["1", "6"])
-def test_watch_only_doctor_rejects_an_older_supported_watch_schema(
     tmp_path, monkeypatch, capsys, version
 ):
     config = write_config(tmp_path, inventory=False)
@@ -545,12 +530,32 @@ def test_watch_only_doctor_rejects_an_older_supported_watch_schema(
     assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
     checks = json.loads(capsys.readouterr().out)
     assert checks["watch_database"] == (
-        f"unreadable (unsupported watch schema version {version}; expected 7)"
+        f"unreadable (unsupported watch schema version {version}; expected 7 or "
+        "an older supported schema)"
     )
 
 
+@pytest.mark.parametrize("version", ["1", "6"])
+def test_watch_only_doctor_accepts_an_older_supported_watch_schema(
+    tmp_path, monkeypatch, capsys, version
+):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute(
+            "UPDATE watch_meta SET value=? WHERE key='schema_version'", (version,)
+        )
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == (
+        f"ok (0 CVEs, schema {version}; will migrate to 7 on the next write)"
+    )
+
+
+@pytest.mark.parametrize("row_count", [2, 50])
 def test_watch_only_doctor_rejects_ambiguous_watch_schema_metadata(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, row_count
 ):
     config = write_config(tmp_path, inventory=False)
     WatchStore(config.watch.database).initialize()
@@ -559,13 +564,47 @@ def test_watch_only_doctor_rejects_ambiguous_watch_schema_metadata(
         db.execute("CREATE TABLE watch_meta (key TEXT, value TEXT NOT NULL)")
         db.executemany(
             "INSERT INTO watch_meta VALUES (?, ?)",
-            [("schema_version", "7"), ("schema_version", "7")],
+            [("schema_version", "7")] * row_count,
         )
     monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
     assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
     checks = json.loads(capsys.readouterr().out)
     assert checks["watch_database"] == (
         "unreadable (ambiguous watch schema metadata; expected one version row)"
+    )
+
+
+def test_watch_only_doctor_rejects_an_incompatible_older_watch_schema(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("ALTER TABLE watch_report DROP COLUMN chain")
+        db.execute("UPDATE watch_meta SET value='6' WHERE key='schema_version'")
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == (
+        "unreadable (watch database cannot be migrated from schema 6: "
+        "watch_report has no chain column)"
+    )
+
+
+def test_watch_only_doctor_reports_a_pre_release_watch_schema(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("ALTER TABLE watch_alert_state DROP COLUMN providers_hash")
+        db.execute("UPDATE watch_meta SET value='2' WHERE key='schema_version'")
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == (
+        "unreadable (watch database was created by a pre-release build; delete "
+        "it and run `watch sync` again)"
     )
 
 
