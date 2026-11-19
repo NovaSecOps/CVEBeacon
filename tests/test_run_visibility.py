@@ -232,6 +232,36 @@ def test_dead_local_holder_is_stale_on_operations(tmp_path, monkeypatch):
         app.extensions["dashboard_jobs"].shutdown()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows PID liveness is unknown")
+def test_unconfirmed_local_holder_is_not_reported_as_stopped(tmp_path):
+    config = make_config(tmp_path)
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    app.extensions["dashboard_schedule_runner"] = fake_scheduler({})[0]
+    client = app.test_client()
+    login(client, "viewer")
+    lock = RunLock(run_lock_path(config), command="watch run")
+    try:
+        assert lock.acquire()
+        reference = lock.path.read_bytes()
+        record = lock.owner_path.read_bytes()
+        lock.release()
+        # Restore the artifacts while the recorded process is still alive, so
+        # the snapshot can confirm neither death nor a live lock holder.
+        lock.path.write_bytes(reference)
+        lock.owner_path.write_bytes(record)
+        lock.owner_path.chmod(0o600)
+        assert lock.snapshot()["state"] == "unknown"
+        page = client.get("/operations/").text
+        assert "Status unclear" in page
+        assert "Run record · unknown" not in page
+        assert "No command from this record is running now" not in page
+        assert "Do not assume the storage is free" in page
+        assert "callout-warning" in page
+    finally:
+        app.extensions["dashboard_jobs"].shutdown()
+
+
 def test_operations_shows_installed_cron_to_viewer(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     new_accounts(config)

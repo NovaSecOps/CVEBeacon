@@ -29,7 +29,7 @@ WORKING_PAGES = (
     ("/watch/clients", "Client allocation requires an inventory scan"),
     ("/operations/", "Run a job"),
     ("/operations/jobs", "Job history"),
-    ("/operations/schedule", "Native schedule"),
+    ("/operations/schedule", "Schedule"),
     ("/users", "Users"),
     ("/users/admin", "admin"),
     ("/roles", "Roles and permissions"),
