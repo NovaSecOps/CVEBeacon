@@ -206,10 +206,13 @@ Perform the upgrade in this order.
    not start another dashboard job:
 
    ```console
-   pgrep -af '[c]vebeacon' | grep -v ' serve ' || true
+   sudo pgrep -u cvebeacon -af '[c]vebeacon' | grep -F '/opt/cvebeacon' | grep -vE '(^| )serve( |$)' || true
    ```
 
-   The command must print nothing before you continue.
+   The command must print nothing before you continue. Change `/opt/cvebeacon`
+   if the checkout is elsewhere. If you stopped a timer, also confirm
+   `systemctl is-active cvebeacon.service` reports `inactive`: a start already
+   queued by the timer can otherwise begin after this check.
 
 3. Stop the dashboard service:
 
@@ -249,13 +252,14 @@ Perform the upgrade in this order.
    sudo systemctl start cvebeacon-dashboard.service
    ```
 
-7. Restore the scheduler you removed, then rerun the checks in
-   [Check the result](#check-the-result):
+7. Restore the scheduler you removed:
 
    ```console
    cb schedule install --times 07:00,19:00 --command watch --yes
    # or: sudo systemctl start cvebeacon.timer
    ```
+
+   Then rerun the checks in [Check the result](#check-the-result).
 
 ### Windows data-directory ACLs
 

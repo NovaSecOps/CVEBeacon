@@ -85,11 +85,13 @@ inventory (`scan`, `export`, `asset`, `inventory ...`) fail with a clear message
 until `[inventory] path` is added. `doctor` still runs: it checks the
 configuration, the watch and state data directories, the watch database,
 channels, sources and the native schedule, reports the inventory checks as
-skipped, and exits nonzero only when one of those checks fails. The dashboard
-still starts in watch-only mode: inventory views show a configuration notice,
-client allocation stays empty, and Operations offers watch operations only. A
-configuration with neither watch mode nor an inventory is rejected, so existing
-configurations keep their behavior.
+skipped, and exits nonzero only when one of those checks fails. A watch schema
+that this release migrates automatically is reported as `ok` with a migration
+note; a schema newer than this release, ambiguous metadata, or an incompatible
+layout fails. The dashboard still starts in watch-only mode: inventory views
+show a configuration notice, client allocation stays empty, and Operations
+offers watch operations only. A configuration with neither watch mode nor an
+inventory is rejected, so existing configurations keep their behavior.
 `schedule install` supports watch-only and combined configurations: it runs
 `watch run` by default when no inventory is configured, and the ordered `run`
 command (scan, then watch run) when both are configured. See
