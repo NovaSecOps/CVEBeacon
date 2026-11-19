@@ -730,12 +730,25 @@ The manual query page has Product, Package (ecosystem/name/version), and Explici
 ## CVE explorer and refresh
 
 Open **CVEs** (`/watch/cves`) to browse stored watch records, including CVE
-List-only entries. Search by CVE ID, description keyword or alias, then filter
-by source, KEV, severity, publication dates, events, reported status or affected
-client. Results are paginated in groups of 50 and sort by publication,
-modification, CVSS, EPSS or KEV. Searches are limited to 256 characters. New provider descriptions use FTS5 word prefixes when available, with literal
-LIKE fallback. Existing NVD descriptions use LIKE in place, without a copying
-migration.
+List-only entries. Search by CVE ID, description keyword or alias. Results show
+the total and are paginated in groups of 50. Filters are in the URL, including
+when moving between pages. Use **Clear filters** to reset them.
+
+- KEV offers CISA, EU, either or neither. Exploitation offers active,
+  proof of concept (`poc`), explicitly none, or unknown. The result shows the
+  supporting source beside the status. KEV has its own filter.
+- EPSS and CVSS minimum and maximum are inclusive. When you choose CVSS
+  versions or providers, one scoring must satisfy both selections and the
+  numeric range. Expand the highest score to inspect all versioned entries.
+  The highest score band uses the explorer's numeric bands across scores.
+- Filter by publication or modification date, source presence, events,
+  reported status and affected client. Enter up to ten exact client names,
+  one per line. Clients come from the latest successful scan.
+
+Filters combine with AND across fields and OR between choices in the same field.
+Results sort by publication, modification, CVSS, EPSS or KEV. Searches are
+limited to 256 characters and use FTS5 word prefixes when available, with literal
+LIKE fallback.
 
 An absent ID shows “Not in our database”, source sync times and, for accounts
 with `run`, a **Fetch or refresh this CVE now** action. The same action appears

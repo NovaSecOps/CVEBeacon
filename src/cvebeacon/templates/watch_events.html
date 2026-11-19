@@ -1,4 +1,4 @@
-{% extends 'base.html' %}{% from 'watch_macros.html' import day %}
+{% extends 'base.html' %}{% from 'watch_macros.html' import day, cvss_scores %}
 {% block title %}Watch events · CVEBeacon{% endblock %}
 {% macro page_url(number) -%}
 {{ url_for('watch.events', page=number, rule=filters.rule, kind=filters.kind, initial=filters.initial, since=filters.since, until=filters.until, cve=filters.cve, pending=filters.pending, client=filters.client) }}
@@ -22,16 +22,17 @@
 {% if results_incomplete %}<p role="status">Results incomplete: this client's CVE list exceeds the filter limit. Filter by an exact CVE to check its membership directly.</p>{% endif %}
 <p><a href="{{ url_for('watch.events') }}">Clear filters</a> · Page {{ page }}{% if has_previous %} · <a href="{{ page_url(page - 1) }}">Newer events</a>{% endif %}{% if has_next %} · <a href="{{ page_url(page + 1) }}">Older events</a>{% endif %}</p>
 <div class="table-wrap"><table>
-<thead><tr><th>Time</th><th>Rule</th><th>CVE</th><th>Kind</th><th>Initial</th><th>Published</th><th>First seen</th><th>Reported</th></tr></thead>
+<thead><tr><th>Time</th><th>Rule</th><th>CVE</th><th>CVSS scores</th><th>Kind</th><th>Initial</th><th>Published</th><th>First seen</th><th>Reported</th></tr></thead>
 <tbody>{% for row in rows %}<tr>
   <td>{{ row.created_at }}</td>
   <td>{{ row.rule }}</td>
   <td><a href="{{ url_for('watch.cve', cve_id=row.cve_id) }}">{{ row.cve_id }}</a></td>
+  <td>{{ cvss_scores(row.cvss_scores) }}</td>
   <td>{{ row.kind }}</td>
   <td>{{ 'yes' if row.initial else 'no' }}</td>
   <td>{{ day(row.published) }}</td>
   <td>{{ day(row.first_seen) }}</td>
   <td>{% set item = marks.get(row.cve_id) %}{% if item %}<span class="badge">reported by {{ watch_identity(item.by, item.username) }}</span>{% else %}<span class="muted">not reported</span>{% endif %}</td>
-</tr>{% else %}<tr><td colspan="8">No matching events. This does not mean no CVE applies; it means no stored event matched these filters.</td></tr>{% endfor %}</tbody>
+</tr>{% else %}<tr><td colspan="9">No matching events. This does not mean no CVE applies; it means no stored event matched these filters.</td></tr>{% endfor %}</tbody>
 </table></div>
 {% endblock %}

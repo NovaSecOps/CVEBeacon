@@ -43,7 +43,9 @@ from .clients import (
 from .dashboard import _text, requires
 from .errors import CVEBeaconError, ConfigurationError, StateError
 from .locking import RunInProgress, RunLock, run_lock_path
+from .watch.explorer import EXPLOITATION_FILTERS, KEV_FILTERS, SEVERITY_BANDS, SOURCES
 from .watch.messages import CVE_URL, EUVD_URL, NVD_URL
+from .watch.records import CVSS_PROVIDERS, CVSS_VERSIONS
 from .watch.reported import format_timestamp, identity_label, normalize_cve_id
 from .watch.reporting import ReportService
 from .watch.rules import EVENT_KINDS, evaluate_condition
@@ -63,6 +65,16 @@ REPORT_PAGE_SIZE = 100
 TRAIL_PAGE_SIZE = 50
 EXPORT_BATCH = 1000
 MAX_PAGE = 100_000
+EXPLORER_CHOICES = {
+    "source": SOURCES,
+    "kev": KEV_FILTERS,
+    "exploitation": EXPLOITATION_FILTERS,
+    "severity": tuple(SEVERITY_BANDS),
+    "cvss_version": tuple(reversed(CVSS_VERSIONS)),
+    "cvss_provider": CVSS_PROVIDERS,
+}
+EXPLORER_BOUNDS = ("epss_min", "epss_max", "cvss_min", "cvss_max")
+EXPLORER_DATES = ("since", "until", "modified_since", "modified_until")
 MARKS = {
     "reported": "The report was recorded.",
     "unreported": "The report was withdrawn.",
@@ -382,6 +394,7 @@ def events():
             since=since,
             until=until,
             offset=(page - 1) * EVENT_PAGE_SIZE,
+            catalogs=config.watch.sources,
         )
     )
     has_next = len(rows) > EVENT_PAGE_SIZE
@@ -428,12 +441,36 @@ def clients():
 @bp.get("/cves")
 @requires("view")
 def explorer():
+    if len(request.query_string) > 8192:
+        abort(400, description="Explorer filters are too long")
     config, store = _state()
-    filters = {name: _text(request.args, name) for name in
-               ("q", "source", "kev", "severity", "has_events", "reported", "client", "sort")}
-    for name in ("kev", "has_events", "reported"):
-        if filters[name] not in ("", "yes", "no"):
-            abort(400)
+    filters = {name: _text(request.args, name) for name in ("q", "has_events", "reported", "sort")}
+    for field, choices in EXPLORER_CHOICES.items():
+        selected_values = request.args.getlist(field)
+        if len(selected_values) > len(choices) + (2 if field == "kev" else 0):
+            abort(400, description=f"Too many {field} selections")
+        if field == "kev":
+            aliases = {"yes": "either", "no": "neither"}
+            selected_values = [aliases.get(value, value) for value in selected_values]
+        filters[field] = tuple(dict.fromkeys(value for value in selected_values if value))
+    bounds = {}
+    for field in EXPLORER_BOUNDS:
+        text = _text(request.args, field, limit=32)
+        filters[field] = text
+        try:
+            bounds[field] = float(text) if text else None
+        except ValueError:
+            abort(400, description=f"Invalid {field} bound")
+    dates = {field: _date_filter(field) for field in EXPLORER_DATES}
+    filters.update({field: value.isoformat() if value else "" for field, value in dates.items()})
+
+    client_lines = request.args.getlist("client_names")
+    if len(client_lines) > 1:
+        abort(400)
+    names = [*request.args.getlist("client"), *(client_lines[0].split("\n") if client_lines else ())]
+    if len(names) > 10 or any(len(name.strip()) > 256 or any(ord(ch) < 32 for ch in name.strip()) for name in names):
+        abort(400, description="Enter up to 10 client names of at most 256 characters each")
+    filters["client"] = tuple(dict.fromkeys(name.strip() for name in names if name.strip()))
     selected = None
     if filters["client"]:
         selected, overflow = client_cve_filter(config.database_path, filters["client"])
@@ -441,20 +478,19 @@ def explorer():
             abort(400, description="Client filter exceeds the local result limit")
     page = _page_number()
     try:
-        result = store.search(query=filters["q"], source=filters["source"], kev=filters["kev"],
-                              severity=filters["severity"], has_events=filters["has_events"],
+        result = store.search(query=filters["q"], **{field: filters[field] for field in EXPLORER_CHOICES},
+                              has_events=filters["has_events"],
                               reported=filters["reported"], sort=filters["sort"] or "modified",
-                              since=_date_filter("since"), until=_date_filter("until"),
                               client_ids=selected, limit=50, offset=(page - 1) * 50,
-                              catalogs=config.watch.sources)
+                              catalogs=config.watch.sources, **bounds, **dates)
     except StateError as exc:
         abort(400, description=str(exc))
     from .sources.common import cve_id
     identifier = cve_id(filters["q"])
     missing = identifier if identifier and store.view(identifier, catalogs=config.watch.sources) is None else None
-    links = dict(request.args)
-    links.pop("page", None)
+    links = {key: value for key, value in filters.items() if value}
     return render_template("watch_explorer.html", result=result, filters=filters, page=page,
+                           choices=EXPLORER_CHOICES,
                            next_url=url_for("watch.explorer", **links, page=page + 1) if page * 50 < result.total else None,
                            previous_url=url_for("watch.explorer", **links, page=page - 1) if page > 1 else None,
                            missing=missing, presence=store.source_presence(identifier) if missing else ())

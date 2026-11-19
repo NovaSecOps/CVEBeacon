@@ -1,4 +1,4 @@
-{% extends 'base.html' %}{% from 'watch_macros.html' import value, day, stamp, report_mark, deliveries %}
+{% extends 'base.html' %}{% from 'watch_macros.html' import value, day, stamp, report_mark, deliveries, exploitation %}
 {% block title %}{{ cve_id }} · Watch · CVEBeacon{% endblock %}
 {% block content %}
 <h1>{{ cve_id }}</h1>
@@ -21,7 +21,7 @@
   <dt>First seen</dt><dd>{{ day(view.first_seen) }}{% if view.first_seen %} <span class="muted">({{ view.first_seen }})</span>{% endif %}</dd>
   <dt>Last modified</dt><dd>{{ value(view.last_modified) }}</dd>
   <dt>Source identifier</dt><dd>{{ value(view.source_identifier) }}</dd>
-  <dt>SSVC exploitation</dt><dd>{{ value(view.ssvc_exploitation) }}</dd>
+  <dt>Exploitation</dt><dd>{{ exploitation(view) }}</dd>
   <dt>EPSS</dt><dd>{{ value(view.epss) }}{% if view.epss is not none %} · percentile {{ value(view.epss_percentile) }} · score date {{ value(view.epss_date) }}{% endif %}</dd>
   <dt>CWEs</dt><dd>{{ view.cwes | join(', ') if view.cwes else 'Not available' }}</dd>
   <dt>Vendors</dt><dd>{{ view.vendors | join(', ') if view.vendors else 'Not available' }}</dd>
@@ -45,10 +45,11 @@
 <h2>Provider records</h2>
 {% for item in provider_records %}<details><summary>{{ item.source }} record</summary><pre class="break">{{ item.display }}</pre>{% if item.truncated %}<p class="muted">Payload preview truncated at 64 KiB. The complete record remains stored.</p>{% endif %}</details>{% endfor %}
 
-<h2>CVSS by provider</h2>
+<h2>CVSS scores</h2>
+{% if view.cvss_severity_differs %}<p>Severity differs between CVSS versions</p>{% endif %}
 <div class="table-wrap"><table>
 <thead><tr><th>Provider</th><th>Source</th><th>Version</th><th>Score</th><th>Severity</th><th>Vector</th></tr></thead>
-<tbody>{% for entry in view.cvss %}<tr><td>{{ entry.provider }}</td><td>{{ entry.source }}</td><td>{{ entry.version }}</td><td>{{ entry.score }}</td><td>{{ value(entry.severity) }}</td><td class="break">{{ value(entry.vector, 'Not available') }}</td></tr>{% else %}<tr><td colspan="6">No CVSS score is stored.</td></tr>{% endfor %}</tbody>
+<tbody>{% for entry in view.cvss_scores %}<tr><td>{{ entry.provider }}</td><td>{{ entry.source }}</td><td>v{{ entry.version }}</td><td>{{ entry.score }}</td><td>{{ entry.severity_band }}</td><td class="break">{{ value(entry.vector, 'Not available') }}</td></tr>{% else %}<tr><td colspan="6">No CVSS score is stored.</td></tr>{% endfor %}</tbody>
 </table></div>
 
 <h2>Known exploitation</h2>

@@ -707,18 +707,26 @@ compatibility default. The HTML part is generated from the same message model
 as the plain-text part, not from a second content path, and both carry the
 same facts. An alert shows a header line per CVE with
 its label and CVSS, the EPSS, KEV, and exploitation fields, the publication and
-first-seen line, the affected-clients line when clients match, the reported
-line when present, the description, the matching rules, and the links. A digest shows a heading, a section per rule with its
+first-seen line, the CVSS scores, the affected-clients line when clients match,
+the reported line when present, the description, the matching rules, and the links. A digest shows a heading, a section per rule with its
 counts, and a compact table with the CVE, severity, EPSS, KEV, exploitation,
 published, and first-seen columns. A screenshot of an HTML alert would show one
 light card with a bold header such as
-`[NEW] CVE-2026-1234 · CVSS 9.8 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active`,
-followed by the date line, the description, the rule and link line, and a grey
+`[NEW] CVE-2026-1234 · CVSS 9.8 v3.1 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active (CISA Vulnrichment (CVE List SSVC))`,
+followed by the date line, the CVSS scores, the description, the rule and link line, and a grey
 reported line when the CVE is marked. A digest screenshot would show the
 summary heading, one short section per rule, and the table below it. The layout
 is a simple table with inline styles only: there are no images, web fonts,
 scripts, tracking pixels, or remote stylesheets, and it stays readable in dark
 mode and in Outlook.
+
+Every alert channel includes a **CVSS scores** block with each available base
+score, version, severity, provider, and vector when supplied. Entries run from
+v4.0 through v2.0. Within each version they are ordered NVD, CNA, CISA ADP,
+EUVD, then other providers. Severity uses the provider's rating when available
+or the version's scale when it is missing. If severity differs across
+versions, the block includes a note. Exploitation lists the source beside the
+status. Missing evidence is shown as unknown.
 
 Every dynamic value is HTML-escaped, and links use only the fixed NVD, CVE.org,
 EUVD, and CISA KEV URL builders with percent-quoted identifiers. A CVE
@@ -770,6 +778,11 @@ The generic webhook receives a stable JSON document:
         "cvss": [
           {"provider": "cna", "source": "security@acme.example", "version": "3.1", "score": 9.8, "vector": null}
         ],
+        "cvss_scores": [
+          {"provider": "cna", "source": "security@acme.example", "version": "3.1", "score": 9.8, "vector": null, "severity": "critical"}
+        ],
+        "cvss_note": null,
+        "exploitation": {"status": "active", "sources": ["CISA Vulnrichment (CVE List SSVC)"]},
         "kev": {
           "cisa": {"added": "2026-11-03", "due": "2026-11-20", "required_action": "Apply the update."},
           "eu": null
@@ -802,6 +815,14 @@ and has an empty `events` list. A report or unreport notice event has `kind`
 `reported` or `unreported`, `rule` `@reported` (an `@`-prefixed name is reserved
 and cannot be a configured rule), and a `notice` object with `action` (`report`
 or `unreport`), `by`, and `note`, plus `username` and `email` when present.
+
+`view.cvss` keeps its original fields and source precedence. The additive
+`view.cvss_scores` array contains every available scoring in display order,
+with a lowercase `severity` on each entry and `vector: null` when the vector
+is missing. It is empty for unscored CVEs. `view.cvss_note` is either
+`"Severity differs between CVSS versions"` or `null`. `view.exploitation`
+contains a `status` of `active`, `poc`, `none`, or `unknown` and an
+array of supporting `sources`.
 
 An event carries `affected_clients` when the latest successful inventory scan
 records an affected or needs-review finding on a client's asset. Each item has
@@ -870,6 +891,7 @@ are ANDed:
 condition = { all = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
 condition = { any = [ { cvss_min = 9.0 }, { epss_min = 0.5 } ] }
 condition = { cvss_min = 9.0 }
+condition = { cvss_min = { score = 9.0, versions = ["4.0", "3.1"] } }
 condition = { epss_min = 0.5 }
 condition = { kev = "any" }
 condition = { all = [ { kev = "any" }, { any = [ { cvss_min = 8 }, { epss_min = 0.5 } ] } ] }
@@ -888,13 +910,19 @@ Leaf keys:
   this value. A missing score is false.
 - `cvss_max` (0 to 10): that highest score is at most this value. A missing
   score is false, so it never selects an unscored CVE.
+- Both CVSS leaves also accept a table with `score`, a nonempty `versions`
+  array selected from `"2.0"`, `"3.0"`, `"3.1"`, and `"4.0"`, and an optional
+  `providers` array. The leaf matches when any entry from a selected version
+  and provider meets its threshold. `providers` overrides `cvss_providers`
+  for that leaf. For example, `{ cvss_max = { score = 7.0, versions = ["4.0"], providers = ["cna"] } }`
+  matches a CNA v4.0 score at or below 7.0.
 - `epss_min` (0 to 1): EPSS is at least this value. A missing EPSS is false. A
   rule that uses `epss_min` requires `epss` in `watch.sources`.
 - `kev = "cisa" | "eu" | "any"`: the CVE is in that KEV catalog. A rule that
   uses `kev = "eu"` requires `eu_kev` in `watch.sources`.
-- `exploitation = "poc" | "active"`: `active` is true when SSVC reports
-  active exploitation or, with `euvd` configured, EUVD has an exploitation
-  date. `poc` is true for poc or active evidence from either source.
+- `exploitation = "poc" | "active"`: `active` is true when NVD or CVE List
+  SSVC reports active exploitation or when configured EUVD has an
+  exploitation date. `poc` includes proof-of-concept and active evidence.
 - `vendor`, `product`: case-insensitive exact names. They match against NVD CPE
   tokens (`palo_alto_networks`) and the selected EUVD item's display names
   (`Apache Software Foundation`). A rule must list both forms when the sources
@@ -905,9 +933,9 @@ Leaf keys:
 - `cna`: case-insensitive exact match against `source_identifier`.
 - `status = "published" | "rejected"`.
 
-Per provider, a CVSS 2.0 score is ignored when that provider also has a 3.x or
-4.0 score. When one provider has both 3.x and 4.0 scores, the highest score is
-used. Event reasons include the selected version, for example
+Scalar CVSS leaves retain their scoring behavior. Within each provider they
+prefer 3.x or 4.0 to 2.0 and pick the highest modern score. Event reasons
+include the selected version, for example
 `cvss 9.8 v3.1 (cna)`.
 
 A rejected CVE never produces a `match` event unless `status = "rejected"` is
@@ -1465,7 +1493,7 @@ See [sources](SOURCES.md) for the full source roles and limitations.
 `cve_list` is enabled in new setup files and in the default source selection.
 Existing explicit `sources` lists keep their selection; add `"cve_list"` to opt
 in. Existing files with no source list receive the new default. The watch
-schema migrates transactionally to version 8, retaining CVEs, events, deliveries,
+schema migrates transactionally to version 9, retaining CVEs, events, deliveries,
 reports and EUVD resume progress. The new provider has its own initial mode,
 window and archive cursors; adding it does not reset an initial EUVD import.
 
@@ -1524,12 +1552,17 @@ real `.zip.zip` baseline names and the previous-day baseline in the 00:00
 release are supported. See [feed limits and cost](SOURCES.md#cve-list-watch-feed).
 Only visible reserved IDs can be stored. Rejected/reserved records require an
 explicit status condition for an initial match. NVD status and description
-always retain precedence when NVD has the CVE; CVE List only fills fields NVD
-lacks. Removing it removes that evidence from active views and filters,
-retaining original provenance separately.
+retain precedence when NVD has the CVE. CVE List fills missing descriptive
+fields and contributes additional CVSS entries for display and qualified
+conditions. CISA Vulnrichment SSVC in CVE List contributes exploitation
+evidence when configured. Disabling CVE List removes its evidence from active
+views and filters while preserving its stored provider records.
 
-The dashboard **CVEs** page lists stored watch CVEs with pagination, source,
-KEV, severity, publication date, event, reported and affected-client filters.
+The dashboard **CVEs** page combines source presence, KEV catalog,
+exploitation status, EPSS and CVSS ranges, CVSS version and provider, highest
+score band, publication and modification dates, events, reported status and
+affected clients. Filter state is included in the page URL. See the
+[dashboard guide](DASHBOARD.md#cve-explorer-and-refresh) for filter behavior.
 Search accepts an exact case-insensitive CVE ID or description keywords and
 aliases. All active descriptions share the original FTS5 word-prefix, order-independent
 semantics when FTS5 is available, including Unicode/diacritic tokenization and
