@@ -783,3 +783,47 @@ def test_reason_text_is_ascii():
     )
     assert events
     assert all(reason.isascii() for event in events for reason in event.reasons)
+
+
+def test_scalar_cvss_rule_identity_and_evaluation_are_stable():
+    from cvebeacon.watch.rules import condition_payload, rule_hash
+
+    current = view(cvss=(
+        CVSSEntry("nvd", "nvd", "2.0", 10.0),
+        CVSSEntry("nvd", "nvd", "3.1", 8.0),
+        CVSSEntry("cna", "example", "4.0", 9.8),
+    ))
+    old = rule({"cvss_providers": ["nvd"], "condition": {"cvss_min": 7, "cvss_max": 8}})
+    assert condition_payload(old.condition) == {"leaf": [["cvss_max", 8.0], ["cvss_min", 7.0]]}
+    assert rule_hash(old) == "1ab40d9405585ec3"
+    assert evaluate_condition(current, old.condition, old) == (True, ("cvss 8.0 v3.1 (nvd)",))
+
+
+@pytest.mark.parametrize(("key", "score", "versions", "providers", "expected"), [
+    ("cvss_min", 9, ["4.0", "3.1"], None, (False, ())),
+    ("cvss_min", 9, ["2.0", "3.1"], None, (True, ("cvss 10.0 v2.0 (nvd)",))),
+    ("cvss_min", 9, ["4.0", "3.1"], ["cna"], (True, ("cvss 9.8 v4.0 (cna)",))),
+    ("cvss_max", 8, ["2.0", "3.1"], None, (True, ("cvss 8.0 v3.1 (nvd)",))),
+    ("cvss_max", 8, ["2.0"], None, (False, ())),
+])
+def test_qualified_cvss_checks_each_entry(key, score, versions, providers, expected):
+    current = view(cvss=(
+        CVSSEntry("nvd", "nvd", "2.0", 10.0),
+        CVSSEntry("nvd", "nvd", "3.1", 8.0),
+        CVSSEntry("cna", "example", "4.0", 9.8),
+    ))
+    leaf = {"score": score, "versions": versions}
+    if providers:
+        leaf["providers"] = providers
+    selected = rule({"cvss_providers": ["nvd"], "condition": {key: leaf}})
+    assert evaluate_condition(current, selected.condition, selected) == expected
+
+
+@pytest.mark.parametrize("leaf", [
+    {"score": 9}, {"score": 9, "versions": []}, {"score": 9, "versions": ["5.0"]},
+    {"score": 11, "versions": ["4.0"]}, {"score": 9, "versions": ["4.0"], "providers": []},
+    {"score": 9, "versions": ["4.0"], "provider": ["cna"]},
+])
+def test_invalid_qualified_cvss_is_field_specific(leaf):
+    with pytest.raises(ConfigurationError, match=r"condition\.cvss_min"):
+        parse_condition({"cvss_min": leaf})

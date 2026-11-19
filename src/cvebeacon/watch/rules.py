@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..errors import ConfigurationError
-from .records import CVSS_PROVIDERS, WatchView, canonical_json, euvd_datetime
+from .records import CVSS_PROVIDERS, CVSS_VERSIONS, WatchView, canonical_json, euvd_datetime
 
 EVENT_KINDS = (
     "match",
@@ -26,8 +26,12 @@ SEVERITY_BANDS = ("none", "low", "medium", "high", "critical")
 EPSS_BAND_LABELS = ("none", "<0.1", "<0.5", "<0.9", ">=0.9")
 # The parser and configuration condition helper share this schema.
 CONDITION_SCHEMA = {
-    "cvss_min": {"kind": "number", "minimum": 0.0, "maximum": 10.0, "example": 9.0},
-    "cvss_max": {"kind": "number", "minimum": 0.0, "maximum": 10.0, "example": 10.0},
+    **{
+        key: {"kind": "number", "minimum": 0.0, "maximum": 10.0, "example": score,
+              "qualified_example": {"score": score, "versions": ["4.0", "3.1"]},
+              "qualifiers": {"versions": CVSS_VERSIONS, "providers": CVSS_PROVIDERS}}
+        for key, score in (("cvss_min", 9.0), ("cvss_max", 10.0))
+    },
     "epss_min": {"kind": "number", "minimum": 0.0, "maximum": 1.0, "example": 0.5},
     "kev": {"kind": "enum", "choices": ("cisa", "eu", "any"), "example": "cisa"},
     "exploitation": {"kind": "enum", "choices": ("poc", "active"), "example": "active"},
@@ -48,6 +52,19 @@ MAX_LEAVES = 32
 MAX_LIST_ITEMS = 100
 MAX_STRING = 200
 OLD_CVES_MODES = ("digest", "alert", "ignore")
+
+
+@dataclass(frozen=True, slots=True)
+class CVSSCondition:
+    score: float
+    versions: tuple[str, ...]
+    providers: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        fields = {"score": self.score, "versions": self.versions}
+        if self.providers:
+            fields["providers"] = self.providers
+        return fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +282,20 @@ def _cwe_values(value: Any, path: str) -> tuple[str, ...]:
 def _leaf_value(key: str, value: Any, path: str) -> Any:
     schema = CONDITION_SCHEMA.get(key, {})
     if schema.get("kind") == "number":
+        if isinstance(value, dict) and "qualifiers" in schema:
+            qualifiers = schema["qualifiers"]
+            if value.keys() - {"score", *qualifiers}:
+                _fail(path, "accepts only score, versions and providers")
+            score = _number(value.get("score"), f"{path}.score", schema["minimum"], schema["maximum"])
+            selections = {}
+            for name, choices in qualifiers.items():
+                if name == "providers" and name not in value:
+                    continue
+                field = f"{path}.{name}"
+                selected = {_enum(item, f"{field}[{index}]", choices)
+                            for index, item in enumerate(_strings(value.get(name), field))}
+                selections[name] = tuple(choice for choice in choices if choice in selected)
+            return CVSSCondition(score, **selections)
         return _number(value, path, schema["minimum"], schema["maximum"])
     if schema.get("kind") == "enum":
         return _enum(value, path, schema["choices"])
@@ -627,7 +658,8 @@ def _is_backlog(view: WatchView, backlog_before: date | None) -> bool:
 
 def condition_payload(condition: Condition) -> dict[str, Any]:
     if condition.kind == "leaf":
-        return {"leaf": [[key, value] for key, value in condition.leaves]}
+        return {"leaf": [[key, value.as_dict() if isinstance(value, CVSSCondition) else value]
+                         for key, value in condition.leaves]}
     if condition.kind == "not":
         return {"not": condition_payload(condition.children[0])}
     return {
@@ -681,6 +713,17 @@ def _keyword_match(values: Iterable[str], description: str | None) -> str | None
 
 def _matches_leaf(view: WatchView, key: str, value: Any, rule: Rule) -> tuple[bool, str | None]:
     if key in {"cvss_min", "cvss_max"}:
+        if isinstance(value, CVSSCondition):
+            qualifying = (
+                entry for entry in view.all_cvss
+                if entry.version in value.versions
+                and entry.provider in (value.providers or rule.cvss_providers)
+                and (entry.score >= value.score if key == "cvss_min" else entry.score <= value.score)
+            )
+            entry = max(qualifying, key=lambda item: item.score, default=None)
+            if entry is None:
+                return False, None
+            return True, f"cvss {_format_number(entry.score)} v{entry.version} ({entry.provider})"
         highest = highest_cvss(view, rule.cvss_providers)
         if highest is None:
             return False, None
@@ -968,10 +1011,13 @@ def _format_number(value: float) -> str:
 
 
 def _describe_leaf(key: str, value: Any) -> str:
-    if key == "cvss_min":
-        return f"cvss >= {_format_number(value)}"
-    if key == "cvss_max":
-        return f"cvss <= {_format_number(value)}"
+    if key in {"cvss_min", "cvss_max"}:
+        operator = ">=" if key == "cvss_min" else "<="
+        if isinstance(value, CVSSCondition):
+            versions = ", ".join(f"v{version}" for version in value.versions)
+            providers = f" ({', '.join(value.providers)})" if value.providers else ""
+            return f"cvss [{versions}] {operator} {_format_number(value.score)}{providers}"
+        return f"cvss {operator} {_format_number(value)}"
     if key == "epss_min":
         return f"epss >= {_format_number(value)}"
     if key == "kev":

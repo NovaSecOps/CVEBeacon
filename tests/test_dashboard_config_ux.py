@@ -279,3 +279,29 @@ def test_reference_and_secret_errors_name_field(accounts, section, changes, fiel
     assert field in response.text
     assert "must be" in response.text or "must contain" in response.text
     assert "KEY=private-contents" not in response.text
+
+
+def test_qualified_cvss_condition_helper_validation_and_preview(accounts):
+    config, _, _, client = accounts
+    document = tomllib.loads(config.config_path.read_text())
+    document.setdefault("watch", {})["channels"] = {
+        "email": {"type": "smtp", "host": "smtp.example.com",
+                  "from": "alerts@example.com", "to": ["alerts@example.com"]},
+    }
+    config.config_path.write_text(editor_module.dumps(document))
+    login(client, "admin")
+    expected = 'cvss_min = { "score" = 9.0, "versions" = ["4.0", "3.1"] }'
+    assert expected in html.unescape(client.get("/config/rules").text)
+
+    valid = '{ cvss_min = { score = 9.0, versions = ["4.0", "3.1"], providers = ["cna"] } }'
+    response = preview(client, "rules", g0_name="example", g0_condition=valid, g0_channels='["email"]')
+    assert response.status_code == 200, response.text
+    assert '"providers" = ["cna"]' in html.unescape(response.text)
+    assert confirm(client, response, "rules").status_code == 303
+    assert client.get("/config/rules").status_code == 200
+
+    invalid = valid.replace("9.0", "11.0")
+    response = preview(client, "rules", g0_condition=invalid)
+    assert response.status_code == 400
+    assert "condition.cvss_min.score must be a number from 0 to 10" in html.unescape(response.text)
+    assert form(response.text)["g0_condition"] == invalid
