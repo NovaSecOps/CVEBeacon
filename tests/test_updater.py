@@ -198,6 +198,9 @@ class FakeNative:
     def service_access(self, venv):
         pass
 
+    def directory_access(self, venv, directories):
+        pass
+
     def active(self, unit):
         return True
 

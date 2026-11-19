@@ -1,6 +1,7 @@
 [Unit]
 Description=CVEBeacon dashboard
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

@@ -56,7 +56,7 @@ def ensure_ready(command, *, prefix=None, running_version=None):
         expected = record["old"] if phase == "rollback-health" else record["new"]
         if phase == "complete":
             expected = record["new"] if record.get("result") == "updated" else record["old"]
-        permitted = command in {"doctor", "serve"} and phase in {"health", "rollback-health", "complete"}
+        permitted = phase == "complete" or (command in {"doctor", "serve"} and phase in {"health", "rollback-health"})
         permitted = permitted or (command == "migrate" and phase == "migrating")
         if permitted and (running_version or version("cvebeacon")) == expected:
             return

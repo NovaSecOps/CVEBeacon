@@ -436,7 +436,7 @@ def test_logging_handler_failure_cannot_interrupt_rollback(transaction, monkeypa
     assert value(config.watch.database) == "old"
 
 
-def test_failed_timer_restart_cannot_commit_an_unfinished_update(transaction):
+def test_failed_timer_restart_retains_committed_state_and_retry_entry(transaction):
     updater, native, config = transaction
     original = native.start
     failed = []
@@ -446,9 +446,13 @@ def test_failed_timer_restart_cannot_commit_an_unfinished_update(transaction):
             raise u.UpdateError("synthetic timer restart failure")
         return original(units)
     native.start = start
-    with pytest.raises(u.UpdateError, match="previous release and state restored"):
-        updater.apply("0.1.1")
-    assert updater.current().name == "0.1.0" and value(config.watch.database) == "old"
+    result = updater.apply("0.1.1")
+    assert result["result"] == "updated" and "recover" in result["warning"]
+    assert updater.current().name == "0.1.1" and value(config.watch.database) == "new"
+    pending = updater.policy.prefix / "update-journal.json"
+    assert json.loads(pending.read_text())["phase"] == "complete"
+    assert u.Updater(updater.policy, native, updater.releases).recover()["result"] == "updated"
+    assert not pending.exists() and "restore" not in native.calls
 
 
 def test_unknown_crontab_read_failure_is_not_treated_as_no_schedule(tmp_path, monkeypatch):

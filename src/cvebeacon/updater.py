@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.parser import BytesParser
 import hashlib
+import ipaddress
 from importlib.metadata import version as installed_version
 import json
 import logging
@@ -490,7 +491,8 @@ class Policy:
         if policy.data.is_symlink() or not policy.data.is_dir() or policy.data.stat().st_uid != account.pw_uid:
             raise UpdateError("data must be a real service-owned directory")
         protected(policy.data.parent, directory=True)
-        if policy.data.is_relative_to(policy.prefix) or policy.data.stat().st_mode & 0o022:
+        if (policy.data.is_relative_to(policy.prefix) or policy.data.stat().st_mode & 0o022
+                or policy.data.stat().st_mode & 0o700 != 0o700):
             raise UpdateError("data must be separate from code and writable only by its service account")
         if policy.config.parent != policy.data:
             raise UpdateError("runtime config must be directly inside the data directory")
@@ -563,8 +565,7 @@ class Native:
             self.run(["systemctl", "stop", *dashboards])
 
     def start(self, units):
-        # Starting a timer is safe while the resource locks are held. Do not
-        # synchronously launch oneshot work that needs those same locks.
+        # Timers resume only after commit and after releasing resource locks.
         selected = [u for u in units if u.endswith(".timer") or u == self.policy.dashboard_unit]
         if selected:
             self.run(["systemctl", "start", *selected])
@@ -578,6 +579,10 @@ class Native:
         self.run([venv / "bin/python", "-I", "-c", code, venv / "bin/cvebeacon", self.policy.config], service=True)
         self.run([venv / "bin/cvebeacon", "--help"], service=True)
 
+    def directory_access(self, venv, directories):
+        code = "import os,sys; assert all(os.access(p,os.R_OK|os.X_OK) and not os.access(p,os.W_OK) for p in sys.argv[1:])"
+        self.run([venv / "bin/python", "-I", "-c", code, *directories], service=True)
+
     def managed_cron(self):
         if shutil.which("crontab", path=SAFE_ENV["PATH"]) is not None:
             result = self.run(["crontab", "-l"], service=True, accepted=(0, 1), completed=True)
@@ -590,7 +595,26 @@ class Native:
     def preflight(self, venv):
         self.service_access(venv)
         self.managed_cron()
-        self.lock_paths(venv / "bin/python")
+        paths = self.lock_paths(venv / "bin/python")
+        # Probe using the same credentials and checked lock implementations as
+        # the transaction. Contention is allowed; inaccessible storage is not.
+        code = """import os,sys,tempfile
+from pathlib import Path
+from cvebeacon.updater import ConfigLock
+from cvebeacon.locking import RunLock
+from cvebeacon.private_storage import private_directory
+for directory in {Path(p).parent for p in sys.argv[1:]}:
+    private_directory(directory)
+    fd, path = tempfile.mkstemp(prefix='.update-preflight-', dir=directory)
+    os.close(fd)
+    os.unlink(path)
+ConfigLock(sys.argv[1]).probe()
+for path in sys.argv[2:]:
+    RunLock(path).probe()
+"""
+        self.run([venv / "bin/python", "-I", "-c", code,
+                  self.policy.config.with_name(".config-" + self.policy.config.name + ".lock"), *paths],
+                 service=True, timeout=None)
 
     def lock_paths(self, python, backup=None, manifest_hash=None):
         action = "recovery-paths" if backup else "paths"
@@ -650,17 +674,31 @@ class Native:
 
     def owns_listener(self, pid):
         """Associate the loopback listener with the selected unit's process."""
-        sockets = {os.readlink(path)[8:-1] for path in Path(f"/proc/{pid}/fd").iterdir()
-                   if os.readlink(path).startswith("socket:[")}
-        port = urlsplit(self.policy.probe).port or 80
-        for protocol in ("tcp", "tcp6"):
+        sockets = set()
+        for path in Path(f"/proc/{pid}/fd").iterdir():
+            try:
+                link = os.readlink(path)
+            except FileNotFoundError:
+                continue  # A process may close an unrelated fd during inspection.
+            if link.startswith("socket:["):
+                sockets.add(link[8:-1])
+        endpoint = urlsplit(self.policy.probe)
+        address = ipaddress.ip_address(endpoint.hostname)
+        port = endpoint.port or 80
+        for protocol in (("tcp",) if address.version == 4 else ("tcp6",)):
             try:
                 rows = Path(f"/proc/{pid}/net/{protocol}").read_text().splitlines()[1:]
             except FileNotFoundError:
                 continue
             for line in rows:
                 fields = line.split()
-                if len(fields) >= 10 and fields[3] == "0A" and int(fields[1].rsplit(":", 1)[1], 16) == port and fields[9] in sockets:
+                if len(fields) < 10 or fields[3] != "0A" or fields[9] not in sockets:
+                    continue
+                encoded, local_port = fields[1].split(":")
+                # proc encodes each 32-bit address word in host byte order.
+                packed = b"".join(int(encoded[i:i + 8], 16).to_bytes(4, sys.byteorder) for i in range(0, len(encoded), 8))
+                bound = ipaddress.ip_address(packed)
+                if int(local_port, 16) == port and (bound == address or bound.is_unspecified):
                     return True
         return False
 
@@ -689,6 +727,35 @@ def sync_directory(path):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def release_directory(path, *, mode=0o755):
+    path.mkdir(mode=mode, exist_ok=True)
+    protected(path, directory=True)
+    # mkdir's mode is filtered by the administrator's umask. These dedicated
+    # code/layout directories need explicit traversal, including after retry.
+    path.chmod(mode)
+    return path
+
+
+def sync_tree(path):
+    """Persist installed bytes and entries, without following directory links."""
+    def failed(error):
+        raise error
+    for parent, _, files in os.walk(path, topdown=False, followlinks=False, onerror=failed):
+        for name in files:
+            entry = Path(parent) / name
+            if entry.is_symlink():
+                continue  # Its containing directory persists the link itself.
+            descriptor = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise UpdateError("invalid installed release file")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        sync_directory(parent)
+    sync_directory(Path(path).parent)
 
 
 def consume_request(config_path):
@@ -793,19 +860,39 @@ class Updater:
                 lock.release()
 
     def _archive(self):
-        # A complete record is durable before its startup fence is removed.
-        archive = self.policy.prefix / "transactions"
-        archive.mkdir(mode=0o755, exist_ok=True)
-        protected(archive, directory=True)
+        # Keep the active entry until the completed copy and its name are
+        # durable. Recovery of a complete record never restores old databases.
+        archive = release_directory(self.policy.prefix / "transactions")
+        self.native.directory_access(self.policy.prefix / "current/.venv", (archive,))
         sync_directory(self.policy.prefix)
-        os.replace(self.policy.prefix / JOURNAL, archive / (self.record["id"] + ".json"))
+        atomic_json(archive / (self.record["id"] + ".json"), self.record)
         sync_directory(archive)
-        sync_directory(self.policy.prefix)
+        active = self.policy.prefix / JOURNAL
+        active.unlink()
+        try:
+            sync_directory(self.policy.prefix)
+        except OSError:
+            # The archive is already durable. Retain an explicit retry entry
+            # when removal durability is uncertain, without changing outcome.
+            atomic_json(active, self.record)
+            raise
 
     def _finish(self, result):
         self._checkpoint("complete", result=result)
-        self._archive()
-        self._result(self.record["new"], result)
+
+    def _finalize(self):
+        warning = None
+        try:
+            self._resume_timers(self.record)
+            self._archive()
+        except (OSError, CVEBeaconError, subprocess.SubprocessError):
+            warning = "update committed; run update recover to finish timer restart and archival"
+            log_warning(warning)
+        result = self.record["result"]
+        selected = self.record["new"] if result == "updated" else self.record["old"]
+        self._result(selected, result, warning=warning)
+        self._retain_best_effort()
+        return {"result": result, "version": selected, **({"warning": warning} if warning else {})}
 
     def _resume_timers(self, record):
         timers = tuple(unit for unit in record["active"] if unit.endswith(".timer"))
@@ -836,6 +923,7 @@ class Updater:
                 if requested:
                     self._request_result(target, "recovered; request again")
                 return result
+            self.record = None
             try:
                 return self._apply(target)
             except BaseException:
@@ -847,6 +935,14 @@ class Updater:
                     if result["result"] == "updated":
                         return result
                     raise UpdateError("update failed; previous release and state restored") from None
+                if self.record and self.record["phase"] == "complete":
+                    # Even a late temporary-directory cleanup failure must not
+                    # rewrite the durable outcome after archival.
+                    result = self.record["result"]
+                    selected = self.record["new"] if result == "updated" else self.record["old"]
+                    warning = "update committed; temporary-file cleanup needs administrator review"
+                    self._result(selected, result, warning=warning)
+                    return {"result": result, "version": selected, "warning": warning}
                 self.event("refuse", "failed")
                 self._result(target, "refused")
                 raise
@@ -893,19 +989,19 @@ class Updater:
                 self.native.freeze(p.units)
                 self.event("freeze")
                 self._checkpoint("snapshot")
-                backup_root = p.prefix / "backups"
-                backup_root.mkdir(mode=0o711, exist_ok=True)
-                protected(backup_root, directory=True)
+                backup_root = release_directory(p.prefix / "backups", mode=0o711)
                 backup = backup_root / self.record["backup"]
                 self.native.backup_directory(backup)
                 self.native.state(old / ".venv/bin/python", "backup", backup)
                 manifest_hash = hashlib.sha256(read_bounded(backup / "manifest.json", 8 * 1024 * 1024)).hexdigest()
                 self._checkpoint("installing", snapshot_ready=True, manifest_sha256=manifest_hash)
                 self.event("backup")
-                destination.mkdir(mode=0o755)
+                release_directory(destination)
                 self.native.install(destination / ".venv", artifacts, [name for name in PACKAGES if name in packages], release.version, python=old / ".venv/bin/python")
                 protected_tree(destination / ".venv")
+                self.native.directory_access(destination / ".venv", (destination.parent, destination))
                 self.native.service_access(destination / ".venv")
+                sync_tree(destination)
                 self.event("install")
                 self._checkpoint("migrating")
                 self.native.command(destination, "migrate")
@@ -919,10 +1015,8 @@ class Updater:
                 self.native.command(destination, "doctor")
                 self.native.probe(release.version)
                 self.event("health")
-                self._resume_timers(self.record)
                 self._finish("updated")
-            self._retain_best_effort()
-            return {"result": "updated", "version": release.version}
+            return self._finalize()
 
     def recover(self):
         with RunLock(self.policy.prefix / "update.lock", command="recover"):
@@ -976,17 +1070,20 @@ class Updater:
                     raise UpdateError("restored release selection could not be verified")
                 self.event("rollback")
                 result = record.get("result", "rolled-back") if record["phase"] == "complete" else "rolled-back"
-                self._resume_timers(record)
                 self._finish(result)
-            self._retain_best_effort()
-            return {"result": result, "version": selected}
+            return self._finalize()
         except BaseException:
             try:
                 self.native.freeze(p.units)
             except BaseException:
                 pass
             self.event("rollback", "failed")
-            self._result(record["new"], "rollback-failed")
+            if record["phase"] == "complete":
+                selected = record["new"] if record["result"] == "updated" else record["old"]
+                self._result(selected, record["result"], warning="completed update recovery could not verify the selected release")
+                raise UpdateError("completed update verification remains incomplete; inspect the active recovery record") from None
+            else:
+                self._result(record["new"], "rollback-failed")
             raise UpdateError("update recovery remains incomplete; writers are blocked until recovery succeeds") from None
 
     def _request_result(self, target, result):
@@ -1003,8 +1100,10 @@ class Updater:
         except OSError:
             log_warning("update request status is unavailable")
 
-    def _result(self, target, result):
+    def _result(self, target, result, *, warning=None):
         value = {"version": target, "result": result, "time": stamp()}
+        if warning:
+            value["warning"] = warning
         try:
             atomic_json(self.policy.prefix / "update-result.json", value, mode=0o600)
         except OSError:
@@ -1029,7 +1128,7 @@ class Updater:
     def _retain_best_effort(self):
         try:
             self._retain()
-        except OSError:
+        except (OSError, CVEBeaconError):
             log_warning("backup retention needs administrator review")
 
     def _retain(self):
@@ -1048,23 +1147,22 @@ class Updater:
         venv = p.prefix / ".venv"
         protected_tree(venv)
         self.native.preflight(venv)
-        releases = p.prefix / "releases"
-        releases.mkdir(mode=0o755, exist_ok=True)
-        protected(releases, directory=True)
-        destination = releases / self.record["old"]
-        destination.mkdir(mode=0o755, exist_ok=True)
-        protected(destination, directory=True)
+        releases = release_directory(p.prefix / "releases")
+        destination = release_directory(releases / self.record["old"])
+        self.native.directory_access(venv, (releases, destination))
         link = destination / ".venv"
         if not link.is_symlink():
             link.symlink_to(venv, target_is_directory=True)
         if link.resolve() != venv:
             raise UpdateError("adopted virtual environment does not match its original path")
-        sync_directory(destination)
+        sync_tree(venv)
+        sync_tree(destination)
         if not (p.prefix / "current").is_symlink() or (p.prefix / "current").resolve() != destination:
             switch(p.prefix, destination)
+        self.native.service_access(p.prefix / "current/.venv")
         self.event("adopt")
         self._finish("adopted")
-        return {"result": "adopted", "version": self.record["old"]}
+        return self._finalize()
 
     def adopt(self):
         p = self.policy
