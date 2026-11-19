@@ -443,6 +443,7 @@ def sync(http, store, watch, now, *, initial_mode=None):
     touched = set()
     touched_bytes = 0
     cache_directory = store.path.parent / (store.path.name + '.cve-list-cache')
+    ensure_private_directory(cache_directory)
 
     def apply(records, *, cutoff=None, acknowledge=False, archive_time=None, baseline=False):
         nonlocal count, new, changed

@@ -266,3 +266,18 @@ def test_sparse_queue_upgrade_does_not_rebuild_existing_fts(tmp_path,monkeypatch
     store.initialize()
     assert not any("'rebuild'" in sql for sql in statements)
     assert store.search(query='Spring4Shell').total==1
+
+
+def test_restored_pending_queue_does_not_require_cache_directory(tmp_path):
+    config=write_config(tmp_path,sources=('nvd','cve_list'))
+    store=WatchStore(config.watch.database)
+    fixture=Release([official()],[official()])
+    assets=dict(zip(('baseline','delta'),fixture.assets()))
+    cursor='2026-11-03T10:00:00+00:00'
+    store.set_metadata({'cve_list_start':cursor,'cve_list_cursor':cursor,'cve_list_initial_mode':'baseline','cve_list_pending_until':NOW.isoformat(),'cve_list_pending_release':json.dumps(assets),'cve_list_repair_days':'[]','cve_list_delta_asset':cve_list._asset_token(assets['delta'])})
+    with store.transaction() as db:
+        db.execute('INSERT INTO watch_cve_list_queue(cve_id,fetch_time,expected_revision) VALUES (?,?,?)',(ID,NOW.isoformat(),cve_list._record_date(official()['cveMetadata']['dateUpdated'])))
+    with mock_client(fixture) as http:
+        cve_list.sync(http,store,config.watch,NOW)
+    assert store.view(ID) is not None
+    assert not store.metadata()['cve_list_pending_until']
