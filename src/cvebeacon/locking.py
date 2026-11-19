@@ -235,6 +235,8 @@ class RunLock:
         self._owner_path: Path | None = None
         self._owner_identity: tuple[int, int] | None = None
         self._owner_descriptor: int | None = None
+        self._temporary_identity: tuple[int, int] | None = None
+        self._temporary_descriptor: int | None = None
         # Only fixed labels may enter the record, never user arguments.
         labels = {"scan", "run", "web-detect", "web-detect --plan", "web-assets"}
         labels.update(f"watch {name}" for name in ("sync", "run", "evaluate", "notify", "report", "unreport"))
@@ -285,37 +287,27 @@ class RunLock:
     def _publish(self, metadata: dict) -> None:
         target = self.owner_path
         temporary = target.with_name(target.name + ".tmp")
-        created = False
-        descriptor = None
-        try:
-            descriptor = private_file(temporary, create=True, exclusive=True, share_delete=True)
-            created = True
-            self._owner_lock(descriptor)
-            self._write(descriptor, json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
-            details = os.fstat(descriptor)
-            identity = (details.st_dev, details.st_ino)
-            # Unlike replace/rename, link refuses any pre-existing destination.
-            # Only this acquisition's files are ever created or removed.
-            os.link(temporary, target)
-            self._owner_identity = identity
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            if created:
-                temporary.unlink(missing_ok=True)
+        # Register ownership before any write so the acquisition's single
+        # rollback path also covers pre-link failures and cleanup failures.
+        self._temporary_descriptor = private_file(temporary, create=True, exclusive=True, share_delete=True)
+        details = os.fstat(self._temporary_descriptor)
+        self._temporary_identity = (details.st_dev, details.st_ino)
+        self._owner_lock(self._temporary_descriptor)
+        self._write(self._temporary_descriptor, json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
+        # Linking refuses any pre-existing destination. Do not register the
+        # final name as ours until that non-replacing operation succeeds.
+        os.link(temporary, target)
+        self._owner_identity = self._temporary_identity
+        self._close_temporary()
+        self._unlink_owned(temporary, self._temporary_identity)
+        self._temporary_identity = None
         # Finish name cleanup with no writer handle open. Windows may defer
         # deletion until handles close even when delete sharing is permitted.
-        descriptor = private_file(target, share_delete=True)
-        try:
-            details = os.fstat(descriptor)
-            if (details.st_dev, details.st_ino) != self._owner_identity:
-                raise CVEBeaconError("operation lock metadata changed during publication")
-            self._owner_lock(descriptor)
-            self._owner_descriptor = descriptor
-            descriptor = None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
+        self._owner_descriptor = private_file(target, share_delete=True)
+        details = os.fstat(self._owner_descriptor)
+        if (details.st_dev, details.st_ino) != self._owner_identity:
+            raise CVEBeaconError("operation lock metadata changed during publication")
+        self._owner_lock(self._owner_descriptor)
 
     @staticmethod
     def _owner_lock(descriptor: int, *, probe=False, unlock=False) -> None:
@@ -345,17 +337,45 @@ class RunLock:
             os.close(descriptor)
 
     def _discard_partial_publication(self) -> None:
-        """Rollback only this acquisition's linked files before a fallback."""
-        self._close_owner()
-        if self._owner_identity is not None:
-            for path in (self.owner_path, self.owner_path.with_name(self.owner_path.name + ".tmp")):
+        """Attempt every owned resource, with one retry for transient I/O errors."""
+        paths = ((self.owner_path, "_owner_identity"),
+                 (self.owner_path.with_name(self.owner_path.name + ".tmp"), "_temporary_identity"))
+        for _ in range(2):
+            errors = []
+            for close in (self._close_owner, self._close_temporary):
                 try:
-                    details = path.lstat()
-                except FileNotFoundError:
+                    close()
+                except BaseException as exc:
+                    errors.append(exc)
+            for path, attribute in paths:
+                try:
+                    self._unlink_owned(path, getattr(self, attribute))
+                except BaseException as exc:
+                    errors.append(exc)
                     continue
-                if (details.st_dev, details.st_ino) == self._owner_identity:
-                    path.unlink()
-            self._owner_identity = None
+                setattr(self, attribute, None)
+            if not errors:
+                return
+            if any(not isinstance(error, OSError) for error in errors):
+                break
+        raise errors[0]
+
+    def _close_temporary(self) -> None:
+        if self._temporary_descriptor is not None:
+            descriptor = self._temporary_descriptor
+            self._temporary_descriptor = None
+            os.close(descriptor)
+
+    @staticmethod
+    def _unlink_owned(path: Path, identity: tuple[int, int] | None) -> None:
+        if identity is None:
+            return
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            return
+        if (details.st_dev, details.st_ino) == identity:
+            path.unlink()
 
     def _lock(self, descriptor: int) -> None:
         if os.name == "nt":  # pragma: no cover - exercised on Windows
@@ -384,6 +404,7 @@ class RunLock:
         if self._descriptor is not None:
             return True
         self._owner_identity = None
+        self._temporary_identity = None
         descriptor = self._open()
         try:
             try:
@@ -424,8 +445,8 @@ class RunLock:
                         raise
                     try:
                         self._discard_partial_publication()
-                    except OSError as cleanup:
-                        raise CVEBeaconError("cannot clean up the operation lock metadata") from cleanup
+                    except OSError:
+                        raise CVEBeaconError("cannot clean up the operation lock metadata") from exc
                     # Permissions or unsupported hard links must not block a
                     # normal run. No partial linked record may retain a lease.
                 else:
@@ -438,11 +459,16 @@ class RunLock:
             self._descriptor = descriptor
             return True
         except BaseException:
-            self._close_owner()
             try:
-                os.close(descriptor)
-            except OSError:
+                self._discard_partial_publication()
+            except BaseException:
+                # Cleanup must never replace the original acquisition failure.
                 pass
+            finally:
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    pass
             raise
 
     def release(self) -> None:
@@ -455,10 +481,7 @@ class RunLock:
             # clear metadata while still locked so a successor cannot be erased.
             os.ftruncate(descriptor, 1)
             self._close_owner()
-            if self._owner_identity is not None:
-                details = self.owner_path.lstat()
-                if (details.st_dev, details.st_ino) == self._owner_identity:
-                    self.owner_path.unlink()
+            self._unlink_owned(self.owner_path, self._owner_identity)
             self._unlock(descriptor)
         except OSError:
             pass

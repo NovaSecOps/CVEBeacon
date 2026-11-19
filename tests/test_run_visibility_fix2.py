@@ -13,35 +13,39 @@ from cvebeacon.locking import RunInProgress, RunLock, run_lock_path
 from test_dashboard_operations import fake_scheduler, login, make_config, new_accounts
 
 
-@pytest.mark.parametrize("emulate_sharing", [False, True, "close-before-unlink"])
+@pytest.mark.parametrize("emulate_sharing", [False, True, "close-before-unlink"],
+                         ids=["native-filesystem", "windows-sharing", "close-before-unlink"])
 def test_holder_record_publication_and_cleanup_respect_windows_sharing(tmp_path, monkeypatch, emulate_sharing):
     handles = {}
     denied = []
     original_open = locking.private_file
-    original_close = os.close
-    original_unlink = Path.unlink
+    original_os = locking.os
+    original_unlink = RunLock._unlink_owned
     def open_file(path, **kwargs):
         fd = original_open(path, **kwargs)
         details = os.fstat(fd)
         handles[fd] = ((details.st_dev, details.st_ino), kwargs.get("readonly", False)
                        or kwargs.get("share_delete", False))
         return fd
-    def close(fd):
-        handles.pop(fd, None)
-        return original_close(fd)
-    def unlink(path, *args, **kwargs):
+    class RecordOS:
+        def __getattr__(self, name):
+            return getattr(original_os, name)
+        def close(self, fd):
+            handles.pop(fd, None)
+            return original_os.close(fd)
+    def unlink(path, identity):
         if path.exists():
             details = path.stat()
-            identity = (details.st_dev, details.st_ino)
-            if any(inode == identity and (not share_delete or emulate_sharing == "close-before-unlink")
+            current_identity = (details.st_dev, details.st_ino)
+            if any(inode == current_identity and (not share_delete or emulate_sharing == "close-before-unlink")
                    for inode, share_delete in handles.values()):
                 denied.append(path.name)
                 raise PermissionError(errno.EACCES, "synthetic Windows delete-sharing refusal")
-        return original_unlink(path, *args, **kwargs)
+        return original_unlink(path, identity)
     if emulate_sharing:
         monkeypatch.setattr(locking, "private_file", open_file)
-        monkeypatch.setattr(locking.os, "close", close)
-        monkeypatch.setattr(Path, "unlink", unlink)
+        monkeypatch.setattr(locking, "os", RecordOS())
+        monkeypatch.setattr(RunLock, "_unlink_owned", staticmethod(unlink))
     monkeypatch.setattr(locking, "_account_name", lambda: "cvebeacon")
     monkeypatch.setattr(locking, "_host_name", lambda: "example.com")
     monkeypatch.setenv("CVEBEACON_DASHBOARD_JOB", "7")
