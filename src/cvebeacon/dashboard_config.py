@@ -222,34 +222,155 @@ COMPLEX_FIELDS = {"sources", "channels", "events", "cvss_providers", "condition"
                   "to", "cc", "bcc", "recipients"}
 
 
-def session_settings_changed(before, after):
-    """Unknown settings fail closed; reporting identity controls reporting access."""
-    safe_sections = {"watch", "sources", "inventory", "http", "state", "output",
-                     "notifications", "product_mappings"}
-    for section in set(before) | set(after):
-        old, new = before.get(section), after.get(section)
-        if old == new:
+# This security allowlist is deliberately independent of presentation metadata.
+# New settings must be reviewed here before their changes preserve sessions.
+_SESSION_SAFE_TABLES = {
+    "watch": {"enabled", "sources", "initial", "backfill_days", "overlap_minutes", "language"},
+    "sources": {"osv_enabled", "nvd_enabled", "cve_enabled", "euvd_enabled", "cisa_kev_enabled",
+                "eu_kev_enabled", "epss_enabled", "nvd_api_key_env", "nvd_api_key_file", "minimum_request_interval"},
+    "inventory": {"path", "format", "worksheet", "header_row", "records_path", "delimiter", "encoding", "web_snapshots"},
+    "http": {"connect_timeout", "read_timeout", "retries", "backoff_seconds", "user_agent"},
+    "state": {"database"}, "output": {"directory"},
+    "notifications.teams": {"enabled", "webhook_env"},
+    "notifications.email": {"enabled", "tenant_id_env", "client_id_env", "client_secret_env", "sender", "recipients"},
+    "rule": {"name", "condition", "channels", "events", "cvss_providers", "enabled", "old_cves"},
+    "mapping": {"vendor", "product", "cpe"},
+    "columns": {"asset_id", "vendor", "product", "version", "category", "system_id", "ecosystem",
+                "purl", "cpe", "repository", "commit", "client"},
+}
+_SESSION_CHANNEL_COMMON = {"type", "enabled", "grouping", "max_items", "min_interval_seconds",
+                           "timeout_seconds", "allow_insecure", "notify_reported", "language"}
+_SESSION_CHANNEL_TYPES = {
+    "smtp": {"host", "port", "security", "username", "password_env", "password_file", "from", "to", "cc", "bcc", "format"},
+    "graph": {"tenant_id", "client_id", "client_secret_env", "client_secret_file", "sender", "to", "cc", "bcc", "format"},
+    "teams": {"webhook_url_env", "webhook_url_file"},
+    "slack": {"webhook_url_env", "webhook_url_file"},
+    "discord": {"webhook_url_env", "webhook_url_file"},
+    "telegram": {"bot_token_env", "bot_token_file", "chat_id"},
+    "matrix": {"homeserver", "room_id", "access_token_env", "access_token_file"},
+    "ntfy": {"server", "topic", "token_env", "token_file", "priority"},
+    "gotify": {"server", "app_token_env", "app_token_file", "priority"},
+    "webhook": {"url", "url_env", "url_file", "header_name", "header_value_env", "header_value_file"},
+}
+_SESSION_ABSENT = object()
+
+
+def _toml_equal(left, right):
+    """Python equality alone conflates TOML booleans, integers and floats."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_toml_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_toml_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+_SESSION_CONDITION_KEYS = {"cvss_min", "cvss_max", "epss_min", "kev", "exploitation",
+                           "vendor", "product", "keyword", "cwe", "cna", "status"}
+
+
+def _session_condition_known(value):
+    if not isinstance(value, dict):
+        return False
+    for key, child in value.items():
+        if key in {"any", "all"}:
+            if not isinstance(child, list) or not all(_session_condition_known(row) for row in child):
+                return False
+        elif key == "not":
+            if not _session_condition_known(child):
+                return False
+        elif key not in _SESSION_CONDITION_KEYS or isinstance(child, dict):
+            return False
+        elif isinstance(child, list) and any(isinstance(item, (dict, list)) for item in child):
+            return False
+    return True
+
+
+def _session_table_changed(before, after, allowed, nested=None):
+    before = {} if before is _SESSION_ABSENT else before
+    after = {} if after is _SESSION_ABSENT else after
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return True
+    for key in before.keys() | after.keys():
+        old, new = before.get(key, _SESSION_ABSENT), after.get(key, _SESSION_ABSENT)
+        if _toml_equal(old, new):
             continue
-        if section not in safe_sections:
-            return True
-        if section == "product_mappings":
-            continue
-        if not isinstance(old or {}, dict) or not isinstance(new or {}, dict):
-            return True
-        if section == "watch":
-            for key in set(old or {}) | set(new or {}):
-                if (old or {}).get(key) == (new or {}).get(key):
-                    continue
-                if key in {"database", "reporting"} or key not in {*WATCH_FIELDS, "rules", "channels"}:
-                    return True
-        elif section == "notifications":
-            if (set(old or {}) | set(new or {})) - {"email", "teams"}:
+        if nested and key in nested:
+            if nested[key](old, new):
                 return True
+        elif key not in allowed:
+            return True
         else:
-            schema = next(schema for specs in SCHEMAS.values() for path, schema in specs if path == section)
-            if (set(old or {}) | set(new or {})) - set(schema):
-                return True
+            for item in (old, new):
+                if item is _SESSION_ABSENT:
+                    continue
+                if key == "condition":
+                    if not _session_condition_known(item):
+                        return True
+                elif isinstance(item, dict) or isinstance(item, list) and any(isinstance(child, (dict, list)) for child in item):
+                    return True
     return False
+
+
+def _session_rows_changed(before, after, schema):
+    before = [] if before is _SESSION_ABSENT else before
+    after = [] if after is _SESSION_ABSENT else after
+    if not isinstance(before, list) or not isinstance(after, list):
+        return True
+    for index in range(max(len(before), len(after))):
+        old = before[index] if index < len(before) else _SESSION_ABSENT
+        new = after[index] if index < len(after) else _SESSION_ABSENT
+        if not _toml_equal(old, new) and _session_table_changed(old, new, _SESSION_SAFE_TABLES[schema]):
+            return True
+    return False
+
+
+def _session_channels_changed(before, after):
+    before = {} if before is _SESSION_ABSENT else before
+    after = {} if after is _SESSION_ABSENT else after
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return True
+    for name in before.keys() | after.keys():
+        old, new = before.get(name, _SESSION_ABSENT), after.get(name, _SESSION_ABSENT)
+        if _toml_equal(old, new):
+            continue
+        for row in (old, new):
+            if row is not _SESSION_ABSENT:
+                if not isinstance(row, dict):
+                    return True
+                kind = row.get("type")
+                if not isinstance(kind, str) or kind.strip().casefold() not in _SESSION_CHANNEL_TYPES:
+                    return True
+        allowed = _SESSION_CHANNEL_COMMON.copy()
+        # A type transition must classify removals and additions separately.
+        for row in (old, new):
+            if row is not _SESSION_ABSENT:
+                allowed.update(_SESSION_CHANNEL_TYPES[row["type"].strip().casefold()])
+        if _session_table_changed(old, new, allowed):
+            return True
+    return False
+
+
+def session_settings_changed(before, after):
+    """End sessions for every changed setting without an explicit classification."""
+    nested = {
+        "watch": lambda old, new: _session_table_changed(old, new, _SESSION_SAFE_TABLES["watch"], {
+            "rules": lambda a, b: _session_rows_changed(a, b, "rule"),
+            "channels": _session_channels_changed,
+        }),
+        "notifications": lambda old, new: _session_table_changed(old, new, set(), {
+            key: lambda a, b, key=key: _session_table_changed(a, b, _SESSION_SAFE_TABLES["notifications." + key])
+            for key in ("teams", "email")
+        }),
+        "inventory": lambda old, new: _session_table_changed(old, new, _SESSION_SAFE_TABLES["inventory"], {
+            "columns": lambda a, b: _session_table_changed(a, b, _SESSION_SAFE_TABLES["columns"]),
+        }),
+        "product_mappings": lambda old, new: _session_rows_changed(old, new, "mapping"),
+    }
+    for section in ("sources", "http", "state", "output"):
+        nested[section] = lambda a, b, section=section: _session_table_changed(a, b, _SESSION_SAFE_TABLES[section])
+    return _session_table_changed(before, after, set(), nested)
 
 
 def access_settings_changed(before, after, updated, baseline, running):
@@ -1145,7 +1266,7 @@ class Editor:
             from .dashboard import create_app
             token = _RELOADING.set(self)
             try:
-                end_sessions = invalid_current or access_settings_changed(
+                end_sessions = pending.lockout or invalid_current or access_settings_changed(
                     old, pending.document, updated, checks_config, self.config)
                 replacement_app = create_app(updated, host=self.host, jobs=self.jobs,
                                              session_app=None if end_sessions else self.active_app)
@@ -1180,9 +1301,7 @@ class Editor:
                     abort(403)
                 if old is not None:
                     self._check_direct_urls(old, pending.document, rollback=section == "rollback")
-                lockout = pending.lockout or invalid_current or access_settings_changed(
-                    old, pending.document, updated, checks_config, self.config)
-                if lockout and not confirmed:
+                if end_sessions and not confirmed:
                     raise ConfigurationError("Confirm the access and session changes before saving")
                 if (updated.watch.users_database != self.config.watch.users_database or
                         updated.watch.users_database != checks_config.watch.users_database):

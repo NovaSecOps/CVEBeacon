@@ -528,7 +528,14 @@ changes to:
   session lifetimes and cookie settings;
 - `watch.database`, which determines the account database location;
 - `[watch.reporting]`, whose identity mode controls who may record reporting;
-- an unknown section or setting, or recovery from an invalid or missing file.
+- an unknown section or setting, including nested notification, channel or rule
+  settings, or recovery from an invalid or missing file.
+
+Session-preserving settings use a separately reviewed allowlist. Adding a field
+to presentation metadata does not classify its session behavior. Comparisons
+distinguish TOML booleans, integers and floats. A preview that required access
+confirmation continues to end sessions even if its original recovery condition
+clears before confirmation.
 
 Effective dashboard settings, account database locations and reporting identity
 are compared against both the valid current file and the running configuration.
