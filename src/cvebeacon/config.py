@@ -19,6 +19,7 @@ from .watch.rules import Rule, parse_rules, validate_rule_sources
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
 OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit", "client")
 WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss")
+INVENTORY_FORMATS = ("auto", "xlsx", "csv", "json", "yaml")
 WATCH_INITIAL_MODES = ("baseline", "backfill", "full")
 WATCH_SETTINGS = {
     "enabled",
@@ -280,7 +281,7 @@ def load_config(path: str | Path) -> AppConfig:
         inventory_format = str(inv.get("format", "auto")).casefold().lstrip(".")
         if inventory_format == "yml":
             inventory_format = "yaml"
-        if inventory_format not in {"auto", "xlsx", "csv", "json", "yaml"}:
+        if inventory_format not in INVENTORY_FORMATS:
             raise ConfigurationError("inventory.format must be auto, xlsx, csv, json, or yaml")
         inventory_config = InventoryConfig(
             path=_resolve(base, inv["path"]) if inv.get("path") else None,
