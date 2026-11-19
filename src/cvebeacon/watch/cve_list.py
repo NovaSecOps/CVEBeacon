@@ -75,7 +75,6 @@ def _record_date_or_none(value):
         return None
 
 
-@source_payload("cve_list")
 def _cisa_adp(provider):
     name = str(provider.get("shortName") or "").casefold()
     return ("cisa" in name or name == "vulnrichment"
@@ -83,6 +82,13 @@ def _cisa_adp(provider):
 
 
 def vulnrichment_exploitation(payload):
+    try:
+        return _vulnrichment_exploitation(payload)
+    except (AttributeError, TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _vulnrichment_exploitation(payload):
     statuses = set()
     for container in (payload.get("containers") or {}).get("adp") or []:
         if not _cisa_adp(container.get("providerMetadata") or {}):
@@ -99,6 +105,7 @@ def vulnrichment_exploitation(payload):
     return next((status for status in reversed(SSVC_EXPLOITATION) if status in statuses), None)
 
 
+@source_payload("cve_list")
 def parse_record(payload):
     if not isinstance(payload, dict):
         raise SourceError("cve_list", "record is not an object")
