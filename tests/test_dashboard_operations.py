@@ -549,6 +549,31 @@ def test_schedule_install_is_blocked_when_it_would_use_root(tmp_path, monkeypatc
     assert "command-line fallback" in response.text.lower()
 
 
+def test_schedule_failure_does_not_claim_an_unchanged_schedule(ops, monkeypatch):
+    _, _, app, client = ops
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+
+    def runner(args, **kwargs):
+        if list(args) == ["crontab", "-l"]:
+            return _Result(returncode=0, stdout="")
+        return _Result(returncode=1, stderr="synthetic install failure")
+
+    app.extensions["dashboard_schedule_runner"] = runner
+    login(client)
+    response = submit(
+        client,
+        "/operations/schedule/install",
+        mode="interval",
+        every="4",
+        command="watch",
+    )
+    assert response.status_code == 400
+    assert "synthetic install failure" in response.text
+    assert "The schedule action failed" in response.text
+    assert "Nothing else was changed" not in response.text
+    assert "Check the value and try again" not in response.text
+
+
 def test_job_history_store_retains_only_the_latest_jobs(tmp_path):
     store = JobStore(tmp_path / "dashboard-jobs")
     first = store.create("scan", "admin", ["scan"])

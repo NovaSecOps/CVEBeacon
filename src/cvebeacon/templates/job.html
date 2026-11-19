@@ -25,7 +25,7 @@
 <dt>Queued</dt><dd>{{ stamp(job.created_at) }}</dd>
 <dt>Started</dt><dd>{{ stamp(job.started_at) if job.started_at else 'Not started' }}</dd>
 <dt>Ended</dt><dd>{{ stamp(job.ended_at) if job.ended_at else 'Not finished' }}</dd>
-<dt>Exit code</dt><dd>{% if job.exit_code is not none %}{{ job.exit_code }} — {{ job.exit_meaning }}{% elif job.active %}Not finished yet{% else %}Not recorded{% endif %}</dd>
+<dt>Exit code</dt><dd>{% if job.exit_code is not none %}<span class="num">{{ job.exit_code }}</span> — {{ job.exit_meaning }}{% elif job.active %}Not finished yet{% else %}Not recorded{% endif %}</dd>
 </dl>
 {% endcall %}
 </div>

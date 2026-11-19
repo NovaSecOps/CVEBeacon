@@ -15,9 +15,20 @@
 {% call callout('info', 'Nothing to do here') %}<p>Wait for this run to finish. External runs are managed by their command-line process or scheduler.</p>{% endcall %}
 {% endcall %}
 {% else %}
-{% call card('Run record · ' ~ holder.state, 'This record is from a command that is no longer running.' if holder.state == 'stale' else 'The current run status could not be read.') %}
+{% set record_titles = {'stale': 'Run record · stale', 'unknown': 'Status unclear', 'unavailable': 'Could not be read'} %}
+{% set record_title = record_titles.get(holder.state, 'Status unclear') %}
+{% if holder.state == 'stale' %}
+{% set record_description = 'This record is from a command that is no longer running.' %}
+{% elif holder.state == 'unknown' %}
+{% set record_description = 'It could not be confirmed whether this command is still running.' %}
+{% else %}
+{% set record_description = 'The run status is unavailable because the lock could not be read.' %}
+{% endif %}
+{% call card(record_title, record_description) %}
 {{ definition_list([('Command', holder.command or 'Unavailable'), ('Account', holder.account or 'unknown'), ('Host', holder.host or 'unknown'), ('Process ID', holder.pid or 'unknown'), ('Started (UTC)', stamp(holder.started_at) if holder.started_at else 'unknown'), ('Elapsed', (holder.elapsed if holder.elapsed is not none else 'unknown') ~ ' seconds')]) }}
-{% if holder.state == 'unavailable' %}{% call callout('warning', 'Run status is unknown') %}<p>The run lock could not be read, so another command may still be running. Do not assume the storage is free.</p>{% endcall %}{% else %}{% call callout('info') %}<p>No command from this record is running now. The record is kept for diagnosis.</p>{% endcall %}{% endif %}
+{% if holder.state == 'stale' %}{% call callout('info') %}<p>No command from this record is running now. The record is kept for diagnosis.</p>{% endcall %}
+{% elif holder.state == 'unknown' %}{% call callout('warning', 'Run status is unclear') %}<p>It could not be confirmed that the command that wrote this record has stopped. Do not assume the storage is free.</p>{% endcall %}
+{% else %}{% call callout('warning', 'Run status is unavailable') %}<p>The run lock could not be read, so another command may still be running. Do not assume the storage is free.</p>{% endcall %}{% endif %}
 {% endcall %}
 {% endif %}
 {% endfor %}
@@ -89,9 +100,9 @@
 {% set status_variants = {'queued': 'neutral', 'running': 'info', 'succeeded': 'success', 'failed': 'danger', 'cancelled': 'neutral'} %}
 {% set status_labels = {'queued': 'Queued', 'running': 'Running', 'succeeded': 'Succeeded', 'failed': 'Failed', 'cancelled': 'Cancelled'} %}
 {% call table_wrap('Jobs in progress') %}<table>
-<thead><tr><th>Job</th><th>Operation</th><th>Status</th><th>Started by</th></tr></thead>
+<thead><tr><th>Job ID</th><th>Operation</th><th>Status</th><th>Started by</th></tr></thead>
 <tbody>{% for job in active %}<tr>
-<td><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">Job {{ job.id }}</a></td>
+<td class="num"><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">{{ job.id }}</a></td>
 <td>{{ job.label }}</td>
 <td>{{ badge(status_labels.get(job.status, job.status), status_variants.get(job.status, 'neutral')) }}{% if job.id in queue_details %}<br><span class="muted">{{ queue_details[job.id] }}</span>{% endif %}</td>
 <td>{{ job.started_by }}</td>

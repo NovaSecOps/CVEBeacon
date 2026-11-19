@@ -5,7 +5,7 @@
 {% block content %}
 {% call page_header('Schedule', 'Set CVEBeacon to run on its own, and check, change or remove the installed schedule.') %}{{ link_button('Back to Operations', url_for('operations.index'), kind='secondary') }}{% endcall %}
 
-{% if error %}{% call callout('danger', 'The schedule was not changed') %}<p>{{ error }}</p><p>Check the value and try again. Nothing else was changed.</p>{% endcall %}{% endif %}
+{% if error %}{% call callout('danger', 'The schedule action failed') %}<p>{{ error }}</p>{% endcall %}{% endif %}
 
 {% call card('Current status', 'What this server currently has installed for CVEBeacon.') %}
 {% if status_error %}

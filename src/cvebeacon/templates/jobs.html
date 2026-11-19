@@ -11,15 +11,15 @@
 {% set status_labels = {'queued': 'Queued', 'running': 'Running', 'succeeded': 'Succeeded', 'failed': 'Failed', 'cancelled': 'Cancelled'} %}
 <p class="muted">{{ jobs | length }} job{{ '' if jobs | length == 1 else 's' }} shown, newest first.</p>
 {% call table_wrap('Recent jobs') %}<table>
-<thead><tr><th>Job</th><th>Operation</th><th>Status</th><th>Started by</th><th>Timing</th><th>Result</th><th>Detail</th></tr></thead>
+<thead><tr><th>Job ID</th><th>Operation</th><th>Status</th><th>Started by</th><th>Timing</th><th>Result</th><th>Detail</th></tr></thead>
 <tbody>
 {% for job in jobs %}<tr>
-<td><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">Job {{ job.id }}</a></td>
+<td class="num"><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">{{ job.id }}</a></td>
 <td>{{ job.label }}</td>
 <td>{{ badge(status_labels.get(job.status, job.status), status_variants.get(job.status, 'neutral')) }}{% if job.id in queue_details %}<br><span class="muted">{{ queue_details[job.id] }}</span>{% endif %}</td>
 <td>{{ job.started_by }}</td>
 <td><span class="muted">Queued</span> <span class="nowrap">{{ stamp(job.created_at) }}</span><br><span class="muted">Started</span> <span class="nowrap">{{ stamp(job.started_at) if job.started_at else 'Not started' }}</span><br><span class="muted">Ended</span> <span class="nowrap">{{ stamp(job.ended_at) if job.ended_at else 'Not finished' }}</span></td>
-<td>{% if job.exit_code is not none %}<span class="nowrap">{{ job.exit_code }}</span> {{ job.exit_meaning }}{% endif %}</td>
+<td>{% if job.exit_code is not none %}<span class="num nowrap">{{ job.exit_code }}</span> {{ job.exit_meaning }}{% endif %}</td>
 <td class="break">{{ job.message or '' }}</td>
 </tr>{% endfor %}
 </tbody></table>{% endcall %}
