@@ -73,7 +73,7 @@ def test_watch_setup_writes_a_loadable_commented_config(tmp_path, monkeypatch, c
     assert "# Alert rule. See docs/WATCH.md." in text
     config = load_config(path)
     assert config.watch.enabled is True
-    assert config.watch.sources == ("nvd", "euvd", "cisa_kev", "eu_kev", "epss")
+    assert config.watch.sources == ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list")
     assert [rule.name for rule in config.watch.rules] == ["critical"]
     assert describe_condition(config.watch.rules[0].condition) == "cvss >= 9.0"
     assert [(channel.name, channel.type) for channel in config.watch.channels] == [

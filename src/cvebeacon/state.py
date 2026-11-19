@@ -189,6 +189,15 @@ class StateStore:
                     applicability TEXT NOT NULL,
                     PRIMARY KEY(run_id, asset_id, identifier)
                 );
+                CREATE TABLE IF NOT EXISTS scan_finding_details (
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    asset_id TEXT NOT NULL,
+                    advisory_id TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY(run_id, asset_id, advisory_id)
+                );
                 CREATE INDEX IF NOT EXISTS runs_successful ON runs(status, completed_at);
                 CREATE INDEX IF NOT EXISTS advisory_aliases_alias ON advisory_aliases(alias, asset_id);
                 CREATE INDEX IF NOT EXISTS advisory_aliases_primary ON advisory_aliases(asset_id, primary_id, alias);
@@ -383,6 +392,13 @@ class StateStore:
                                  last_seen=excluded.last_seen, fingerprint=excluded.fingerprint, payload_json=excluded.payload_json""",
                             (finding.asset.asset_id, primary, first_seen, completed, fingerprint, payload),
                         )
+                        db.execute(
+                            """INSERT INTO scan_finding_details(run_id,asset_id,advisory_id,first_seen,last_seen,payload_json)
+                               VALUES (?,?,?,?,?,?)
+                               ON CONFLICT(run_id,asset_id,advisory_id) DO UPDATE SET
+                                 last_seen=excluded.last_seen, payload_json=excluded.payload_json""",
+                            (run_id, finding.asset.asset_id, primary, first_seen, completed, payload),
+                        )
                         if event_type:
                             cursor = db.execute(
                                 "INSERT INTO events(run_id,occurred_at,asset_id,cve_id,event_type,fingerprint,payload_json) VALUES (?,?,?,?,?,?,?)",
@@ -395,6 +411,17 @@ class StateStore:
                                     "INSERT INTO deliveries(event_id,channel,state,updated_at) VALUES (?,?,?,?)",
                                     (event_id, channel, "pending", completed),
                                 )
+                latest = db.execute(
+                    "SELECT run_id FROM runs WHERE status='completed' "
+                    "ORDER BY completed_at DESC, rowid DESC LIMIT 1"
+                ).fetchone()
+                # The export only reads the newest successful run. Keep that
+                # snapshot and drop detail rows for every other run so the
+                # table stays bounded to one run's findings.
+                db.execute(
+                    "DELETE FROM scan_finding_details WHERE run_id<>?",
+                    (str(latest[0]) if latest is not None else "",),
+                )
                 if attempt_id:
                     db.execute("UPDATE scan_attempts SET run_id=? WHERE attempt_id=?", (run_id, attempt_id))
         except (sqlite3.Error, OSError) as exc:

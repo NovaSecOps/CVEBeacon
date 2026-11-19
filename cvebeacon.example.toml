@@ -45,7 +45,7 @@ minimum_request_interval = 6
 [watch]
 enabled = false
 database = "cvebeacon-watch.db"
-sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
+sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list"]
 initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
@@ -73,6 +73,15 @@ overlap_minutes = 15
 # from = "alerts@example.invalid"
 # to = ["security@example.invalid"]
 # format = "html"               # text (default) or html
+
+# Optional local backups. See docs/BACKUP.md.
+[backup]
+# Relative to this configuration file; disabled to use the state database's
+# backup directory by default.
+# directory = "backups"
+retention_days = 7
+keep_min = 3
+compress = true
 
 # Scan-report notifications (legacy; secrets come from the environment).
 # Watch alerts use the separate [watch.channels.*] tables above.

@@ -490,7 +490,8 @@ def _ask_sources() -> tuple[str, ...]:
             enabled.append(name)
     if "epss" not in enabled:
         print("Warning: EPSS is disabled; epss_min rules will be unavailable.")
-    return tuple(enabled)
+    print("CVE List V5 is enabled by default; edit watch.sources to disable it.")
+    return (*enabled, "cve_list")
 
 
 def _ask_watch_settings() -> WatchSettings:

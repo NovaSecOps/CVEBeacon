@@ -485,3 +485,21 @@ def impacts_for(
     if isinstance(value, ClientImpacts):
         return value
     return ClientImpacts(tuple(value or ()))
+
+
+def cve_findings(path: str | Path, identifier: str, *, limit: int = 100):
+    """Read bounded findings from the latest complete scan, including unassigned assets."""
+    limit = max(1, min(int(limit), 100))
+    def read(db):
+        scan = _latest_successful_scan(db)
+        if scan is None:
+            return ()
+        rows = db.execute(
+            "SELECT sf.asset_id,sf.advisory_id,sf.applicability,coalesce(sac.client,'') AS client "
+            "FROM scan_findings sf LEFT JOIN scan_asset_clients sac "
+            "ON sac.run_id=sf.run_id AND sac.asset_id=sf.asset_id "
+            "WHERE sf.run_id=? AND sf.identifier=? ORDER BY sf.asset_id LIMIT ?",
+            (scan.run_id, identifier, limit),
+        ).fetchall()
+        return tuple(dict(row) for row in rows)
+    return _read(path, read, ())

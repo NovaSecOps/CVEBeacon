@@ -690,6 +690,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     app.register_blueprint(create_inventory_blueprint(config))
     from .dashboard_update import create_blueprint as create_update_blueprint
     app.register_blueprint(create_update_blueprint(config))
+    from .dashboard_backup import create_blueprint as create_backup_blueprint
+    app.register_blueprint(create_backup_blueprint(config))
     return app
 
 

@@ -491,7 +491,7 @@ def fetch_nvd_cve(
     )
     vulnerabilities, _, total = _nvd_page(payload, 0)
     if total < 1 or not vulnerabilities:
-        raise SourceError("nvd", "source returned no vulnerability for a requested identifier")
+        raise SourceError("nvd", "source returned no vulnerability for a requested identifier", status_code=404)
     matches: list[WatchRecord] = []
     for wrapped in vulnerabilities:
         raw = wrapped.get("cve") if isinstance(wrapped, dict) else None

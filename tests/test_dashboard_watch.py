@@ -208,7 +208,7 @@ def test_overview_shows_database_cursors_sync_health_and_initial_state(watch):
     assert response.status_code == 200
     text = response.text
     assert "watch.db" in text
-    assert "Schema version" in text and "7" in text
+    assert "Schema version" in text and "8" in text
     assert NOW.isoformat() in text
     assert "2026-11-01" in text
     assert "scanning 2026-10-30..2026-11-03, page 2 of 5" in text

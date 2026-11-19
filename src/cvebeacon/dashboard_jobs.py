@@ -60,13 +60,14 @@ RUN_OPERATIONS = (
 )
 RETRY_OPERATIONS = ("watch-retry-failed", "watch-retry-ambiguous")
 FULL_HISTORY_OPERATIONS = frozenset({"watch-sync", "watch-run", "run"})
-WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:-1]) | frozenset(RETRY_OPERATIONS) | {"notify-test"}
+WATCH_OPERATIONS = frozenset(RUN_OPERATIONS[1:-1]) | frozenset(RETRY_OPERATIONS) | {"notify-test", "watch-refresh"}
 
 OPERATION_LABELS = {
     "scan": "Scan inventory",
     "web-detect": "Detect client web technologies",
     "web-plan": "Show planned web requests",
     "watch-sync": "Synchronise watch data",
+    "watch-refresh": "Fetch or refresh a CVE",
     "watch-evaluate": "Evaluate every stored CVE",
     "watch-notify": "Deliver pending alerts",
     "watch-retry-failed": "Retry failed deliveries",
@@ -74,7 +75,12 @@ OPERATION_LABELS = {
     "watch-run": "Watch run",
     "run": "Run scan and watch together",
     "notify-test": "Send channel test",
+    "backup-create": "Create backup",
+    "backup-verify": "Verify backup",
+    "backup-restore": "Restore backup",
 }
+
+BACKUP_OPERATIONS = frozenset({"backup-create", "backup-verify", "backup-restore"})
 
 DATA_CHANGING = frozenset(
     operation for operation in OPERATION_LABELS if operation != "notify-test"
@@ -505,6 +511,10 @@ def build_command(
     confirmed: bool = False,
     channel: str | None = None,
     client: str | None = None,
+    backup_id: str | None = None,
+    include_secrets: bool = False,
+    created_by: str | None = None,
+    cve_id: str | None = None,
 ) -> list[str]:
     """Build the CLI child command without a shell or any secret value."""
     if operation not in OPERATION_LABELS:
@@ -525,6 +535,18 @@ def build_command(
         "--config",
         str(config.config_path),
     ]
+    if operation in BACKUP_OPERATIONS:
+        if operation == "backup-create":
+            args = [*base, "backup", "create"]
+            if include_secrets:
+                args.append("--include-secrets")
+            if created_by:
+                args.extend([f"--created-by={created_by}"])
+            return args
+        if not isinstance(backup_id, str) or not backup_id:
+            raise ConfigurationError("choose a retained backup")
+        action = "restore" if operation == "backup-restore" else "verify"
+        return [*base, "backup", action, backup_id, *(["--yes"] if operation == "backup-restore" else [])]
     if operation in {"web-detect", "web-plan"}:
         from .web_assets import client_label, require_companion
         require_companion()
@@ -535,6 +557,9 @@ def build_command(
         return [*base, "web-detect", label, *plan]
     if operation == "scan":
         return [*base, "scan"]
+    if operation == "watch-refresh":
+        from .watch.reported import normalize_cve_id
+        return [*base, "watch", "refresh", normalize_cve_id(cve_id)]
     if operation == "watch-sync":
         args = [*base, "watch", "sync"]
     elif operation == "watch-evaluate":

@@ -28,6 +28,7 @@ With no configured file or dashboard inventory, `web_snapshots` disabled (the de
 - **Reports:** query the current inventory and download an XLSX or JSON report using the existing reporting functions. Exports do not commit monitoring state. Check the report's coverage and source-health fields even when the download succeeds.
 - **Sources:** view cached observations from the latest recorded scan, including check result, retrieval time and available source timestamp. Opening this page does not contact the sources.
 - **Operations:** start `scan`, `watch sync`, `watch evaluate --all`, `watch notify`, `watch run` or the combined `run` as a background job, retry failed or ambiguous deliveries, and send a labelled channel test. Each job has a status, timestamps, exit code and meaning, the account that started it, a bounded log tail, cancellation and an audit entry.
+- **Backups:** view the retained backup count and last backup time. Administrators can create, verify, download, prune and restore backups; create, verify and restore use the same background job and run-lock rules as other data-changing work. See [backup and restore](BACKUP.md).
 
 ## Operations and background jobs
 
@@ -148,10 +149,11 @@ The **Watch** pages read the watch database through the same store and status
 helpers as `cvebeacon watch status`. They never contact a source and do not
 change scan or delivery state.
 
-- **Watch overview:** database path and schema, NVD and EUVD cursors (including
-  EUVD page progress), the last sync per source with request counts, EPSS score
-  date, watched/KEV/SSVC counts, per-channel pending, sending, failed and
-  ambiguous deliveries, the reported-to-clients count, and initial-mode state.
+- **Watch overview:** database path and schema, NVD, EUVD and CVE List cursors
+  (including EUVD page progress and the CVE List initial mode/start), the last
+  sync per source with request counts, EPSS score date, watched/KEV/SSVC counts,
+  per-channel pending, sending, failed and ambiguous deliveries, the
+  reported-to-clients count, and initial-mode state.
   A database written before sync summaries were recorded shows the counts as not
   recorded until the next sync.
 - **Events:** filter by rule, kind, initial flag, date range, exact CVE, client
@@ -482,6 +484,7 @@ container layout.
 | Dashboard sessions and cookies | `edit_dashboard` (view; changes administrator-only) |
 | HTTP client | `edit_http` |
 | State database and report output paths | `edit_system` (view; changes administrator-only) |
+| Backup directory and retention | `edit_system` (view; path changes administrator-only) |
 
 Blank fields omit a setting and use the configuration loader's default. String
 fields accept plain text. Enumerated settings use selectors, boolean settings use
@@ -755,3 +758,34 @@ those settings.
 ## Package identities and advisory views
 
 The manual query page has Product, Package (ecosystem/name/version), and Explicit PURL modes. Each uses the CLI assessment engine and preserves monitoring/event/delivery state. Findings can be filtered by category, system, ecosystem, PURL, advisory ID and CVE alias. Asset and evidence details show supplied identities, aliases and fixed boundaries. Fixed boundaries require review of the branch and source range before choosing an upgrade. Reports include separate Identities and Advisory Details sheets to keep Findings compact. Authentication and CSRF protection apply equally to all query modes.
+
+## CVE explorer and refresh
+
+Open **CVEs** (`/watch/cves`) to browse stored watch records, including CVE
+List-only entries. Search by CVE ID, description keyword or alias, then filter
+by source, KEV, severity, publication dates, events, reported status or affected
+client. Results are paginated in groups of 50 and sort by publication,
+modification, CVSS, EPSS or KEV. Searches are limited to 256 characters. New provider descriptions use FTS5 word prefixes when available, with literal
+LIKE fallback. Existing NVD descriptions use LIKE in place, without a copying
+migration.
+
+An absent ID shows “Not in our database”, source sync times and, for accounts
+with `run`, a **Fetch or refresh this CVE now** action. The same action appears
+on `/watch/cve/<CVE-ID>`. It submits an audited background job under the shared
+run lock, requires CSRF protection, and refreshes only that CVE from enabled
+sources. It evaluates that CVE's rules and queues matching deliveries without
+sending them. They go out on the next `watch notify` or `watch run`; users with
+`run` permission can choose **Deliver now** to start the existing audited notify
+job. Both the CVE and refresh-job pages explain this timing. Errors remain visible
+in the job log and source check status.
+
+The existing detail page adds presence (present, absent or not synced), source
+update and check times, retained provider containers, current rule matches and
+up to 100 findings from the latest successful inventory scan, including
+unassigned assets. Existing report history, statement generation, event and
+delivery status remain available. Remote source values are escaped, provider
+previews are capped at 64 KiB with
+a truncation marker, and no channel credentials are displayed. Read-only pages
+use snapshots and never migrate the watch DB or acquire writer locks. See
+[watch behavior](WATCH.md#cve-list-and-the-explorer)
+for feed limits, first-sync costs, upgrade behavior and CLI refresh.

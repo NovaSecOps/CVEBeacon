@@ -12,7 +12,7 @@ from typing import Any, Iterable, Mapping
 CVSS_PROVIDERS = ("nvd", "cna", "cisa-adp", "euvd", "other")
 CVSS_VERSIONS = ("2.0", "3.0", "3.1", "4.0")
 SSVC_EXPLOITATION = ("none", "poc", "active")
-STATUSES = ("published", "rejected")
+STATUSES = ("published", "rejected", "reserved")
 EPSS_BANDS = (0.1, 0.5, 0.9)
 EUVD_TIMESTAMP_FORMATS = ("%b %d, %Y, %I:%M:%S %p",)
 
@@ -137,7 +137,7 @@ def epss_band(value: float | None) -> int:
 
 @dataclass(frozen=True, slots=True)
 class WatchRecord:
-    """The NVD-owned part of a CVE, as stored in ``watch_cve``."""
+    """Normalized provider fields or the merged row stored in ``watch_cve``."""
 
     cve_id: str
     status: str
@@ -157,7 +157,7 @@ class WatchRecord:
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
-            raise ValueError("watch record status must be published or rejected")
+            raise ValueError("watch record status must be published, rejected or reserved")
         if self.description is not None:
             object.__setattr__(self, "description", self.description[:1000])
         object.__setattr__(self, "cvss", normalized_cvss(self.cvss))

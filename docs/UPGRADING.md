@@ -1,8 +1,68 @@
 # Upgrading CVEBeacon
 
 Old configuration files remain valid. The optional `[update]` section defaults
-to disabled. Database migrations run locally and preserve existing records.
-Back up before upgrading; do not run an older executable against newer schemas.
+to disabled and the optional `[backup]` section uses owner-only local defaults.
+Database migrations run locally and preserve existing records. Back up before
+upgrading with `cvebeacon backup create`; see [backup and restore](BACKUP.md).
+Do not run an older executable against newer schemas.
+
+
+## Watch schema 7 to 8
+
+Existing NVD rows and EUVD items remain in place, including extra legacy
+columns. The migration adds empty provider, origin, source-check, scoped EUVD and
+initial-evaluation tables, plus provider search storage. It does not copy or parse existing
+NVD/EUVD records, backfill descriptions, rebuild `watch_cve`, or index the full
+historical database. Reserved CVE List state lives in its provider record;
+legacy identity placeholders do not require replacing the old status constraint.
+
+The FTS index contains only new provider descriptions. Existing NVD descriptions
+stay in their original table and retain the original FTS5 keyword semantics
+through an in-memory candidate matcher (literal LIKE when FTS5 is unavailable). Thus
+initial migration work is independent of the number of CVEs. A small amount of
+space for new table/index pages and the SQLite journal is still required; disk
+or injected failures roll back the schema and added tables together. The
+synthetic acceptance measurement is reproducible with:
+
+```console
+python tools/cve_migration_benchmark.py --rows 430000
+```
+
+A malformed historical record does not block this migration. Reading that CVE
+fails closed with its identifier in the error. Restore a known-good backup or
+use `cvebeacon watch refresh CVE-2026-12345` to replace the malformed source row
+from a valid targeted response; failed source lookups leave the old evidence
+untouched. No row is silently skipped or described as unaffected.
+
+Adding `cve_list` to an existing installation starts its independent baseline,
+even if `watch.initial` still says `full` or `backfill`. The first sync stores
+the newest archive boundary without importing history. After that, the initial
+mode is not consulted again: every archive imports records at or after the
+cursor normally, including records with no usable date. Importing source history
+requires an explicit confirmed command; see [watch](WATCH.md).
+Its pending or failed initialization is degraded source coverage and does not
+hold the existing NVD/EUVD initial window open.
+
+## Pre-release schema 8 and older provenance
+
+The unreleased provider-copy layout has a separate transactional recovery path,
+gated by its missing sparse-storage marker. It restores original NVD fields,
+removes redundant NVD copies, and rebuilds only new-provider search rows. Unlike
+the released schema-7 upgrade, this path scans and parses provider copies and may
+need additional time/journal space. Stop writers and keep a backup first. Invalid
+provider JSON rolls back the recovery and names the CVE; repair that provider
+copy or restore the backup before retrying. It is not silently quarantined.
+
+The oldest schema-1 rows may contain deprecated EUVD/EPSS columns without source
+provenance. Those columns remain intact. They cannot establish whether NVD also
+supplied the row, so rows lacking explicit provenance retain the legacy NVD/base
+classification; it must not be interpreted as verified NVD origin. A normal
+source sync or targeted refresh supplies current attributed evidence. No origin
+is guessed from a missing description or score.
+
+The CVE List cursor records the last complete archive boundary. No delta-log
+queue or per-CVE repair table exists in schema 8. Read-only pages still do not
+migrate or take write locks.
 
 ## Supported updater installations
 
@@ -34,14 +94,17 @@ Never run the privileged updater inside a container.
    also confirm `systemctl is-active cvebeacon.service` reports `inactive`: a
    start already queued by the timer can otherwise begin after this check. Stop
    the dashboard and other data writers after work finishes.
-2. Use SQLite's online backup for **each** state database, including watch,
-   account, monitoring, dashboard job and automation ledgers. Keep backups and
-   configuration copies private. SQLite files may have live WAL contents: a
-   simple file copy is insufficient. Record all paths and ownership.
-   Include the private `inventories/` directory beside the monitoring database.
-   It contains client profiles, current uploads and the last five versions per
-   client. Keep its owner-only permissions and pair the copy with the same
-   account database backup.
+2. Use the [backup command](BACKUP.md) (`cvebeacon --config CONFIG backup
+   create --include-secrets`) for SQLite's online backup of the core state
+   databases, including watch, account, monitoring, dashboard job and other
+   discovered stores under the data directory, plus the configuration. If
+   automation keeps a separate state directory or ledger, back it up with its
+   own documented procedure. Keep backups and configuration copies private.
+   SQLite files may have live WAL contents: a simple file copy is insufficient.
+   Record all paths and ownership.
+   Also copy the private `inventories/` directory beside the monitoring database.
+   It contains client profiles, current uploads and retained versions. Keep its
+   owner-only permissions and restore it with the matching account database.
 3. Obtain the release from the configured GitHub repository. Verify
    `SHA256SUMS.sig` against an independently pinned public key, then verify
    every artifact against `SHA256SUMS`:
