@@ -516,6 +516,91 @@ def test_watch_only_doctor_checks_an_existing_watch_database(
     assert checks["watch_database"] == "ok (0 CVEs, schema 7)"
 
 
+def test_watch_only_doctor_rejects_an_unsupported_watch_schema(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("UPDATE watch_meta SET value='999' WHERE key='schema_version'")
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == (
+        "unreadable (unsupported watch schema version 999)"
+    )
+
+
+def test_watch_only_doctor_rejects_an_incomplete_watch_schema(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("DROP TABLE watch_event")
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 2
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == (
+        "unreadable (watch database is missing required tables)"
+    )
+
+
+def test_watch_only_doctor_accepts_a_migratable_watch_schema(
+    tmp_path, monkeypatch, capsys
+):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("UPDATE watch_meta SET value='1' WHERE key='schema_version'")
+    monkeypatch.setattr(cli, "status", lambda **kwargs: "not installed")
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["watch_database"] == (
+        "ok (0 CVEs, schema 1; will migrate to 7)"
+    )
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="POSIX file modes for a non-root account",
+)
+def test_watch_only_doctor_unwritable_database_has_no_traceback(tmp_path):
+    config = write_config(tmp_path, inventory=False)
+    WatchStore(config.watch.database).initialize()
+    config.watch.database.chmod(0o400)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "cvebeacon",
+                "--config",
+                str(config.config_path),
+                "doctor",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        config.watch.database.chmod(0o600)
+    assert result.returncode == 2, result.stderr
+    assert "not writable" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_watch_channel_check_derives_env_only_credential_names(
+    tmp_path, monkeypatch
+):
+    from cvebeacon.watch import channels as watch_channels
+
+    config = write_config(tmp_path, inventory=False, channels=MISSING_WEBHOOK_URL)
+    monkeypatch.delenv("CVEBEACON_TEST_MISSING_HOOK", raising=False)
+    monkeypatch.setitem(watch_channels.CREDENTIAL_FIELDS, "webhook", ("url_env",))
+    assert cli._watch_channel_check(config).startswith("missing: hook (url)")
+
+
 MISSING_WEBHOOK_URL = """
 [watch.channels.hook]
 type = "webhook"
@@ -767,6 +852,41 @@ def test_watch_only_doctor_live_checks_only_watch_sources(
     checks = json.loads(capsys.readouterr().out)
     assert calls == [("nvd", "epss")]
     assert checks["live_sources"] == {"nvd": "ok", "epss": "ok"}
+
+
+def test_live_source_checks_filter_to_the_requested_sources(
+    tmp_path, monkeypatch
+):
+    config = write_config(tmp_path, inventory=False, sources=("nvd", "epss"))
+    calls = []
+
+    class FakeHttp:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get_json(self, *args, **kwargs):
+            calls.append("nvd")
+            return {"vulnerabilities": []}
+
+    class FakeEPSS:
+        def __init__(self, http):
+            pass
+
+        def scores(self, identifiers):
+            calls.append("epss")
+            return {}
+
+    monkeypatch.setattr(cli, "HttpClient", FakeHttp)
+    monkeypatch.setattr(cli, "EPSSSource", FakeEPSS)
+    checks = cli._live_source_checks(config, only=("nvd", "epss"))
+    assert checks == {"nvd": "ok", "epss": "ok"}
+    assert calls == ["nvd", "epss"]
 
 
 def test_watch_only_config_serves_dashboard(tmp_path, monkeypatch):
