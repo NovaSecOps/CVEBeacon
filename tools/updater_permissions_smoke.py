@@ -1,6 +1,7 @@
 """Check adoption permissions with real credentials in a disposable prefix.
 
 Run as root with a prepared local wheelhouse. No users or units are installed.
+Include Core wheels for 0.1.0 and 0.1.1, plus their binary dependencies.
 Only the scratch prefix's otherwise-world-writable temporary ancestors are
 excluded from the production protected-path check.
 """
@@ -71,6 +72,12 @@ def acceptance(wheelhouse, mask):
                     path.chmod(0o750 if path.stat().st_mode & 0o111 else 0o640)
         previous = os.umask(mask)
         try:
+            if mask == 0o077:
+                # Recover the layout left by an interrupted private-umask adopt.
+                pending = u.Updater(policy, native)
+                pending._begin("0.1.0", "0.1.0", (), kind="adopt")
+                (prefix / "releases").mkdir(mode=0o700)
+                (prefix / "releases/0.1.0").mkdir(mode=0o700)
             assert u.Updater(policy, native).adopt()["result"] == "adopted"
         finally:
             os.umask(previous)
@@ -81,16 +88,48 @@ def acceptance(wheelhouse, mask):
         native.service_access(prefix / "current/.venv")
         code = "import os,sys; assert os.access(sys.argv[1],os.R_OK|os.X_OK); assert not os.access(sys.argv[1],os.W_OK); assert not os.access(sys.argv[2],os.W_OK); assert os.geteuid()==int(sys.argv[3]); assert os.getgroups()==[]"
         native.run([prefix / "current/.venv/bin/python", "-I", "-c", code, prefix, prefix / "current/.venv/bin/cvebeacon", account.pw_uid], service=True)
+        # The unprivileged guard must be able to persist a completed root-owned
+        # journal, and refuse a writer when that barrier fails.
+        completed = u.Updater(policy, native)
+        completed._begin("0.1.0", "0.1.0", (), kind="adopt")
+        completed._finish("adopted")
+        guard = "from cvebeacon.update_transaction import ensure_ready; import sys; ensure_ready('dashboard-write',prefix=sys.argv[1],running_version='0.1.0')"
+        native.run([prefix / "current/.venv/bin/python", "-I", "-c", guard, prefix], service=True)
+        denied = """import sys
+from cvebeacon import updater as u
+from cvebeacon.update_transaction import ensure_ready
+from cvebeacon.errors import CVEBeaconError
+def failed(path):
+    raise OSError('synthetic completion barrier failure')
+u.sync_directory = failed
+try:
+    ensure_ready('dashboard-write', prefix=sys.argv[1], running_version='0.1.0')
+except CVEBeaconError:
+    pass
+else:
+    raise AssertionError('writer admitted after failed completion barrier')
+"""
+        native.run([prefix / "current/.venv/bin/python", "-I", "-c", denied, prefix], service=True)
+        assert completed._finalize()["result"] == "adopted"
         # Check a generated release too: the outer mask must not affect access.
         previous = os.umask(mask)
         try:
             generated = u.release_directory(prefix / "releases/0.1.1")
-            native.install(generated / ".venv", wheelhouse, ["cvebeacon"], "0.1.0")
+            native.install(generated / ".venv", wheelhouse, ["cvebeacon"], generated.name)
         finally:
             os.umask(previous)
         native.directory_access(generated / ".venv", (generated, generated / ".venv"))
         native.service_access(generated / ".venv")
+        assert native.inventory(generated / ".venv")["cvebeacon"] == generated.name
         native.run([generated / ".venv/bin/python", "-I", "-c", code, prefix, generated / ".venv/bin/cvebeacon", account.pw_uid], service=True)
+        previous = os.umask(mask)
+        try:
+            backups = u.release_directory(prefix / "backups", mode=0o711)
+        finally:
+            os.umask(previous)
+        assert backups.stat().st_uid == 0 and stat.S_IMODE(backups.stat().st_mode) == 0o711
+        traversal = "import os,sys; p=sys.argv[1]; assert os.access(p,os.X_OK) and not os.access(p,os.R_OK) and not os.access(p,os.W_OK)"
+        native.run([generated / ".venv/bin/python", "-I", "-c", traversal, backups], service=True)
         data.chmod(0o500)
         try:
             try:
@@ -111,7 +150,7 @@ def acceptance(wheelhouse, mask):
         else:
             raise AssertionError("preflight accepted a service-unreadable config")
         assert private.stat().st_uid == 0 and stat.S_IMODE(private.stat().st_mode) == 0o600
-        print(f"Umask {mask:03o}: adoption and generated releases allow service read/execute, deny code writes, clear groups, and reject read-only data/private config.")
+        print(f"Umask {mask:03o}: adoption/retry and matching-version releases allow read/execute, deny code writes, clear groups; completion guards enforce durability; backups allow traversal only; read-only data/private config are refused.")
 
 
 if __name__ == "__main__":

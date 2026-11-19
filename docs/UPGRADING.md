@@ -114,10 +114,13 @@ Generated `releases`, version and `transactions` directories are root-owned
 `0755`, explicitly set regardless of the administrator's umask. New venvs use
 root ownership and umask `022` (normally `0755` directories/executables and
 `0644` non-executable files). The outer root:service `0750` prefix still limits
-traversal to that group. Every generated layout directory is checked under
-service credentials for read/traversal and denied write access; adoption also
-executes through `current/.venv` before completing. No recursive permission or
-ownership change is applied to existing snapshots.
+traversal to that group. The release/version directories are checked under
+service credentials for read/traversal and denied write access before migration
+or adoption completes; `transactions` is checked during archival. The `backups`
+container is root-owned `0711`, giving the service traversal-only access, while
+each snapshot is service-owned `0700`. Adoption also executes through
+`current/.venv` before completing. No recursive permission or ownership change
+is applied to existing snapshots.
 
 Use the reference units in `deploy/systemd/`: their executable path is
 `/opt/cvebeacon/current/.venv/bin/cvebeacon`. Choose `watch run` instead of `run`
@@ -247,9 +250,12 @@ administrator-owned path guard is relaxed for this rootless scratch check; no sy
 external release endpoint is contacted.
 For a separate real-credential check, run
 `sudo .venv/bin/python tools/updater_permissions_smoke.py --wheelhouse /path/to/wheelhouse`.
+That wheelhouse must include Core `0.1.0` and `0.1.1` wheels and their binary
+dependencies, built locally for this disposable check.
 It tests adoption under administrator umasks `077` and `027`, all created
-directory modes, generated-release read-only execution, cleared groups,
-read-only data and private config refusal entirely in a disposable prefix. It does not create
+release/transaction modes, interrupted-adoption retry, matching-version release
+read-only execution, completion guard barriers, traversal-only backups, cleared
+groups, read-only data and private config refusal entirely in a disposable prefix. It does not create
 accounts or inspect or install schedules.
 
 Before stopping anything, the updater writes and fsyncs one active
@@ -261,8 +267,14 @@ publication are best effort and cannot skip recovery.
 
 An active record fences normal CLI and unit writer startup and dashboard writes.
 Only the recorded version may start for migration or the updater's health
-phase. A durable `complete` record permits ordinary writers only for the
-verified selected version. A subsequent apply recovers the pending transaction first, without
+phase. A `complete` record permits ordinary writers only for the verified
+selected version after the writer guard successfully fsyncs the journal's
+directory. Visibility of the completed replacement alone is insufficient: a
+failed completion barrier keeps writes fenced, including dashboard mutations.
+A guard may itself complete that durability barrier before the updater's
+fsync returns; an admitted write then follows a persisted completion which
+recovery finalizes without restoring older data.
+A subsequent apply recovers the pending transaction first, without
 checking another release or replacing the record. Explicit recovery is:
 
 ```console

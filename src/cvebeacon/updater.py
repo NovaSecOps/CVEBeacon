@@ -886,7 +886,7 @@ class Updater:
             self._resume_timers(self.record)
             self._archive()
         except (OSError, CVEBeaconError, subprocess.SubprocessError):
-            warning = "update committed; run update recover to finish timer restart and archival"
+            warning = "update committed; run update recover to finish finalization"
             log_warning(warning)
         result = self.record["result"]
         selected = self.record["new"] if result == "updated" else self.record["old"]
