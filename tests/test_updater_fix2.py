@@ -53,3 +53,26 @@ def test_dashboard_check_handles_storage_oserrors(updates, monkeypatch):
     login(client)
     monkeypatch.setattr(dashboard_update, "check", lambda *args: (_ for _ in ()).throw(PermissionError("synthetic storage error")))
     assert submit(client, "/updates/check").status_code == 400
+
+def test_tampered_snapshot_config_never_replaces_the_live_config(tmp_path):
+    config = write_config(tmp_path, inventory=False)
+    snapshot = tmp_path.parent / (tmp_path.name + "-snapshot")
+    snapshot.mkdir()
+    update_state.backup(config, tmp_path, snapshot)
+    before = config.config_path.read_bytes()
+    (snapshot / "config.toml").write_text(before.decode() + "\n# tampered snapshot\n")
+    with pytest.raises(update_state.SnapshotError, match="config.*checksum|config.*snapshot"):
+        update_state.restore(config, tmp_path, snapshot)
+    assert config.config_path.read_bytes() == before
+
+def test_tampered_snapshot_config_is_refused_by_the_worker_before_loading_it(tmp_path):
+    import subprocess
+    config = write_config(tmp_path, inventory=False)
+    snapshot = tmp_path.parent / (tmp_path.name + "-snapshot")
+    snapshot.mkdir()
+    update_state.backup(config, tmp_path, snapshot)
+    before = config.config_path.read_bytes()
+    (snapshot / "config.toml").write_bytes(before + b"\n# tampered snapshot\n")
+    result = subprocess.run([sys.executable, "-m", "cvebeacon.update_state", "restore", str(config.config_path), str(tmp_path), str(snapshot)], capture_output=True)
+    assert result.returncode != 0
+    assert config.config_path.read_bytes() == before

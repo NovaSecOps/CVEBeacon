@@ -148,10 +148,15 @@ def restore_config(path, data, source):
     path = Path(path)
     if path.parent != data:
         raise SnapshotError("runtime config must be directly inside the data directory")
+    expected = _manifest(Path(source), data)["config_sha256"]
+    if digest(Path(source) / "config.toml") != expected:
+        raise SnapshotError("config snapshot checksum mismatch")
     fd, temporary = tempfile.mkstemp(prefix=".update-config-", dir=data)
     os.close(fd)
     try:
         shutil.copyfile(Path(source) / "config.toml", temporary)
+        if digest(Path(temporary)) != expected:
+            raise SnapshotError("config snapshot checksum mismatch")
         Path(temporary).chmod(0o600)
         sync_file(temporary)
         os.replace(temporary, path)
@@ -163,6 +168,8 @@ def restore_config(path, data, source):
 def restore(config, data, source):
     source = Path(source)
     manifest = _manifest(source, data)
+    if digest(source / "config.toml") != manifest["config_sha256"]:
+        raise SnapshotError("config snapshot checksum mismatch")
     original = {row["path"] for row in manifest["databases"]}
     for path in databases(config, data, validate_known=False):
         if path.relative_to(data).as_posix() not in original:
