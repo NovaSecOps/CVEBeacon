@@ -26,7 +26,7 @@ enabled = false
 # [state] database, so in this container it is written to /state.
 [watch]
 enabled = false
-sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
+sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list"]
 initial = "baseline"
 
 [[watch.rules]]

@@ -71,14 +71,15 @@ CVEBeacon is agentless and network-isolated from monitored assets: it reads supp
 ## System requirements
 
 CVEBeacon runs on Linux and Windows with Python 3.11 or newer; see the
-[validation matrix](docs/VALIDATION.md). The figures below were measured on one
-x86_64 host (Ryzen 9 5900X, Python 3.13, no NVD API key, default pacing) with a
-five-asset inventory. RAM is the process peak; database size is the watch
-database after the run. ARM devices are expected to take longer in wall time
-and to need about the same RAM (estimate; not measured on ARM). Figures are
-rounded.
+[validation matrix](docs/VALIDATION.md). The historical figures below were
+measured with a five-asset inventory, no NVD API key and default pacing. RAM is
+the process peak; database size is the watch database after the run. Resource
+needs vary by environment; these rounded measurements are not system minima.
 
-| Mode | Peak RAM | Disk after first run | First run | Scheduled run | Requests, first run (NVD, EUVD, KEV, EPSS) |
+The historical measurements below **exclude `cve_list`** and do not describe
+the complete new default source selection.
+
+| Mode | Peak RAM | Disk after first run | First run | Scheduled run | Requests, first run (NVD, EUVD, KEV, EPSS; without CVE List) |
 | --- | ---: | ---: | ---: | ---: | --- |
 | inventory scan only | 87 MiB | 9.5 MiB state DB + about 8 MiB JSON report per scan | 3.5 min cold, 2.5 min warm | 2.5 min | not reported by `scan`; see [network requirements](docs/NETWORK_REQUIREMENTS.md) |
 | watch baseline | 55 MiB | 30 MiB database | 0.3 s empty baseline, then 9 s first real sync | 9 s | NVD 2, EUVD 6, KEV 2, EPSS 2 |
@@ -87,6 +88,21 @@ rounded.
 | backfill 30 days | 226 MiB | 144 MiB database (EUVD incomplete) | 45 min | 30 s | NVD 157, EUVD 216, KEV 2, EPSS 1 |
 | **backfill 120 days** (heavy) | 234 MiB | 231 MiB database | 64 min, plus a 4 min resumed sync | 4 min | NVD 220, EUVD 650 + 139 on resume, KEV 2, EPSS 1 |
 | **full history** (heavy) | 372 MiB | 718 MiB database (EUVD incomplete) | 98 min, then further syncs to finish EUVD | about 20 min per resumed sync while EUVD catch-up lasts | NVD 508 (419,060 CVEs), EUVD 851 (incomplete), KEV 2 (CISA 1, EU 1), EPSS 1 |
+
+CVE List adds the current day's hourly cumulative delta in normal operation and
+one official end-of-day archive for each outstanding past day. There is no daily
+full-baseline download and no rolling-log repair. A first backfill/full history
+import, a missing archive or a gap longer than seven days can download one
+baseline (about 635 MiB in public metadata observed on 2026-11-19), requiring
+space for its cached archive, optional inner ZIP and new provider data. Preflight
+reserves three times the expanded archive plus directory space, so a large
+baseline can need several GiB of free disk even though the final database is
+smaller. The archive cap is 1 GiB; a larger source fails visibly rather than
+buffering without a limit. Schema 7 → 8 adds empty tables/indexes without copying
+the historical NVD/EUVD database. See [source costs](docs/SOURCES.md#cve-list-watch-feed)
+and [upgrading](docs/UPGRADING.md) for limits, retry costs and the reproducible
+430,000-CVE migration check. The table's RAM, disk and timings are not updated
+measurements for this additional source.
 
 The 30-day database has incomplete EUVD data after an HTTP 403 that survived
 retries; NVD, CISA KEV and EPSS completed in the first run, and the EU KEV dump
@@ -119,7 +135,9 @@ for one JSON report per scan (about 8 MiB with five assets) and for backups.
 
 - **2 GB RAM and 1 GB free disk**: enough for inventory scans, a baseline, and a
   backfill of up to 30 days on a Raspberry Pi 4 or 5. The largest of these peaks
-  is 226 MiB; the largest database is 144 MiB.
+  is 226 MiB; the largest database is 144 MiB. These figures exclude a CVE List
+  full-baseline import, whose expanded-archive preflight can require several GiB
+  of free space.
 - **120-day backfill and full history are heavy first loads.** The 120-day load
   takes about an hour and leaves a 0.23 GB database. Full history took 98
   minutes for the first sync and leaves a database of about 0.7 GB while EUVD

@@ -113,7 +113,10 @@ def _parser() -> argparse.ArgumentParser:
     delete = schedule_sub.add_parser("remove"); delete.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); delete.add_argument("--yes", action="store_true")
     watch = commands.add_parser("watch", help="keep a local database of recently changed CVEs")
     watch_sub = watch.add_subparsers(dest="watch_command", required=True)
+    watch_refresh = watch_sub.add_parser("refresh", help="fetch or refresh exactly one CVE and evaluate its rules")
+    watch_refresh.add_argument("cve_id")
     watch_sync = watch_sub.add_parser("sync", help="refresh the watch database from public sources")
+    watch_sync.add_argument("--cve-list-initial", choices=("baseline", "backfill", "full"), help="explicitly restart CVE List initialization; history requires confirmation")
     watch_sync.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
     watch_statement = watch_sub.add_parser("statement", help="render one stored CVE from a statement template")
     watch_statement.add_argument("cve_id")
@@ -126,6 +129,7 @@ def _parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="overwrite an existing output file"
     )
     watch_run = watch_sub.add_parser("run", help="refresh the watch database, evaluate rules and deliver alerts")
+    watch_run.add_argument("--cve-list-initial", choices=("baseline", "backfill", "full"), help="explicitly restart CVE List initialization; history requires confirmation")
     watch_run.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
     watch_notify = watch_sub.add_parser("notify", help="deliver pending watch alerts")
     watch_notify.add_argument("--channel", help="only deliver through this channel")
@@ -748,15 +752,21 @@ def _run_watch(args, config: AppConfig) -> int:
             print("initialization stays open until the initial sync completes")
         return 0
     with HttpClient(config.http) as http:
+        if args.watch_command == "refresh":
+            from .watch.refresh import refresh_watch
+            report, result = refresh_watch(config, http, args.cve_id)
+            _print_sync_report(report)
+            _print_evaluation(result)
+            return 4 if report.failures else 0
         if args.watch_command == "sync":
-            report = sync_watch(config, http, assume_yes=args.yes)
+            report = sync_watch(config, http, assume_yes=args.yes, **({"cve_list_initial": args.cve_list_initial} if getattr(args,"cve_list_initial",None) else {}))
             if report.cancelled:
                 print("cancelled")
                 return 1
             _print_sync_report(report)
             return 4 if report.failures else 0
         try:
-            report = sync_watch(config, http, assume_yes=args.yes)
+            report = sync_watch(config, http, assume_yes=args.yes, **({"cve_list_initial": args.cve_list_initial} if getattr(args,"cve_list_initial",None) else {}))
             if report.cancelled:
                 print("cancelled")
                 return 1
@@ -765,7 +775,7 @@ def _run_watch(args, config: AppConfig) -> int:
                 config.watch.rules,
                 catalogs=config.watch.sources,
                 initial=report.initial_evaluation,
-                complete=not report.failures,
+                complete=getattr(report, "initial_complete", not report.failures),
             )
             _print_evaluation(result)
         except SourceError as exc:
@@ -1262,7 +1272,7 @@ def _lock_required(args: argparse.Namespace) -> bool:
         return True
     if args.command != "watch":
         return False
-    if args.watch_command in {"sync", "run", "evaluate", "report", "unreport"}:
+    if args.watch_command in {"sync", "refresh", "run", "evaluate", "report", "unreport"}:
         return True
     return (
         args.watch_command == "notify"
