@@ -92,6 +92,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     login_throttle = (session_app.extensions["account_login_throttle"] if session_app is not None else
                       AccountLoginThrottle())
     app = Flask(__name__)
+    # Lets templates link to features that are not always registered.
+    app.jinja_env.globals["has_endpoint"] = lambda name: name in app.view_functions
     app.extensions["dashboard_auth"] = auth
     app.extensions["account_sessions"] = account_sessions
     app.extensions["dashboard_users"] = users
