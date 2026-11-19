@@ -288,7 +288,7 @@ class RunLock:
         created = False
         descriptor = None
         try:
-            descriptor = private_file(temporary, create=True, exclusive=True)
+            descriptor = private_file(temporary, create=True, exclusive=True, share_delete=True)
             created = True
             self._owner_lock(descriptor)
             self._write(descriptor, json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
@@ -332,6 +332,19 @@ class RunLock:
             descriptor = self._owner_descriptor
             self._owner_descriptor = None
             os.close(descriptor)
+
+    def _discard_partial_publication(self) -> None:
+        """Rollback only this acquisition's linked files before a fallback."""
+        self._close_owner()
+        if self._owner_identity is not None:
+            for path in (self.owner_path, self.owner_path.with_name(self.owner_path.name + ".tmp")):
+                try:
+                    details = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if (details.st_dev, details.st_ino) == self._owner_identity:
+                    path.unlink()
+            self._owner_identity = None
 
     def _lock(self, descriptor: int) -> None:
         if os.name == "nt":  # pragma: no cover - exercised on Windows
@@ -397,8 +410,11 @@ class RunLock:
                 except OSError as exc:
                     if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
                         raise
-                    # Existing writable locks still work in shared/read-only
-                    # parents. Private identity is unavailable in that case.
+                    try:
+                        self._discard_partial_publication()
+                    except OSError as cleanup:
+                        raise CVEBeaconError("cannot clean up the operation lock metadata") from cleanup
+                    # A permission fallback cannot retain a partial record lease.
             except OSError as exc:
                 raise CVEBeaconError("cannot write the operation lock metadata") from exc
             self._descriptor = descriptor
@@ -469,7 +485,7 @@ class RunLock:
                     return "holder unavailable"
                 return holder or "holder unavailable"
             path = owner_record_path(self.path, token)
-            owner_fd = private_file(path, readonly=os.name != "nt")
+            owner_fd = private_file(path, readonly=os.name != "nt", share_delete=True)
             try:
                 if live and not self._owner_is_live(owner_fd):
                     return "holder unavailable"

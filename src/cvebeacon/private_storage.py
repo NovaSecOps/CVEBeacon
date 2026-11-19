@@ -64,7 +64,8 @@ def validate_file(descriptor: int, path: Path,
 
 
 def private_file(path: Path, *, create: bool = False, exclusive: bool = False,
-                 readonly: bool = False, owner_only: bool = True) -> int:
+                 readonly: bool = False, owner_only: bool = True,
+                 share_delete: bool = False) -> int:
     """Open without following links; new files are private unless relaxed."""
     try:
         current = path.lstat()
@@ -79,7 +80,7 @@ def private_file(path: Path, *, create: bool = False, exclusive: bool = False,
         from .windows_private import open_file
         descriptor = open_file(
             path, create=create, exclusive=exclusive, readonly=readonly,
-            owner_only=owner_only,
+            owner_only=owner_only, share_delete=share_delete,
         )
     else:
         flags = (os.O_RDONLY if readonly else os.O_RDWR) | os.O_NOFOLLOW | os.O_NONBLOCK
