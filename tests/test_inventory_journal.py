@@ -1,13 +1,15 @@
 """Recover pending inventory changes according to the durable audit decision."""
 
+import os
 from pathlib import Path
 
 import pytest
 
-from cvebeacon import inventory_journal as journal
+from cvebeacon import inventory_journal as journal, snapshot as primitives
 from cvebeacon.inventory import load_inventory
 from cvebeacon.managed_inventory import client_key, encode_records, profiles
 from cvebeacon.models import Asset
+from cvebeacon.private_storage import private_directory, private_file
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
 from test_dashboard_watch import PASSWORD
 from watch_support import write_config
@@ -16,10 +18,10 @@ from watch_support import write_config
 @pytest.fixture
 def storage(tmp_path):
     data = tmp_path / "data"
-    data.mkdir(mode=0o700)
+    private_directory(data, owner_only=True)
     config = write_config(data, inventory=False)
     directory = config.inventory_directory
-    directory.mkdir(mode=0o700)
+    private_directory(directory, owner_only=True)
     users = UserStore(config.watch.users_database)
     users.add("admin", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
     actor = users.authenticate("admin", PASSWORD)
@@ -97,8 +99,23 @@ def test_new_profile_and_removal_finish_after_commit(storage):
     assert archived.read_bytes() == previous and not current.exists()
 
 
-def test_update_snapshot_restores_managed_files_and_audit_together(storage, tmp_path):
+@pytest.mark.parametrize("without_unix_flags", (False, True), ids=("native", "without-unix-flags"))
+def test_update_snapshot_restores_managed_files_and_audit_together(
+    storage, tmp_path, monkeypatch, without_unix_flags,
+):
     from cvebeacon import update_state
+
+    if without_unix_flags:
+        class WindowsFileAPI:
+            name = "nt"
+
+            def __getattr__(self, name):
+                if name in {"O_DIRECTORY", "O_NOFOLLOW", "fchmod"}:
+                    raise AttributeError(name)
+                return getattr(os, name)
+
+        monkeypatch.setattr(primitives, "os", WindowsFileAPI())
+        monkeypatch.setattr(update_state, "os", WindowsFileAPI())
 
     config, directory, users, _, label, key = storage
     current = directory / f"{key}.json"
@@ -110,22 +127,27 @@ def test_update_snapshot_restores_managed_files_and_audit_together(storage, tmp_
         "profile": (profile, b'{"name":"Sample client","notes":"","contact":""}'),
     })
     snapshot = tmp_path / "snapshots" / "one"
-    snapshot.mkdir(parents=True)
+    private_directory(snapshot, owner_only=True)
     update_state.backup(config, config.config_path.parent, snapshot)
+    for entry in snapshot.iterdir():
+        os.close(private_file(entry, readonly=True))
     before = users.audit_entries()
     _stage(storage, {"current": (current, _data("after", label))})
     assert config.effective_inventory is not None
     other = directory / f"{client_key('New client')}.json"
     journal.replace_bytes(other, _data("new", "New client"))
     unrelated = directory / "notes.json"
-    unrelated.write_text("operator file")
+    unrelated.write_text("Nota do operador — privada", encoding="utf-8")
     history.unlink()
 
     update_state.restore(config, config.config_path.parent, snapshot)
     update_state.verify_restore(config, config.config_path.parent, snapshot)
     assert users.audit_entries() == before
     assert current.read_bytes() == history.read_bytes() == previous
-    assert profile.exists() and not other.exists() and unrelated.read_text() == "operator file"
+    assert profile.exists() and not other.exists()
+    assert unrelated.read_text(encoding="utf-8") == "Nota do operador — privada"
+    for path in (current, history, profile, config.config_path, config.watch.users_database):
+        os.close(private_file(path, readonly=True))
 
 
 @pytest.mark.parametrize("platform", ("nt", "posix"))
@@ -133,7 +155,7 @@ def test_directory_sync_works_without_unix_open_flags(tmp_path, monkeypatch, pla
     from types import SimpleNamespace
 
     calls = []
-    monkeypatch.setattr(journal, "os", SimpleNamespace(
+    monkeypatch.setattr(primitives, "os", SimpleNamespace(
         name=platform, O_RDONLY=0, open=lambda *args: 7,
         fsync=lambda fd: calls.append(("sync", fd)), close=lambda fd: calls.append(("close", fd)),
     ))
@@ -169,3 +191,18 @@ def test_snapshot_refuses_too_many_entries_before_copying(storage, tmp_path, mon
     with pytest.raises(update_state.SnapshotError, match="managed inventory snapshot"):
         update_state._managed_snapshot(config, tmp_path)
     assert not list(tmp_path.glob("inventory-*.copy"))
+
+
+def test_unsafe_orphan_staging_path_does_not_block_current_inventory(storage, caplog):
+    config, directory, _, _, label, key = storage
+    current = directory / f"{key}.json"
+    journal.replace_bytes(current, _data("active", label))
+    orphan = directory / journal.PARTS["current"]
+    orphan.mkdir()
+    sentinel = orphan / "operator-note"
+    sentinel.write_text("private content", encoding="utf-8")
+
+    assert [asset.asset_id for asset in load_inventory(config.effective_inventory)] == ["active"]
+    assert sentinel.read_text(encoding="utf-8") == "private content"
+    assert "Skipping an unsafe orphaned inventory staging file" in caplog.text
+    assert "private content" not in caplog.text

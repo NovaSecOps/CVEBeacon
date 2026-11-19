@@ -304,7 +304,8 @@ class BoundedYAMLLoader(yaml.SafeLoader):
             self.depth -= 1
 
     def construct_mapping(self, node, deep=False):
-        # YAML merges can expand a small file into a very large mapping.
+        # Alias-based merges are refused during composition. Reject merges
+        # written with inline mappings before SafeLoader flattens them, too.
         if any(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value):
             raise InventoryValidationError([ValidationIssue("YAML merge keys are not supported. Use a separate value for each field.")])
         mapping = super().construct_mapping(node, deep=deep)

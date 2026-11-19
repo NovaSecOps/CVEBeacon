@@ -5,24 +5,24 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import sqlite3
 import stat
 import sys
-import tempfile
 
 from .config import load_config
 from .errors import CVEBeaconError
 from .inventory_journal import recover, remove_file
 from .managed_inventory import is_managed_file
-from .private_storage import private_directory
+from .private_storage import private_directory, private_file
+from .publication import replace_file
 from .snapshot import (
     SnapshotError,
     copy_sqlite as _copy_sqlite,
     digest,
     logical_digest,
     sync_directory,
-    sync_file,
 )
 from .state import StateStore
 from .watch.store import WatchStore
@@ -164,6 +164,20 @@ def _restore_managed(config, source, files):
         if path.name not in files:
             remove_file(path)
 
+
+def _temporary_file(directory, prefix):
+    path = directory / (prefix + secrets.token_hex(16))
+    return path, private_file(path, create=True, exclusive=True)
+
+
+def _copy_config(source, descriptor):
+    with os.fdopen(descriptor, "wb") as destination:
+        with source.open("rb") as original:
+            shutil.copyfileobj(original, destination)
+        destination.flush()
+        os.fsync(destination.fileno())
+
+
 def backup(config, data, destination):
     destination = Path(destination)
     paths = databases(config, data)
@@ -175,22 +189,20 @@ def backup(config, data, destination):
         if exists:
             entry["mode"] = stat.S_IMODE(path.stat().st_mode)
             target = destination / entry["backup"]
+            os.close(private_file(target, create=True, exclusive=True))
             _copy_sqlite(path, target)
             entry.update(sha256=digest(target), logical_sha256=logical_digest(target))
         manifest["databases"].append(entry)
     config_backup = destination / "config.toml"
-    shutil.copyfile(config.config_path, config_backup)
-    config_backup.chmod(0o600)
-    sync_file(config_backup)
+    _copy_config(config.config_path, private_file(config_backup, create=True, exclusive=True))
     manifest["config_sha256"] = digest(config_backup)
     temporary = destination / ".manifest-completing"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = private_file(temporary, create=True, exclusive=True)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         json.dump(manifest, stream)
         stream.flush()
         os.fsync(stream.fileno())
-    temporary.chmod(0o600)
-    os.replace(temporary, destination / "manifest.json")
+    replace_file(temporary, destination / "manifest.json")
     sync_directory(destination)
 
 
@@ -201,18 +213,15 @@ def restore_config(path, data, source):
     expected = _manifest(Path(source), data)["config_sha256"]
     if digest(Path(source) / "config.toml") != expected:
         raise SnapshotError("config snapshot checksum mismatch")
-    fd, temporary = tempfile.mkstemp(prefix=".update-config-", dir=data)
-    os.close(fd)
+    temporary, fd = _temporary_file(data, ".update-config-")
     try:
-        shutil.copyfile(Path(source) / "config.toml", temporary)
-        if digest(Path(temporary)) != expected:
+        _copy_config(Path(source) / "config.toml", fd)
+        if digest(temporary) != expected:
             raise SnapshotError("config snapshot checksum mismatch")
-        Path(temporary).chmod(0o600)
-        sync_file(temporary)
-        os.replace(temporary, path)
+        replace_file(temporary, path)
         sync_directory(data)
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 def restore(config, data, source):
@@ -244,15 +253,16 @@ def restore(config, data, source):
         saved = source / row["backup"]
         if digest(saved) != row["sha256"]:
             raise SnapshotError("snapshot database checksum mismatch")
-        fd, temporary = tempfile.mkstemp(prefix=".update-restore-", dir=path.parent)
+        temporary, fd = _temporary_file(path.parent, ".update-restore-")
         os.close(fd)
         try:
-            _copy_sqlite(saved, Path(temporary))
-            Path(temporary).chmod(row.get("mode", 0o600) & 0o600)
-            os.replace(temporary, path)
+            _copy_sqlite(saved, temporary)
+            if os.name == "posix":
+                temporary.chmod(row.get("mode", 0o600) & 0o600)
+            replace_file(temporary, path)
             sync_directory(path.parent)
         finally:
-            Path(temporary).unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
     _restore_managed(config, source, managed)
     restore_config(config.config_path, data, source)
 

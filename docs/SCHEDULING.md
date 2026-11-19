@@ -69,7 +69,7 @@ this setup, and a password-logon task is the documented alternative.
 follows the configuration:
 
 - `watch` when watch mode is enabled and there is no inventory;
-- `scan` when only an inventory is configured;
+- `scan` when a configured or uploaded inventory is available and watch mode is disabled;
 - `both` when both are configured.
 
 `watch` runs `<executable> --config <path> watch run`. `scan` runs
@@ -96,7 +96,7 @@ terminal. Configure `baseline` or `backfill` for unattended first runs, or run
 ## Single-flight lock
 
 `scan` locks the inventory state storage beside `[state] database`. `run` locks
-that storage when an inventory is configured and the watch storage when watch
+that storage when a configured or uploaded inventory is available and the watch storage when watch
 is enabled. `watch sync`, `watch evaluate`, `watch run`, `watch report`,
 `watch unreport` and delivery runs (`watch notify`, including the retry
 variants) lock the watch storage beside `[watch] database`. Channel tests do

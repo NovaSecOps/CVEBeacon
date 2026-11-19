@@ -159,3 +159,14 @@ def test_yaml_complexity_and_configured_aliases_have_safe_errors(tmp_path):
         inventory.load_inventory(InventoryConfig(path))
     with pytest.raises(InventoryValidationError, match="YAML aliases"):
         inventory.inspect_inventory(path)
+
+
+def test_yaml_duplicate_fields_are_rejected_without_echoing_values(tmp_path):
+    content = b"- {asset_id: a, vendor: hidden-one, vendor: hidden-two, product: Widget, version: '1'}"
+    path = tmp_path / "inventory.yaml"
+    path.write_bytes(content)
+    with pytest.raises(ConfigurationError, match="duplicate field names") as upload:
+        preview_upload(content, ".yaml", "Example")
+    with pytest.raises(InventoryValidationError, match="duplicate field names") as configured:
+        inventory.load_inventory(InventoryConfig(path))
+    assert "hidden-" not in str(upload.value) + str(configured.value)

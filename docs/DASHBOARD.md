@@ -22,7 +22,7 @@ With no configured file or dashboard inventory, `web_snapshots` disabled (the de
 
 - **Overview:** last successful full scan, most recent attempted scan, current inventory count, latest known affected/review findings, coverage gaps, KEV counts, recent material changes, notification acceptance/failure, and source observations.
 - **Findings:** filter by asset, vendor, product, version, CVE, applicability, severity or minimum CVSS, and CISA/EU KEV. Expand evidence to see the assessment reason, provenance, conflicts, CVSS and EPSS. Unknown KEV membership is distinct from a healthy negative result.
-- **Assets:** search the current configured inventory and inspect an asset's stored findings. A changed version or removed asset leaves its older observations explicitly labelled as historical.
+- **Assets:** search the current inventory, including dashboard uploads, and inspect an asset's stored findings. A changed version or removed asset leaves its older observations explicitly labelled as historical.
 - **History:** browse material events, filter exact asset/CVE identifiers, and open the evidence saved with an event. Older-event links provide access beyond the first page.
 - **Manual query:** query a vendor/product/version using the same core operation as the CLI. Results show uncertainty and degraded source status. Queries can take several minutes and do not change scheduled alert state.
 - **Reports:** query the current inventory and download an XLSX or JSON report using the existing reporting functions. Exports do not commit monitoring state. Check the report's coverage and source-health fields even when the download succeeds.
@@ -39,7 +39,7 @@ Operations run as short-lived children of the same `cvebeacon` executable with t
 | Command | Storage locked |
 | --- | --- |
 | `scan` | Inventory state |
-| `run` | Inventory state when an inventory is configured; watch storage when watch is enabled |
+| `run` | Inventory state when a configured or uploaded inventory is available, plus watch storage when watch is enabled |
 | `watch sync`, `watch evaluate`, `watch run` | Watch storage |
 | `watch notify`, including retry variants | Watch storage |
 | `watch report`, `watch unreport`, dashboard report/unreport | Watch storage |
@@ -209,7 +209,9 @@ record a client report because there is no CVEBeacon account identity.
 
 Open **Clients → Add client**, enter a name and optional notes and contact, then
 open **Upload inventory** on the new client page. Choose a CSV, Excel (.xlsx),
-JSON or YAML file up to 32 MiB. On the preview, match your column names to
+JSON or YAML file up to 32 MiB. For Excel, the 32 MiB limit also applies to
+each decompressed part and the workbook's total expanded data. Split a larger
+workbook into smaller uploads. On the preview, match your column names to
 fields such as **Asset ID**, **Vendor**, **Product** and **Version**. Select
 **Check column mapping** to review row warnings and errors before saving. Use
 **Replace this client's inventory** to switch to a new list, or **Add to it**

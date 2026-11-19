@@ -49,7 +49,7 @@
 {% if enabled and accounts and 'manage_inventory' in permissions %}
 <section>
 <h2>Upload inventory</h2>
-<p>Choose a CSV, Excel (.xlsx), JSON or YAML file up to 32 MiB. Check the rows and match the columns on the next screen before saving.</p>
+<p>Choose a CSV, Excel (.xlsx), JSON or YAML file up to 32 MiB. Excel files must also fit within 32 MiB after decompression. Split larger workbooks into smaller uploads. Check the rows and match the columns on the next screen before saving.</p>
 <form method="post" enctype="multipart/form-data" action="{{ url_for('client_inventory.upload', key=key, name=profile.name) }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label for="inventory">Inventory file</label>

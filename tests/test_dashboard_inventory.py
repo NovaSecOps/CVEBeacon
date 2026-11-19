@@ -8,10 +8,11 @@ import re
 from openpyxl import Workbook
 import pytest
 
-from cvebeacon import dashboard_inventory
+from cvebeacon import dashboard_inventory, inventory_journal
 from cvebeacon.dashboard import create_app
 from cvebeacon.inventory import load_inventory
 from cvebeacon.inventory_preview import preview_upload
+from cvebeacon.private_storage import private_directory, private_file
 from cvebeacon.web_assets import client_key
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
 from test_dashboard_watch import PASSWORD, csrf, login
@@ -199,11 +200,11 @@ def test_bad_files_sizes_collisions_and_paths_are_safe(deployment, tmp_path, mon
     assert upload(browser, second, oversized).status_code == 413
     if os.name == "posix":
         target = tmp_path / "untouched.json"
-        target.write_text("untouched")
+        target.write_text("untouched", encoding="utf-8")
         path = config.inventory_directory / f"{client_key('../Client B')}.json"
         path.symlink_to(target)
         assert upload(browser, second).status_code == 503
-        assert target.read_text() == "untouched"
+        assert target.read_text(encoding="utf-8") == "untouched"
     assert browser.get("/watch/clients/%2e%2e/download").status_code == 404
     assert all("SENSITIVE-MARKER" not in row.action for row in users.audit_entries())
 
@@ -285,7 +286,7 @@ def test_corrupt_version_gives_recovery_guidance(deployment):
     assert submit(browser, detail, upload(browser, detail)).status_code == 303
     assert submit(browser, detail, upload(browser, detail)).status_code == 303
     archived, = config.inventory_directory.glob("*.*.json")
-    archived.write_text("private-corrupt-version")
+    archived.write_text("private-corrupt-version", encoding="utf-8")
     response = change(browser, detail, "restore", version=archived.name.split(".")[1])
     assert response.status_code == 409
     assert "Choose another version" in response.text
@@ -354,7 +355,7 @@ def test_corrupt_inventory_blocks_cli_export_and_dashboard_download(deployment, 
     contents = CSV.replace(b"private-asset", b"healthy")
     assert submit(browser, healthy, upload(browser, healthy, contents)).status_code == 303
     path = config.inventory_directory / f"{client_key('Unreadable client')}.json"
-    path.write_text("PRIVATE-INVENTORY-CONTENTS")
+    path.write_text("PRIVATE-INVENTORY-CONTENTS", encoding="utf-8")
     monkeypatch.setattr(cli, "_run_query", lambda *a, **kw: pytest.fail("queried with incomplete inventory"))
 
     admin = _admin(app)
@@ -441,3 +442,29 @@ def test_removing_final_inventory_explains_why_scans_are_unavailable(deployment)
     removed = change(browser, detail, "remove", confirm="remove")
     page = browser.get(removed.location)
     assert "upload or restore an inventory to run scans" in page.text
+
+
+def test_dashboard_creates_private_inventory_directory_and_journal(deployment, monkeypatch):
+    config, _, _, manager = deployment
+    directory = config.inventory_directory
+    assert not directory.exists()
+    staged = []
+    stage_change = dashboard_inventory.stage_change
+
+    def check_staged(directory, db, users, actor, event, key, detail, changes):
+        stage_change(directory, db, users, actor, event, key, detail, changes)
+        assert directory.is_dir()
+        private_directory(directory, owner_only=True)
+        names = [inventory_journal.PARTS[kind] for kind in changes]
+        for name in [inventory_journal.MARKER, *names]:
+            os.close(private_file(directory / name, readonly=True))
+        staged.append(set(changes))
+
+    monkeypatch.setattr(dashboard_inventory, "stage_change", check_staged)
+    detail = add(manager)
+    assert submit(manager, detail, upload(manager, detail)).status_code == 303
+    newer = CSV.replace(b"private-asset", b"newer-asset")
+    assert submit(manager, detail, upload(manager, detail, newer)).status_code == 303
+    assert staged == [{"profile"}, {"current"}, {"archive", "current"}]
+    assert not list(directory.glob(".inventory-pending*"))
+    assert current(manager, detail)[0]["asset_id"] == "newer-asset"

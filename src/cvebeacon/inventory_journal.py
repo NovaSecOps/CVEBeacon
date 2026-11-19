@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
-import os
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 
 from .errors import StateError
 from .private_storage import private_directory
+from .snapshot import sync_directory
 from .web_assets import replace_bytes
 from .web_inventory import decode_json, read_bytes
+
+LOG = logging.getLogger("cvebeacon")
 
 MARKER = ".inventory-pending"
 PARTS = {kind: f"{MARKER}-{kind}" for kind in ("current", "profile", "archive")}
@@ -20,17 +23,6 @@ TARGETS = {
     "profile": re.compile(r"[a-f0-9]{64}\.client"),
     "archive": re.compile(r"[a-f0-9]{64}\.[0-9]{8}T[0-9]{12}Z\.json"),
 }
-
-
-def sync_directory(directory):
-    if os.name != "posix":
-        return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(directory, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def remove_file(path):
@@ -84,6 +76,14 @@ def _read_marker(directory):
         raise StateError("A pending client inventory change could not be read.") from exc
 
 
+def _discard_orphans(parts):
+    for part in parts:
+        try:
+            remove_file(part)
+        except (OSError, StateError, ValueError):
+            LOG.warning("Skipping an unsafe orphaned inventory staging file.")
+
+
 def recover(directory: Path, users_path: Path | None):
     """Resolve a pending change against its committed audit row before reading files."""
     if directory.is_symlink():
@@ -102,8 +102,7 @@ def recover(directory: Path, users_path: Path | None):
     # Serializes with both an in-flight writer and another recovery process.
     with UserStore(users_path).transaction() as db:
         if not pending_exists(directory):
-            for part in parts:
-                remove_file(part)
+            _discard_orphans(parts)
             return
         row, chain, targets = _read_marker(directory)
         committed = db.execute("SELECT 1 FROM cb_user_audit WHERE id=? AND chain=?", (row, chain)).fetchone()
@@ -121,5 +120,4 @@ def recover(directory: Path, users_path: Path | None):
                 from .managed_inventory import prune
                 prune(directory / targets["current"][0])
         remove_file(directory / MARKER)
-        for part in parts:
-            remove_file(part)
+        _discard_orphans(parts)

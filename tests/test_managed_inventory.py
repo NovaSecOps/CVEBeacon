@@ -8,20 +8,18 @@ import pytest
 from cvebeacon.config import load_config
 from cvebeacon.inventory import load_inventory
 from cvebeacon.models import Asset
+from cvebeacon.private_storage import private_directory
+from cvebeacon.web_assets import replace_bytes
 from cvebeacon.managed_inventory import client_key
 
 
 def test_watch_only_config_discovers_inventory_without_reloading(tmp_path):
     path = tmp_path / "cvebeacon.toml"
-    path.write_text("[state]\ndatabase = 'state.db'\n[watch]\nenabled = true\n")
+    path.write_text("[state]\ndatabase = 'state.db'\n[watch]\nenabled = true\n", encoding="utf-8")
     config = load_config(path)
     assert config.effective_inventory is None
-    directory = tmp_path / "inventories"
-    directory.mkdir(mode=0o700)
     asset = Asset("asset", vendor="vendor", product="product", version="1", client="Example")
-    source = directory / f"{client_key(asset.client)}.json"
-    source.touch(mode=0o600)
-    source.write_text(json.dumps([asdict(asset)]))
+    source = write_managed(config.inventory_directory, asset.client, asset.asset_id)
     assert load_inventory(config.effective_inventory) == [asset]
     assert load_inventory(load_config(path).effective_inventory) == [asset]
     source.unlink()
@@ -29,11 +27,11 @@ def test_watch_only_config_discovers_inventory_without_reloading(tmp_path):
 
 
 def write_managed(directory, client, asset_id):
-    directory.mkdir(mode=0o700, exist_ok=True)
+    if not directory.exists():
+        private_directory(directory, owner_only=True)
     path = directory / f"{client_key(client)}.json"
-    path.touch(mode=0o600)
     asset = Asset(asset_id, vendor="vendor", product="product", version="1", client=client)
-    path.write_text(json.dumps([asdict(asset)]))
+    replace_bytes(path, json.dumps([asdict(asset)]).encode("utf-8"))
     return path
 
 
@@ -41,9 +39,9 @@ def test_merge_collisions_report_client_names_without_asset_ids(tmp_path):
     from cvebeacon.errors import InventoryValidationError
 
     source = tmp_path / "inventory.csv"
-    source.write_text("asset_id,vendor,product,version,client\nprivate-id,v,p,1,Configured client\n")
+    source.write_text("asset_id,vendor,product,version,client\nprivate-id,v,p,1,Configured client\n", encoding="utf-8")
     path = tmp_path / "config.toml"
-    path.write_text("[state]\ndatabase='state.db'\n[inventory]\npath='inventory.csv'\n")
+    path.write_text("[state]\ndatabase='state.db'\n[inventory]\npath='inventory.csv'\n", encoding="utf-8")
     config = load_config(path)
     write_managed(config.inventory_directory, "Dashboard client", "PRIVATE-ID")
     with pytest.raises(InventoryValidationError) as result:
@@ -57,11 +55,11 @@ def test_validation_and_doctor_report_corrupt_inventory(tmp_path, capsys, caplog
     from cvebeacon.cli import main
 
     path = tmp_path / "config.toml"
-    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n", encoding="utf-8")
     config = load_config(path)
     write_managed(config.inventory_directory, "One", "asset-1")
     corrupt = write_managed(config.inventory_directory, "Two", "asset-2")
-    corrupt.write_text("FILE-CONTENTS-MARKER")
+    corrupt.write_text("FILE-CONTENTS-MARKER", encoding="utf-8")
     assert [asset.asset_id for asset in load_inventory(config.effective_inventory)] == ["asset-1"]
     assert "Skipping invalid client inventory" in caplog.text
     assert main(["--config", str(path), "inventory", "validate"]) == 2
@@ -75,15 +73,15 @@ def test_validation_and_doctor_report_corrupt_inventory(tmp_path, capsys, caplog
 def test_old_configs_ignore_profiles_and_history_and_can_disable_managed(tmp_path):
     path = tmp_path / "config.toml"
     old = "[state]\ndatabase='state.db'\n[watch]\nenabled=true\n"
-    path.write_text(old)
+    path.write_text(old, encoding="utf-8")
     config = load_config(path)
     directory = config.inventory_directory
-    directory.mkdir(mode=0o700)
+    private_directory(directory, owner_only=True)
     (directory / "unused.client").touch()
     (directory / f"{client_key('Example')}.20261110T120000000000Z.json").touch()
     assert config.effective_inventory is None
     write_managed(directory, "Example", "asset")
-    path.write_text(old + "[inventory]\nmanaged=false\n")
+    path.write_text(old + "[inventory]\nmanaged=false\n", encoding="utf-8")
     assert load_config(path).effective_inventory is None
 
 
@@ -93,7 +91,7 @@ def test_scan_with_a_corrupt_inventory_does_not_replace_successful_correlation(t
     from cvebeacon.models import QueryResult
 
     path = tmp_path / "config.toml"
-    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n", encoding="utf-8")
     config = load_config(path)
     write_managed(config.inventory_directory, "One", "asset-1")
     monkeypatch.setattr(cli, "_run_query", lambda config, assets, **kwargs: [
@@ -104,7 +102,7 @@ def test_scan_with_a_corrupt_inventory_does_not_replace_successful_correlation(t
     initial = latest_successful_scan(config.database_path)
     assert initial is not None
     corrupt = write_managed(config.inventory_directory, "Two", "asset-2")
-    corrupt.write_text("INVALID INVENTORY")
+    corrupt.write_text("INVALID INVENTORY", encoding="utf-8")
     assert cli.main(command) == 4
     assert latest_successful_scan(config.database_path) == initial
 
@@ -113,38 +111,44 @@ def test_legacy_inventory_directory_and_configured_input_are_not_merged(tmp_path
     directory = tmp_path / "inventories"
     directory.mkdir(mode=0o755)
     legacy = directory / "stock.json"
-    legacy.write_text(json.dumps([asdict(Asset("legacy", "v", "p", "1", client="Example"))]))
+    legacy.write_text(json.dumps([asdict(Asset("legacy", "v", "p", "1", client="Example"))]), encoding="utf-8")
     path = tmp_path / "config.toml"
-    path.write_text("[state]\ndatabase='state.db'\n[inventory]\npath='inventories/stock.json'\n")
+    path.write_text("[state]\ndatabase='state.db'\n[inventory]\npath='inventories/stock.json'\n", encoding="utf-8")
     config = load_config(path)
     assert [asset.asset_id for asset in load_inventory(config.effective_inventory)] == ["legacy"]
 
     named = write_managed(directory, "Example", "legacy")
-    path.write_text(f"[state]\ndatabase='state.db'\n[inventory]\npath='inventories/{named.name}'\n")
+    path.write_text(f"[state]\ndatabase='state.db'\n[inventory]\npath='inventories/{named.name}'\n", encoding="utf-8")
     config = load_config(path)
     assert [asset.asset_id for asset in load_inventory(config.effective_inventory)] == ["legacy"]
 
 
 def test_discovery_requires_inventory_names_and_names_the_client_in_warnings(tmp_path, caplog):
     path = tmp_path / "config.toml"
-    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n", encoding="utf-8")
     config = load_config(path)
     directory = config.inventory_directory
-    directory.mkdir(mode=0o700)
+    private_directory(directory, owner_only=True)
     inventory = write_managed(directory, "Example", "a")
     data = inventory.read_bytes()
-    inventory.rename(directory / inventory.name.upper().replace(".JSON", ".json"))
+    uppercase = directory / f"{inventory.stem.upper()}.json"
+    inventory.unlink()
+    replace_bytes(uppercase, data)
     (directory / "stray.json").write_bytes(data)
+    assert {item.name for item in directory.iterdir()} == {uppercase.name, "stray.json"}
     assert config.effective_inventory is None
 
     profile = directory / f"{client_key('Example')}.client"
-    profile.touch(mode=0o600)
-    profile.write_text(json.dumps({"name": "Example", "notes": "", "contact": ""}))
+    replace_bytes(profile, b'{"name":"Example","notes":"","contact":""}')
+    uppercase.unlink()
     inventory = write_managed(directory, "Example", "a")
     inventory.write_bytes(data.replace(b'"Example"', b'"PRIVATE-MARKER"'))
+    inventory_config = config.effective_inventory
+    assert inventory.name in {item.name for item in directory.iterdir()}
+    assert inventory_config is not None
     from cvebeacon.errors import InventoryValidationError
     with pytest.raises(InventoryValidationError, match="no valid records"):
-        load_inventory(config.effective_inventory)
+        load_inventory(inventory_config)
     assert "Example" in caplog.text
     assert "PRIVATE-MARKER" not in caplog.text
     assert inventory.stem not in caplog.text
@@ -161,9 +165,9 @@ def test_managed_keys_normalize_unicode_and_are_safe_for_reserved_labels():
 
 def test_unsafe_inventory_directory_is_reported(tmp_path, caplog):
     path = tmp_path / "config.toml"
-    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n", encoding="utf-8")
     config = load_config(path)
-    config.inventory_directory.write_text("ordinary file")
+    config.inventory_directory.write_text("ordinary file", encoding="utf-8")
     assert config.effective_inventory is None
     assert "inventory storage is not a directory" in caplog.text
 
@@ -173,10 +177,10 @@ def test_scan_explains_missing_requested_report_when_inventory_is_partial(tmp_pa
     from cvebeacon.models import QueryResult
 
     path = tmp_path / "config.toml"
-    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n")
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n", encoding="utf-8")
     config = load_config(path)
     write_managed(config.inventory_directory, "Good client", "asset-1")
-    write_managed(config.inventory_directory, "Bad client", "asset-2").write_text("invalid")
+    write_managed(config.inventory_directory, "Bad client", "asset-2").write_text("invalid", encoding="utf-8")
     monkeypatch.setattr(cli, "_run_query", lambda config, assets, **kwargs: [
         QueryResult(asset, (), ()) for asset in assets
     ])
