@@ -1139,12 +1139,12 @@ delete them and run `watch sync` again. They are not migrated.
   only when its source date is at least as recent. Unchanged, older or unversioned
   shared data cannot clear newer targeted evidence. Reconciliation includes
   removed aliases.
-- `watch_cve_list_queue` persists expected revisions and log observation times;
-  `watch_cve_list_observation` tracks imported revision order independently of
-  record content dates. Source metadata retains the
-  pinned repair snapshot, remaining archived days and coverage cursor.
-  `watch_initial_cve` records only the source's initial-import evaluation work,
-  preserving initial digest semantics across failures and independent global runs.
+- CVE List feed state lives only in `watch_meta`: the saved start and initial
+  mode, initial pending/completed markers, the last fully imported archive
+  boundary and its asset token. There is no rolling-log queue, observation table
+  or per-ID repair obligation. `watch_initial_cve` records only the source's
+  initial-import evaluation work, preserving initial digest semantics across
+  failures and independent global runs.
 - `watch_meta.euvd_page_cursor` holds the in-progress EUVD window, its pinned
   total, the next page, the page size, and whether the window is being scanned
   or verified. It is cleared when the window commits.
@@ -1475,19 +1475,23 @@ while unrelated incremental matches stay normal. A CVE List failure or pending
 bounded catch-up is degraded coverage and does not hold other sources' initial
 completion open.
 
-Ordinary sync uses hourly deltas. Gap repair reads current/archived deltas
-independently and uses the rolling log only as revision hints, with up to 100
-remaining per-ID fetches per run. Unproven cross-midnight intervals retain their
-cursor and show degraded coverage, even after known IDs have been processed.
-An explicit confirmed `--cve-list-initial full` repairs such an interval;
-expired log retention also permits a bounded baseline fallback. There is no
-automatic daily baseline download. Both `.zip` and real `.zip.zip` baseline
-names and the previous-day baseline in the 00:00 release are supported. See
-[feed limits and cost](SOURCES.md#cve-list-watch-feed). Only visible reserved IDs
-can be stored. Rejected/reserved records require an explicit status condition
-for an initial match. NVD status and description always retain precedence when
-NVD has the CVE; CVE List only fills fields NVD lacks. Removing it removes that
-evidence from active views and filters, retaining original provenance separately.
+Ordinary sync imports the newest hourly cumulative delta for the current day.
+At each day boundary it imports that day's official
+`cve_YYYY-MM-DD_at_end_of_day` cumulative archive, one per outstanding past day.
+If a required archive is missing or more than seven days are outstanding, one
+full baseline is imported and catch-up continues from its midnight boundary.
+The CVE List cursor therefore records the last archive that was fully validated
+and committed; a failure leaves it in place and the next sync retries. Imports
+are idempotent and never replace a newer stored `dateUpdated` with an older one.
+There is no rolling-log repair queue and no per-ID feed repair. Manual
+`watch refresh` never changes these cursors or archive state. Both `.zip` and
+real `.zip.zip` baseline names and the previous-day baseline in the 00:00
+release are supported. See [feed limits and cost](SOURCES.md#cve-list-watch-feed).
+Only visible reserved IDs can be stored. Rejected/reserved records require an
+explicit status condition for an initial match. NVD status and description
+always retain precedence when NVD has the CVE; CVE List only fills fields NVD
+lacks. Removing it removes that evidence from active views and filters,
+retaining original provenance separately.
 
 The dashboard **CVEs** page lists stored watch CVEs with pagination, source,
 KEV, severity, publication date, event, reported and affected-client filters.

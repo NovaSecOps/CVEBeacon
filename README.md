@@ -89,14 +89,15 @@ the complete new default source selection.
 | **backfill 120 days** (heavy) | 234 MiB | 231 MiB database | 64 min, plus a 4 min resumed sync | 4 min | NVD 220, EUVD 650 + 139 on resume, KEV 2, EPSS 1 |
 | **full history** (heavy) | 372 MiB | 718 MiB database (EUVD incomplete) | 98 min, then further syncs to finish EUVD | about 20 min per resumed sync while EUVD catch-up lasts | NVD 508 (419,060 CVEs), EUVD 851 (incomplete), KEV 2 (CISA 1, EU 1), EPSS 1 |
 
-CVE List adds a small hourly delta in normal operation and a rolling log plus
-bounded record lookups for cross-midnight/gap repair. There is no daily full
-baseline download. Initial backfill/full history or a gap outside retained
-coverage can download one baseline (about 635 MiB in public metadata observed on
-2026-11-19), requiring space for its cached archive, optional inner ZIP and new
-provider data. The archive cap is 1 GiB; a larger source fails visibly rather
-than buffering without a limit. Schema 7 → 8 adds empty tables/indexes without
-copying the historical NVD/EUVD database. See [source costs](docs/SOURCES.md#cve-list-watch-feed)
+CVE List adds the current day's hourly cumulative delta in normal operation and
+one official end-of-day archive for each outstanding past day. There is no daily
+full-baseline download and no rolling-log repair. A first backfill/full history
+import, a missing archive or a gap longer than seven days can download one
+baseline (about 635 MiB in public metadata observed on 2026-11-19), requiring
+space for its cached archive, optional inner ZIP and new provider data. The
+archive cap is 1 GiB; a larger source fails visibly rather than buffering without
+a limit. Schema 7 → 8 adds empty tables/indexes without copying the historical
+NVD/EUVD database. See [source costs](docs/SOURCES.md#cve-list-watch-feed)
 and [upgrading](docs/UPGRADING.md) for limits, retry costs and the reproducible
 430,000-CVE migration check. The table's RAM, disk and timings are not updated
 measurements for this additional source.
