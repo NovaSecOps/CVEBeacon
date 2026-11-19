@@ -41,7 +41,8 @@ def archive(payload=None):
     file = BytesIO()
     with zipfile.ZipFile(file, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         if payload is not None:
-            zip_file.writestr(payload['cveMetadata']['cveId'] + '.json', json.dumps(payload))
+            for item in payload if isinstance(payload, list) else [payload]:
+                zip_file.writestr(item['cveMetadata']['cveId'] + '.json', json.dumps(item))
     return file.getvalue()
 
 
@@ -57,11 +58,13 @@ def main():
     late['cveMetadata']['dateUpdated'] = '2026-11-18T23:55:00Z'
     next_day = record('CVE-2026-10003', 'Next-day delta update')
     next_day['cveMetadata']['dateUpdated'] = '2026-11-19T01:00:00Z'
+    omitted = record('CVE-2026-10004', 'Delta member omitted from the log')
+    omitted['cveMetadata']['dateUpdated'] = '2026-11-19T01:00:00Z'
     bodies = {'2026-11-18_all_CVEs_at_midnight.zip.zip': wrapped.getvalue(),
               '2026-11-19_all_CVEs_at_midnight.zip.zip': wrapped.getvalue(),
               '2026-11-18_delta_CVEs_at_2300Z.zip': archive(delta),
               '2026-11-19_delta_CVEs_at_0000Z.zip': archive(),
-              '2026-11-19_delta_CVEs_at_0100Z.zip': archive(next_day)}
+              '2026-11-19_delta_CVEs_at_0100Z.zip': archive([next_day, omitted])}
     phase = [0]
     seen = []
 
@@ -78,10 +81,12 @@ def main():
                 assets = [{"name": name, "size": len(bodies[name]), "digest": 'sha256:' + hashlib.sha256(bodies[name]).hexdigest(), "browser_download_url": base + '/assets/' + name} for name in names]
                 body = json.dumps({'assets': assets}).encode()
             elif parsed.path == '/deltaLog':
-                groups = [{'fetchTime': NOW.isoformat(), 'numberOfChanges': 1, 'new': [{'cveId': 'CVE-2026-10001'}], 'updated': [], 'error': []},
+                groups = [{'fetchTime': NOW.isoformat(), 'numberOfChanges': 1, 'new': [{'cveId': 'CVE-2026-10001', 'dateUpdated': delta['cveMetadata']['dateUpdated']}], 'updated': [], 'error': []},
                           {'fetchTime': (NOW-timedelta(days=30)).isoformat(), 'numberOfChanges': 0, 'new': [], 'updated': [], 'error': []}]
                 if phase[0] > 0:
-                    groups.insert(0, {'fetchTime': '2026-11-19T00:01:00Z', 'numberOfChanges': 1, 'new': [{'cveId': 'CVE-2026-10003'}], 'updated': [], 'error': []})
+                    groups.insert(0, {'fetchTime': '2026-11-19T00:01:00Z', 'numberOfChanges': 1, 'new': [{'cveId': 'CVE-2026-10003', 'dateUpdated': late['cveMetadata']['dateUpdated']}], 'updated': [], 'error': []})
+                if phase[0] > 1:
+                    groups.insert(0, {'fetchTime': '2026-11-19T01:00:00Z', 'numberOfChanges': 1, 'new': [], 'updated': [{'cveId': 'CVE-2026-10003', 'dateUpdated': next_day['cveMetadata']['dateUpdated']}], 'error': []})
                 body = json.dumps(groups).encode()
             elif parsed.path.startswith('/assets/'):
                 body = bodies[parsed.path.rsplit('/', 1)[1]]
@@ -144,10 +149,16 @@ channels = ["sink"]
                 assert store.search(query='Spring4Shell').total == 1
                 phase[0] = 1
                 midnight = datetime(2026, 11, 19, 0, 35, tzinfo=timezone.utc)
-                assert not sync_watch(config, http, clock=lambda: midnight).failures
+                midnight_report = sync_watch(config, http, clock=lambda: midnight)
+                assert midnight_report.failures == ('cve_list',)
+                assert midnight_report.initial_complete
+                assert store.metadata()['cve_list_coverage_gap']
+                assert store.metadata()['cve_list_cursor'] == NOW.isoformat()
                 assert store.view('CVE-2026-10003', catalogs=config.watch.sources).description == late['containers']['cna']['descriptions'][0]['value']
                 phase[0] = 2
-                assert not sync_watch(config, http, clock=lambda: midnight+timedelta(hours=1)).failures
+                assert sync_watch(config, http, clock=lambda: midnight+timedelta(hours=1)).failures == ('cve_list',)
+                assert store.metadata()['cve_list_cursor'] == NOW.isoformat()
+                assert store.view('CVE-2026-10004', catalogs=config.watch.sources).description == omitted['containers']['cna']['descriptions'][0]['value']
                 assert store.view('CVE-2026-10003', catalogs=config.watch.sources).description == next_day['containers']['cna']['descriptions'][0]['value']
                 assert sum('_all_CVEs_' in path for path in seen) == 1
                 app = dashboard.create_app(config)
@@ -162,7 +173,7 @@ channels = ["sink"]
                 app.extensions['dashboard_jobs'].shutdown()
             finally:
                 http.close()
-        print('PASS: real release names + nested baseline → 23:00/00:00/01:00 deltas → search/detail → targeted refresh/event; baseline downloads: 1')
+        print('PASS: real release names + nested baseline → 23:00/00:00/01:00 deltas + omitted log member + durable unproven gap → search/detail → targeted refresh/event; baseline downloads: 1')
         print(f'Local fake requests: {len(seen)}; external requests and notifications: 0')
         return 0
     finally:

@@ -1131,11 +1131,17 @@ delete them and run `watch sync` again. They are not migrated.
   names are not part of the fingerprint.
 - `watch_provider` retains only new provider evidence, not copies of NVD rows.
   `watch_search`/FTS index new provider descriptions; historical NVD descriptions
-  are searched in place using LIKE. Active providers govern filters and sorting.
+  retain their FTS5 semantics through a bounded in-memory matcher (LIKE when
+  FTS5 is unavailable). Active providers govern filters and sorting.
 - `watch_euvd_override` stores CVE-scoped targeted lookups independently of shared
   advisory aliases. Refreshing one CVE cannot change a sibling's view, fingerprint
-  or queue entry. A later global sync may supersede an older scoped observation.
-- `watch_cve_list_queue` persists log-repair records; source metadata retains the
+  or queue entry. A changed global advisory can supersede its scoped observation
+  only when its source date is at least as recent. Unchanged, older or unversioned
+  shared data cannot clear newer targeted evidence. Reconciliation includes
+  removed aliases.
+- `watch_cve_list_queue` persists expected revisions and log observation times;
+  `watch_cve_list_observation` tracks imported revision order independently of
+  record content dates. Source metadata retains the
   pinned repair snapshot, remaining archived days and coverage cursor.
   `watch_initial_cve` records only the source's initial-import evaluation work,
   preserving initial digest semantics across failures and independent global runs.
@@ -1469,10 +1475,13 @@ while unrelated incremental matches stay normal. A CVE List failure or pending
 bounded catch-up is degraded coverage and does not hold other sources' initial
 completion open.
 
-Ordinary sync uses hourly deltas. Cross-midnight/gap repair uses the rolling log,
-cheap archived deltas and up to 100 remaining per-ID fetches per run. Full
-baselines are reserved for initial history or gaps outside the retained log;
-there is no daily baseline download. Both `.zip` and real `.zip.zip` baseline
+Ordinary sync uses hourly deltas. Gap repair reads current/archived deltas
+independently and uses the rolling log only as revision hints, with up to 100
+remaining per-ID fetches per run. Unproven cross-midnight intervals retain their
+cursor and show degraded coverage, even after known IDs have been processed.
+An explicit confirmed `--cve-list-initial full` repairs such an interval;
+expired log retention also permits a bounded baseline fallback. There is no
+automatic daily baseline download. Both `.zip` and real `.zip.zip` baseline
 names and the previous-day baseline in the 00:00 release are supported. See
 [feed limits and cost](SOURCES.md#cve-list-watch-feed). Only visible reserved IDs
 can be stored. Rejected/reserved records require an explicit status condition
@@ -1483,8 +1492,12 @@ evidence from active views and filters, retaining original provenance separately
 The dashboard **CVEs** page lists stored watch CVEs with pagination, source,
 KEV, severity, publication date, event, reported and affected-client filters.
 Search accepts an exact case-insensitive CVE ID or description keywords and
-aliases. New provider descriptions use FTS5 when available, with literal LIKE fallback;
-historical NVD descriptions stay in place and use LIKE without a copying migration;
+aliases. All active descriptions share the original FTS5 word-prefix, order-independent
+semantics when FTS5 is available, including Unicode/diacritic tokenization and
+terms spanning providers. Existing NVD text stays in place: a bounded in-memory
+FTS candidate verifies each row without a copying migration or persistent write.
+This requires a scan for legacy text and can be slower on large databases.
+Without FTS5, search retains the original literal LIKE substring fallback;
 queries are limited to 256 characters and results to 100 per storage request
 (50 per dashboard page). FTS search uses word prefixes; fallback search uses a
 literal substring. Sorting supports publication date, modification date, CVSS,
