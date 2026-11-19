@@ -148,10 +148,28 @@ Linux user cron requires an installed, running cron service. It uses the host's 
 
 The repository ships `deploy/systemd/cvebeacon-dashboard.service`, which runs the
 dashboard on `127.0.0.1` as the service user with `NoNewPrivileges=yes`. Under
-that setting the dashboard Schedule page cannot write the user crontab. Install
-the schedule from the CLI as the service user, or use the systemd timer in the
-[deployment guide](DEPLOY.md#run-the-dashboard). To manage the schedule from the
-dashboard instead, add a drop-in with `NoNewPrivileges=no`; the dashboard process
-can then gain privileges through setuid and setgid helpers such as `crontab`, so
-accept that trade-off only where dashboard access is already equivalent to the
-service account.
+that setting `crontab` cannot use its setuid or setgid helper, so the dashboard
+Schedule page cannot read or update the user crontab and shows a permission
+error. Install the schedule from the CLI as the service user, or with the service
+and timer examples in the deployment guide's
+[Schedule it](DEPLOY.md#schedule-it) section; `deploy/systemd` ships no timer
+unit.
+
+To manage the schedule from the dashboard instead, the drop-in must restore both
+the privilege transition and write access to the distribution's cron spool:
+
+```ini
+[Service]
+NoNewPrivileges=no
+ReadWritePaths=/var/spool/cron/crontabs
+```
+
+Use `ReadWritePaths=/var/spool/cron` on hosts whose spool is directly under that
+directory. `NoNewPrivileges=no` lets `crontab` switch to its privileged user or
+group, and the `ReadWritePaths` entry keeps that spool writable under
+`ProtectSystem=strict`.
+The dashboard process can then gain privileges through setuid and setgid helpers
+such as `crontab`, so accept that trade-off only where dashboard access is
+already equivalent to the service account. See the
+[deployment guide](DEPLOY.md#run-the-dashboard) for the complete drop-in and
+restart commands.

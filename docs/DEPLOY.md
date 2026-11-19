@@ -134,8 +134,10 @@ sudo systemctl enable --now cvebeacon.timer
 
 `deploy/systemd/cvebeacon-dashboard.service` runs `cvebeacon serve` on
 `127.0.0.1:8787` as the `cvebeacon` user. It assumes the paths in this section;
-edit `WorkingDirectory`, `ExecStart` and `ReadWritePaths` when the checkout or
-data directory differs.
+edit `WorkingDirectory`, `ExecStart`, `EnvironmentFile` and `ReadWritePaths` when
+the checkout, data directory, environment file or other writable output paths
+differ. If any of those paths is under a home directory, adjust or remove
+`ProtectHome=yes`.
 
 ```console
 sudo install -m 0644 /opt/cvebeacon/deploy/systemd/cvebeacon-dashboard.service /etc/systemd/system/
@@ -144,13 +146,36 @@ sudo systemctl enable --now cvebeacon-dashboard.service
 ```
 
 The unit sets `NoNewPrivileges=yes` and other hardening that keeps the service
-inside the data directory. That setting also prevents the dashboard's Schedule
-page from writing the user crontab. With this unit, install the schedule from
-the CLI as the service user (`sudo -u cvebeacon ... schedule install`) or use
-the systemd timer above. Alternatively, to manage the schedule from the
-dashboard, add a drop-in with `NoNewPrivileges=no`; this permits the dashboard
-process to gain privileges through setuid and setgid helpers such as `crontab`,
-so enable it only where dashboard access is already equivalent to the service
+inside the data directory. That setting prevents `crontab` from using its setuid
+or setgid helper, so the dashboard's Schedule page cannot read or update the user
+crontab and shows a permission error. With this unit, install the schedule from
+the CLI as the service user (`sudo -u cvebeacon ... schedule install`) or with
+the documented service and timer examples above. `deploy/systemd` ships no timer
+file; the timer is the example in this guide.
+
+To manage the schedule from the dashboard instead, add a complete drop-in at
+`/etc/systemd/system/cvebeacon-dashboard.service.d/crontab.conf`:
+
+```ini
+[Service]
+NoNewPrivileges=no
+ReadWritePaths=/var/spool/cron/crontabs
+```
+
+Use `ReadWritePaths=/var/spool/cron` on hosts whose crontab spool is directly
+under that directory. `NoNewPrivileges=no` restores the setuid or setgid
+transition for `crontab`, and the spool path makes it writable under
+`ProtectSystem=strict`; both are required for the Schedule page to read and
+update the crontab. Reload and restart after adding the drop-in:
+
+```console
+sudo systemctl daemon-reload
+sudo systemctl restart cvebeacon-dashboard.service
+```
+
+This trade-off lets the dashboard process gain privileges through setuid and
+setgid helpers such as `crontab`, and gives it write access to the cron spool.
+Enable it only where dashboard access is already equivalent to the service
 account.
 
 ### Check the result
@@ -159,22 +184,25 @@ account.
 cb watch status
 cb schedule status
 sudo systemctl list-timers cvebeacon.timer
+sudo systemctl status cvebeacon-dashboard.service
 ```
 
 Use the line for the scheduler you installed; see [exit codes](DEVELOPMENT.md#exit-codes).
 
 ### Upgrade
 
-Stop the scheduler you actually use and wait for a running job to finish; run
-one line:
+Stop the scheduler you actually use, stop the dashboard service so it cannot
+start new jobs, and wait for a running job to finish; run one line:
 
 ```console
 cb schedule remove --yes                                # built-in crontab
 sudo systemctl stop cvebeacon.timer cvebeacon.service   # systemd timer
+sudo systemctl stop cvebeacon-dashboard.service         # installed dashboard
 ```
 
 Back up the watch database with SQLite's online backup (use the path
-`watch status` reports):
+`watch status` reports). Keep the dashboard stopped and let active jobs finish
+before copying database files or their sidecars.
 
 ```console
 sudo -u cvebeacon sqlite3 /var/lib/cvebeacon/cvebeacon-watch.db ".backup '/var/lib/cvebeacon/watch-backup.db'"
@@ -197,6 +225,7 @@ sudo -u cvebeacon git -C /opt/cvebeacon pull --ff-only
 sudo -u cvebeacon /opt/cvebeacon/.venv/bin/python -m pip install /opt/cvebeacon
 cb schedule install --times 07:00,19:00 --command watch --yes
 # or: sudo systemctl start cvebeacon.timer
+sudo systemctl start cvebeacon-dashboard.service         # when installed
 ```
 
 ### Windows data-directory ACLs
