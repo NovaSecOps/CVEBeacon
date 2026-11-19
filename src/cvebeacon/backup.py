@@ -34,6 +34,7 @@ from .locking import (
     dashboard_job_id,
 )
 from .private_storage import private_directory, private_file
+from .publication import replace_file
 from .snapshot import (
     SnapshotError,
     copy_sqlite,
@@ -858,11 +859,29 @@ def _stage_file(source: Path, target: Path, expected: str, *, prefix: str) -> Pa
         raise
 
 
+def _restore_database_content(source: Path, target: Path) -> None:
+    """Copy a verified snapshot into a live database with SQLite's backup API."""
+    try:
+        with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=30)) as src:
+            with closing(sqlite3.connect(target, timeout=30)) as dst:
+                src.backup(dst, pages=-1)
+                if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise BackupError("restored database integrity check failed")
+        if os.name == "posix":
+            target.chmod(0o600)
+    except BackupError:
+        raise
+    except sqlite3.Error as exc:
+        raise BackupError(f"database restore failed ({type(exc).__name__})") from None
+    except OSError as exc:
+        raise BackupError(f"database restore failed ({type(exc).__name__})") from None
+
+
 def _replace_staged(item: _StagedFile) -> None:
     if item.kind == "database":
-        for suffix in ("-wal", "-shm", "-journal"):
-            Path(str(item.target) + suffix).unlink(missing_ok=True)
-    os.replace(item.temporary, item.target)
+        _restore_database_content(item.temporary, item.target)
+        return
+    replace_file(item.temporary, item.target)
     _sync_directory(item.target.parent)
 
 
@@ -941,6 +960,12 @@ def restore(config: AppConfig, backup_id: str) -> dict:
 
 
 def _restore(config: AppConfig, backup_id: str) -> dict:
+    # Refuse contention before verification, validation or any filesystem work.
+    with _locked(config, "backup-restore"):
+        return _restore_locked(config, backup_id)
+
+
+def _restore_locked(config: AppConfig, backup_id: str) -> dict:
     backup, manifest = _verify(config, backup_id)
     _refuse_newer(manifest)
     restored, validation_directory, validation_copies = _validate_restored_config(
@@ -948,53 +973,54 @@ def _restore(config: AppConfig, backup_id: str) -> dict:
     )
     try:
         _validate_restore(config, restored, manifest, validation_copies)
-        with _locked(config, "backup-restore"):
-            own_job = dashboard_job_id()
-            active = [job for job in _active_jobs(config) if job["id"] != own_job]
-            if active:
-                labels = ", ".join(
-                    f"job {job['id']} ({job['operation']}, {job['status']})" for job in active
-                )
-                raise BackupError(
-                    "restore refused while dashboard jobs are active: " + labels
-                    + "; wait for them to finish or cancel them from the Operations page"
-                )
-            skip_roles = {"users", "jobs"} if own_job is not None else set()
-            preserved = _preserved_absent(manifest)
-            safety = _create(
-                config,
-                include_secrets=bool(manifest["secrets"]),
-                created_by="pre-restore",
-                extra_databases=[Path(row["path"]) for row in manifest["databases"] if row["exists"]],
-                extra_secret_paths=[Path(row["path"]) for row in manifest["secrets"]],
+        own_job = dashboard_job_id()
+        active = [job for job in _active_jobs(config) if job["id"] != own_job]
+        if active:
+            labels = ", ".join(
+                f"job {job['id']} ({job['operation']}, {job['status']})" for job in active
             )
-            items: list[_StagedFile] = []
-            created: list[Path] = []
+            raise BackupError(
+                "restore refused while dashboard jobs are active: " + labels
+                + "; wait for them to finish or cancel them from the Operations page"
+            )
+        skip_roles = {"users", "jobs"} if own_job is not None else set()
+        preserved = _preserved_absent(manifest)
+        safety = _create(
+            config,
+            include_secrets=bool(manifest["secrets"]),
+            created_by="pre-restore",
+            extra_databases=[Path(row["path"]) for row in manifest["databases"] if row["exists"]],
+            extra_secret_paths=[Path(row["path"]) for row in manifest["secrets"]],
+        )
+        items: list[_StagedFile] = []
+        created: list[Path] = []
+        try:
+            items, created = _stage_restore(backup.path, manifest, config, skip_roles)
             try:
-                items, created = _stage_restore(backup.path, manifest, config, skip_roles)
-                try:
-                    for item in items:
-                        _replace_staged(item)
-                    from .update_state import migrate
-
-                    migrate(load_config(config.config_path))
-                except KeyboardInterrupt:
-                    _rollback(config, safety, skip_roles=skip_roles, created=created)
-                    raise
-                except BaseException:
-                    try:
-                        _rollback(config, safety, skip_roles=skip_roles, created=created)
-                    except BaseException:
-                        raise BackupError(
-                            f"restore failed and automatic rollback from safety backup "
-                            f"{safety.id} is incomplete; restore it manually"
-                        ) from None
-                    raise BackupError(
-                        f"restore failed; previous state restored from safety backup {safety.id}"
-                    ) from None
-            finally:
                 for item in items:
-                    item.temporary.unlink(missing_ok=True)
+                    _replace_staged(item)
+                from .update_state import migrate
+
+                migrate(load_config(config.config_path))
+            except KeyboardInterrupt:
+                _rollback(config, safety, skip_roles=skip_roles, created=created)
+                raise
+            except BaseException as exc:
+                try:
+                    _rollback(config, safety, skip_roles=skip_roles, created=created)
+                except BaseException as rollback_exc:
+                    raise BackupError(
+                        f"restore failed ({type(exc).__name__}) and automatic rollback "
+                        f"from safety backup {safety.id} is incomplete "
+                        f"({type(rollback_exc).__name__}); restore it manually"
+                    ) from None
+                raise BackupError(
+                    f"restore failed ({type(exc).__name__}); previous state restored "
+                    f"from safety backup {safety.id}"
+                ) from None
+        finally:
+            for item in items:
+                item.temporary.unlink(missing_ok=True)
         skipped = sorted({
             row["role"] for row in manifest["databases"]
             if row.get("role") in skip_roles and row["exists"]

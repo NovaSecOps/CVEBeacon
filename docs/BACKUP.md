@@ -115,13 +115,16 @@ Create, verify, restore, prune and dashboard download take the shared run
 locks. Restore is refused while another run or a dashboard job is active, and
 says what to stop or wait for.
 
-`restore` verifies the whole backup and validates the backed-up configuration
-with the running loader before changing anything. It refuses a configuration
-that this version cannot load and a backup whose state or watch schema is newer
-than the running code. It then keeps an automatic `pre-restore` safety backup,
-stages every replacement in a private temporary file beside its target with
-fsync, and only then replaces the databases, configuration and secrets in a
-fixed order. The safety backup includes the live account, job-history and other
+`restore` takes the shared run lock before verification, validation or any
+filesystem work, then verifies the whole backup and validates the backed-up
+configuration with the running loader before changing anything. It refuses a
+configuration that this version cannot load and a backup whose state or watch
+schema is newer than the running code. It then keeps an automatic `pre-restore`
+safety backup and stages every replacement in a private temporary file beside
+its target with fsync. Databases are copied into the live files with SQLite's
+own backup API, so open SQLite connections are tolerated and each database is
+replaced atomically; configuration and secret files use bounded atomic file
+replacement. The safety backup includes the live account, job-history and other
 state databases, the current configuration and every secret file that the
 restore will overwrite, including secret files that are no longer referenced by
 the current configuration. If any replacement or migration step fails, the

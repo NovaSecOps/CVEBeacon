@@ -262,22 +262,71 @@ def test_restore_rolls_back_when_a_later_replacement_fails(tmp_path, monkeypatch
         db.execute("UPDATE backup_sentinel SET value='live watch'")
         db.commit()
     original = config.config_path.read_bytes()
-    real_replace = backup.os.replace
-    failed = {"done": False}
+    real = backup._restore_database_content
+    calls = []
 
     def failing(source, target):
-        if not failed["done"] and Path(target).name == "watch.db":
-            failed["done"] = True
-            raise OSError("injected replacement failure")
-        return real_replace(source, target)
+        calls.append(Path(target))
+        if len(calls) == 2:
+            raise OSError("injected restore failure")
+        return real(source, target)
 
-    monkeypatch.setattr(backup.os, "replace", failing)
-    with pytest.raises(backup.BackupError, match="previous state restored"):
+    monkeypatch.setattr(backup, "_restore_database_content", failing)
+    with pytest.raises(backup.BackupError, match="previous state restored") as failure:
         backup.restore(config, created.id)
-    monkeypatch.setattr(backup.os, "replace", real_replace)
+    assert "OSError" in str(failure.value)
+    assert len(calls) > 2
     assert values(config.database_path) == ["live state"]
     assert values(config.watch.database) == ["live watch"]
     assert config.config_path.read_bytes() == original
+
+
+def test_restore_does_not_replace_database_files(tmp_path, monkeypatch):
+    config = write_config(tmp_path, inventory=False)
+    seed(config)
+    created = backup.create(config)
+    with sqlite3.connect(config.database_path) as db:
+        db.execute("DELETE FROM backup_sentinel")
+        db.execute("INSERT INTO backup_sentinel VALUES ('changed')")
+        db.commit()
+    real_replace = backup.os.replace
+
+    def guarded(source, target):
+        if Path(target).suffix == ".db":
+            raise OSError("database files must be restored through SQLite")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(backup.os, "replace", guarded)
+    backup.restore(config, created.id)
+    assert values(config.database_path) == ["state original"]
+
+
+def test_restore_works_with_an_open_database_connection(tmp_path):
+    config = write_config(tmp_path, inventory=False)
+    seed(config)
+    created = backup.create(config)
+    connection = sqlite3.connect(config.database_path)
+    try:
+        with sqlite3.connect(config.database_path) as db:
+            db.execute("DELETE FROM backup_sentinel")
+            db.execute("INSERT INTO backup_sentinel VALUES ('changed')")
+            db.commit()
+        backup.restore(config, created.id)
+        assert values(config.database_path) == ["state original"]
+    finally:
+        connection.close()
+
+
+def test_restore_checks_the_lock_before_verification(tmp_path, monkeypatch):
+    config = write_config(tmp_path, inventory=False)
+    lock = RunLock(Path(config.database_path).parent / LOCK_NAME, command="scan")
+    assert lock.acquire()
+    monkeypatch.setattr(backup, "_verify", lambda *args: pytest.fail("verification ran before the lock check"))
+    try:
+        with pytest.raises(backup.BackupBusy):
+            backup.restore(config, "20250101T000000Z")
+    finally:
+        lock.release()
 
 
 def test_restore_leaves_live_data_recorded_absent(tmp_path):
