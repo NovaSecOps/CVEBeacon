@@ -417,3 +417,73 @@ def test_watch_status_and_dashboard_show_cve_list_feed_state(tmp_path):
         assert 'baseline' in page.text
     finally:
         app.extensions['dashboard_jobs'].shutdown()
+
+def test_boundary_record_is_imported_after_the_cursor(tmp_path):
+    config,store=started(tmp_path,NOW)
+    boundary=record(updated=NOW.isoformat(),description='exactly on the boundary')
+    fixture=Archives(hour=13,delta=[boundary])
+    with mock_client(fixture) as http:
+        cve_list.sync(http,store,config.watch,NOW+timedelta(hours=1))
+    assert store.view(ID) is not None
+    assert store.metadata()['cve_list_cursor']==(NOW+timedelta(hours=1)).isoformat()
+
+
+def test_boundary_replay_does_not_create_a_duplicate_event(tmp_path):
+    config,store=started(tmp_path,NOW.replace(hour=11))
+    boundary=record(updated=NOW.isoformat(),description='boundary replay')
+    fixture=Archives(hour=12,delta=[boundary])
+    rules=parse_rules([{'name':'critical','condition':{'cvss_min':9},'channels':['sink']}])
+    with mock_client(fixture) as http:
+        cve_list.sync(http,store,config.watch,NOW)
+    store.evaluate_touched(rules,catalogs=('cve_list',))
+    assert len(store.events(cve=ID))==1
+    # Force the same boundary archive to be read again. The record is at the
+    # cursor exactly; it must be re-offered idempotently, not alerted twice.
+    store.set_metadata({'cve_list_archive_asset':'force-replay'})
+    with mock_client(fixture) as http:
+        result=cve_list.sync(http,store,config.watch,NOW)
+    assert result[0]==1
+    store.evaluate_touched(rules,catalogs=('cve_list',))
+    assert len(store.events(cve=ID))==1
+
+
+def test_new_reserved_record_with_old_date_reserved_is_imported(tmp_path):
+    config,store=started(tmp_path,NOW.replace(hour=9))
+    payload=official('CVE-2026-30001',state='RESERVED')
+    del payload['containers']
+    del payload['cveMetadata']['dateUpdated']
+    payload['cveMetadata']['dateReserved']='2026-01-01T00:00:00Z'
+    fixture=Archives(hour=13,delta=[payload])
+    with mock_client(fixture) as http:
+        result=cve_list.sync(http,store,config.watch,NOW+timedelta(hours=1))
+    assert result[0]==1
+    assert store.view('CVE-2026-30001') is not None
+
+
+@pytest.mark.parametrize('broken',['missing','invalid'])
+def test_existing_record_update_without_usable_date_is_stored(tmp_path,broken):
+    config,store=started(tmp_path,NOW.replace(hour=9))
+    first=record(description='version one',updated=NOW.replace(hour=10,minute=30).isoformat())
+    with mock_client(Archives(hour=11,delta=[first])) as http:
+        cve_list.sync(http,store,config.watch,NOW)
+    corrected=record(description='corrected version two')
+    if broken=='missing':
+        del corrected['cveMetadata']['dateUpdated']
+    else:
+        corrected['cveMetadata']['dateUpdated']='not-a-date'
+    with mock_client(Archives(hour=13,delta=[corrected])) as http:
+        result=cve_list.sync(http,store,config.watch,NOW+timedelta(hours=1))
+    assert result[0]==1
+    assert store.view(ID).description=='corrected version two'
+    with store.read() as db:
+        row=db.execute("SELECT source_updated FROM watch_provider WHERE cve_id=? AND source='cve_list'",(ID,)).fetchone()
+    assert row['source_updated']==cve_list._record_date(NOW.replace(hour=10,minute=30).isoformat())
+
+
+def test_release_selection_skips_an_invalid_newest_candidate():
+    invalid=_release_entry('2026-11-19',2)
+    invalid['assets'][0]['size']=cve_list.ARCHIVE_CAP+1
+    valid=_release_entry('2026-11-19',1)
+    with mock_client(lambda _:httpx.Response(200,json=[invalid,valid])) as http:
+        assets,_=cve_list.release(http,{})
+    assert assets['delta']['name']=='2026-11-19_delta_CVEs_at_0100Z.zip'

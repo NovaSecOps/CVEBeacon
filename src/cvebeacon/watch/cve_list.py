@@ -154,6 +154,7 @@ def _hourly_release(releases):
     Select explicitly by the hourly archive names and their UTC date instead.
     """
     candidates = []
+    failures = []
     for item in releases:
         if not isinstance(item, dict) or item.get("draft") or item.get("prerelease"):
             continue
@@ -167,10 +168,15 @@ def _hourly_release(releases):
             baseline_day = datetime.strptime(selected["baseline"]["name"][:10], "%Y-%m-%d")
             if not timedelta(0) <= delta_time - baseline_day < timedelta(days=2):
                 raise ValueError("incoherent release")
+        except SourceError as exc:
+            failures.append(exc)
+            continue
         except (KeyError, TypeError, ValueError):
             continue
         candidates.append((delta_time, selected))
     if not candidates:
+        if failures:
+            raise failures[-1]
         raise SourceError("cve_list", "release list omitted a coherent hourly baseline and delta archive")
     return max(candidates, key=lambda item: item[0])[1]
 
@@ -415,7 +421,7 @@ def end_of_day(http, day):
     return None
 
 
-def _import_archive(http, store, watch, asset, at, metadata, *, initial=False, after=None, since=None):
+def _import_archive(http, store, watch, asset, at, *, initial=False, after=None, since=None):
     """Commit bounded batches; publish coverage only after validated EOF.
 
     Evaluation obligations already live in watch_touched. Do not accumulate a
@@ -440,9 +446,12 @@ def _import_archive(http, store, watch, asset, at, metadata, *, initial=False, a
     for payload in archive_records(http, asset, allow_empty="_all_CVEs_" not in asset["name"],
                                    cache_directory=directory):
         record = parse_record(payload)
-        stamp = _time(record.last_modified) if record.last_modified else None
+        raw_metadata = payload.get("cveMetadata") if isinstance(payload, dict) else None
+        raw_updated = raw_metadata.get("dateUpdated") if isinstance(raw_metadata, dict) else None
+        normalized_updated = _record_date_or_none(raw_updated)
+        stamp = _time(normalized_updated) if normalized_updated else None
         if stamp is not None:
-            if after is not None and stamp <= after:
+            if after is not None and stamp < after:
                 continue
             if since is not None and stamp < since:
                 continue
@@ -485,14 +494,17 @@ def sync(http, store, watch, now, *, initial_mode=None):
     baseline_time = _time(baseline["name"][:10] + "T00:00:00Z")
     latest = _delta_time(delta)
     cursor = _time(metadata["cve_list_cursor"]) if metadata.get("cve_list_cursor") else None
-    start_time = _time(metadata["cve_list_start"])
+    try:
+        start_time = _time(metadata["cve_list_start"])
+    except SourceError:
+        start_time = None
     initialising = mode in ("full", "backfill") and (
         cursor is None or metadata.get("cve_list_initial_pending") == "1")
     totals = [0, 0, 0]
 
     def apply(asset, at, *, initial, after=None, since=None):
         nonlocal cursor
-        counts = _import_archive(http, store, watch, asset, at, metadata,
+        counts = _import_archive(http, store, watch, asset, at,
                                  initial=initial, after=after, since=since)
         for index, value in enumerate(counts):
             totals[index] += value

@@ -1164,14 +1164,24 @@ class WatchStore:
                 content, raw = canonical_json(_nvd_content(record)), canonical_json(payload)
                 previous = db.execute("SELECT record_json,payload_json,source_updated FROM watch_provider WHERE cve_id=? AND source=?",
                                       (record.cve_id, source)).fetchone()
-                updated = self._parse_timestamp(record.last_modified) if source == "cve_list" else None
-                if source == "cve_list" and previous and previous['source_updated']:
-                    stored = self._parse_timestamp(previous['source_updated'])
-                    if stored is not None and (updated is None or updated < stored):
-                        unchanged += 1
-                        continue
+                updated = None
+                source_updated = record.last_modified
+                if source == "cve_list":
+                    metadata = payload.get("cveMetadata") if isinstance(payload, dict) else None
+                    raw_updated = metadata.get("dateUpdated") if isinstance(metadata, dict) else None
+                    updated = self._parse_timestamp(raw_updated)
+                    if updated is None and previous and previous["source_updated"]:
+                        # An unknown incoming date is still stored; retain the
+                        # last known revision so a later valid date cannot move
+                        # the row backwards.
+                        source_updated = previous["source_updated"]
+                    if previous and previous["source_updated"]:
+                        stored = self._parse_timestamp(previous["source_updated"])
+                        if updated is not None and stored is not None and updated < stored:
+                            unchanged += 1
+                            continue
                 db.execute("INSERT INTO watch_provider VALUES (?,?,?,?,?,?) ON CONFLICT(cve_id,source) DO UPDATE SET record_json=excluded.record_json,payload_json=excluded.payload_json,source_updated=excluded.source_updated,checked_at=excluded.checked_at",
-                           (record.cve_id, source, content, raw, record.last_modified, now))
+                           (record.cve_id, source, content, raw, source_updated, now))
                 if previous and previous["record_json"] == content and previous["payload_json"] == raw:
                     unchanged += 1
                     continue
