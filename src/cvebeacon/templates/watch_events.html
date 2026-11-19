@@ -1,37 +1,51 @@
-{% extends 'base.html' %}{% from 'watch_macros.html' import day %}
+{% extends 'base.html' %}
+{% from 'watch_macros.html' import day, cvss_scores %}
+{% from 'ui.html' import page_header, card, field, button, link_button, callout, table_wrap, badge, empty_state, term %}
 {% block title %}Watch events · CVEBeacon{% endblock %}
 {% macro page_url(number) -%}
 {{ url_for('watch.events', page=number, rule=filters.rule, kind=filters.kind, initial=filters.initial, since=filters.since, until=filters.until, cve=filters.cve, pending=filters.pending, client=filters.client) }}
 {%- endmacro %}
 {% block content %}
-<h1>Watch events</h1>
-<p>Events exclude report and unreport notices. Each row shows the official publication date, the date this instance first stored the CVE, and the current reported mark.</p>
-<form method="get" class="filters">
-  <label>Rule<input name="rule" value="{{ filters.rule }}" maxlength="64" list="watch-rule-names"></label>
+{{ page_header('Watch events', 'Review alerts from your watch rules and filter by event, client, or date.') }}
+<p class="help">Events exclude report and unreport notices. First seen is the date this instance first stored the CVE. {{ term('CVSS', 'a 0-10 severity score') }}</p>
+{% call card('Filter events') %}
+<form method="get" class="explorer-fields">
+  <div class="field"><label for="event-rule">Rule</label><input id="event-rule" name="rule" value="{{ filters.rule }}" maxlength="64" list="watch-rule-names"></div>
   <datalist id="watch-rule-names">{% for name in rule_names %}<option value="{{ name }}">{% endfor %}</datalist>
-  <label>Kind<select name="kind"><option value="">Any</option>{% for kind in kinds %}<option value="{{ kind }}" {% if filters.kind == kind %}selected{% endif %}>{{ kind }}</option>{% endfor %}</select></label>
-  <label>Initial<select name="initial"><option value="">Any</option><option value="yes" {% if filters.initial == 'yes' %}selected{% endif %}>Yes</option><option value="no" {% if filters.initial == 'no' %}selected{% endif %}>No</option></select></label>
-  <label>Pending delivery<select name="pending"><option value="">Any</option><option value="yes" {% if filters.pending == 'yes' %}selected{% endif %}>Yes</option><option value="no" {% if filters.pending == 'no' %}selected{% endif %}>No</option></select></label>
-  <label>Client<select name="client"><option value="">Any</option>{% for name in client_names %}<option value="{{ name }}" {% if filters.client == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
-  <label>From date<input type="date" name="since" value="{{ filters.since }}"></label>
-  <label>To date<input type="date" name="until" value="{{ filters.until }}"></label>
-  <label>CVE<input name="cve" value="{{ filters.cve }}" maxlength="32" placeholder="CVE-2026-1234"></label>
-  <button>Filter</button>
+  <div class="field"><label for="event-kind">Kind</label><select id="event-kind" name="kind"><option value="">Any</option>{% for kind in kinds %}<option value="{{ kind }}" {% if filters.kind == kind %}selected{% endif %}>{{ kind }}</option>{% endfor %}</select></div>
+  {% for name, label in [('initial','Initial'),('pending','Pending delivery')] %}
+  <div class="field"><label for="event-{{ name }}">{{ label }}</label><select id="event-{{ name }}" name="{{ name }}"><option value="">Any</option><option value="yes" {% if filters[name] == 'yes' %}selected{% endif %}>Yes</option><option value="no" {% if filters[name] == 'no' %}selected{% endif %}>No</option></select></div>
+  {% endfor %}
+  <div class="field"><label for="event-client">Client</label><select id="event-client" name="client"><option value="">Any</option>{% for name in client_names %}<option value="{{ name }}" {% if filters.client == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+  {{ field('From date', 'since', type='date', value=filters.since) }}
+  {{ field('To date', 'until', type='date', value=filters.until) }}
+  {{ field('CVE', 'cve', value=filters.cve, maxlength=32, placeholder='CVE-2026-1234') }}
+  <div class="form-actions">{{ button('Filter events') }} {{ link_button('Clear filters', url_for('watch.events'), kind='secondary') }}</div>
 </form>
-{% if clients_incomplete %}<p>Client choices are incomplete. Use the <a href="{{ url_for('watch.clients') }}">Clients page</a> to select other clients.</p>{% endif %}
-{% if results_incomplete %}<p role="status">Results incomplete: this client's CVE list exceeds the filter limit. Filter by an exact CVE to check its membership directly.</p>{% endif %}
-<p><a href="{{ url_for('watch.events') }}">Clear filters</a> · Page {{ page }}{% if has_previous %} · <a href="{{ page_url(page - 1) }}">Newer events</a>{% endif %}{% if has_next %} · <a href="{{ page_url(page + 1) }}">Older events</a>{% endif %}</p>
-<div class="table-wrap"><table>
-<thead><tr><th>Time</th><th>Rule</th><th>CVE</th><th>Kind</th><th>Initial</th><th>Published</th><th>First seen</th><th>Reported</th></tr></thead>
+{% endcall %}
+{% if clients_incomplete %}{% call callout('info') %}<p>Client choices are incomplete. Use the <a href="{{ url_for('watch.clients') }}">Clients page</a> to select other clients.</p>{% endcall %}{% endif %}
+{% if results_incomplete %}{% call callout('warning', 'Results incomplete') %}<p>This client's CVE list exceeds the filter limit. Filter by an exact CVE to check its membership directly.</p>{% endcall %}{% endif %}
+{% if rows %}
+{% call table_wrap('Matching watch events') %}<table>
+<thead><tr><th scope="col">Time</th><th scope="col">Rule</th><th scope="col">CVE</th><th scope="col">CVSS scores</th><th scope="col">Kind</th><th scope="col">Initial</th><th scope="col">Published</th><th scope="col">First seen</th><th scope="col">Reported</th></tr></thead>
 <tbody>{% for row in rows %}<tr>
   <td>{{ row.created_at }}</td>
   <td>{{ row.rule }}</td>
-  <td><a href="{{ url_for('watch.cve', cve_id=row.cve_id) }}">{{ row.cve_id }}</a></td>
+  <td class="nowrap"><a href="{{ url_for('watch.cve', cve_id=row.cve_id) }}">{{ row.cve_id }}</a></td>
+  <td>{{ cvss_scores(row.cvss_scores) }}{% if row.cvss_severity_differs %}<p class="help">Severity differs between CVSS versions</p>{% endif %}</td>
   <td>{{ row.kind }}</td>
   <td>{{ 'yes' if row.initial else 'no' }}</td>
   <td>{{ day(row.published) }}</td>
   <td>{{ day(row.first_seen) }}</td>
-  <td>{% set item = marks.get(row.cve_id) %}{% if item %}<span class="badge">reported by {{ watch_identity(item.by, item.username) }}</span>{% else %}<span class="muted">not reported</span>{% endif %}</td>
-</tr>{% else %}<tr><td colspan="8">No matching events. This does not mean no CVE applies; it means no stored event matched these filters.</td></tr>{% endfor %}</tbody>
-</table></div>
+  <td>{% set item = marks.get(row.cve_id) %}{% if item %}{{ badge('reported by ' ~ watch_identity(item.by, item.username), 'info') }}{% else %}<span class="muted">not reported</span>{% endif %}</td>
+</tr>{% endfor %}</tbody>
+</table>{% endcall %}
+{% else %}
+{{ empty_state('No matching events.', 'Change the filters to see other stored alerts. Check scan findings for applicability.') }}
+{% endif %}
+<div class="pagination" role="group" aria-label="Pages of watch events">
+  {% if has_previous %}{{ link_button('Newer events', page_url(page - 1), kind='secondary') }}{% endif %}
+  <span>Page {{ page }}</span>
+  {% if has_next %}{{ link_button('Older events', page_url(page + 1), kind='secondary') }}{% endif %}
+</div>
 {% endblock %}

@@ -368,7 +368,7 @@ def test_migrate_version_seven_preserves_existing_state(raw, tmp_path):
     reopened = WatchStore(store.path)
     reopened.initialize()
     reopened.initialize()
-    assert reopened.metadata()["schema_version"] == "9"
+    assert reopened.metadata()["schema_version"] == "10"
     assert rows(reopened) == before
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT * FROM watch_event").fetchall() == original_events
@@ -452,7 +452,7 @@ def test_migration_failure_rolls_back_new_tables(raw, tmp_path, monkeypatch):
         for table in ("delivery", "conversation", "batch"):
             db.execute("DROP TABLE watch_teams_bot_" + table)
         db.execute("UPDATE watch_meta SET value='7' WHERE key='schema_version'")
-    monkeypatch.setattr(storage, "_SCHEMA", (*storage._SCHEMA, "INVALID MIGRATION STATEMENT"))
+    monkeypatch.setattr(storage, "_SCHEMA_10", (*storage._SCHEMA_10, "INVALID MIGRATION STATEMENT"))
     with pytest.raises(StateError, match="transaction failed"):
         store.initialize()
     with sqlite3.connect(store.path) as db:
@@ -806,8 +806,8 @@ def test_authentic_schema_seven_upgrade_preserves_all_existing_rows(tmp_path):
     store = WatchStore(path)
     store.initialize()
     store.initialize()
-    assert SCHEMA_VERSION == 9
-    assert store.metadata()["schema_version"] == "9"
+    assert SCHEMA_VERSION == 10
+    assert store.metadata()["schema_version"] == "10"
     assert store.metadata()["provider_storage"] == "sparse-v1"
     assert store.metadata()["teams_bot_storage"] == "durable-v1"
     with sqlite3.connect(path) as db:
@@ -873,7 +873,7 @@ def test_bot_documentation_and_manifest_contract():
     assert "smba.trafficmanager.net" in network and "Teams bot Connector" in network
     assert "protected files" in network and "TEAMS.md" in network
     assert "protected files" in (root / "README.md").read_text(encoding="utf-8")
-    assert "schema is version 9" in watch and "`teams_bot`" in watch.split("Common keys:", 1)[1].split("- `enabled`", 1)[0]
+    assert "schema is version 10" in watch and "`teams_bot`" in watch.split("Common keys:", 1)[1].split("- `enabled`", 1)[0]
     assert "schema 7 to 8" in (root / "docs/UPGRADING.md").read_text(encoding="utf-8")
     assert "placeholder" in guide and "https://example.com/api/messages" in guide
     assert "Object IDs and UPNs must both belong" in guide

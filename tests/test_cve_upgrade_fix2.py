@@ -21,6 +21,7 @@ def prerelease_eight(path, *, corrupt=False):
     store.upsert_nvd([record])
     store.upsert_cve_list([official(description='CNA text')])
     with sqlite3.connect(path) as db:
+        db.execute("UPDATE watch_meta SET value='8' WHERE key='schema_version'")
         db.execute("DELETE FROM watch_meta WHERE key='provider_storage'")
         for name in ('insert','delete','update'):
             db.execute('DROP TRIGGER IF EXISTS watch_search_'+name)

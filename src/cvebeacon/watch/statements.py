@@ -33,9 +33,8 @@ from ..clients import (
     markdown_escape_client,
 )
 from ..errors import CVEBeaconError
-from .messages import CVE_URL, EUVD_URL, NVD_URL, PROVIDER_ORDER
-from .records import CVSS_PROVIDERS, CVSSEntry, ReportedMark, WatchView
-from .rules import highest_cvss
+from .messages import CVE_URL, EUVD_URL, NVD_URL
+from .records import CVSSEntry, ReportedMark, WatchView
 from .store import WatchStore
 
 MISSING = "not available"
@@ -162,18 +161,6 @@ def _provider_label(provider: str, entry: CVSSEntry, view: WatchView) -> str:
     return "Other"
 
 
-def _severity(score: float | None) -> str | None:
-    if score is None or score < 0.1:
-        return None
-    if score < 4:
-        return "low"
-    if score < 7:
-        return "medium"
-    if score < 9:
-        return "high"
-    return "critical"
-
-
 def _products(view: WatchView) -> str:
     if view.products and len(view.vendors) == 1:
         return "\n".join(f"{view.vendors[0]} {product}" for product in view.products)
@@ -196,14 +183,13 @@ def build_fields(
     client_escape: Callable[[str], str] | None = None,
 ) -> dict[str, str]:
     """Derive every statement field from one stored watch view."""
-    highest = highest_cvss(view, CVSS_PROVIDERS)
+    highest = view.highest_score
     provider = highest.provider if highest is not None else None
     score = highest.score if highest is not None else None
     cvss_lines = [
         f"{entry.score:g} v{entry.version} "
-        f"({_provider_label(name, entry, view)})"
-        for name in PROVIDER_ORDER
-        if (entry := highest_cvss(view, (name,))) is not None
+        f"({_provider_label(entry.provider, entry, view)})"
+        for entry in view.cvss_scores
     ]
     kev_added = view.cisa_kev_added or view.eu_kev_added
     reported, reported_by, reported_at = _reported_marks(reported_mark)
@@ -227,7 +213,7 @@ def build_fields(
         "cvss_max_version": _text(highest.version) if highest is not None else MISSING,
         "cvss_max_vector": _text(highest.vector) if highest is not None else MISSING,
         "cvss_all": "\n".join(cvss_lines) or MISSING,
-        "severity": _severity(score) or MISSING,
+        "severity": highest.severity_band if highest is not None and highest.severity_band != "none" else MISSING,
         "epss": f"{view.epss:.5f}" if view.epss is not None else MISSING,
         "epss_percentile": (
             f"{view.epss_percentile:.5f}"

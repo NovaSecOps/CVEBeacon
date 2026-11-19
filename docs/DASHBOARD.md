@@ -163,16 +163,16 @@ change scan or delivery state.
   explicit notice; select other clients through the paginated Clients page.
   A client filter exceeding 100,000 CVEs shows a results-incomplete notice;
   an exact CVE filter checks membership directly without that cap.
-  Each row shows the published and first-seen
-  dates and the current reported mark. Report and unreport notices are excluded;
+  Each row shows all available CVSS scores with versions and providers, the
+  published and first-seen dates, and the current reported mark. Report and unreport notices are excluded;
   they appear in the CVE trail.
 - **Clients:** every client label in the latest successful inventory scan with
   its asset count and the CVEs currently affecting it, 50 clients per page. A
   `review` badge marks findings stored as needs-review; advisory identifiers
   without a CVE are shown without a CVE link. Client names are internal and
   never sent to public sources.
-- **CVE detail:** the stored view with CVSS by provider, EPSS, CISA and EU KEV
-  dates and required action, SSVC exploitation, CWEs, products, references,
+- **CVE detail:** the stored view with all versioned CVSS scores, EPSS, CISA and EU KEV
+  dates and required action, exploitation and its sources, CWEs, products, references,
   publication and first-seen dates, the clients affected in the latest
   successful inventory scan, the CVE's events with per-channel delivery
   state, and the report/unreport trail with its notice states. The trail is
@@ -764,12 +764,28 @@ The manual query page has Product, Package (ecosystem/name/version), and Explici
 ## CVE explorer and refresh
 
 Open **CVEs** (`/watch/cves`) to browse stored watch records, including CVE
-List-only entries. Search by CVE ID, description keyword or alias, then filter
-by source, KEV, severity, publication dates, events, reported status or affected
-client. Results are paginated in groups of 50 and sort by publication,
-modification, CVSS, EPSS or KEV. Searches are limited to 256 characters. New provider descriptions use FTS5 word prefixes when available, with literal
-LIKE fallback. Existing NVD descriptions use LIKE in place, without a copying
-migration.
+List-only entries. Search by CVE ID, description keyword or alias. Results show
+the total and are paginated in groups of 50. Filters are in the URL, including
+when moving between pages. Use **Clear filters** to reset them.
+
+- KEV offers CISA, EU, either or neither. Exploitation offers active,
+  proof of concept (`poc`), explicitly none, or unknown. The result shows the
+  supporting source beside the status. KEV has its own filter.
+- EPSS and CVSS minimum and maximum are inclusive. When you choose CVSS
+  versions or providers, one scoring must satisfy both selections and the
+  numeric range. Expand the highest score to inspect all versioned entries.
+  The highest score band uses the explorer's numeric bands across scores.
+- Filter by publication or modification date, source presence, events,
+  reported status and affected client. Enter up to ten exact client names,
+  one per line. Clients come from the latest successful scan.
+
+Filters combine with AND across fields and OR between choices in the same field.
+Events and reported status each take a single choice.
+Results sort by publication, modification, CVSS, EPSS or KEV. Searches are
+limited to 256 characters and use FTS5 word prefixes when available, with literal
+LIKE fallback.
+The CVSS and exploitation indexes are built on the first watch write after
+upgrading. Broad filters can take longer on databases awaiting that write.
 
 An absent ID shows “Not in our database”, source sync times and, for accounts
 with `run`, a **Fetch or refresh this CVE now** action. The same action appears

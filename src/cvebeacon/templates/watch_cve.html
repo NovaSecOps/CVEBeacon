@@ -1,19 +1,25 @@
-{% extends 'base.html' %}{% from 'watch_macros.html' import value, day, stamp, report_mark, deliveries %}
+{% extends 'base.html' %}
+{% set nav_active = 'watch.explorer' %}
+{% from 'watch_macros.html' import value, day, stamp, report_mark, deliveries, exploitation %}
+{% from 'ui.html' import page_header, card, callout, link_button, table_wrap, badge, severity_badge, kev_badge, applicability_badge, field, button, term %}
 {% block title %}{{ cve_id }} · Watch · CVEBeacon{% endblock %}
 {% block content %}
-<h1>{{ cve_id }}</h1>
-{% if banner %}<p class="badge">{{ banner }}</p>{% endif %}
-{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
+{% call page_header(cve_id, 'Review stored scores, source coverage, and the alert and reporting history.') %}
+  {{ link_button('Back to CVE explorer', url_for('watch.explorer'), kind='secondary') }}
+  {% if can_statement %}{{ link_button('Generate statement', url_for('watch.statement', cve_id=cve_id)) }}{% endif %}
+{% endcall %}
+{% if banner %}{% call callout('success') %}{{ banner }}{% endcall %}{% endif %}
+{% if error %}{% call callout('danger', 'Could not update the report') %}{{ error }}{% endcall %}{% endif %}
+
+<div class="card-grid cve-summary">
+{% call card('Stored view') %}
 <p>
   <a href="{{ nvd_url }}" rel="noreferrer noopener">NVD</a> ·
   <a href="{{ cve_org_url }}" rel="noreferrer noopener">CVE.org</a>
   {% if euvd_url %} · <a href="{{ euvd_url }}" rel="noreferrer noopener">EUVD</a>{% endif %}
-  {% if can_statement %} · <a href="{{ url_for('watch.statement', cve_id=cve_id) }}">Generate statement</a>{% endif %}
 </p>
 <p>{{ report_mark(mark_entry) }}</p>
 
-{% include 'watch_presence.html' %}
-<h2>Stored view</h2>
 <dl>
   <dt>Status</dt><dd>{{ view.status }}</dd>
   <dt>Description</dt><dd>{{ value(view.description) }}</dd>
@@ -21,71 +27,85 @@
   <dt>First seen</dt><dd>{{ day(view.first_seen) }}{% if view.first_seen %} <span class="muted">({{ view.first_seen }})</span>{% endif %}</dd>
   <dt>Last modified</dt><dd>{{ value(view.last_modified) }}</dd>
   <dt>Source identifier</dt><dd>{{ value(view.source_identifier) }}</dd>
-  <dt>SSVC exploitation</dt><dd>{{ value(view.ssvc_exploitation) }}</dd>
-  <dt>EPSS</dt><dd>{{ value(view.epss) }}{% if view.epss is not none %} · percentile {{ value(view.epss_percentile) }} · score date {{ value(view.epss_date) }}{% endif %}</dd>
+  <dt>Exploitation</dt><dd>{{ exploitation(view) }}</dd>
+  <dt>{{ term('EPSS', 'estimated chance the flaw is exploited in the next 30 days') }}</dt><dd>{{ value(view.epss) }}{% if view.epss is not none %} · percentile {{ value(view.epss_percentile) }} · score date {{ value(view.epss_date) }}{% endif %}</dd>
   <dt>CWEs</dt><dd>{{ view.cwes | join(', ') if view.cwes else 'Not available' }}</dd>
   <dt>Vendors</dt><dd>{{ view.vendors | join(', ') if view.vendors else 'Not available' }}</dd>
   <dt>Products</dt><dd>{{ view.products | join(', ') if view.products else 'Not available' }}</dd>
 </dl>
-
-<h2>Affected clients</h2>
+{% endcall %}
+{% call card('Affected clients') %}
 {% if affected_clients %}
-<ul>{% for item in affected_clients %}<li>{{ item.name }} · {{ item.assets }} asset{{ '' if item.assets == 1 else 's' }}{% if item.status == 'needs_review' %} <span class="badge needs_review">review</span>{% endif %}</li>{% endfor %}</ul>{% if affected_clients.omitted %}<p class="muted">and {{ affected_clients.omitted }} more client{{ '' if affected_clients.omitted == 1 else 's' }}.</p>{% endif %}
+<ul>{% for item in affected_clients %}<li>{{ item.name }} · {{ item.assets }} asset{{ '' if item.assets == 1 else 's' }}{% if item.status == 'needs_review' %} {{ badge('review', 'warning') }}{% endif %}</li>{% endfor %}</ul>{% if affected_clients.omitted %}<p class="muted">and {{ affected_clients.omitted }} more client{{ '' if affected_clients.omitted == 1 else 's' }}.</p>{% endif %}
 {% elif inventory_scan %}
 <p>No client is affected by this CVE in the latest successful inventory scan.</p>
 {% else %}
 <p>No successful inventory scan is available.</p>
 {% endif %}
+{% endcall %}
+</div>
 
-<h2>Scan findings</h2>
-<p class="muted">Latest successful inventory scan, up to 100 findings.</p>
-<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Client</th><th>Advisory</th><th>Applicability</th></tr></thead><tbody>
-{% for item in scan_findings %}<tr><td>{{ item.asset_id }}</td><td>{{ item.client or 'Unassigned' }}</td><td>{{ item.advisory_id }}</td><td>{{ item.applicability }}</td></tr>{% else %}<tr><td colspan="4">No scan findings are stored for this CVE.</td></tr>{% endfor %}
-</tbody></table></div>
-<h2>Provider records</h2>
-{% for item in provider_records %}<details><summary>{{ item.source }} record</summary><pre class="break">{{ item.display }}</pre>{% if item.truncated %}<p class="muted">Payload preview truncated at 64 KiB. The complete record remains stored.</p>{% endif %}</details>{% endfor %}
+{% call card('Scan findings', 'Latest successful inventory scan, up to 100 findings.') %}
+{% call table_wrap('Stored scan findings for this CVE') %}<table><thead><tr><th>Asset</th><th>Client</th><th>Advisory</th><th>Applicability</th></tr></thead><tbody>
+{% for item in scan_findings %}<tr><td>{{ item.asset_id }}</td><td>{{ item.client or 'Unassigned' }}</td><td>{{ item.advisory_id }}</td><td>{{ applicability_badge(item.applicability) }}</td></tr>{% else %}<tr><td colspan="4">No scan findings are stored for this CVE.</td></tr>{% endfor %}
+</tbody></table>{% endcall %}
+{% endcall %}
 
-<h2>CVSS by provider</h2>
-<div class="table-wrap"><table>
-<thead><tr><th>Provider</th><th>Source</th><th>Version</th><th>Score</th><th>Severity</th><th>Vector</th></tr></thead>
-<tbody>{% for entry in view.cvss %}<tr><td>{{ entry.provider }}</td><td>{{ entry.source }}</td><td>{{ entry.version }}</td><td>{{ entry.score }}</td><td>{{ value(entry.severity) }}</td><td class="break">{{ value(entry.vector, 'Not available') }}</td></tr>{% else %}<tr><td colspan="6">No CVSS score is stored.</td></tr>{% endfor %}</tbody>
-</table></div>
+{% include 'watch_presence.html' %}
+{% call card('Provider records') %}
+{% for item in provider_records %}<details class="disclosure"><summary>{{ item.source }} record</summary><pre class="break">{{ item.display }}</pre>{% if item.truncated %}<p class="muted">Payload preview truncated at 64 KiB. The complete record remains stored.</p>{% endif %}</details>{% else %}<p>No provider records are stored.</p>{% endfor %}
+{% endcall %}
 
-<h2>Known exploitation</h2>
+{% call card('CVSS scores') %}
+<p class="help">{{ term('CVSS', 'a 0-10 severity score') }}</p>
+{% if view.cvss_severity_differs %}<p class="help">Severity differs between CVSS versions</p>{% endif %}
+{% call table_wrap('CVSS scores by version and provider') %}<table>
+<thead><tr><th>Provider</th><th>Source</th><th>Version</th><th class="num">Score</th><th>Severity</th><th>Vector</th></tr></thead>
+<tbody>{% for entry in view.cvss_scores %}<tr><td>{{ entry.provider }}</td><td>{{ entry.source }}</td><td>v{{ entry.version }}</td><td class="num">{{ entry.score }}</td><td>{{ severity_badge(entry.severity_band) }}</td><td class="break">{{ value(entry.vector, 'Not available') }}</td></tr>{% else %}<tr><td colspan="6">No CVSS score is stored.</td></tr>{% endfor %}</tbody>
+</table>{% endcall %}
+{% endcall %}
+
+{% call card('Known exploitation') %}
+<p class="help">{{ term('KEV', 'on the list of flaws known to be actively exploited') }}</p>
 <dl>
-  <dt>CISA KEV</dt><dd>{% if view.cisa_kev_added %}Yes · added {{ view.cisa_kev_added }}{% else %}No{% endif %}</dd>
+  <dt>CISA KEV</dt><dd>{% if view.cisa_kev_added %}{{ kev_badge('Yes') }} · added {{ view.cisa_kev_added }}{% else %}No{% endif %}</dd>
   <dt>CISA due date</dt><dd>{{ value(view.cisa_kev_due, 'Not applicable') }}</dd>
   <dt>CISA required action</dt><dd>{{ value(view.cisa_required_action, 'Not applicable') }}</dd>
   <dt>CISA ransomware use</dt><dd>{{ value(view.cisa_ransomware, 'Not applicable') }}</dd>
-  <dt>EU KEV</dt><dd>{% if view.eu_kev_added %}Yes · added {{ view.eu_kev_added }}{% else %}No{% endif %}</dd>
+  <dt>EU KEV</dt><dd>{% if view.eu_kev_added %}{{ kev_badge('Yes') }} · added {{ view.eu_kev_added }}{% else %}No{% endif %}</dd>
   <dt>EUVD</dt><dd>{% if view.euvd_id %}{{ view.euvd_id }}{% if view.euvd_exploited_since %} · exploited since {{ view.euvd_exploited_since }}{% endif %}{% else %}Not linked{% endif %}</dd>
 </dl>
+{% endcall %}
 
-<h2>References</h2>
+{% call card('References') %}
 <ul>{% for reference in view.references %}<li>{% if reference.url.startswith('http://') or reference.url.startswith('https://') %}<a href="{{ reference.url }}" rel="noreferrer noopener" class="break">{{ reference.url }}</a>{% else %}<span class="break">{{ reference.url }}</span>{% endif %}{% if reference.tags %} <span class="muted">({{ reference.tags | join(', ') }})</span>{% endif %}</li>{% else %}<li>No references are stored.</li>{% endfor %}</ul>
+{% endcall %}
 
 {% if can_report %}
-<h2>{{ 'Withdraw report' if mark_entry else 'Report to clients' }}</h2>
+{% call card('Withdraw report' if mark_entry else 'Report to clients') %}
 {% if mark_entry %}
-<form method="post" action="{{ url_for('watch.unreport_cve', cve_id=cve_id) }}">
+<form method="post" class="stack" action="{{ url_for('watch.unreport_cve', cve_id=cve_id) }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Note (optional)<input name="note" maxlength="500" placeholder="Why the report is withdrawn"></label>
-  <button>Withdraw report</button>
+  {{ field('Note', 'note', maxlength=500, optional=true, placeholder='Why the report is withdrawn') }}
+  <div class="form-actions">{{ button('Withdraw report') }}</div>
 </form>
 {% else %}
-<form method="post" action="{{ url_for('watch.report_cve', cve_id=cve_id) }}">
+<form method="post" class="stack" action="{{ url_for('watch.report_cve', cve_id=cve_id) }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Note (optional)<input name="note" maxlength="500" placeholder="Ticket or client reference"></label>
-  <button>Report to clients</button>
+  {{ field('Note', 'note', maxlength=500, optional=true, placeholder='Ticket or client reference') }}
+  <div class="form-actions">{{ button('Report to clients') }}</div>
 </form>
 {% endif %}
 <p class="muted">The report is recorded as the logged-in account. Channels configured with <code>notify_reported</code> receive a queued notice through the normal delivery ledger.</p>
+{% endcall %}
 {% endif %}
 
-<h2>Current rule matches</h2>
+{% call card('Current rule matches') %}
 <ul>{% for item in rule_matches %}<li>{{ item.name }} · {{ 'Matches' if item.matched else 'Does not match' }}{% if not item.enabled %} · disabled{% endif %}</li>{% else %}<li>No watch rules are configured.</li>{% endfor %}</ul>
-<h2>Events</h2>
-<div class="table-wrap"><table>
+{% endcall %}
+
+{% call card('Events') %}
+{% call table_wrap('Stored events and delivery outcomes') %}<table>
 <thead><tr><th>Time</th><th>Rule</th><th>Kind</th><th>Initial</th><th>Reasons</th><th>Published</th><th>First seen</th><th>Deliveries</th></tr></thead>
 <tbody>{% for row in event_rows %}<tr>
   <td>{{ row.event.created_at }}</td>
@@ -97,20 +117,22 @@
   <td>{{ day(row.event.first_seen) }}</td>
   <td>{{ deliveries(row.deliveries) }}</td>
 </tr>{% else %}<tr><td colspan="8">No stored events for this CVE.</td></tr>{% endfor %}</tbody>
-</table></div>
+</table>{% endcall %}
+{% endcall %}
 
-<h2>Reported-to-clients trail</h2>
-<p class="muted">Newest {{ trail_page_size }} entries per page. Use the reported export for the complete trail.</p>
+{% call card('Reported-to-clients trail', 'Use the reported export for the complete trail.') %}
+<p class="muted">Newest {{ trail_page_size }} entries per page.</p>
 <p>Page {{ trail_page }}{% if trail_has_previous %} · <a href="{{ url_for('watch.cve', cve_id=cve_id, trail_page=trail_page - 1) }}">Newer entries</a>{% endif %}{% if trail_has_next %} · <a href="{{ url_for('watch.cve', cve_id=cve_id, trail_page=trail_page + 1) }}">Older entries</a>{% endif %}</p>
-<div class="table-wrap"><table>
+{% call table_wrap('Report and withdrawal history') %}<table>
 <thead><tr><th>Time</th><th>Action</th><th>By</th><th>Identity mode</th><th>Note</th><th>Notices</th></tr></thead>
 <tbody>{% for row in trail_rows %}<tr>
   <td>{{ stamp(row.entry.at) }}</td>
-  <td>{{ row.entry.action }}{% if row.entry.legacy %} <span class="badge">legacy unchained</span>{% endif %}</td>
+  <td>{{ row.entry.action }}{% if row.entry.legacy %} {{ badge('legacy unchained') }}{% endif %}</td>
   <td>{{ watch_identity(row.entry.by, row.entry.username) }}</td>
   <td>{{ value(row.entry.identity_mode, 'legacy') }}</td>
   <td>{{ value(row.entry.note, '') }}</td>
   <td>{{ deliveries(row.notices) }}</td>
 </tr>{% else %}<tr><td colspan="6">{{ 'No entries on this page.' if trail_page > 1 else 'This CVE has never been reported to clients.' }}</td></tr>{% endfor %}</tbody>
-</table></div>
+</table>{% endcall %}
+{% endcall %}
 {% endblock %}

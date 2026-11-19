@@ -279,3 +279,16 @@ def test_release_rejects_oversize_metadata_and_asset_size(monkeypatch):
     assets[0]['size'] = cve_list.ARCHIVE_CAP + 1
     with mock_client(lambda _: httpx.Response(200, json=[{'assets': assets}])) as http, pytest.raises(SourceError, match='size limit'):
         cve_list.release(http, {})
+
+
+def test_malformed_nested_record_is_an_isolated_source_failure():
+    from cvebeacon.watch import cve_list as feed
+    payload = {
+        "dataType": "CVE_RECORD", "dataVersion": "5.1",
+        "cveMetadata": {"cveId": "CVE-2026-1234", "state": "PUBLISHED"},
+        "containers": "not-a-dict",
+    }
+    with pytest.raises(SourceError):
+        feed.parse_record(payload)
+    assert feed.vulnrichment_exploitation(payload) is None
+    assert feed.vulnrichment_exploitation("not-a-record") is None

@@ -115,7 +115,7 @@ def test_failed_or_degraded_refresh_retains_old_finding_visibly(setup, health):
     assert response.status_code == 200
     assert "coverage was incomplete" in response.text
     assert "Retained observation" in response.text
-    assert 'class="badge badge-danger"' in response.text
+    assert 'class="badge badge-danger">Affected</span>' in response.text
     assert 'class="badge badge-success"' not in response.text
 
 
@@ -167,6 +167,23 @@ def test_findings_severity_labels_match_route_boundaries(setup):
         "None (0)",
     ):
         assert label in text, label
+
+
+@pytest.mark.parametrize(("score", "version", "display"), [
+    (9.1, "3.1", '<span class="num">9.1</span> <span class="badge badge-neutral">CVSS 3.1</span>'),
+    (0, "4.0", '<span class="num">0</span> <span class="badge badge-neutral">CVSS 4.0</span>'),
+    (9.1, None, '<span class="num">9.1</span> <span class="badge badge-neutral">Version unknown</span>'),
+])
+def test_findings_severity_cell_keeps_score_version(setup, score, version, display):
+    _, store, client = setup
+    base = result()
+    finding = base.findings[0]
+    vuln = replace(finding.vulnerability, cvss_score=score, cvss_version=version)
+    store.record_scan([replace(base, findings=(replace(finding, vulnerability=vuln),))])
+
+    response = client.get("/findings")
+    assert response.status_code == 200
+    assert display in response.text
 
 
 def test_assets_explains_coverage_and_asset_detail_marks_active_nav(setup):

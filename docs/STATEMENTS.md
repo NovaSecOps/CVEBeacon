@@ -81,8 +81,8 @@ Unknown-name diagnostics list every unique unknown name up to 128 names and
 | `cvss_max_provider` | Provider of the highest score: `NVD`, `CISA-ADP`, `EUVD`, `CNA: <source>`, or `Other`. |
 | `cvss_max_version` | CVSS version of the highest score, for example `3.1`. |
 | `cvss_max_vector` | CVSS vector of the highest score, for example `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`. |
-| `cvss_all` | One line per provider with a score, for example `9.8 v3.1 (NVD)`. |
-| `severity` | Score band of `cvss_max`: `none` (rendered as `not available`), `low`, `medium`, `high`, or `critical`. |
+| `cvss_all` | One line per scoring with its version and provider, for example `9.8 v3.1 (NVD)`. |
+| `severity` | Severity of `cvss_max` using its provider rating or version scale. `none` is rendered as `not available`. |
 | `epss` | EPSS probability with five decimals, for example `0.62214`. |
 | `epss_percentile` | EPSS percentile with five decimals, for example `0.95421`. |
 | `epss_date` | EPSS score date, for example `2026-11-03`. |

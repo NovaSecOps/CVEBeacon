@@ -67,10 +67,10 @@ def body_for(item: DeliveryEvent, channel: str = "slack") -> str:
 def test_match_line_follows_the_template():
     text = body_for(event())
     assert "[NEW] CVE-2026-1234" in text
-    assert "CVSS 9.8 (CNA: acme.example), NVD pending" in text
+    assert "CVSS 9.8 v3.1 (CNA: acme.example), NVD pending" in text
     assert "EPSS 0.62" in text
     assert "KEV: CISA – EU –" in text
-    assert "Exploitation: none" in text
+    assert "Exploitation: unknown" in text
     assert "Published 2026-10-30 · first seen 2026-11-04" in text
     assert "Acme Widget before 4.2.1" in text
     assert "Rule: critical-or-likely" in text
@@ -164,7 +164,7 @@ def test_kev_added_label_and_detail():
         ("exploitation_active", ("exploitation poc -> active (cisa-adp)",), {"ssvc_exploitation": "active"}, "[ACTIVELY EXPLOITED]"),
         ("severity_increase", ("severity high -> critical",), {}, "[SEVERITY UP high->critical]"),
         ("epss_increase", ("epss <0.1 -> <0.5",), {}, "[EPSS UP 0.08->0.61]"),
-        ("nvd_score_added", ("nvd score absent -> present",), {"cvss": (CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.1),)}, "[NVD SCORED 9.1]"),
+        ("nvd_score_added", ("nvd score absent -> present",), {"cvss": (CVSSEntry("nvd", "nvd@nist.gov", "3.1", 9.1),)}, "[NVD SCORED 9.1 v3.1]"),
         ("rejected", ("status published -> rejected",), {"status": "rejected"}, "[REJECTED]"),
     ],
 )
@@ -186,11 +186,11 @@ def test_score_labels_name_each_provider():
         )
     )
     text = body_for(event(current=current))
-    assert "CVSS 9.8 (CNA: acme.example)" in text
-    assert "CVSS 8 (NVD)" in text
-    assert "CVSS 7.5 (CISA-ADP)" in text
-    assert "CVSS 6 (EUVD)" in text
-    assert "CVSS 5 (Other)" in text
+    assert "CVSS 9.8 v3.1 (CNA: acme.example)" in text
+    assert "CVSS 8 v3.1 (NVD)" in text
+    assert "CVSS 7.5 v3.1 (CISA-ADP)" in text
+    assert "CVSS 6 v3.1 (EUVD)" in text
+    assert "CVSS 5 v3.1 (Other)" in text
     assert "NVD pending" not in text
 
 
@@ -684,3 +684,86 @@ def test_kev_due_is_escaped_like_other_dynamic_text():
     )
     text = body_for(item, "teams")
     assert "Due 2026-\\[11\\]-20" in text
+
+
+@pytest.mark.parametrize("channel", ["smtp", "graph", "teams", "slack", "discord",
+                                    "telegram", "matrix", "ntfy", "gotify", "webhook"])
+@pytest.mark.parametrize(("entries", "expected_lines"), [
+    ((), ("CVSS scores:", "CVSS not scored")),
+    ((CVSSEntry("cna", "example.com", "3.1", 9.8),),
+     ("CVSS scores:", "CVSS 9.8 v3.1 (CNA: example.com) · critical")),
+    ((CVSSEntry("nvd", "nvd", "2.0", 9.8),
+      CVSSEntry("cna", "example.com", "3.1", 9.8),
+      CVSSEntry("euvd", "euvd", "3.0", 6.2),
+      CVSSEntry("cisa-adp", "", "4.0", 8.5, "CVSS:4.0/AV:N"),
+      CVSSEntry("nvd", "nvd", "4.0", 9.9)),
+     ("CVSS scores:", "CVSS 9.9 v4.0 (NVD) · critical",
+      "CVSS 8.5 v4.0 (CISA-ADP) · high · CVSS:4.0/AV:N",
+      "CVSS 9.8 v3.1 (CNA: example.com) · critical",
+      "CVSS 6.2 v3.0 (EUVD) · medium", "CVSS 9.8 v2.0 (NVD) · high",
+      "Severity differs between CVSS versions")),
+])
+def test_cvss_score_block_golden_by_channel(channel, entries, expected_lines):
+    item = event(current=view(cvss=entries))
+    message, = build_messages(
+        (item,), channel_type=channel, grouping="run",
+        max_items=20, names={}, since="2026-11-01", format="html",
+    )
+    actual = [line.strip().replace(r"\-", "-") for line in message.body.splitlines()]
+    start = actual.index("CVSS scores:")
+    assert tuple(actual[start:start + len(expected_lines)]) == expected_lines
+    assert actual[start + len(expected_lines)].startswith("Acme Widget")
+    if channel in ("smtp", "graph"):
+        expected_html = "<strong>CVSS scores:</strong><br>" + "<br>".join(expected_lines[1:])
+        assert expected_html in message.html
+    if channel == "webhook":
+        scores = webhook_payload((item,), {})["events"][0]["view"]
+        assert len(scores["cvss_scores"]) == len(entries)
+        assert scores["cvss_note"] == (expected_lines[-1] if len(entries) > 1 else None)
+
+
+def test_webhook_keeps_legacy_scores_and_adds_full_versioned_scores():
+    primary = CVSSEntry("nvd", "nvd", "2.0", 9.8)
+    official = CVSSEntry("cna", "example.com", "4.0", 9.9, "CVSS:4.0/AV:N")
+    current = view(cvss=(primary,), additional_cvss=(official,))
+    payload = webhook_payload((event(current=current),), {})
+    assert payload["version"] == 2
+    result = payload["events"][0]["view"]
+    assert result["cvss"] == [{"provider": "nvd", "source": "nvd", "version": "2.0",
+                               "score": 9.8, "vector": None}]
+    assert result["cvss_scores"] == [
+        {"provider": "cna", "source": "example.com", "version": "4.0",
+         "score": 9.9, "vector": "CVSS:4.0/AV:N", "severity": "critical"},
+        {"provider": "nvd", "source": "nvd", "version": "2.0",
+         "score": 9.8, "vector": None, "severity": "high"},
+    ]
+    assert result["cvss_note"] == "Severity differs between CVSS versions"
+
+
+def test_qualified_alert_title_and_webhook_use_the_stored_matching_score():
+    selected = CVSSEntry("nvd", "nvd", "3.1", 7.0)
+    newer = CVSSEntry("nvd", "nvd", "4.0", 9.9)
+    current = view(cvss=(selected, newer))
+    item = event(current=current, details={"cvss_selected": selected.as_dict()})
+    second = event(current=current, details={"cvss_selected": newer.as_dict()},
+                   event_id=2, rule="another")
+    message, = build_messages((item, second), channel_type="smtp", grouping="run",
+                              max_items=20, names={}, format="html")
+    headers = [line for line in message.body.splitlines() if line.startswith("[NEW]")]
+    assert len(headers) == 2
+    assert "CVSS 7 v3.1 (NVD) · EPSS" in headers[0]
+    assert "CVSS 9.9 v4.0 (NVD) · EPSS" in headers[1]
+    assert "CVSS 7 v3.1 (NVD) · EPSS" in message.html
+    assert "CVSS 9.9 v4.0 (NVD) · critical" in message.body
+    document = webhook_payload((item,), {})
+    assert document["events"][0]["view"]["cvss_selected"] == selected.as_dict()
+
+
+def test_version_disagreement_compares_band_sets_and_handles_legacy_severity():
+    current = view(cvss=tuple(
+        CVSSEntry(provider, provider, version, score, severity=123)
+        for version in ("3.1", "4.0")
+        for provider, score in (("nvd", 9.8), ("cna", 7.0))
+    ))
+    assert [entry.severity_band for entry in current.cvss_scores] == ["critical", "high"] * 2
+    assert "Severity differs between CVSS versions" not in body_for(event(current=current))

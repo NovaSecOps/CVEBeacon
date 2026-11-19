@@ -133,8 +133,8 @@ with early expiry refresh. DMs are created without a card using
 `POST {service_url}/v3/conversations`, then reused from the watch database.
 Cards go to `POST {service_url}/v3/conversations/{id}/activities`.
 
-The watch database migrates transactionally to schema 9, adding the Teams bot
-storage after the schema 8 provider, search and CVE List migration. It stores
+The watch database creates Teams bot storage in the schema 8 to 9 migration
+step. Schema 10 preserves it. It stores
 conversation references, rendered card batches and per-destination delivery
 states; it never stores the client secret or access token. Failed card batches
 retain their original content so newly queued events cannot merge into a retry.

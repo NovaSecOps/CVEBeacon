@@ -158,7 +158,7 @@ def test_pt_pt_renders_every_message_channel_family():
         assert "[NOVO]" in body, channel
         assert "Publicado: 2026-10-30" in body, channel
         assert "visto pela primeira vez: 2026-11-04" in body, channel
-        assert "Exploração: nenhuma" in body, channel
+        assert "Exploração: desconhecida" in body, channel
         assert "Regra: critical-or-likely" in body, channel
         assert "https://nvd.nist.gov/vuln/detail/CVE-2026-1234" in body, channel
 
@@ -180,7 +180,7 @@ def test_pt_pt_alert_header_and_reported_line():
     )
     message = message_for(event(reported=mark), "smtp", format="text")
     assert "[NOVO] CVE-2026-1234" in message.body
-    assert "CVSS 9.8 (CNA: acme.example), NVD pendente" in message.body
+    assert "CVSS 9.8 v3.1 (CNA: acme.example), NVD pendente" in message.body
     assert "EPSS 0.62" in message.body
     assert "KEV: CISA – UE –" in message.body
     assert (
@@ -327,10 +327,10 @@ def test_text_and_html_carry_the_same_facts():
     visible = visible_html(message.html)
     for fact in (
         "[KEV ADDED: CISA] CVE-2026-1234",
-        "CVSS 9.8 (CNA: acme.example), NVD pending",
+        "CVSS 9.8 v3.1 (CNA: acme.example), NVD pending",
         "EPSS 0.62",
         "KEV: CISA ✓ EU –",
-        "Exploitation: none",
+        "Exploitation: unknown",
         "Published 2026-10-30 · first seen 2026-11-04",
         "Acme Widget before 4.2.1 allows unauthenticated remote code execution.",
         "Due 2026-11-20",
@@ -520,7 +520,7 @@ def test_oversized_fixed_digest_summary_is_rejected(channel):
                     )
                 ),
             },
-            "[PONTUAÇÃO NVD ADICIONADA 9.1]",
+            "[PONTUAÇÃO NVD ADICIONADA 9.1 v3.1]",
             "[NVD SCORED",
         ),
         (

@@ -571,3 +571,23 @@ details.disclosure > summary { font-weight: 600; }
   .shell { display: block; }
   body { background: #ffffff; color: #000000; }
 }
+
+/* Watch filter forms */
+form.explorer-filters { display: grid; grid-template-columns: minmax(0, 1fr); max-width: none; }
+.explorer-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  align-items: end;
+  gap: var(--space-3);
+  margin-block: var(--space-3);
+}
+.explorer-fields > *, .explorer-options { min-width: 0; }
+.explorer-facets { grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr)); }
+.explorer-options { align-self: stretch; }
+.explorer-options .field-check + .field-check { margin-top: var(--space-1); }
+.explorer-options input[type="checkbox"] { min-height: 0; margin: 0; }
+.cvss-score-list { min-width: 10rem; padding-inline-start: var(--space-4); text-align: start; }
+form.configuration-form { max-width: none; }
+.configuration-form .field { margin-block: var(--space-3); }
+.configuration-form fieldset, .configuration-form textarea { min-width: 0; max-width: 100%; }
+.cve-summary { align-items: start; }

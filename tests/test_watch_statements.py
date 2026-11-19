@@ -344,7 +344,7 @@ def test_fields_cover_the_documented_names(tmp_path):
     assert fields["cvss_max_provider"] == "NVD"
     assert fields["cvss_max_version"] == "3.1"
     assert fields["cvss_max_vector"].startswith("CVSS:3.1/AV:N")
-    assert fields["cvss_all"] == "8.1 v3.1 (CNA: acme.example)\n9.8 v3.1 (NVD)\n7.5 v3.1 (EUVD)"
+    assert fields["cvss_all"] == "9.8 v3.1 (NVD)\n8.1 v3.1 (CNA: acme.example)\n7.5 v3.1 (EUVD)"
     assert fields["severity"] == "critical"
     assert fields["epss"] == "0.62214"
     assert fields["epss_percentile"] == "0.95421"
@@ -1762,3 +1762,16 @@ def test_statement_reads_first_seen_from_the_stored_view(tmp_path, monkeypatch):
     out = tmp_path / 'statement.md'
     statements.write_statement(store, view.cve_id, catalogs=SOURCES, template=template, out=out, now=NOW)
     assert out.read_text(encoding="utf-8") == '2026-11-04T00:30:00+02:00|2026-11-03'
+
+
+def test_statement_includes_supplemental_provider_scores():
+    from cvebeacon.watch.records import CVSSEntry, WatchView
+
+    current = WatchView("CVE-2026-10001", "published",
+                        cvss=(CVSSEntry("nvd", "nvd", "3.1", 7.0),),
+                        additional_cvss=(CVSSEntry("cisa-adp", "CISA", "4.0", 9.6),))
+    fields = statements.build_fields(current, first_seen=None, generated_at=NOW)
+    assert fields["cvss_max"] == "9.6"
+    assert fields["cvss_max_version"] == "4.0"
+    assert fields["cvss_max_provider"] == "CISA-ADP"
+    assert fields["cvss_all"] == "9.6 v4.0 (CISA-ADP)\n7 v3.1 (NVD)"

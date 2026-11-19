@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -247,7 +248,7 @@ def test_v1_database_migrates_in_place(tmp_path):
         )
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "9"
+    assert store.metadata()["schema_version"] == "10"
     with sqlite3.connect(path) as db:
         tables = {
             row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -310,8 +311,8 @@ def test_unknown_schema_version_still_fails_closed(tmp_path):
     store = WatchStore(path)
     store.initialize()
     with sqlite3.connect(path) as db:
-        db.execute("UPDATE watch_meta SET value='10' WHERE key='schema_version'")
-    with pytest.raises(Exception, match="unsupported watch schema version 10"):
+        db.execute("UPDATE watch_meta SET value='11' WHERE key='schema_version'")
+    with pytest.raises(StateError, match="unsupported watch schema version 11"):
         store.initialize()
 
 
@@ -366,7 +367,7 @@ def test_v2_database_keeps_deliveries_and_adds_statuses(tmp_path):
         )
     upgraded = WatchStore(path, clock=lambda: NOW)
     upgraded.initialize()
-    assert upgraded.metadata()["schema_version"] == "9"
+    assert upgraded.metadata()["schema_version"] == "10"
     assert upgraded.delivery_status()[0].pending == 1
     upgraded.mark_delivery([event_id], "soc-email", "ambiguous", error="test")
     assert upgraded.delivery_status()[0].ambiguous == 1
@@ -488,7 +489,7 @@ def test_v3_database_adds_first_attempt_at_and_keeps_rows(tmp_path):
         )
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "9"
+    assert store.metadata()["schema_version"] == "10"
     with sqlite3.connect(path) as db:
         columns = {
             row[1] for row in db.execute("PRAGMA table_info(watch_delivery)")
@@ -575,7 +576,7 @@ def test_p1a_queue_upgrade_drops_stale_obligations(tmp_path, initial_mode):
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
     metadata = store.metadata()
-    assert metadata["schema_version"] == "9"
+    assert metadata["schema_version"] == "10"
     assert metadata["initial_evaluated_at"] == NOW.isoformat()
     assert store.pending_evaluations(10) == ()
     assert store.status()["rows"] == 1
@@ -913,3 +914,24 @@ def test_pt_pt_epss_transition_without_a_previous_score(tmp_path):
     )[0]
     assert "[EPSS AUMENTOU nenhuma-><0.9]" in message.body
     assert "none" not in message.body.splitlines()[0]
+
+
+def test_qualified_provider_override_rebases_severity_and_reports_its_score(tmp_path):
+    store = WatchStore(tmp_path / "watch.db", clock=lambda: NOW)
+    identifier = "CVE-2026-0001"
+    cna = CVSSEntry("cna", "Example", "4.0", 9.6)
+    nvd = CVSSEntry("nvd", "nvd", "3.1", 7.0)
+
+    def scoped(provider, version):
+        return rule(condition={"cvss_min": {"score": 7, "versions": [version], "providers": [provider]}})
+
+    store.upsert_nvd([record(cvss=(cna, nvd))])
+    assert store.evaluate_touched((scoped("cna", "4.0"),), catalogs=("nvd",)).by_kind == (("match", 1),)
+    touch(store, identifier)
+    only_nvd = scoped("nvd", "3.1")
+    assert store.evaluate_touched((only_nvd,), catalogs=("nvd",)).events == 0
+    store.upsert_nvd([record(cvss=(cna, replace(nvd, score=9.8)))])
+    assert store.evaluate_touched((only_nvd,), catalogs=("nvd",)).by_kind == (("severity_increase", 1),)
+    latest = next(event for event in store.events() if event.kind == "severity_increase")
+    assert latest.reasons == ("severity high -> critical",)
+    assert latest.details["cvss_selected"]["version"] == "3.1"

@@ -6,6 +6,32 @@ Database migrations run locally and preserve existing records. Back up before
 upgrading with `cvebeacon backup create`; see [backup and restore](BACKUP.md).
 Do not run an older executable against newer schemas.
 
+## Watch schema 9 to 10
+
+The first watch write applies any pending steps in order from schema 7 to 8
+to 9 to 10, in one transaction. Schema 10 preserves the Teams bot conversations,
+frozen batches and delivery records introduced in schema 9.
+
+The 9-to-10 step fills in CISA Vulnrichment SSVC exploitation from stored
+CVE List payloads. Explicit `none` is stored for display and
+filtering. Only recovered `poc` and `active` statuses enter the evaluation queue
+as initial evidence. Existing matches absorb the recovered status into their
+baseline without creating an `exploitation_active` event. New matches use the
+initial digest, including for rules with `old_cves = "alert"`. Rules with
+`old_cves = "ignore"` record the match without sending it. Subsequent live
+exploitation changes use the normal alert rules.
+
+The migration builds narrow CVSS and exploitation indexes from the stored
+evidence. The database needs space for those indexes and the SQLite journal
+during the first write. Records, events, delivery history, source cursors and
+report history are preserved. Read-only explorer requests can use the stored
+records before that write. The benchmark below measures a database upgrading
+from schema 7 through the current schema.
+
+Scalar CVSS conditions retain their matching behavior and rule identity. The
+optional version-qualified form is available through the same rule and editor
+interfaces. Version 2 webhook documents gain the complete score list and
+exploitation details alongside the original CVSS field.
 
 ## Watch schema 7 to 8
 
@@ -21,8 +47,8 @@ stay in their original table and retain the original FTS5 keyword semantics
 through an in-memory candidate matcher (literal LIKE when FTS5 is unavailable). Thus
 initial migration work is independent of the number of CVEs. A small amount of
 space for new table/index pages and the SQLite journal is still required; disk
-or injected failures roll back the schema and added tables together. The
-synthetic acceptance measurement is reproducible with:
+or injected failures roll back the schema and added tables together. To measure
+the full upgrade from a synthetic schema-7 database to the current schema, run:
 
 ```console
 python tools/cve_migration_benchmark.py --rows 430000
@@ -66,9 +92,8 @@ migrate or take write locks.
 
 ## Optional Teams bot channel (schema 8 to 9)
 
-Back up the watch database before upgrading. The first write-capable watch
-operation applies the released schema 7 to 8 migration and then migrates schema
-8 to 9 in the same transaction, preserving existing event, delivery and
+Back up the watch database before upgrading. The schema 8 to 9 step runs
+after provider storage is ready and before the schema 10 backfill, preserving existing event, delivery and
 reporting history. The new tables store Teams bot conversation references,
 frozen message batches and per-recipient results. The schema-8 provider, search
 and CVE List storage is unchanged. Bot migration checks actual tables and

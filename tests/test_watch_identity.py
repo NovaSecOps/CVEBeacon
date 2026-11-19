@@ -699,7 +699,7 @@ def test_schema_five_database_migrates_report_identity_in_place(tmp_path):
         db.execute("UPDATE watch_meta SET value='5' WHERE key='schema_version'")
     store = WatchStore(path, clock=lambda: NOW)
     store.initialize()
-    assert store.metadata()["schema_version"] == "9"
+    assert store.metadata()["schema_version"] == "10"
     entries = store.reported_entries()
     assert len(entries) == 1
     entry = entries[0]

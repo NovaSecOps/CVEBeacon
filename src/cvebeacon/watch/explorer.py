@@ -2,16 +2,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+from itertools import islice
 from contextlib import closing
 import json
 import re
 import sqlite3
 
+from ..clients import MAX_CLIENT_CVES
 from ..errors import StateError
 from ..sources.common import cve_id
+from . import explorer_index
+from .records import CVSS_PROVIDERS, CVSS_VERSIONS, SSVC_EXPLOITATION
 
 SOURCES = ("nvd", "euvd", "cve_list", "cisa_kev", "eu_kev", "epss")
 MAX_QUERY = 256
+KEV_FILTERS = ("cisa", "eu", "either", "neither")
+EXPLOITATION_FILTERS = (*SSVC_EXPLOITATION, "unknown")
+SEVERITY_MINIMA = {"critical": 9, "high": 7, "medium": 4, "low": 0.1, "none": 0}
+SEVERITY_BANDS = (*SEVERITY_MINIMA, "unknown")
 
 
 @dataclass(frozen=True)
@@ -21,28 +30,85 @@ class SearchResult:
     fts: bool = False
 
 
+def _choices(values, allowed, label):
+    if isinstance(values, str):
+        values = (values,) if values else ()
+    if (not isinstance(values, (tuple, list)) or len(values) > len(allowed)
+            or any(not isinstance(value, str) or value not in allowed for value in values)):
+        raise StateError(f"Invalid {label} filter")
+    return tuple(dict.fromkeys(values))
+
+
+def _number_range(low, high, maximum, label):
+    for value in (low, high):
+        if value is not None and (type(value) not in (int, float) or not 0 <= value <= maximum):
+            raise StateError(f"{label} bounds must be between 0 and {maximum}")
+    if low is not None and high is not None and low > high:
+        raise StateError(f"{label} minimum exceeds its maximum")
+
+
+def _date_range(low, high, label):
+    if any(value is not None and type(value) is not date for value in (low, high)):
+        raise StateError(f"Invalid {label} date")
+    if low and high and low > high:
+        raise StateError(f"{label} start date follows its end date")
+
+
+def _range_conditions(where, values, field, low, high):
+    for value, operator in ((low, ">="), (high, "<=")):
+        if value is not None:
+            where.append(f"{field} {operator} ?")
+            values.append(value)
+
+
+def _in(values):
+    return "(" + ",".join("?" for _ in values) + ")"
+
+
 def search(store, *, query="", source="", kev="", severity="", since=None, until=None,
            has_events="", reported="", client_ids=None, sort="modified", limit=50, offset=0,
-           use_fts=True, catalogs=SOURCES):
+           use_fts=True, catalogs=SOURCES, exploitation="", epss_min=None, epss_max=None,
+           cvss_min=None, cvss_max=None, cvss_version="", cvss_provider="",
+           modified_since=None, modified_until=None):
     if not isinstance(query, str) or len(query) > MAX_QUERY:
         raise StateError("Search must be at most 256 characters")
     query = query.strip()
+    source = _choices(source, SOURCES, "source")
+    kev = _choices(kev, (*KEV_FILTERS, "yes", "no"), "KEV")
+    severity = _choices(severity, SEVERITY_BANDS, "severity")
+    exploitation = _choices(exploitation, EXPLOITATION_FILTERS, "exploitation")
+    cvss_version = _choices(cvss_version, CVSS_VERSIONS, "CVSS version")
+    cvss_provider = _choices(cvss_provider, CVSS_PROVIDERS, "CVSS provider")
+    has_events = _choices(has_events, ("yes", "no"), "events")
+    reported = _choices(reported, ("yes", "no"), "reported")
+    if len(has_events) > 1 or len(reported) > 1:
+        raise StateError("Events and reported filters each accept one choice")
+    _number_range(epss_min, epss_max, 1, "EPSS")
+    _number_range(cvss_min, cvss_max, 10, "CVSS")
+    _date_range(since, until, "Publication")
+    _date_range(modified_since, modified_until, "Modification")
     limit = max(1, min(int(limit), 100))
     offset = max(0, min(int(offset), 5_000_000))
+    if client_ids is not None:
+        client_ids = tuple(islice(client_ids, MAX_CLIENT_CVES + 1))
+        if len(client_ids) > MAX_CLIENT_CVES:
+            raise StateError("Client filter exceeds the local result limit")
     with store.read() as db, closing(sqlite3.connect(":memory:")) as matcher:
         active = tuple(name for name in SOURCES if name in catalogs)
         enabled = "(" + ",".join("'" + name + "'" for name in active) + ")" if active else "('')"
-        fallback = f"(SELECT p.record_json FROM watch_provider p WHERE p.cve_id=b.cve_id AND p.source IN {enabled} ORDER BY CASE p.source WHEN 'cve_list' THEN 0 WHEN 'euvd' THEN 1 ELSE 2 END LIMIT 1)"
+        fallback = f"(SELECT p.record_json FROM watch_provider p WHERE p.cve_id=b.cve_id AND p.source IN {enabled} ORDER BY CASE p.source WHEN 'cve_list' THEN 0 WHEN 'euvd' THEN 1 WHEN 'cisa_kev' THEN 2 ELSE 3 END LIMIT 1)"
         official = "(SELECT p.record_json FROM watch_provider p WHERE p.cve_id=b.cve_id AND p.source='cve_list')" if "cve_list" in active else "NULL"
-        def base_field(name, empty="NULL"):
-            fallback_value = f"json_extract({fallback},'$.{name}')"
-            primary = f"b.{name}"
-            if name != "status":
-                missing = "'[]'" if name == "cvss_json" else "''"
-                primary = f"COALESCE(NULLIF(b.{name},{missing}),json_extract({official},'$.{name}'),b.{name})"
-            return f"CASE WHEN o.cve_id IS NOT NULL THEN COALESCE({fallback_value},{empty}) ELSE {primary} END AS effective_{name}"
-        fields = [base_field(name, "'[]'" if name == "cvss_json" else "'reserved'" if name == "status" else "NULL") for name in ("description", "published", "last_modified", "cvss_json", "status")]
-        cte = "WITH base AS (SELECT b.*," + ",".join(fields) + " FROM watch_cve b LEFT JOIN watch_origin o ON o.cve_id=b.cve_id) "
+        fields = [
+            f"CASE WHEN o.cve_id IS NOT NULL THEN json_extract({fallback},'$.{name}') "
+            f"ELSE COALESCE(NULLIF(b.{name},''),json_extract({official},'$.{name}'),b.{name}) "
+            f"END AS effective_{name}"
+            for name in ("published", "last_modified")
+        ]
+        fields.append(f"{official} AS official_record")
+        cte = (
+            "WITH base AS (SELECT b.*,o.cve_id IS NOT NULL AS provider_only,"
+            + ",".join(fields) + " FROM watch_cve b LEFT JOIN watch_origin o ON o.cve_id=b.cve_id) "
+        )
         where, values = [], []
         identifier = cve_id(query)
         fts = False
@@ -99,47 +165,136 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
             "eu_kev": "EXISTS(SELECT 1 FROM watch_kev k WHERE k.cve_id=c.cve_id AND k.catalog='eu')",
         }
         if source:
-            if source not in presence:
-                raise StateError("Unknown source filter")
-            where.append(presence[source] if source in active else "0")
-        cisa = presence['cisa_kev'] if 'cisa_kev' in active else "c.cisa_kev_added IS NOT NULL"
-        eu = presence['eu_kev'] if 'eu_kev' in active else "0"
+            where.append("(" + " OR ".join(presence[name] if name in active else "0" for name in source) + ")")
+        cisa = presence["cisa_kev"] if "cisa_kev" in active else "c.cisa_kev_added IS NOT NULL"
+        eu = presence["eu_kev"] if "eu_kev" in active else "0"
         kev_sql = f"({cisa} OR {eu})"
-        base_score = "COALESCE((SELECT max(json_extract(j.value,'$.score')) FROM json_each(CASE WHEN json_valid(c.effective_cvss_json) THEN c.effective_cvss_json ELSE '[]' END) j),-1)"
-        shared_score = "(SELECT i.score FROM watch_euvd_item i JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id WHERE a.cve_id=c.cve_id ORDER BY watch_euvd_rank(i.exploited_since,i.date_updated,i.euvd_id) DESC LIMIT 1)"
-        override_score = "(SELECT json_extract(j.value,'$.score') FROM watch_euvd_override ov,json_each(ov.items_json) j WHERE ov.cve_id=c.cve_id ORDER BY watch_euvd_rank(json_extract(j.value,'$.exploited_since'),json_extract(j.value,'$.date_updated'),json_extract(j.value,'$.euvd_id')) DESC LIMIT 1)"
-        euvd_score = f"CASE WHEN EXISTS(SELECT 1 FROM watch_euvd_override ov WHERE ov.cve_id=c.cve_id) THEN {override_score} ELSE {shared_score} END" if 'euvd' in active else "NULL"
-        score = f"max({base_score},COALESCE({euvd_score},-1))"
-        if kev in ("yes", "no"):
-            where.append(("NOT " if kev == "no" else "") + kev_sql)
-        if severity:
-            bands = {"critical": (9, 10.1), "high": (7, 9), "medium": (4, 7), "low": (0.1, 4), "none": (0, 0.1), "unknown": (-1, 0)}
-            if severity not in bands:
-                raise StateError("Unknown severity filter")
-            low, high = bands[severity]
-            where.append(f"{score} >= ? AND {score} < ?")
-            values.extend((low, high))
-        for bound, operator in ((since, ">="), (until, "<=")):
-            if bound:
-                where.append(f"substr(c.effective_published,1,10) {operator} ?")
-                values.append(bound.isoformat())
-        for value, sql in ((has_events, "EXISTS(SELECT 1 FROM watch_event e WHERE e.cve_id=c.cve_id)"),
-                           (reported, "EXISTS(SELECT 1 FROM watch_report r WHERE r.cve_id=c.cve_id AND r.action='report' AND NOT EXISTS(SELECT 1 FROM watch_report newer WHERE newer.cve_id=r.cve_id AND newer.id>r.id))")):
-            if value in ("yes", "no"):
-                where.append(("NOT " if value == "no" else "") + sql)
+        kev_clauses = {"cisa": cisa, "eu": eu, "either": kev_sql, "neither": f"NOT {kev_sql}",
+                       "yes": kev_sql, "no": f"NOT {kev_sql}"}
+        positive_kev = bool(kev and not {"neither", "no"}.intersection(kev))
+        if kev:
+            either = bool({"either", "yes"}.intersection(kev))
+            requested = tuple(name for name in ("cisa", "eu") if either or name in kev)
+            if positive_kev and all(f"{name}_kev" in active for name in requested):
+                where.append(f"c.cve_id IN (SELECT cve_id FROM watch_kev WHERE catalog IN {_in(requested)})")
+                values.extend(requested)
+            else:
+                where.append("(" + " OR ".join(kev_clauses[name] for name in kev) + ")")
+
+        score_filter = bool(cvss_version or cvss_provider or cvss_min is not None or cvss_max is not None)
+        marker = db.execute("SELECT value FROM watch_meta WHERE key='explorer_storage'").fetchone()
+        indexed = bool(marker and marker[0] == explorer_index.STORAGE)
+        maximum_only = bool(indexed and score_filter and not cvss_version and not cvss_provider
+                            and (cvss_max is None or cvss_max == 10))
+        metric_filter = bool(exploitation or severity or sort == "cvss" or maximum_only)
+        search_from = " FROM base c"
+        if indexed:
+            indexed_sources = tuple(name for name in explorer_index.SOURCES if name == "nvd" or name in active)
+            def metrics(field):
+                columns = [f"m.{name}_{field}" for name in indexed_sources]
+                return f"max({','.join(columns)})" if len(columns) > 1 else columns[0]
+            score = metrics("score")
+            if metric_filter:
+                search_from += " JOIN watch_explorer_metrics m ON m.cve_id=c.cve_id"
+            if exploitation:
+                where.append(f"{metrics('exploitation')} IN {_in(exploitation)}")
+                values.extend(explorer_index.EXPLOITATION_LEVELS[name] for name in exploitation)
+            if severity:
+                bands = " ".join(f"WHEN {score} >= {minimum} THEN '{band}'"
+                                 for band, minimum in SEVERITY_MINIMA.items())
+                where.append(f"(CASE {bands} ELSE 'unknown' END) IN {_in(severity)}")
+                values.extend(severity)
+        else:
+            euvd_scores = ""
+            euvd_exploited = "0"
+            if "euvd" in active:
+                shared_items = (
+                    "FROM watch_euvd_item i JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id "
+                    "WHERE a.cve_id=c.cve_id AND NOT EXISTS("
+                    "SELECT 1 FROM watch_euvd_override ov WHERE ov.cve_id=c.cve_id)"
+                )
+                override_items = "FROM watch_euvd_override ov,json_each(ov.items_json) j WHERE ov.cve_id=c.cve_id"
+                euvd_scores = (
+                    f" UNION ALL SELECT i.version,'euvd',i.score {shared_items} AND i.version IS NOT NULL"
+                    f" UNION ALL SELECT json_extract(j.value,'$.version'),'euvd',json_extract(j.value,'$.score') "
+                    f"{override_items} AND json_extract(j.value,'$.version') IS NOT NULL"
+                )
+                euvd_exploited = (
+                    f"(EXISTS(SELECT 1 {shared_items} AND NULLIF(i.exploited_since,'') IS NOT NULL) OR "
+                    f"EXISTS(SELECT 1 {override_items} AND NULLIF(json_extract(j.value,'$.exploited_since'),'') IS NOT NULL))"
+                )
+            if exploitation:
+                official_ssvc = "json_extract(c.official_record,'$.ssvc_exploitation')"
+                status = (
+                    f"CASE WHEN {euvd_exploited} OR 'active' IN (c.ssvc_exploitation,{official_ssvc}) THEN 'active' "
+                    f"WHEN 'poc' IN (c.ssvc_exploitation,{official_ssvc}) THEN 'poc' "
+                    f"WHEN 'none' IN (c.ssvc_exploitation,{official_ssvc}) THEN 'none' ELSE 'unknown' END"
+                )
+                where.append(f"{status} IN {_in(exploitation)}")
+                values.extend(exploitation)
+
+            score_rows = (
+                "SELECT json_extract(j.value,'$.version') AS version, json_extract(j.value,'$.provider') AS provider, "
+                "json_extract(j.value,'$.score') AS score "
+                "FROM json_each(CASE WHEN json_valid(c.cvss_json) THEN c.cvss_json ELSE '[]' END) j "
+                "WHERE NOT c.provider_only UNION ALL "
+                "SELECT json_extract(j.value,'$.version'),json_extract(j.value,'$.provider'),json_extract(j.value,'$.score') "
+                "FROM json_each(json_extract(c.official_record,'$.cvss_json')) j" + euvd_scores
+            )
+            score = f"COALESCE((SELECT max(score) FROM ({score_rows})),-1)"
+            if severity:
+                bands = " ".join(f"WHEN max(score) >= {minimum} THEN '{band}'"
+                                 for band, minimum in SEVERITY_MINIMA.items())
+                where.append(f"(SELECT CASE {bands} ELSE 'unknown' END FROM ({score_rows})) IN {_in(severity)}")
+                values.extend(severity)
+
+        if maximum_only:
+            where.append(f"{score} >= ?")
+            values.append(cvss_min if cvss_min is not None else 0)
+        elif score_filter:
+            cvss_conditions = []
+            cvss_values = []
+            _range_conditions(cvss_conditions, cvss_values, "score", cvss_min, cvss_max)
+            for field, selected in (("version", cvss_version), ("provider", cvss_provider)):
+                if selected:
+                    cvss_conditions.append(f"{field} IN {_in(selected)}")
+                    cvss_values.extend(selected)
+            if indexed:
+                if indexed_sources != explorer_index.SOURCES:
+                    cvss_conditions.append(f"source IN {_in(indexed_sources)}")
+                    cvss_values.extend(indexed_sources)
+                predicate = " AND ".join(cvss_conditions)
+                where.append(f"EXISTS(SELECT 1 FROM watch_explorer_score s WHERE s.cve_id=c.cve_id AND {predicate})")
+            else:
+                where.append(
+                    f"EXISTS(SELECT 1 FROM ({score_rows}) WHERE score IS NOT NULL AND "
+                    + " AND ".join(cvss_conditions) + ")"
+                )
+            values.extend(cvss_values)
+
+        epss = "(SELECT epss FROM watch_epss e WHERE e.cve_id=c.cve_id)" if "epss" in active else "NULL"
+        _range_conditions(where, values, epss, epss_min, epss_max)
+        for field, low, high in (("effective_published", since, until),
+                                 ("effective_last_modified", modified_since, modified_until)):
+            _range_conditions(where, values, f"substr(c.{field},1,10)",
+                              low.isoformat() if low else None, high.isoformat() if high else None)
+        for selected, sql in (
+            (has_events, "c.cve_id IN (SELECT e.cve_id FROM watch_event e)"),
+            (reported, "(SELECT r.action FROM watch_report r WHERE r.cve_id=c.cve_id ORDER BY r.id DESC LIMIT 1) IS 'report'"),
+        ):
+            if selected:
+                where.append(("NOT " if selected[0] == "no" else "") + f"({sql})")
         if client_ids is not None:
-            # A bounded temporary table avoids SQLite's parameter limit and
-            # leaves client identities entirely in the local scan database.
             db.execute("CREATE TEMP TABLE selected_cves(cve_id TEXT PRIMARY KEY)")
             db.executemany("INSERT OR IGNORE INTO selected_cves VALUES (?)", ((i,) for i in client_ids))
             where.append("c.cve_id IN (SELECT cve_id FROM selected_cves)")
         orders = {"published": "c.effective_published", "modified": "c.effective_last_modified", "cvss": score,
-                  "epss": "(SELECT epss FROM watch_epss e WHERE e.cve_id=c.cve_id)" if "epss" in active else "NULL", "kev": kev_sql}
+                  "epss": epss, "kev": kev_sql}
         if sort not in orders:
             raise StateError("Unknown sort order")
         condition = " WHERE " + " AND ".join(where) if where else ""
-        total = db.execute(cte + "SELECT count(*) FROM base c" + condition, values).fetchone()[0]
-        rows = db.execute(cte + "SELECT c.cve_id FROM base c" + condition + " ORDER BY " + orders[sort] + " DESC,c.cve_id DESC LIMIT ? OFFSET ?", (*values, limit, offset)).fetchall()
+        total = db.execute(cte + "SELECT count(*)" + search_from + condition, values).fetchone()[0]
+        rows = db.execute(cte + "SELECT c.cve_id" + search_from + condition + " ORDER BY " + orders[sort] + " DESC,c.cve_id DESC LIMIT ? OFFSET ?", (*values, limit, offset)).fetchall()
         return SearchResult(tuple(store._view(db, row[0], catalogs) for row in rows), total, fts)
 
 

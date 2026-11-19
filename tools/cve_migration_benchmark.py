@@ -1,4 +1,4 @@
-"""Measure schema-7 upgrade time and disk growth using synthetic local data."""
+"""Measure a schema-7 to current upgrade using synthetic local data."""
 from __future__ import annotations
 
 import argparse
@@ -58,12 +58,16 @@ def benchmark(rows=430_000):
         sampler.join(timeout=2)
         with sqlite3.connect(path) as db:
             db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-            counts = {name:db.execute(f'SELECT count(*) FROM {name}').fetchone()[0] for name in ('watch_cve','watch_euvd_item','watch_provider','watch_search')}
+            tables = ('watch_cve', 'watch_euvd_item', 'watch_provider', 'watch_search',
+                      'watch_explorer_metrics', 'watch_explorer_score')
+            counts = {name: db.execute(f'SELECT count(*) FROM {name}').fetchone()[0] for name in tables}
             assert counts['watch_cve'] == rows
             assert counts['watch_euvd_item'] == min(rows,5000)
             assert counts['watch_provider'] == counts['watch_search'] == 0
+            assert counts['watch_explorer_metrics'] == rows
+            assert counts['watch_explorer_score'] == rows + min(rows, 5000)
         after = size()
-        assert after - before < 2 * 1024 * 1024
+        assert after - before < 2 * 1024 * 1024 + 256 * rows
         return {'rows':rows,'before_mib':round(before/2**20,3),'after_mib':round(after/2**20,3),
                 'growth_mib':round((after-before)/2**20,3),'peak_sampled_mib':round(peak[0]/2**20,3),
                 'migration_seconds':round(elapsed,4),'table_rows':counts}

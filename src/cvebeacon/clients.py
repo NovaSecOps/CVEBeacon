@@ -387,10 +387,11 @@ def client_name(path: str | Path, name: str) -> str | None:
 
 
 def client_cve_filter(
-    path: str | Path, name: str, *, cve_id: str | None = None
+    path: str | Path, name: str | tuple[str, ...], *, cve_id: str | None = None
 ) -> tuple[tuple[str, ...], bool]:
-    """Return client CVEs with explicit overflow, or check one exact CVE."""
-    wanted = name.strip().casefold()
+    """Return CVEs for any chosen client with explicit overflow."""
+    names = (name,) if isinstance(name, str) else name
+    wanted = tuple(dict.fromkeys(item.strip().casefold() for item in names if item.strip()))
     if not wanted:
         return (), False
 
@@ -400,14 +401,15 @@ def client_cve_filter(
             return (), False
         exact = " AND sf.identifier=?" if cve_id else ""
         limit = 1 if cve_id else MAX_CLIENT_CVES + 1
+        placeholders = ",".join("?" for _ in wanted)
         cursor = db.execute(
             "SELECT DISTINCT sf.identifier FROM scan_asset_clients sac "
             "CROSS JOIN scan_findings sf "
             "ON sac.run_id = sf.run_id AND sac.asset_id = sf.asset_id "
-            "WHERE sac.run_id=? AND sac.client_key=? "
+            f"WHERE sac.run_id=? AND sac.client_key IN ({placeholders}) "
             "AND sf.applicability IN ('affected','needs_review') "
             "AND sf.identifier LIKE 'CVE-%'" + exact + " ORDER BY sf.identifier LIMIT ?",
-            (scan.run_id, wanted, *((cve_id.upper(),) if cve_id else ()), limit),
+            (scan.run_id, *wanted, *((cve_id.upper(),) if cve_id else ()), limit),
         )
         rows = cursor.fetchmany(limit)
         return (tuple(str(row["identifier"]) for row in rows[:MAX_CLIENT_CVES]),

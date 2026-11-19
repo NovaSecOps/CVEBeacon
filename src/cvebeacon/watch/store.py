@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..errors import SourceError, StateError
+from . import explorer_index
 from .directories import ensure_private_directory
 from .chain import (
     chain_hash,
@@ -37,6 +38,9 @@ from .records import (
     WatchRecord,
     build_view,
     canonical_json,
+    cvss_severity_differs,
+    display_cvss,
+    normalized_cvss,
 )
 from .reported import (
     NOTICE_KINDS,
@@ -62,7 +66,8 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
+_CVE_LIST_SSVC = "CISA Vulnrichment (CVE List SSVC)"
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
@@ -128,7 +133,7 @@ _NVD_CONTENT_COLUMNS = (
     "cisa_ransomware",
 )
 
-_SCHEMA = (
+_SCHEMA_THROUGH_8 = (
     """CREATE TABLE IF NOT EXISTS watch_origin (
         cve_id TEXT PRIMARY KEY, source TEXT NOT NULL
     )""",
@@ -282,6 +287,8 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS watch_event_created ON watch_event(created_at, id)",
     "CREATE INDEX IF NOT EXISTS watch_delivery_status ON watch_delivery(status)",
     "CREATE INDEX IF NOT EXISTS watch_report_cve ON watch_report(cve_id, id)",
+)
+_SCHEMA_9 = (
     """CREATE TABLE IF NOT EXISTS watch_teams_bot_conversation (
         tenant_id TEXT NOT NULL, app_id TEXT NOT NULL, recipient TEXT NOT NULL,
         service_url TEXT NOT NULL, conversation_id TEXT NOT NULL,
@@ -303,6 +310,12 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS watch_teams_bot_batch_scope ON watch_teams_bot_batch(channel, tenant_id, app_id)",
 )
+_SCHEMA_10 = (
+    """CREATE TABLE IF NOT EXISTS watch_initial_ssvc (
+        cve_id TEXT PRIMARY KEY, status TEXT NOT NULL CHECK(status IN ('poc','active'))
+    )""",
+) + explorer_index.SCHEMA
+_SCHEMA = _SCHEMA_THROUGH_8 + _SCHEMA_9 + _SCHEMA_10
 
 
 _TEAMS_BOT_COLUMNS = {
@@ -362,6 +375,11 @@ class WatchEventRow:
     details: Mapping[str, Any] = field(default_factory=dict)
     published: str | None = None
     first_seen: str | None = None
+    cvss_scores: tuple[CVSSEntry, ...] = ()
+
+    @property
+    def cvss_severity_differs(self) -> bool:
+        return cvss_severity_differs(self.cvss_scores)
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,12 +515,6 @@ def _alert_columns_current(db: sqlite3.Connection) -> bool:
     return {"rule_hash", "providers_hash"} <= alert and "occurrence" in event
 
 
-def _euvd_sql_rank(exploited, updated, identifier):
-    rank = EUVDUpdate((), identifier, exploited, date_updated=updated).rank()
-    numeric = "".join(f"{len(str(value)):08d}:{value}" for value in rank[2])
-    return f"{rank[0]}\0{rank[1]}\0{numeric}"
-
-
 def _euvd_covers_observation(updated, scoped_updated, checked_at):
     if not updated:
         return False
@@ -576,7 +588,6 @@ class WatchStore:
         missing = not self.path.exists()
         db = sqlite3.connect(":memory:") if missing else self._connect_readonly()
         db.row_factory = sqlite3.Row
-        db.create_function("watch_euvd_rank", 3, _euvd_sql_rank, deterministic=True)
         try:
             if missing:
                 self._ensure_schema(db, _timestamp(self._clock))
@@ -605,13 +616,17 @@ class WatchStore:
         if self.path.is_file():
             with closing(self._connect_readonly()) as db:
                 try:
-                    meta = dict(db.execute("SELECT key,value FROM watch_meta WHERE key IN ('schema_version','provider_storage','teams_bot_storage')"))
+                    meta = dict(db.execute(
+                        "SELECT key,value FROM watch_meta WHERE key IN "
+                        "('schema_version','provider_storage','teams_bot_storage','explorer_storage')"
+                    ))
                 except sqlite3.Error:
                     meta = {}
                 if (
                     meta.get("schema_version") == str(SCHEMA_VERSION)
                     and meta.get("provider_storage") == "sparse-v1"
                     and meta.get("teams_bot_storage") == "durable-v1"
+                    and meta.get("explorer_storage") == explorer_index.STORAGE
                     and self._storage_columns_present(db, _TEAMS_BOT_COLUMNS)
                 ):
                     if not _alert_columns_current(db):
@@ -642,12 +657,13 @@ class WatchStore:
                 "('report_legacy_max_id','0')"
             )
             cls._ensure_search(db)
+            explorer_index.initialize(db)
             cls._set_meta(db, {"provider_storage": "sparse-v1"})
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
             raise StateError(f"unsupported watch schema version {version}")
-        if version in {"2", "3", "4", "5", "6", "7", "8", "9"} and not _alert_columns_current(db):
+        if version != "1" and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
             # not migrated; the operator deletes the file and resyncs.
             raise StateError(
@@ -671,7 +687,7 @@ class WatchStore:
                     "watch database cannot be migrated from schema "
                     f"{version}: missing {table}.{column}"
                 )
-        for statement in _SCHEMA:
+        for statement in _SCHEMA_THROUGH_8:
             db.execute(statement)
         if version == "1":
             columns = {
@@ -747,9 +763,40 @@ class WatchStore:
                 payload = json.loads(row["payload_json"])
                 text = description_text(payload) if row["source"] == "cve_list" else payload.get("description") or ""
                 db.execute("INSERT INTO watch_search VALUES (?,?,?)", (row["cve_id"], row["source"], text))
-        cls._ensure_teams_bot_schema(db)
         cls._ensure_search(db)
+        for statement in _SCHEMA_9:
+            db.execute(statement)
+        cls._ensure_teams_bot_schema(db)
+        for statement in _SCHEMA_10:
+            db.execute(statement)
+        if version_number < 10:
+            cls._backfill_vulnrichment(db, now)
+        explorer_index.initialize(db)
         cls._set_meta(db, {"schema_version": str(SCHEMA_VERSION), "provider_storage": "sparse-v1"})
+
+    @staticmethod
+    def _backfill_vulnrichment(db, now):
+        from .cve_list import vulnrichment_exploitation
+
+        db.execute("CREATE TEMP TABLE recovered_ssvc(cve_id TEXT PRIMARY KEY, status TEXT NOT NULL)")
+        for row in db.execute(
+            "SELECT cve_id,payload_json FROM watch_provider WHERE source='cve_list' "
+            "AND json_extract(record_json,'$.ssvc_exploitation') IS NULL "
+            "AND instr(lower(payload_json), '\"ssvc\"') > 0 ORDER BY cve_id"
+        ):
+            status = vulnrichment_exploitation(json.loads(row["payload_json"]))
+            if status is not None:
+                db.execute("INSERT INTO recovered_ssvc VALUES (?,?)", (row["cve_id"], status))
+        db.execute(
+            "UPDATE watch_provider AS p SET record_json=json_set(record_json,'$.ssvc_exploitation',"
+            "(SELECT status FROM recovered_ssvc WHERE cve_id=p.cve_id)) "
+            "WHERE p.source='cve_list' AND p.cve_id IN (SELECT cve_id FROM recovered_ssvc)"
+        )
+        db.execute("INSERT OR IGNORE INTO watch_initial_ssvc SELECT cve_id,status FROM recovered_ssvc "
+                   "WHERE status IN ('poc','active')")
+        db.execute("INSERT OR IGNORE INTO watch_touched SELECT cve_id,? FROM recovered_ssvc "
+                   "WHERE status IN ('poc','active')", (now,))
+        db.execute("DROP TABLE recovered_ssvc")
 
     @staticmethod
     def _ensure_search(db: sqlite3.Connection) -> None:
@@ -1067,21 +1114,17 @@ class WatchStore:
         return "changed"
 
     @staticmethod
-    def _best_euvd(db: sqlite3.Connection, identifier: str) -> EUVDUpdate | None:
+    def _euvd_candidates(db: sqlite3.Connection, identifier: str) -> tuple[EUVDUpdate, ...]:
         override = db.execute("SELECT items_json FROM watch_euvd_override WHERE cve_id=?", (identifier,)).fetchone()
         if override is not None:
-            candidates = [_euvd_from_row(item) for item in json.loads(override[0])]
-            return max(candidates, key=lambda item: item.rank()) if candidates else None
+            return tuple(_euvd_from_row(item) for item in json.loads(override[0]))
         rows = db.execute(
             "SELECT i.* FROM watch_euvd_item i "
             "JOIN watch_euvd_alias a ON a.euvd_id=i.euvd_id "
             "WHERE a.cve_id=?",
             (identifier,),
         ).fetchall()
-        if not rows:
-            return None
-        candidates = [_euvd_from_row(row) for row in rows]
-        return max(candidates, key=lambda item: item.rank())
+        return tuple(_euvd_from_row(row) for row in rows)
 
     @staticmethod
     def _kev_row(
@@ -1119,8 +1162,11 @@ class WatchStore:
         row = self._row(db, identifier)
         if row is None:
             return None
-        record = self._merged_record(db, identifier, catalogs)
-        euvd = self._best_euvd(db, identifier) if "euvd" in catalogs else None
+        record, additional_cvss, ssvc_source = self._merged_record(db, identifier, catalogs)
+        euvd_candidates = self._euvd_candidates(db, identifier) if "euvd" in catalogs else ()
+        euvd = max(euvd_candidates, key=EUVDUpdate.rank, default=None)
+        extra_euvd = tuple(item.cvss for item in euvd_candidates
+                           if item.cvss is not None and item is not euvd and item.cvss != euvd.cvss)
         return build_view(
             record,
             euvd=euvd,
@@ -1130,6 +1176,8 @@ class WatchStore:
             eu_catalog="eu_kev" in catalogs,
             epss=self._epss_row(db, identifier) if "epss" in catalogs else None,
             first_seen=row["first_seen"],
+            additional_cvss=normalized_cvss((*additional_cvss, *extra_euvd)),
+            ssvc_source=ssvc_source,
         )
 
     def _refresh_views(
@@ -1275,21 +1323,28 @@ class WatchStore:
         providers = {item["source"]: self._record({"cve_id": identifier, **json.loads(item["record_json"])})
                      for item in db.execute("SELECT source,record_json FROM watch_provider WHERE cve_id=?", (identifier,))
                      if item["source"] in allowed}
-        if origin is not None:
-            return next((providers[name] for name in ("cve_list", "euvd", "cisa_kev", "eu_kev") if name in providers), WatchRecord(identifier, "reserved"))
-        primary = self._record(row)
         official = providers.get("cve_list")
+        if origin is not None:
+            record = next((providers[name] for name in ("cve_list", "euvd", "cisa_kev", "eu_kev") if name in providers), WatchRecord(identifier, "reserved"))
+            return record, (), _CVE_LIST_SSVC if official and official.ssvc_exploitation else None
+        primary = self._record(row)
+        nvd_ssvc = "NVD SSVC" if primary.ssvc_exploitation else None
         if official is None:
-            return primary
-        # NVD status and every populated NVD field retain their old meaning.
-        return replace(primary,
+            return primary, (), nvd_ssvc
+        additional_cvss = tuple(entry for entry in official.cvss if primary.cvss and entry not in primary.cvss)
+        strengths = {None: 0, "none": 1, "poc": 2, "active": 3}
+        use_official_ssvc = strengths[official.ssvc_exploitation] > strengths[primary.ssvc_exploitation]
+        # Keep NVD precedence for legacy scoring and stable descriptive fields.
+        merged = replace(primary,
                        published=primary.published or official.published,
                        last_modified=primary.last_modified or official.last_modified,
                        description=primary.description or official.description,
                        source_identifier=primary.source_identifier or official.source_identifier,
                        cvss=primary.cvss or official.cvss, cwes=primary.cwes or official.cwes,
                        products=primary.products or official.products,
-                       references=primary.references or official.references)
+                       references=primary.references or official.references,
+                       ssvc_exploitation=official.ssvc_exploitation if use_official_ssvc else primary.ssvc_exploitation)
+        return merged, additional_cvss, _CVE_LIST_SSVC if use_official_ssvc else nvd_ssvc
 
     def upsert_nvd(self, records, *, meta=None, catalogs=()) -> StepCounts:
         self.initialize()
@@ -1708,6 +1763,8 @@ class WatchStore:
         created: dict[str, int] = {}
         stamp = _timestamp(lambda: now)
         backlog_before = self._backlog_before(db)
+        active_rules = [(rule, rule.name.casefold(), rule_hash(rule), providers_hash(rule))
+                        for rule in rules if rule.enabled]
         for identifier in identifiers:
             source_initial = db.execute("SELECT 1 FROM watch_initial_cve WHERE cve_id=?", (identifier,)).fetchone() is not None
             source_backlog = backlog_before
@@ -1723,12 +1780,10 @@ class WatchStore:
             view = self._view(db, identifier, catalogs)
             if view is None:
                 continue
-            for rule in rules:
-                if not rule.enabled:
-                    continue
-                key = rule.name.casefold()
-                current_hash = rule_hash(rule)
-                current_providers = providers_hash(rule)
+            recovered = db.execute("SELECT status FROM watch_initial_ssvc WHERE cve_id=?", (identifier,)).fetchone()
+            initial_exploitation = bool(recovered and recovered[0] == view.ssvc_exploitation
+                                        and view.ssvc_source == _CVE_LIST_SSVC)
+            for rule, key, current_hash, current_providers in active_rules:
                 stored = self._alert_state(db, key, identifier)
                 previous = None
                 if stored is not None:
@@ -1744,6 +1799,7 @@ class WatchStore:
                     rule,
                     now=now,
                     backlog_before=source_backlog,
+                    initial_exploitation=initial_exploitation,
                 )
                 if state is None:
                     continue
@@ -1794,6 +1850,7 @@ class WatchStore:
                     )
                     created[event.kind] = created.get(event.kind, 0) + 1
         db.executemany("DELETE FROM watch_initial_cve WHERE cve_id=?", ((value,) for value in identifiers))
+        db.executemany("DELETE FROM watch_initial_ssvc WHERE cve_id=?", ((value,) for value in identifiers))
         return created
 
     @staticmethod
@@ -1930,6 +1987,42 @@ class WatchStore:
             initial_sync_pending=initial_pending and not close_initial,
         )
 
+    @staticmethod
+    def _event_scores(db, rows, catalogs):
+        if not rows:
+            return {}
+        ids = canonical_json(list(dict.fromkeys(row["cve_id"] for row in rows)))
+        base = (
+            "SELECT c.cve_id,c.cvss_json FROM selected s JOIN watch_cve c USING(cve_id) "
+            "WHERE NOT EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=s.cve_id)"
+        )
+        if "cve_list" in catalogs or not catalogs:
+            base += (
+                " UNION ALL SELECT p.cve_id,json_extract(p.record_json,'$.cvss_json') "
+                "FROM selected s JOIN watch_provider p USING(cve_id) WHERE p.source='cve_list'"
+            )
+        selected = "WITH selected(cve_id) AS (SELECT value FROM json_each(?)) "
+        scores = {}
+        try:
+            for identifier, cvss_json in db.execute(selected + base, (ids,)):
+                scores.setdefault(identifier, []).extend(CVSSEntry(**item) for item in json.loads(cvss_json))
+            if "euvd" in catalogs:
+                euvd = db.execute(
+                    selected + "SELECT s.cve_id,i.version,i.score,i.vector FROM selected s "
+                    "JOIN watch_euvd_alias a USING(cve_id) JOIN watch_euvd_item i USING(euvd_id) "
+                    "WHERE NOT EXISTS(SELECT 1 FROM watch_euvd_override o WHERE o.cve_id=s.cve_id) "
+                    "UNION ALL SELECT s.cve_id,json_extract(j.value,'$.version'),"
+                    "json_extract(j.value,'$.score'),json_extract(j.value,'$.vector') FROM selected s "
+                    "JOIN watch_euvd_override o USING(cve_id),json_each(o.items_json) j",
+                    (ids,),
+                )
+                for identifier, version, score, vector in euvd:
+                    if version is not None and score is not None:
+                        scores.setdefault(identifier, []).append(CVSSEntry("euvd", "euvd", version, score, vector))
+        except (TypeError, ValueError) as exc:
+            raise StateError("watch database contains an invalid CVSS entry") from exc
+        return {identifier: display_cvss(normalized_cvss(entries)) for identifier, entries in scores.items()}
+
     def events(
         self,
         *,
@@ -1943,6 +2036,7 @@ class WatchStore:
         since: date | None = None,
         until: date | None = None,
         offset: int = 0,
+        catalogs: Sequence[str] | None = None,
     ) -> tuple[WatchEventRow, ...]:
         if limit < 1:
             raise StateError("event limit must be positive")
@@ -2010,6 +2104,7 @@ class WatchStore:
                 + " ORDER BY e.created_at DESC, e.id DESC LIMIT ? OFFSET ?",
                 parameters,
             ).fetchall()
+            scores = self._event_scores(db, rows, catalogs) if catalogs is not None else {}
         output: list[WatchEventRow] = []
         for row in rows:
             try:
@@ -2031,6 +2126,7 @@ class WatchStore:
                     details,
                     row["published"],
                     row["first_seen"],
+                    scores.get(row["cve_id"], ()),
                 )
             )
         return tuple(output)
@@ -3748,9 +3844,13 @@ class WatchStore:
                     }
                 else:
                     eu_watched = set()
-                active_ssvc = db.execute(
-                    "SELECT COUNT(*) FROM watch_cve WHERE ssvc_exploitation='active'"
-                ).fetchone()[0]
+                active_query = "SELECT cve_id FROM watch_cve WHERE ssvc_exploitation='active'"
+                if "cve_list" in catalogs:
+                    active_query += (
+                        " UNION SELECT p.cve_id FROM watch_provider p JOIN watch_cve c USING(cve_id) "
+                        "WHERE p.source='cve_list' AND json_extract(p.record_json,'$.ssvc_exploitation')='active'"
+                    )
+                active_ssvc = db.execute(f"SELECT COUNT(*) FROM ({active_query})").fetchone()[0]
                 epss_rows = db.execute("SELECT COUNT(*) FROM watch_epss").fetchone()[0]
                 epss_date = db.execute(
                     "SELECT MAX(score_date) FROM watch_epss"

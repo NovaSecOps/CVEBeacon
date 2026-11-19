@@ -1,9 +1,20 @@
-<h2>Source presence</h2>
-<p class="muted">Absence describes stored observations. Failed or unstarted syncs leave coverage uncertain.</p>
-<div class="table-wrap"><table><thead><tr><th>Source</th><th>Presence</th><th>Source updated</th><th>Last checked or synced</th></tr></thead><tbody>
-{% for item in presence %}<tr><td>{{ item.source }}</td><td>{{ item.state }}{% if item.error %} · latest sync failed{% endif %}</td><td>{{ item.updated or 'Not available' }}</td><td>{{ item.checked or 'Never' }}</td></tr>{% endfor %}
-</tbody></table></div>
-{% if accounts and 'run' in permissions %}<form method="post" action="{{ url_for('watch.refresh_cve', cve_id=cve_id or missing) }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Fetch or refresh this CVE now</button></form>{% endif %}
-
-<p class="muted">Refresh queues deliveries. They go out on the next watch notify or watch run.</p>
-{% if accounts and 'run' in permissions %}<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="watch-notify"><button>Deliver now</button></form>{% endif %}
+{% from 'ui.html' import card, button, table_wrap with context %}
+{% call card('Source presence', 'These are stored observations. Failed or unstarted syncs leave coverage uncertain.') %}
+{% call table_wrap('Source presence and last check') %}<table>
+<thead><tr><th scope="col">Source</th><th scope="col">Presence</th><th scope="col">Source updated</th><th scope="col">Last checked or synced</th></tr></thead>
+<tbody>{% for item in presence %}<tr><td>{{ item.source }}</td><td>{{ item.state }}{% if item.error %} · latest sync failed{% endif %}</td><td>{{ item.updated or 'Not available' }}</td><td>{{ item.checked or 'Never' }}</td></tr>{% endfor %}</tbody>
+</table>{% endcall %}
+<p class="help">Refresh queues deliveries. They go out on the next watch notify or watch run.</p>
+{% if accounts and 'run' in permissions %}
+<div class="form-actions">
+  <form method="post" action="{{ url_for('watch.refresh_cve', cve_id=cve_id or missing) }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {{ button('Fetch or refresh this CVE now', kind='secondary') }}
+  </form>
+  <form method="post" action="{{ url_for('operations.run_job') }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="watch-notify">
+    {{ button('Deliver now', kind='secondary') }}
+  </form>
+</div>
+{% endif %}
+{% endcall %}

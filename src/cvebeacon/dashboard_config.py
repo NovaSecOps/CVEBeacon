@@ -276,8 +276,17 @@ def _toml_equal(left, right):
     return left == right
 
 
-_SESSION_CONDITION_KEYS = {"cvss_min", "cvss_max", "epss_min", "kev", "exploitation",
-                           "vendor", "product", "keyword", "cwe", "cna", "status"}
+def _known_cvss_condition(key, value):
+    qualifiers = CONDITION_SCHEMA.get(key, {}).get("qualifiers")
+    return (
+        qualifiers is not None
+        and value.keys() <= {"score", *qualifiers}
+        and type(value.get("score")) in (int, float)
+        and all(isinstance(value[name], list)
+                and all(isinstance(entry, str) and entry.strip().casefold() in choices
+                        for entry in value[name])
+                for name, choices in qualifiers.items() if name in value)
+    )
 
 
 def _session_condition_known(value):
@@ -290,8 +299,11 @@ def _session_condition_known(value):
         elif key == "not":
             if not _session_condition_known(child):
                 return False
-        elif key not in _SESSION_CONDITION_KEYS or isinstance(child, dict):
+        elif key not in LEAF_KEYS:
             return False
+        elif isinstance(child, dict):
+            if not _known_cvss_condition(key, child):
+                return False
         elif isinstance(child, list) and any(isinstance(item, (dict, list)) for item in child):
             return False
     return True
@@ -481,6 +493,9 @@ def safe_error(error, document, path):
     message = str(error).replace(str(path), "configuration").replace(str(path.parent), "configuration directory")
     strings = []
     known = {"any", "all", "not", *LEAF_KEYS, *COMMON_KEYS, *RULE_FIELDS, *MAPPING_FIELDS}
+    for leaf in CONDITION_SCHEMA.values():
+        known.update(leaf.get("qualified_example", {}))
+        known.update(leaf.get("qualifiers", {}))
     known.update(SECTIONS)
     known.update({"state", "output", "product_mappings", "notifications", "teams", "email"})
     for specs in SCHEMAS.values():
@@ -2398,6 +2413,10 @@ def retainable_form_value(control, submitted, section):
             if not isinstance(item, dict):
                 return False
             for identity, child in _walk(item):
+                parent = identity[-2] if len(identity) > 1 else None
+                if parent in CONDITION_SCHEMA and CONDITION_SCHEMA[parent].get("qualifiers"):
+                    # The enclosing CVSS table is checked as a whole.
+                    continue
                 if any(isinstance(part, str) and part not in {*LEAF_KEYS, "any", "all", "not"} for part in identity):
                     return False
                 key = identity[-1]
@@ -2417,7 +2436,8 @@ def retainable_form_value(control, submitted, section):
                     elif not isinstance(child, bool):
                         return False
                 if leaf.get("kind") == "number" and not isinstance(child, (int, float)):
-                    return False
+                    if not isinstance(child, dict) or not _known_cvss_condition(key, child):
+                        return False
         return True
     except (ValueError, RecursionError):
         # Malformed structured text has no trustworthy leaf boundaries.

@@ -48,6 +48,19 @@ class CVSSEntry:
     vector: str | None = None
     severity: str | None = None
 
+    @property
+    def severity_band(self) -> str:
+        supplied = self.severity.strip().lower() if isinstance(self.severity, str) else ""
+        if supplied in {"none", "low", "medium", "high", "critical"}:
+            return supplied
+        if self.version != "2.0" and self.score >= 9:
+            return "critical"
+        if self.score >= 7:
+            return "high"
+        if self.score >= 4:
+            return "medium"
+        return "low" if self.score or self.version == "2.0" else "none"
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
@@ -64,14 +77,31 @@ class CVSSEntry:
             self.source,
             self.version,
             self.score,
-            self.vector or "",
-            self.severity or "",
+            self.vector if isinstance(self.vector, str) else "",
+            self.severity if isinstance(self.severity, str) else "",
         )
 
 
 def normalized_cvss(entries: Iterable[CVSSEntry]) -> tuple[CVSSEntry, ...]:
     unique = {entry.sort_key(): entry for entry in entries}
     return tuple(unique[key] for key in sorted(unique))
+
+
+def display_cvss(entries: Iterable[CVSSEntry]) -> tuple[CVSSEntry, ...]:
+    versions = {version: index for index, version in enumerate(reversed(CVSS_VERSIONS))}
+    providers = {provider: index for index, provider in enumerate(CVSS_PROVIDERS)}
+    return tuple(sorted(entries, key=lambda entry: (
+        versions.get(entry.version, len(versions)),
+        providers.get(entry.provider, len(providers)),
+        entry.sort_key(),
+    )))
+
+
+def cvss_severity_differs(entries: Iterable[CVSSEntry]) -> bool:
+    bands = {}
+    for entry in entries:
+        bands.setdefault(entry.version, set()).add(entry.severity_band)
+    return len({frozenset(values) for values in bands.values()}) > 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +272,34 @@ class WatchView:
     epss: float | None = None
     epss_percentile: float | None = None
     epss_date: str | None = None
+    additional_cvss: tuple[CVSSEntry, ...] = ()
+    ssvc_source: str | None = None
+
+    @property
+    def all_cvss(self) -> tuple[CVSSEntry, ...]:
+        return normalized_cvss((*self.cvss, *self.additional_cvss)) if self.additional_cvss else self.cvss
+
+    @property
+    def cvss_scores(self) -> tuple[CVSSEntry, ...]:
+        return display_cvss(self.all_cvss)
+
+    @property
+    def highest_score(self) -> CVSSEntry | None:
+        return max(self.cvss_scores, key=lambda entry: entry.score, default=None)
+
+    @property
+    def cvss_severity_differs(self) -> bool:
+        return cvss_severity_differs(self.all_cvss)
+
+    @property
+    def exploitation(self) -> tuple[str, tuple[str, ...]]:
+        sources = []
+        if self.euvd_exploited_since:
+            sources.append("EUVD")
+        if self.ssvc_exploitation is not None:
+            sources.append(self.ssvc_source or "SSVC")
+        status = "active" if self.euvd_exploited_since else self.ssvc_exploitation or "unknown"
+        return status, tuple(dict.fromkeys(sources))
 
     @property
     def epss_band(self) -> int:
@@ -260,6 +318,8 @@ class WatchView:
             "eu_kev_added": self.eu_kev_added,
             "euvd_exploited_since": self.euvd_exploited_since,
         }
+        if self.additional_cvss:
+            value["additional_cvss"] = [entry.as_dict() for entry in self.additional_cvss]
         return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
@@ -325,6 +385,8 @@ def build_view(
     eu_catalog: bool = False,
     epss: tuple[float, float, str] | None = None,
     first_seen: str | None = None,
+    additional_cvss: tuple[CVSSEntry, ...] = (),
+    ssvc_source: str | None = None,
 ) -> WatchView:
     """Combine the raw source rows into one CVE view.
 
@@ -374,4 +436,6 @@ def build_view(
         epss=epss[0] if epss is not None else None,
         epss_percentile=epss[1] if epss is not None else None,
         epss_date=epss[2] if epss is not None else None,
+        additional_cvss=additional_cvss,
+        ssvc_source=ssvc_source,
     )
