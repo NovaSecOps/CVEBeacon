@@ -24,6 +24,7 @@
   'web_snapshot_remove': 'Web snapshot removed',
   'update_check': 'Release check',
   'update_request': 'Update requested',
+  'cve_refresh_requested': 'CVE refresh requested',
   'backup_create_requested': 'Backup requested',
   'backup_verify_requested': 'Backup check requested',
   'backup_restore_requested': 'Restore requested',
@@ -52,9 +53,9 @@
 {% endif %}
 {% call table_wrap('Account audit entries') %}
 <table><thead><tr><th>Time</th><th>Action</th><th>Account</th><th>Actor</th></tr></thead><tbody>
-{% for entry in entries %}{% set parts = entry.action.split(':', 1) %}{% set label = action_labels.get(parts[0]) %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{% if label %}<span title="{{ entry.action }}">{{ label }}</span>{% else %}{{ entry.action }}{% endif %}<br><code class="muted">{{ entry.action }}</code></td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
+{% for entry in entries %}{% set parts = entry.action.split(':', 1) %}{% set label = action_labels.get(parts[0]) %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{% if label %}<span title="{{ entry.action }}">{{ label }}</span><br>{% endif %}<code class="muted">{{ entry.action }}</code></td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
 {% else %}<tr><td colspan="4">No audit entries recorded yet. Entries appear when accounts are created, changed or used.</td></tr>{% endfor %}
 </tbody></table>
 {% endcall %}
-<p class="muted">Actions are recorded by CVEBeacon itself: the dashboard, the command-line tool and background jobs. An action with an empty Actor happened outside the dashboard's administrator gate, such as a sign-in attempt or a command-line command. Where recorded, the text after the action name identifies the affected job, version, setting or record. Actions never recorded — for example changes made directly in the databases — are not in this log, and the chain check can only verify the rows that are here.</p>
+<p class="muted">Actions are recorded by CVEBeacon itself: the dashboard, the command-line tool and background jobs. An action with an empty Actor was not attributed to a signed-in administrator, such as a sign-in attempt or a command-line command. The text after the action name gives a short detail such as the affected job, version, setting or record. Actions never recorded — for example changes made directly in the databases — are not in this log, and the chain check can only verify the rows that are here.</p>
 {% endblock %}

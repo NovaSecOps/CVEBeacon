@@ -23,7 +23,7 @@ def create_blueprint(config):
         require_accounts()
         try:
             check(config)
-            current_app.extensions["dashboard_users"].record_action("update_check", username=g.user.username)
+            current_app.extensions["dashboard_users"].record_action("update_check", username=g.user.username, actor=g.user.username)
         except (CVEBeaconError, OSError):
             return render_template("error.html", code=400, service_error=True, message="Release check failed."), 400
         return redirect(url_for("updates.index"), code=303)
