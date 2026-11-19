@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .config import WATCH_INITIAL_MODES, WATCH_SOURCES, INVENTORY_FORMATS
 from .watch.catalog import SUPPORTED_LANGUAGES
-from .watch.channels import CHANNEL_TYPES, GROUPING_MODES, MESSAGE_FORMATS, SMTP_SECURITY, SMTP_DEFAULT_PORTS
+from .watch.channels import CHANNEL_TYPES, GROUPING_MODES, MESSAGE_FORMATS, SMTP_SECURITY, SMTP_DEFAULT_PORTS, TEAMS_BOT_FORMATS
 from .watch.records import CVSS_PROVIDERS
 from .watch.reported import IDENTITY_MODES
 from .watch.rules import EVENT_KINDS, OLD_CVES_MODES
@@ -66,6 +66,7 @@ CHANNEL_DEFAULTS = {"allow_insecure": False, "security": "starttls", "port": SMT
 CHANNEL_REQUIRED = {
     "smtp": {"host", "from", "to"},
     "graph": {"tenant_id", "client_id", "sender", "to"},
+    "teams_bot": {"tenant_id", "app_id", "client_secret_file"},
     "telegram": {"chat_id"}, "matrix": {"homeserver", "room_id"},
     "ntfy": {"topic"}, "gotify": {"server"},
 }
@@ -129,6 +130,13 @@ def metadata(path, key, default, kind, *, channel_type=None):
         if key == "priority":
             choices = tuple(range(1, 6)) if channel_type == "ntfy" else tuple(range(-2, 11))
             default = 3 if channel_type == "ntfy" else 5
+        if channel_type == "teams_bot" and key == "format":
+            choices = TEAMS_BOT_FORMATS
+            default = "adaptive_card"
+        elif channel_type == "teams_bot" and key in {"recipients", "conversation_references"}:
+            default = ()
+        elif channel_type == "teams_bot" and key == "service_url":
+            default = "https://smba.trafficmanager.net/teams/"
     if isinstance(default, Path):
         default = str(default)
     if isinstance(default, tuple):
@@ -138,6 +146,9 @@ def metadata(path, key, default, kind, *, channel_type=None):
         minimum = 3
     if key in {"to", "cc", "bcc", "recipients"}:
         kind = "addresses"
+    if channel_type == "teams_bot" and key == "recipients":
+        # Bot recipients are object IDs or UPNs, not only email addresses.
+        kind = "toml"
     if choices:
         kind = "enum"
     help_text = HELP.get(key, "")
