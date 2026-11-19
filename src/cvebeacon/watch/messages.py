@@ -251,7 +251,7 @@ def _cvss_field(
 ) -> str:
     if catalog is None:
         catalog = catalog_for(DEFAULT_LANGUAGE)
-    best = _best_by_provider(view.cvss)
+    best = _best_by_provider(view.all_cvss)
     parts: list[str] = []
     for provider in PROVIDER_ORDER:
         entry = best.get(provider)
@@ -265,6 +265,7 @@ def _cvss_field(
                 catalog,
                 "cvss_score",
                 score=f"{entry.score:g}",
+                version=entry.version,
                 provider=label,
             )
         )
@@ -275,6 +276,23 @@ def _cvss_field(
     return ", ".join(parts)
 
 
+def _cvss_lines(view: WatchView, catalog: Mapping[str, str]) -> tuple[str, ...]:
+    lines = []
+    for entry in view.cvss_scores:
+        provider = _provider_label(entry.provider, entry, view, catalog)
+        if entry.provider != "cna" and entry.source and entry.source.casefold() != provider.casefold():
+            provider += f": {_clean(entry.source, 100)}"
+        label = translate(catalog, "cvss_score", score=f"{entry.score:g}",
+                          version=entry.version, provider=provider)
+        line = f"{label} · {_severity_text(entry.severity_band, catalog)}"
+        if entry.vector:
+            line += f" · {_clean(entry.vector)}"
+        lines.append(line)
+    if view.cvss_severity_differs:
+        lines.append(catalog["cvss_severity_differs"])
+    return (catalog["cvss_scores"] + ":", *(lines or [catalog["cvss_not_scored"]]))
+
+
 def _epss_field(view: WatchView) -> str:
     if view.epss is None:
         return "–"
@@ -282,11 +300,9 @@ def _epss_field(view: WatchView) -> str:
 
 
 def _exploitation_value(view: WatchView, catalog: Mapping[str, str]) -> str:
-    if view.ssvc_exploitation == "active" or view.euvd_exploited_since:
-        return catalog["exploitation_active"]
-    if view.ssvc_exploitation == "poc":
-        return catalog["exploitation_poc"]
-    return catalog["exploitation_none"]
+    status, sources = view.exploitation
+    label = catalog[f"exploitation_{status}"]
+    return f"{label} ({', '.join(sources)})" if sources else label
 
 
 def _reason_transition(reasons: Sequence[str], prefix: str) -> tuple[str, str] | None:
@@ -366,7 +382,7 @@ def _kind_label(
         nvd = _best_by_provider(event.view.cvss).get("nvd")
         if nvd is not None:
             return translate(
-                catalog, "label_nvd_scored", score=f"{nvd.score:g}"
+                catalog, "label_nvd_scored", score=f"{nvd.score:g}", version=nvd.version
             )
         return catalog["label_nvd_scored_plain"]
     if kind == "rejected":
@@ -425,6 +441,7 @@ class _EventFacts:
     label: str
     cve_id: str
     cvss: str
+    cvss_lines: tuple[str, ...]
     epss: str
     kev: str
     exploitation: str
@@ -465,6 +482,7 @@ def _event_facts(
         label=_kind_label(event, STYLE_PLAIN, catalog),
         cve_id=str(event.cve_id),
         cvss=_cvss_field(view, STYLE_PLAIN, catalog),
+        cvss_lines=_cvss_lines(view, catalog),
         epss=_epss_field(view),
         kev=translate(
             catalog,
@@ -513,6 +531,7 @@ def _event_lines(
     lines = [
         _event_summary(facts, style, catalog),
         f"  {_dynamic(facts.date_line, style)}",
+        *(f"  {_dynamic(line, style)}" for line in facts.cvss_lines),
     ]
     if facts.description:
         lines.append(f"  {_dynamic(facts.description, style)}")
@@ -774,6 +793,7 @@ def _html_event_block(facts: _EventFacts, catalog: Mapping[str, str]) -> str:
         "</strong></td></tr>",
         f'<tr><td style="{_HTML_TD}{_HTML_MUTED}">'
         f"{_h(facts.date_line)}</td></tr>",
+        f'<tr><td style="{_HTML_TD}">{_html_cvss(facts.cvss_lines)}</td></tr>',
     ]
     if facts.description:
         rows.append(
@@ -807,6 +827,10 @@ def _html_event_block(facts: _EventFacts, catalog: Mapping[str, str]) -> str:
         'cellspacing="0" border="0" '
         f'style="{_HTML_BLOCK}">' + "".join(rows) + "</table>"
     )
+
+
+def _html_cvss(lines: Sequence[str]) -> str:
+    return f"<strong>{_h(lines[0])}</strong><br>" + "<br>".join(_h(line) for line in lines[1:])
 
 
 def _html_run_fragment(
@@ -886,7 +910,7 @@ def _html_digest_fragment(
         )
         values = (
             "<br>".join(cell),
-            _h(item.cvss),
+            _h(item.cvss) + "<br>" + _html_cvss(item.cvss_lines),
             _h(item.epss),
             _h(item.kev),
             _h(item.exploitation),
@@ -1229,7 +1253,7 @@ def _notice_text(
     note = event.details.get("note")
     if isinstance(note, str) and note.strip():
         line += "\n  " + _dynamic(note, style, 500)
-    return line
+    return line + "\n" + "\n".join(f"  {_dynamic(item, style)}" for item in _cvss_lines(event.view, catalog))
 
 
 def _notice_html(
@@ -1256,6 +1280,7 @@ def _notice_html(
         parts.append(
             f'<p style="margin:0;{_HTML_MUTED}">{_h(_clean(note, 500))}</p>'
         )
+    parts.append(f'<p style="margin:8px 0;">{_html_cvss(_cvss_lines(event.view, catalog))}</p>')
     return "\n".join(parts)
 
 
@@ -1462,8 +1487,7 @@ def webhook_payload(
 ) -> dict[str, Any]:
     """Return the stable version 2 webhook document.
 
-    ``affected_clients`` is added only when at least one client is affected, so
-    documents without clients stay byte-identical to earlier versions.
+    The original CVSS field remains in place alongside the complete score list.
     """
     output = []
     alerts = tuple(
@@ -1492,6 +1516,14 @@ def webhook_payload(
                         }
                         for entry in view.cvss
                     ],
+                    "cvss_scores": [
+                        {**entry.as_dict(), "severity": entry.severity_band}
+                        for entry in view.cvss_scores
+                    ],
+                    "cvss_note": (
+                        catalog_for(DEFAULT_LANGUAGE)["cvss_severity_differs"] if view.cvss_severity_differs else None
+                    ),
+                    "exploitation": {"status": view.exploitation[0], "sources": list(view.exploitation[1])},
                     "kev": {
                         "cisa": (
                             {
