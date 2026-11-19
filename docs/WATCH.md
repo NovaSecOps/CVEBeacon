@@ -39,7 +39,7 @@ configuration:
 [watch]
 enabled = false
 database = "cvebeacon-watch.db"
-sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss"]
+sources = ["nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list"]
 initial = "baseline"
 backfill_days = 7
 overlap_minutes = 15
@@ -55,7 +55,7 @@ language = "en"
   Configurations from earlier builds that omitted this setting should pin
   `database = "cvebeacon-watch.db"` before upgrading, or the old file is
   ignored and a new baseline starts.
-- `sources`: any subset of `nvd`, `euvd`, `cisa_kev`, `eu_kev`, and `epss`.
+- `sources`: any subset of `nvd`, `euvd`, `cisa_kev`, `eu_kev`, `epss`, and `cve_list`.
   `nvd` is required. Unknown names are rejected.
 - `initial`: what the first sync does; see [initial modes](#initial-modes).
 - `backfill_days`: 1 to 120, used only when `initial = "backfill"`.
@@ -546,7 +546,7 @@ that stronger claim. `watch reported --verify` reports the first broken row and
 exits 2; when it succeeds it prints how many rows are chained and how many are
 legacy and unchained. The user audit table uses the same construction.
 
-The watch database schema is version 7. Rows written before the identity upgrade
+The watch database schema is version 8. Rows written before the identity upgrade
 have `chain_version = 0`, a null chain, and are reported as legacy unchained;
 the chain starts with the first report written after the upgrade. Migration
 records the highest legacy row id in `watch_meta` once. A legacy row must be at
@@ -1010,7 +1010,9 @@ rule sets `old_cves = "alert"`.
 
 An evaluation during the first sync of a database in `backfill` or `full` mode
 marks its `match` events `initial = 1`. `cvebeacon watch evaluate --all` marks
-only the `match` events it creates as initial; escalations keep `initial = 0`.
+only the `match` events it creates as initial; escalations keep `initial = 0`,
+except for CVEs still carrying a pending CVE List source-initial mark, whose
+events all use the initial ledger.
 It always does this, including after initialization is closed, so re-evaluating
 after a rule change produces a summary digest instead of individual alerts. It
 requires `--yes` or a confirmation. Once a failure-free initial sync has
@@ -1051,7 +1053,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 7. An unknown version still fails closed. The version 1
+place to schema version 8. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to
@@ -1072,6 +1074,13 @@ with the first report written after the upgrade. A version 6 database keeps its
 existing chains and gains `chain_version = 1` without re-hashing them. Migration
 never rewrites a stored chain, even when the version metadata claims to be
 older. Later edits and middle deletions then fail `watch reported --verify`.
+The version 7 to 8 upgrade adds empty tables and a sparse FTS index for new
+provider descriptions. Existing NVD/EUVD data and extra legacy columns stay in
+place: there is no historical JSON validation, payload copy, description copy
+or `watch_cve` rebuild. Read-only pages use snapshots without writer locks and
+can browse schema-7 observations before the first mutating command upgrades
+it. See [upgrading](UPGRADING.md) and the synthetic migration benchmark.
+
 After the upgrade, run
 `cvebeacon watch evaluate --all --yes`
 BEFORE the first `watch run`, as after adding a rule. Otherwise every CVE from
@@ -1079,7 +1088,9 @@ the initial window alerts one by one as NVD touches it. Schema 2 databases
 written by a pre-release build of this branch are refused with a message to
 delete them and run `watch sync` again. They are not migrated.
 
-- `watch_cve` holds NVD-owned data only: status, description, CNA, CVSS from
+- `watch_cve` holds NVD-owned fields and sparse identity/first-seen placeholders
+  for CVEs discovered by another source; `watch_origin` identifies those placeholders.
+  Its NVD-owned fields include: status, description, CNA, CVSS from
   NVD, CNA, CISA ADP and other providers, SSVC, CPE products, references, and
   NVD's own CISA KEV fields.
 - `watch_euvd_item` holds one row per EUVD item, keyed by `euvd_id`, whether or
@@ -1100,8 +1111,8 @@ delete them and run `watch sync` again. They are not migrated.
   that fingerprint.
 - `watch_touched` is the durable evaluation queue. Every source transaction
   inserts the CVE ids it changed, so an interrupted or failed run cannot lose
-  the obligation. Only ids with a `watch_cve` row are queued; an id first seen
-  from EUVD or KEV is queued when NVD inserts its row. `pending_evaluations`
+  the obligation. CVE List records and targeted EUVD/KEV discoveries can create
+  identity rows without claiming NVD presence. `pending_evaluations`
   reads the queue and `acknowledge` removes completed entries.
 - `watch_alert_state` keeps the first match time, the alert snapshot, and the
   rule and CVSS-provider hashes for each casefolded rule name and CVE. A later
@@ -1124,10 +1135,28 @@ delete them and run `watch sync` again. They are not migrated.
   mode is `0600`. It contains password hashes; keep it with the watch database
   backup and inside the same ACL-protected directory on Windows.
 - `watch_meta.view_policy` records the configured sources that affect view
-  derivation: `cisa_kev`, `eu_kev`, `euvd`, and `epss`. When it changes, every stored
-  view is recomputed in batches of 5,000 and every stored CVE is queued,
+  derivation: `cisa_kev`, `eu_kev`, `euvd`, `epss`, and `cve_list`. Changes
+  limited to CVE List queue only CVEs with its stored evidence; enabling an empty
+  provider does not scan or queue historical NVD rows. Other policy changes
+  recompute stored views in batches of 5,000 and queue the affected CVEs,
   including CVEs whose fingerprint did not change, because vendor and product
   names are not part of the fingerprint.
+- `watch_provider` retains only new provider evidence, not copies of NVD rows.
+  `watch_search`/FTS index new provider descriptions; historical NVD descriptions
+  retain their FTS5 semantics through a bounded in-memory matcher (LIKE when
+  FTS5 is unavailable). Active providers govern filters and sorting.
+- `watch_euvd_override` stores CVE-scoped targeted lookups independently of shared
+  advisory aliases. Refreshing one CVE cannot change a sibling's view, fingerprint
+  or queue entry. A changed global advisory can supersede its scoped observation
+  only when its source date is at least as recent. Unchanged, older or unversioned
+  shared data cannot clear newer targeted evidence. Reconciliation includes
+  removed aliases.
+- CVE List feed state lives only in `watch_meta`: the saved start and initial
+  mode, initial pending/completed markers, the last fully imported archive
+  boundary and its asset token. There is no rolling-log queue, observation table
+  or per-ID repair obligation. `watch_initial_cve` records only the source's
+  initial-import evaluation work, preserving initial digest semantics across
+  failures and independent global runs.
 - `watch_meta.euvd_page_cursor` holds the in-progress EUVD window, its pinned
   total, the next page, the page size, and whether the window is being scanned
   or verified. It is cleared when the window commits.
@@ -1430,3 +1459,119 @@ Watch mode uses the same public sources as the rest of CVEBeacon:
 - [FIRST EPSS](https://www.first.org/epss/) for exploitation probability.
 
 See [sources](SOURCES.md) for the full source roles and limitations.
+
+## CVE List and the explorer
+
+`cve_list` is enabled in new setup files and in the default source selection.
+Existing explicit `sources` lists keep their selection; add `"cve_list"` to opt
+in. Existing files with no source list receive the new default. The watch
+schema migrates transactionally to version 8, retaining CVEs, events, deliveries,
+reports and EUVD resume progress. The new provider has its own initial mode,
+window and archive cursors; adding it does not reset an initial EUVD import.
+
+On a fresh deployment its initial mode follows `watch.initial`: `baseline`
+stores the newest archive boundary as the cursor without importing history,
+`backfill` imports the recent modified window as initial and non-alerting, and
+`full` imports history as initial and non-alerting. A provider added to an
+existing deployment **defaults to baseline regardless of the old
+`watch.initial`**. Initial modes apply only before the first cursor exists.
+To explicitly restart only this provider with history:
+
+```console
+cvebeacon watch sync --cve-list-initial backfill --yes
+cvebeacon watch sync --cve-list-initial full --yes
+```
+
+Without `--yes`, history needs an affirmative confirmation. The same option is
+available on `watch run`; existing NVD/EUVD initialization and cursors are not
+reset. Source-specific initial events use the normal initial delivery ledger,
+while unrelated incremental events stay normal. A CVE List failure or pending
+bounded catch-up is degraded coverage and does not hold other sources' initial
+completion open.
+
+Ordinary sync imports the newest hourly cumulative delta for the current day.
+At each day boundary it imports that day's official
+`cve_YYYY-MM-DD_at_end_of_day` cumulative archive, one per outstanding past day.
+The latest release is selected from a bounded release listing by hourly archive
+names and UTC date, never by trusting GitHub's `/latest` marker, because the
+end-of-day release can be the repository's latest.
+If a required archive is missing or more than seven days are outstanding, one
+baseline archive is read; records at or after the cursor are stored, so a
+boundary record is re-offered idempotently, and catch-up continues from its
+midnight boundary.
+The CVE List cursor therefore records the last archive that was fully validated
+and committed, except for the baseline start marker, which is stored without an
+archive import. A failure leaves the cursor in place and the next sync retries.
+Imports
+are idempotent and never replace a newer stored `dateUpdated` with an older one.
+There is no rolling-log repair queue and no per-ID feed repair. After
+initialisation the initial mode is never consulted again: every hourly delta,
+end-of-day delta and gap-fallback baseline imports records whose `dateUpdated` is
+at or after the cursor as normal changes that can alert; records before the
+cursor are skipped as already known, and a boundary record is re-offered
+idempotently so it is neither lost nor alerted twice. Records with a missing or
+unparseable `dateUpdated` are always imported and counted, regardless of
+`dateReserved` or `datePublished`, never silently skipped. When both
+observations have a valid `dateUpdated`, the newer date wins; when either lacks
+one, the observation fetched most recently wins. A gap-fallback
+baseline therefore fills the outstanding interval completely. Until the
+end-of-day tag is published shortly after 00:00, a sync that needs it fails
+closed with the cursor unchanged and retries; daily schedules should avoid the
+short 00:00–00:45 window. `watch status` and the dashboard overview show the
+cursor, initial mode and saved start. Manual `watch refresh`
+never changes these cursors or archive state. Both `.zip` and
+real `.zip.zip` baseline names and the previous-day baseline in the 00:00
+release are supported. See [feed limits and cost](SOURCES.md#cve-list-watch-feed).
+Only visible reserved IDs can be stored. Rejected/reserved records require an
+explicit status condition for an initial match. NVD status and description
+always retain precedence when NVD has the CVE; CVE List only fills fields NVD
+lacks. Removing it removes that evidence from active views and filters,
+retaining original provenance separately.
+
+The dashboard **CVEs** page lists stored watch CVEs with pagination, source,
+KEV, severity, publication date, event, reported and affected-client filters.
+Search accepts an exact case-insensitive CVE ID or description keywords and
+aliases. All active descriptions share the original FTS5 word-prefix, order-independent
+semantics when FTS5 is available, including Unicode/diacritic tokenization and
+terms spanning providers. Existing NVD text stays in place: a bounded in-memory
+FTS candidate verifies each row without a copying migration or persistent write.
+This requires a scan for legacy text and can be slower on large databases.
+Without FTS5, search retains the original literal LIKE substring fallback;
+queries are limited to 256 characters and results to 100 per storage request
+(50 per dashboard page). FTS search uses word prefixes; fallback search uses a
+literal substring. Sorting supports publication date, modification date, CVSS,
+EPSS and KEV. A missing ID shows “Not in our database” and the stored source
+sync times. Source absence never proves that an asset is unaffected.
+
+To fetch a missing CVE or refresh an existing one:
+
+```console
+cvebeacon watch refresh CVE-2026-12345
+```
+
+This uses bounded single-record NVD, EUVD, CVE List and EPSS lookups for enabled
+sources. KEV catalogs have no per-ID endpoint: their small, bounded catalogs are
+read and only the requested CVE's rows are updated. CVE List targeted records
+are capped at 4 MiB; the other small replies are capped at 8 MiB. A CVE found
+only in EUVD or KEV also creates a watch record, without
+claiming NVD presence. EUVD scores remain in its enrichment table so later
+refreshes can lower as well as raise the stored score. Targeted EUVD evidence
+is scoped to the requested CVE, even for an advisory with multiple aliases. No full sync runs and no
+feed cursor advances. Only the requested CVE's
+rules are evaluated; matching events and pending deliveries use the normal
+ledger. Refresh does not send notifications; `watch notify` or `watch run`
+delivers them normally. The dashboard says they go out on the next watch notify
+or watch run and offers **Deliver now** to accounts with `run` permission, using
+the existing audited notify job. Source errors retain previous observations and are
+reported as degraded coverage.
+
+The dashboard action requires an account with `run`, a valid CSRF token and an
+auditable job submission. It uses the shared run lock; a conflict may require a
+retry after the active run finishes. CVE IDs are validated before any request or
+job is started. The existing CVE detail page includes source presence and
+update/check times, original provider records, current rule matches, events,
+deliveries, report state and the latest successful inventory scan's findings and
+affected clients. Scan findings are limited to 100 displayed rows. Each provider payload preview
+is capped at 64 KiB before decoding/rendering and labelled when truncated. Full
+records stay stored. A later absent lookup is shown alongside retained evidence;
+an older absent check cannot override a newer positive observation.

@@ -7,13 +7,27 @@ CVEBeacon uses DNS and outbound HTTPS over TCP 443. It does not require inbound 
 | Purpose | Destination |
 | --- | --- |
 | NVD CVE and CPE APIs | `services.nvd.nist.gov` |
-| official targeted CVE List V5 records | `raw.githubusercontent.com` |
+| CVE List V5 targeted records | `raw.githubusercontent.com` |
+| CVE List release metadata | `api.github.com` |
+| CVE List delta/baseline asset URLs | `github.com` |
+| GitHub release asset redirects | `release-assets.githubusercontent.com`, `objects.githubusercontent.com` |
 | ENISA EUVD search and KEV dump | `euvdservices.enisa.europa.eu` |
 | CISA KEV JSON | `www.cisa.gov` |
 | FIRST EPSS API | `api.first.org` |
 | OSV package queries and advisory records | `api.osv.dev` |
 
 These sources require no API key, token or account. Requests carry public vendor/product/version or CPE terms, a supported versionless PURL, ecosystem/package name, an exact supplied commit hash, or advisory/CVE identifiers. Package version comparisons happen locally. OSV repository URLs are compared locally, not fetched. Full CISA/EU KEV catalogs are downloaded without inventory metadata.
+
+CVE List watch sync is archive-only: ordinary same-day updates download the
+newest hourly cumulative delta; each past day adds its official end-of-day
+archive. Full archives (about 635 MiB in metadata observed on 2026-11-19) are
+limited to initial history, a missing archive or a gap longer than seven days,
+not daily operation. See [source limits and costs](SOURCES.md#cve-list-watch-feed).
+The anonymous GitHub API normally permits 60 requests/hour per originating IP;
+conditional metadata avoids re-reading an unchanged release list, and catch-up
+makes at most seven end-of-day tag lookups plus the current release list.
+Shared egress can consume that quota. Rate-limit failures remain degraded source
+coverage with retained progress. No GitHub token is required or sent.
 
 Asset IDs, system IDs, categories, owners, comments, hostnames and local paths are never serialized into public vulnerability queries. Only provide public software names in identity fields. Component terms can reveal technologies being investigated. This is agentless monitoring, isolated from monitored assets; live public lookups are not air-gapped operation. Qualified PURLs and subpaths remain local and unsupported for exact lookup.
 

@@ -36,7 +36,7 @@ CONDITION_SCHEMA = {
     "keyword": {"kind": "strings", "example": ["remote code execution"]},
     "cwe": {"kind": "cwe", "example": ["CWE-79"]},
     "cna": {"kind": "strings", "example": ["Example"]},
-    "status": {"kind": "enum", "choices": ("published", "rejected"), "example": "published"},
+    "status": {"kind": "enum", "choices": ("published", "rejected", "reserved"), "example": "published"},
 }
 LEAF_KEYS = tuple(CONDITION_SCHEMA)
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
@@ -144,7 +144,7 @@ class AlertSnapshot:
             raise ValueError("invalid alert snapshot")
         if snapshot.epss_band not in EPSS_BAND_LABELS:
             raise ValueError("invalid alert snapshot")
-        if snapshot.status not in {"published", "rejected"}:
+        if snapshot.status not in {"published", "rejected", "reserved"}:
             raise ValueError("invalid alert snapshot")
         if snapshot.max_severity_band not in SEVERITY_BANDS:
             raise ValueError("invalid alert snapshot")
@@ -272,6 +272,7 @@ def _leaf_value(key: str, value: Any, path: str) -> Any:
         return _cwe_values(value, path)
     if schema.get("kind") == "strings":
         return _strings(value, path)
+
     _fail(path, "is not a known condition key")
     raise AssertionError("unreachable")
 
@@ -828,7 +829,7 @@ def evaluate(
     snapshot = snapshot_for(view, rule)
     if previous is None:
         matched, reasons = evaluate_condition(view, rule.condition, rule)
-        if matched and view.status == "rejected" and "status rejected" not in reasons:
+        if matched and view.status in {"rejected", "reserved"} and f"status {view.status}" not in reasons:
             matched, reasons = False, ()
         if not matched:
             return None, ()
