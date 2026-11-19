@@ -21,6 +21,21 @@ from test_dashboard_operations import (
 from watch_support import mock_client
 
 
+def _held_lock_bytes(lock):
+    if os.name != "nt":
+        return lock.path.read_bytes()
+    # Windows denies reads of byte zero through a second handle. Read through
+    # the holder's descriptor so the byte-for-byte assertion still covers it.
+    fd = lock._descriptor
+    assert fd is not None
+    position = os.lseek(fd, 0, os.SEEK_CUR)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        return os.read(fd, os.fstat(fd).st_size)
+    finally:
+        os.lseek(fd, position, os.SEEK_SET)
+
+
 @pytest.mark.parametrize("store", ["state", "watch"])
 @pytest.mark.parametrize("suffix", [".owner.json", ".owner." + "a" * 32 + ".json"])
 def test_holder_namespace_is_protected_in_current_and_candidate_roots(tmp_path, store, suffix):
@@ -62,6 +77,11 @@ def test_release_does_not_remove_a_replacement_file(tmp_path):
     target = lock.owner_path
     replacement = tmp_path / "protected"
     replacement.write_bytes(b"preserve replacement")
+    if os.name == "nt":
+        # A leased record cannot be replaced on Windows. Inject the race in
+        # release's gap after closing the lease and before removing the name.
+        lock._close_owner()
+        assert RunLock(lock.path).probe() is not None
     os.replace(replacement, target)
     lock.release()
     assert target.read_bytes() == b"preserve replacement"
@@ -125,10 +145,10 @@ def test_private_metadata_permission_failure_does_not_block_shared_lock(tmp_path
             raise PermissionError(error, "synthetic metadata permission refusal")
         return original(target, **kwargs)
     monkeypatch.setattr(locking, "private_file", open_file)
-    with RunLock(path):
+    with RunLock(path) as lock:
         snapshot = RunLock(path).snapshot()
         assert snapshot["state"] == "active" and not snapshot["dashboard"]
-        assert "account" not in path.read_text(errors="replace")
+        assert "account" not in _held_lock_bytes(lock).decode("utf-8", errors="replace")
 
 
 def test_new_acquisition_preserves_a_legacy_orphan_in_a_sticky_parent(tmp_path):
@@ -163,7 +183,7 @@ def test_bad_lock_does_not_hide_operations(tmp_path):
     try:
         page = client.get("/operations/")
         assert page.status_code == 200 and "unavailable" in page.text.lower()
-        assert target.read_text() == "preserve"
+        assert target.read_text(encoding="utf-8") == "preserve"
     finally:
         app.extensions["dashboard_jobs"].shutdown()
 
@@ -211,9 +231,9 @@ def test_real_channel_test_is_lock_free_and_does_not_change_watch_storage(tmp_pa
         return httpx.Response(200)
     monkeypatch.setattr(cli, "HttpClient", lambda _: mock_client(sink))
     with RunLock(run_lock_path(config)) as lock:
-        inline, owner = lock.path.read_bytes(), lock.owner_path.read_bytes()
+        inline, owner = _held_lock_bytes(lock), lock.owner_path.read_bytes()
         assert cli.main(["--config", str(config.config_path), "watch", "notify", "test", "sink"]) == 0
-        assert lock.path.read_bytes() == inline and lock.owner_path.read_bytes() == owner
+        assert _held_lock_bytes(lock) == inline and lock.owner_path.read_bytes() == owner
     assert config.watch.database.read_bytes() == before
     assert len(requests) == 1 and requests[0]["test"] is True
 
@@ -235,10 +255,13 @@ def test_old_token_cannot_identify_holder_before_new_reference_is_written(tmp_pa
     path = tmp_path / "run.lock"
     monkeypatch.setenv("CVEBEACON_DASHBOARD_JOB", "99")
     with RunLock(path, command="watch run") as old:
-        reference, payload, owner = path.read_bytes(), old.owner_path.read_bytes(), old.owner_path
+        reference, payload, owner = _held_lock_bytes(old), old.owner_path.read_bytes(), old.owner_path
     path.write_bytes(reference)
-    owner.write_bytes(payload)
-    owner.chmod(0o600)
+    fd = locking.private_file(owner, create=True, exclusive=True)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
     monkeypatch.delenv("CVEBEACON_DASHBOARD_JOB")
     current = RunLock(path, command="scan")
     original = current._lock

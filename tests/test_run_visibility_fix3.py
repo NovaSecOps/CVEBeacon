@@ -128,6 +128,10 @@ def test_temporary_rollback_preserves_a_replacement_inode(tmp_path, monkeypatch)
         return descriptor
     def write(fd, data):
         if b'"account"' in data:
+            if os.name == "nt":
+                # Windows permits replacement only after the temporary lease
+                # closes. Exercise rollback's close-to-unlink race there.
+                lock._close_temporary()
             os.replace(replacement, temporary_paths[0])
             raise error
         return original_write(fd, data)
