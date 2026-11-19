@@ -882,7 +882,8 @@ def _run_stix_export(args, config: AppConfig) -> int:
     ):
         protected.add(database)
         protected.update(
-            Path(str(database) + suffix) for suffix in ("-wal", "-shm")
+            Path(str(database) + suffix)
+            for suffix in ("-wal", "-shm", "-journal")
         )
     if config.inventory is not None and config.inventory.path is not None:
         protected.add(config.inventory.path)
@@ -898,6 +899,9 @@ def _run_stix_export(args, config: AppConfig) -> int:
             client=args.client,
             include_clients=args.include_clients,
             since=args.since,
+            warning=lambda message: print(
+                f"warning: {message}", file=sys.stderr
+            ),
         )
     )
     return 0

@@ -14,7 +14,8 @@ import re
 import sqlite3
 import tempfile
 import uuid
-from collections.abc import Iterable, Mapping
+import warnings
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
@@ -31,6 +32,7 @@ from .identity import (
 )
 
 STIX_VERSION = "2.1"
+CREATED_TABLE = "stix_object_created"
 # Fixed project namespace for UUIDv5 identifiers. Changing it would make
 # re-exports create new objects instead of updating the existing ones.
 STIX_NAMESPACE = uuid.UUID("1c0ca72c-9854-4be1-b48b-ef2e89900fdc")
@@ -73,6 +75,7 @@ class ScanSnapshot:
     completed_at: str
     findings: tuple[ExportFinding, ...]
     history: tuple[ExportFinding, ...] = ()
+    history_skipped: int = 0
 
 
 @dataclass
@@ -192,38 +195,56 @@ def _run_clients(db: sqlite3.Connection, run_id: str) -> dict[str, str]:
     }
 
 
+def _export_finding(
+    row: sqlite3.Row, clients: Mapping[str, str]
+) -> ExportFinding:
+    try:
+        payload = json.loads(row["payload_json"])
+    except (TypeError, ValueError) as exc:
+        raise StateError("state database contains an invalid finding") from exc
+    if not isinstance(payload, dict):
+        raise StateError("state database contains an invalid finding")
+    asset = payload.get("asset")
+    if not isinstance(asset, dict):
+        raise StateError("state database contains an invalid finding")
+    clean_asset = {
+        key: value for key, value in asset.items() if key != "client"
+    }
+    finding = {key: value for key, value in payload.items() if key != "asset"}
+    asset_id = str(row["asset_id"])
+    client = clients.get(asset_id, "")
+    if not client:
+        client = str(asset.get("client") or "")
+    return ExportFinding(
+        asset=clean_asset,
+        finding=finding,
+        first_seen=str(row["first_seen"]),
+        last_seen=str(row["last_seen"]),
+        client=client,
+    )
+
+
 def _export_findings(
     rows: Iterable[sqlite3.Row], clients: Mapping[str, str]
 ) -> tuple[ExportFinding, ...]:
+    return tuple(_export_finding(row, clients) for row in rows)
+
+
+def _history_findings(
+    rows: Iterable[sqlite3.Row], clients: Mapping[str, str]
+) -> tuple[tuple[ExportFinding, ...], int]:
+    """Read advisory history, skipping and counting unrelated malformed rows."""
     output: list[ExportFinding] = []
+    skipped = 0
     for row in rows:
         try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, ValueError) as exc:
-            raise StateError("state database contains an invalid finding") from exc
-        if not isinstance(payload, dict):
-            raise StateError("state database contains an invalid finding")
-        asset = payload.get("asset")
-        if not isinstance(asset, dict):
-            raise StateError("state database contains an invalid finding")
-        clean_asset = {
-            key: value for key, value in asset.items() if key != "client"
-        }
-        finding = {key: value for key, value in payload.items() if key != "asset"}
-        asset_id = str(row["asset_id"])
-        client = clients.get(asset_id, "")
-        if not client:
-            client = str(asset.get("client") or "")
-        output.append(
-            ExportFinding(
-                asset=clean_asset,
-                finding=finding,
-                first_seen=str(row["first_seen"]),
-                last_seen=str(row["last_seen"]),
-                client=client,
-            )
-        )
-    return tuple(output)
+            item = _export_finding(row, clients)
+            _parse_timestamp(item.first_seen)
+        except StateError:
+            skipped += 1
+            continue
+        output.append(item)
+    return tuple(output), skipped
 
 
 def read_latest_successful_scan(path: str | Path) -> ScanSnapshot:
@@ -245,12 +266,15 @@ def read_latest_successful_scan(path: str | Path) -> ScanSnapshot:
             if not rows:
                 rows = _fallback_rows(db, run_id, completed_at)
             clients = _run_clients(db, run_id)
-            history = _current_rows(db)
+            history, history_skipped = _history_findings(
+                _current_rows(db), clients
+            )
             return ScanSnapshot(
                 run_id,
                 completed_at,
                 _export_findings(rows or (), clients),
-                _export_findings(history, clients),
+                history,
+                history_skipped,
             )
     except sqlite3.Error as exc:
         raise StateError(f"cannot read state database for STIX export: {exc}") from exc
@@ -599,7 +623,10 @@ def _history_indexes(
         name = _vulnerability_name(vulnerability)
         if not name:
             continue
-        first_seen = _parse_timestamp(item.first_seen)
+        try:
+            first_seen = _parse_timestamp(item.first_seen)
+        except StateError:
+            continue
         vulnerability_id = _object_id(
             "vulnerability", "vulnerability|" + name.upper()
         )
@@ -911,6 +938,93 @@ def build_bundle(
     return bundle
 
 
+def _read_created_ledger(database: str | Path) -> dict[str, str]:
+    """Read the first-created ledger, treating a missing table as empty."""
+    try:
+        with closing(_connect_readonly(Path(database))) as db:
+            db.execute("BEGIN")
+            rows = db.execute(
+                f"SELECT object_id,created FROM {CREATED_TABLE}"
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return {}
+        raise StateError(
+            "cannot read the STIX created ledger from the state database"
+        ) from exc
+    output: dict[str, str] = {}
+    for row in rows:
+        created = str(row["created"])
+        try:
+            _parse_timestamp(created)
+        except StateError:
+            continue
+        output[str(row["object_id"])] = created
+    return output
+
+
+def _clamp_created_timestamps(value: dict[str, Any], created: str) -> None:
+    created_at = _parse_timestamp(created)
+    value["created"] = created
+    for key in ("modified", "published"):
+        if key not in value:
+            continue
+        current = _parse_timestamp(value[key])
+        if current < created_at:
+            value[key] = _format_timestamp(created_at)
+
+
+def _apply_created_ledger(
+    bundle: Mapping[str, Any], ledger: Mapping[str, str]
+) -> dict[str, str]:
+    """Apply stored created values and return first-created rows to add."""
+    pending: dict[str, str] = {}
+    for value in bundle.get("objects", ()):
+        if "created" not in value:
+            continue
+        object_id = str(value["id"])
+        stored = ledger.get(object_id)
+        if stored is None:
+            pending[object_id] = str(value["created"])
+        else:
+            _clamp_created_timestamps(value, stored)
+    return pending
+
+
+def _write_created_ledger(
+    database: str | Path, pending: Mapping[str, str]
+) -> bool:
+    if not pending:
+        return True
+    try:
+        connection = sqlite3.connect(str(database), timeout=5.0)
+        try:
+            connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute(
+                f"CREATE TABLE IF NOT EXISTS {CREATED_TABLE} ("
+                "object_id TEXT PRIMARY KEY, created TEXT NOT NULL)"
+            )
+            connection.executemany(
+                f"INSERT INTO {CREATED_TABLE}(object_id,created) "
+                "VALUES (?,?) ON CONFLICT(object_id) DO UPDATE SET "
+                "created=excluded.created",
+                sorted(pending.items()),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    except (sqlite3.Error, OSError):
+        return False
+    return True
+
+
+def _warn(warning: Callable[[str], None] | None, message: str) -> None:
+    if warning is not None:
+        warning(message)
+    else:
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
 def export_stix(
     database: str | Path,
     output: str | Path,
@@ -919,9 +1033,17 @@ def export_stix(
     include_clients: bool = False,
     since: str | None = None,
     generated_at: datetime | None = None,
+    warning: Callable[[str], None] | None = None,
 ) -> Path:
     """Export the latest successful inventory run as one STIX 2.1 bundle."""
     snapshot = read_latest_successful_scan(database)
+    if snapshot.history_skipped:
+        _warn(
+            warning,
+            "skipped "
+            f"{snapshot.history_skipped} malformed historical finding "
+            "row(s) while deriving created timestamps",
+        )
     selected = select_findings(
         snapshot.findings, client=client, since=since
     )
@@ -931,6 +1053,22 @@ def export_stix(
         include_clients=include_clients,
         history=snapshot.history,
     )
+    try:
+        ledger = _read_created_ledger(database)
+    except StateError:
+        _warn(
+            warning,
+            "the STIX created ledger could not be read; using computed "
+            "created timestamps",
+        )
+        ledger = {}
+    pending = _apply_created_ledger(bundle, ledger)
+    if not _write_created_ledger(database, pending):
+        _warn(
+            warning,
+            "the STIX created ledger is read-only; using computed created "
+            "timestamps for new objects",
+        )
     return write_bundle(bundle, output)
 
 

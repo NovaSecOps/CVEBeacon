@@ -16,17 +16,20 @@ cvebeacon --config cvebeacon.toml export stix --output clients.json --include-cl
 cvebeacon --config cvebeacon.toml export stix --output recent.json --since 2026-11-01
 ```
 
-`--output` is required. The command is read-only for database content: it does
-not create the state database, change findings, deliver notifications, query
-public sources, or read the watch database. Only the configured state database
-is needed; an inventory path is not read, so a state-only configuration is
+`--output` is required. The export is read-only for findings: it does not create
+the state database, change findings, deliver notifications, query public
+sources, or read the watch database. It does create or update one additive
+`stix_object_created` table in the state database to keep `created` timestamps
+stable; that ledger is the only write. Only the configured state database is
+needed; an inventory path is not read, so a state-only configuration is
 sufficient for this command.
 
-SQLite may create or refresh `-wal` and `-shm` sidecar files beside a
-write-ahead-logging state database while it is opened read-only. Those files are
-a SQLite read-side effect, not a CVEBeacon state change. On read-only media,
-copy the state database and any sidecar files to a writable location before
-exporting.
+SQLite may create or refresh `-wal`, `-shm`, and `-journal` sidecar files
+beside a state database while it is opened. Those files are a SQLite effect,
+not a change to findings. If the state database is read-only, the export still
+runs but uses computed `created` timestamps and prints a warning. On read-only
+media, copy the state database and any sidecar files to a writable location to
+keep the ledger.
 
 | Option | Meaning |
 | --- | --- |
@@ -136,6 +139,27 @@ and identity `modified` use the export time, clamped to be no earlier than
 under the same fixed IDs, including after an earlier observation drops out of a
 later scan. All timestamps are UTC with millisecond precision and a `Z` suffix.
 
+### Created-timestamp ledger
+
+The first export that writes objects creates an additive
+`stix_object_created(object_id TEXT PRIMARY KEY, created TEXT)` table in the
+state database. Each exported STIX object ID is recorded once with its first
+computed `created` value. Later exports reuse the stored value for that ID,
+even if the underlying observation or asset identity changes.
+
+- Only object IDs that have a STIX `created` property are recorded:
+  vulnerabilities, relationships, identities, and reports. Software SCOs are
+  not versioned and are not recorded.
+- The ledger is created lazily on the first export; old state databases need no
+  migration and keep working. The table is additive and the state schema version
+  is unchanged.
+- Findings, events, clients, and other monitoring state are not changed.
+- If the database cannot accept the write, the export proceeds with computed
+  values and prints a warning. Repeated exports against a read-only database can
+  therefore produce different `created` values.
+- Deleting the ledger or exporting from a different state database starts a new
+  first-created history.
+
 ## Privacy and client labels
 
 Client labels are internal by default. Without `--include-clients`, the bundle
@@ -170,10 +194,13 @@ before merging them.
 - Only the newest successful run's finding snapshot is retained. Detail rows for
   every other run are pruned by later scans, so the table stays bounded to one
   run's findings; monitoring history and events are not pruned by this policy.
-- `created` values are derived from the full stored current-findings history
-  rather than a separate STIX object-version ledger. They remain stable while
-  that history retains the earliest observation; deleting or replacing the
-  state database removes that history.
+- A malformed row in the advisory `current_findings` history is skipped and
+  counted rather than blocking the export. A malformed row in the selected
+  successful run remains a hard error because it is part of the exported
+  finding data.
+- The created ledger's first values are computed from stored observations. If
+  the state database is read-only, those values are not persisted and later
+  writable exports start the ledger from then-current computed values.
 - There are no STIX data markings. Handling rules are outside the bundle.
 - The exporter does not deliver anything, run continuously, or act as a TAXII
   server. Re-run the command to refresh the snapshot.
