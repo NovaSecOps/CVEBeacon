@@ -52,12 +52,19 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
                 values.append(identifier)
             else:
                 tokens = re.findall(r"\w+", query, re.UNICODE)[:32]
-                fts = bool(use_fts and tokens and db.execute("SELECT 1 FROM sqlite_master WHERE name='watch_fts'").fetchone())
+                legacy = db.execute("SELECT value FROM watch_meta WHERE key='schema_version'").fetchone()[0] != '8'
+                fts = bool(use_fts and tokens and (legacy or db.execute("SELECT 1 FROM sqlite_master WHERE name='watch_fts'").fetchone()))
+                if fts:
+                    try:
+                        matcher.execute("CREATE VIRTUAL TABLE candidate USING fts5(text,content='')")
+                    except sqlite3.OperationalError as exc:
+                        if 'no such module' not in str(exc).lower():
+                            raise
+                        fts = False
                 if fts:
                     # Reuse the exact SQLite tokenizer and prefix semantics on
                     # one candidate at a time. No historical text copy, index
                     # backfill or persistent write is needed for legacy NVD.
-                    matcher.execute("CREATE VIRTUAL TABLE candidate USING fts5(text,content='')")
                     ascii_terms = re.findall(r"[A-Za-z0-9]+", " ".join(tokens)) if all(token.isascii() for token in tokens) else ()
                     last_text, last_result = None, 0
                     def matches(text, expression):
