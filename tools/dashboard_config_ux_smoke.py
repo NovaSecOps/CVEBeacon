@@ -13,6 +13,7 @@ import tomllib
 import httpx
 
 from dashboard_config_smoke import PASSWORD, controls
+from cvebeacon.dashboard_config import value
 
 
 def smoke(directory):
@@ -78,6 +79,22 @@ def smoke(directory):
             assert bad.status_code == 400
             assert "watch.rules[0].condition.kev must be one of cisa, eu, any" in bad.text
             assert "{ kev = true }" in bad.text
+            recipients = ['"Doe, John" <john@example.com>']
+            confirm("channels", preview("channels", g0_to=value(recipients)))
+            confirm("channels", preview("channels"))
+            assert tomllib.loads(path.read_text())["watch"]["channels"]["email"]["to"] == recipients
+            pasted = "https://secret.example/token/SYNTHETIC-CREDENTIAL"
+            for section, changes in [
+                ("sources", {"g0_nvd_api_key_file": pasted, "g0_minimum_request_interval": "oops"}),
+                ("watch", {"g0_initial": pasted}),
+                ("rules", {"g0_name": "example", "g0_channels": '["email"]', "g0_condition": '{ kev = "' + pasted + '" }'}),
+            ]:
+                refused = preview(section, **changes)
+                assert refused.status_code == 400
+                assert pasted not in refused.text
+            confirm("notifications", preview("notifications", g1_recipients='["example-distribution", "one@example.com, two@example.com"]'))
+            confirm("notifications", preview("notifications"))
+            assert tomllib.loads(path.read_text())["notifications"]["email"]["recipients"] == ["example-distribution", "one@example.com, two@example.com"]
             confirm("dashboard", preview("dashboard", g0_session_idle_seconds="120"))
             assert client.get("/").status_code == 303
             login()
@@ -94,4 +111,4 @@ def smoke(directory):
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="cvebeacon-config-ux-") as directory:
         smoke(Path(directory))
-    print("PASS real serve: channel format preserves login, dashboard change ends login, exact KEV error, recipients saved as arrays")
+    print("PASS real serve: channel format preserves login, dashboard change ends login, exact KEV error, recipient round-trips, legacy recipients and credential-error redaction")

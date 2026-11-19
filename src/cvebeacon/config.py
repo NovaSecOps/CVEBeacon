@@ -194,6 +194,13 @@ def _bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
     return value
 
 
+def notification_recipients(value):
+    """Validate legacy recipients without imposing watch-channel restrictions."""
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise ConfigurationError("notifications.email.recipients must be a list of strings")
+    return tuple(item.strip() for item in value)
+
+
 def load_config(path: str | Path) -> AppConfig:
     config_path = Path(path).expanduser().resolve()
     try:
@@ -351,11 +358,7 @@ def load_config(path: str | Path) -> AppConfig:
             raise ConfigurationError(
                 "sources.nvd_api_key_file must not be group or other accessible"
             )
-    raw_recipients = email_data.get("recipients", [])
-    if not isinstance(raw_recipients, list) or not all(
-        isinstance(value, str) and value.strip() for value in raw_recipients
-    ):
-        raise ConfigurationError("notifications.email.recipients must be a list of strings")
+    raw_recipients = notification_recipients(email_data.get("recipients", []))
     sender = str(email_data.get("sender", "")).strip()
     if email_enabled and (not sender or not raw_recipients):
         raise ConfigurationError("enabled email notifications require sender and at least one recipient")
@@ -440,7 +443,7 @@ def load_config(path: str | Path) -> AppConfig:
                 email_data.get("client_secret_env", "CVEBEACON_M365_CLIENT_SECRET")
             ),
             sender=sender,
-            recipients=tuple(value.strip() for value in raw_recipients),
+            recipients=raw_recipients,
         ),
         watch=WatchConfig(
             enabled=watch_enabled,

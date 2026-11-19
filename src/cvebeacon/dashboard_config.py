@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import secrets
 import stat
@@ -25,7 +26,7 @@ from werkzeug.exceptions import HTTPException
 
 from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
-                     TeamsConfig, WatchConfig, load_config)
+                     TeamsConfig, WatchConfig, load_config, notification_recipients)
 from .dashboard_config_fields import metadata
 from .errors import CVEBeaconError, ConfigurationError
 from .locking import LOCK_NAME, run_lock_path
@@ -1931,6 +1932,23 @@ def check_protected_paths(updated, config_path, backup_dir, configs, documents=(
 
 
 
+class FieldValidationError(ConfigurationError):
+    """A message made solely from fixed field identities and validation guidance."""
+
+
+def form_row_count():
+    text = request.form.get("row_count", "1")
+    try:
+        if len(text) > 3:
+            raise ValueError
+        count = int(text)
+        if not 1 <= count <= 101:
+            raise ValueError
+    except ValueError:
+        abort(400, "row_count must be an integer from 1 to 101")
+    return count
+
+
 def _kind(key):
     if key in BOOLEAN_FIELDS or key.endswith("_enabled"):
         return "boolean"
@@ -2017,7 +2035,8 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                     "product_mappings" if section == "product-mappings" else label)
             spec = FIELD_METADATA[f"{path}.{key}"]
             text = ("" if item is None or direct_url else
-                    ", ".join(item) if spec.kind == "addresses" and isinstance(item, list) else
+                    (value(item) if any("," in address for address in item) else ", ".join(item))
+                    if spec.kind == "addresses" and isinstance(item, list) else
                     str(item) if spec.kind in {"string", "enum"} else value(item))
             hint = _display(spec.default)
             if section == "channels" and path == "watch.channels.smtp" and key == "port":
@@ -2034,6 +2053,7 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                              "minimum": spec.minimum, "maximum": spec.maximum, "step": spec.step,
                              "checked": item is True or item is None and spec.default is True,
                              "identity": f"{path}.{key}", "spec": spec,
+                             "error_identity": f"{path}.{key}" + (f" (row {index + 1})" if section == "channels" else ""),
                              "secret": key.endswith("_file"),
                              "existing": bool(item),
                              "readonly": (readonly_channel or readonly_dashboard
@@ -2056,14 +2076,10 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
     return output
 
 
-def parse_form(editor, section, document, current_config, permissions, *, can_admin=False):
+def parse_form(editor, section, document, current_config, permissions, *, can_admin=False, count=None):
     can_manage = "manage_secrets" in permissions
-    try:
-        count = int(request.form.get("row_count", "1"))
-        if not 1 <= count <= 101:
-            abort(400)
-    except ValueError:
-        abort(400)
+    if count is None:
+        count = form_row_count()
     row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
     groups = groups_for(section, document, count=count, row_types=row_types,
                         can_manage=can_manage, can_admin=can_admin)
@@ -2083,19 +2099,19 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                     if control["kind"] in {"string", "enum"}:
                         row[key] = text
                         if key.endswith("_env") and text.strip() and ENV_NAME_PATTERN.fullmatch(text.strip()) is None:
-                            raise ConfigurationError(control["identity"] + " must be an environment variable name, for example EXAMPLE_SECRET")
+                            raise FieldValidationError(control["error_identity"] + " must be an environment variable name, for example EXAMPLE_SECRET")
                         if control["kind"] == "enum":
                             choices = control["choices"]
                             if choices and isinstance(choices[0], int):
                                 try:
                                     row[key] = int(text)
                                 except ValueError:
-                                    raise ConfigurationError(control["identity"] + " must be one of " + ", ".join(map(str, choices))) from None
+                                    raise FieldValidationError(control["error_identity"] + " must be one of " + ", ".join(map(str, choices))) from None
                             normalized = row[key].strip().casefold() if isinstance(row[key], str) else row[key]
                             if normalized not in [choice.casefold() if isinstance(choice, str) else choice for choice in choices]:
                                 # Preserve the loader's legacy inventory format aliases.
                                 if control["identity"] != "inventory.format" or normalized.lstrip(".") not in {*choices, "yml"}:
-                                    raise ConfigurationError(control["identity"] + " must be one of " + ", ".join(map(str, choices)))
+                                    raise FieldValidationError(control["error_identity"] + " must be one of " + ", ".join(map(str, choices)))
                     elif control["kind"] == "addresses":
                         try:
                             if text.lstrip().startswith("["):
@@ -2105,9 +2121,14 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                                 addresses = parsed["value"]
                             else:
                                 addresses = [address.strip() for address in text.split(",")]
-                            row[key] = list(_email_addresses({key: addresses}, key, control["identity"].rsplit(".", 1)[0], required=control["required"]))
+                            row[key] = (list(notification_recipients(addresses))
+                                        if control["identity"] == "notifications.email.recipients" else
+                                        list(_email_addresses({key: addresses}, key, control["identity"].rsplit(".", 1)[0], required=control["required"])))
                         except (ValueError, RecursionError, ConfigurationError):
-                            raise ConfigurationError(control["identity"] + " must be comma-separated email addresses or a TOML array of email addresses") from None
+                            expected = ("comma-separated recipient names or a TOML array of nonempty strings"
+                                        if control["identity"] == "notifications.email.recipients" else
+                                        "comma-separated email addresses or a TOML array of email addresses")
+                            raise FieldValidationError(control["error_identity"] + " must be " + expected) from None
                     else:
                         try:
                             parsed = tomllib.loads("value = " + text)
@@ -2120,7 +2141,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                                 raise ValueError
                         except (ValueError, RecursionError):
                             expected_format = {"number": "a TOML number", "boolean": "true or false", "toml": "a valid TOML array or table"}[control["kind"]]
-                            raise ConfigurationError(control["identity"] + " must be " + expected_format) from None
+                            raise FieldValidationError(control["error_identity"] + " must be " + expected_format) from None
                 if control["secret"]:
                     secret_name = name + "_new"
                     expected.add(secret_name)
@@ -2144,11 +2165,13 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 for control in group["controls"]:
                     if control["required"] and not row.get(control["key"]):
                         expected_format = {"toml": "a nonempty TOML array or table", "addresses": "at least one email address"}.get(control["kind"], "nonempty plain text")
-                        raise ConfigurationError(control["identity"] + " is required; expected " + expected_format)
-        if section == "notifications" and rows[1] is not None and rows[1].get("enabled"):
-            for key in ("sender", "recipients"):
-                if not rows[1].get(key):
-                    raise ConfigurationError(f"notifications.email.{key} is required when enabled; expected an email address" + (" list" if key == "recipients" else ""))
+                        raise FieldValidationError(control["error_identity"] + " is required; expected " + expected_format)
+        if section == "notifications":
+            for group, row in zip(groups, rows):
+                if group["prefix"] == ("notifications", "email") and row is not None and row.get("enabled"):
+                    for key in ("sender", "recipients"):
+                        if not row.get(key):
+                            raise FieldValidationError(f"notifications.email.{key} is required when enabled; expected an email address" + (" list" if key == "recipients" else ""))
         if section == "rules":
             from .watch.rules import parse_condition
             for index, row in enumerate(rows):
@@ -2260,6 +2283,71 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
 
 
 
+_CREDENTIAL_TEXT = re.compile(r"[a-z][a-z0-9+.-]*://|\b[A-Za-z_][A-Za-z0-9_]*\s*=", re.I)
+
+
+def retainable_form_value(control, submitted, section):
+    """Retain safe ordinary input, without treating rejected text as validated."""
+    key, spec = control["key"], control["spec"]
+    if (control["readonly"] or key in {"url", "name"} or key.endswith(("_env", "_file"))
+            or section == "product-mappings"):
+        return False
+    if spec.kind == "enum":
+        if not submitted.strip():
+            return True
+        if spec.choices and isinstance(spec.choices[0], int):
+            try:
+                return int(submitted) in spec.choices
+            except ValueError:
+                return False
+        normalized = submitted.strip().casefold()
+        if control["identity"] == "inventory.format":
+            normalized = normalized.lstrip(".")
+            normalized = "yaml" if normalized == "yml" else normalized
+        return normalized in [str(choice).casefold() for choice in spec.choices]
+    if spec.kind not in {"toml", "addresses"}:
+        return _CREDENTIAL_TEXT.search(submitted) is None
+    if not submitted.strip():
+        return True
+    if spec.kind == "addresses" and not submitted.lstrip().startswith("["):
+        return _CREDENTIAL_TEXT.search(submitted) is None
+    try:
+        parsed = tomllib.loads("value = " + submitted)
+        if set(parsed) != {"value"}:
+            return False
+        item = parsed["value"]
+        if any(_CREDENTIAL_TEXT.search(text) for text in _form_strings(item)):
+            return False
+        if spec.item_choices:
+            return isinstance(item, list) and all(isinstance(child, str) and child.strip().casefold() in spec.item_choices for child in item)
+        if key == "condition":
+            for identity, child in _walk(item):
+                if any(isinstance(part, str) and part not in {*LEAF_KEYS, "any", "all", "not"} for part in identity):
+                    return False
+                leaf = CONDITION_SCHEMA.get(identity[-1], {})
+                if isinstance(child, str) and leaf.get("kind") == "enum":
+                    if child.strip().casefold() not in leaf["choices"]:
+                        return False
+                if isinstance(child, str) and leaf.get("kind") == "number":
+                    return False
+        return True
+    except (ValueError, RecursionError):
+        # Malformed structured text has no trustworthy leaf boundaries.
+        return False
+
+
+def _form_strings(item):
+    if isinstance(item, str):
+        yield item
+    elif isinstance(item, dict):
+        for key, child in item.items():
+            yield key
+            yield from _form_strings(child)
+    elif isinstance(item, list):
+        for child in item:
+            yield from _form_strings(child)
+
+
 def register_config(app, config, *, host):
     """Register isolated routes and a dispatcher for immutable reloads."""
     from .dashboard import requires
@@ -2316,14 +2404,12 @@ def register_config(app, config, *, host):
                     abort(400, "Unsupported configuration action; reload the form")
                 if request.form.get("version") != version:
                     abort(409, "Configuration changed; reload the form")
-                count = int(request.form.get("row_count", "1")) if request.form.get("row_count", "1").isdigit() else 0
-                if not 1 <= count <= 101:
-                    abort(400)
+                count = form_row_count()
                 row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
                 groups = groups_for(section, document, count=count, row_types=row_types,
                                     can_manage="manage_secrets" in g.permissions, can_admin=g.user.is_admin)
                 candidate, staged, replacements = parse_form(editor, section, document, current_config,
-                                                             g.permissions, can_admin=g.user.is_admin)
+                                                             g.permissions, can_admin=g.user.is_admin, count=count)
                 preview, lockout = editor.preview(
                     section, candidate, version, staged, replacements,
                     current_document=document, current_config=current_config,
@@ -2343,8 +2429,12 @@ def register_config(app, config, *, host):
                                    condition_schema=CONDITION_SCHEMA, toml_value=value,
                                    saved=request.args.get("saved") == "1",
                                    read_only=editor.read_only())
+        except FieldValidationError as exc:
+            error = str(exc)
         except ConfigurationError as exc:
-            error = safe_error(exc, document or {}, editor.path)
+            credential_inputs = [text for key, text in request.form.items()
+                                 if key.endswith(("_env", "_file", "_new"))]
+            error = safe_error(exc, [document or {}, credential_inputs], editor.path)
         except HTTPException as exc:
             if exc.code not in {400, 409}:
                 raise
@@ -2358,28 +2448,8 @@ def register_config(app, config, *, host):
                 for control in group["controls"]:
                     key = control["key"]
                     submitted = request.form.get(control["id"], control["value"])
-                    # Unvalidated labels and credential assignments were never
-                    # safe error output. Retain their validated baseline instead.
-                    if (control["readonly"] or key in {"url", "name"}
-                            or section == "product-mappings"):
+                    if not retainable_form_value(control, submitted, section):
                         continue
-                    if key.endswith("_env") and submitted.strip() and ENV_NAME_PATTERN.fullmatch(submitted.strip()) is None:
-                        continue
-                    if control["spec"].item_choices and submitted.strip():
-                        try:
-                            items = tomllib.loads("value = " + submitted)["value"]
-                            if not isinstance(items, list) or any(not isinstance(item, str) or item.strip().casefold() not in control["spec"].item_choices for item in items):
-                                continue
-                        except (ValueError, RecursionError):
-                            continue
-                    if key == "condition" and submitted.strip():
-                        try:
-                            condition = tomllib.loads("value = " + submitted)["value"]
-                            if any(isinstance(part, str) and part not in {*LEAF_KEYS, "any", "all", "not"}
-                                   for identity, _ in _walk(condition) for part in identity if not isinstance(part, int)):
-                                continue
-                        except (ValueError, RecursionError):
-                            pass
                     control["value"] = submitted
                     control["checked"] = submitted == "true" or submitted == "" and control["spec"].default is True
             return render_template("config_section.html", section=section, groups=groups,

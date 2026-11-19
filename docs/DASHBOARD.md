@@ -449,7 +449,11 @@ checkboxes, and numeric settings show the validator's bounds. Required fields
 are marked; requirements on a blank final row apply only when that row is added.
 Defaults appear as placeholders and beneath the controls. Email `to`, `cc`,
 `bcc` and legacy `recipients` accept comma-separated addresses or TOML arrays;
-the editor trims and deduplicates them and validates every address. Other arrays,
+watch-channel lists are trimmed, deduplicated and validated per address. Existing
+items containing commas, including quoted display names, render as TOML arrays
+so an unchanged form preserves their meaning. Legacy `recipients` keeps the
+loader's nonempty-string rules, ordering and duplicates, including distribution
+names without `@`; it has no separate editor limit on recipient count. Other arrays,
 column mappings and nested rule conditions accept TOML values. For example,
 use `["soc-email"]` for channels and
 `{ any = [{ cvss_min = 9.0 }, { epss_min = 0.5 }] }` for a condition.
@@ -459,9 +463,11 @@ remove existing rows. Every submitted document is validated by `load_config`,
 including channel references and source requirements. Invalid submissions name
 the field and expected format, keep ordinary form
 values for correction, and leave the file intact. Secret contents are never
-redisplayed. Unvalidated row labels, invalid enum lists and invalid credential
-references retain their validated baseline instead of repeating potentially
-sensitive text; re-enter changed labels after correcting an error. The condition
+redisplayed. Changed credential references, unvalidated row labels, rejected
+enum values and unsafe or malformed structured values retain their validated
+baseline instead of repeating potentially sensitive text. This policy does not
+read any reference target. Re-enter changed references and labels after correcting
+an error. The condition
 editor lists valid leaves, values and examples from
 the parser's schema; for example, `kev` accepts `"cisa"`, `"eu"` or `"any"`, and
 `kev = true` reports the exact condition path and accepted values.
