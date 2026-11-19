@@ -44,10 +44,12 @@ cvebeacon.example.com {
 
 	reverse_proxy 127.0.0.1:8787 {
 		# The dashboard validates this Host header and ignores forwarded
-		# headers. Send the backend address and drop client-supplied
-		# X-Forwarded-* values.
+		# headers. Send the backend address and clear client-supplied
+		# forwarding headers.
 		header_up Host {upstream_hostport}
 		header_up -X-Forwarded-*
+		header_up -X-Real-IP
+		header_up -Forwarded
 
 		# Manual queries and report generation can run for several minutes;
 		# background jobs return immediately.

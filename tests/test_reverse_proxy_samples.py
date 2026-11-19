@@ -71,6 +71,16 @@ def test_samples_send_a_backend_host_header_and_no_forwarded_client_host():
             assert stripped.endswith('"";') or stripped.startswith("header_up -"), stripped
 
 
+def test_samples_clear_all_client_forwarding_headers():
+    nginx = _text(NGINX)
+    caddy = _text(CADDY)
+    for header in ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Port", "X-Forwarded-Proto", "X-Real-IP", "Forwarded"):
+        assert f'proxy_set_header {header} "";' in nginx, header
+    assert "header_up -X-Forwarded-*" in caddy
+    assert "header_up -X-Real-IP" in caddy
+    assert "header_up -Forwarded" in caddy
+
+
 def test_samples_terminate_tls_and_redirect_http():
     nginx = _text(NGINX)
     caddy = _text(CADDY)
