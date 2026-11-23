@@ -13,7 +13,7 @@ CVEBeacon uses DNS and outbound HTTPS over TCP 443. It does not require inbound 
 | GitHub release asset redirects | `release-assets.githubusercontent.com`, `objects.githubusercontent.com` |
 | ENISA EUVD search and KEV dump | `euvdservices.enisa.europa.eu` |
 | CISA KEV JSON | `www.cisa.gov` |
-| FIRST EPSS API | `api.first.org` |
+| FIRST EPSS API and dated score files | `api.first.org`, `epss.empiricalsecurity.com` |
 | OSV package queries and advisory records | `api.osv.dev` |
 
 These sources require no API key, token or account. Requests carry public vendor/product/version or CPE terms, a supported versionless PURL, ecosystem/package name, an exact supplied commit hash, or advisory/CVE identifiers. Package version comparisons happen locally. OSV repository URLs are compared locally, not fetched. Full CISA/EU KEV catalogs are downloaded without inventory metadata.

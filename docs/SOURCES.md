@@ -163,7 +163,8 @@ its failure is degraded coverage and cannot hold NVD/EUVD initialization open.
 ## FIRST Exploit Prediction Scoring System
 
 - Purpose: add a daily probability estimate for exploitation prioritization.
-- Interfaces: [EPSS](https://www.first.org/epss/) and [EPSS API](https://api.first.org/epss/).
+- Interfaces: [EPSS](https://www.first.org/epss/), [EPSS API](https://api.first.org/epss/),
+  and the dated score files at `https://epss.empiricalsecurity.com/epss_scores-YYYY-MM-DD.csv.gz`.
 - Data used: score, percentile, and score date.
 - Limitations: EPSS is predictive and changes regularly. It is not evidence of known exploitation and is not used as exact applicability evidence.
 
