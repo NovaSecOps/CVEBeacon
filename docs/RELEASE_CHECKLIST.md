@@ -59,17 +59,32 @@ environment directly.
      --jq '.branch_policies[] | {name, type}'
    gh api repos/NovaSecOps/CVEBeacon/environments/release/variables \
      --jq '.variables[] | {name, value}'
+   gh api repos/NovaSecOps/CVEBeacon/environments/release/secrets \
+     --jq '.secrets[].name'
    ```
 
    Confirm `can_admins_bypass` is `false`, `protection_rules` contains a
-   `required_reviewers` rule, the branch policies list a `tag` named `v*`, and
-   the environment variables include `RELEASE_PUBLISH_ENABLED=true`. The last
-   check reads the environment directly; a repository-level variable with the
-   same name is not sufficient and must be removed.
+   `required_reviewers` rule, the branch policies list a `tag` named `v*`, the
+   environment variables include `RELEASE_PUBLISH_ENABLED=true`, and the
+   environment secrets include `RELEASE_SIGNING_KEY`. The variable and secret
+   checks read the environment directly; repository-level values with the same
+   names are not sufficient and must be removed.
 10. Add a repository tag ruleset that blocks updates and deletions for `v*`.
     The release job also verifies that the tag still points at the built
     commit before creating the draft, but the ruleset prevents the move in the
-    first place.
+    first place. The ruleset list endpoint does not return conditions or
+    rules; verify the detail endpoint for each tag ruleset:
+
+    ```console
+    gh api repos/NovaSecOps/CVEBeacon/rulesets \
+      --jq '.[] | select(.target == "tag") | .id'
+    gh api repos/NovaSecOps/CVEBeacon/rulesets/<id> \
+      --jq '{target, enforcement, conditions, rules, bypass_actors}'
+    ```
+
+    Confirm the detail response targets `tag`, includes `refs/tags/v*` in
+    `conditions.ref_name.include`, lists `deletion` and `update` rules, has
+    `enforcement` set to `active`, and has no bypass actors.
 
 ## Before tagging
 
