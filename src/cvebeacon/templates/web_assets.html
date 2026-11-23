@@ -1,62 +1,91 @@
 {% extends 'base.html' %}
+{% from 'ui.html' import page_header, card, callout, empty_state, definition_list, table_wrap, button %}
 {% block title %}Web assets · CVEBeacon{% endblock %}
-{% macro asset_fields(entry, document) %}
-<label>Hostname <input name="hostname" value="{{ entry.get('hostname', '') }}" required maxlength="256"></label>
-<label>Scheme <select name="scheme">{% for scheme in ['https','http'] %}<option {% if entry.get('scheme', 'https') == scheme %}selected{% endif %}>{{ scheme }}</option>{% endfor %}</select></label>
-<label>Port <input name="port" type="number" min="1" max="65535" value="{{ entry.get('port', 443) }}" required></label>
-<label>Starting path <input name="path" value="{{ entry.get('path', '/') }}" maxlength="2048" required></label>
-<label>Expiry (optional, ISO 8601 UTC) <input name="expires_at" value="{{ entry.get('expires_at', '') }}" placeholder="2027-11-01T00:00:00Z"></label>
-<label><input name="allow_redirects" type="checkbox" value="yes" {% if entry.get('allow_redirects', true) %}checked{% endif %}>Allow redirects to listed hosts and ports</label>
-<label>Maximum redirects <input name="max_redirects" type="number" min="0" max="2" value="{{ entry.get('max_redirects', 2) }}" required></label>
-<label><input name="allow_private_address" type="checkbox" value="yes" {% if entry.get('allow_private_address') %}checked{% endif %}>I authorise access to private addresses for this asset (including loopback)</label>
-{% if current_user.is_admin %}<label>Client CA bundle path (optional) <input name="ca_bundle" value="{{ document.get('ca_bundle', '') }}"></label><p>Changing the client CA bundle renews authorisation on every saved entry.</p>{% else %}<input type="hidden" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}">{% endif %}
-<label><input name="attest" type="checkbox" value="yes" required>I attest that this client authorises observation of this asset and the selected redirect and address policy.</label>
+{% macro asset_fields(entry, document, prefix) %}
+<div class="field"><label for="{{ prefix }}-hostname">Hostname</label><input id="{{ prefix }}-hostname" name="hostname" value="{{ entry.get('hostname', '') }}" required maxlength="256"><p class="help">The site address without https://, for example shop.example.com.</p></div>
+<div class="field"><label for="{{ prefix }}-scheme">Scheme</label><select name="scheme" id="{{ prefix }}-scheme">{% for scheme in ['https','http'] %}<option {% if entry.get('scheme', 'https') == scheme %}selected{% endif %}>{{ scheme }}</option>{% endfor %}</select><p class="help">Use https unless the site only offers http.</p></div>
+<div class="field"><label for="{{ prefix }}-port">Port</label><input id="{{ prefix }}-port" name="port" type="number" min="1" max="65535" value="{{ entry.get('port', 443) }}" required><p class="help">Usually 443 for https and 80 for http.</p></div>
+<div class="field"><label for="{{ prefix }}-path">Starting path</label><input id="{{ prefix }}-path" name="path" value="{{ entry.get('path', '/') }}" maxlength="2048" required><p class="help">Start from / unless the site lives in a subfolder.</p></div>
+<div class="field"><label for="{{ prefix }}-expires">Expiry <span class="optional">(optional)</span></label><input id="{{ prefix }}-expires" name="expires_at" value="{{ entry.get('expires_at', '') }}" placeholder="2027-11-01T00:00:00Z"><p class="help">Use ISO 8601 UTC, for example 2027-11-01T00:00:00Z. Leave blank for no expiry. The date must be in the future.</p></div>
+<div class="field field-check"><input id="{{ prefix }}-redirects" name="allow_redirects" type="checkbox" value="yes" {% if entry.get('allow_redirects', true) %}checked{% endif %}><label for="{{ prefix }}-redirects">Allow redirects to listed hosts and ports</label></div>
+<div class="field"><label for="{{ prefix }}-max-redirects">Maximum redirects</label><input id="{{ prefix }}-max-redirects" name="max_redirects" type="number" min="0" max="2" value="{{ entry.get('max_redirects', 2) }}" required><p class="help">0 to 2. Each redirect must stay on a listed host and port.</p></div>
+<div class="field field-check"><input id="{{ prefix }}-private" name="allow_private_address" type="checkbox" value="yes" {% if entry.get('allow_private_address') %}checked{% endif %}><label for="{{ prefix }}-private">I authorise access to private addresses for this asset (including loopback)</label><p class="help">Only tick this if the client has approved checking an internal address.</p></div>
+{% if current_user.is_admin %}<div class="field"><label for="{{ prefix }}-ca">Client CA bundle path <span class="optional">(optional)</span></label><input id="{{ prefix }}-ca" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}"><p class="help">Changing the client CA bundle renews authorisation on every saved entry.</p></div>{% else %}<input type="hidden" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}">{% endif %}
+<div class="field field-check"><input id="{{ prefix }}-attest" name="attest" type="checkbox" value="yes" required><label for="{{ prefix }}-attest">I attest that this client authorises observation of this asset and the selected redirect and address policy.</label></div>
 {% endmacro %}
 {% block content %}
-<h1>Client web assets</h1>
-<p>Record authorised assets, preview requests, and observe direct product evidence. Detection is manual; scheduling is future work. Results are hints for review.</p>
-{% if error %}<p role="alert">{{ error }}</p>{% endif %}
-{% if not available %}<p role="status">{{ notice }}</p>{% endif %}
-<form method="get"><label>Client label <input name="client" value="{{ client }}" required maxlength="256"></label><button>Open client</button></form>
-<ul>{% for name in clients %}<li><a href="{{ url_for('web.index', client=name) }}">{{ name }}</a></li>{% endfor %}</ul>
+{{ page_header('Web assets', 'Record the websites a client has authorised you to check, then look for software on them. Detection is manual and results are hints for review.') }}
+{% if error %}{% call callout('danger', 'That web asset change was not saved') %}<p>{{ error }}</p>{% endcall %}{% endif %}
+{% if not available %}{% call callout('warning', 'Web detection is not available') %}<p>{{ notice }} The saved list below can still be viewed and edited, but detection buttons stay disabled until the optional Extensions package is installed.</p>{% endcall %}{% endif %}
+
+{% call card('Choose a client', 'Open a client to see their saved sites, or type a client name to start.') %}
+<form class="filters" method="get"><div class="field"><label for="web-client">Client name</label><input id="web-client" name="client" value="{{ client }}" required maxlength="256"><p class="help">Use the same name as on the Clients page.</p></div><div class="form-actions">{{ button('Open client') }}</div></form>
+{% if clients %}<p class="muted">Saved clients:</p><p>{% for name in clients %}<a href="{{ url_for('web.index', client=name) }}">{{ name }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+{% endcall %}
+
 {% if document %}
-<h2>{{ client }}</h2>
-<p>Saving records the signed-in user and current UTC time. Unsaved entries are never observed.</p>
-<h3>Authorised assets</h3>
+{% call card('Authorised sites for ' ~ client, 'Only these saved sites can be checked. Saving records your signed-in name and the current UTC time. Unsaved entries are never checked.') %}
+{% call callout('info', 'Only check sites you are allowed to check') %}<p>Web detection may only target sites you own or that the client has authorised in writing. Do not add a public site just because it is reachable. Results are hints for review, not proof of what is installed.</p>{% endcall %}
 {% for entry in document.assets %}
-<article><h4>{{ entry.get('hostname', entry.get('url', '')) }} · {{ entry.get('scheme', 'https') }}:{{ entry.get('port', 443) }}{{ entry.get('path', '/') }}</h4>
-<p>Authorised by {{ entry.get('authorized_by', '') }} at {{ entry.get('authorized_at', '') }}. Expiry: {{ entry.get('expires_at', 'none') }}.</p>
-<p>Redirects: {{ entry.get('allow_redirects', true) }} (maximum {{ entry.get('max_redirects', 2) }}). Private addresses: {{ entry.get('allow_private_address', false) }}.</p>
+<h3>{{ entry.get('hostname', entry.get('url', '')) }} · {{ entry.get('scheme', 'https') }}:{{ entry.get('port', 443) }}{{ entry.get('path', '/') }}</h3>
+{{ definition_list([
+  ('Authorised by', entry.get('authorized_by', '')),
+  ('Authorised at', watch_stamp(entry.get('authorized_at')) or 'Not recorded'),
+  ('Expires', watch_stamp(entry.get('expires_at')) if entry.get('expires_at') else 'No expiry'),
+  ('Redirects', ('Allowed' if entry.get('allow_redirects', true) else 'Not allowed') ~ ' (maximum ' ~ entry.get('max_redirects', 2) ~ ')'),
+  ('Private addresses', 'Allowed' if entry.get('allow_private_address', false) else 'Not allowed'),
+]) }}
 {% if accounts and 'manage_web_assets' in permissions %}
-<details><summary>Change asset</summary><form method="post" action="{{ url_for('web.save') }}">
+<details class="disclosure"><summary>Change this site</summary><form method="post" class="stack" action="{{ url_for('web.save') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="change"><input type="hidden" name="index" value="{{ loop.index0 }}">
-{{ asset_fields(entry, document) }}<button {% if not available %}disabled{% endif %}>Save with attestation</button></form></details>
-<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="index" value="{{ loop.index0 }}"><button name="action" value="remove" {% if not available %}disabled{% endif %}>Remove asset</button></form>
-{% endif %}</article>
-{% else %}<p>No saved assets.</p>{% endfor %}
+{{ asset_fields(entry, document, 'change-' ~ loop.index0) }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
+<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="index" value="{{ loop.index0 }}"><div class="form-actions">{{ button('Remove this site', kind='danger', confirm='Remove this site from the authorised list?', name='action', value='remove') }}</div></form>
+{% endif %}
+{% else %}<p class="muted">No authorised sites saved yet. Add one below and tick the authorisation box.</p>{% endfor %}
+{% endcall %}
+
 {% if accounts and 'manage_web_assets' in permissions %}
-{% if document.assets or snapshot or removed or run or products or reviews %}<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><label><input type="checkbox" name="confirm" value="yes" required>I want to remove every saved asset and all saved detection results for this client.</label><button name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></form>{% endif %}
-<details><summary>Add authorised asset</summary><form method="post" action="{{ url_for('web.save') }}">
+{% call card('Add an authorised site', 'Record a site the client has authorised. The attestation box must be ticked before the site can be saved.') %}
+<details class="disclosure" id="add-asset"><summary>Add authorised site</summary><form method="post" class="stack" action="{{ url_for('web.save') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="add">
-{{ asset_fields({}, document) }}<button {% if not available %}disabled{% endif %}>Save with attestation</button></form></details>
+{{ asset_fields({}, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
+{% endcall %}
+{% if document.assets or snapshot or removed or run or products or reviews %}
+{% call card('Remove all sites and results', 'Delete every saved site and all saved detection results for this client. This cannot be undone.', tone='danger') %}
+<form method="post" class="stack" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><div class="field field-check"><input id="remove-all-confirm" type="checkbox" name="confirm" value="yes" required><label for="remove-all-confirm">I want to remove every saved asset and all saved detection results for this client.</label></div><div class="form-actions"><button class="btn btn-danger" type="submit" name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></div></form>
+{% endcall %}
 {% endif %}
+{% endif %}
+
 {% if accounts and 'run' in permissions %}
-<form method="post" action="{{ url_for('web.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">
-<button name="action" value="web-plan" {% if not available or not document.assets %}disabled{% endif %}>Show planned requests (sends nothing)</button>
-<button name="action" value="web-detect" {% if not available or not document.assets %}disabled{% endif %}>Detect web technologies</button></form>
+{% call card('Check the saved sites', 'Preview the requests first, or run detection now. Detection contacts only the saved sites above.') %}
+<form method="post" class="stack" action="{{ url_for('web.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><div class="form-actions"><button class="btn btn-secondary" type="submit" name="action" value="web-plan" {% if not available or not document.assets %}disabled{% endif %}>Show planned requests (sends nothing)</button><button class="btn" type="submit" name="action" value="web-detect" {% if not available or not document.assets %}disabled{% endif %}>Detect web technologies</button></div></form>
+{% endcall %}
 {% endif %}
-<h3>Last run</h3>
-{% if removed %}<p role="status">Results include assets removed since the last run. Run detection again to refresh retained results.</p>{% endif %}
-{% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ last_job.created_at }} · {{ last_job.exit_meaning }}</p>{% endif %}
-{% if run %}<p>Last observation: {{ run.get('started_at', '') }} → {{ run.get('ended_at', '') }} · {{ run.get('status', '') }} · requests: {{ run.get('request_count', '') }} · duration: {{ run.get('duration_seconds', '') }} seconds.</p>{% else %}<p>No observation metadata yet.</p>{% endif %}
-{% if snapshot %}<p>Saved inventory: {{ snapshot.generated_at }} · {{ snapshot.status }} · {{ snapshot.record_count }} products. Enable <code>[inventory] web_snapshots = true</code> in <a href="{{ url_for('config_editor.inventory') }}">inventory configuration</a> to include saved snapshots in normal scans. A failed observation retains the previous inventory.</p>{% endif %}
-<h3>Detected products</h3>
-<table><thead><tr><th>Host</th><th>Product</th><th>Versions</th><th>Evidence type</th><th>Category</th><th>Confidence</th></tr></thead><tbody>
-{% for item in products %}<tr><td>{{ item.get('hostname', '') }}</td><td>{{ item.get('vendor', '') }}/{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') or 'version unknown' }}</td><td>{{ item.get('evidence_types', []) | join(', ') }}</td><td>{{ item.get('category', '') }}</td><td>{{ item.get('confidence', '') }}</td></tr>{% else %}<tr><td colspan="6">No detected products.</td></tr>{% endfor %}</tbody></table>
-<h3>Review entries</h3>
-<table><thead><tr><th>Asset</th><th>Reason</th><th>Product</th><th>Conflicting versions</th><th>HTTP status</th><th>Retry after (seconds)</th></tr></thead><tbody>
-{% for item in reviews %}<tr><td>{{ item.get('asset_id', '') }}</td><td>{{ item.get('reason', '') }}</td><td>{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') }}</td><td>{{ item.get('status', '') }}</td><td>{{ item.get('retry_after', '') }}</td></tr>{% else %}<tr><td colspan="6">No review entries.</td></tr>{% endfor %}</tbody></table>
-{% if truncated %}<p>Showing the first 1,000 entries per table. Full results remain in the private data directory.</p>{% endif %}
-<p>Response bodies and cookies are never stored or displayed.</p>
+
+{% call card('Latest detection', 'When detection last ran and what it saved.') %}
+{% if removed %}{% call callout('warning') %}<p>Results include assets removed since the last run. Run detection again to refresh retained results.</p>{% endcall %}{% endif %}
+{% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ watch_stamp(last_job.created_at) }} · {{ last_job.exit_meaning }}</p>{% endif %}
+{% if run %}<p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · {{ run.get('status', '') }} · requests: {{ run.get('request_count', '') }} · duration: {{ run.get('duration_seconds', '') }} seconds.</p>{% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
+{% if snapshot %}<p>Saved inventory: {{ watch_stamp(snapshot.generated_at) }} · {{ snapshot.status }} · {{ snapshot.record_count }} products. Enable <code>[inventory] web_snapshots = true</code> in <a href="{{ url_for('config_editor.inventory') }}">inventory configuration</a> to include saved snapshots in normal scans. A failed observation retains the previous inventory.</p>{% endif %}
+{% if truncated %}<p class="muted">Showing the first 1,000 entries per table. Full results remain in the private data directory.</p>{% endif %}
+<p class="muted">Response bodies and cookies are never stored or displayed.</p>
+{% endcall %}
+
+{% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.') %}
+{% call table_wrap('Detected products') %}
+<table><thead><tr><th scope="col">Host</th><th scope="col">Product</th><th scope="col">Versions</th><th scope="col">Evidence type</th><th scope="col">Category</th><th scope="col">Confidence</th></tr></thead><tbody>
+{% for item in products %}<tr><td>{{ item.get('hostname', '') }}</td><td>{{ item.get('vendor', '') }}/{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') or 'version unknown' }}</td><td>{{ item.get('evidence_types', []) | join(', ') }}</td><td>{{ item.get('category', '') }}</td><td>{{ item.get('confidence', '') }}</td></tr>{% else %}<tr><td colspan="6">No products detected yet. Run detection after saving a site.</td></tr>{% endfor %}</tbody></table>
+{% endcall %}
+{% endcall %}
+
+{% call card('Entries to review', 'Detection results that need a person to decide. Compare each one with the site before relying on it.') %}
+{% call table_wrap('Web detection entries to review') %}
+<table><thead><tr><th scope="col">Asset</th><th scope="col">Reason</th><th scope="col">Product</th><th scope="col">Conflicting versions</th><th scope="col">HTTP status</th><th scope="col">Retry after (seconds)</th></tr></thead><tbody>
+{% for item in reviews %}<tr><td>{{ item.get('asset_id', '') }}</td><td>{{ item.get('reason', '') }}</td><td>{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') }}</td><td>{{ item.get('status', '') }}</td><td class="num">{{ item.get('retry_after', '') }}</td></tr>{% else %}<tr><td colspan="6">No entries need review.</td></tr>{% endfor %}</tbody></table>
+{% endcall %}
+{% endcall %}
+{% elif not clients %}
+{{ empty_state('No web assets yet', 'Type a client name above and open it. Then add a site the client has authorised you to check.') }}
 {% endif %}
 {% endblock %}

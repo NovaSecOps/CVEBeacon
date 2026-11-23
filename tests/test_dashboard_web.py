@@ -389,7 +389,7 @@ def test_url_entries_display_and_save_equivalent_target(web, url, scheme, port, 
     save_allowlist(path, document)
     page = client.get("/web-assets?client=Acme")
     assert f'example.invalid · {scheme}:{port}{path_value}' in page.text
-    form = page.text.split('<summary>Change asset</summary>', 1)[1].split('</form>', 1)[0]
+    form = page.text.split('<summary>Change this site</summary>', 1)[1].split('</form>', 1)[0]
     # Submit the actual rendered controls, so a wrong default cannot pass unnoticed.
     fields = dict(re.findall(r'name="([^"]+)"[^>]*value="([^"]*)"', form))
     fields["scheme"] = re.search(r'<option selected>([^<]+)</option>', form)[1]
