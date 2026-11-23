@@ -94,10 +94,10 @@ environment directly.
 - Review dependency versions and vulnerability advisories.
 - Confirm the source and network documentation against current endpoints.
 - Scan the public tree for secrets, private inventories, machine-specific paths, and generated state.
-- Bump `version` in `pyproject.toml`; the tag must equal `v` plus that exact
-  version (`0.1.0` becomes `v0.1.0`).
+- Confirm `version` in `pyproject.toml`; bump it only for a new release. The
+  tag must equal `v` plus that exact version (`0.1.0` becomes `v0.1.0`).
 - Update the release notes template values that are not filled in by the
-  workflow, and commit the version bump.
+  workflow, and commit the version change, if any.
 - Treat changes to `requirements/release-build.txt` as reviewed changes. The
   python distribution build fails when a pinned version or hash does not match
   the index.
