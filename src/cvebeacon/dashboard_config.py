@@ -2505,6 +2505,11 @@ def _form_strings(item):
             yield from _form_strings(child)
 
 
+def match_request(form):
+    """Whether this POST asks for the read-only recent-CVE rule check."""
+    return bool(form.get("match_rule")) and form.get("action") in {None, "", "preview"}
+
+
 def register_config(app, config, *, host):
     """Register isolated routes and a dispatcher for immutable reloads."""
     from .dashboard import requires
@@ -2524,7 +2529,11 @@ def register_config(app, config, *, host):
                 error="Configuration changed; reload the configuration page",
                 read_only=editor.read_only(),
             ), 409
-        if not editor.read_only():
+        # The match check is read-only, so it must not create the writer lock
+        # or remove expired staged files. Every editing request still cleans up.
+        if not editor.read_only() and not (
+                request.method == "POST" and request.endpoint == "config_editor.rules"
+                and match_request(request.form)):
             editor.cleanup()
 
     @blueprint.teardown_request
@@ -2552,7 +2561,7 @@ def register_config(app, config, *, host):
                     raise ConfigurationError(
                         "The configuration directory is read-only. Ask the operator to enable "
                         "editing for the dashboard service, then reload this page.")
-                if section == "rules" and request.form.get("match_rule") and not request.form.get("action"):
+                if section == "rules" and match_request(request.form):
                     # A read-only check against stored CVEs: no preview record is made.
                     from .dashboard_rule_builder import match_preview
                     match = match_preview(request.form, document, current_config)

@@ -1,5 +1,8 @@
 """Regression tests for the configuration hooks used by the guided setup pages."""
 
+import os
+import time
+
 from flask import request
 import pytest
 from werkzeug.datastructures import MultiDict
@@ -172,6 +175,100 @@ def test_rule_page_calls_the_builder_hook(accounts, monkeypatch):
     response = client.post("/config/rules", data=data)
     assert response.status_code == 200
     assert calls and calls[0][1] == 1
+
+
+def rules_request(client, editor, **changes):
+    page = client.get("/config/rules")
+    assert page.status_code == 200
+    document, _, _, version, _ = editor.read()
+    data = form_data(document, "rules", g0_name="Example rule",
+                     g0_condition='{ kev = "cisa" }', g0_channels='["email"]',
+                     g0_events='["match"]', **changes)
+    data["version"] = version
+    data["csrf"] = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    return data
+
+
+def test_match_button_reaches_the_hook_from_the_rendered_form(accounts, monkeypatch):
+    config, _, app, client = accounts
+    login(client, "admin")
+    editor = app.extensions["dashboard_config"]
+    before = config.config_path.read_bytes()
+    calls, rendered = [], []
+    result = {"matches": [], "total": 0}
+
+    def match(form, document, current_config):
+        calls.append(dict(form))
+        return result
+
+    real_render = config_module.render_template
+
+    def record_render(template, **context):
+        if template == "config_section.html":
+            rendered.append(context)
+        return real_render(template, **context)
+
+    monkeypatch.setattr(dashboard_rule_builder, "match_preview", match)
+    monkeypatch.setattr(config_module, "render_template", record_render)
+
+    data = rules_request(client, editor, match_rule="0")
+    response = client.post("/config/rules", data=data)
+
+    assert response.status_code == 200
+    assert calls and calls[0]["match_rule"] == "0"
+    assert calls[0]["action"] == "preview"
+    assert rendered[-1]["match"] == result
+    assert editor.pending == {}
+    assert config.config_path.read_bytes() == before
+
+
+def test_confirm_request_never_calls_the_match_hook(accounts, monkeypatch):
+    _, _, app, client = accounts
+    login(client, "admin")
+    editor = app.extensions["dashboard_config"]
+    page = client.get("/config/rules")
+    assert page.status_code == 200
+    calls = []
+    monkeypatch.setattr(dashboard_rule_builder, "match_preview",
+                        lambda form, document, current: calls.append(dict(form)))
+
+    response = client.post("/config/rules", data={
+        "csrf": page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0],
+        "action": "confirm", "match_rule": "0", "preview": "missing"})
+
+    assert response.status_code == 400
+    assert calls == []
+
+
+def test_match_request_does_not_clean_up_or_take_the_writer_lock(accounts, monkeypatch):
+    _, _, app, client = accounts
+    login(client, "admin")
+    editor = app.extensions["dashboard_config"]
+    page = client.get("/config/rules")
+    assert page.status_code == 200
+    document, _, _, version, _ = editor.read()
+    data = form_data(document, "rules", g0_name="Example rule",
+                     g0_condition='{ kev = "cisa" }', g0_channels='["email"]',
+                     g0_events='["match"]', match_rule="0")
+    data["version"] = version
+    data["csrf"] = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    data.pop("action")  # The match dispatch also accepts an action-less check.
+
+    editor.secret_dir.mkdir(mode=0o700, exist_ok=True)
+    expired = editor.secret_dir / (config_module.STAGE_PREFIX + "expired-match-check")
+    expired.write_text("synthetic staged value", encoding="utf-8")
+    old = time.time() - config_module.PREVIEW_SECONDS - 60
+    os.utime(expired, (old, old))
+    lock_path = editor.path.with_name(".config-" + editor.path.name + ".lock")
+    lock_path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(dashboard_rule_builder, "match_preview",
+                        lambda form, document, current: {"matches": [], "total": 0})
+    response = client.post("/config/rules", data=data)
+
+    assert response.status_code == 200
+    assert not lock_path.exists()
+    assert expired.exists()
 
 
 def test_config_confirm_defaults_and_optional_targets(setup):
