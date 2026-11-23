@@ -42,6 +42,7 @@
   <dt>Assets in the uploaded inventory</dt><dd>{{ count }}</dd>
   {% if upload %}<dt>Last inventory change</dt><dd>{{ stamp(upload[1]) }} by {{ upload[0] }}</dd>{% endif %}
 </dl>
+<p class="help">The next scan uses this version. The previous versions stay available below.</p>
 <div class="form-actions">
   {{ link_button('Download current inventory', url_for('client_inventory.download', key=key, name=profile.name), kind='secondary') }}
   {% if can_manage and can_scan %}{{ link_button('Upload inventory', '#upload-inventory', kind='secondary') }}{% endif %}
@@ -66,7 +67,7 @@
 {% if accounts and 'manage_schedule' not in permissions and scan_schedule != 'scan' %}
 <p>Ask an administrator to change the schedule.</p>
 {% endif %}
-<p>The watchlist shows affected clients after a successful scan.</p>
+<p>The Clients page shows affected clients after a successful scan.</p>
 {% endcall %}
 {% endif %}
 </div>
@@ -105,7 +106,8 @@
 <p>No affected or needs-review findings in that scan.</p>
 {% endif %}
 {% if summary.omitted_findings %}<p>{{ summary.omitted_findings }} more findings.</p>{% endif %}
-<p>{{ link_button('View watch events for this client', url_for('watch.events', client=summary.name), kind='secondary') }}</p>
+<p class="muted">A scan reports only what it could check. Missing results are not proof that the client is unaffected.</p>
+<div class="form-actions">{{ link_button('View alerts for this client', url_for('watch.events', client=summary.name), kind='secondary') }}</div>
 {% endcall %}
 {% else %}
 {{ empty_state('No scan results for ' ~ profile.name, 'Run a successful inventory scan to see findings for this client.') }}
@@ -137,7 +139,7 @@
 {% if present and accounts and 'manage_inventory' in permissions %}
 {% call card('Remove inventory', tone='danger') %}
 <details class="disclosure">
-<summary>Review removal</summary>
+<summary>Remove this inventory</summary>
 <form method="post" class="stack" action="{{ url_for('client_inventory.change', key=key, name=profile.name) }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="revision" value="{{ revision }}">

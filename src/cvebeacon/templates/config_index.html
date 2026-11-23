@@ -1,8 +1,55 @@
-{% extends "base.html" %}{% block title %}Configuration · CVEBeacon{% endblock %}
-{% block content %}<h1>Configuration</h1>
-{% if read_only %}<p><strong>Read-only configuration.</strong> The configuration directory is not writable by the dashboard service, so sections are viewable where possible, but saving and rollback are disabled. Enable editing only for the dashboard service as described in the deployment guide, then restart the other services after a save.</p>{% endif %}
-<p>Choose a section. Viewing and editing require its edit permission and view permission.</p>
-<ul>{% for section, permission in sections.items() %}{% if permission in permissions %}<li><a href="{{ url_for('config_editor.' + section) }}">{{ section }}</a>{% if section == 'notifications' %} — scan-report notifications (legacy; secrets from the environment){% elif section == 'channels' %} — watch alert channels{% endif %}</li>{% endif %}{% endfor %}</ul>
-<p><a href="{{ url_for('config_editor.backups') }}">Backups and rollback</a> require every configuration edit permission.</p>
-<p>Every save requires a validated diff preview. Comments and formatting from hand-edited files are lost; the original file is backed up. The last ten backups are retained. Saving reloads the dashboard and ends existing sessions. Other running commands keep their configuration until restarted.</p>
+{% extends "base.html" %}
+{% from 'ui.html' import page_header, card, callout, table_wrap, empty_state %}
+{% block title %}Configuration · CVEBeacon{% endblock %}
+{% block content %}
+{% set section_info = {
+  'watch': ('Watch settings', 'Choose what CVEBeacon watches and how far back to start.'),
+  'sources': ('Data sources', 'Choose which public vulnerability feeds are used.'),
+  'rules': ('Alert rules', 'Decide which changes create an alert and where it is sent.'),
+  'channels': ('Alert channels', 'Choose where alert messages go, such as email, chat or a webhook. These are the watch alert channels.'),
+  'reporting': ('Client reporting', 'Choose how reports name the organisation that receives them.'),
+  'inventory': ('Inventory', 'Choose where the software list comes from and how its columns are read.'),
+  'dashboard': ('Dashboard and sign-in', 'Session length, cookie and sign-in settings for the dashboard.'),
+  'http': ('Network requests', 'How long to wait and how often to retry when contacting data sources.'),
+  'system': ('Storage', 'Where the database and generated reports are written.'),
+  'backup': ('Backups', 'How many backups are kept and how long they are retained.'),
+  'notifications': ('Scan-report notifications', 'Send scan findings by email or chat. These are the older scan-report notifications (legacy; secrets from the environment).'),
+  'product-mappings': ('Product mappings', 'Match vendor and product names to standard CPE names so inventory rows can be compared with vulnerability records.'),
+} %}
+{% set visible_sections = [] %}
+{% for section, permission in sections.items() %}{% if permission in permissions %}{% set _ = visible_sections.append(section) %}{% endif %}{% endfor %}
+
+{{ page_header('Configuration', 'Change how CVEBeacon watches, scans and reports. Every change is checked and previewed before it is saved.') }}
+
+{% if read_only %}{% call callout('warning', 'Read-only configuration') %}<p>The dashboard service cannot write to the configuration directory. You can look at the values here, but saving and rollback are disabled. Ask the operator to enable editing for the dashboard service as described in the deployment guide, then restart the other services after a save.</p>{% endcall %}{% endif %}
+
+{% if visible_sections %}
+{% call card('Settings sections', 'Choose a section to review its current values. You only see sections you are allowed to change.') %}
+{% call table_wrap('Configuration sections') %}
+<table>
+  <thead><tr><th scope="col">Section</th><th scope="col">What it controls</th></tr></thead>
+  <tbody>{% for section in visible_sections %}
+    {% set info = section_info.get(section, (section | replace('-', ' ') | capitalize, '')) %}
+    <tr><th scope="row"><a href="{{ url_for('config_editor.' + section) }}">{{ info[0] }}</a></th><td>{{ info[1] }}</td></tr>
+  {% endfor %}</tbody>
+</table>
+{% endcall %}
+{% endcall %}
+{% else %}
+{{ empty_state('No configuration sections available', 'Your role can view this page but not change any configuration section. Ask an administrator if you need access.') }}
+{% endif %}
+
+{% call card('Backups and rollback', 'Restore an earlier configuration if a change goes wrong.') %}
+<p><a href="{{ url_for('config_editor.backups') }}">Open backups and rollback</a> to see retained copies and restore one. This requires every configuration edit permission. The current configuration is backed up before a rollback.</p>
+{% endcall %}
+
+{% call card('Before you save') %}
+<ul>
+  <li>Every save needs a preview first. You see a before-and-after difference, then confirm.</li>
+  <li>Saving rewrites the configuration file. Comments and hand-made formatting are lost.</li>
+  <li>The original file is backed up first. The last ten backups are kept.</li>
+  <li>Saving reloads the dashboard. Changes to dashboard, sign-in or client-reporting settings end every session, so everyone signs in again. Other changes keep sessions signed in.</li>
+  <li>Other changes take effect on the next run. Other running commands keep their old settings until they are restarted.</li>
+</ul>
+{% endcall %}
 {% endblock %}

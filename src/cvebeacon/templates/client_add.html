@@ -11,12 +11,14 @@
 {% call card('Client details') %}
 <form method="post" class="stack">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  {{ field('Client name', 'name', value=profile.name if profile else '', required=true, maxlength=120) }}
+  {{ field('Client name', 'name', value=profile.name if profile else '', required=true, maxlength=120,
+           help='Use the name your team and the client recognise. It appears in reports and on the Clients page.') }}
   {{ field('Contact', 'contact', value=profile.contact if profile else '', optional=true, maxlength=200,
            help='Enter a name or contact details your team can refer to.') }}
   <div class="field">
     <label for="notes">Notes <span class="optional">(optional)</span></label>
     <textarea id="notes" name="notes" maxlength="1000" rows="3">{{ profile.notes if profile else '' }}</textarea>
+    <p class="help">Anything your team should know about this client.</p>
   </div>
   <div class="form-actions">{{ button('Add client') }}</div>
 </form>

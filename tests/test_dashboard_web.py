@@ -306,6 +306,19 @@ def test_missing_companion_notice_and_refusal_without_extensions(accounts, monke
     app.extensions["dashboard_jobs"].shutdown()
 
 
+def test_missing_companion_disables_per_site_remove(accounts, monkeypatch):
+    config, _, app, client = accounts
+    monkeypatch.setattr(web_assets, "companion_available", lambda: False)
+    login(client, "admin")
+    path, _ = paths(config, "Acme")
+    save_allowlist(path, {"client": "Acme", "assets": [{"hostname": "example.invalid"}]})
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    remove = re.search(r"<button[^>]*>Remove this site</button>", page.text)
+    assert remove is not None and "disabled" in remove.group(0)
+    app.extensions["dashboard_jobs"].shutdown()
+
+
 @pytest.mark.parametrize("client_name", ["--help", "--plan"])
 def test_client_labels_are_values_never_companion_flags(accounts, client_name):
     from cvebeacon.cli import _parser
@@ -389,7 +402,7 @@ def test_url_entries_display_and_save_equivalent_target(web, url, scheme, port, 
     save_allowlist(path, document)
     page = client.get("/web-assets?client=Acme")
     assert f'example.invalid · {scheme}:{port}{path_value}' in page.text
-    form = page.text.split('<summary>Change asset</summary>', 1)[1].split('</form>', 1)[0]
+    form = page.text.split('<summary>Change this site</summary>', 1)[1].split('</form>', 1)[0]
     # Submit the actual rendered controls, so a wrong default cannot pass unnoticed.
     fields = dict(re.findall(r'name="([^"]+)"[^>]*value="([^"]*)"', form))
     fields["scheme"] = re.search(r'<option selected>([^<]+)</option>', form)[1]
