@@ -225,13 +225,13 @@ before either container publication or drafting the release can run. Only that
 job receives the signing secret; the container job never receives the key. The signing step writes it to a private temporary file
 and removes that file on exit.
 
-Replace the fail-closed placeholder in `src/cvebeacon/release-allowed-signers`
-with `cvebeacon-release namespaces="cvebeacon-release"` followed by the public
-key type and base64 public key. Commit only that public pin before building the
-first updatable release. Distribute the fingerprint independently. For a fork,
-pin the fork owner's key and configure its repository in both update settings
-and administrator policy. Rotate keys through an authenticated administrator
-update to the allowed-signers file; never trust a new key from an unsigned asset.
+The public key is pinned in `src/cvebeacon/release-allowed-signers` as
+`cvebeacon-release namespaces="cvebeacon-release"` followed by the public key
+type and base64 public key. Confirm that pin matches the fingerprint distributed
+independently. For a fork, pin the fork owner's key and configure its repository
+in both update settings and administrator policy. Rotate keys through an
+authenticated administrator update to the allowed-signers file; never trust a
+new key from an unsigned asset.
 
 The release builds core, extensions and automation wheels and a binary runtime
 wheelhouse for the documented native targets. All artifacts, including dependency
