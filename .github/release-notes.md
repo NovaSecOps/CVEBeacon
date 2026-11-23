@@ -16,8 +16,8 @@ Released {{DATE}}.
 | `cvebeacon_extensions-{{VERSION}}-py3-none-any.whl` | Optional extensions wheel |
 | `cvebeacon_automation-{{VERSION}}-py3-none-any.whl` | Optional automation wheel |
 | `cvebeacon-{{VERSION}}.tar.gz` | Core source distribution |
-| `cvebeacon-windows-x64.zip` | Windows x86-64 one-folder bundle and one-file executable |
-| Runtime wheelhouse (`*.whl`) | Binary dependency wheels for CPython 3.11–3.14 on Linux x86-64 and aarch64 |
+| `cvebeacon-windows-x64.zip` | Windows x86-64 one-folder bundle, one-file executable, `LICENSE` and `NOTICE` |
+| Runtime wheelhouse (`*.whl`) | Additional binary dependency wheels for CPython 3.11–3.14 on Linux x86-64 and aarch64 |
 | `SHA256SUMS` | SHA-256 checksums for every asset |
 | `SHA256SUMS.sig` | SSH signature over `SHA256SUMS` |
 
