@@ -418,11 +418,12 @@ def test_events_filters_and_pagination(watch):
     first = client.get("/watch/events")
     assert first.status_code == 200
     assert first.text.count('href="/watch/cve/') == 50
-    assert "Page 1" in first.text and "Older events" in first.text
+    assert "Page 1" in first.text and '>Next</a>' in first.text
+    assert "<summary>Filter</summary>" in first.text
     second = client.get("/watch/events?page=2")
     assert second.status_code == 200
     assert second.text.count('href="/watch/cve/') == 13
-    assert "Page 2" in second.text and "Newer events" in second.text
+    assert "Page 2" in second.text and '>Previous</a>' in second.text
     empty = client.get("/watch/events?page=3")
     assert empty.status_code == 200
     assert empty.text.count('href="/watch/cve/') == 0

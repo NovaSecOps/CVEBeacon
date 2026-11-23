@@ -1,18 +1,51 @@
-{% extends 'base.html' %}{% from 'watch_macros.html' import value, day, report_mark %}
+{% extends 'base.html' %}
+{% set nav_active = 'watch.explorer' %}
+{% from 'watch_macros.html' import value, report_mark %}
+{% from 'ui.html' import page_header, card, callout, button, link_button %}
 {% block title %}Statement for {{ cve_id }} · CVEBeacon{% endblock %}
 {% block content %}
-<h1>Generate statement</h1>
-<p><a href="{{ url_for('watch.cve', cve_id=cve_id) }}">{{ cve_id }}</a> · {{ value(view.description) }}</p>
+{% call page_header('Generate statement', 'Create a document about ' ~ cve_id ~ ' from the data stored in CVEBeacon.') %}
+  {{ link_button('Back to ' ~ cve_id, url_for('watch.cve', cve_id=cve_id), kind='secondary') }}
+{% endcall %}
+
+{% if error %}{% call callout('danger', 'The statement was not generated') %}{{ error }} Check the template and try again.{% endcall %}{% endif %}
+
+<div class="card-grid">
+{% call card('The CVE', 'What the statement will describe.') %}
+<p><a href="{{ url_for('watch.cve', cve_id=cve_id) }}">{{ cve_id }}</a></p>
+<p>{{ value(view.description) }}</p>
 <p>{{ report_mark(mark_entry) }}</p>
-{% if error %}<p class="warning" role="alert">{{ error }}</p>{% endif %}
-<form method="post" enctype="multipart/form-data" action="{{ url_for('watch.statement', cve_id=cve_id) }}">
+<p class="help">A statement uses stored data only. If a source is missing or a sync failed, say so in your message to clients.</p>
+{% endcall %}
+
+{% call card('Choose a template', 'Use the built-in Markdown template, or upload your own.') %}
+<form method="post" enctype="multipart/form-data" action="{{ url_for('watch.statement', cve_id=cve_id) }}" class="stack">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label><span><input type="radio" name="template" value="builtin" checked> Built-in Markdown template</span></label>
-  <label><span><input type="radio" name="template" value="upload"> Uploaded template</span></label>
-  <label>Template file<input type="file" name="template_file" accept=".md,.txt,.docx"></label>
-  <button>Generate and download</button>
+  <fieldset class="explorer-options">
+    <legend>Template</legend>
+    <div class="field field-check">
+      <input id="template-builtin" type="radio" name="template" value="builtin" checked>
+      <label for="template-builtin">Built-in Markdown template</label>
+    </div>
+    <div class="field field-check">
+      <input id="template-upload" type="radio" name="template" value="upload">
+      <label for="template-upload">Uploaded template</label>
+    </div>
+  </fieldset>
+  <div class="field">
+    <label for="template-file">Template file</label>
+    <input id="template-file" type="file" name="template_file" accept=".md,.txt,.docx" aria-describedby="template-file-help">
+    <p class="help" id="template-file-help">Uploaded templates must be UTF-8 Markdown or plain text (<code>.md</code>, <code>.txt</code>) or Word (<code>.docx</code>), at most {{ max_upload }} bytes. The file is read in a temporary directory and is not stored by the dashboard.</p>
+  </div>
+  <div class="form-actions">{{ button('Generate and download') }}</div>
 </form>
-<p class="muted">Uploaded templates must be UTF-8 Markdown or plain text (<code>.md</code>, <code>.txt</code>) or Word (<code>.docx</code>), at most {{ max_upload }} bytes. The file is read in a temporary directory and is not stored by the dashboard.</p>
-<h2>Built-in template</h2>
-<pre>{{ builtin }}</pre>
+{% endcall %}
+</div>
+
+{% call card('Built-in template', 'What the built-in option produces.') %}
+<details class="disclosure">
+  <summary>Preview the built-in template</summary>
+  <pre>{{ builtin }}</pre>
+</details>
+{% endcall %}
 {% endblock %}

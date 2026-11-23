@@ -118,6 +118,9 @@ def test_explorer_preserves_repeated_filters_across_pagination(tmp_path):
                       "&since=2026-11-01&modified_until=2026-11-02&kev=neither")
     assert page.status_code == 200
     assert "51 CVEs · Page 1" in page.text
+    assert "Active filters:" in page.text
+    assert "KEV: Neither catalog" in page.text
+    assert "<summary>Filter</summary>" in page.text
     assert 'href="/watch/cves">Clear filters</a>' in page.text
     assert '<summary>9.8 v4.0</summary>' in page.text
     assert "7 v3.1" in page.text and "8.5 v2.0" in page.text
@@ -180,4 +183,17 @@ def test_event_list_and_detail_show_all_scores_and_version_disagreement(tmp_path
     assert detail.status_code == 200
     assert all(label in detail.text for label in ("v2.0</td>", "v3.1</td>", "v4.0</td>", "CVSS:4.0/AV:N"))
     assert "Severity differs between CVSS versions" in detail.text
+    app.extensions["dashboard_jobs"].shutdown()
+
+
+def test_cve_detail_keeps_uncertainty_next_to_scores(tmp_path):
+    from test_dashboard_watch import seeded, login
+
+    _, _, _, app, client = seeded(tmp_path)
+    login(client, "reader")
+    page = client.get("/watch/cve/CVE-2026-0002")
+    assert page.status_code == 200
+    assert "Neither proves the flaw is not exploited" in page.text
+    assert "not proof that the flaw is not exploited" in page.text
+    assert "are not the same as “not affected”" in page.text
     app.extensions["dashboard_jobs"].shutdown()

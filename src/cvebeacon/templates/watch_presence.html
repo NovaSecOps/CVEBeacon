@@ -1,10 +1,21 @@
-{% from 'ui.html' import card, button, table_wrap with context %}
-{% call card('Source presence', 'These are stored observations. Failed or unstarted syncs leave coverage uncertain.') %}
-{% call table_wrap('Source presence and last check') %}<table>
+{% from 'ui.html' import card, button, table_wrap, badge, term, help with context %}
+{% from 'watch_macros.html' import day %}
+{% call card('Source presence', 'Which sources hold a record for this CVE, and when each was last checked.') %}
+{{ help('Present means the source has a stored record. Absent means the source has been synced but has no record; a very new CVE can be absent until the next sync. Not synced means the source has not been checked yet, so coverage is unknown.') }}
+{% call table_wrap('Source presence and last check') %}
+<table>
 <thead><tr><th scope="col">Source</th><th scope="col">Presence</th><th scope="col">Source updated</th><th scope="col">Last checked or synced</th></tr></thead>
-<tbody>{% for item in presence %}<tr><td>{{ item.source }}</td><td>{{ item.state }}{% if item.error %} · latest sync failed{% endif %}</td><td>{{ item.updated or 'Not available' }}</td><td>{{ item.checked or 'Never' }}</td></tr>{% endfor %}</tbody>
-</table>{% endcall %}
-<p class="help">Refresh queues deliveries. They go out on the next watch notify or watch run.</p>
+<tbody>{% for item in presence %}<tr>
+  <td>{{ item.source }}</td>
+  <td>{% set variant = 'success' if item.state == 'present' else 'warning' if item.state in ['present (last check absent)', 'not synced'] else 'neutral' %}{{ badge(item.state, variant) }}{% if item.error %} {{ badge('Latest sync failed', 'danger') }}{% endif %}</td>
+  <td>{{ day(item.updated) if item.updated else 'Not available' }}</td>
+  <td>{% if item.checked %}{{ watch_stamp(item.checked) }}{% else %}Never{% endif %}</td>
+</tr>{% else %}<tr><td colspan="4">No source presence information is stored.</td></tr>{% endfor %}</tbody>
+</table>
+{% endcall %}
+{{ help('Failed or unstarted syncs leave coverage uncertain.') }}
+<p class="help">{{ term('Coverage', 'whether a source has been checked') }} is not the same as proof that a CVE does not affect you.</p>
+{{ help('Refresh queues deliveries. They go out on the next watch notify or watch run.') }}
 {% if accounts and 'run' in permissions %}
 <div class="form-actions">
   <form method="post" action="{{ url_for('watch.refresh_cve', cve_id=cve_id or missing) }}">

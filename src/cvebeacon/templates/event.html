@@ -1,1 +1,27 @@
-{% extends 'base.html' %}{% from 'macros.html' import finding_detail %}{% block content %}<h1>Historical event {{ event.event_id }}</h1><p class="warning">Historical observation from {{ event.occurred_at }}. This is not a current assessment.</p><p>{{ event.event_type }} · {{ event.finding.asset.asset_id }} · {{ event.finding.vulnerability.cve_id }}</p><p>{{ event.finding.asset.vendor }} · {{ event.finding.asset.product }} · {{ event.finding.asset.version }}</p>{{ finding_detail(event.finding) }}{% endblock %}
+{% extends 'base.html' %}
+{% set nav_active = 'history' %}
+{% from 'macros.html' import finding_detail %}
+{% from 'ui.html' import page_header, card, callout, definition_list %}
+{% block title %}Historical event {{ event.event_id }} · CVEBeacon{% endblock %}
+{% block content %}
+{{ page_header('Historical event ' ~ event.event_id, 'A stored observation from one past scan. It is not a current assessment.') }}
+{% call callout('warning', 'Historical observation') %}
+<p>From {{ watch_stamp(event.occurred_at) }}. This is not a current assessment. Open <a href="{{ url_for('findings') }}">Findings</a> for the current view of this asset.</p>
+{% endcall %}
+
+{% call card('What this event records', 'The asset, CVE and change type stored with this observation.') %}
+{{ definition_list([
+  ('Event type', 'A new finding' if event.event_type == 'new' else 'A changed finding' if event.event_type == 'changed' else event.event_type),
+  ('Asset', event.finding.asset.asset_id),
+  ('CVE', event.finding.vulnerability.cve_id),
+  ('Vendor', event.finding.asset.vendor),
+  ('Product', event.finding.asset.product),
+  ('Version', event.finding.asset.version or 'Not recorded'),
+]) }}
+<p class="help">Raw event type: <code>{{ event.event_type }}</code>. Event {{ event.event_id }}.</p>
+{% endcall %}
+
+{% call card('Finding at that time', 'The evidence and assessment stored with this event.') %}
+{{ finding_detail(event.finding) }}
+{% endcall %}
+{% endblock %}
