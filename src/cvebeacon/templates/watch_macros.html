@@ -47,3 +47,14 @@
 } -%}
 {{ labels.get(value, value or 'Not recorded') }}
 {%- endmacro %}
+
+{#- Plain-language names for stored source-presence states. -#}
+{% macro presence_label(state) -%}
+{%- set labels = {
+  'present': 'Present',
+  'absent': 'Absent',
+  'not synced': 'Not synced yet',
+  'present (last check absent)': 'Present, but the latest check found it absent',
+} -%}
+{{ labels.get(state, (state | capitalize) if state else 'Unknown') }}
+{%- endmacro %}

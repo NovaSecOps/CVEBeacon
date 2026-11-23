@@ -21,6 +21,10 @@ def test_source_presence_and_escaped_dashboard(tmp_path):
     assert 'CVE-2026-0001' in page.text and '<script>bad()' not in page.text
     page = client.get('/watch/cve/CVE-2026-0001')
     assert 'Source presence' in page.text and 'Scan findings' in page.text
+    assert '<span class="badge badge-success">Present</span>' in page.text
+    assert '<span class="badge badge-warning">Not synced yet</span>' in page.text
+    assert '<span class="badge badge-success">present</span>' not in page.text
+    assert '<span class="badge badge-warning">not synced</span>' not in page.text
     assert 'cve_list' in page.text and '<script>bad()' not in page.text
     missing = client.get('/watch/cves?q=CVE-2026-9999')
     assert 'Not in our database' in missing.text and '2026-11-03' in missing.text
@@ -28,6 +32,27 @@ def test_source_presence_and_escaped_dashboard(tmp_path):
     assert client.get('/watch/cves?q=' + 'x' * 257).status_code == 400
     app.extensions['dashboard_jobs'].shutdown()
 
+
+
+def test_source_presence_explains_a_latest_absent_check(tmp_path):
+    from test_dashboard_watch import seeded, login
+
+    _, _, store, app, client = seeded(tmp_path)
+    with store.transaction() as db:
+        db.execute(
+            "INSERT INTO watch_source_check (cve_id, source, present, checked_at, error)"
+            " VALUES (?, 'nvd', 0, ?, NULL)",
+            ("CVE-2026-0001", "2026-11-04T00:00:00Z"),
+        )
+    states = {row["source"]: row["state"] for row in store.source_presence("CVE-2026-0001")}
+    assert states["nvd"] == "present (last check absent)"
+    login(client, "reader")
+    page = client.get("/watch/cve/CVE-2026-0001")
+    assert page.status_code == 200
+    assert "Present, but the latest check found it absent" in page.text
+    assert "its latest check did not find this CVE" in page.text
+    assert '<span class="muted">(present (last check absent))</span>' in page.text
+    app.extensions["dashboard_jobs"].shutdown()
 
 
 def test_detail_findings_clients_and_delivery_timestamps(tmp_path):

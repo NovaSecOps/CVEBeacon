@@ -270,6 +270,8 @@ def test_cve_detail_shows_stored_view_kev_links_events_and_trail(watch):
     assert response.status_code == 200
     text = response.text
     assert "CVE-2026-0002" in text
+    assert '<p class="lead">Acme Widget' not in text
+    assert '<p>Acme Widget' in text
     assert "Apply updates" in text and "2026-11-20" in text
     assert "active" in text
     assert "CWE-79" in text and "widget" in text
@@ -433,6 +435,21 @@ def test_events_filters_and_pagination(watch):
         "/watch/events?page=100001",
     ):
         assert client.get(path).status_code == 400
+
+
+def test_events_active_filters_and_reported_badge_use_plain_language(watch):
+    _, _, _, _, client = watch
+    login(client, "reader")
+    filtered = client.get("/watch/events?initial=yes&pending=no")
+    assert filtered.status_code == 200
+    assert "from the first check only" in filtered.text
+    assert "with no pending delivery" in filtered.text
+    assert "first check: yes" not in filtered.text
+    assert "pending delivery: no" not in filtered.text
+    page = client.get("/watch/events")
+    assert page.status_code == 200
+    assert "Reported by seed" in page.text
+    assert "reported by seed" not in page.text
 
 
 @pytest.mark.parametrize(

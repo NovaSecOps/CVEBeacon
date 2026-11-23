@@ -13,7 +13,7 @@
 
 <div class="card-grid cve-summary">
 {% call card('Summary') %}
-<p class="lead">{{ value(view.description) }}</p>
+<p>{{ value(view.description) }}</p>
 <p>
   {% set highest = view.highest_score %}
   {% if highest %}{{ severity_badge(highest.severity_band) }} <span class="num">{{ '%g'|format(highest.score) }}</span> <span class="muted">v{{ highest.version }} · {{ highest.provider }}</span>{% else %}{{ badge('No CVSS score', 'neutral') }}{% endif %}

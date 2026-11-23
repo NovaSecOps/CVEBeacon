@@ -1,13 +1,13 @@
 {% from 'ui.html' import card, button, table_wrap, badge, term, help with context %}
-{% from 'watch_macros.html' import day %}
+{% from 'watch_macros.html' import day, presence_label %}
 {% call card('Source presence', 'Which sources hold a record for this CVE, and when each was last checked.') %}
-{{ help('Present means the source has a stored record. Absent means the source has been synced but has no record; a very new CVE can be absent until the next sync. Not synced means the source has not been checked yet, so coverage is unknown.') }}
+{{ help('Present means the source has a stored record. Absent means the source has been synced but has no record; a very new CVE can be absent until the next sync. Not synced yet means the source has not been checked yet, so coverage is unknown. Present, but the latest check found it absent means the source still holds a stored record, but its latest check did not find this CVE.') }}
 {% call table_wrap('Source presence and last check') %}
 <table>
 <thead><tr><th scope="col">Source</th><th scope="col">Presence</th><th scope="col">Source updated</th><th scope="col">Last checked or synced</th></tr></thead>
 <tbody>{% for item in presence %}<tr>
   <td>{{ item.source }}</td>
-  <td>{% set variant = 'success' if item.state == 'present' else 'warning' if item.state in ['present (last check absent)', 'not synced'] else 'neutral' %}{{ badge(item.state, variant) }}{% if item.error %} {{ badge('Latest sync failed', 'danger') }}{% endif %}</td>
+  <td>{% set label = presence_label(item.state) %}{% set variant = 'success' if item.state == 'present' else 'warning' if item.state in ['present (last check absent)', 'not synced'] else 'neutral' %}{{ badge(label, variant) }}{% if label != (item.state | capitalize) %} <span class="muted">({{ item.state }})</span>{% endif %}{% if item.error %} {{ badge('Latest sync failed', 'danger') }}{% endif %}</td>
   <td>{{ day(item.updated) if item.updated else 'Not available' }}</td>
   <td>{% if item.checked %}{{ watch_stamp(item.checked) }}{% else %}Never{% endif %}</td>
 </tr>{% else %}<tr><td colspan="4">No source presence information is stored.</td></tr>{% endfor %}</tbody>

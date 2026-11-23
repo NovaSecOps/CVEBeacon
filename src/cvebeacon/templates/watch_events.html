@@ -41,8 +41,8 @@
 {% if filters.since %}{% set _ = active.append('from ' ~ filters.since) %}{% endif %}
 {% if filters.until %}{% set _ = active.append('through ' ~ filters.until) %}{% endif %}
 {% if filters.cve %}{% set _ = active.append('CVE: ' ~ filters.cve) %}{% endif %}
-{% if filters.initial %}{% set _ = active.append('first check: ' ~ filters.initial) %}{% endif %}
-{% if filters.pending %}{% set _ = active.append('pending delivery: ' ~ filters.pending) %}{% endif %}
+{% if filters.initial %}{% set _ = active.append('from the first check only' if filters.initial == 'yes' else 'not from the first check') %}{% endif %}
+{% if filters.pending %}{% set _ = active.append('with pending delivery' if filters.pending == 'yes' else 'with no pending delivery') %}{% endif %}
 {% if active %}<p class="muted">Showing: {{ active | join(' · ') }}.</p>{% endif %}
 
 {% if rows %}
@@ -59,7 +59,7 @@
   <td>{{ 'Yes' if row.initial else 'No' }}</td>
   <td>{{ day(row.published) }}</td>
   <td>{{ day(row.first_seen) }}</td>
-  <td>{% set item = marks.get(row.cve_id) %}{% if item %}{{ badge('reported by ' ~ watch_identity(item.by, item.username), 'info') }}{% else %}<span class="muted">not reported</span>{% endif %}</td>
+  <td>{% set item = marks.get(row.cve_id) %}{% if item %}{{ badge('Reported by ' ~ watch_identity(item.by, item.username), 'info') }}{% else %}<span class="muted">not reported</span>{% endif %}</td>
 </tr>{% endfor %}</tbody>
 </table>
 {% endcall %}
