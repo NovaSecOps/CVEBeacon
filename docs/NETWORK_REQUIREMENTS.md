@@ -31,6 +31,13 @@ coverage with retained progress. No GitHub token is required or sent.
 
 Asset IDs, system IDs, categories, owners, comments, hostnames and local paths are never serialized into public vulnerability queries. Only provide public software names in identity fields. Component terms can reveal technologies being investigated. This is agentless monitoring, isolated from monitored assets; live public lookups are not air-gapped operation. Qualified PURLs and subpaths remain local and unsupported for exact lookup.
 
+## Optional update checks
+
+`cvebeacon update check` makes one anonymous HTTPS request to `api.github.com`;
+applying an update downloads that release's assets from `github.com` and the
+GitHub asset redirect hosts above. The request sends no token, inventory,
+configuration, user, host or local path. See [upgrading](UPGRADING.md).
+
 ## Optional credentialed functionality
 
 | Purpose | Destination |
