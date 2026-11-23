@@ -37,10 +37,13 @@ def form_data(document, section, **changes):
     return data
 
 
-def parse(editor, section, document, current, data, *, form=None, count=None):
+def parse(editor, section, document, current, *, form=None, count=None):
+    options = {"count": count}
+    if form is not None:
+        options["form"] = form
     return config_module.parse_form(
         editor, section, document, current, {"view", config_module.SECTIONS[section]},
-        count=count, form=form if form is not None else MultiDict(data))
+        **options)
 
 
 def test_explicit_form_matches_request_form(setup):
@@ -49,14 +52,15 @@ def test_explicit_form_matches_request_form(setup):
     editor = app.extensions["dashboard_config"]
     document, _, _, _, current = editor.read()
     data = form_data(document, "http", g0_retries="4")
+    permissions = {"view", config_module.SECTIONS["http"]}
 
     with app.test_request_context("/config/http", method="POST", data=data):
-        implicit = parse(editor, "http", document, current, data)
-        explicit = parse(editor, "http", document, current, data, form=request.form)
+        implicit = config_module.parse_form(editor, "http", document, current, permissions)
+        explicit = config_module.parse_form(editor, "http", document, current, permissions,
+                                            form=request.form)
 
-    assert implicit[0] == explicit[0]
-    assert implicit[1:] == explicit[1:]
-    assert explicit[0]["http"]["retries"] == 4
+    assert implicit == explicit
+    assert implicit[0]["http"]["retries"] == 4
 
 
 def test_explicit_form_does_not_read_request_form(setup):
@@ -68,7 +72,7 @@ def test_explicit_form_does_not_read_request_form(setup):
 
     with app.test_request_context("/config/http", method="POST",
                                   data={"csrf": "b" * 64, "g0_retries": "9"}):
-        result = parse(editor, "http", document, current, submitted,
+        result = parse(editor, "http", document, current,
                        form=MultiDict(submitted))
 
     assert result[0]["http"]["retries"] == 4
@@ -79,12 +83,31 @@ def test_explicit_form_still_rejects_unknown_fields(setup):
     app = client.application
     editor = app.extensions["dashboard_config"]
     document, _, _, _, current = editor.read()
-    data = form_data(document, "http")
-    data["b0_join"] = "any"
+    clean = form_data(document, "http")
+    permissions = {"view", config_module.SECTIONS["http"]}
+    forged = MultiDict([*clean.items(), ("b0_join", "any")])
 
-    with app.test_request_context("/config/http", method="POST", data=data):
+    with app.test_request_context("/config/http", method="POST", data=clean):
+        config_module.parse_form(editor, "http", document, current, permissions)
         with pytest.raises(BadRequest):
-            parse(editor, "http", document, current, data)
+            config_module.parse_form(editor, "http", document, current, permissions,
+                                     form=forged)
+
+
+def test_explicit_form_still_rejects_repeated_fields(setup):
+    _, _, client = setup
+    app = client.application
+    editor = app.extensions["dashboard_config"]
+    document, _, _, _, current = editor.read()
+    clean = form_data(document, "http")
+    permissions = {"view", config_module.SECTIONS["http"]}
+    forged = MultiDict([*clean.items(), ("row_count", clean["row_count"])])
+
+    with app.test_request_context("/config/http", method="POST", data=clean):
+        config_module.parse_form(editor, "http", document, current, permissions)
+        with pytest.raises(BadRequest):
+            config_module.parse_form(editor, "http", document, current, permissions,
+                                     form=forged)
 
 
 def test_field_error_exposes_key_and_reason(setup):
@@ -96,7 +119,7 @@ def test_field_error_exposes_key_and_reason(setup):
 
     with app.test_request_context("/config/http", method="POST", data=data):
         with pytest.raises(config_module.FieldValidationError) as caught:
-            parse(editor, "http", document, current, data)
+            parse(editor, "http", document, current, form=MultiDict(data))
 
     assert caught.value.key == "retries"
     assert caught.value.reason == "value"
@@ -113,7 +136,7 @@ def test_required_field_error_exposes_key_and_reason(setup):
 
     with app.test_request_context("/config/rules", method="POST", data=data):
         with pytest.raises(config_module.FieldValidationError) as caught:
-            parse(editor, "rules", document, current, data, count=1)
+            parse(editor, "rules", document, current, form=MultiDict(data), count=1)
 
     assert caught.value.key == "condition"
     assert caught.value.reason == "required"
