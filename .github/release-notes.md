@@ -64,8 +64,8 @@ instead of replacing it.
 
 ## Upgrade notes
 
-- **First published release (`0.1.0`).** Installs made from source before
-  `0.1.0` was published carry only the fail-closed placeholder signing pin, so
+- **Installs made from source before `0.1.0`.** Installs made before the first
+  published release (`0.1.0`) carry only the fail-closed placeholder signing pin, so
   the updater cannot authenticate an update. Upgrade each such installation
   manually once as described in
   [upgrading](https://github.com/novasecops/cvebeacon/blob/main/docs/UPGRADING.md);
