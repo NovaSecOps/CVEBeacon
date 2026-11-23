@@ -9,6 +9,7 @@ from dataclasses import MISSING, dataclass, field, fields, replace
 from datetime import date, datetime, time, timezone
 import difflib
 import hashlib
+from importlib.util import find_spec
 import json
 import logging
 import os
@@ -1989,6 +1990,10 @@ class FieldValidationError(ConfigurationError):
     """Build field errors only from known metadata and fixed guidance templates."""
 
     def __init__(self, control=None, reason=None):
+        # Callers that build their own form (the guided setup wizard) need to
+        # attach the message to the control that failed.  The text stays fixed.
+        self.key = control.get("key") if isinstance(control, dict) else None
+        self.reason = reason
         if not isinstance(control, dict) or control.get("identity") not in FIELD_METADATA:
             super().__init__("Invalid configuration field; use the expected format")
             return
@@ -2016,8 +2021,9 @@ class FieldValidationError(ConfigurationError):
         super().__init__(label + " " + guidance)
 
 
-def form_row_count():
-    text = request.form.get("row_count", "1")
+def form_row_count(form=None):
+    form = request.form if form is None else form
+    text = form.get("row_count", "1")
     try:
         if len(text) > 3:
             raise ValueError
@@ -2169,11 +2175,13 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
     return output
 
 
-def parse_form(editor, section, document, current_config, permissions, *, can_admin=False, count=None):
+def parse_form(editor, section, document, current_config, permissions, *, can_admin=False, count=None,
+               form=None):
+    form = request.form if form is None else form
     can_manage = "manage_secrets" in permissions
     if count is None:
-        count = form_row_count()
-    row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
+        count = form_row_count(form)
+    row_types = [form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
     groups = groups_for(section, document, count=count, row_types=row_types,
                         can_manage=can_manage, can_admin=can_admin)
     rows, staged, replacements, secret_requests = [], [], [], []
@@ -2183,11 +2191,11 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             row = {}
             prefix = group["prefix"]
             expected.add(f"remove{index}")
-            remove = request.form.get(f"remove{index}") == "yes"
+            remove = form.get(f"remove{index}") == "yes"
             for control in group["controls"]:
                 key, name = control["key"], control["id"]
                 expected.add(name)
-                text = request.form.get(name, "")
+                text = form.get(name, "")
                 if not remove and (text != "" if control["kind"] == "string" else text.strip() != ""):
                     if control["kind"] in {"string", "enum"}:
                         row[key] = text
@@ -2234,7 +2242,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 if control["secret"]:
                     secret_name = name + "_new"
                     expected.add(secret_name)
-                    secret = request.form.get(secret_name, "")
+                    secret = form.get(secret_name, "")
                     if secret and not remove:
                         if not can_manage:
                             raise ConfigurationError(
@@ -2245,7 +2253,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 # Keep a legacy direct endpoint only when no reference replaces it.
                 row["url"] = group["data"]["url"]
             rows.append(None if remove else row)
-        if set(request.form) - expected or any(len(request.form.getlist(key)) != 1 for key in request.form):
+        if set(form) - expected or any(len(form.getlist(key)) != 1 for key in form):
             abort(400)
         for group, row in zip(groups, rows):
             active = row is not None and (section not in {"rules", "channels", "product-mappings"}
@@ -2497,6 +2505,11 @@ def _form_strings(item):
             yield from _form_strings(child)
 
 
+def match_request(form):
+    """Whether this POST asks for the read-only recent-CVE rule check."""
+    return bool(form.get("match_rule")) and form.get("action") in {None, "", "preview"}
+
+
 def register_config(app, config, *, host):
     """Register isolated routes and a dispatcher for immutable reloads."""
     from .dashboard import requires
@@ -2516,7 +2529,11 @@ def register_config(app, config, *, host):
                 error="Configuration changed; reload the configuration page",
                 read_only=editor.read_only(),
             ), 409
-        if not editor.read_only():
+        # The match check is read-only, so it must not create the writer lock
+        # or remove expired staged files. Every editing request still cleans up.
+        if not editor.read_only() and not (
+                request.method == "POST" and request.endpoint == "config_editor.rules"
+                and match_request(request.form)):
             editor.cleanup()
 
     @blueprint.teardown_request
@@ -2535,6 +2552,7 @@ def register_config(app, config, *, host):
         document = None
         groups = None
         version = None
+        match = None
         status = 400
         try:
             document, _, _, version, current_config = editor.read()
@@ -2543,6 +2561,20 @@ def register_config(app, config, *, host):
                     raise ConfigurationError(
                         "The configuration directory is read-only. Ask the operator to enable "
                         "editing for the dashboard service, then reload this page.")
+                if section == "rules" and match_request(request.form):
+                    # A read-only check against stored CVEs: no preview record is made.
+                    from .dashboard_rule_builder import match_preview
+                    match = match_preview(request.form, document, current_config)
+                    if match is not None:
+                        return render_template("config_section.html", section=section,
+                                               groups=groups_for(section, document,
+                                                                 can_manage="manage_secrets" in g.permissions,
+                                                                 can_admin=g.user.is_admin),
+                                               version=version, match=match, events=EVENT_KINDS,
+                                               leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
+                                               toml_value=value, channel_types=sorted(TYPE_KEYS),
+                                               channel_names=[channel.name for channel in current_config.watch.channels],
+                                               read_only=editor.read_only())
                 action = request.form.get("action")
                 if action == "confirm":
                     ended = editor.commit(request.form.get("preview"), section, app.extensions["dashboard_users"],
@@ -2557,8 +2589,15 @@ def register_config(app, config, *, host):
                 row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
                 groups = groups_for(section, document, count=count, row_types=row_types,
                                     can_manage="manage_secrets" in g.permissions, can_admin=g.user.is_admin)
+                prepared = request.form
+                if section == "rules":
+                    # The visual builder rewrites its posted fields into the
+                    # same values the text form sends, before the checks run.
+                    from .dashboard_rule_builder import prepare_rules_form
+                    prepared = prepare_rules_form(request.form, document, current_config, count)
                 candidate, staged, replacements = parse_form(editor, section, document, current_config,
-                                                             g.permissions, can_admin=g.user.is_admin, count=count)
+                                                             g.permissions, can_admin=g.user.is_admin,
+                                                             count=count, form=prepared)
                 preview, lockout = editor.preview(
                     section, candidate, version, staged, replacements,
                     current_document=document, current_config=current_config,
@@ -2574,9 +2613,10 @@ def register_config(app, config, *, host):
                                                      can_manage="manage_secrets" in g.permissions,
                                                      can_admin=g.user.is_admin),
                                    version=version, preview=preview, diff=diff, lockout=lockout,
-                                   channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS, leaves=LEAF_KEYS,
-                                   condition_schema=CONDITION_SCHEMA, toml_value=value,
-                                   saved=request.args.get("saved") == "1",
+                                   match=match, channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS,
+                                   leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
+                                   channel_names=[channel.name for channel in current_config.watch.channels],
+                                   toml_value=value, saved=request.args.get("saved") == "1",
                                    read_only=editor.read_only())
         except FieldValidationError as exc:
             error = str(exc)
@@ -2605,7 +2645,9 @@ def register_config(app, config, *, host):
             return render_template("config_section.html", section=section, groups=groups,
                                    version=version, error=error, events=EVENT_KINDS,
                                    leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA, toml_value=value,
-                                   channel_types=sorted(TYPE_KEYS), read_only=editor.read_only()), status
+                                   match=match, channel_types=sorted(TYPE_KEYS),
+                                   channel_names=[channel.name for channel in current_config.watch.channels],
+                                   read_only=editor.read_only()), status
         return render_template("config_error.html", error=error,
                                read_only=editor.read_only()), status
 
@@ -2683,6 +2725,9 @@ def register_config(app, config, *, host):
             return render_template("config_error.html", error=exc.description,
                                    read_only=editor.read_only()), exc.code
 
+    if find_spec(".dashboard_channel_wizard", __package__) is not None:
+        from .dashboard_channel_wizard import register_channel_wizard
+        register_channel_wizard(blueprint, editor)
     app.register_blueprint(blueprint)
     if _RELOADING.get() is None:
         app.wsgi_app = editor
