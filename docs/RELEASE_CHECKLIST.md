@@ -31,8 +31,9 @@ environment directly.
 ## One-time setup
 
 1. In the repository settings, open **Environments** and create `release`.
-2. Add at least one required reviewer. Enable **Prevent self-review** when the
-   plan offers it.
+2. Add at least one required reviewer. Enable **Prevent self-review** only
+   when a second reviewer exists; with a single possible reviewer it blocks
+   every release deployment.
 3. Add a deployment **Tag** rule for `v*`. Use a tag rule, not a branch rule.
 4. Turn off **Allow administrators to bypass configured protection rules**.
 5. Only after steps 1-4, add an environment variable
