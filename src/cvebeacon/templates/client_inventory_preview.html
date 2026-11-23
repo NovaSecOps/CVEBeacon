@@ -7,6 +7,7 @@
 {{ link_button('Back to ' ~ profile.name, url_for('client_inventory.detail', key=key, name=profile.name), kind='secondary') }}
 {% endcall %}
 {{ steps(['Choose a file', 'Review and save'], current=2) }}
+{% call callout('info', 'Nothing is saved yet') %}<p>Changing the column matching or moving between pages only updates this preview. Nothing is stored until you choose Save inventory.</p>{% endcall %}
 {% if error %}{% call callout('danger', 'Inventory could not be saved') %}<p>{{ error }}</p>{% endcall %}{% endif %}
 
 {% call card('Review this inventory') %}
@@ -86,6 +87,7 @@
     {% else %}
     {{ button('Save inventory', name='action', value='save') }}
     {% endif %}
+    <span class="help">Save becomes available when at least one row is ready and no row has an error.</span>
   </div>
 </form>
 {% endcall %}
