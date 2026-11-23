@@ -29,12 +29,14 @@ Windows outputs are `dist/cvebeacon/cvebeacon.exe` and `dist/cvebeacon.exe`. Lin
 ## Release artifacts
 
 The local build commands above remain the primary path. When a release is
-published, its GitHub release also carries the core wheel and source
-distribution built by `python -m build`, and the Windows archive named
-`cvebeacon-windows-x64.zip`. Anyone can rebuild the same artifacts from the
-tagged source with the commands on this page; the checksums in the release
-cover only the uploaded files. Container images, when published, are described
-in the [container guide](CONTAINERS.md).
+published, its GitHub release also carries the core, extensions and automation
+wheels built by `python -m build`, the core source distribution, the Windows
+archive named `cvebeacon-windows-x64.zip`, and the binary runtime wheelhouse for
+CPython 3.11–3.14 on Linux x86-64 and aarch64. `SHA256SUMS` covers every uploaded
+artifact except itself and `SHA256SUMS.sig`, which is the SSH signature over the
+manifest. Anyone can rebuild artifacts from the tagged source with the commands
+on this page; the checksums cover only the files the workflow uploads. Container
+images, when published, are described in the [container guide](CONTAINERS.md).
 
 The release job installs `requirements/release-build.txt` with
 `pip --require-hashes` and builds with `python -m build --no-isolation`. That

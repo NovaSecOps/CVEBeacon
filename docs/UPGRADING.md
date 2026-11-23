@@ -274,10 +274,10 @@ monitoring timer only when its schedule is wanted.
 
 ## Enable checking and applying
 
-The release key placeholder deliberately trusts **no** key. Obtain the public
+The packaged `release-allowed-signers` pins the release public key. Obtain that
 key through an authenticated channel and compare its fingerprint independently.
-The packaged `release-allowed-signers` is the default, or set `signers` in the
-administrator policy to a root-owned override with this format:
+The packaged file is the default, or set `signers` in the administrator policy
+to a root-owned override with this format:
 
 ```text
 cvebeacon-release namespaces="cvebeacon-release" ssh-ed25519 PUBLIC_KEY

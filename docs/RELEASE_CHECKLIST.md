@@ -31,8 +31,9 @@ environment directly.
 ## One-time setup
 
 1. In the repository settings, open **Environments** and create `release`.
-2. Add at least one required reviewer. Enable **Prevent self-review** when the
-   plan offers it.
+2. Add at least one required reviewer. Enable **Prevent self-review** only
+   when a second reviewer exists; with a single possible reviewer it blocks
+   every release deployment.
 3. Add a deployment **Tag** rule for `v*`. Use a tag rule, not a branch rule.
 4. Turn off **Allow administrators to bypass configured protection rules**.
 5. Only after steps 1-4, add an environment variable
@@ -58,17 +59,32 @@ environment directly.
      --jq '.branch_policies[] | {name, type}'
    gh api repos/NovaSecOps/CVEBeacon/environments/release/variables \
      --jq '.variables[] | {name, value}'
+   gh api repos/NovaSecOps/CVEBeacon/environments/release/secrets \
+     --jq '.secrets[].name'
    ```
 
    Confirm `can_admins_bypass` is `false`, `protection_rules` contains a
-   `required_reviewers` rule, the branch policies list a `tag` named `v*`, and
-   the environment variables include `RELEASE_PUBLISH_ENABLED=true`. The last
-   check reads the environment directly; a repository-level variable with the
-   same name is not sufficient and must be removed.
+   `required_reviewers` rule, the branch policies list a `tag` named `v*`, the
+   environment variables include `RELEASE_PUBLISH_ENABLED=true`, and the
+   environment secrets include `RELEASE_SIGNING_KEY`. The variable and secret
+   checks read the environment directly; repository-level values with the same
+   names are not sufficient and must be removed.
 10. Add a repository tag ruleset that blocks updates and deletions for `v*`.
     The release job also verifies that the tag still points at the built
     commit before creating the draft, but the ruleset prevents the move in the
-    first place.
+    first place. The ruleset list endpoint does not return conditions or
+    rules; verify the detail endpoint for each tag ruleset:
+
+    ```console
+    gh api repos/NovaSecOps/CVEBeacon/rulesets \
+      --jq '.[] | select(.target == "tag") | .id'
+    gh api repos/NovaSecOps/CVEBeacon/rulesets/<id> \
+      --jq '{target, enforcement, conditions, rules, bypass_actors}'
+    ```
+
+    Confirm the detail response targets `tag`, includes `refs/tags/v*` in
+    `conditions.ref_name.include`, lists `deletion` and `update` rules, has
+    `enforcement` set to `active`, and has no bypass actors.
 
 ## Before tagging
 
@@ -78,10 +94,10 @@ environment directly.
 - Review dependency versions and vulnerability advisories.
 - Confirm the source and network documentation against current endpoints.
 - Scan the public tree for secrets, private inventories, machine-specific paths, and generated state.
-- Bump `version` in `pyproject.toml`; the tag must equal `v` plus that exact
-  version (`0.1.0` becomes `v0.1.0`).
+- Confirm `version` in `pyproject.toml`; bump it only for a new release. The
+  tag must equal `v` plus that exact version (`0.1.0` becomes `v0.1.0`).
 - Update the release notes template values that are not filled in by the
-  workflow, and commit the version bump.
+  workflow, and commit the version change, if any.
 - Treat changes to `requirements/release-build.txt` as reviewed changes. The
   python distribution build fails when a pinned version or hash does not match
   the index.
@@ -195,6 +211,12 @@ ssh-keygen -t ed25519 -N '' -f release-signing-key -C cvebeacon-release
 ssh-keygen -lf release-signing-key.pub
 ```
 
+On Windows, run the `ssh-keygen` command from `cmd.exe` with `-N ""`, or from a
+POSIX shell. Windows PowerShell drops the empty argument and fails with "Too
+many arguments". Do not use PowerShell quoting workarounds: newer PowerShell
+versions can pass the quote characters through literally and silently set a
+passphrase made of quotes.
+
 Keep a secure offline copy of the private key. Put its complete private-key text
 in the **environment** secret `RELEASE_SIGNING_KEY` on the existing protected
 `release` environment. Do not create a repository-wide secret or commit the
@@ -203,13 +225,13 @@ before either container publication or drafting the release can run. Only that
 job receives the signing secret; the container job never receives the key. The signing step writes it to a private temporary file
 and removes that file on exit.
 
-Replace the fail-closed placeholder in `src/cvebeacon/release-allowed-signers`
-with `cvebeacon-release namespaces="cvebeacon-release"` followed by the public
-key type and base64 public key. Commit only that public pin before building the
-first updatable release. Distribute the fingerprint independently. For a fork,
-pin the fork owner's key and configure its repository in both update settings
-and administrator policy. Rotate keys through an authenticated administrator
-update to the allowed-signers file; never trust a new key from an unsigned asset.
+The public key is pinned in `src/cvebeacon/release-allowed-signers` as
+`cvebeacon-release namespaces="cvebeacon-release"` followed by the public key
+type and base64 public key. Confirm that pin matches the fingerprint distributed
+independently. For a fork, pin the fork owner's key and configure its repository
+in both update settings and administrator policy. Rotate keys through an
+authenticated administrator update to the allowed-signers file; never trust a
+new key from an unsigned asset.
 
 The release builds core, extensions and automation wheels and a binary runtime
 wheelhouse for the documented native targets. All artifacts, including dependency
