@@ -211,6 +211,12 @@ ssh-keygen -t ed25519 -N '' -f release-signing-key -C cvebeacon-release
 ssh-keygen -lf release-signing-key.pub
 ```
 
+On Windows, run the `ssh-keygen` command from `cmd.exe` with `-N ""`, or from a
+POSIX shell. Windows PowerShell drops the empty argument and fails with "Too
+many arguments". Do not use PowerShell quoting workarounds: newer PowerShell
+versions can pass the quote characters through literally and silently set a
+passphrase made of quotes.
+
 Keep a secure offline copy of the private key. Put its complete private-key text
 in the **environment** secret `RELEASE_SIGNING_KEY` on the existing protected
 `release` environment. Do not create a repository-wide secret or commit the
