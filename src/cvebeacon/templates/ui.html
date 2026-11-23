@@ -64,7 +64,7 @@
 {% macro help(text) %}<p class="help">{{ text }}</p>{% endmacro %}
 
 {#- Buttons. kind: primary, secondary, danger. confirm adds a data-confirm prompt (needs script, optional). -#}
-{% macro button(label, kind='primary', confirm=none, type='submit', name=none, value=none) %}<button type="{{ type }}" class="btn{% if kind != 'primary' %} btn-{{ kind }}{% endif %}"{% if confirm %} data-confirm="{{ confirm }}"{% endif %}{% if name %} name="{{ name }}" value="{{ value }}"{% endif %}>{{ label }}</button>{% endmacro %}
+{% macro button(label, kind='primary', confirm=none, type='submit', name=none, value=none, disabled=false) %}<button type="{{ type }}" class="btn{% if kind != 'primary' %} btn-{{ kind }}{% endif %}"{% if confirm %} data-confirm="{{ confirm }}"{% endif %}{% if name %} name="{{ name }}" value="{{ value }}"{% endif %}{% if disabled %} disabled{% endif %}>{{ label }}</button>{% endmacro %}
 
 {% macro link_button(label, url, kind='primary') %}<a class="btn{% if kind != 'primary' %} btn-{{ kind }}{% endif %}" href="{{ url }}">{{ label }}</a>{% endmacro %}
 

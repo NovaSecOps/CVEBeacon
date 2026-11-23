@@ -39,7 +39,7 @@
 <details class="disclosure"><summary>Change this site</summary><form method="post" class="stack" action="{{ url_for('web.save') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="change"><input type="hidden" name="index" value="{{ loop.index0 }}">
 {{ asset_fields(entry, document, 'change-' ~ loop.index0) }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
-<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="index" value="{{ loop.index0 }}"><div class="form-actions">{{ button('Remove this site', kind='danger', confirm='Remove this site from the authorised list?', name='action', value='remove') }}</div></form>
+<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="index" value="{{ loop.index0 }}"><div class="form-actions">{{ button('Remove this site', kind='danger', confirm='Remove this site from the authorised list?', name='action', value='remove', disabled=not available) }}</div></form>
 {% endif %}
 {% else %}<p class="muted">No authorised sites saved yet. Add one below and tick the authorisation box.</p>{% endfor %}
 {% endcall %}
