@@ -23,9 +23,9 @@ Released {{DATE}}.
 
 The core, extensions and automation wheels and the source distribution require
 Python 3.11 or newer. The runtime wheelhouse covers CPython 3.11–3.14 on Linux
-x86-64 and aarch64. Install the extensions and automation wheels only when those
-distributions were installed before. The Windows archive is built on Windows
-Server 2025 for x86-64; extract it and run `cvebeacon.exe --help` before
+x86-64 and aarch64. Install the extensions and automation wheels only if you use
+those features (or already have them installed). The Windows archive is built on
+Windows Server 2025 for x86-64; extract it and run `cvebeacon.exe --help` before
 replacing an existing installation.
 GitHub also attaches the source archives for the tag.
 
@@ -64,12 +64,12 @@ instead of replacing it.
 
 ## Upgrade notes
 
-- **First release.** Installs from before this release carry only the
-  fail-closed placeholder signing pin, so the updater cannot authenticate this
-  release. Upgrade one installation manually as described in
+- **First published release (`0.1.0`).** Installs made from source before
+  `0.1.0` was published carry only the fail-closed placeholder signing pin, so
+  the updater cannot authenticate an update. Upgrade each such installation
+  manually once as described in
   [upgrading](https://github.com/novasecops/cvebeacon/blob/main/docs/UPGRADING.md);
-  after that manual upgrade, the updater verifies and installs later releases
-  normally.
+  after that, the updater verifies and installs later releases normally.
 - Stop running scans and back up the SQLite state before upgrading.
 - Roll back with the matching release and database backup, not an in-place
   database downgrade.
