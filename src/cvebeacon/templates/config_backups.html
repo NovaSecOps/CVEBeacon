@@ -23,7 +23,7 @@
   <input type="hidden" name="version" value="{{ version }}">
   <div class="field">
     <label for="backup">Backup</label>
-    <select name="backup" id="backup">{% for name in backups %}<option value="{{ name }}">{{ name[0:4] }}-{{ name[4:6] }}-{{ name[6:8] }} {{ name[9:11] }}:{{ name[11:13] }} UTC</option>{% endfor %}</select>
+    <select name="backup" id="backup">{% for name in backups %}<option value="{{ name }}">{{ name[0:4] }}-{{ name[4:6] }}-{{ name[6:8] }} {{ name[9:11] }}:{{ name[11:13] }}:{{ name[13:15] }} UTC</option>{% endfor %}</select>
     <p class="help">Backups are listed newest first. The newest is selected by default.</p>
   </div>
   <div class="form-actions"><button class="btn" type="submit" {% if not backups or read_only %}disabled{% endif %}>Preview restore</button></div>
