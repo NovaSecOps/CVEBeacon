@@ -180,7 +180,7 @@ def test_score_labels_name_each_provider():
         cvss=(
             CVSSEntry("cna", "security@acme.example", "3.1", 9.8),
             CVSSEntry("nvd", "nvd@nist.gov", "3.1", 8.0),
-            CVSSEntry("cisa-adp", "cisa@example.gov", "3.1", 7.5),
+            CVSSEntry("cisa-adp", "cisa@example.com", "3.1", 7.5),
             CVSSEntry("euvd", "enisa", "3.1", 6.0),
             CVSSEntry("other", "someone", "3.1", 5.0),
         )

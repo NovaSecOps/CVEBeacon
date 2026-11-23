@@ -963,7 +963,7 @@ def test_rejected_answer_is_not_replayed(monkeypatch):
         feed(monkeypatch, ["BAD", "alerts@example.org"])
         assert (
             wizard._ask_validated(
-                "From address", "a@b.org", wizard._validate_email
+                "From address", "a@example.com", wizard._validate_email
             )
             == "alerts@example.org"
         )
@@ -971,7 +971,7 @@ def test_rejected_answer_is_not_replayed(monkeypatch):
         feed(monkeypatch, [""])
         assert (
             wizard._ask_validated(
-                "From address", "a@b.org", wizard._validate_email
+                "From address", "a@example.com", wizard._validate_email
             )
             == "alerts@example.org"
         )
