@@ -18,7 +18,7 @@ Released {{DATE}}.
 | `cvebeacon-{{VERSION}}.tar.gz` | Core source distribution |
 | `cvebeacon-windows-x64.zip` | Windows x86-64 one-folder bundle, one-file executable, `LICENSE` and `NOTICE` |
 | Runtime wheelhouse (`*.whl`) | Additional binary dependency wheels for CPython 3.11–3.14 on Linux x86-64 and aarch64 |
-| `SHA256SUMS` | SHA-256 checksums for every asset |
+| `SHA256SUMS` | SHA-256 checksums for every other artifact |
 | `SHA256SUMS.sig` | SSH signature over `SHA256SUMS` |
 
 The core, extensions and automation wheels and the source distribution require
