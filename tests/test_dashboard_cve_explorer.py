@@ -21,6 +21,10 @@ def test_source_presence_and_escaped_dashboard(tmp_path):
     assert 'CVE-2026-0001' in page.text and '<script>bad()' not in page.text
     page = client.get('/watch/cve/CVE-2026-0001')
     assert 'Source presence' in page.text and 'Scan findings' in page.text
+    assert '<span class="badge badge-success">Present</span>' in page.text
+    assert '<span class="badge badge-warning">Not synced yet</span>' in page.text
+    assert '<span class="badge badge-success">present</span>' not in page.text
+    assert '<span class="badge badge-warning">not synced</span>' not in page.text
     assert 'cve_list' in page.text and '<script>bad()' not in page.text
     missing = client.get('/watch/cves?q=CVE-2026-9999')
     assert 'Not in our database' in missing.text and '2026-11-03' in missing.text
@@ -28,6 +32,27 @@ def test_source_presence_and_escaped_dashboard(tmp_path):
     assert client.get('/watch/cves?q=' + 'x' * 257).status_code == 400
     app.extensions['dashboard_jobs'].shutdown()
 
+
+
+def test_source_presence_explains_a_latest_absent_check(tmp_path):
+    from test_dashboard_watch import seeded, login
+
+    _, _, store, app, client = seeded(tmp_path)
+    with store.transaction() as db:
+        db.execute(
+            "INSERT INTO watch_source_check (cve_id, source, present, checked_at, error)"
+            " VALUES (?, 'nvd', 0, ?, NULL)",
+            ("CVE-2026-0001", "2026-11-04T00:00:00Z"),
+        )
+    states = {row["source"]: row["state"] for row in store.source_presence("CVE-2026-0001")}
+    assert states["nvd"] == "present (last check absent)"
+    login(client, "reader")
+    page = client.get("/watch/cve/CVE-2026-0001")
+    assert page.status_code == 200
+    assert "Present, but the latest check found it absent" in page.text
+    assert "its latest check did not find this CVE" in page.text
+    assert '<span class="muted">(present (last check absent))</span>' in page.text
+    app.extensions["dashboard_jobs"].shutdown()
 
 
 def test_detail_findings_clients_and_delivery_timestamps(tmp_path):
@@ -118,6 +143,9 @@ def test_explorer_preserves_repeated_filters_across_pagination(tmp_path):
                       "&since=2026-11-01&modified_until=2026-11-02&kev=neither")
     assert page.status_code == 200
     assert "51 CVEs · Page 1" in page.text
+    assert "Active filters:" in page.text
+    assert "KEV: Neither catalog" in page.text
+    assert "<summary>Filter</summary>" in page.text
     assert 'href="/watch/cves">Clear filters</a>' in page.text
     assert '<summary>9.8 v4.0</summary>' in page.text
     assert "7 v3.1" in page.text and "8.5 v2.0" in page.text
@@ -180,4 +208,17 @@ def test_event_list_and_detail_show_all_scores_and_version_disagreement(tmp_path
     assert detail.status_code == 200
     assert all(label in detail.text for label in ("v2.0</td>", "v3.1</td>", "v4.0</td>", "CVSS:4.0/AV:N"))
     assert "Severity differs between CVSS versions" in detail.text
+    app.extensions["dashboard_jobs"].shutdown()
+
+
+def test_cve_detail_keeps_uncertainty_next_to_scores(tmp_path):
+    from test_dashboard_watch import seeded, login
+
+    _, _, _, app, client = seeded(tmp_path)
+    login(client, "reader")
+    page = client.get("/watch/cve/CVE-2026-0002")
+    assert page.status_code == 200
+    assert "Neither proves the flaw is not exploited" in page.text
+    assert "not proof that the flaw is not exploited" in page.text
+    assert "are not the same as “not affected”" in page.text
     app.extensions["dashboard_jobs"].shutdown()

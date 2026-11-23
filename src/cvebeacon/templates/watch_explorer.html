@@ -1,21 +1,31 @@
 {% extends 'base.html' %}
-{% from 'watch_macros.html' import cvss_scores, exploitation %}
+{% from 'watch_macros.html' import cvss_scores, exploitation, day %}
 {% from 'ui.html' import page_header, card, field, button, link_button, term, table_wrap, kev_badge, empty_state, pagination %}
 {% block title %}CVE explorer · CVEBeacon{% endblock %}
 
-{% macro options(name, label) %}
-{% set labels = {
+{% macro option_label(name, value) -%}
+{%- set labels = {
   'kev': {'cisa': 'CISA', 'eu': 'EU', 'either': 'Either catalog', 'neither': 'Neither catalog'},
-  'exploitation': {'none': 'None', 'poc': 'Proof of concept', 'active': 'Active', 'unknown': 'Unknown'},
+  'exploitation': {'none': 'None reported', 'poc': 'Proof of concept', 'active': 'Active', 'unknown': 'Unknown'},
   'source': {'nvd': 'NVD', 'euvd': 'EUVD', 'cve_list': 'CVE List', 'cisa_kev': 'CISA KEV', 'eu_kev': 'EU KEV', 'epss': 'EPSS'},
   'cvss_provider': {'nvd': 'NVD', 'cna': 'CNA', 'cisa-adp': 'CISA ADP', 'euvd': 'EUVD', 'other': 'Other'},
-} %}
+} -%}
+{%- if name == 'cvss_version' -%}v{{ value }}{%- else -%}{{ labels.get(name, {}).get(value, value | capitalize) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro option_list(name, values) -%}
+{%- for value in values -%}
+{{ option_label(name, value) }}{% if not loop.last %}, {% endif %}
+{%- endfor -%}
+{%- endmacro %}
+
+{% macro options(name, label) %}
 <fieldset class="explorer-options">
   <legend>{{ label }}</legend>
   {% for value in choices[name] %}
   <div class="field field-check">
     <input id="filter-{{ name }}-{{ loop.index }}" type="checkbox" name="{{ name }}" value="{{ value }}" {{ 'checked' if value in filters[name] }}>
-    <label for="filter-{{ name }}-{{ loop.index }}">{{ 'v' ~ value if name == 'cvss_version' else labels.get(name, {}).get(value, value | capitalize) }}</label>
+    <label for="filter-{{ name }}-{{ loop.index }}">{{ option_label(name, value) }}</label>
   </div>
   {% endfor %}
 </fieldset>
@@ -31,18 +41,21 @@
 {% endmacro %}
 
 {% block content %}
-{{ page_header('CVE explorer', 'Search known security flaws and combine filters. Bookmark the results to save your choices.') }}
-{% call card('Search and filter') %}
+{{ page_header('CVE explorer', 'Search the stored security flaws. Add filters to narrow the list, then open a CVE for its full record.') }}
+
+{% set advanced_active = filters.kev or filters.source or filters.exploitation or filters.severity or filters.cvss_version or filters.cvss_provider or filters.epss_min or filters.epss_max or filters.cvss_min or filters.cvss_max or filters.since or filters.until or filters.modified_since or filters.modified_until or filters.client %}
+
+{% call card('Search and filter', 'Search by CVE ID or keyword. Use Filter to narrow the results; your choices stay in the address bar so you can bookmark them.') %}
 <form method="get" class="stack explorer-filters">
   <div class="explorer-fields">
     {{ field('CVE ID, keyword or alias', 'q', value=filters.q, maxlength=256) }}
     <div class="field"><label for="filter-sort">Sort</label><select id="filter-sort" name="sort">{% for name, label in [('modified','Last modified'),('published','Published'),('cvss','CVSS'),('epss','EPSS'),('kev','KEV')] %}<option value="{{ name }}" {{ 'selected' if filters.sort == name }}>{{ label }}</option>{% endfor %}</select></div>
-    {% for name, label in [('has_events','Has events'),('reported','Reported to clients')] %}
+    {% for name, label in [('has_events','Has alerts'),('reported','Reported to clients')] %}
     <div class="field"><label for="filter-{{ name }}">{{ label }}</label><select id="filter-{{ name }}" name="{{ name }}">{% for value, text in [('','Any'),('yes','Yes'),('no','No')] %}<option value="{{ value }}" {{ 'selected' if filters[name] == value }}>{{ text }}</option>{% endfor %}</select></div>
     {% endfor %}
   </div>
-  <details class="disclosure" {% if filters.kev or filters.source or filters.exploitation or filters.severity or filters.cvss_version or filters.cvss_provider or filters.epss_min or filters.epss_max or filters.cvss_min or filters.cvss_max or filters.since or filters.until or filters.modified_since or filters.modified_until or filters.client %}open{% endif %}>
-    <summary>More filters</summary>
+  <details class="disclosure" {% if advanced_active %}open{% endif %}>
+    <summary>Filter</summary>
     <p class="help">A CVE must match every field you use. It can match any selection within that field.</p>
     <p class="help">{{ term('CVSS', 'a 0-10 severity score') }} · {{ term('EPSS', 'estimated chance the flaw is exploited in the next 30 days') }} · {{ term('KEV', 'on the list of flaws known to be actively exploited') }}</p>
     <div class="explorer-fields explorer-facets">
@@ -53,6 +66,7 @@
       {{ options('cvss_version', 'CVSS version') }}
       {{ options('cvss_provider', 'CVSS provider') }}
     </div>
+    <p class="help">Source present means the source holds a stored record for the CVE. A source that is missing from a CVE has not necessarily checked it yet, so absence is not proof the CVE does not affect you.</p>
     <p class="help">The CVSS version, provider and range must match the same score.</p>
     <div class="explorer-fields">
       {{ bounds('epss', 'EPSS', '1') }}
@@ -62,6 +76,7 @@
       {% endfor %}
     </div>
     <div class="field"><label for="filter-clients">Affected clients, one exact name per line</label><textarea id="filter-clients" name="client_names" rows="3" maxlength="2569">{{ filters.client|join('\n') }}</textarea></div>
+    <p class="help">Reported to clients means a person recorded a report in CVEBeacon. It is not client confirmation.</p>
   </details>
   <div class="form-actions">
     {{ button('Search') }}
@@ -69,30 +84,56 @@
   </div>
 </form>
 {% endcall %}
+
+{% set active = [] %}
+{% if filters.q %}{% set _ = active.append('search “' ~ filters.q ~ '”') %}{% endif %}
+{% if filters.has_events %}{% set _ = active.append('has alerts: ' ~ ('yes' if filters.has_events == 'yes' else 'no')) %}{% endif %}
+{% if filters.reported %}{% set _ = active.append('reported to clients: ' ~ ('yes' if filters.reported == 'yes' else 'no')) %}{% endif %}
+{% if filters.sort and filters.sort != 'modified' %}{% set _ = active.append('sorted by ' ~ filters.sort) %}{% endif %}
+{% if filters.kev %}{% set _ = active.append('KEV: ' ~ option_list('kev', filters.kev)) %}{% endif %}
+{% if filters.exploitation %}{% set _ = active.append('exploitation: ' ~ option_list('exploitation', filters.exploitation)) %}{% endif %}
+{% if filters.source %}{% set _ = active.append('source present: ' ~ option_list('source', filters.source)) %}{% endif %}
+{% if filters.severity %}{% set _ = active.append('score band: ' ~ option_list('severity', filters.severity)) %}{% endif %}
+{% if filters.cvss_version %}{% set _ = active.append('CVSS version: ' ~ option_list('cvss_version', filters.cvss_version)) %}{% endif %}
+{% if filters.cvss_provider %}{% set _ = active.append('CVSS provider: ' ~ option_list('cvss_provider', filters.cvss_provider)) %}{% endif %}
+{% if filters.epss_min %}{% set _ = active.append('EPSS at least ' ~ filters.epss_min) %}{% endif %}
+{% if filters.epss_max %}{% set _ = active.append('EPSS at most ' ~ filters.epss_max) %}{% endif %}
+{% if filters.cvss_min %}{% set _ = active.append('CVSS at least ' ~ filters.cvss_min) %}{% endif %}
+{% if filters.cvss_max %}{% set _ = active.append('CVSS at most ' ~ filters.cvss_max) %}{% endif %}
+{% if filters.since %}{% set _ = active.append('published from ' ~ filters.since) %}{% endif %}
+{% if filters.until %}{% set _ = active.append('published through ' ~ filters.until) %}{% endif %}
+{% if filters.modified_since %}{% set _ = active.append('modified from ' ~ filters.modified_since) %}{% endif %}
+{% if filters.modified_until %}{% set _ = active.append('modified through ' ~ filters.modified_until) %}{% endif %}
+{% if filters.client %}{% set _ = active.append('client: ' ~ (filters.client | join(', '))) %}{% endif %}
+{% if active %}<p class="muted">Active filters: {{ active | join(' · ') }}.</p>{% endif %}
+
 {% if missing %}
-{% call card(missing) %}<p>Not in our database</p>{% endcall %}
+{% call card(missing, 'No stored source record matches this CVE ID yet.') %}<p>Not in our database. Check the ID for typos, or wait for the next successful sync. This is a gap in local coverage, not proof that the CVE is harmless.</p>{% endcall %}
 {% include 'watch_presence.html' %}
 {% endif %}
 <p class="muted" role="status">{{ result.total }} CVEs · Page {{ page }}</p>
 {% if result.records %}
-{% call table_wrap('Matching CVEs and scores') %}<table>
+{% call table_wrap('Matching CVEs and scores') %}
+<table>
 <thead><tr><th scope="col">CVE</th><th scope="col">Description</th><th scope="col">Published</th><th scope="col">Modified</th><th scope="col" class="num">CVSS</th><th scope="col" class="num">EPSS</th><th scope="col">KEV</th><th scope="col">Exploitation</th></tr></thead>
 <tbody>
 {% for item in result.records %}
 <tr>
   <td class="nowrap"><a href="{{ url_for('watch.cve', cve_id=item.cve_id) }}">{{ item.cve_id }}</a></td>
   <td>{{ item.description or 'Not available' }}</td>
-  <td>{{ item.published or 'Not available' }}</td>
-  <td>{{ item.last_modified or 'Not available' }}</td>
+  <td>{{ day(item.published) if item.published else 'Not available' }}</td>
+  <td>{{ day(item.last_modified) if item.last_modified else 'Not available' }}</td>
   <td class="num">{% set highest = item.highest_score %}{% if highest %}<details><summary>{{ '%g'|format(highest.score) }} v{{ highest.version }}</summary>{{ cvss_scores(item.cvss_scores) }}{% if item.cvss_severity_differs %}<p class="help">Severity differs between CVSS versions</p>{% endif %}</details>{% else %}Not available{% endif %}</td>
   <td class="num">{{ item.epss if item.epss is not none else 'Not available' }}</td>
   <td>{% if item.cisa_kev_added %}{{ kev_badge('CISA') }}{% endif %}{% if item.eu_kev_added %}{{ kev_badge('EU') }}{% endif %}{% if not item.cisa_kev_added and not item.eu_kev_added %}No{% endif %}</td>
   <td>{{ exploitation(item) }}</td>
 </tr>
 {% endfor %}
-</tbody></table>{% endcall %}
+</tbody></table>
+{% endcall %}
 {% elif not missing %}
 {{ empty_state('No CVEs match these filters.', 'Change or clear the filters to see other stored CVEs.') }}
 {% endif %}
 {% if previous_url or next_url %}{{ pagination(page, previous_url, next_url, 'CVEs') }}{% endif %}
+{% if result.records %}<p class="help">Exploitation shows what sources report. “None” does not prove a flaw is not exploited, and “Unknown” means no source has assessed it. KEV “No” means no list entry was found, not that the flaw is unused.</p>{% endif %}
 {% endblock %}

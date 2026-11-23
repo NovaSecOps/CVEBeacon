@@ -1,18 +1,86 @@
-{% extends 'base.html' %}{% from 'watch_macros.html' import value, day, stamp %}
+{% extends 'base.html' %}
+{% set nav_active = 'watch.overview' %}
+{% from 'watch_macros.html' import value, stamp %}
+{% from 'ui.html' import page_header, card, stat, stat_grid, callout, table_wrap, badge %}
 {% block title %}Watch overview · CVEBeacon{% endblock %}
 {% block content %}
-<h1>Watch overview</h1>
-<p class="muted">Rule evaluation creates alert events; delivery happens on <code>watch notify</code> or the next <code>watch run</code>.</p>
-{% if not watch_enabled %}<p class="warning" role="alert">Watch mode is disabled in the configuration. Stored data is shown as it is; new syncs will not run.</p>{% endif %}
-{% if failures %}<p class="warning" role="alert">The last sync failed for: {{ failures }}.</p>{% endif %}
-<div class="metrics">
-  <section><strong>{{ status.rows }}</strong><span>Watched CVEs</span></section>
-  <section><strong>{{ status.any_watched }}</strong><span>Watched CVEs in KEV (CISA {{ status.cisa_watched }}, EU {{ status.eu_watched }})</span></section>
-  <section><strong>{{ status.active_ssvc }}</strong><span>With active SSVC exploitation</span></section>
-  <section><strong>{{ status.reported }}</strong><span>Reported to clients</span></section>
-</div>
+{{ page_header('Watch overview', 'What CVEBeacon is watching, where the data comes from, and whether alerts were delivered.', url_for('watch.events'), 'Review alerts') }}
 
-<h2>Database</h2>
+{% if not watch_enabled %}
+{% call callout('warning', 'Watch mode is off') %}
+<p>Stored data is shown as it is, but new syncs will not run. Turn watch mode on in the configuration to keep this data current.</p>
+{% endcall %}
+{% endif %}
+{% if failures %}
+{% call callout('danger', 'The last sync failed') %}
+<p>These sources did not finish: {{ failures }}. Their data may be out of date. Check the source settings and the network, then run a sync again.</p>
+{% endcall %}
+{% endif %}
+
+{% call stat_grid() %}
+  {{ stat(status.rows, 'Watched CVEs', 'Known flaws followed by your watch rules.') }}
+  {{ stat(status.any_watched, 'Watched CVEs in KEV', 'On the KEV lists of flaws known to be actively exploited: CISA ' ~ status.cisa_watched ~ ', EU ' ~ status.eu_watched ~ '.', tone='warning' if status.any_watched else none) }}
+  {{ stat(status.active_ssvc, 'Active exploitation (SSVC)', 'SSVC is a decision guide that rates urgency. Active means a source reports exploitation now.', tone='critical' if status.active_ssvc else none) }}
+  {{ stat(status.reported, 'Reported to clients', 'Report marks that are currently active.', href=url_for('watch.reported')) }}
+{% endcall %}
+
+{% call card('How alerts arrive', 'A watch rule creates an alert when it matches a CVE. The alert is sent by the next watch job.') %}
+<p>Rule evaluation creates alert events; delivery happens on <code>watch notify</code> or the next <code>watch run</code>. Unsent alerts stay queued and appear in the delivery table below.</p>
+{% call callout('info', 'What an empty list does not mean') %}
+<p>No alert means no stored rule matched. It is not proof that a flaw is absent, not exploited, or not present in your systems.</p>
+{% endcall %}
+{% endcall %}
+
+{% call card('Last sync by source', 'What each data source returned on its last run.') %}
+{% if last_sync_at %}<p class="muted">Last sync started {{ last_sync_at }}.</p>{% else %}<p class="muted">No sync summary has been recorded yet.</p>{% endif %}
+{% call table_wrap('Last sync by source') %}
+<table>
+<thead><tr><th scope="col">Source</th><th scope="col">Last sync</th><th scope="col" class="num">Requests</th><th scope="col" class="num">Records</th><th scope="col" class="num">New</th><th scope="col" class="num">Changed</th><th scope="col">Result</th></tr></thead>
+<tbody>{% for row in sources %}<tr>
+  <td>{{ row.source }}</td>
+  <td>{{ stamp(row.at) }}</td>
+  <td class="num">{{ value(row.requests) }}</td>
+  <td class="num">{{ value(row.records) }}</td>
+  <td class="num">{{ value(row.new) }}</td>
+  <td class="num">{{ value(row.changed) }}</td>
+  <td>{% if row.error %}{{ badge('Failed', 'danger') }} <span class="break">{{ row.error }}</span>{% else %}{{ badge('OK', 'success') }}{% endif %}</td>
+</tr>{% else %}<tr><td colspan="7">No sources are configured.</td></tr>{% endfor %}</tbody>
+</table>
+{% endcall %}
+<p class="help">Requests and records count the last attempt. A failed or unstarted sync leaves coverage for that source uncertain.</p>
+{% endcall %}
+
+{% call card('Alert delivery', 'Where queued alerts are in the delivery process.') %}
+{% call table_wrap('Channel delivery health') %}
+<table>
+<thead><tr><th scope="col">Channel</th><th scope="col" class="num">Pending</th><th scope="col" class="num">Sending</th><th scope="col" class="num">Failed</th><th scope="col" class="num">Given up</th><th scope="col" class="num">Ambiguous</th><th scope="col">Last success</th></tr></thead>
+<tbody>{% for row in deliveries %}<tr>
+  <td>{{ row.channel }}</td>
+  <td class="num">{{ row.pending }}</td>
+  <td class="num">{{ row.sending }}</td>
+  <td class="num">{{ row.failed }}</td>
+  <td class="num">{{ row.given_up }}</td>
+  <td class="num">{{ row.ambiguous }}</td>
+  <td>{{ stamp(row.last_success) }}</td>
+</tr>{% else %}<tr><td colspan="7">No channels are configured and no deliveries are recorded.</td></tr>{% endfor %}</tbody>
+</table>
+{% endcall %}
+<p class="help">Pending means queued but not sent yet. Ambiguous means the remote service may or may not have received the alert; check it before sending again.</p>
+{% endcall %}
+
+{% call card('Initial load', 'How the first history window was filled when this instance started.') %}
+<dl>
+  <dt>Mode</dt><dd>{{ initial.mode }}</dd>
+  <dt>Initial window start</dt><dd>{{ value(initial.window_start, 'not set') }}</dd>
+  <dt>Initialized at</dt><dd>{{ stamp(initial.initialized_at) }}</dd>
+  <dt>Initial sync completed</dt><dd>{{ stamp(initial.sync_completed_at) }}{% if initial.sync_pending %} {{ badge('Pending', 'warning') }}{% endif %}</dd>
+  <dt>Initial evaluation completed</dt><dd>{{ stamp(initial.evaluated_at) }}{% if initial.evaluation_pending %} {{ badge('Pending', 'warning') }}{% endif %}</dd>
+</dl>
+{% endcall %}
+
+{% call card('Database details', 'Technical information for support and troubleshooting.') %}
+<details class="disclosure">
+<summary>Technical details</summary>
 <dl>
   <dt>Path</dt><dd class="break">{{ status.database }}</dd>
   <dt>Schema version</dt><dd>{{ value(meta.get('schema_version'), 'unknown') }}</dd>
@@ -25,26 +93,6 @@
   <dt>EUVD items</dt><dd>{{ status.euvd_items }}</dd>
   <dt>Lookups pending or backing off</dt><dd>{{ status.lookups }}</dd>
 </dl>
-
-<h2>Last sync by source</h2>
-<p class="muted">{% if last_sync_at %}Last sync started {{ last_sync_at }}.{% else %}No sync summary has been recorded yet.{% endif %}</p>
-<div class="table-wrap"><table>
-<thead><tr><th>Source</th><th>Last sync</th><th>Requests</th><th>Records</th><th>New</th><th>Changed</th><th>Result</th></tr></thead>
-<tbody>{% for row in sources %}<tr><td>{{ row.source }}</td><td>{{ stamp(row.at) }}</td><td>{{ value(row.requests) }}</td><td>{{ value(row.records) }}</td><td>{{ value(row.new) }}</td><td>{{ value(row.changed) }}</td><td>{% if row.error %}<span class="warning">{{ row.error }}</span>{% else %}ok{% endif %}</td></tr>{% else %}<tr><td colspan="7">No sources are configured.</td></tr>{% endfor %}</tbody>
-</table></div>
-
-<h2>Channel delivery health</h2>
-<div class="table-wrap"><table>
-<thead><tr><th>Channel</th><th>Pending</th><th>Sending</th><th>Failed</th><th>Given up</th><th>Ambiguous</th><th>Last success</th></tr></thead>
-<tbody>{% for row in deliveries %}<tr><td>{{ row.channel }}</td><td>{{ row.pending }}</td><td>{{ row.sending }}</td><td>{{ row.failed }}</td><td>{{ row.given_up }}</td><td>{{ row.ambiguous }}</td><td>{{ stamp(row.last_success) }}</td></tr>{% else %}<tr><td colspan="7">No channels are configured and no deliveries are recorded.</td></tr>{% endfor %}</tbody>
-</table></div>
-
-<h2>Initial mode</h2>
-<dl>
-  <dt>Mode</dt><dd>{{ initial.mode }}</dd>
-  <dt>Initial window start</dt><dd>{{ value(initial.window_start, 'not set') }}</dd>
-  <dt>Initialized at</dt><dd>{{ stamp(initial.initialized_at) }}</dd>
-  <dt>Initial sync completed</dt><dd>{{ stamp(initial.sync_completed_at) }}{% if initial.sync_pending %} <span class="badge needs_review">pending</span>{% endif %}</dd>
-  <dt>Initial evaluation completed</dt><dd>{{ stamp(initial.evaluated_at) }}{% if initial.evaluation_pending %} <span class="badge needs_review">pending</span>{% endif %}</dd>
-</dl>
+</details>
+{% endcall %}
 {% endblock %}

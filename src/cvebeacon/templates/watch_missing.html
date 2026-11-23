@@ -1,3 +1,12 @@
 {% extends 'base.html' %}
+{% set nav_active = 'watch.explorer' %}
+{% from 'ui.html' import page_header, callout %}
 {% block title %}{{ cve_id }} · CVEBeacon{% endblock %}
-{% block content %}<h1>{{ cve_id }}</h1><p>Not in our database</p><p><a href="{{ url_for('watch.explorer') }}">Browse CVEs</a></p>{% include 'watch_presence.html' %}{% endblock %}
+{% block content %}
+{{ page_header(cve_id, 'This CVE is not in the local database yet. It may be newer than the last sync, or the ID may be different.', url_for('watch.explorer'), 'Search CVEs') }}
+{% call callout('warning', 'No stored record found') %}
+<p>Not in our database means no source record stored in CVEBeacon matches this ID. That is a gap in local coverage, not proof that the CVE is harmless or that your systems are unaffected.</p>
+<p>Check the ID and search again. A new CVE appears after the next successful sync. A failed or unstarted sync leaves coverage unknown.</p>
+{% endcall %}
+{% include 'watch_presence.html' %}
+{% endblock %}
