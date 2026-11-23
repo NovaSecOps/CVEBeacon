@@ -1,18 +1,42 @@
-{% extends 'base.html' %}{% from 'watch_macros.html' import value, stamp %}
+{% extends 'base.html' %}
+{% from 'watch_macros.html' import value, stamp, identity_mode %}
+{% from 'ui.html' import page_header, card, callout, table_wrap, empty_state, link_button, pagination %}
 {% block title %}Reported to clients · CVEBeacon{% endblock %}
 {% block content %}
-<h1>Reported to clients</h1>
-<p>These are the CVEs whose latest report mark is active. The full append-only trail, including withdrawals, is available as CSV or JSON to accounts with the <code>view_audit</code> permission.</p>
-{% if can_export %}<p><a href="{{ url_for('watch.export_reported', format='csv') }}">Download CSV</a> · <a href="{{ url_for('watch.export_reported', format='json') }}">Download JSON</a></p>{% endif %}
-<p>Page {{ page }}{% if has_previous %} · <a href="{{ url_for('watch.reported', page=page - 1) }}">Previous</a>{% endif %}{% if has_next %} · <a href="{{ url_for('watch.reported', page=page + 1) }}">Next</a>{% endif %}</p>
-<div class="table-wrap"><table>
-<thead><tr><th>CVE</th><th>Reported by</th><th>Identity mode</th><th>Reported at</th><th>Note</th></tr></thead>
+{% call page_header('Reported to clients', 'CVEs whose latest report mark is active, meaning they were reported to clients and not withdrawn.') %}
+  {% if can_export %}
+    {{ link_button('Download CSV', url_for('watch.export_reported', format='csv')) }}
+    {{ link_button('Download JSON', url_for('watch.export_reported', format='json'), kind='secondary') }}
+  {% endif %}
+{% endcall %}
+
+{% call callout('info', 'What this list means') %}
+<p>A CVE appears here when someone records a report from its detail page. The mark is active until it is withdrawn. This is an internal record; it does not confirm that a client received or acted on the report.</p>
+{% endcall %}
+<p class="muted">{% if can_export %}The downloads include the full append-only trail, including withdrawals.{% else %}The full append-only trail, including withdrawals, is available as CSV or JSON to accounts with the <code>view_audit</code> permission.{% endif %}</p>
+
+{% if rows %}
+{% call card('Current reports', 'Newest report marks first. Open a CVE for its full record and history.') %}
+{% call table_wrap('CVEs currently reported to clients') %}
+<table>
+<thead><tr><th scope="col">CVE</th><th scope="col">Reported by</th><th scope="col">How the name was recorded</th><th scope="col">Reported at</th><th scope="col">Note</th></tr></thead>
 <tbody>{% for row in rows %}<tr>
   <td><a href="{{ url_for('watch.cve', cve_id=row.cve_id) }}">{{ row.cve_id }}</a></td>
   <td>{{ watch_identity(row.by, row.username) }}</td>
-  <td>{{ value(row.identity_mode, 'legacy') }}</td>
+  <td>{{ identity_mode(row.identity_mode or 'legacy') }} <span class="muted">({{ value(row.identity_mode, 'legacy') }})</span></td>
   <td>{{ stamp(row.at) }}</td>
   <td>{{ value(row.note, '') }}</td>
-</tr>{% else %}<tr><td colspan="5">No CVE is currently reported to clients.</td></tr>{% endfor %}</tbody>
-</table></div>
+</tr>{% endfor %}</tbody>
+</table>
+{% endcall %}
+{% endcall %}
+{{ pagination(page, url_for('watch.reported', page=page - 1) if has_previous else none,
+              url_for('watch.reported', page=page + 1) if has_next else none, 'reports') }}
+{% else %}
+{% if has_previous %}
+{{ empty_state('No reports on this page', 'This page is past the end of the list. Go back to see the current reports.') }}
+{% else %}
+{{ empty_state('No CVE is currently reported to clients', 'Open a CVE from the CVE explorer and use Report to clients when you have told clients about it.') }}
+{% endif %}
+{% endif %}
 {% endblock %}
