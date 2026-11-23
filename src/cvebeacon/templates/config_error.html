@@ -1,2 +1,21 @@
-{% extends "base.html" %}{% block title %}Configuration error · CVEBeacon{% endblock %}
-{% block content %}<h1>Configuration could not be loaded or saved</h1><p>{{ error }}</p>{% if read_only %}<p>The configuration directory is read-only, so saving and rollback are disabled. Enable editing for the dashboard service as described in the deployment guide.</p>{% endif %}<p>Reload the section to correct the values and create a new preview.</p><a href="{{ url_for('config_editor.index') }}">Configuration sections</a>{% endblock %}
+{% extends "base.html" %}
+{% set nav_active = 'config_editor.index' %}
+{% from 'ui.html' import page_header, card, callout, link_button %}
+{% block title %}Configuration error · CVEBeacon{% endblock %}
+{% block content %}
+{% call page_header('Configuration could not be loaded or saved', 'Nothing was changed. The message below says what is wrong and what to do next.') %}
+  {{ link_button('Back to configuration sections', url_for('config_editor.index')) }}
+{% endcall %}
+
+{% call callout('danger', 'What went wrong') %}<p>{{ error }}</p><p>Reload the section to correct the values and create a new preview.</p>{% endcall %}
+{% if read_only %}{% call callout('warning', 'Read-only configuration') %}<p>The dashboard service cannot write to the configuration directory, so saving and rollback are disabled. Ask the operator to enable editing for the dashboard service as described in the deployment guide.</p>{% endcall %}{% endif %}
+
+{% call card('What you can do') %}
+<ol>
+  <li>Go back to the configuration sections.</li>
+  <li>Open the section you were changing and check the highlighted value.</li>
+  <li>Validate and preview the change again. Nothing is saved until you confirm.</li>
+</ol>
+<p>If the same message appears again, ask an administrator to check the configuration file and the permissions on its directory.</p>
+{% endcall %}
+{% endblock %}

@@ -1,8 +1,33 @@
-{% extends "base.html" %}{% block title %}Configuration backups · CVEBeacon{% endblock %}
-{% block content %}<h1>Configuration backups</h1><p><a href="{{ url_for('config_editor.index') }}">All configuration sections</a></p>
-{% if request.args.get("saved") == "1" %}<p role="status">Saved; takes effect on the next run. Restart other running commands to use the saved settings.</p>{% endif %}
-{% if read_only %}<p><strong>Rollback is disabled.</strong> The configuration directory is not writable by the dashboard service. Enable editing for the dashboard service, then reload this page.</p>{% endif %}
-{% if current_invalid %}<p><strong>Current configuration is invalid or missing.</strong> The rollback diff is hidden because the live values cannot be validated. The selected backup is validated before it is shown and restored.</p>{% endif %}
-{% if preview %}{% include "config_confirm.html" %}{% else %}<p>Restore a complete configuration through validation and a diff preview. Referenced secret files are not restored or deleted. The current configuration is backed up before rollback.</p>
-<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="preview"><input type="hidden" name="version" value="{{ version }}"><label>Backup <select name="backup">{% for name in backups %}<option>{{ name }}</option>{% endfor %}</select></label><button {% if not backups or read_only %}disabled{% endif %}>Validate and preview rollback</button></form>{% endif %}
+{% extends "base.html" %}
+{% set nav_active = 'config_editor.index' %}
+{% from 'ui.html' import page_header, card, callout, link_button, steps %}
+{% block title %}Configuration backups · CVEBeacon{% endblock %}
+{% block content %}
+{% call page_header('Configuration backups', 'Restore the configuration from an earlier save. You will see the difference before anything is restored.') %}
+  {{ link_button('Back to configuration', url_for('config_editor.index'), kind='secondary') }}
+{% endcall %}
+{{ steps(['Choose a backup', 'Review changes', 'Restored'], current=3 if request.args.get('saved') == '1' else 2 if preview else 1) }}
+
+{% if request.args.get("saved") == "1" %}{% call callout('success', 'Backup restored') %}<p>Saved; takes effect on the next run. Restart other running commands to use the saved settings.</p>{% endcall %}{% endif %}
+{% if read_only %}{% call callout('warning', 'Rollback is disabled') %}<p>The dashboard service cannot write to the configuration directory, so saving and rollback are disabled. Ask the operator to enable editing for the dashboard service, then reload this page.</p>{% endcall %}{% endif %}
+{% if current_invalid %}{% call callout('warning', 'Current configuration is invalid or missing') %}<p>The rollback difference is hidden because the live values cannot be validated. The selected backup is validated before it is shown and restored.</p>{% endcall %}{% endif %}
+
+{% if preview %}
+{% include "config_confirm.html" %}
+{% else %}
+{% call card('Restore a backup', 'A restore replaces the whole configuration. Secret files that the configuration refers to are not restored or deleted. The current configuration is backed up before the restore.') %}
+{% if not backups %}<p class="muted">No backups yet. A backup is made before every configuration save, so the first backup appears after the first save.</p>{% endif %}
+<form method="post" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="action" value="preview">
+  <input type="hidden" name="version" value="{{ version }}">
+  <div class="field">
+    <label for="backup">Backup</label>
+    <select name="backup" id="backup">{% for name in backups %}<option value="{{ name }}">{{ name[0:4] }}-{{ name[4:6] }}-{{ name[6:8] }} {{ name[9:11] }}:{{ name[11:13] }} UTC</option>{% endfor %}</select>
+    <p class="help">Backups are listed newest first. The newest is selected by default.</p>
+  </div>
+  <div class="form-actions"><button class="btn" type="submit" {% if not backups or read_only %}disabled{% endif %}>Preview restore</button></div>
+</form>
+{% endcall %}
+{% endif %}
 {% endblock %}

@@ -1,6 +1,10 @@
-{% from 'ui.html' import card, button %}
-{% call card('Review changes') %}<pre>{{ diff }}</pre>
-<p>Credential values are never displayed. Webhook endpoint values are redacted. Saving removes comments and original formatting, keeps a backup, reloads the dashboard. {% if lockout %}These changes end all sessions; log in again.{% else %}Sessions stay signed in. Saved settings take effect on the next run; restart other running commands.{% endif %}</p>
+{% from 'ui.html' import card, button, callout, link_button %}
+{% call card('Review changes', 'Nothing has been saved yet. Check the difference below, then confirm.') %}
+<p class="muted">Lines starting with <code>-</code> are removed and lines starting with <code>+</code> are added. Credential values are never displayed, and webhook endpoint values are redacted.</p>
+{% if diff %}<pre>{{ diff }}</pre>{% else %}<p class="muted">No differences to show. Either the values are unchanged or the current configuration could not be read.</p>{% endif %}
+{% if lockout %}{% call callout('warning', 'These changes affect access or session settings') %}<p>Check that you can sign in to the destination account store and that the cookie settings match how you reach the dashboard. Saving ends all sessions, including yours.</p>{% endcall %}{% endif %}
 <form method="post" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="confirm"><input type="hidden" name="preview" value="{{ preview }}">
-{% if lockout %}<p><strong>These changes affect access or session settings.</strong> Check that you can log in to the destination account store and that the cookie settings match your transport.</p><div class="field field-check"><input id="confirm-lockout" type="checkbox" name="lockout" value="yes" required><label for="confirm-lockout">I confirm the access changes and can log in again.</label></div>{% endif %}
-<div class="form-actions">{{ button("Confirm and save") }}</div></form>{% endcall %}
+{% if lockout %}<div class="field field-check"><input id="confirm-lockout" type="checkbox" name="lockout" value="yes" required><label for="confirm-lockout">I confirm the access changes and can log in again.</label></div>{% endif %}
+<p class="muted">Saving removes comments and original formatting, keeps a backup, and reloads the dashboard. {% if lockout %}These changes end all sessions; log in again.{% else %}Sessions stay signed in. Saved settings take effect on the next run; restart other running commands to use them.{% endif %}</p>
+<div class="form-actions">{{ button("Confirm and save") }}{{ link_button('Back without saving', url_for(request.endpoint), kind='secondary') }}</div></form>
+{% endcall %}
