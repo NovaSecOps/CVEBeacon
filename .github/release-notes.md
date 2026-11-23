@@ -21,10 +21,12 @@ Released {{DATE}}.
 | `SHA256SUMS` | SHA-256 checksums for every asset |
 | `SHA256SUMS.sig` | SSH signature over `SHA256SUMS` |
 
-The wheels and source distribution require Python 3.11 or newer. Install the
-extensions and automation wheels only when those distributions were installed
-before. The Windows archive is built on Windows Server 2025 for x86-64; extract
-it and run `cvebeacon.exe --help` before replacing an existing installation.
+The core, extensions and automation wheels and the source distribution require
+Python 3.11 or newer. The runtime wheelhouse covers CPython 3.11–3.14 on Linux
+x86-64 and aarch64. Install the extensions and automation wheels only when those
+distributions were installed before. The Windows archive is built on Windows
+Server 2025 for x86-64; extract it and run `cvebeacon.exe --help` before
+replacing an existing installation.
 GitHub also attaches the source archives for the tag.
 
 Verify the signature and checksums from the directory that contains the
