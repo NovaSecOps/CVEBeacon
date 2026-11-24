@@ -687,6 +687,17 @@ def add_admin(config):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_host_scheduler(monkeypatch):
+    """Keep Home tests independent of the host's real scheduler.
+
+    The real probe calls cron or Windows Task Scheduler with a short timeout,
+    which a slow CI host can exceed. Tests that need another schedule state
+    override this stub.
+    """
+    monkeypatch.setattr(dashboard_setup, "schedule_scan_state", lambda config: "none")
+
+
 def make_app(tmp_path, *, inventory=False, enabled=True, channels="", rules=(), admin=False):
     config = write_config(tmp_path, inventory=inventory, enabled=enabled, channels=channels)
     if rules:
