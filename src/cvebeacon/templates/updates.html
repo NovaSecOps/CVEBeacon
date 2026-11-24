@@ -3,19 +3,21 @@
 {% block title %}Updates · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Updates', 'Check whether a newer CVEBeacon release is available and, as an administrator, request an update.') }}
-{% call callout('info', 'How updates work') %}<p>CVEBeacon can check a signed release feed for newer versions. An administrator can queue an update; the updater verifies the release signature and backs up state before applying it. Updates are enabled or disabled in the configuration.</p>{% endcall %}
-{% if not enabled %}{% call callout('warning', 'Updates are disabled') %}<p>An administrator can enable signed release updates using the <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">upgrade guide</a>.</p>{% endcall %}{% endif %}
+{% call callout('info', 'How updates work') %}<p>CVEBeacon can check for new versions and, if you allow it, install them. It checks the release signature and makes a backup first.</p>{% endcall %}
+{% if not enabled %}{% call callout('warning', 'Updates are disabled') %}<p>An administrator can turn on update checks in the configuration. See the <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">upgrade guide</a>.</p>{% endcall %}{% endif %}
 {% if notice %}{% call callout('warning', 'This installation cannot use the updater') %}<p>{{ notice }} See the <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">upgrade instructions</a>.</p>{% endcall %}{% endif %}
 {% call card('Current status', 'The version this installation runs and what the last release check found.') %}
 <p>Current version: <strong>{{ current }}</strong></p>
-<p>Available version: {{ status.available or 'No newer release checked' }}</p>
+<p>Available version: {{ status.available or 'No newer version found yet' }}</p>
 <p>Last check: {{ watch_stamp(status.last_check) or 'Never' }}</p>
+{% if status.last_request or status.last_update %}<details class="disclosure"><summary>Technical details</summary>
 {% if status.last_request %}<p class="muted">Last request: {{ status.last_request.result }} ({{ status.last_request.version or 'unspecified version' }}) at {{ watch_stamp(status.last_request.time) }}</p>{% endif %}
 {% if status.last_update %}<p class="muted">Last update: {{ status.last_update.result }} ({{ status.last_update.version }}) at {{ watch_stamp(status.last_update.time) }}</p>{% endif %}
+</details>{% endif %}
 {% if status.last_update and status.last_update.warning %}{% call callout('danger', 'The last update needs attention') %}<p>{{ status.last_update.warning }}</p>{% endcall %}{% endif %}
 {% endcall %}
 {% if status.notes %}
-{% call card('Release notes', 'What the available version changes, as written by the release feed.') %}
+{% call card('Release notes', 'What the available version changes, as described by the release.') %}
 <pre class="break">{{ status.notes }}</pre>
 {% endcall %}
 {% endif %}
@@ -24,8 +26,8 @@
 <form method="post" action="{{ url_for('updates.check_now') }}" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}"><div class="form-actions">{{ button('Check for updates', kind='secondary') }}</div></form>
 {% if status.available and not notice %}
 <form method="post" action="{{ url_for('updates.queue') }}" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ status.available }}">
-<div class="form-actions">{{ button('Update now', confirm='Queue the update to version ' ~ status.available ~ '? The updater verifies the release and backs up state before applying it.') }}</div></form>
-<p class="muted">The administrator updater verifies the release and backs up state before applying this request. Until then this installation keeps running the current version.</p>
+<div class="form-actions">{{ button('Update now', confirm='Queue the update to version ' ~ status.available ~ '? The updater checks the release signature and makes a backup first.') }}</div></form>
+<p class="muted">The updater checks the release signature and makes a backup before installing this version. Until then, this installation keeps running the current version.</p>
 {% endif %}
 {% endcall %}
 {% endif %}

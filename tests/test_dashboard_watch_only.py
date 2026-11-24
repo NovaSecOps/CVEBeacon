@@ -32,9 +32,9 @@ WORKING_PAGES = (
     ("/operations/schedule", "Schedule"),
     ("/users", "Users"),
     ("/users/admin", "admin"),
-    ("/roles", "Roles and permissions"),
+    ("/roles", "Roles"),
     ("/account", "My account"),
-    ("/audit", "Account audit"),
+    ("/audit", "Audit"),
     ("/sources", "Source status"),
 )
 

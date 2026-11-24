@@ -413,10 +413,10 @@ def test_admin_pages_and_delegated_user_management(accounts):
 def test_audit_tamper_is_visible(accounts):
     _, users, _, client = accounts
     login(client, "admin")
-    assert "Chain verified" in client.get("/audit").text
+    assert "Record check passed" in client.get("/audit").text
     with users.transaction() as db:
         db.execute("UPDATE cb_user_audit SET action='altered' WHERE id=1")
-    assert "Chain verification failed at row 1" in client.get("/audit").text
+    assert "Record check failed at row 1" in client.get("/audit").text
 
 
 def test_permission_denial_explains_the_role_and_local_only_options(accounts):
