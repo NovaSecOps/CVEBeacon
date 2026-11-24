@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 
 import pytest
 
@@ -701,6 +702,41 @@ def test_build_model_keeps_excludes_and_the_match_mode():
             BUILD_FIELD_CRITERIA,
             NO_CRITERIA_MESSAGE,
         ),
+        (
+            5,
+            {"kev": "include"},
+            {"kev": "cisa"},
+            BUILD_FIELD_JOIN,
+            "Match: choose one of the options.",
+        ),
+        (
+            "any",
+            {"kev": 5},
+            {"kev": "cisa"},
+            "kev",
+            "On a list of flaws known to be exploited: choose one of the options.",
+        ),
+        (
+            "any",
+            {"kev": ["include"]},
+            {"kev": "cisa"},
+            "kev",
+            "On a list of flaws known to be exploited: choose one of the options.",
+        ),
+        (
+            "any",
+            {"vendor": "include"},
+            {"vendor": ["A", "B"]},
+            "vendor",
+            "Vendor is one of: enter at least one value, separated by commas.",
+        ),
+        (
+            "any",
+            {"cvss_min": "include"},
+            {"cvss_min": 9.5},
+            "cvss_min",
+            "Severity score is at least: enter a number from 0 to 10.",
+        ),
     ],
 )
 def test_build_model_errors_are_field_keyed_and_do_not_echo(
@@ -726,6 +762,27 @@ def test_build_model_unknown_criterion_is_a_bad_request():
 def test_build_result_error_for_unknown_field_is_none():
     result = build_model("any", {"kev": ""}, {})
     assert result.error_for("nope") is None
+
+
+def test_build_model_rejects_underscores_in_numbers():
+    result = build_model("any", {"cvss_min": "include"}, {"cvss_min": "1_0"})
+    assert not result.ok
+    assert result.model is None
+    assert result.error_for("cvss_min") == (
+        "Severity score is at least: enter a number from 0 to 10."
+    )
+
+
+def test_build_model_normalises_negative_zero():
+    result = build_model("any", {"cvss_min": "include"}, {"cvss_min": "-0"})
+    assert result.ok
+    value = result.model.uses["cvss_min"][1]
+    assert value == 0.0
+    assert math.copysign(1.0, value) == 1.0
+    assert describe(result.model) == "Alert when: severity score at least 0.0."
+    assert describe(Model("any", {"cvss_min": ("include", -0.0)})) == (
+        "Alert when: severity score at least 0.0."
+    )
 
 
 def test_describe_single_include_and_all_mode():
@@ -777,6 +834,31 @@ def test_describe_uses_plain_words_for_every_criterion():
     assert "weakness type is one of CWE-79, CWE-80" in text
     assert "reported by one of Example Corp, Widget Inc" in text
     assert "status is Published" in text
+
+
+def test_describe_shows_exact_score_thresholds():
+    assert describe(
+        build_model("any", {"cvss_min": "include"}, {"cvss_min": "9.55"}).model
+    ) == "Alert when: severity score at least 9.55."
+    assert describe(
+        build_model("any", {"cvss_max": "include"}, {"cvss_max": "9.55"}).model
+    ) == "Alert when: severity score at most 9.55."
+    assert describe(
+        build_model(
+            "any", {"epss_min": "include"}, {"epss_min": "0.1234567"}
+        ).model
+    ) == "Alert when: exploitation chance at least 0.1234567."
+
+
+def test_describe_shows_tiny_epss_values_in_decimal():
+    assert describe(Model("any", {"epss_min": ("include", 1e-05)})) == (
+        "Alert when: exploitation chance at least 0.00001."
+    )
+    result = build_model("any", {"epss_min": "include"}, {"epss_min": "0.00001"})
+    assert result.ok
+    assert describe(result.model) == (
+        "Alert when: exploitation chance at least 0.00001."
+    )
 
 
 def test_public_copy_never_uses_banned_words():

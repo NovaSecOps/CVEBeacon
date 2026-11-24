@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
 from .errors import ConfigurationError
@@ -311,7 +312,7 @@ def build_model(
     if unknown:
         raise ValueError("unknown criterion " + ", ".join(sorted(unknown)))
 
-    join = (join or "").strip()
+    join = join.strip() if isinstance(join, str) else ""
     errors: list[tuple[str, str]] = []
     if join not in JOINS:
         errors.append((BUILD_FIELD_JOIN, "Match: choose one of the options."))
@@ -319,7 +320,13 @@ def build_model(
     built: dict[str, tuple[str, Any]] = {}
     chosen_include = False
     for criterion in CRITERIA:
-        use = (uses.get(criterion.key) or "").strip()
+        use = uses.get(criterion.key)
+        if use is None:
+            use = USE_NOT_USED
+        elif isinstance(use, str):
+            use = use.strip()
+        else:
+            use = None
         if use not in (USE_NOT_USED, USE_INCLUDE, USE_EXCLUDE):
             errors.append((criterion.key, _choose_message(criterion)))
             continue
@@ -328,7 +335,7 @@ def build_model(
         chosen_include = chosen_include or use == USE_INCLUDE
         text = values.get(criterion.key, "")
         if not isinstance(text, str):
-            text = str(text)
+            text = ""
         value, message = _parse_value(criterion, text)
         if message is not None:
             errors.append((criterion.key, message))
@@ -548,6 +555,8 @@ def _parse_value(
 def _parse_number(
     criterion: Criterion, text: str
 ) -> tuple[float | None, str | None]:
+    if "_" in text:
+        return None, _number_message(criterion)
     try:
         number = float(text)
     except ValueError:
@@ -559,6 +568,9 @@ def _parse_number(
         or not criterion.minimum <= number <= criterion.maximum
     ):
         return None, _number_message(criterion)
+    if number == 0:
+        # Normalise -0.0 so descriptions never read "at least -0.0".
+        number = 0.0
     return number, None
 
 
@@ -620,11 +632,11 @@ def _criterion_text(key: str, value: Any) -> str:
             "active": "actively exploited",
         }[value]
     if key == "cvss_min":
-        return f"severity score at least {float(value):.1f}"
+        return f"severity score at least {_display_number(value)}"
     if key == "cvss_max":
-        return f"severity score at most {float(value):.1f}"
+        return f"severity score at most {_display_number(value)}"
     if key == "epss_min":
-        return f"exploitation chance at least {float(value):g}"
+        return f"exploitation chance at least {_display_number(value)}"
     if key == "vendor":
         return _name_text("vendor", value)
     if key == "product":
@@ -667,3 +679,12 @@ def _number_text(value: float | None) -> str:
     if value is None:
         return ""
     return f"{value:g}"
+
+
+def _display_number(value: Any) -> str:
+    """Format a stored score in plain decimal without changing its value."""
+    number = float(value)
+    if number == 0:
+        # Normalise -0.0 so a description never reads "at least -0.0".
+        number = 0.0
+    return format(Decimal(repr(number)), "f")
