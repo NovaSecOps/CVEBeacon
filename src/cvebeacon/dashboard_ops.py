@@ -148,6 +148,52 @@ def _render_operations(config: AppConfig, *, error: str | None = None, status: i
     ), status
 
 
+def _submit_channel_test(config: AppConfig, channel: str):
+    """Queue one channel test on the shared lock-free test lane.
+
+    Returns ``(job, error_response)``: the queued job on success, otherwise
+    the operations response that explains why nothing was started.
+    """
+    enabled = {
+        item.name for item in config.watch.channels if item.enabled
+    }
+    if channel not in enabled:
+        abort(400)
+    try:
+        argv = _manager().command_builder(
+            config, "notify-test", channel=channel
+        )
+        job = _manager().submit(
+            "notify-test", started_by=_actor(), argv=argv
+        )
+    except (RunInProgress, JobQueueFull) as exc:
+        return None, _render_operations(config, error=str(exc), status=409)
+    except ConfigurationError as exc:
+        return None, _render_operations(config, error=str(exc), status=400)
+    return job, None
+
+
+def _enabled_channel(config: AppConfig, name: str):
+    for channel in config.watch.channels:
+        if channel.enabled and channel.name == name:
+            return channel
+    abort(404)
+
+
+def _channel_test_job(name: str, job_id: int):
+    if not 1 <= job_id <= 2**63 - 1:
+        abort(404)
+    job = _manager().store.get(job_id)
+    if (
+        job is None
+        or job.operation != "notify-test"
+        or not job.argv
+        or job.argv[-1] != name
+    ):
+        abort(404)
+    return job
+
+
 def _fallback_install_command(
     config: AppConfig,
     *,
@@ -347,23 +393,52 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
     def test_channel():
         require_accounts()
         channel = _text(request.form, "channel", required=True, limit=64)
-        enabled = {
-            item.name for item in config.watch.channels if item.enabled
-        }
-        if channel not in enabled:
-            abort(400)
-        try:
-            argv = _manager().command_builder(
-                config, "notify-test", channel=channel
-            )
-            job = _manager().submit(
-                "notify-test", started_by=_actor(), argv=argv
-            )
-        except (RunInProgress, JobQueueFull) as exc:
-            return _render_operations(config, error=str(exc), status=409)
-        except ConfigurationError as exc:
-            return _render_operations(config, error=str(exc), status=400)
+        job, error_response = _submit_channel_test(config, channel)
+        if error_response is not None:
+            return error_response
         return redirect(url_for("operations.job_detail", job_id=job.id), code=303)
+
+    @blueprint.get("/channels/<name>/test")
+    @requires("view")
+    def channel_test_form(name: str):
+        channel = _enabled_channel(config, name)
+        return render_template(
+            "channel_test.html",
+            channel_name=channel.name,
+            channel_type=channel.type,
+            job=None,
+            queue_detail=None,
+            log="",
+        )
+
+    @blueprint.post("/channels/<name>/test")
+    @requires("test_channel")
+    def channel_test_submit(name: str):
+        require_accounts()
+        _enabled_channel(config, name)
+        job, error_response = _submit_channel_test(config, name)
+        if error_response is not None:
+            return error_response
+        return redirect(
+            url_for("operations.channel_test_result", name=name, job_id=job.id),
+            code=303,
+        )
+
+    @blueprint.get("/channels/<name>/test/<int:job_id>")
+    @requires("view")
+    def channel_test_result(name: str, job_id: int):
+        job = _channel_test_job(name, job_id)
+        channel = next(
+            (item for item in config.watch.channels if item.name == name), None
+        )
+        return render_template(
+            "channel_test.html",
+            channel_name=name,
+            channel_type=channel.type if channel is not None else "unknown",
+            job=job,
+            queue_detail=_manager().queue_details().get(job.id),
+            log=_manager().store.log_tail(job),
+        )
 
     @blueprint.post("/jobs/<int:job_id>/cancel")
     @requires("run")
