@@ -145,8 +145,8 @@ def row_summary(text, index):
     return found.group(1).strip() if found else None
 
 
-def mode_checked(text, index):
-    found = re.search(rf'name="b{index}_mode" value="([a-z]+)" checked', text)
+def row_mode(text, index):
+    found = re.search(rf'name="b{index}_mode" value="([a-z]+)"', text)
     return found.group(1) if found else None
 
 
@@ -179,13 +179,13 @@ def selected_option(text, identifier):
 def assert_rendered_builder_state(text, index, condition):
     read = read_condition(condition)
     if read.model is None:
-        assert mode_checked(text, index) == "text"
+        assert row_mode(text, index) == "text"
         assert read.reason in text
         assert f'id="rule-{index}-criteria"' not in text
         return
 
     model = read.model
-    assert mode_checked(text, index) == "builder"
+    assert row_mode(text, index) == "builder"
     assert selected_option(text, f"b{index}_join") == model.join
     for criterion in CRITERIA:
         expected = model.uses.get(criterion.key)
@@ -277,7 +277,11 @@ def test_render_criteria_matches_the_model():
         header = re.search(r"<th scope=\"row\">(.*?)<p class=\"help\"[^>]*>(.*?)</p>", body, re.S)
         assert header is not None
         assert header.group(1).strip() == criterion.label
-        assert header.group(2).strip() == criterion.help
+        expected_help = criterion.help
+        if criterion.kind == "number":
+            spec = CONDITION_SCHEMA[key]
+            expected_help += f" Enter a value from {spec['minimum']} to {spec['maximum']}."
+        assert header.group(2).strip() == expected_help
         if criterion.kind == "enum":
             options = re.findall(
                 rf'id="b0_{key}_value".*?</select>', body, re.S
@@ -286,9 +290,8 @@ def test_render_criteria_matches_the_model():
             values = re.findall(r'<option value="([^"]*)"', options[0])
             assert values == [choice for choice, _ in criterion.choices]
         elif criterion.kind == "number":
-            assert f'min="{criterion.minimum}"' in body
-            assert f'max="{criterion.maximum}"' in body
-            assert f'step="{criterion.step}"' in body
+            assert 'type="text" inputmode="decimal"' in body
+            assert not re.search(r' (?:min|max|step)="', body)
 
 
 def test_representable_conditions_open_in_the_form_and_describe_in_words(tmp_path):
@@ -296,7 +299,7 @@ def test_representable_conditions_open_in_the_form_and_describe_in_words(tmp_pat
     _, _, client = write_app(tmp_path, rules)
     text = client.get("/config/rules").text
     for index, (condition, expected) in enumerate(REPRESENTABLE):
-        assert mode_checked(text, index) == "builder"
+        assert row_mode(text, index) == "builder"
         assert row_summary(text, index) == expected
         model = read_condition(condition).model
         assert describe(model) == expected
@@ -443,7 +446,7 @@ def test_text_mode_keeps_the_existing_textareas(tmp_path):
     rule = model_rule({"kev": "cisa", "cvss_min": 9.0})
     _, _, client = write_app(tmp_path, [rule])
     text = client.get("/config/rules").text
-    assert mode_checked(text, 0) == "text"
+    assert row_mode(text, 0) == "text"
     assert 'name="g0_condition"' in text
     assert 'name="g0_channels"' in text
     assert 'name="g0_events"' in text
@@ -550,19 +553,33 @@ def test_builder_mode_without_javascript_is_a_plain_post(tmp_path):
     assert saved.watch.rules[0].condition == parse_condition({"kev": "eu"})
 
 
-def test_text_radio_without_javascript_uses_the_hidden_fallback(tmp_path):
+def test_mode_switch_without_javascript_posts_only_visible_mode(tmp_path):
     rule = model_rule({"kev": "cisa"})
-    config, _, client = write_app(tmp_path, [rule])
+    config, app, client = write_app(tmp_path, [rule])
+    before = config.config_path.read_bytes()
     page = client.get("/config/rules")
+    assert 'name="edit_as_text" value="0"' in page.text
     data = page_form(page.text)
-    data["b0_mode"] = "text"
-    # Leave the builder controls in place, as a browser without JavaScript
-    # would; the hidden text values are the fallback source.
+    assert data["b0_mode"] == "builder"
+    assert "g0_condition" not in data
+    assert "g0_channels" not in data
+    assert "g0_events" not in data
+
+    data["edit_as_text"] = "0"
     response = client.post("/config/rules", data=data)
     assert response.status_code == 200, response.text
+    assert 'name="use_builder" value="0"' in response.text
+    assert app.extensions["dashboard_config"].pending == {}
+    assert config.config_path.read_bytes() == before
+    fields = page_form(response.text)
+    assert fields["b0_mode"] == "text"
+    assert not any(key.startswith("b0_") and key != "b0_mode" for key in fields)
+    assert {"g0_condition", "g0_channels", "g0_events"} <= set(fields)
+
+    response = client.post("/config/rules", data=fields)
+    assert response.status_code == 200, response.text
     assert confirm(client, response).status_code == 303
-    saved = load_config(config.config_path)
-    assert saved.watch.rules[0].condition == parse_condition({"kev": "cisa"})
+    assert load_config(config.config_path).watch.rules[0].condition == parse_condition({"kev": "cisa"})
 
 
 @pytest.mark.parametrize(
@@ -1032,6 +1049,200 @@ def test_another_post_route_keeps_the_8kib_body_limit(tmp_path):
     assert response.status_code == 413
 
 
+@pytest.mark.parametrize(
+    "channels,events",
+    [
+        ([" email ", "backup"], [" MATCH ", "rejected"]),
+        (["backup", "email"], ["rejected", "match"]),
+        (["backup", "email", "backup"], ["match", "match", "rejected"]),
+        (["email"], ["Match"]),
+    ],
+)
+def test_browser_noop_preserves_raw_channels_and_events(tmp_path, channels, events):
+    rule = model_rule({"kev": "cisa"}) | {"channels": channels}
+    if events is None:
+        del rule["events"]
+    else:
+        rule["events"] = events
+    config, _, client = write_app(tmp_path, [rule], CHANNEL | {"backup": CHANNEL["email"]})
+    page = client.get("/config/rules")
+    fields = page_form(page.text)
+    assert set(fields.getlist("b0_channels")) == {item.strip() for item in channels}
+    assert set(fields.getlist("b0_events")) == set(load_config(config.config_path).watch.rules[0].events)
+    assert confirm(client, client.post("/config/rules", data=fields)).status_code == 303
+    assert tomllib.loads(config.config_path.read_text())["watch"]["rules"] == [rule]
+
+
+@pytest.mark.parametrize("control", ["\r", "\n", "\t", "\0", "\x85"])
+def test_browser_noop_preserves_control_character_condition(tmp_path, control):
+    rule = model_rule({"keyword": [f"alpha{control}beta"]})
+    config, _, client = write_app(tmp_path, [rule])
+    before = rule_hash(config.watch.rules[0])
+    page = client.get("/config/rules")
+    fields = page_form(page.text)
+    assert fields["b0_mode"] == "text"
+    assert "b0_keyword_value" not in fields
+    assert confirm(client, client.post("/config/rules", data=fields)).status_code == 303
+    assert tomllib.loads(config.config_path.read_text())["watch"]["rules"] == [rule]
+    assert rule_hash(load_config(config.config_path).watch.rules[0]) == before
+
+
+def test_decimal_threshold_controls_cannot_block_submit(tmp_path):
+    condition = {"all": [{"cvss_min": 9.55}, {"epss_min": 0.00001}]}
+    _, _, client = write_app(tmp_path, [model_rule(condition)])
+    page = client.get("/config/rules")
+    for key, expected in (("cvss_min", "9.55"), ("epss_min", "0.00001")):
+        tag = re.search(rf'<input id="b0_{key}_value"[^>]*>', page.text)[0]
+        attributes = dict(re.findall(r'([\w-]+)="([^"]*)"', tag))
+        assert attributes["type"] == "text"
+        assert attributes["inputmode"] == "decimal"
+        assert attributes["value"] == expected
+        assert not {"step", "min", "max"} & attributes.keys()
+    assert confirm(client, preview(client, page)).status_code == 303
+
+
+@pytest.mark.parametrize("button", ["match_rule", "edit_as_text"])
+def test_rule_actions_keep_pending_edits_in_all_rows(tmp_path, button):
+    rules = [
+        model_rule({"kev": "cisa"}, "first"),
+        model_rule({"kev": "cisa", "cvss_min": 9.0}, "second"),
+        model_rule({"keyword": ["original"]}, "third"),
+    ]
+    config, app, client = write_app(tmp_path, rules, CHANNEL | {"backup": CHANNEL["email"]})
+    before = config.config_path.read_bytes()
+    page = client.get("/config/rules")
+    fields = page_form(page.text)
+    changes = {
+        "b0_kev_value": "eu",
+        "b0_events": "rejected",
+        "b0_channels": "backup",
+        "g1_name": "renamed",
+        "g1_condition": '{ keyword = ["edited"] }',
+        "g1_events": '["rejected"]',
+        "g2_cvss_providers": '["cna"]',
+        "b2_keyword_value": "pending",
+        "remove2": "yes",
+        button: "0",
+    }
+    for key, value in changes.items():
+        fields[key] = value
+    response = client.post("/config/rules", data=fields)
+    assert response.status_code == 200
+    retained = page_form(response.text)
+    for key in ("g1_name", "g1_condition", "g1_events", "g2_cvss_providers",
+                "b2_keyword_value", "remove2"):
+        assert retained[key] == fields[key]
+    if button == "match_rule":
+        assert "uses this rule’s stored score providers" in response.text
+        for key in ("b0_kev_value", "b0_events", "b0_channels"):
+            assert retained[key] == fields[key]
+    else:
+        assert tomllib.loads("condition = " + retained["g0_condition"])["condition"] == {"kev": "eu"}
+        assert tomllib.loads("channels = " + retained["g0_channels"])["channels"] == ["backup"]
+        assert tomllib.loads("events = " + retained["g0_events"])["events"] == ["rejected"]
+        retained["use_builder"] = "0"
+        back = client.post("/config/rules", data=retained)
+        assert back.status_code == 200
+        assert page_form(back.text)["b0_kev_value"] == "eu"
+    assert app.extensions["dashboard_config"].pending == {}
+    assert config.config_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("button", ["match_rule", "edit_as_text"])
+def test_stale_rule_action_does_not_associate_rows(tmp_path, monkeypatch, button):
+    config, _, client = write_app(tmp_path, [model_rule({"kev": "cisa"})])
+    fields = page_form(client.get("/config/rules").text)
+    fields[button] = "0"
+    fields["version"] = "stale"
+    before = config.config_path.read_bytes()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("stale form reached the match hook")
+
+    monkeypatch.setattr(builder, "match_preview", unexpected)
+    response = client.post("/config/rules", data=fields)
+    assert response.status_code == 409
+    assert "The configuration changed. Reload and try again." in response.text
+    assert config.config_path.read_bytes() == before
+
+
+def test_credential_keyword_is_absent_from_entire_error_response(tmp_path):
+    _, _, client = write_app(tmp_path, [model_rule({"keyword": ["original"]})])
+    fields = page_form(client.get("/config/rules").text)
+    secret = "token=SYNTHETIC_REDACTION_FIXTURE"
+    fields["b0_keyword_value"] = secret
+    fields.pop("b0_channels")
+    response = client.post("/config/rules", data=fields)
+    assert response.status_code == 400
+    assert "Choose at least one channel" in response.text
+    assert secret not in response.text
+    assert "Some criterion values were withheld." in response.text
+
+
+@pytest.mark.parametrize("button", [None, "match_rule", "edit_as_text"])
+def test_rule_actions_reject_conflicting_or_forged_fields(tmp_path, button):
+    config, _, client = write_app(tmp_path, [model_rule({"kev": "cisa"})])
+    before = config.config_path.read_bytes()
+    fields = page_form(client.get("/config/rules").text)
+    if button:
+        fields[button] = "0"
+    if button == "edit_as_text":
+        # Ensure this action is implemented before testing its rejection paths.
+        assert client.post("/config/rules", data=fields).status_code == 200
+
+    cases = [
+        ("g0_condition", '{ kev = "eu" }', False),
+        ("g0_channels", '["email"]', False),
+        ("g0_events", '["match"]', False),
+        ("b00_join", "any", False),
+        ("g00_name", "other", False),
+        ("b9_mode", "builder", False),
+        ("g9_name", "other", False),
+        ("g0_extra", "other", False),
+        ("g0_name", "duplicate", True),
+        ("b0_join", "unknown", False),
+        ("b0_mode", "text", False),
+        ("b0_events", "match", True),
+        ("b0_events", " MATCH ", True),
+        ("b0_join", None, False),
+    ]
+    for field, value, duplicate in cases:
+        forged = fields.copy()
+        if duplicate:
+            forged.add(field, value)
+        elif value is None:
+            forged.pop(field)
+        else:
+            forged[field] = value
+        assert client.post("/config/rules", data=forged).status_code == 400, field
+        assert config.config_path.read_bytes() == before
+
+
+def test_rules_post_rejects_multipart(tmp_path):
+    config, _, client = write_app(tmp_path, [model_rule({"kev": "cisa"})])
+    before = config.config_path.read_bytes()
+    fields = page_form(client.get("/config/rules").text)
+    response = client.post("/config/rules", data=fields, content_type="multipart/form-data")
+    assert response.status_code == 400
+    assert config.config_path.read_bytes() == before
+
+
+def test_open_rules_post_is_rejected_before_reading_form(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    path = tmp_path / "config.toml"
+    path.write_text(dashboard_config.dumps(document()))
+    client = dashboard.create_app(load_config(path)).test_client()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("open dashboard parsed a rules form")
+
+    from flask import Request
+
+    monkeypatch.setattr(Request, "_load_form_data", unexpected)
+    result = client.post("/config/rules", data={"action": "preview"})
+    assert result.status_code == 403
+
+
 def test_recent_check_does_not_count_catalog(tmp_path, monkeypatch):
     config, app, client = write_app(tmp_path, [model_rule({"kev": "cisa"})])
     store = app.extensions["dashboard_watch"]["store"]
@@ -1095,3 +1306,90 @@ def test_rule_builder_script_respects_server_disabled_controls():
         editable.use.change();
         assert.equal(editable.value.disabled, false);
     """, str(script)], check=True, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("dense", [False, True])
+def test_near_maximum_config_browser_form_fits_with_margin(tmp_path, dense):
+    from string import ascii_lowercase, digits
+
+    from cvebeacon.watch.rules import EVENT_KINDS
+
+    names = ["email"]
+    if dense:
+        names = [*ascii_lowercase, *digits, *(f"a{item}" for item in ascii_lowercase)]
+    channels = dict.fromkeys(names, CHANNEL["email"])
+    # Subnormal scores have the longest plain-decimal render values.
+    numeric = [{key: 5e-324} for key in ("cvss_min", "cvss_max", "epss_min")]
+    rules = [
+        model_rule({"all": numeric}, f"rule-{index}") | {
+            "channels": names,
+            "events": list(EVENT_KINDS),
+        }
+        for index in range(100)
+    ]
+    limit = dashboard_config.MAX_CONFIG
+    remaining = limit - len(dashboard_config.dumps(document(rules, channels)).encode())
+    item_cost = len(("🧪" * 200).encode()) + 4  # TOML quotes, comma and space
+    whole_items = remaining // item_cost
+    for start in range(0, whole_items, 100):
+        items = min(100, whole_items - start)
+        rules[start // 100]["condition"] = {
+            "all": [*numeric, {
+                "keyword": ["🧪" * 199 + chr(0x1F300 + offset) for offset in range(items)]
+            }],
+        }
+    config, _, client = write_app(tmp_path, rules, channels)
+    before = config.config_path.read_bytes()
+    assert limit - 2 * item_cost < len(before) <= limit
+    fields = page_form(client.get("/config/rules").text)
+    assert fields["row_count"] == "101"
+    assert fields.getlist("b0_channels") == names
+    assert fields.getlist("b0_events") == list(EVENT_KINDS)
+    body = urlencode(list(fields.items(multi=True))).encode("ascii")
+    measurement = (len(before), len(body), sum(len(values) for _, values in fields.lists()))
+    assert len(body) * 1.25 <= RULES_REQUEST_BYTES, measurement
+    response = client.post("/config/rules", data=body,
+                           content_type="application/x-www-form-urlencoded")
+    assert response.status_code == 200, response.text
+    assert confirm(client, response).status_code == 303
+    assert config.config_path.read_bytes() == before
+
+
+def test_rules_translator_bounds_total_fields(tmp_path):
+    config, _, client = write_app(tmp_path, [model_rule({"kev": "cisa"})])
+    before = config.config_path.read_bytes()
+    fields = page_form(client.get("/config/rules").text)
+    for _ in range(200):
+        fields.add("b0_channels", "email")
+    response = client.post("/config/rules", data=fields)
+    assert response.status_code == 400
+    assert "Too many rule form fields" in response.text
+    assert config.config_path.read_bytes() == before
+
+
+def test_recent_check_withholds_credential_keyword_and_match_reasons(tmp_path):
+    config, app, client = write_app(tmp_path, [model_rule({"keyword": ["original"]})])
+    secret = "token=SYNTHETIC_MATCH_FIXTURE"
+    app.extensions["dashboard_watch"]["store"].upsert_nvd(
+        [WatchRecord(
+            cve_id="CVE-2026-0001",
+            status="published",
+            published="2026-11-01T00:00:00.000",
+            last_modified="2026-11-02T00:00:00.000",
+            description=secret,
+            source_identifier="security@example.test",
+        )],
+        catalogs=config.watch.sources,
+    )
+    fields = page_form(client.get("/config/rules").text)
+    fields["b0_keyword_value"] = secret
+    proposed = client.post("/config/rules", data=fields)
+    assert proposed.status_code == 200
+    assert secret in proposed.text  # The explicit confirmation diff shows proposed values.
+    fields["match_rule"] = "0"
+    result = client.post("/config/rules", data=fields)
+    assert result.status_code == 200
+    assert "1 of the 1 most recently changed stored CVEs match this rule." in result.text
+    assert secret not in result.text
+    assert row_summary(result.text, 0) is None
+    assert "Some criterion values were withheld." in result.text

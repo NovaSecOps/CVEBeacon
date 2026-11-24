@@ -2507,7 +2507,13 @@ def _form_strings(item):
 
 def match_request(form):
     """Whether this POST asks for the read-only recent-CVE rule check."""
-    return bool(form.get("match_rule")) and form.get("action") in {None, "", "preview"}
+    return "match_rule" in form and form.get("action") in {None, "", "preview"}
+
+
+def _rule_form_action(form):
+    return match_request(form) or (
+        form.get("action") == "preview" and ("edit_as_text" in form or "use_builder" in form)
+    )
 
 
 def _rule_builder_render_context(section, document, count):
@@ -2541,11 +2547,10 @@ def register_config(app, config, *, host):
                 error="Configuration changed; reload the configuration page",
                 read_only=editor.read_only(),
             ), 409
-        # The match check is read-only, so it must not create the writer lock
-        # or remove expired staged files. Every editing request still cleans up.
+        # Rule checks and mode switches leave staged files and the writer lock alone.
         if not editor.read_only() and not (
                 request.method == "POST" and request.endpoint == "config_editor.rules"
-                and match_request(request.form)):
+                and _rule_form_action(request.form)):
             editor.cleanup()
 
     @blueprint.teardown_request
@@ -2565,6 +2570,7 @@ def register_config(app, config, *, host):
         groups = None
         version = None
         match = None
+        retained_form = None
         status = 400
         try:
             document, _, _, version, current_config = editor.read()
@@ -2573,69 +2579,67 @@ def register_config(app, config, *, host):
                     raise ConfigurationError(
                         "The configuration directory is read-only. Ask the operator to enable "
                         "editing for the dashboard service, then reload this page.")
-                if section == "rules" and match_request(request.form):
-                    # A read-only check against stored CVEs: no preview record is made.
-                    from .dashboard_rule_builder import match_preview
-                    match = match_preview(request.form, document, current_config)
-                    if match is not None:
-                        groups = groups_for(section, document,
-                                            can_manage="manage_secrets" in g.permissions,
-                                            can_admin=g.user.is_admin)
-                        return render_template("config_section.html", section=section,
-                                               groups=groups,
-                                               **_rule_builder_render_context(
-                                                   section, document, len(groups)),
-                                               version=version, match=match, events=EVENT_KINDS,
-                                               leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
-                                               toml_value=value, channel_types=sorted(TYPE_KEYS),
-                                               channel_names=[channel.name for channel in current_config.watch.channels],
-                                               read_only=editor.read_only())
                 action = request.form.get("action")
+                rule_action = section == "rules" and _rule_form_action(request.form)
                 if action == "confirm":
                     ended = editor.commit(request.form.get("preview"), section, app.extensions["dashboard_users"],
                                           {permission}, request.form.get("lockout") == "yes")
                     return redirect(url_for("login") if ended else
                                     url_for("config_editor." + section, saved=1), code=303)
-                if action != "preview":
+                if action != "preview" and not rule_action:
                     abort(400, "Unsupported configuration action; reload the form")
                 if request.form.get("version") != version:
-                    abort(409, "Configuration changed; reload the form")
+                    abort(409, "The configuration changed. Reload and try again."
+                          if section == "rules" else "Configuration changed; reload the form")
                 count = form_row_count()
-                row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
-                groups = groups_for(section, document, count=count, row_types=row_types,
-                                    can_manage="manage_secrets" in g.permissions, can_admin=g.user.is_admin)
-                prepared = request.form
-                if section == "rules":
-                    # The visual builder rewrites its posted fields into the
-                    # same values the text form sends, before the checks run.
-                    from .dashboard_rule_builder import prepare_rules_form
-                    prepared = prepare_rules_form(request.form, document, current_config, count)
-                candidate, staged, replacements = parse_form(editor, section, document, current_config,
-                                                             g.permissions, can_admin=g.user.is_admin,
-                                                             count=count, form=prepared)
-                preview, lockout = editor.preview(
-                    section, candidate, version, staged, replacements,
-                    current_document=document, current_config=current_config,
-                )
-                staged = []
-                diff = "\n".join(difflib.unified_diff(
-                    dumps(redacted(project_document(document, section))).splitlines(),
-                    dumps(redacted(project_document(candidate, section))).splitlines(),
-                    fromfile="current", tofile="proposed", lineterm=""))
-            new_type = request.args.get("new_type", "smtp")
-            groups = groups_for(section, document, new_type=new_type,
-                                can_manage="manage_secrets" in g.permissions,
-                                can_admin=g.user.is_admin)
-            return render_template("config_section.html", section=section,
-                                   groups=groups,
-                                   **_rule_builder_render_context(
-                                       section, document, len(groups)),
-                                   version=version, preview=preview, diff=diff, lockout=lockout,
-                                   match=match, channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS,
-                                   leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
-                                   channel_names=[channel.name for channel in current_config.watch.channels],
-                                   toml_value=value, saved=request.args.get("saved") == "1",
-                                   read_only=editor.read_only())
+                if rule_action:
+                    from .dashboard_rule_builder import match_preview, retain_rule_action_form
+
+                    retained_form, error = retain_rule_action_form(
+                        request.form, document, current_config, count)
+                    if match_request(request.form):
+                        match = match_preview(request.form, document, current_config)
+                    groups = groups_for(section, document, count=count,
+                                        can_manage="manage_secrets" in g.permissions,
+                                        can_admin=g.user.is_admin)
+                    status = 200
+                else:
+                    row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
+                    groups = groups_for(section, document, count=count, row_types=row_types,
+                                        can_manage="manage_secrets" in g.permissions, can_admin=g.user.is_admin)
+                    prepared = request.form
+                    if section == "rules":
+                        # The visual builder rewrites its posted fields into the
+                        # same values the text form sends, before the checks run.
+                        from .dashboard_rule_builder import prepare_rules_form
+                        prepared = prepare_rules_form(request.form, document, current_config, count)
+                    candidate, staged, replacements = parse_form(editor, section, document, current_config,
+                                                                 g.permissions, can_admin=g.user.is_admin,
+                                                                 count=count, form=prepared)
+                    preview, lockout = editor.preview(
+                        section, candidate, version, staged, replacements,
+                        current_document=document, current_config=current_config,
+                    )
+                    staged = []
+                    diff = "\n".join(difflib.unified_diff(
+                        dumps(redacted(project_document(document, section))).splitlines(),
+                        dumps(redacted(project_document(candidate, section))).splitlines(),
+                        fromfile="current", tofile="proposed", lineterm=""))
+            if retained_form is None:
+                new_type = request.args.get("new_type", "smtp")
+                groups = groups_for(section, document, new_type=new_type,
+                                    can_manage="manage_secrets" in g.permissions,
+                                    can_admin=g.user.is_admin)
+                return render_template("config_section.html", section=section,
+                                       groups=groups,
+                                       **_rule_builder_render_context(
+                                           section, document, len(groups)),
+                                       version=version, preview=preview, diff=diff, lockout=lockout,
+                                       match=match, channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS,
+                                       leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
+                                       channel_names=[channel.name for channel in current_config.watch.channels],
+                                       toml_value=value, saved=request.args.get("saved") == "1",
+                                       read_only=editor.read_only())
         except FieldValidationError as exc:
             error = str(exc)
         except ConfigurationError as exc:
@@ -2649,13 +2653,20 @@ def register_config(app, config, *, host):
         finally:
             for path in staged:
                 path.unlink(missing_ok=True)
-        if groups is not None and status == 400 and request.form.get("action") == "preview":
+        if groups is not None and (
+                retained_form is not None or status == 400 and request.form.get("action") == "preview"):
+            if retained_form is not None:
+                from .watch.rules import NAME_PATTERN
+            form = request.form if retained_form is None else retained_form
             for index, group in enumerate(groups):
-                group["removed"] = request.form.get(f"remove{index}") == "yes"
+                group["removed"] = form.get(f"remove{index}") == "yes"
                 for control in group["controls"]:
-                    key = control["key"]
-                    submitted = request.form.get(control["id"], control["value"])
-                    retained = retained_form_value(control, submitted, section)
+                    submitted = form.get(control["id"], control["value"])
+                    if retained_form is not None and control["key"] == "name":
+                        # Rule actions keep valid labels without redisplaying unvalidated ones.
+                        retained = submitted if not submitted.strip() or NAME_PATTERN.fullmatch(submitted.strip()) else None
+                    else:
+                        retained = retained_form_value(control, submitted, section)
                     if retained is None:
                         continue
                     control["value"] = retained

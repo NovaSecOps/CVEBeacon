@@ -15,11 +15,11 @@
   {'key': 'exploitation', 'label': 'Exploitation status', 'kind': 'enum', 'input': 'select',
    'help': 'Active means a source reports attacks now.'},
   {'key': 'cvss_min', 'label': 'Severity score is at least', 'kind': 'number', 'input': 'number',
-   'step': '0.1', 'help': 'A 0-10 severity score (CVSS). 9 and above is Critical. CVEs with no score yet never match.'},
+   'help': 'A 0-10 severity score (CVSS). 9 and above is Critical. CVEs with no score yet never match.'},
   {'key': 'cvss_max', 'label': 'Severity score is at most', 'kind': 'number', 'input': 'number',
-   'step': '0.1', 'help': 'CVEs with no score yet never match.'},
+   'help': 'CVEs with no score yet never match.'},
   {'key': 'epss_min', 'label': 'Exploitation chance is at least', 'kind': 'number', 'input': 'number',
-   'step': '0.01', 'help': 'EPSS is the estimated chance of exploitation in the next 30 days. 0.5 means 50%. CVEs with no value yet never match.'},
+   'help': 'EPSS is the estimated chance of exploitation in the next 30 days. 0.5 means 50%. CVEs with no value yet never match.'},
   {'key': 'vendor', 'label': 'Vendor is one of', 'kind': 'text', 'input': 'text',
    'help': 'Names must match exactly (capital letters do not matter). Example: Example Corp, Widget Inc.'},
   {'key': 'product', 'label': 'Product is one of', 'kind': 'text', 'input': 'text',
@@ -53,19 +53,18 @@
 {% macro error_target(key, index) %}{% if key == 'criteria' or key == 'condition' %}rule-{{ index }}-criteria{% elif key == 'channels' %}rule-{{ index }}-channels{% elif key == 'events' %}rule-{{ index }}-events{% elif key == 'join' %}b{{ index }}_join{% else %}b{{ index }}_{{ key }}_value{% endif %}{% endmacro %}
 
 {% if field.key == 'condition' %}
-{% set condition = group.data.get('condition') if group.data else none %}
 {% set stored = rule_builder_rows.get(index, {}) if rule_builder_rows is defined else {} %}
 {% set ui = none %}
 {% set ui_state = g.get('rule_builder') if g is defined else none %}
 {% if ui_state and ui_state.get('rows') and index in ui_state.get('rows') %}{% set ui = ui_state.get('rows').get(index) %}{% endif %}
-{% set posted_mode = request.form.get('b' ~ index ~ '_mode') if request.form else none %}
-{% set mode = ui.get('mode') if ui else (posted_mode if posted_mode in ['builder', 'text'] else stored.get('mode', 'builder')) %}
+{% set mode = ui.get('mode') if ui else stored.get('mode', 'builder') %}
 {% set join = ui.get('join') if ui else stored.get('join', 'any') %}
-{% set uses = ui.get('uses') if ui else stored.get('uses', {}) %}
-{% set values = ui.get('values') if ui else stored.get('values', {}) %}
-{% set errors = ui.get('errors') if ui else {} %}
-{% set reason = (ui.get('reason') if ui and ui.get('reason') else stored.get('reason', '')) %}
-{% set summary = ui.get('summary') if ui and ui.get('summary') else ('' if errors else stored.get('summary', '')) %}
+{% set uses = ui.get('uses', {}) if ui else stored.get('uses', {}) %}
+{% set values = ui.get('values', {}) if ui else stored.get('values', {}) %}
+{% set errors = ui.get('errors', {}) if ui else {} %}
+{% set reason = stored.get('reason', '') %}
+{% set summary = ui.get('summary', '') if ui else stored.get('summary', '') %}
+{% set withheld = ui and ui.get('withheld') %}
 {% set channels_field = namespace(value=none) %}
 {% set events_field = namespace(value=none) %}
 {% for control in group.controls %}
@@ -79,20 +78,17 @@
   {% endcall %}
 {% endif %}
 
-<div class="field">
-  <p id="rule-{{ index }}-mode-label"><strong>How do you want to edit this rule?</strong></p>
-  <div role="radiogroup" aria-labelledby="rule-{{ index }}-mode-label">
-    <div class="field field-check"><input id="b{{ index }}_mode_builder" type="radio" name="b{{ index }}_mode" value="builder"{% if mode != 'text' %} checked{% endif %}{% if read_only %} disabled{% endif %}><label for="b{{ index }}_mode_builder">Use the form</label></div>
-    <div class="field field-check"><input id="b{{ index }}_mode_text" type="radio" name="b{{ index }}_mode" value="text"{% if mode == 'text' %} checked{% endif %}{% if read_only %} disabled{% endif %}><label for="b{{ index }}_mode_text">Edit as text (advanced)</label></div>
-  </div>
-</div>
+<input type="hidden" name="b{{ index }}_mode" value="{{ mode }}">
+{% if not read_only %}
+  {% if mode == 'builder' %}
+    <div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="edit_as_text" value="{{ index }}">Edit as text</button></div>
+  {% elif stored.get('mode') == 'builder' and group.data.get('condition') %}
+    <div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="use_builder" value="{{ index }}">Use the builder</button></div>
+  {% endif %}
+{% endif %}
 
 {% if mode == 'text' %}
   {% if reason %}{% call callout('info', 'Edited as text') %}<p>{{ reason }}</p>{% endcall %}{% endif %}
-  {#- The ordinary textarea stays authoritative in text mode.  The read-only
-      match check re-renders the rule page, so show the text it actually
-      checked when the page has not been saved. -#}
-  {% if match and ui and ui.get('condition_text') %}{% set _ = field.update({'value': ui.get('condition_text')}) %}{% endif %}
   {{ config_control(field, index) }}
   {% if channels_field.value %}{{ config_control(channels_field.value, index) }}{% endif %}
   {% if events_field.value %}{{ config_control(events_field.value, index) }}{% endif %}
@@ -120,7 +116,7 @@
         {% set error = errors.get(key) %}
         {% set schema = condition_schema.get(key, {}) %}
         <tr class="criterion" data-criterion="{{ key }}">
-          <th scope="row">{{ criterion.label }}<p class="help" id="b{{ index }}_{{ key }}_help">{{ criterion.help }}</p></th>
+          <th scope="row">{{ criterion.label }}<p class="help" id="b{{ index }}_{{ key }}_help">{{ criterion.help }}{% if criterion.input == 'number' %} Enter a value from {{ schema.minimum }} to {{ schema.maximum }}.{% endif %}</p></th>
           <td><label class="visually-hidden" for="b{{ index }}_{{ key }}_use">Use {{ criterion.label }}</label>
             <select id="b{{ index }}_{{ key }}_use" name="b{{ index }}_{{ key }}_use" data-rule-use{% if read_only %} disabled{% endif %}>
               <option value=""{% if not use %} selected{% endif %}>Not used</option>
@@ -137,7 +133,7 @@
                 {% if value and value|string|lower not in lower_choices %}<option value="{{ value }}" selected>Submitted value</option>{% endif %}
               </select>
             {% elif criterion.input == 'number' %}
-              <input id="b{{ index }}_{{ key }}_value" name="b{{ index }}_{{ key }}_value" type="number" value="{{ value }}" min="{{ schema.get('minimum', '') }}" max="{{ schema.get('maximum', '') }}" step="{{ criterion.step }}" data-rule-value{% if read_only %} disabled{% endif %} aria-describedby="b{{ index }}_{{ key }}_help{% if error %} b{{ index }}_{{ key }}_error{% endif %}"{% if error %} aria-invalid="true"{% endif %}>
+              <input id="b{{ index }}_{{ key }}_value" name="b{{ index }}_{{ key }}_value" type="text" inputmode="decimal" value="{{ value }}" data-rule-value{% if read_only %} disabled{% endif %} aria-describedby="b{{ index }}_{{ key }}_help{% if error %} b{{ index }}_{{ key }}_error{% endif %}"{% if error %} aria-invalid="true"{% endif %}>
             {% else %}
               <input id="b{{ index }}_{{ key }}_value" name="b{{ index }}_{{ key }}_value" type="text" value="{{ value }}" data-rule-value{% if read_only %} disabled{% endif %} aria-describedby="b{{ index }}_{{ key }}_help{% if error %} b{{ index }}_{{ key }}_error{% endif %}"{% if error %} aria-invalid="true"{% endif %}>
             {% endif %}
@@ -148,7 +144,7 @@
       </tbody>
     </table>
     {% endcall %}
-    <p class="muted" id="rule-{{ index }}-summary">{{ summary }}</p>
+    {% if not withheld %}<p class="muted" id="rule-{{ index }}-summary">{{ summary }}</p>{% endif %}
     <p class="help">An exclusion only applies when the information is known.</p>
     {% call explain('How conditions are written') %}
     <ul>{% for key, spec in condition_schema.items() %}<li><code>{{ key }} = {{ toml_value(spec.example) }}</code> — {% if spec.kind == 'enum' %}one of {{ spec.choices|join(', ') }}{% elif spec.kind == 'number' %}number from {{ spec.minimum }} to {{ spec.maximum }}{% elif spec.kind == 'cwe' %}array of CWE numbers or identifiers{% else %}nonempty array of strings{% endif %}{% if spec.qualifiers %}. For selected versions, use <code>{{ key }} = {{ toml_value(spec.qualified_example) }}</code>. Versions are {{ spec.qualifiers.versions|join(", ") }}.{% endif %}</li>{% endfor %}</ul>
@@ -156,7 +152,7 @@
     {% endcall %}
   </fieldset>
 
-  {% set selected_channels = ui.get('channels') if ui and ui.get('channels') is not none else (group.data.get('channels', []) if group.data else []) %}
+  {% set selected_channels = ui.get('channels') if ui and ui.get('channels') is not none else stored.get('channels', []) %}
   <div class="field" id="rule-{{ index }}-channels">
     <p><strong>Send to</strong></p>
     {% if not channel_names %}
@@ -170,9 +166,7 @@
     {% if errors.get('channels') %}<p class="field-error" id="rule-{{ index }}-channels-error">{{ errors.get('channels') }}</p>{% endif %}
   </div>
 
-  {% set stored_events = group.data.get('events') if group.data else [] %}
-  {% set default_events = events|list %}
-  {% set selected_events = ui.get('events') if ui and ui.get('events') is not none else (stored_events if stored_events else default_events) %}
+  {% set selected_events = ui.get('events') if ui and ui.get('events') is not none else stored.get('events', events) %}
   <div class="field" id="rule-{{ index }}-events">
     <p><strong>Alert on</strong></p>
     {% for kind in events %}
@@ -182,18 +176,15 @@
     {% if errors.get('events') %}<p class="field-error" id="rule-{{ index }}-events-error">{{ errors.get('events') }}</p>{% endif %}
   </div>
 
-  {#- Hidden text values keep the text radio usable when JavaScript is off and
-      are overwritten by the server whenever the builder mode is used. -#}
-  <textarea name="g{{ index }}_condition" hidden>{{ toml_value(condition) if condition is mapping else '' }}</textarea>
-  <textarea name="g{{ index }}_channels" hidden>{{ toml_value(selected_channels|list) }}</textarea>
-  <textarea name="g{{ index }}_events" hidden>{% if not stored_events and selected_events|list|sort == events|list|sort %}{% else %}{{ toml_value(selected_events|list) }}{% endif %}</textarea>
-
 {% endif %}
+
+{% if withheld %}<p class="muted">Some criterion values were withheld. Re-enter them before saving.</p>{% endif %}
 
 {% if not read_only and group.data.get('name') %}<div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="match_rule" value="{{ index }}">Check against recent CVEs</button></div>{% endif %}
 
 {% if match and match.get('index') == index %}
   {% call callout('info', 'Recent CVE check') %}
+  <p>This check uses this rule’s stored score providers.</p>
   {% if match.get('error') %}
     <p>{{ match.get('error') }}</p>
   {% elif match.get('stored', 0) == 0 %}
