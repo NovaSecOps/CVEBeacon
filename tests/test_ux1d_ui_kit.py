@@ -422,3 +422,43 @@ def test_setup_checklist_classes_are_styled_with_tokens():
         "/* --------------------------------------------- 5. Legacy", 1
     )[0]
     assert "#" not in new_rules
+    narrow = css.split("@media (max-width: 40rem) {", 1)[1].split("}", 2)
+    assert "#" not in narrow[0] + narrow[1]
+    assert not re.search(r"rgba?\(|hsla?\(", new_rules + narrow[0] + narrow[1])
+
+
+def test_setup_steps_keep_numbers_beside_each_row():
+    css = STYLESHEET.read_text(encoding="utf-8")
+    rule = re.search(r"\.setup-steps \{([^}]*)\}", css).group(1)
+
+    assert "list-style: decimal outside" in rule
+    assert "padding: 0 0 0 2rem" in rule
+
+
+@pytest.mark.parametrize(
+    "url", ["javascript:alert(1)", "//elsewhere.example/x", "https://elsewhere.example/", "next"]
+)
+def test_setup_checklist_links_only_server_paths(env, url):
+    text = render(
+        env,
+        "{% from 'ui.html' import setup_checklist %}"
+        "{{ setup_checklist(items, 0, 1) }}",
+        items=[item("one", "todo", action_url=url, action_label="Go", hint="Ask an administrator.")],
+    )
+
+    assert "href=" not in text
+    assert "Go</a>" not in text
+    assert '<p class="help">Ask an administrator.</p>' in text
+
+
+def test_check_field_derived_id_never_holds_whitespace(env):
+    text = render(
+        env,
+        "{% from 'ui.html' import check_field %}"
+        "{{ check_field('Email team', 'channels', value='email team', help='Help.') }}",
+    )
+
+    assert '<input id="f-channels-email%20team" type="checkbox"' in text
+    assert '<label for="f-channels-email%20team">' in text
+    assert 'aria-describedby="f-channels-email%20team-help"' in text
+    assert 'id="f-channels-email%20team-help"' in text

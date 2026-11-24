@@ -81,7 +81,8 @@
 {% endmacro %}
 
 {#- Getting-started list. items: list of dicts {id,title,state,detail,action_url,action_label,hint}.
-    state: done|todo|attention|unknown|na. open: bool (list expanded). -#}
+    state: done|todo|attention|unknown|na. open: bool (list expanded).
+    action_url must be a server-built path (url_for output); anything else is not linked. -#}
 {% macro setup_checklist(items, done, total, open=true, unknown=0) %}
 {% set labels = {'done': ('Done','success'), 'todo': ('To do','neutral'), 'attention': ('Needs attention','warning'),
                  'unknown': ('Could not check','warning'), 'na': ('Not available','neutral')} %}
@@ -91,7 +92,7 @@
 <ol class="setup-steps">{% for s in items %}
 <li class="setup-step setup-{{ s.state }}" id="setup-{{ s.id }}"><div class="setup-row"><span class="setup-state">{{ badge(labels[s.state][0], labels[s.state][1]) }}</span>
 <div class="setup-body"><p class="setup-title">{{ s.title }}</p><p class="setup-detail">{{ s.detail }}</p>
-{% if s.action_url %}<a class="btn btn-secondary btn-small" href="{{ s.action_url }}">{{ s.action_label }}</a>{% elif s.hint %}<p class="help">{{ s.hint }}</p>{% endif %}</div></div></li>{% endfor %}</ol></details>
+{% if s.action_url and (s.action_url | string).startswith('/') and not (s.action_url | string).startswith('//') %}<a class="btn btn-secondary btn-small" href="{{ s.action_url }}">{{ s.action_label }}</a>{% elif s.hint %}<p class="help">{{ s.hint }}</p>{% endif %}</div></div></li>{% endfor %}</ol></details>
 {% endmacro %}
 
 {#- <select> with label, help, error. options: list of (value, text). -#}
@@ -104,7 +105,8 @@
 
 {#- Checkbox with label and help (class field-check already exists). -#}
 {% macro check_field(label, name, value='yes', checked=false, help=none, id=none) %}
-{% set cid = id or 'f-' ~ name ~ '-' ~ value %}
+{#- A derived id is percent-encoded so it never holds whitespace; pass an explicit id when a name and value pair repeats. -#}
+{% set cid = id or ('f-' ~ name ~ '-' ~ value) | urlencode %}
 <div class="field field-check"><input id="{{ cid }}" type="checkbox" name="{{ name }}" value="{{ value }}"{% if checked %} checked{% endif %}{% if help %} aria-describedby="{{ cid }}-help"{% endif %}><label for="{{ cid }}">{{ label }}</label>{% if help %}<p class="help" id="{{ cid }}-help">{{ help }}</p>{% endif %}</div>
 {% endmacro %}
 

@@ -517,7 +517,8 @@ details.disclosure > summary { font-weight: 600; }
   display: flex; justify-content: space-between; gap: var(--space-3);
   cursor: pointer; min-height: 40px; align-items: center;
 }
-.setup-steps { list-style: decimal inside; margin: 0; padding: 0; }
+/* Outside markers with container padding keep each number beside its row. */
+.setup-steps { list-style: decimal outside; margin: 0; padding: 0 0 0 2rem; }
 .setup-step {
   display: list-item;
   padding: var(--space-3) 0; border-top: 1px solid var(--border);
