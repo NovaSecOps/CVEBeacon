@@ -121,6 +121,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     app = Flask(__name__)
     # Lets templates link to features that are not always registered.
     app.jinja_env.globals["has_endpoint"] = lambda name: name in app.view_functions
+    # True only in account mode and with the named permission.
+    app.jinja_env.globals["can"] = lambda permission: bool(
+        getattr(g, "accounts", False)) and permission in (
+            getattr(g, "permissions", None) or ())
     app.extensions["dashboard_auth"] = auth
     app.extensions["account_sessions"] = account_sessions
     app.extensions["dashboard_users"] = users
@@ -359,7 +363,9 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/")
     @requires("view")
     def overview():
-        return render_template("overview.html", data=snapshot())
+        from .dashboard_setup import Viewer, gather
+        return render_template("overview.html", data=snapshot(),
+                               setup=gather(config, viewer=Viewer.from_flask(app)))
 
     @app.get("/findings")
     @requires("view")
