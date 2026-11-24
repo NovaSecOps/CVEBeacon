@@ -8,6 +8,7 @@ reported as a good state.
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -136,6 +137,18 @@ def _failure_names(value) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+def _failed_test_detail(names) -> str:
+    """One sentence naming up to three failed channels and any remainder."""
+    shown = list(names)[:3]
+    quoted = [f'"{name}"' for name in shown]
+    if len(names) > len(shown):
+        listed = ", ".join(quoted)
+        return f"The last test to {listed} and {len(names) - len(shown)} more failed."
+    if len(quoted) == 1:
+        return f"The last test to {quoted[0]} failed."
+    return f"The last test to {', '.join(quoted[:-1])} and {quoted[-1]} failed."
+
+
 def _link(
     viewer: Viewer,
     permission: str | None,
@@ -207,8 +220,15 @@ def _sources_step(config: AppConfig, meta, now: datetime, viewer: Viewer) -> Ste
             _link(viewer, "view", "watch.overview", "See sync details", None),
         )
     sources = tuple(config.watch.sources or ())
+    if not sources:
+        return _step(
+            "sources", SOURCES_TITLE, "todo",
+            "Watch mode is on, but no data source is selected.",
+            _link(viewer, "edit_watch", "config_editor.watch", "Choose sources",
+                  "Ask an administrator to choose data sources."),
+        )
     last_sync_at = meta.get("last_sync_at")
-    if not sources or not last_sync_at:
+    if not last_sync_at:
         return _step(
             "sources", SOURCES_TITLE, "todo",
             "Watch mode is on, but no data has been downloaded yet.",
@@ -271,6 +291,8 @@ def _channel_step(config: AppConfig, jobs, viewer: Viewer) -> Step:
 
     tested = [channel.name for channel in enabled
               if channel.name in latest and accepted(latest[channel.name])]
+    failed = [channel.name for channel in enabled
+              if channel.name in latest and latest[channel.name].status == "failed"]
     if tested:
         name = tested[0]
         detail = (
@@ -279,9 +301,17 @@ def _channel_step(config: AppConfig, jobs, viewer: Viewer) -> Step:
         )
         if len(enabled) > 1:
             detail += f" {len(tested)} of {len(enabled)} channels tested."
+        if failed:
+            # A failure on another channel must not be hidden by a success.
+            detail += " " + _failed_test_detail(failed)
+            job = latest[failed[0]]
+            return _step(
+                "channel", CHANNEL_TITLE, "attention", detail,
+                _link(viewer, "view", "operations.channel_test_result", "Review the test", None,
+                      values={"name": failed[0], "job_id": job.id},
+                      fallback="operations.job_detail", fallback_values={"job_id": job.id}),
+            )
         return _step("channel", CHANNEL_TITLE, "done", detail)
-    failed = [channel.name for channel in enabled
-              if channel.name in latest and latest[channel.name].status == "failed"]
     if failed:
         name = failed[0]
         job = latest[name]
@@ -308,10 +338,10 @@ def _rule_step(config: AppConfig, viewer: Viewer) -> Step:
     sending = [rule for rule in config.watch.rules
                if rule.enabled and channels.intersection(rule.channels)]
     if sending:
-        return _step(
-            "rule", RULE_TITLE, "done",
-            f"{len(sending)} rule(s) send alerts to an enabled channel.",
-        )
+        count = len(sending)
+        detail = ("1 rule sends alerts to an enabled channel." if count == 1
+                  else f"{count} rules send alerts to an enabled channel.")
+        return _step("rule", RULE_TITLE, "done", detail)
     return _step(
         "rule", RULE_TITLE, "todo",
         "No enabled rule sends alerts to an enabled channel, so no alert will be delivered.",
@@ -378,8 +408,9 @@ def _backup_step(info, now: datetime, viewer: Viewer) -> Step | None:
         )
     last = info.get("last")
     if not last:
+        detail = "No valid backup exists yet." if info.get("count") else "No backup exists yet."
         return _step(
-            "backup", BACKUP_TITLE, "todo", "No backup exists yet.",
+            "backup", BACKUP_TITLE, "todo", detail,
             _link(viewer, None, "backups.index", "Open Backups", hint, admin=True),
         )
     age = _age(last, now)
@@ -472,11 +503,37 @@ def _backup_info(config: AppConfig, viewer: Viewer):
         return None
 
 
+def _completed_scan_exists(path: Path) -> bool:
+    """Whether a completed scan is on record, without opening a WAL connection.
+
+    A read-only WAL connection leaves ``-wal``/``-shm`` files beside the scan
+    database. When no writer is active the main file is read immutably, which
+    creates nothing; anything unclear falls through to the normal read so the
+    existing error handling still applies.
+    """
+    for suffix in ("-wal", "-journal"):
+        if Path(str(path) + suffix).exists():
+            return True
+    try:
+        uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as db:
+            row = db.execute(
+                "SELECT 1 FROM runs WHERE status='completed' LIMIT 1"
+            ).fetchone()
+            return row is not None
+    except (sqlite3.Error, OSError, ValueError):
+        return True
+
+
 def _client_info(config: AppConfig):
     try:
+        managed = has_managed_inventory(config.inventory_directory)
+        path = Path(config.database_path)
+        if not path.is_file() or not _completed_scan_exists(path):
+            return ClientInfo(managed=managed, scanned=0)
         return ClientInfo(
-            managed=has_managed_inventory(config.inventory_directory),
-            scanned=client_page(config.database_path, limit=1)[2],
+            managed=managed,
+            scanned=client_page(path, limit=1)[2],
         )
     except READ_FAILURES:
         return None

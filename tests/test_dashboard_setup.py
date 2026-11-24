@@ -25,6 +25,7 @@ from cvebeacon.dashboard_setup import (
     gather,
 )
 from cvebeacon.errors import StateError
+from cvebeacon.state import StateStore
 from cvebeacon.watch.channels import ChannelConfig
 from cvebeacon.watch.rules import Condition, Rule
 from cvebeacon.watch.store import WatchStore
@@ -234,10 +235,13 @@ def test_sources_step_reports_unreadable_data(meta):
     assert item.action_url == "/watch.overview"
 
 
-def test_sources_step_without_sources_asks_for_the_first_sync():
+def test_sources_step_without_sources_asks_to_choose_sources():
     item = step(steps_for(unit_config(sources=())), "sources")
     assert item.state == "todo"
-    assert item.detail == "Watch mode is on, but no data has been downloaded yet."
+    assert item.detail == "Watch mode is on, but no data source is selected."
+    assert item.action_label == "Choose sources"
+    assert item.action_url == "/config_editor.watch"
+    assert item.hint is None
 
 
 def test_channel_step_reports_no_enabled_channel():
@@ -321,6 +325,50 @@ def test_channel_step_uses_the_latest_job_per_channel():
     assert item.state == "done"
 
 
+def test_channel_step_reports_a_failure_beside_an_accepted_test():
+    config = unit_config(channels=(make_channel("email"), make_channel("slack")))
+    item = step(steps_for(config, jobs=(
+        make_job(1, name="email"),
+        make_job(2, name="slack", status="failed", exit_code=3),
+    )), "channel")
+    assert item.state == "attention"
+    assert item.detail == (
+        f'"email" accepted a test message on {STAMP}. '
+        "Accepted means the service took it; check that it arrived. "
+        "1 of 2 channels tested. "
+        'The last test to "slack" failed.'
+    )
+    assert item.action_label == "Review the test"
+    assert item.action_url == "/operations.job_detail?job_id=2"
+
+
+def test_channel_step_names_at_most_three_failed_channels():
+    names = ("email", "alpha", "bravo", "charlie", "delta", "echo")
+    config = unit_config(channels=tuple(make_channel(name) for name in names))
+    jobs = [make_job(1, name="email")]
+    jobs.extend(make_job(index, name=name, status="failed", exit_code=3)
+                for index, name in enumerate(names[1:], start=2))
+    item = step(steps_for(config, jobs=tuple(jobs)), "channel")
+    assert item.state == "attention"
+    assert item.detail.endswith(
+        'The last test to "alpha", "bravo", "charlie" and 2 more failed.'
+    )
+    assert item.action_url == "/operations.job_detail?job_id=2"
+
+
+def test_channel_step_names_several_failed_channels():
+    config = unit_config(channels=(make_channel("email"), make_channel("alpha"),
+                                   make_channel("bravo")))
+    item = step(steps_for(config, jobs=(
+        make_job(1, name="email"),
+        make_job(2, name="alpha", status="failed", exit_code=3),
+        make_job(3, name="bravo", status="failed", exit_code=3),
+    )), "channel")
+    assert item.state == "attention"
+    assert item.detail.endswith('The last test to "alpha" and "bravo" failed.')
+    assert item.action_url == "/operations.job_detail?job_id=2"
+
+
 def test_channel_step_ignores_disabled_channels_and_other_jobs():
     config = unit_config(channels=(make_channel("email"), make_channel("old", enabled=False)))
     jobs = (
@@ -372,11 +420,11 @@ def test_rule_step_reports_done_and_counts_rules():
     config = unit_config(channels=(make_channel(),), rules=(make_rule(),))
     item = step(steps_for(config), "rule")
     assert item.state == "done"
-    assert item.detail == "1 rule(s) send alerts to an enabled channel."
+    assert item.detail == "1 rule sends alerts to an enabled channel."
     config = unit_config(channels=(make_channel(),),
                          rules=(make_rule("first"), make_rule("second")))
     item = step(steps_for(config), "rule")
-    assert item.detail == "2 rule(s) send alerts to an enabled channel."
+    assert item.detail == "2 rules send alerts to an enabled channel."
 
 
 def test_client_step_reports_no_client_list():
@@ -442,6 +490,7 @@ def test_schedule_step_states(state, expected, detail, label, url):
 
 @pytest.mark.parametrize("info,state,detail", [
     ({"count": 0, "last": None, "last_id": None}, "todo", "No backup exists yet."),
+    ({"count": 2, "last": None, "last_id": None}, "todo", "No valid backup exists yet."),
     ({"count": 1, "last": (NOW - timedelta(days=STALE_BACKUP_DAYS + 1)).isoformat(),
       "last_id": "b"}, "attention", "The newest backup is 8 days old."),
     ({"count": 1, "last": "2026-11-23T09:30:00+00:00", "last_id": "b"}, "done",
@@ -500,6 +549,11 @@ def test_view_only_actions_are_limited_to_read_pages():
     item = step(steps_for(config, viewer=make_viewer({"view"}, is_admin=False)), "sources")
     assert item.action_url is None
     assert item.hint == "Ask an administrator to turn on watch mode."
+
+    item = step(steps_for(unit_config(sources=()),
+                          viewer=make_viewer({"view"}, is_admin=False)), "sources")
+    assert item.action_url is None
+    assert item.hint == "Ask an administrator to choose data sources."
 
     item = step(steps_for(unit_config(channels=(make_channel(),)),
                           viewer=make_viewer({"view"}, is_admin=False)), "channel")
@@ -586,6 +640,7 @@ def test_all_setup_copy_avoids_banned_words():
     )
     collected = []
     collected.extend(steps_for(unit_config(enabled=False)))
+    collected.extend(steps_for(unit_config(sources=())))
     collected.extend(steps_for(config))
     collected.extend(steps_for(config, meta={"initial_mode": "baseline"}))
     collected.extend(steps_for(config, meta={
@@ -599,6 +654,13 @@ def test_all_setup_copy_avoids_banned_words():
     collected.extend(steps_for(config, jobs=None))
     collected.extend(steps_for(config, jobs=(make_job(status="failed", exit_code=3),)))
     collected.extend(steps_for(config, jobs=(make_job(),)))
+    mixed = unit_config(channels=(make_channel("email"), make_channel("slack")),
+                        rules=(make_rule(),))
+    collected.extend(steps_for(mixed, jobs=(
+        make_job(1, name="email"),
+        make_job(2, name="slack", status="failed", exit_code=3),
+    )))
+    collected.extend(steps_for(config, backup_info={"count": 2, "last": None, "last_id": None}))
     collected.extend(steps_for(unit_config(managed=False)))
     collected.extend(steps_for(config, schedule_state="unknown"))
     collected.extend(steps_for(config, backup_info=None))
@@ -672,6 +734,18 @@ def test_fresh_watch_install_renders_every_step_to_do(tmp_path):
     assert not config.watch.database.exists()
 
 
+def test_home_get_does_not_create_scan_database_sidecars(tmp_path):
+    config, app = make_app(tmp_path, inventory=False)
+    assert not config.database_path.exists()
+    client = app.test_client()
+    for _ in range(2):
+        page = client.get("/")
+        assert page.status_code == 200
+        for suffix in ("-wal", "-shm"):
+            sidecar = config.database_path.with_name(config.database_path.name + suffix)
+            assert not sidecar.exists(), sidecar
+
+
 def test_fresh_scan_install_renders_every_step_to_do(tmp_path):
     (tmp_path / "missing-inventory.csv").write_text(
         "asset_id,vendor,product,version\na,Acme,Widget,1\n", encoding="utf-8")
@@ -696,7 +770,7 @@ def test_home_counts_a_successful_channel_test_and_matching_rule(tmp_path):
     assert page.status_code == 200
     assert "2 of 6 steps done" in page.text
     assert "accepted a test message on" in page.text
-    assert "1 rule(s) send alerts to an enabled channel." in page.text
+    assert "1 rule sends alerts to an enabled channel." in page.text
 
 
 def test_home_offers_one_account_callout_instead_of_links(tmp_path):
@@ -775,7 +849,8 @@ def test_home_reports_unreadable_backups(tmp_path, monkeypatch):
 
 
 def test_home_reports_unreadable_client_information(tmp_path, monkeypatch):
-    _, _, client = make_home(tmp_path)
+    config, app, client = make_home(tmp_path)
+    StateStore(config.database_path).record_scan([])
 
     def explode(path, *, limit=1):
         raise sqlite3.Error("client secret detail")
