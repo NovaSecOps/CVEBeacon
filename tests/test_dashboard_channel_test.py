@@ -262,6 +262,18 @@ def test_other_failure_shows_the_exit_meaning(app_client):
     assert "The test could not run. Validation or operational failure." in page.text
 
 
+def test_interrupted_failure_without_exit_code_says_it_stopped(app_client):
+    _, app, client = app_client
+    login(client)
+    store = app.extensions["dashboard_jobs"].store
+    job = store.create("notify-test", "admin", ["cvebeacon", "watch", "notify-test", "sink"])
+    store.finish(job.id, "failed", exit_code=None, message="stopped")
+    page = client.get(f"/operations/channels/sink/test/{job.id}")
+    assert page.status_code == 200
+    assert "The test stopped before it finished" in page.text
+    assert "Not finished." not in page.text
+
+
 def test_queued_and_running_results_show_progress_without_claims(app_client):
     _, app, client = app_client
     login(client)

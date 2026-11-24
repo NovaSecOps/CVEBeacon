@@ -38,7 +38,7 @@
 {% if not can_edit_channels %}<p class="help">Ask someone who may edit alert channels.</p>{% endif %}
 {% endcall %}
 {% elif job.status == 'failed' %}
-{% call callout('danger') %}<p>The test could not run. {{ job.exit_meaning }}.</p>{% endcall %}
+{% call callout('danger') %}<p>{% if job.exit_code is none %}The test stopped before it finished, for example because the dashboard restarted. Send the test again.{% else %}The test could not run. {{ job.exit_meaning }}.{% endif %}</p>{% endcall %}
 {% elif job.status == 'cancelled' %}
 {% call callout('info') %}<p>The test was cancelled.</p>{% endcall %}
 {% endif %}
