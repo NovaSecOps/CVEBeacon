@@ -192,3 +192,20 @@ def test_samples_allow_dashboard_uploads_and_slow_queries():
     assert "response_header_timeout 300s" in caddy
     assert "read_timeout 300s" in caddy
     assert "write_timeout 300s" in caddy
+
+
+def test_samples_raise_the_body_limit_only_for_client_inventory_uploads():
+    nginx = _text(NGINX)
+    server = _block(nginx, "server {\n    listen 443 ssl;")
+    dashboard = _block(server, "location / {")
+    inventory = _block(dashboard, "location ~ ^/watch/clients/[^/]+/upload$ {")
+    assert "client_max_body_size 6m;" in server
+    assert "client_max_body_size 34m;" in inventory
+    assert "proxy_pass http://127.0.0.1:8787;" not in inventory
+
+    caddy = _text(CADDY)
+    path_pattern = r"^/watch/clients/[^/]+/upload$"
+    assert f"@inventory_upload path_regexp {path_pattern}" in caddy
+    assert f"@other_requests not path_regexp {path_pattern}" in caddy
+    assert re.search(r"request_body @inventory_upload\s*\{\s*max_size 34MB\s*\}", caddy)
+    assert re.search(r"request_body @other_requests\s*\{\s*max_size 6MB\s*\}", caddy)
