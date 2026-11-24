@@ -28,7 +28,9 @@
 {% call table_wrap('Configuration sections') %}
 <table>
   <thead><tr><th scope="col">Section</th><th scope="col">What it controls</th></tr></thead>
-  <tbody>{% for section in visible_sections %}
+  <tbody>{% if has_endpoint('config_editor.channel_wizard') and 'edit_channels' in permissions %}
+    <tr><th scope="row"><a href="{{ url_for('config_editor.channel_wizard') }}">Guided setup</a></th><td>Add an alert channel step by step.{% if 'edit_rules' in permissions %} Choose what triggers an alert in <a href="{{ url_for('config_editor.rules') }}">alert rules</a>.{% endif %}</td></tr>
+  {% endif %}{% for section in visible_sections %}
     {% set info = section_info.get(section, (section | replace('-', ' ') | capitalize, '')) %}
     <tr><th scope="row"><a href="{{ url_for('config_editor.' + section) }}">{{ info[0] }}</a></th><td>{{ info[1] }}</td></tr>
   {% endfor %}</tbody>

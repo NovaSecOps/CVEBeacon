@@ -1,0 +1,5 @@
+{#- Rule builder hook. The visual rule builder replaces this body.
+    Included from config_section.html for the condition, channels and events
+    controls of each rule. It receives the current `field`, `group` and
+    `index` and may render an ordinary control with config_control(field, index). -#}
+{{ config_control(field, index) }}
