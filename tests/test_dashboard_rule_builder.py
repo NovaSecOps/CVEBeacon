@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import html
 import re
+import sys
 import tomllib
+from decimal import Decimal
+from pathlib import Path
+from urllib.parse import urlencode
 
 import pytest
 from werkzeug.datastructures import MultiDict
 
 from cvebeacon import dashboard, dashboard_config, dashboard_rule_builder as builder
 from cvebeacon.config import load_config
+from cvebeacon.dashboard_watch import RULES_REQUEST_BYTES
 from cvebeacon.errors import ConfigurationError
 from cvebeacon.rule_builder import (
     CRITERIA,
@@ -33,12 +38,12 @@ CHANNEL = {
 }
 
 
-def document(rules=(), channels=None, sources=None):
+def document(rules=(), channels=None, sources=None, watch_enabled=True):
     data = {
         "inventory": {"path": "inventory.csv"},
         "state": {"database": "state.db"},
         "output": {"directory": "reports"},
-        "watch": {"enabled": True, "rules": list(rules)},
+        "watch": {"enabled": watch_enabled, "rules": list(rules)},
     }
     if channels is None:
         channels = CHANNEL
@@ -49,11 +54,16 @@ def document(rules=(), channels=None, sources=None):
     return data
 
 
-def write_app(tmp_path, rules=(), channels=None, sources=None):
+def write_app(tmp_path, rules=(), channels=None, sources=None, watch_enabled=True):
     tmp_path.mkdir(parents=True, exist_ok=True)
     tmp_path.chmod(0o700)
     path = tmp_path / "config.toml"
-    path.write_text(dashboard_config.dumps(document(rules, channels, sources)), encoding="utf-8")
+    path.write_text(
+        dashboard_config.dumps(
+            document(rules, channels, sources, watch_enabled=watch_enabled)
+        ),
+        encoding="utf-8",
+    )
     path.chmod(0o644)
     (tmp_path / "inventory.csv").write_text(
         "asset_id,vendor,product,version\na,Acme,Widget,1\n", encoding="utf-8"
@@ -158,6 +168,45 @@ def value_of(text, index, key):
     return html.unescape(value.group(1)) if value else None
 
 
+def selected_option(text, identifier):
+    match = re.search(rf'<select id="{re.escape(identifier)}".*?</select>', text, re.S)
+    if match is None:
+        return None
+    selected = re.search(r'<option value="([^"]*)"[^>]*selected', match.group(0))
+    return html.unescape(selected.group(1)) if selected else None
+
+
+def assert_rendered_builder_state(text, index, condition):
+    read = read_condition(condition)
+    if read.model is None:
+        assert mode_checked(text, index) == "text"
+        assert read.reason in text
+        assert f'id="rule-{index}-criteria"' not in text
+        return
+
+    model = read.model
+    assert mode_checked(text, index) == "builder"
+    assert selected_option(text, f"b{index}_join") == model.join
+    for criterion in CRITERIA:
+        expected = model.uses.get(criterion.key)
+        assert selected_use(text, index, criterion.key) == (expected[0] if expected else "")
+        if expected is None:
+            continue
+        value = (
+            selected_option(text, f"b{index}_{criterion.key}_value")
+            if CRITERIA_BY_KEY[criterion.key].kind == "enum"
+            else value_of(text, index, criterion.key)
+        )
+        model_value = expected[1]
+        if isinstance(model_value, tuple):
+            assert value.split(", ") == list(model_value)
+        elif isinstance(model_value, float):
+            assert Decimal(value) == Decimal(repr(model_value))
+        else:
+            assert value == model_value
+    assert row_summary(text, index) == describe(model)
+
+
 def model_rule(condition, name="rule"):
     return {
         "name": name,
@@ -251,6 +300,7 @@ def test_representable_conditions_open_in_the_form_and_describe_in_words(tmp_pat
         assert row_summary(text, index) == expected
         model = read_condition(condition).model
         assert describe(model) == expected
+        assert_rendered_builder_state(text, index, condition)
 
 
 DOCUMENTED = [
@@ -290,8 +340,7 @@ def test_every_schema_example_opens_in_the_form(tmp_path):
     for index, (key, spec) in enumerate(CONDITION_SCHEMA.items()):
         read = read_condition({key: spec["example"]})
         assert read.model is not None
-        assert mode_checked(text, index) == "builder"
-        assert row_summary(text, index) == describe(read.model)
+        assert_rendered_builder_state(text, index, {key: spec["example"]})
 
 
 def test_documented_conditions_render_the_same_model_as_the_rule_module(tmp_path):
@@ -301,11 +350,9 @@ def test_documented_conditions_render_the_same_model_as_the_rule_module(tmp_path
     for index, condition in enumerate(DOCUMENTED):
         read = read_condition(condition)
         if read.model is not None:
-            assert mode_checked(text, index) == "builder"
-            assert row_summary(text, index) == describe(read.model)
+            assert_rendered_builder_state(text, index, condition)
         else:
-            assert mode_checked(text, index) == "text"
-            assert read.reason in text
+            assert_rendered_builder_state(text, index, condition)
 
 
 def test_non_representable_conditions_stay_in_text_mode(tmp_path):
@@ -313,12 +360,63 @@ def test_non_representable_conditions_stay_in_text_mode(tmp_path):
     _, _, client = write_app(tmp_path, rules)
     text = client.get("/config/rules").text
     for index, (condition, expected) in enumerate(TEXT_MODE):
-        assert mode_checked(text, index) == "text"
-        assert f'id="rule-{index}-criteria"' not in text
         reason = read_condition(condition).reason
         assert expected in reason
+        assert_rendered_builder_state(text, index, condition)
         assert f'name="g{index}_condition"' in text
         assert reason in text
+
+
+def test_precise_threshold_renders_without_rounding(tmp_path):
+    condition = {"cvss_min": 9.123456789123}
+    _, _, client = write_app(tmp_path, [model_rule(condition)])
+    text = client.get("/config/rules").text
+    assert_rendered_builder_state(text, 0, condition)
+
+
+def test_template_has_no_condition_reader_or_summary_mirror():
+    template = Path(__file__).parents[1] / "src/cvebeacon/templates/_rule_builder.html"
+    source = template.read_text(encoding="utf-8")
+    for mirror in (
+        "macro leaf_node",
+        "macro flat_node",
+        "macro classify",
+        "macro describe_value",
+        "macro describe_model",
+        "macro number_text",
+        "macro display_value",
+    ):
+        assert mirror not in source
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        {"not_a_key": 1},
+        {},
+        "not a table",
+        {"kev": ["cisa"]},
+        {"cvss_min": "high"},
+    ],
+)
+def test_unreadable_conditions_use_the_p5_text_mode_reason(condition):
+    rule = model_rule(condition)
+    expected = read_condition(condition)
+    state = builder.render_rule_builder_rows(document([rule]), count=1)[0]
+    assert state == {
+        "mode": "text",
+        "join": "any",
+        "uses": {},
+        "values": {},
+        "reason": expected.reason,
+        "summary": "",
+    }
+
+
+def test_rules_render_hook_is_lazy_and_skips_an_absent_builder_module(monkeypatch):
+    assert dashboard_config._rule_builder_render_context("http", {}, 0) == {}
+    monkeypatch.setitem(sys.modules, "cvebeacon.dashboard_rule_builder", None)
+    assert dashboard_config._rule_builder_render_context("rules", {}, 1) == {}
 
 
 def test_initial_builder_values_channels_and_events(tmp_path):
@@ -884,3 +982,51 @@ def test_read_only_builder_is_disabled(tmp_path):
         assert re.search(r'name="b0_kev_use"[^>]* disabled', text)
     finally:
         tmp_path.chmod(0o700)
+
+
+@pytest.mark.parametrize("watch_enabled", [True, False])
+def test_maximum_rule_page_saves_as_a_byte_identical_noop(
+    tmp_path, watch_enabled
+):
+    rules = [model_rule({"kev": "cisa"}, f"rule-{index}") for index in range(100)]
+    config, _, client = write_app(
+        tmp_path, rules, watch_enabled=watch_enabled
+    )
+    before = config.config_path.read_bytes()
+    page = client.get("/config/rules")
+    assert page.status_code == 200
+    data = page_form(page.text)
+    assert data.get("row_count") == "101"
+    body_size = len(urlencode(list(data.items(multi=True))).encode("utf-8"))
+    assert 8192 < body_size < RULES_REQUEST_BYTES
+
+    response = client.post("/config/rules", data=data)
+    assert response.status_code == 200, response.text
+    assert "No differences to show." in response.text
+    assert confirm(client, response).status_code == 303
+    assert config.config_path.read_bytes() == before
+
+
+def test_rules_post_just_over_its_body_limit_gets_413(tmp_path):
+    _, _, client = write_app(tmp_path)
+    page = client.get("/config/rules")
+    token = re.search(r'name="csrf" value="([^"]+)"', page.text)[1]
+    body = urlencode(
+        {"csrf": token, "padding": "x" * RULES_REQUEST_BYTES}
+    ).encode("utf-8")
+    assert len(body) > RULES_REQUEST_BYTES
+    response = client.post(
+        "/config/rules",
+        data=body,
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert response.status_code == 413
+
+
+def test_another_post_route_keeps_the_8kib_body_limit(tmp_path):
+    _, _, client = write_app(tmp_path)
+    page = client.get("/config/http")
+    data = page_form(page.text)
+    data["padding"] = "x" * 8192
+    response = client.post("/config/http", data=data)
+    assert response.status_code == 413

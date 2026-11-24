@@ -9,12 +9,6 @@
     shows the stored (or re-posted) values, and dashboard_rule_builder.py is
     the only translator.  The optional rule_builder.js only tidies the rows. -#}
 {% from 'ui.html' import callout, table_wrap, explain %}
-{% set reason_multiple = 'This rule uses several criteria in one block, which the form cannot show.' %}
-{% set reason_repeated = 'This rule uses the same criterion more than once, which the form cannot show.' %}
-{% set reason_nested = 'This rule groups criteria in a way the form cannot show.' %}
-{% set reason_qualified = 'This rule sets score limits for particular versions or sources, which the form cannot show.' %}
-{% set reason_comma = 'A value contains a comma, which the form cannot split reliably.' %}
-{% set reason_unreadable = 'This rule uses a condition the form cannot read.' %}
 {% set criteria = [
   {'key': 'kev', 'label': 'On a list of flaws known to be exploited', 'kind': 'enum', 'input': 'select',
    'help': 'KEV lists are published by CISA (US) and the EU. A flaw on a list is being attacked in the real world.'},
@@ -56,243 +50,22 @@
   'rejected': 'Record is rejected'
 } %}
 
-{% macro number_text(value) -%}
-{%- set text = "%.10f"|format(value) -%}
-{%- set text = text.rstrip('0').rstrip('.') -%}
-{%- if '.' not in text -%}{{ text }}.0{%- else -%}{{ text }}{%- endif -%}
-{%- endmacro %}
-
-{% macro display_value(value, key=none) -%}
-{%- if value is iterable and value is not string and value is not mapping -%}
-  {%- if key == 'cwe' -%}
-    {%- set items = [] -%}
-    {%- for item in value -%}
-      {%- set text = item|string -%}
-      {%- set _ = items.append('CWE-' ~ text[4:] if (text|lower).startswith('cwe-') else 'CWE-' ~ text) -%}
-    {%- endfor -%}
-    {{ items|join(', ') }}
-  {%- else -%}
-    {{ value|join(', ') }}
-  {%- endif -%}
-{%- elif value is integer -%}{{ value }}.0
-{%- elif value is number -%}{{ number_text(value) }}
-{%- else -%}{{ value }}
-{%- endif -%}
-{%- endmacro %}
-
-{% macro leaf_node(node, out) %}
-{% set out.ok = false %}{% set out.key = '' %}{% set out.value = none %}{% set out.reason = reason_unreadable %}
-{% if node is mapping %}
-  {% if node|length == 1 %}
-    {% set key = (node.keys()|list)[0] %}
-    {% set value = (node.values()|list)[0] %}
-    {% if key in condition_schema %}
-      {% if value is mapping %}
-        {% set out.reason = reason_qualified %}
-      {% else %}
-        {% set comma = namespace(value=false) %}
-        {% if value is iterable and value is not string and value is not mapping %}
-          {% for item in value %}{% if item is string and ',' in item %}{% set comma.value = true %}{% endif %}{% endfor %}
-        {% endif %}
-        {% if comma.value %}
-          {% set out.reason = reason_comma %}
-        {% else %}
-          {% set out.ok = true %}{% set out.key = key %}{% set out.value = value %}
-        {% endif %}
-      {% endif %}
-    {% elif key in ['any', 'all', 'not'] %}
-      {% set out.reason = reason_nested %}
-    {% endif %}
-  {% else %}
-    {% set out.reason = reason_multiple %}
-  {% endif %}
-{% endif %}
-{% endmacro %}
-
-{% macro flat_node(node, out) %}
-{% set out.ok = false %}{% set out.reason = reason_nested %}{% set out.join = 'any' %}{% set out.rows = [] %}
-{% if node is mapping and node|length == 1 %}
-  {% set key = (node.keys()|list)[0] %}
-  {% set value = (node.values()|list)[0] %}
-  {% if key in ['any', 'all'] and value is iterable and value is not string and value is not mapping and value|length > 0 %}
-    {% set collected = namespace(ok=true, reason='', rows=[], keys=[]) %}
-    {% for item in value %}
-      {% set leaf_state = namespace(ok=false, key='', value=none, reason='') %}
-      {{ leaf_node(item, leaf_state) }}
-      {% if not leaf_state.ok %}
-        {% set collected.ok = false %}{% set collected.reason = leaf_state.reason %}
-      {% elif leaf_state.key in collected.keys %}
-        {% set collected.ok = false %}{% set collected.reason = reason_repeated %}
-      {% else %}
-        {% set _ = collected.rows.append((leaf_state.key, leaf_state.value)) %}
-        {% set _ = collected.keys.append(leaf_state.key) %}
-      {% endif %}
-    {% endfor %}
-    {% set out.ok = collected.ok %}{% set out.reason = collected.reason %}
-    {% set out.join = key %}{% set out.rows = collected.rows %}
-  {% elif key in condition_schema %}
-    {% set leaf_state = namespace(ok=false, key='', value=none, reason='') %}
-    {{ leaf_node(node, leaf_state) }}
-    {% if leaf_state.ok %}
-      {% set out.ok = true %}{% set out.reason = '' %}{% set out.rows = [(leaf_state.key, leaf_state.value)] %}
-    {% else %}
-      {% set out.reason = leaf_state.reason %}
-    {% endif %}
-  {% endif %}
-{% elif node is mapping and node|length > 1 %}
-  {% set out.reason = reason_multiple %}
-{% endif %}
-{% endmacro %}
-
-{% macro classify(cond, out) %}
-{% set out.mode = 'text' %}{% set out.reason = reason_unreadable %}
-{% set out.join = 'any' %}{% set out.uses = {} %}{% set out.values = {} %}
-{% if cond is mapping and cond|length > 0 %}
-  {% set keys = cond.keys()|list %}
-  {% set exclude = namespace(found=false, ok=false, reason='', join='any', inc=[], exc=[]) %}
-  {% set all_rows = cond.get('all') %}
-  {% if keys == ['all'] and all_rows is iterable and all_rows is not string and all_rows is not mapping and all_rows|length == 2 %}
-    {% set nots = [] %}{% set positives = [] %}
-    {% for item in all_rows %}
-      {% if item is mapping and item.keys()|list == ['not'] %}
-        {% set _ = nots.append(item.get('not')) %}
-      {% else %}
-        {% set _ = positives.append(item) %}
-      {% endif %}
-    {% endfor %}
-    {% if nots|length == 1 and positives|length == 1 %}
-      {% set exclude.found = true %}
-      {% set included = namespace(ok=false, reason='', join='any', rows=[]) %}
-      {{ flat_node(positives[0], included) }}
-      {% set excluded = namespace(ok=false, reason='', rows=[]) %}
-      {% set negative = nots[0] %}
-      {% if negative is mapping and negative|length == 1 and (negative.keys()|list)[0] == 'any' and negative.get('any') is iterable and negative.get('any') is not string and negative.get('any') is not mapping %}
-        {% set collected = namespace(ok=true, reason='', rows=[], keys=[]) %}
-        {% for item in negative.get('any') %}
-          {% set leaf_state = namespace(ok=false, key='', value=none, reason='') %}
-          {{ leaf_node(item, leaf_state) }}
-          {% if not leaf_state.ok %}
-            {% set collected.ok = false %}{% set collected.reason = leaf_state.reason %}
-          {% elif leaf_state.key in collected.keys %}
-            {% set collected.ok = false %}{% set collected.reason = reason_repeated %}
-          {% else %}
-            {% set _ = collected.rows.append((leaf_state.key, leaf_state.value)) %}
-            {% set _ = collected.keys.append(leaf_state.key) %}
-          {% endif %}
-        {% endfor %}
-        {% set excluded.ok = collected.ok %}{% set excluded.reason = collected.reason %}{% set excluded.rows = collected.rows %}
-      {% else %}
-        {% set leaf_state = namespace(ok=false, key='', value=none, reason='') %}
-        {{ leaf_node(negative, leaf_state) }}
-        {% if leaf_state.ok %}
-          {% set excluded.ok = true %}{% set excluded.rows = [(leaf_state.key, leaf_state.value)] %}
-        {% else %}
-          {% set excluded.reason = leaf_state.reason %}
-        {% endif %}
-      {% endif %}
-      {% set exclude.inc = included.rows %}{% set exclude.exc = excluded.rows %}{% set exclude.join = included.join %}
-      {% set duplicate = namespace(value=false) %}
-      {% for key, value in exclude.inc %}
-        {% for key2, value2 in exclude.exc %}{% if key == key2 %}{% set duplicate.value = true %}{% endif %}{% endfor %}
-      {% endfor %}
-      {% if included.ok and excluded.ok and not duplicate.value and exclude.inc|length > 0 %}
-        {% set exclude.ok = true %}
-      {% elif not included.ok %}
-        {% set exclude.reason = included.reason %}
-      {% elif duplicate.value %}
-        {% set exclude.reason = reason_repeated %}
-      {% else %}
-        {% set exclude.reason = excluded.reason or reason_nested %}
-      {% endif %}
-    {% endif %}
-  {% endif %}
-  {% if exclude.found %}
-    {% if exclude.ok %}
-      {% set out.mode = 'builder' %}
-      {% set out.join = exclude.join if exclude.inc|length > 1 else 'any' %}
-      {% for key, value in exclude.inc %}
-        {% set _ = out.uses.update({key: 'include'}) %}
-        {% set _ = out.values.update({key: display_value(value, key)}) %}
-      {% endfor %}
-      {% for key, value in exclude.exc %}
-        {% set _ = out.uses.update({key: 'exclude'}) %}
-        {% set _ = out.values.update({key: display_value(value, key)}) %}
-      {% endfor %}
-    {% else %}
-      {% set out.reason = exclude.reason %}
-    {% endif %}
-  {% else %}
-    {% set flat = namespace(ok=false, reason='', join='any', rows=[]) %}
-    {{ flat_node(cond, flat) }}
-    {% if flat.ok %}
-      {% set out.mode = 'builder' %}
-      {% set out.join = flat.join if flat.rows|length > 1 else 'any' %}
-      {% for key, value in flat.rows %}
-        {% set _ = out.uses.update({key: 'include'}) %}
-        {% set _ = out.values.update({key: display_value(value, key)}) %}
-      {% endfor %}
-    {% else %}
-      {% set out.reason = flat.reason %}
-    {% endif %}
-  {% endif %}
-{% endif %}
-{% endmacro %}
-
-{% macro describe_value(key, value, criterion) -%}
-{%- if key == 'kev' -%}{{ {'cisa': 'on the CISA list', 'eu': 'on the EU list', 'any': 'on either known-exploited list'}.get(value, value) }}
-{%- elif key == 'exploitation' -%}{{ {'poc': 'exploit code exists or is active', 'active': 'actively exploited'}.get(value, value) }}
-{%- elif key == 'status' -%}status is {{ choice_labels.get(value, value) }}
-{%- elif key in ['cvss_min', 'cvss_max', 'epss_min'] -%}{{ {'cvss_min': 'severity score at least', 'cvss_max': 'severity score at most', 'epss_min': 'exploitation chance at least'}[key] }} {{ value }}
-{%- else -%}
-  {%- set items = value.split(', ') if value is string and value else [value] -%}
-  {%- if key in ['vendor', 'product'] -%}{{ key }} is {% if items|length > 1 %}one of {% endif %}{{ value }}
-  {%- elif key == 'keyword' -%}description contains {% if items|length > 1 %}any of {% endif %}{{ value }}
-  {%- elif key == 'cwe' -%}weakness type is {% if items|length > 1 %}one of {% endif %}{{ value }}
-  {%- elif key == 'cna' -%}reported by {% if items|length > 1 %}one of {% endif %}{{ value }}
-  {%- endif -%}
-{%- endif -%}
-{%- endmacro %}
-
-{% macro describe_model(uses, values, join) -%}
-{%- set includes = [] -%}{%- set excludes = [] -%}
-{%- for criterion in criteria -%}
-  {%- if uses.get(criterion.key) == 'include' -%}{%- set _ = includes.append(criterion.key) -%}
-  {%- elif uses.get(criterion.key) == 'exclude' -%}{%- set _ = excludes.append(criterion.key) -%}{%- endif -%}
-{%- endfor -%}
-{%- if includes|length == 0 -%}No criteria are included, so this rule does not alert.
-{%- else -%}
-  {%- set include_text = [] -%}
-  {%- for key in includes -%}{%- set _ = include_text.append(describe_value(key, values.get(key, ''), criteria_by_key[key])) -%}{%- endfor -%}
-  {%- if includes|length == 1 -%}Alert when: {{ include_text[0] }}.{% else %}Alert when {{ 'ALL' if join == 'all' else 'ANY' }} of: {{ include_text|join('; ') }}.{% endif -%}
-  {%- if excludes -%}
-    {%- set exclude_text = [] -%}
-    {%- for key in excludes -%}{%- set _ = exclude_text.append(describe_value(key, values.get(key, ''), criteria_by_key[key])) -%}{%- endfor -%}
-    {%- if excludes|length == 1 %} Never alert when: {{ exclude_text[0] }}.{% else %} Never alert when any of: {{ exclude_text|join('; ') }}.{% endif -%}
-  {%- endif -%}
-{%- endif -%}
-{%- endmacro %}
-
 {% macro error_target(key, index) %}{% if key == 'criteria' or key == 'condition' %}rule-{{ index }}-criteria{% elif key == 'channels' %}rule-{{ index }}-channels{% elif key == 'events' %}rule-{{ index }}-events{% elif key == 'join' %}b{{ index }}_join{% else %}b{{ index }}_{{ key }}_value{% endif %}{% endmacro %}
 
 {% if field.key == 'condition' %}
 {% set condition = group.data.get('condition') if group.data else none %}
-{% set classification = namespace(mode='text', reason='', join='any', uses={}, values={}) %}
-{% if condition is mapping %}
-  {{ classify(condition, classification) }}
-{% else %}
-  {% set classification.mode = 'builder' %}
-{% endif %}
+{% set stored = rule_builder_rows.get(index, {}) if rule_builder_rows is defined else {} %}
 {% set ui = none %}
 {% set ui_state = g.get('rule_builder') if g is defined else none %}
 {% if ui_state and ui_state.get('rows') and index in ui_state.get('rows') %}{% set ui = ui_state.get('rows').get(index) %}{% endif %}
 {% set posted_mode = request.form.get('b' ~ index ~ '_mode') if request.form else none %}
-{% set mode = ui.get('mode') if ui else (posted_mode if posted_mode in ['builder', 'text'] else classification.mode) %}
-{% set join = ui.get('join') if ui else classification.join %}
-{% set uses = ui.get('uses') if ui else classification.uses %}
-{% set values = ui.get('values') if ui else classification.values %}
+{% set mode = ui.get('mode') if ui else (posted_mode if posted_mode in ['builder', 'text'] else stored.get('mode', 'builder')) %}
+{% set join = ui.get('join') if ui else stored.get('join', 'any') %}
+{% set uses = ui.get('uses') if ui else stored.get('uses', {}) %}
+{% set values = ui.get('values') if ui else stored.get('values', {}) %}
 {% set errors = ui.get('errors') if ui else {} %}
-{% set reason = (ui.get('reason') if ui and ui.get('reason') else (classification.reason if classification.mode == 'text' else '')) %}
-{% set summary = (ui.get('summary') if ui and ui.get('summary') else ('' if errors else describe_model(uses, values, join))) %}
+{% set reason = (ui.get('reason') if ui and ui.get('reason') else stored.get('reason', '')) %}
+{% set summary = ui.get('summary') if ui and ui.get('summary') else ('' if errors else stored.get('summary', '')) %}
 {% set channels_field = namespace(value=none) %}
 {% set events_field = namespace(value=none) %}
 {% for control in group.controls %}
@@ -417,7 +190,7 @@
 
 {% endif %}
 
-{% if not read_only %}<div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="match_rule" value="{{ index }}">Check against recent CVEs</button></div>{% endif %}
+{% if not read_only and group.data.get('name') %}<div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="match_rule" value="{{ index }}">Check against recent CVEs</button></div>{% endif %}
 
 {% if match and match.get('index') == index %}
   {% call callout('info', 'Recent CVE check') %}

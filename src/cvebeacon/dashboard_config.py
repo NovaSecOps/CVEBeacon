@@ -2510,6 +2510,18 @@ def match_request(form):
     return bool(form.get("match_rule")) and form.get("action") in {None, "", "preview"}
 
 
+def _rule_builder_render_context(section, document, count):
+    if section != "rules":
+        return {}
+    try:
+        from .dashboard_rule_builder import render_rule_builder_rows
+    except ModuleNotFoundError as error:
+        if error.name != f"{__package__}.dashboard_rule_builder":
+            raise
+        return {}
+    return {"rule_builder_rows": render_rule_builder_rows(document, count)}
+
+
 def register_config(app, config, *, host):
     """Register isolated routes and a dispatcher for immutable reloads."""
     from .dashboard import requires
@@ -2566,10 +2578,13 @@ def register_config(app, config, *, host):
                     from .dashboard_rule_builder import match_preview
                     match = match_preview(request.form, document, current_config)
                     if match is not None:
+                        groups = groups_for(section, document,
+                                            can_manage="manage_secrets" in g.permissions,
+                                            can_admin=g.user.is_admin)
                         return render_template("config_section.html", section=section,
-                                               groups=groups_for(section, document,
-                                                                 can_manage="manage_secrets" in g.permissions,
-                                                                 can_admin=g.user.is_admin),
+                                               groups=groups,
+                                               **_rule_builder_render_context(
+                                                   section, document, len(groups)),
                                                version=version, match=match, events=EVENT_KINDS,
                                                leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
                                                toml_value=value, channel_types=sorted(TYPE_KEYS),
@@ -2608,10 +2623,13 @@ def register_config(app, config, *, host):
                     dumps(redacted(project_document(candidate, section))).splitlines(),
                     fromfile="current", tofile="proposed", lineterm=""))
             new_type = request.args.get("new_type", "smtp")
+            groups = groups_for(section, document, new_type=new_type,
+                                can_manage="manage_secrets" in g.permissions,
+                                can_admin=g.user.is_admin)
             return render_template("config_section.html", section=section,
-                                   groups=groups_for(section, document, new_type=new_type,
-                                                     can_manage="manage_secrets" in g.permissions,
-                                                     can_admin=g.user.is_admin),
+                                   groups=groups,
+                                   **_rule_builder_render_context(
+                                       section, document, len(groups)),
                                    version=version, preview=preview, diff=diff, lockout=lockout,
                                    match=match, channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS,
                                    leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
@@ -2643,6 +2661,8 @@ def register_config(app, config, *, host):
                     control["value"] = retained
                     control["checked"] = submitted == "true" or submitted == "" and control["spec"].default is True
             return render_template("config_section.html", section=section, groups=groups,
+                                   **_rule_builder_render_context(
+                                       section, document, len(groups)),
                                    version=version, error=error, events=EVENT_KINDS,
                                    leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA, toml_value=value,
                                    match=match, channel_types=sorted(TYPE_KEYS),

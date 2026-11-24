@@ -58,6 +58,8 @@ from .watch.store import EventDeliveries, WatchStore
 from .watch.sync import euvd_progress
 
 STATE_KEY = "dashboard_watch"
+RULES_REQUEST_BYTES = 1024 * 1024
+RULES_FORM_PARTS = 8192
 MAX_STATEMENT_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_REQUEST_BYTES = MAX_STATEMENT_UPLOAD_BYTES + 64 * 1024
 EVENT_PAGE_SIZE = 50
@@ -106,6 +108,13 @@ def register_watch(app, config: AppConfig) -> None:
             request.max_content_length = UPLOAD_REQUEST_BYTES
             request.max_form_memory_size = 128 * 1024
             request.max_form_parts = 4
+        elif request.endpoint == "config_editor.rules" and request.method == "POST":
+            # 101 rendered rows can post 22 builder controls each plus the
+            # existing rule fields. One MiB leaves room for their URL-encoded
+            # names and values; the part cap also covers multipart clients.
+            request.max_content_length = RULES_REQUEST_BYTES
+            request.max_form_memory_size = RULES_REQUEST_BYTES
+            request.max_form_parts = RULES_FORM_PARTS
         else:
             request.max_content_length = 8192
             request.max_form_memory_size = 8192

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime, timezone
+from decimal import Decimal
 import re
 import sqlite3
 import tomllib
@@ -30,6 +31,7 @@ from .rule_builder import (
     build_model,
     describe,
     keep_original_condition,
+    read_condition,
 )
 from .watch.rules import (
     EVENT_KINDS,
@@ -72,6 +74,56 @@ def _document_rules(document: Any) -> list[dict[str, Any]]:
     if not isinstance(rules, list):
         return []
     return [row for row in rules if isinstance(row, dict)]
+
+
+def _render_value(value: Any) -> str:
+    if isinstance(value, tuple):
+        return ", ".join(value)
+    if isinstance(value, float):
+        return format(Decimal(repr(value)), "f")
+    return str(value)
+
+
+def render_rule_builder_rows(document: Any, count: int | None = None):
+    """Build the server-owned display state for each rendered rule row."""
+    rules = _document_rules(document)
+    row_count = len(rules) + 1 if count is None else count
+    output = {}
+    for index in range(row_count):
+        if index >= len(rules):
+            output[index] = {
+                "mode": _MODE_BUILDER,
+                "join": "any",
+                "uses": {},
+                "values": {},
+                "reason": "",
+                "summary": "",
+            }
+            continue
+        read = read_condition(rules[index].get("condition"))
+        model = read.model
+        if model is None:
+            output[index] = {
+                "mode": _MODE_TEXT,
+                "join": "any",
+                "uses": {},
+                "values": {},
+                "reason": read.reason or "",
+                "summary": "",
+            }
+            continue
+        output[index] = {
+            "mode": _MODE_BUILDER,
+            "join": model.join,
+            "uses": {key: use for key, (use, _) in model.uses.items()},
+            "values": {
+                key: _render_value(value)
+                for key, (_, value) in model.uses.items()
+            },
+            "reason": "",
+            "summary": describe(model),
+        }
+    return output
 
 
 def _without_builder_keys(form: MultiDict) -> MultiDict:
