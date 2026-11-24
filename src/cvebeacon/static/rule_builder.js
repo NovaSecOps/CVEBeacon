@@ -12,7 +12,7 @@ for (const fieldset of document.querySelectorAll("fieldset.criteria")) {
     for (const row of rows) {
         const use = row.querySelector("[data-rule-use]");
         const value = row.querySelector("[data-rule-value]");
-        if (!use || !value) {
+        if (!use || !value || use.disabled || value.disabled) {
             continue;
         }
         const sync = () => {

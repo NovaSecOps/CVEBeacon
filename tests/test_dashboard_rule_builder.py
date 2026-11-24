@@ -1056,3 +1056,42 @@ def test_recent_check_does_not_count_catalog(tmp_path, monkeypatch):
     ordinary = store.search(sort="modified", limit=100, catalogs=config.watch.sources)
     assert ordinary.total == 0
     assert any("SELECT count(*)" in query for query in queries)
+
+
+def test_rule_builder_script_is_in_rules_head(tmp_path):
+    _, _, client = write_app(tmp_path)
+    rules = client.get("/config/rules").text
+    assert rules.index('src="/static/rule_builder.js"') < rules.index("</head>")
+    assert "rule_builder.js" not in client.get("/config/http").text
+
+
+def test_rule_builder_script_respects_server_disabled_controls():
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required to execute the optional script")
+    script = Path(builder.__file__).parent / "static/rule_builder.js"
+    subprocess.run([node, "-e", """
+        const assert = require('node:assert/strict');
+        const makeRow = (disabled, choice) => {
+            const use = {value: choice, disabled, addEventListener(_, fn) { this.change = fn; }};
+            const value = {disabled};
+            const row = {
+                querySelector(sel) { return sel === '[data-rule-use]' ? use : value; },
+                classList: {toggle() {}},
+            };
+            return {row, use, value};
+        };
+        const readonly = makeRow(true, 'include');
+        const editable = makeRow(false, '');
+        const table = {querySelectorAll() { return [readonly.row, editable.row]; }};
+        global.document = {querySelectorAll() { return [{querySelector() { return table; }}]; }};
+        require(process.argv[1]);
+        assert.equal(readonly.value.disabled, true);
+        assert.equal(editable.value.disabled, true);
+        editable.use.value = 'include';
+        editable.use.change();
+        assert.equal(editable.value.disabled, false);
+    """, str(script)], check=True, capture_output=True, text=True)
