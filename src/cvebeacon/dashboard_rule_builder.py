@@ -495,6 +495,7 @@ def match_preview(form, document, current_config):
             sort="modified",
             limit=100,
             catalogs=current_config.watch.sources,
+            count_total=False,
         )
     except (KeyError, CVEBeaconError, OSError, sqlite3.Error):
         return {

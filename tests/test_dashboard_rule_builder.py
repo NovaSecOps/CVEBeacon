@@ -1030,3 +1030,29 @@ def test_another_post_route_keeps_the_8kib_body_limit(tmp_path):
     data["padding"] = "x" * 8192
     response = client.post("/config/http", data=data)
     assert response.status_code == 413
+
+
+def test_recent_check_does_not_count_catalog(tmp_path, monkeypatch):
+    config, app, client = write_app(tmp_path, [model_rule({"kev": "cisa"})])
+    store = app.extensions["dashboard_watch"]["store"]
+    store.initialize()
+    from contextlib import contextmanager
+
+    queries = []
+    read = store.read
+
+    @contextmanager
+    def traced_read():
+        with read() as connection:
+            connection.set_trace_callback(queries.append)
+            yield connection
+
+    monkeypatch.setattr(store, "read", traced_read)
+    fields = page_form(client.get("/config/rules").text)
+    fields["match_rule"] = "0"
+    assert client.post("/config/rules", data=fields).status_code == 200
+    assert any("ORDER BY c.effective_last_modified" in query for query in queries)
+    assert not any("SELECT count(*)" in query for query in queries)
+    ordinary = store.search(sort="modified", limit=100, catalogs=config.watch.sources)
+    assert ordinary.total == 0
+    assert any("SELECT count(*)" in query for query in queries)
