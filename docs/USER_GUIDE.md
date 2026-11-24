@@ -96,18 +96,23 @@ value directly. Aliases and merge keys are refused.
 1. In the dashboard, open **Clients → Add client**. Enter the name and any
    notes or contact details you want to keep with it.
 2. On the client page, choose **Upload inventory** and select a CSV, XLSX, JSON
-   or YAML file up to 32 MiB. For CSV, use UTF-8 and comma-separated columns.
-   Excel uses the first sheet, with column names in the first row. For JSON
-   and YAML, use a list of records or put one list under a top-level field
-   such as `assets`. Use text for versions, including in Excel.
+   or YAML file up to 32 MiB, or paste CSV, JSON or YAML rows up to 100 KB.
+   The upload card links to a CSV template. For CSV, use UTF-8 and
+   comma-separated columns. Excel uses the first sheet, with column names in
+   the first row. For JSON and YAML, use a list of records or put one list
+   under a top-level field such as `assets`. Use text for versions, including
+   in Excel.
 3. Check the first rows and choose the matching column for each field. For
    example, match **Product** to a column called **Application**. Select
    **Check column mapping** to see which rows are ready and which need a fix.
    Each asset needs a unique Asset ID across all inventories. The client you
    selected is assigned to every row.
-4. Select **Replace this client's inventory** or **Add to it**, then choose
-   **Save inventory**. You can download the saved JSON, restore one of the five
-   previous versions, or remove the current upload from the client page.
+4. **Add these assets to the current inventory** is selected by default and
+   keeps the assets already saved. Choose **Replace this client's inventory**
+   only when the file is the full inventory; assets missing from that file are
+   removed. Then choose **Save inventory**. You can download the saved JSON,
+   restore one of the five previous versions, or remove the current upload from
+   the client page.
 5. Choose **Run a scan now** if you have permission to start scans. Scheduled
    scans pick up saved changes automatically. If your schedule runs only
    watch jobs, use **Operations → Schedule** to select a schedule that includes

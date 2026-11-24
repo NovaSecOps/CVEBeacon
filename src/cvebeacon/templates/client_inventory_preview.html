@@ -3,7 +3,7 @@
 {% from 'ui.html' import badge, button, card, callout, empty_state, link_button, page_header, steps, table_wrap, term %}
 {% block title %}Preview inventory · CVEBeacon{% endblock %}
 {% block content %}
-{% call page_header('Preview inventory for ' ~ profile.name, 'Match the columns, check the rows and choose how to save this upload.') %}
+{% call page_header('Preview inventory for ' ~ profile.name, 'Match the columns, check the rows and choose how to save these assets.') %}
 {{ link_button('Back to ' ~ profile.name, url_for('client_inventory.detail', key=key, name=profile.name), kind='secondary') }}
 {% endcall %}
 {{ steps(['Choose a file', 'Review and save'], current=2) }}
@@ -78,8 +78,9 @@
 
   <fieldset class="stack">
     <legend>How should we save these assets?</legend>
-    <label for="mode-replace"><input id="mode-replace" type="radio" name="mode" value="replace"{% if mode == 'replace' %} checked{% endif %}> Replace this client's inventory</label>
-    <label for="mode-add"><input id="mode-add" type="radio" name="mode" value="add"{% if mode == 'add' %} checked{% endif %}> Add to it</label>
+    <label for="mode-add"><input id="mode-add" type="radio" name="mode" value="add"{% if mode == 'add' %} checked{% endif %}> Add these assets to the current inventory</label>
+    <label for="mode-replace"><input id="mode-replace" type="radio" name="mode" value="replace"{% if mode == 'replace' %} checked{% endif %}> Replace this client's inventory. Assets not in this file are removed.</label>
+    <p class="help">Adding keeps the current assets and appends these rows. Choose Replace only when you want the file to become the full inventory.</p>
   </fieldset>
   <div class="form-actions">
     {% if not preview.assets or preview.errors %}

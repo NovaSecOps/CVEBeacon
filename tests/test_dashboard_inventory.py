@@ -1,5 +1,6 @@
 """The account dashboard guides and protects client inventory management."""
 
+import csv
 import io
 import json
 import os
@@ -11,7 +12,7 @@ import pytest
 from cvebeacon import dashboard_inventory, inventory_journal
 from cvebeacon.dashboard import create_app
 from cvebeacon.inventory import load_inventory
-from cvebeacon.inventory_preview import preview_upload
+from cvebeacon.inventory_preview import FIELDS, preview_upload
 from cvebeacon.private_storage import private_directory, private_file
 from cvebeacon.web_assets import client_key
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
@@ -36,6 +37,7 @@ def deployment(tmp_path):
 
 ADD = "/watch/clients/add"
 CSV = b"asset_id,vendor,wrong_title,version,client\nprivate-asset,Example,Widget,1,Untrusted client\n"
+MAX_PASTE_BYTES = 100_000
 
 
 def add(browser, name="Example client"):
@@ -55,7 +57,18 @@ def path_for(detail, action):
 def upload(browser, detail, data=CSV, filename="example.csv"):
     return browser.post(path_for(detail, "upload"), data={
         "csrf": csrf(browser, detail), "inventory": (io.BytesIO(data), filename),
+        "pasted_rows": "", "paste_format": "csv",
     })
+
+
+def paste_upload(browser, detail, text, format="csv", *, file=None):
+    data = {
+        "csrf": csrf(browser, detail), "pasted_rows": text, "paste_format": format,
+        "inventory": (io.BytesIO(b""), ""),
+    }
+    if file is not None:
+        data["inventory"] = (io.BytesIO(file), "example.csv")
+    return browser.post(path_for(detail, "upload"), data=data, content_type="multipart/form-data")
 
 
 def submit(browser, detail, preview, *, action="save", mode="replace", product="2", **options):
@@ -151,6 +164,131 @@ def test_guided_upload_to_watch_only_with_permissions_and_audit(deployment):
     assert all(marker not in repr(audits) for marker in (
         "private-asset", "private-notes-marker", "private-contact", "wrong_title", "Untrusted client",
     ))
+
+
+def test_preview_defaults_to_add_and_replace_explains_removed_assets(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    preview = upload(browser, detail)
+    assert preview.status_code == 200
+    assert re.search(r'name="mode" value="add" checked', preview.text)
+    assert not re.search(r'name="mode" value="replace" checked', preview.text)
+    assert "Replace this client's inventory. Assets not in this file are removed." in preview.text
+
+
+def test_inventory_template_download_has_canonical_fields_and_requires_view(deployment):
+    _, users, app, browser = deployment
+    response = browser.get("/watch/clients/inventory-template")
+    assert response.status_code == 200
+    assert response.headers["Content-Type"] == "text/csv; charset=utf-8"
+    assert response.headers["Content-Disposition"] == "attachment; filename=inventory-template.csv"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+    assert rows[0] == list(FIELDS)
+    preview = preview_upload(response.data, ".csv", "Example client")
+    asset, = preview.assets
+    assert preview.errors == preview.warnings == 0
+    assert asset.asset_id == "example-asset-001"
+    assert asset.vendor == "Example Vendor" and asset.product == "Example Product"
+
+    viewer = app.test_client()
+    login(viewer, "reader")
+    assert viewer.get("/watch/clients/inventory-template").status_code == 200
+
+    admin = users.authenticate("admin", PASSWORD)
+    users.save_role("inventory-no-view", {"manage_inventory"}, authorization=admin)
+    users.add("inventory-no-view", password=PASSWORD, role="inventory-no-view")
+    limited = app.test_client()
+    login(limited, "inventory-no-view")
+    assert limited.get("/watch/clients/inventory-template").status_code == 403
+
+
+def test_upload_form_offers_paste_and_a_csv_template(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    page = browser.get(detail).text
+    assert "Download a CSV template" in page
+    assert 'label for="pasted-rows">Or paste rows</label>' in page
+    assert 'name="paste_format"' in page
+    assert 'option value="csv"' in page and 'option value="json"' in page and 'option value="yaml"' in page
+    assert "Paste up to 100 KB, or upload a file for larger inventories." in page
+
+
+def test_pasted_csv_uses_the_preview_and_save_flow(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    preview = paste_upload(
+        browser, detail,
+        "asset_id,vendor,product,version\npasted-asset,Example Vendor,Example Product,1.0.0\n",
+    )
+    assert preview.status_code == 200
+    assert "Example Product" in preview.text and "Ready to import." in preview.text
+    assert re.search(r'name="mode" value="add" checked', preview.text)
+    saved = submit(browser, detail, preview, mode="add")
+    assert saved.status_code == 303
+    row, = current(browser, detail)
+    assert row["asset_id"] == "pasted-asset" and row["product"] == "Example Product"
+
+
+@pytest.mark.parametrize(("format", "text"), (
+    ("json", '[{"asset_id":"pasted-json","vendor":"Example","product":"Widget","version":"1.0"}]'),
+    ("yaml", "- asset_id: pasted-yaml\n  vendor: Example\n  product: Widget\n  version: '1.0'\n"),
+))
+def test_pasted_json_and_yaml_use_the_inventory_preview(deployment, format, text):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    response = paste_upload(browser, detail, text, format)
+    assert response.status_code == 200
+    assert "Ready to import." in response.text
+    assert f"pasted-{format}" in response.text
+
+
+def test_paste_requires_exactly_one_source(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    neither = paste_upload(browser, detail, "")
+    assert neither.status_code == 400 and "Choose a file or paste rows." in neither.text
+    both = paste_upload(
+        browser, detail,
+        "asset_id,vendor,product,version\npasted-asset,Example,Widget,1.0\n", file=CSV,
+    )
+    assert both.status_code == 400 and "Choose a file or paste rows, not both." in both.text
+
+
+def test_paste_over_100_kb_is_rejected_with_guidance(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    text = "é" * (MAX_PASTE_BYTES // 2 + 1)
+    assert len(text.encode("utf-8")) > MAX_PASTE_BYTES
+    oversized = paste_upload(browser, detail, text)
+    assert oversized.status_code == 400
+    assert "Paste up to 100 KB, or upload a file for larger inventories." in oversized.text
+
+
+def test_largest_allowed_paste_fits_multipart_limits_and_previews(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    rows = io.StringIO()
+    writer = csv.writer(rows, lineterminator="\n")
+    writer.writerow(FIELDS)
+    writer.writerow(["example-asset-001", "Example Vendor", "Example Product", "1.0.0", *([""] * (len(FIELDS) - 4))])
+    payload = rows.getvalue() + "\n" * (MAX_PASTE_BYTES - len(rows.getvalue().encode("utf-8")))
+    assert len(payload.encode("utf-8")) == MAX_PASTE_BYTES
+
+    response = paste_upload(browser, detail, payload)
+    multipart_size = response.request.content_length
+    assert multipart_size > MAX_PASTE_BYTES
+    assert multipart_size <= 128 * 1024
+    assert multipart_size <= dashboard_inventory.UPLOAD_REQUEST_BYTES
+    assert response.status_code == 200 and "Example Product" in response.text
+
+
+def test_file_upload_still_previews_after_paste_support(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    response = upload(browser, detail)
+    assert response.status_code == 200
+    assert "private-asset" in response.text and "Widget" in response.text
 
 
 def _admin(app):
