@@ -65,6 +65,11 @@
 {% set reason = stored.get('reason', '') %}
 {% set summary = ui.get('summary', '') if ui else stored.get('summary', '') %}
 {% set withheld = ui and ui.get('withheld') %}
+{% if rules_over_limit and index == 0 and field.key == 'condition' %}
+  {% call callout('warning', 'Read-only rule list') %}
+  <p>This page can edit up to {{ rules_row_limit }} rules. This configuration has more; edit the file directly.</p>
+  {% endcall %}
+{% endif %}
 {% set channels_field = namespace(value=none) %}
 {% set events_field = namespace(value=none) %}
 {% for control in group.controls %}
@@ -82,7 +87,7 @@
 {% if not read_only %}
   {% if mode == 'builder' %}
     <div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="edit_as_text" value="{{ index }}">Edit as text</button></div>
-  {% elif stored.get('mode') == 'builder' and group.data.get('condition') %}
+  {% elif stored.get('mode') == 'builder' and group.data.get('condition') and (not ui or ui.get('representable')) and not withheld %}
     <div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="use_builder" value="{{ index }}">Use the builder</button></div>
   {% endif %}
 {% endif %}

@@ -39,6 +39,7 @@ from .watch.rules import Rule, EVENT_KINDS, LEAF_KEYS, CONDITION_SCHEMA
 from .watch.users import UserStore
 
 MAX_CONFIG = 256 * 1024
+RULES_ROW_LIMIT = 101
 KEEP_BACKUPS = 10
 PREVIEW_SECONDS = 600
 MAX_PENDING_PER_SESSION = 32
@@ -2028,10 +2029,10 @@ def form_row_count(form=None):
         if len(text) > 3:
             raise ValueError
         count = int(text)
-        if not 1 <= count <= 101:
+        if not 1 <= count <= RULES_ROW_LIMIT:
             raise ValueError
     except ValueError:
-        abort(400, "row_count must be an integer from 1 to 101")
+        abort(400, f"row_count must be an integer from 1 to {RULES_ROW_LIMIT}")
     return count
 
 
@@ -2087,7 +2088,11 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
         rows = get_table(document, "watch").get("rules", []) if section == "rules" else document.get("product_mappings", [])
         schema = RULE_FIELDS if section == "rules" else MAPPING_FIELDS
         prefix = ("watch", "rules") if section == "rules" else ("product_mappings",)
-        for index in range(count if count is not None else len(rows) + 1):
+        if count is None and section == "rules":
+            row_count = len(rows) if len(rows) >= RULES_ROW_LIMIT else len(rows) + 1
+        else:
+            row_count = count if count is not None else len(rows) + 1
+        for index in range(row_count):
             groups.append((f"{section} {index + 1}", schema, rows[index] if index < len(rows) else {}, (*prefix, index)))
     else:
         rows = list(get_table(document, "watch.channels").items())
@@ -2525,7 +2530,12 @@ def _rule_builder_render_context(section, document, count):
         if error.name != f"{__package__}.dashboard_rule_builder":
             raise
         return {}
-    return {"rule_builder_rows": render_rule_builder_rows(document, count)}
+    rules = get_table(document, "watch").get("rules", [])
+    return {
+        "rule_builder_rows": render_rule_builder_rows(document, count),
+        "rules_over_limit": len(rules) > RULES_ROW_LIMIT,
+        "rules_row_limit": RULES_ROW_LIMIT,
+    }
 
 
 def register_config(app, config, *, host):
@@ -2574,7 +2584,14 @@ def register_config(app, config, *, host):
         status = 400
         try:
             document, _, _, version, current_config = editor.read()
+            rules_over_limit = (
+                section == "rules"
+                and len(get_table(document, "watch").get("rules", [])) > RULES_ROW_LIMIT
+            )
             if request.method == "POST":
+                if rules_over_limit:
+                    abort(400, f"This page can edit up to {RULES_ROW_LIMIT} rules. "
+                          "This configuration has more; edit the file directly.")
                 if editor.read_only():
                     raise ConfigurationError(
                         "The configuration directory is read-only. Ask the operator to enable "
@@ -2639,7 +2656,7 @@ def register_config(app, config, *, host):
                                        leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
                                        channel_names=[channel.name for channel in current_config.watch.channels],
                                        toml_value=value, saved=request.args.get("saved") == "1",
-                                       read_only=editor.read_only())
+                                       read_only=editor.read_only() or rules_over_limit)
         except FieldValidationError as exc:
             error = str(exc)
         except ConfigurationError as exc:
@@ -2678,7 +2695,7 @@ def register_config(app, config, *, host):
                                    leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA, toml_value=value,
                                    match=match, channel_types=sorted(TYPE_KEYS),
                                    channel_names=[channel.name for channel in current_config.watch.channels],
-                                   read_only=editor.read_only()), status
+                                   read_only=editor.read_only() or rules_over_limit), status
         return render_template("config_error.html", error=error,
                                read_only=editor.read_only()), status
 

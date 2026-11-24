@@ -582,6 +582,115 @@ def test_mode_switch_without_javascript_posts_only_visible_mode(tmp_path):
     assert load_config(config.config_path).watch.rules[0].condition == parse_condition({"kev": "cisa"})
 
 
+def test_text_to_builder_preserves_pending_integer_to_float_type_change(tmp_path):
+    config, _, client = write_app(tmp_path, [model_rule({"cvss_min": 7})])
+    before = config.config_path.read_bytes()
+    page = client.get("/config/rules")
+    fields = page_form(page.text)
+    fields["edit_as_text"] = "0"
+    response = client.post("/config/rules", data=fields)
+    assert response.status_code == 200, response.text
+
+    fields = page_form(response.text)
+    fields["g0_condition"] = '{ cvss_min = 7.0 }'
+    fields["use_builder"] = "0"
+    response = client.post("/config/rules", data=fields)
+
+    assert response.status_code == 200, response.text
+    assert "Keep editing this condition as text to preserve its structure." in response.text
+    assert row_mode(response.text, 0) == "text"
+    assert page_form(response.text)["g0_condition"] == '{ cvss_min = 7.0 }'
+    assert config.config_path.read_bytes() == before
+
+
+def test_nonrepresentable_text_draft_hides_use_builder_after_other_row_check(tmp_path):
+    rules = [model_rule({"kev": "cisa"}, "first"), model_rule({"status": "published"}, "second")]
+    _, _, client = write_app(tmp_path, rules)
+    fields = page_form(client.get("/config/rules").text)
+    fields["edit_as_text"] = "0"
+    response = client.post("/config/rules", data=fields)
+    assert response.status_code == 200, response.text
+
+    fields = page_form(response.text)
+    fields["g0_condition"] = '{ not = { kev = "cisa" } }'
+    fields["match_rule"] = "1"
+    response = client.post("/config/rules", data=fields)
+
+    assert response.status_code == 200, response.text
+    assert row_mode(response.text, 0) == "text"
+    assert page_form(response.text)["g0_condition"] == '{ not = { kev = "cisa" } }'
+    assert 'name="use_builder" value="0"' not in response.text
+
+
+def _write_quote_heavy_rules_config(config_path, *, event_kinds):
+    """Write a compact, valid config whose text-mode forms expand heavily."""
+    base = dashboard_config.dumps(document())
+    assert '"rules" = []\n' in base
+    parts = [base.replace('"rules" = []\n', "", 1)]
+    stored_events = dashboard_config.value(list(event_kinds))
+    parts.extend([
+        '[[watch.rules]]\nname = "ordinary"\n'
+        'condition = { kev = "cisa" }\nchannels = ["email"]\n'
+        f"events = {stored_events}\n"
+    ])
+    for rule_index in range(12):
+        values = ["\"" * 195 + f",{rule_index * 100 + item:04d}" for item in range(100)]
+        condition = "{ keyword = [" + ", ".join("'" + item + "'" for item in values) + "] }"
+        parts.append(
+            f'[[watch.rules]]\nname = "quoted-{rule_index}"\n'
+            f"condition = {condition}\nchannels = [\"email\"]\n"
+            f"events = {stored_events}\n"
+        )
+    config_path.write_text("\n".join(parts), encoding="utf-8")
+
+
+@pytest.mark.parametrize(("submitter", "row"), [("match_rule", "0"), ("edit_as_text", "0")])
+def test_quote_heavy_valid_page_fits_rules_limit_for_read_only_actions(tmp_path, submitter, row):
+    from cvebeacon.watch.rules import EVENT_KINDS
+
+    config, _, client = write_app(tmp_path)
+    _write_quote_heavy_rules_config(config.config_path, event_kinds=EVENT_KINDS)
+    before = config.config_path.read_bytes()
+    assert dashboard_config.MAX_CONFIG * 0.9 <= len(before) <= dashboard_config.MAX_CONFIG
+
+    page = client.get("/config/rules")
+    assert page.status_code == 200, page.text
+    assert row_mode(page.text, 1) == "text"
+    fields = page_form(page.text)
+    body = urlencode(list(fields.items(multi=True))).encode("ascii")
+    assert 1_400_000 <= len(body) < 1_550_000
+
+    action_form = MultiDict(fields)
+    action_form.add(submitter, row)
+    body = urlencode(list(action_form.items(multi=True))).encode("ascii")
+    response = client.post(
+        "/config/rules",
+        data=body,
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert response.status_code == 200, response.text
+    assert config.config_path.read_bytes() == before
+    assert len(body) * 1.25 <= RULES_REQUEST_BYTES
+
+
+def test_quote_heavy_config_preview_keeps_save_size_limit_separate(tmp_path):
+    from cvebeacon.watch.rules import EVENT_KINDS
+
+    config, _, client = write_app(tmp_path)
+    _write_quote_heavy_rules_config(config.config_path, event_kinds=EVENT_KINDS)
+    before = config.config_path.read_bytes()
+    fields = page_form(client.get("/config/rules").text)
+    body = urlencode(list(fields.items(multi=True))).encode("ascii")
+    assert len(body) > 1_400_000
+    response = client.post(
+        "/config/rules", data=body,
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert response.status_code == 400
+    assert "Configuration exceeds the size limit" in response.text
+    assert config.config_path.read_bytes() == before
+
+
 @pytest.mark.parametrize(
     "change,message",
     [
@@ -1021,6 +1130,51 @@ def test_maximum_rule_page_saves_as_a_byte_identical_noop(
     assert response.status_code == 200, response.text
     assert "No differences to show." in response.text
     assert confirm(client, response).status_code == 303
+    assert config.config_path.read_bytes() == before
+
+
+def test_full_rule_limit_omits_add_row_and_keeps_all_rules(tmp_path):
+    rules = [model_rule({"kev": "cisa"}, f"rule-{index}") for index in range(101)]
+    config, _, client = write_app(tmp_path, rules)
+    page = client.get("/config/rules")
+    assert page.status_code == 200
+    fields = page_form(page.text)
+    assert fields["row_count"] == "101"
+    assert 'name="g100_name"' in page.text
+    assert 'name="g101_name"' not in page.text
+
+    response = client.post("/config/rules", data=fields)
+    assert response.status_code == 200, response.text
+    assert confirm(client, response).status_code == 303
+    assert len(load_config(config.config_path).watch.rules) == 101
+
+
+def test_rule_page_over_limit_renders_read_only_and_refuses_truncation(tmp_path):
+    rules = [model_rule({"kev": "cisa"}, f"rule-{index}") for index in range(102)]
+    config, _, client = write_app(tmp_path, rules)
+    before = config.config_path.read_bytes()
+    page = client.get("/config/rules")
+    assert page.status_code == 200, page.text
+    assert 'value="rule-101"' in page.text
+    assert (
+        "This page can edit up to 101 rules. This configuration has more; "
+        "edit the file directly."
+    ) in page.text
+    assert 'name="row_count" value="102"' in page.text
+    assert re.search(r'name="remove0"[^>]*disabled', page.text)
+    assert "Validate and preview" not in page.text
+
+    fields = page_form(page.text)
+    bounded = MultiDict()
+    for name, value in fields.items(multi=True):
+        row = re.match(r"(?:[gb])(\d+)_|remove(\d+)$", name)
+        if row and int(row.group(1) or row.group(2)) >= 101:
+            continue
+        if name == "row_count":
+            value = "101"
+        bounded.add(name, value)
+    response = client.post("/config/rules", data=bounded)
+    assert response.status_code == 400
     assert config.config_path.read_bytes() == before
 
 

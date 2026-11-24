@@ -58,9 +58,9 @@ from .watch.store import EventDeliveries, WatchStore
 from .watch.sync import euvd_progress
 
 STATE_KEY = "dashboard_watch"
-# The near-256 KiB rule page fixtures post up to 832,206 URL-encoded bytes.
-# Round up with at least 25% headroom for the rules editor alone.
-RULES_REQUEST_BYTES = 1152 * 1024
+# The 262,014-byte quote-heavy TOML fixture posts 1,461,491 URL-encoded bytes.
+# Keep about 43% headroom for the rules editor alone.
+RULES_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_STATEMENT_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_REQUEST_BYTES = MAX_STATEMENT_UPLOAD_BYTES + 64 * 1024
 EVENT_PAGE_SIZE = 50

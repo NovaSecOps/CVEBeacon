@@ -343,7 +343,11 @@ def _posted_text_row(form, index):
         condition = _parse_text_value(form.get(f"g{index}_condition", ""), "condition")
     except ConfigurationError:
         condition = None
-    return {"mode": _MODE_TEXT, "withheld": _condition_withheld(condition)}
+    return {
+        "mode": _MODE_TEXT,
+        "withheld": _condition_withheld(condition),
+        "representable": condition is not None and read_condition(condition).model is not None,
+    }
 
 
 def retain_rule_action_form(form, document, current_config, count):
@@ -390,7 +394,7 @@ def retain_rule_action_form(form, document, current_config, count):
         posted = MultiDict(form)
         for field, value in _text_fields(index, original, row, condition, channels).items():
             posted[field] = value
-        rows[index] = {"mode": _MODE_TEXT}
+        rows[index] = {"mode": _MODE_TEXT, "representable": True}
         return posted, None
 
     if row["mode"] != _MODE_TEXT or read_condition(original.get("condition")).model is None:
@@ -408,7 +412,9 @@ def retain_rule_action_form(form, document, current_config, count):
     read = read_condition(condition)
     if read.model is None:
         return form, read.reason
-    if keep_original_condition(original.get("condition"), read.model) != condition:
+    from .dashboard_config import _toml_equal
+
+    if not _toml_equal(keep_original_condition(original.get("condition"), read.model), condition):
         return form, "Keep editing this condition as text to preserve its structure."
     for field, choices in (("channels", channels), ("events", EVENT_KINDS)):
         selected = selections[field]
