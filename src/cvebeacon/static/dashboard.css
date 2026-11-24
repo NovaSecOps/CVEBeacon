@@ -512,6 +512,31 @@ details.disclosure > summary { font-weight: 600; }
 /* Pagination */
 .pagination { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; margin: var(--space-4) 0; color: var(--text-muted); }
 
+/* Getting-started checklist (Home). State is carried by the badge text, never colour alone. */
+.setup-checklist summary {
+  display: flex; justify-content: space-between; gap: var(--space-3);
+  cursor: pointer; min-height: 40px; align-items: center;
+}
+/* Outside markers with container padding keep each number beside its row. */
+.setup-steps { list-style: decimal outside; margin: 0; padding: 0 0 0 2rem; }
+.setup-step {
+  display: list-item;
+  padding: var(--space-3) 0; border-top: 1px solid var(--border);
+}
+.setup-row { display: grid; grid-template-columns: 8.5rem 1fr; gap: var(--space-3); }
+.setup-title { font-weight: 600; margin: 0; }
+.setup-detail { margin: var(--space-1) 0 var(--space-2); color: var(--text-muted); }
+/* Attention is carried by the badge text; the title keeps the normal text colour. */
+.setup-attention .setup-title { color: var(--text); }
+
+/* Closed-by-default explanation. */
+.explain-body { padding: var(--space-2) 0; }
+
+/* Rule builder rows (part 3). The controls stack inside the criterion cell. */
+.criteria { display: grid; gap: var(--space-3); }
+.criterion { vertical-align: top; }
+.criterion-controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: end; }
+
 /* --------------------------------------------- 5. Legacy classes (still used) */
 
 .muted { color: var(--text-muted); }
@@ -560,6 +585,10 @@ details.disclosure > summary { font-weight: 600; }
   .page-actions { width: 100%; }
   .form-actions .btn, .form-actions button { flex: 1 1 auto; }
   form.stack { max-width: none; }
+}
+
+@media (max-width: 40rem) {
+  .setup-row { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
