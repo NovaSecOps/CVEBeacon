@@ -18,6 +18,7 @@ from cvebeacon.errors import ConfigurationError
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
 from test_dashboard import setup
 from test_dashboard_accounts import accounts as account_fixture, login, csrf, PASSWORD
+from test_dashboard_rule_builder import page_form
 
 
 @pytest.fixture
@@ -65,11 +66,30 @@ def form(page, action="preview"):
 
 
 def preview(client, section="http", **changes):
-    page = client.get("/config/" + section)
+    path = "/config/" + section
+    page = client.get(path)
     assert page.status_code == 200, page.text
-    data = form(page.text)
-    data.update(changes)
-    return client.post("/config/" + section, data=data)
+    if section != "rules":
+        data = form(page.text)
+        data.update(changes)
+        return client.post(path, data=data)
+
+    data = page_form(page.text)
+    text_rows = dict.fromkeys(
+        match[1] for field in changes
+        if (match := re.fullmatch(r"g([0-9]+)_(?:condition|channels|events)", field))
+    )
+    for index in text_rows:
+        mode = f"b{index}_mode"
+        if data[mode] == "builder":
+            data["edit_as_text"] = index
+            switched = client.post(path, data=data)
+            assert switched.status_code == 200, switched.text
+            data = page_form(switched.text)
+        assert data[mode] == "text"
+    for field, value in changes.items():
+        data[field] = value
+    return client.post(path, data=data)
 
 
 def confirm(client, response, section="http", **changes):
