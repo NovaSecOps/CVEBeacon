@@ -519,9 +519,10 @@ details.disclosure > summary { font-weight: 600; }
 }
 .setup-steps { list-style: decimal inside; margin: 0; padding: 0; }
 .setup-step {
-  display: grid; grid-template-columns: 8.5rem 1fr; gap: var(--space-3);
+  display: list-item;
   padding: var(--space-3) 0; border-top: 1px solid var(--border);
 }
+.setup-row { display: grid; grid-template-columns: 8.5rem 1fr; gap: var(--space-3); }
 .setup-title { font-weight: 600; margin: 0; }
 .setup-detail { margin: var(--space-1) 0 var(--space-2); color: var(--text-muted); }
 /* Attention is carried by the badge text; the title keeps the normal text colour. */
@@ -586,7 +587,7 @@ details.disclosure > summary { font-weight: 600; }
 }
 
 @media (max-width: 40rem) {
-  .setup-step { grid-template-columns: 1fr; }
+  .setup-row { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: no-preference) {

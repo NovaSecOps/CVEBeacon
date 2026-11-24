@@ -83,6 +83,75 @@ def test_setup_checklist_renders_every_state_and_progress(env):
         assert f"Detail for {key}." in text
 
 
+def test_setup_checklist_unknown_suffix_only_when_present(env):
+    items = [item("sources", "done")]
+    default = render(
+        env,
+        "{% from 'ui.html' import setup_checklist %}"
+        "{{ setup_checklist(items, 1, 1) }}",
+        items=items,
+    )
+    explicit_zero = render(
+        env,
+        "{% from 'ui.html' import setup_checklist %}"
+        "{{ setup_checklist(items, 1, 1, unknown=0) }}",
+        items=items,
+    )
+    with_unknown = render(
+        env,
+        "{% from 'ui.html' import setup_checklist %}"
+        "{{ setup_checklist(items, 4, 6, unknown=2) }}",
+        items=items,
+    )
+
+    assert '<span class="setup-progress">1 of 1 steps done</span>' in default
+    assert "could not be checked" not in default
+    assert '<span class="setup-progress">1 of 1 steps done</span>' in explicit_zero
+    assert "could not be checked" not in explicit_zero
+    assert (
+        '<span class="setup-progress">4 of 6 steps done; 2 could not be checked</span>'
+        in with_unknown
+    )
+
+
+def test_setup_checklist_escapes_the_unknown_count(env):
+    text = render(
+        env,
+        "{% from 'ui.html' import setup_checklist %}"
+        "{{ setup_checklist(items, 1, 2, unknown='<b>3</b>') }}",
+        items=[item("sources", "done")],
+    )
+
+    assert "&lt;b&gt;3&lt;/b&gt; could not be checked" in text
+    assert "<b>3</b>" not in text
+
+
+def test_setup_checklist_wraps_the_row_in_a_grid_container(env):
+    text = render(
+        env,
+        "{% from 'ui.html' import setup_checklist %}"
+        "{{ setup_checklist(items, 0, 1) }}",
+        items=[item("channel", "todo")],
+    )
+
+    assert 'id="setup-channel"><div class="setup-row"><span class="setup-state">' in text
+
+
+def test_setup_step_keeps_list_markers_and_grid_is_on_the_inner_row():
+    css = STYLESHEET.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+    step_rule = css.split(".setup-step {", 1)[1].split("}", 1)[0]
+    assert "display: list-item" in step_rule
+    assert "display: grid" not in step_rule
+
+    row_rule = css.split(".setup-row {", 1)[1].split("}", 1)[0]
+    assert "display: grid" in row_rule
+    assert "grid-template-columns: 8.5rem 1fr" in row_rule
+
+    media = css.split("@media (max-width: 40rem) {", 1)[1].split("\n}", 1)[0]
+    assert ".setup-row { grid-template-columns: 1fr; }" in media
+
+
 def test_setup_checklist_action_and_hint_rules(env):
     items = [
         item(
@@ -336,6 +405,7 @@ def test_setup_checklist_classes_are_styled_with_tokens():
         ".setup-checklist summary {",
         ".setup-steps {",
         ".setup-step {",
+        ".setup-row {",
         ".setup-title {",
         ".setup-detail {",
         ".setup-attention .setup-title {",
@@ -346,7 +416,7 @@ def test_setup_checklist_classes_are_styled_with_tokens():
     ):
         assert selector in css, selector
     assert "@media (max-width: 40rem)" in css
-    assert ".setup-step { grid-template-columns: 1fr; }" in css
+    assert ".setup-row { grid-template-columns: 1fr; }" in css
 
     new_rules = css.split(".setup-checklist summary {", 1)[1].split(
         "/* --------------------------------------------- 5. Legacy", 1

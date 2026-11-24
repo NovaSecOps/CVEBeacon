@@ -82,16 +82,16 @@
 
 {#- Getting-started list. items: list of dicts {id,title,state,detail,action_url,action_label,hint}.
     state: done|todo|attention|unknown|na. open: bool (list expanded). -#}
-{% macro setup_checklist(items, done, total, open=true) %}
+{% macro setup_checklist(items, done, total, open=true, unknown=0) %}
 {% set labels = {'done': ('Done','success'), 'todo': ('To do','neutral'), 'attention': ('Needs attention','warning'),
                  'unknown': ('Could not check','warning'), 'na': ('Not available','neutral')} %}
 <details class="card setup-checklist" id="getting-started"{% if open %} open{% endif %} aria-labelledby="getting-started-title">
-<summary><h2 class="card-title" id="getting-started-title">Getting started</h2><span class="setup-progress">{{ done }} of {{ total }} steps done</span></summary>
+<summary><h2 class="card-title" id="getting-started-title">Getting started</h2><span class="setup-progress">{{ done }} of {{ total }} steps done{% if unknown %}; {{ unknown }} could not be checked{% endif %}</span></summary>
 <p class="card-description">These steps set up monitoring. Finishing them does not mean every flaw has been found.</p>
 <ol class="setup-steps">{% for s in items %}
-<li class="setup-step setup-{{ s.state }}" id="setup-{{ s.id }}"><span class="setup-state">{{ badge(labels[s.state][0], labels[s.state][1]) }}</span>
+<li class="setup-step setup-{{ s.state }}" id="setup-{{ s.id }}"><div class="setup-row"><span class="setup-state">{{ badge(labels[s.state][0], labels[s.state][1]) }}</span>
 <div class="setup-body"><p class="setup-title">{{ s.title }}</p><p class="setup-detail">{{ s.detail }}</p>
-{% if s.action_url %}<a class="btn btn-secondary btn-small" href="{{ s.action_url }}">{{ s.action_label }}</a>{% elif s.hint %}<p class="help">{{ s.hint }}</p>{% endif %}</div></li>{% endfor %}</ol></details>
+{% if s.action_url %}<a class="btn btn-secondary btn-small" href="{{ s.action_url }}">{{ s.action_label }}</a>{% elif s.hint %}<p class="help">{{ s.hint }}</p>{% endif %}</div></div></li>{% endfor %}</ol></details>
 {% endmacro %}
 
 {#- <select> with label, help, error. options: list of (value, text). -#}
