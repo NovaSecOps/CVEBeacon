@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+import cvebeacon.clients as clients_module
 from cvebeacon.clients import (
     ClientImpact,
     ClientImpacts,
@@ -100,6 +101,87 @@ def test_affected_and_review_clients_are_grouped(tmp_path):
             )
         )
     }
+
+
+def test_no_client_asset_counts_are_separate_and_use_same_run(tmp_path):
+    path = tmp_path / "state.db"
+    store = StateStore(path)
+    named = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    no_client_affected = Asset("fw1", "Acme", "Widget", "2")
+    no_client_review = Asset("fw2", "Acme", "Widget", "3")
+    no_client_unaffected = Asset("fw3", "Acme", "Widget", "4")
+    scan(
+        store,
+        [
+            QueryResult(
+                named,
+                (finding(named, "CVE-2026-0001", Applicability.AFFECTED),),
+                (),
+            ),
+            QueryResult(
+                no_client_affected,
+                (finding(no_client_affected, "CVE-2026-0001", Applicability.AFFECTED),),
+                (),
+            ),
+            QueryResult(
+                no_client_review,
+                (finding(no_client_review, "CVE-2026-0001", Applicability.NEEDS_REVIEW),),
+                (),
+            ),
+            QueryResult(
+                no_client_unaffected,
+                (finding(no_client_unaffected, "CVE-2026-0001", Applicability.NOT_AFFECTED),),
+                (),
+            ),
+        ],
+    )
+    # A failed, newer run must not replace either half of the same-run result.
+    newer = Asset("g1", "Acme", "Widget", "5", client="Globex")
+    scan(
+        store,
+        [
+            QueryResult(
+                newer,
+                (finding(newer, "CVE-2026-0001", Applicability.AFFECTED),),
+                (),
+            )
+        ],
+        failed=True,
+    )
+
+    impact_reader = getattr(clients_module, "affected_clients_and_unassigned", None)
+    assert callable(impact_reader)
+    named_impacts, no_client_impacts = impact_reader(path, ("CVE-2026-0001",))
+
+    assert named_impacts == {
+        "CVE-2026-0001": ClientImpacts(
+            (ClientImpact("Acme", 1, "affected"),)
+        )
+    }
+    summary = no_client_impacts["CVE-2026-0001"]
+    assert (summary.affected, summary.needs_review) == (1, 1)
+    assert "Unassigned" not in repr(named_impacts)
+
+
+def test_no_client_impacts_omit_zero_counts(tmp_path):
+    path = tmp_path / "state.db"
+    store = StateStore(path)
+    asset = Asset("a1", "Acme", "Widget", "1", client="Acme")
+    scan(
+        store,
+        [
+            QueryResult(
+                asset,
+                (finding(asset, "CVE-2026-0001", Applicability.AFFECTED),),
+                (),
+            )
+        ],
+    )
+
+    impact_reader = getattr(clients_module, "affected_clients_and_unassigned", None)
+    assert callable(impact_reader)
+    _, no_client_impacts = impact_reader(path, ("CVE-2026-0001",))
+    assert no_client_impacts == {}
 
 
 def test_unaffected_cves_and_unassigned_assets_are_omitted(tmp_path):
