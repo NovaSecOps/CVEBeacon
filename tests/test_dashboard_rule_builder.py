@@ -63,10 +63,11 @@ def write_app(tmp_path, rules=(), channels=None, sources=None, watch_enabled=Tru
             document(rules, channels, sources, watch_enabled=watch_enabled)
         ),
         encoding="utf-8",
+        newline="\n",
     )
     path.chmod(0o644)
     (tmp_path / "inventory.csv").write_text(
-        "asset_id,vendor,product,version\na,Acme,Widget,1\n", encoding="utf-8"
+        "asset_id,vendor,product,version\na,Acme,Widget,1\n", encoding="utf-8", newline="\n"
     )
     config = load_config(path)
     users = UserStore(config.watch.users_database)
@@ -641,7 +642,7 @@ def _write_quote_heavy_rules_config(config_path, *, event_kinds):
             f"condition = {condition}\nchannels = [\"email\"]\n"
             f"events = {stored_events}\n"
         )
-    config_path.write_text("\n".join(parts), encoding="utf-8")
+    config_path.write_text("\n".join(parts), encoding="utf-8", newline="\n")
 
 
 @pytest.mark.parametrize(("submitter", "row"), [("match_rule", "0"), ("edit_as_text", "0")])
@@ -860,7 +861,7 @@ def test_new_rule_without_events_keeps_the_defaults(tmp_path):
     response = client.post("/config/rules", data=data)
     assert response.status_code == 200, response.text
     assert confirm(client, response).status_code == 303
-    saved = tomllib.loads(client.application.extensions["dashboard_config"].path.read_text())
+    saved = tomllib.loads(client.application.extensions["dashboard_config"].path.read_text(encoding="utf-8"))
     assert "events" not in saved["watch"]["rules"][0]
 
 
@@ -1224,7 +1225,7 @@ def test_browser_noop_preserves_raw_channels_and_events(tmp_path, channels, even
     assert set(fields.getlist("b0_channels")) == {item.strip() for item in channels}
     assert set(fields.getlist("b0_events")) == set(load_config(config.config_path).watch.rules[0].events)
     assert confirm(client, client.post("/config/rules", data=fields)).status_code == 303
-    assert tomllib.loads(config.config_path.read_text())["watch"]["rules"] == [rule]
+    assert tomllib.loads(config.config_path.read_text(encoding="utf-8"))["watch"]["rules"] == [rule]
 
 
 @pytest.mark.parametrize("control", ["\r", "\n", "\t", "\0", "\x85"])
@@ -1237,7 +1238,7 @@ def test_browser_noop_preserves_control_character_condition(tmp_path, control):
     assert fields["b0_mode"] == "text"
     assert "b0_keyword_value" not in fields
     assert confirm(client, client.post("/config/rules", data=fields)).status_code == 303
-    assert tomllib.loads(config.config_path.read_text())["watch"]["rules"] == [rule]
+    assert tomllib.loads(config.config_path.read_text(encoding="utf-8"))["watch"]["rules"] == [rule]
     assert rule_hash(load_config(config.config_path).watch.rules[0]) == before
 
 
@@ -1384,7 +1385,7 @@ def test_rules_post_rejects_multipart(tmp_path):
 def test_open_rules_post_is_rejected_before_reading_form(tmp_path, monkeypatch):
     tmp_path.chmod(0o700)
     path = tmp_path / "config.toml"
-    path.write_text(dashboard_config.dumps(document()))
+    path.write_text(dashboard_config.dumps(document()), encoding="utf-8", newline="\n")
     client = dashboard.create_app(load_config(path)).test_client()
 
     def unexpected(*args, **kwargs):
