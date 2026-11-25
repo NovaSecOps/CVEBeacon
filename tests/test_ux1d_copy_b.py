@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 import html as html_module
-from pathlib import Path
+import json
 import re
 
-from cvebeacon import backup, dashboard, dashboard_ops, dashboard_update
+from flask import url_for
+
+from cvebeacon import backup, dashboard, dashboard_ops, dashboard_update, dashboard_web
 from cvebeacon.config import UpdateConfig
 from cvebeacon.dashboard_config import FIELD_METADATA
 from cvebeacon.dashboard_config_fields import FIELD_LABELS
 from cvebeacon.state import StateStore
 from cvebeacon.watch.store import WatchStore
+from cvebeacon.watch.permissions import PERMISSIONS
 from test_dashboard_operations import login, make_config, new_accounts
 
 BANNED_WORDS = re.compile(r"\b(safe|protected|working|healthy|all set|not affected)\b", re.I)
@@ -26,11 +29,24 @@ def page_text(markup: str) -> str:
 
 
 def outside_technical(markup: str) -> str:
-    value = re.sub(r"(?is)<details\b.*?</details>", " ", markup)
-    value = re.sub(r"(?is)<(code|pre)\b.*?</\1>", " ", value)
+    value = re.sub(
+        r"(?is)<details\b[^>]*>\s*<summary>\s*Technical details\s*</summary>.*?</details>",
+        " ",
+        markup,
+    )
     value = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", value)
     value = re.sub(r"(?s)<[^>]+>", " ", value)
     return re.sub(r"\s+", " ", html_module.unescape(value))
+
+
+def test_raw_code_is_exempt_only_inside_technical_details():
+    assert "SIGINT" in outside_technical("<code>SIGINT</code>")
+    assert "SIGINT" in outside_technical(
+        "<details class='disclosure'><summary>More information</summary><pre>SIGINT</pre></details>"
+    )
+    assert "SIGINT" not in outside_technical(
+        "<details class='disclosure'><summary>Technical details</summary><pre>SIGINT</pre></details>"
+    )
 
 
 def admin_app(tmp_path, monkeypatch, *, updates=False):
@@ -126,6 +142,8 @@ def test_schedule_uses_plain_time_and_task_labels(tmp_path, monkeypatch):
         assert expected in response.text, expected
     for old in ("Schedule type", "Interval in hours", "Fixed local times", "Scan inventory"):
         assert old not in response.text, old
+    for value in ("interval", "times", "scan", "watch", "both"):
+        assert f'<option value="{value}"' in response.text, value
 
 
 def test_backups_use_readable_and_plain_columns(tmp_path, monkeypatch):
@@ -147,6 +165,9 @@ def test_backups_use_readable_and_plain_columns(tmp_path, monkeypatch):
         "Delete expired backups",
         "Readable is not proof it can be restored. Use Verify.",
         ">Readable<",
+        "Not requested",
+        "Monitoring data version",
+        "Watch data version",
         "Running backups automatically",
     ):
         assert expected in response.text, expected
@@ -157,8 +178,81 @@ def test_backups_use_readable_and_plain_columns(tmp_path, monkeypatch):
         "<th>Databases</th>",
         ">Ready<",
         "equally protected",
+        '<code class="muted">state ',
+        '<code class="muted">watch ',
     ):
         assert old not in response.text, old
+
+
+def test_backups_describe_coverage_and_managed_inventory_separately(tmp_path, monkeypatch):
+    _, _, _, client = admin_app(tmp_path, monkeypatch)
+    response = client.get("/backups/")
+    assert response.status_code == 200
+    visible = page_text(response.text)
+    for expected in (
+        "configured state databases",
+        "monitoring and inventory state",
+        "watch history",
+        "account records",
+        "dashboard job history",
+        "other SQLite databases CVEBeacon owns in its data directory",
+        "the configuration file",
+        "referenced password and key files, only when you choose to include them.",
+        "Dashboard-managed inventory files are not included",
+        "Copy the private inventory directory separately",
+    ):
+        assert expected in visible, expected
+    assert "every data file" not in visible
+
+
+def test_backup_format_versions_use_plain_names(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    StateStore(config.database_path).initialize()
+    WatchStore(config.watch.database).initialize()
+    backup.create(config, created_by="admin")
+    new_accounts(config)
+    monkeypatch.setattr(dashboard_ops.scheduling, "status", lambda **kwargs: "not installed")
+    client = dashboard.create_app(config).test_client()
+    login(client)
+    response = client.get("/backups/")
+    assert response.status_code == 200
+    visible = outside_technical(response.text)
+    assert "Monitoring data version" in visible
+    assert "Watch data version" in visible
+    assert re.search(r"<code[^>]*>\s*(?:state|watch)\s+\d+\s*</code>", response.text) is None
+
+
+def test_requested_secrets_with_missing_file_are_not_reported_as_included(tmp_path, monkeypatch):
+    secret_file = tmp_path / "missing-secret.txt"
+    secret_file.write_text("synthetic password", encoding="utf-8")
+    secret_file.chmod(0o600)
+    channels = '''
+[watch.channels.mail]
+type = "smtp"
+host = "mail.example.com"
+from = "alerts@example.com"
+to = ["security@example.com"]
+password_file = "missing-secret.txt"
+'''
+    config = make_config(tmp_path, channels=channels)
+    secret_file.unlink()
+    StateStore(config.database_path).initialize()
+    WatchStore(config.watch.database).initialize()
+    created = backup.create(config, include_secrets=True, created_by="admin")
+    manifest = json.loads((created.path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["include_secrets"] is True
+    assert manifest["secrets"] == []
+    assert manifest["skipped_secrets"] == ["watch.channels.mail.password"]
+
+    new_accounts(config)
+    monkeypatch.setattr(dashboard_ops.scheduling, "status", lambda **kwargs: "not installed")
+    app = dashboard.create_app(config)
+    client = app.test_client()
+    login(client)
+    response = client.get("/backups/")
+    assert response.status_code == 200
+    assert "<td>Requested</td>" in response.text
+    assert "<td>Included</td>" not in response.text
 
 
 def test_updates_explain_signature_and_backup_without_feed_jargon(tmp_path, monkeypatch):
@@ -183,11 +277,49 @@ def test_roles_lead_with_plain_permission_descriptions(tmp_path, monkeypatch):
     assert "A role is a set of things people may do." in response.text
     assert "A person with the Manage users permission, but not an administrator" in response.text
     assert (
-        '<td>Open pages and read findings, alerts and reports<br>'
+        '<td>Read dashboard pages, findings and alerts<br>'
         '<code class="muted">view</code></td>'
     ) in response.text
     assert "<th>What it allows</th>" not in response.text
     assert "non-admin" not in response.text
+
+
+def test_every_role_capability_has_a_plain_description_and_matches_its_boundary(tmp_path, monkeypatch):
+    _, _, _, client = admin_app(tmp_path, monkeypatch)
+    response = client.get("/roles")
+    assert response.status_code == 200
+    rows = re.findall(
+        r'<td>(.*?)<br><code class="muted">([^<]+)</code></td>', response.text
+    )
+    descriptions = {capability: page_text(description) for description, capability in rows}
+    assert set(descriptions) == set(PERMISSIONS)
+    for capability, description in descriptions.items():
+        assert description.strip(), capability
+        assert description != capability, capability
+        assert "_" not in description, (capability, description)
+
+    assert descriptions["view"].strip() == "Read dashboard pages, findings and alerts"
+    assert descriptions["run"].strip() == (
+        "Start scans, data updates and other tasks. Manual queries and report exports "
+        "need both Run and View."
+    )
+    assert descriptions["edit_channels"].strip() == (
+        "Change where alerts are sent. Credential values need Manage secrets; file "
+        "reference paths need an administrator."
+    )
+    assert descriptions["edit_reporting"].strip() == (
+        "Choose how a person is identified when they mark a CVE as reported."
+    )
+    assert descriptions["manage_secrets"].strip() == (
+        "Change credential values and secret file contents. An administrator must "
+        "change file reference paths."
+    )
+    assert descriptions["manage_inventory"].strip() == (
+        "Upload and manage dashboard-managed client software lists."
+    )
+    assert descriptions["view_audit"].strip() == (
+        "Read the account activity log and export the full history of CVEs reported to clients."
+    )
 
 
 def test_audit_uses_record_check_wording_and_no_raw_action_titles(tmp_path, monkeypatch):
@@ -201,6 +333,35 @@ def test_audit_uses_record_check_wording_and_no_raw_action_titles(tmp_path, monk
     assert "<span title=" not in response.text
     assert '<code class="muted">login</code>' not in response.text
     assert "Signed in" in response.text
+
+
+def test_unknown_audit_action_uses_plain_fallback_and_keeps_raw_code_in_details(tmp_path, monkeypatch):
+    _, users, _, client = admin_app(tmp_path, monkeypatch)
+    users.record_action("future_action", username="admin", actor="admin", detail="support note")
+    response = client.get("/audit")
+    assert response.status_code == 200
+    assert "Other recorded action" in response.text
+    assert "future_action:support note" in response.text
+    assert "future_action:support note" not in outside_technical(response.text)
+
+
+def test_confirmation_text_remains_copy_pinned(tmp_path, monkeypatch):
+    _, _, _, client = admin_app(tmp_path, monkeypatch, updates=True)
+    account = client.get("/account")
+    backups = client.get("/backups/")
+    monkeypatch.setattr(dashboard_update, "read_status", lambda config: {"available": "1.2.3"})
+    monkeypatch.setattr(dashboard_update, "unsupported_reason", lambda: None)
+    updates = client.get("/updates/")
+    assert account.status_code == backups.status_code == updates.status_code == 200
+    assert 'data-confirm="Log out everywhere, including this browser?"' in account.text
+    assert (
+        'data-confirm="Delete backups older than 7 day(s)? The newest 3 readable backups are always kept."'
+        in backups.text
+    )
+    assert (
+        'data-confirm="Queue the update to version 1.2.3? The updater checks the release signature and makes a backup first."'
+        in updates.text
+    )
 
 
 def test_account_and_user_edit_avoid_session_jargon(tmp_path, monkeypatch):
@@ -217,9 +378,32 @@ def test_account_and_user_edit_avoid_session_jargon(tmp_path, monkeypatch):
     assert "This signs them out everywhere." in edit.text
 
 
-def test_web_assets_points_to_the_inventory_settings():
-    template = Path(__file__).resolve().parents[1] / "src/cvebeacon/templates/web_assets.html"
-    source = template.read_text(encoding="utf-8")
-    assert "web_snapshots = true" not in source
-    assert "turn on web snapshots in the" in source
-    assert "Inventory settings" in source
+def test_web_assets_points_to_the_inventory_settings(tmp_path, monkeypatch):
+    _, _, app, client = admin_app(tmp_path, monkeypatch)
+    allowlist = tmp_path / "allowlist.json"
+    snapshot_file = tmp_path / "snapshot.json"
+    snapshot_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        dashboard_web,
+        "paths",
+        lambda config, client_name: (allowlist, snapshot_file),
+    )
+    monkeypatch.setattr(
+        dashboard_web,
+        "read_allowlist",
+        lambda path, client_name: ({"client": client_name, "assets": []}, "v1"),
+    )
+    monkeypatch.setattr(
+        dashboard_web,
+        "read_web_snapshot",
+        lambda path: ([], {"generated_at": "2026-11-25T00:00:00Z", "status": "success", "record_count": 0}),
+    )
+    response = client.get("/web-assets?client=Acme")
+    assert response.status_code == 200
+    with app.test_request_context():
+        expected_destination = url_for("config_editor.inventory")
+    link = re.search(r'<a href="([^"]+)">Inventory settings</a>', response.text)
+    assert link is not None
+    assert link.group(1) == expected_destination
+    assert "web_snapshots = true" not in response.text
+    assert "turn on web snapshots in the" in response.text

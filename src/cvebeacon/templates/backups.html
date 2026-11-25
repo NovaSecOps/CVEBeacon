@@ -10,7 +10,15 @@
 {% endcall %}
 {% if can_admin %}
 {% call card('Create a backup', 'Take a fresh copy now.') %}
-<p>A backup contains every data file and the configuration file, taken while CVEBeacon keeps running. Each file gets a recorded checksum; use Verify to check them. Referenced password and key files are left out unless you include them.</p>
+<p>A backup contains:</p>
+<ul>
+<li>the configured state databases, including monitoring and inventory state, watch history, account records and dashboard job history;</li>
+<li>other SQLite databases CVEBeacon owns in its data directory;</li>
+<li>the configuration file; and</li>
+<li>referenced password and key files, only when you choose to include them.</li>
+</ul>
+<p>Dashboard-managed inventory files are not included. Copy the private inventory directory separately.</p>
+<p>Databases are copied while CVEBeacon keeps running. Each file gets a recorded checksum; use Verify to check them.</p>
 <form method="post" action="{{ url_for('backups.create_backup') }}" class="stack">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 <div class="field"><label for="f-include-secrets"><input id="f-include-secrets" type="checkbox" name="include_secrets" value="yes" aria-describedby="f-include-secrets-help"> Include referenced password and key files</label>
@@ -36,8 +44,8 @@
 <td>{{ watch_stamp(backup.created_at) or 'unknown' }}{% if backup.created_by %}<br><span class="muted">{{ backup.created_by }}</span>{% endif %}</td>
 <td>{{ backup.size_label }}</td>
 <td class="num">{{ backup.databases }}</td>
-<td>{{ 'Included' if backup.include_secrets else 'Not included' }}</td>
-<td>{% for name, value in backup.schema_versions.items()|sort %}<code class="muted">{{ name }} {{ value }}</code>{% if not loop.last %}, {% endif %}{% else %}{{ 'unknown' if backup.databases else 'no files' }}{% endfor %}</td>
+<td>{{ 'Requested' if backup.include_secrets else 'Not requested' }}</td>
+<td>{% for name, value in backup.schema_versions.items()|sort %}{{ {'state': 'Monitoring data', 'watch': 'Watch data'}.get(name, 'Other data') }} version {{ value }}{% if not loop.last %}, {% endif %}{% else %}{{ 'unknown' if backup.databases else 'no files' }}{% endfor %}</td>
 <td>{% if backup.valid %}{{ badge('Readable', 'success') }}{% else %}{{ badge('Not usable', 'danger') }}{% endif %}{% if backup.error %}<br><span class="muted">{{ backup.error }}</span>{% endif %}</td>
 <td>
 {% if backup.valid %}
@@ -56,6 +64,6 @@
 {{ empty_state('No backups have been taken yet', 'Use Create a backup above so a restorable copy exists before something goes wrong.') }}
 {% endif %}
 <p class="muted">Verify checks every file before you rely on a backup. Downloads are built on request and are not kept on disk. Deleting expired backups never removes the newest readable backups.</p>
-{% call explain('Running backups automatically') %}<p>Automatic backups run outside the dashboard with the operating system's scheduler, for example cron or a systemd timer. See the backup guide for examples.</p>{% endcall %}
+{% call explain('Running backups automatically') %}<p>Automatic backups run outside the dashboard with the operating system's scheduler, such as a scheduled task or timer. See the backup guide for examples.</p>{% endcall %}
 {% endif %}
 {% endblock %}

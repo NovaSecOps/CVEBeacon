@@ -2,26 +2,27 @@
 {% from 'ui.html' import page_header, card, callout, table_wrap, badge, button %}
 {% block title %}Roles · CVEBeacon{% endblock %}
 {% set capability_help = {
-  'view': 'Open pages and read findings, alerts and reports',
+  'view': 'Read dashboard pages, findings and alerts',
   'report': 'Mark a CVE as reported to clients',
   'statement': 'Generate a written statement for a CVE',
-  'run': 'Start scans, data updates and other tasks; submit manual queries and report exports',
+  'run': 'Start scans, data updates and other tasks. Manual queries and report exports need both Run and View.',
   'retry': 'Retry failed message deliveries',
   'test_channel': 'Send a test message to an alert channel',
   'edit_rules': 'Change which flaws trigger alerts',
-  'edit_channels': 'Change where alerts are sent; credentials in them need an administrator',
+  'edit_channels': 'Change where alerts are sent. Credential values need Manage secrets; file reference paths need an administrator.',
   'edit_sources': 'Change which public vulnerability sources are used',
   'edit_watch': 'Change what CVEBeacon watches',
-  'edit_reporting': 'Change how reports name the organisation that receives them',
+  'edit_reporting': 'Choose how a person is identified when they mark a CVE as reported.',
   'edit_dashboard': 'See dashboard sign-in settings; changes need an administrator',
   'edit_inventory': 'Change how the software list is read',
   'edit_http': 'Change how CVEBeacon connects to public data sources',
   'edit_system': 'See where CVEBeacon stores its data and reports; changes need an administrator',
   'manage_web_assets': 'Add, change and remove client websites checked for software',
   'manage_schedule': 'Install and remove the automatic schedule',
-  'manage_secrets': 'Change notification credentials and where their secret files are read from',
+  'manage_inventory': 'Upload and manage dashboard-managed client software lists.',
+  'manage_secrets': 'Change credential values and secret file contents. An administrator must change file reference paths.',
   'manage_users': 'Manage accounts that are not administrators and the roles they can be given',
-  'view_audit': 'See the account activity log',
+  'view_audit': 'Read the account activity log and export the full history of CVEs reported to clients.',
 } %}
 {% block content %}
 {{ page_header('Roles', 'A role is a set of things people may do. Give a role to an account on the Users page.') }}

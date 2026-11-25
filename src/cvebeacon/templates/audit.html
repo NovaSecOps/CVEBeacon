@@ -53,7 +53,7 @@
 {% endif %}
 {% call table_wrap('Account audit entries') %}
 <table><thead><tr><th>Time</th><th>What happened</th><th>Account</th><th>Actor</th></tr></thead><tbody>
-{% for entry in entries %}{% set parts = entry.action.split(':', 1) %}{% set label = action_labels.get(parts[0]) %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{% if label %}{{ label }}{% if parts|length > 1 %} <span class="muted">{{ parts[1] }}</span>{% endif %}{% else %}<code class="muted">{{ entry.action }}</code>{% endif %}</td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
+{% for entry in entries %}{% set parts = entry.action.split(':', 1) %}{% set label = action_labels.get(parts[0]) %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{% if label %}{{ label }}{% if parts|length > 1 %} <span class="muted">{{ parts[1] }}</span>{% endif %}{% else %}Other recorded action <details class="disclosure"><summary>Technical details</summary><code class="muted">{{ entry.action }}</code></details>{% endif %}</td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
 {% else %}<tr><td colspan="4">No audit entries recorded yet. Entries appear when accounts are created, changed or used.</td></tr>{% endfor %}
 </tbody></table>
 {% endcall %}
