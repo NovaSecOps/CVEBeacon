@@ -70,7 +70,7 @@ group read the installed files:
 sudo install -d -o root -g proxy -m 0750 /path/to/cvebeacon-certs
 sudo sh -c 'umask 077; openssl pkcs12 -in /path/to/organisation-certificate.pfx -clcerts -nokeys -out /path/to/cvebeacon-certs/dashboard-cert.pem'
 sudo sh -c 'umask 077; openssl pkcs12 -in /path/to/organisation-certificate.pfx -cacerts -nokeys -out /path/to/cvebeacon-certs/organisation-chain.pem'
-sudo sh -c 'umask 077; openssl pkcs12 -in /path/to/organisation-certificate.pfx -nocerts -nodes -out /path/to/cvebeacon-certs/dashboard-key.pem'
+sudo sh -c 'umask 077; openssl pkcs12 -in /path/to/organisation-certificate.pfx -nocerts -noenc -out /path/to/cvebeacon-certs/dashboard-key.pem'
 sudo sh -c 'umask 077; cat /path/to/cvebeacon-certs/dashboard-cert.pem /path/to/cvebeacon-certs/organisation-chain.pem > /path/to/cvebeacon-certs/fullchain.pem'
 sudo chown root:proxy /path/to/cvebeacon-certs/fullchain.pem /path/to/cvebeacon-certs/dashboard-key.pem
 sudo chmod 0640 /path/to/cvebeacon-certs/fullchain.pem /path/to/cvebeacon-certs/dashboard-key.pem
@@ -79,6 +79,8 @@ sudo rm /path/to/cvebeacon-certs/dashboard-cert.pem /path/to/cvebeacon-certs/org
 
 Check that the public key derived from the certificate matches the one from
 the private key. The two hashes must be identical:
+
+OpenSSL versions older than 3.0 use `-nodes` instead of `-noenc`.
 
 ```console
 openssl x509 -in /path/to/cvebeacon-certs/fullchain.pem -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum
