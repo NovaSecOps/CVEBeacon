@@ -301,6 +301,25 @@ def test_largest_allowed_paste_fits_multipart_limits_and_previews(deployment):
     assert response.status_code == 200 and "Example Product" in response.text
 
 
+def test_upload_accepts_eight_parts_and_rejects_nine(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    path = path_for(detail, "upload")
+    fields = {
+        "csrf": csrf(browser, detail), "inventory": (io.BytesIO(CSV), "example.csv"),
+        "pasted_rows": "", "paste_format": "csv",
+    }
+    six_parts = browser.post(path, data={**fields, "harmless_a": "one", "harmless_b": "two"},
+                             content_type="multipart/form-data")
+    assert six_parts.status_code == 200 and "private-asset" in six_parts.text
+
+    nine_parts = browser.post(path, data={
+        **fields, "harmless_a": "one", "harmless_b": "two", "harmless_c": "three",
+        "harmless_d": "four", "harmless_e": "five",
+    }, content_type="multipart/form-data")
+    assert nine_parts.status_code == 413
+
+
 def test_file_upload_still_previews_after_paste_support(deployment):
     _, _, _, browser = deployment
     detail = add(browser)
