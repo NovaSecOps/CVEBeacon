@@ -36,20 +36,32 @@ Windows Server 2025 for x86-64; extract it and run `cvebeacon.exe --help` before
 replacing an existing installation.
 GitHub also attaches the source archives for the tag.
 
+## Release signing key
+
+The release signing key is an ED25519 key with fingerprint
+`SHA256:Pe4UwQlazZWtwypCbAKnaoewMnTalXe1n+LceV/xdbE`. For manual verification,
+`SIGNERS_FILE` must be the same trusted allowed-signers file selected by the
+updater's `Policy.signers`: the packaged file by default, or the administrator's
+root-owned override when one is configured. Check its fingerprint against the
+published fingerprint above before verifying the release. Set `SIGNERS_FILE`
+in your shell to that file's path. A checksum file without its SSH signature is
+insufficient.
+
+For a first install or recovery without a trusted installed signer file, obtain
+the allowed-signers entry from the repository on GitHub at this release's tag,
+independently of the release download. Check its fingerprint against the
+published fingerprint above, then use it as `SIGNERS_FILE`. Do not use a signer
+file from an unverified release archive.
+
 Verify the signature and checksums from the directory that contains the
-downloaded files. Obtain the signer pin through an authenticated channel and
-compare its key fingerprint independently; a checksum file without its SSH
-signature is insufficient.
+downloaded files:
 
 ```console
-ssh-keygen -Y verify -f /etc/cvebeacon/release-allowed-signers \
+ssh-keygen -Y verify -f "$SIGNERS_FILE" \
   -I cvebeacon-release -n cvebeacon-release \
   -s SHA256SUMS.sig < SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
-
-Use the path to your independently obtained copy of the pinned signers file in
-place of `/etc/cvebeacon/release-allowed-signers`.
 
 ## Container image
 
