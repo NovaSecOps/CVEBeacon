@@ -157,7 +157,7 @@
   <tbody>{% for version in history %}
   <tr>
     <td><time>{{ version_stamp(version) }}</time></td>
-{% if can_manage and not is_unassigned %}
+{% if can_manage %}
     <td><form method="post" action="{{ change_href }}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="revision" value="{{ revision }}">
