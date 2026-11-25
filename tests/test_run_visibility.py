@@ -26,7 +26,7 @@ def test_external_run_is_visible_to_viewer(tmp_path):
         with RunLock(run_lock_path(config), command="watch run"):
             page = client.get("/operations/")
             assert page.status_code == 200
-            assert "Active run" in page.text
+            assert "Another task is running" in page.text
             assert "watch run" in page.text
             assert "Elapsed" in page.text
             assert "Cancel job" not in page.text
@@ -226,8 +226,8 @@ def test_dead_local_holder_is_stale_on_operations(tmp_path, monkeypatch):
         monkeypatch.setattr(locking.os, "kill", dead)
         assert lock.snapshot()["state"] == "stale"
         page = client.get("/operations/").text
-        assert "Run record · stale" in page
-        assert "Active run" not in page
+        assert "Task record · stale" in page
+        assert "Another task is running" not in page
     finally:
         app.extensions["dashboard_jobs"].shutdown()
 
@@ -254,9 +254,9 @@ def test_unconfirmed_local_holder_is_not_reported_as_stopped(tmp_path):
         assert lock.snapshot()["state"] == "unknown"
         page = client.get("/operations/").text
         assert "Status unclear" in page
-        assert "Run record · unknown" not in page
+        assert "Task record · unknown" not in page
         assert "No command from this record is running now" not in page
-        assert "Do not assume the storage is free" in page
+        assert "Another task may still be using the same data." in page
         assert "callout-warning" in page
     finally:
         app.extensions["dashboard_jobs"].shutdown()
@@ -272,6 +272,6 @@ def test_operations_shows_installed_cron_to_viewer(tmp_path, monkeypatch):
     client = app.test_client()
     login(client, "viewer")
     try:
-        assert "Scheduled by cron" in client.get("/operations/").text
+        assert "Scheduled automatically" in client.get("/operations/").text
     finally:
         app.extensions["dashboard_jobs"].shutdown()

@@ -184,7 +184,7 @@ def test_bad_lock_does_not_hide_operations(tmp_path):
         page = client.get("/operations/")
         assert page.status_code == 200 and "unavailable" in page.text.lower()
         assert "Could not be read" in page.text
-        assert "Do not assume the storage is free" in page.text
+        assert "Another task may still be using the same data." in page.text
         assert target.read_text(encoding="utf-8") == "preserve"
     finally:
         app.extensions["dashboard_jobs"].shutdown()
@@ -213,7 +213,7 @@ def test_windows_operations_schedule_is_restricted_and_cached(tmp_path, monkeypa
         assert client.get("/operations/schedule").status_code == 403
         for _ in range(2):
             text = client.get("/operations/").text
-            assert "Scheduled by Windows Task Scheduler" in text
+            assert "Scheduled automatically" in text
             assert "SYNTHETIC_SCHEDULE_SECRET" not in text
             assert "/opt/private" not in text and "synthetic-private-account" not in text
         assert len(calls) == 1

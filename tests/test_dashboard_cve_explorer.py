@@ -89,7 +89,7 @@ def test_refresh_explains_queue_and_offers_deliver_now(tmp_path,monkeypatch):
     response=client.post('/watch/cve/CVE-2026-10001/refresh',data={'csrf':token})
     assert response.status_code==303
     job_page=client.get(response.location)
-    assert 'next watch notify or watch run' in job_page.text
+    assert 'next time CVEBeacon runs' in job_page.text
     assert 'Deliver now' in job_page.text
     assert client.post('/operations/run',data={'operation':'watch-notify'}).status_code==400
     response=client.post('/operations/run',data={'csrf':token,'operation':'watch-notify'})

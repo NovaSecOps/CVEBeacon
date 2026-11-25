@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% from 'macros.html' import inventory_notice %}
 {% from 'watch_macros.html' import stamp %}
-{% from 'ui.html' import page_header, card, callout, empty_state, definition_list, table_wrap, badge, button %}
+{% from 'ui.html' import page_header, card, callout, empty_state, definition_list, table_wrap, badge, button, explain %}
 {% block title %}Operations · CVEBeacon{% endblock %}
 {% block head %}{% if active or external_runs %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
 {% block content %}
@@ -10,36 +10,37 @@
 
 {% for holder in external_runs %}
 {% if holder.state == 'active' %}
-{% call card('Active run', 'A command started outside the dashboard is using the same storage. Jobs started here wait for it to finish.') %}
+{% call card('Another task is running', 'Another CVEBeacon task is using the same data, so this one waits.') %}
 {{ definition_list([('Command', holder.command or 'Unavailable'), ('Account', holder.account or 'unknown'), ('Host', holder.host or 'unknown'), ('Process ID', holder.pid or 'unknown'), ('Started (UTC)', stamp(holder.started_at) if holder.started_at else 'unknown'), ('Elapsed', (holder.elapsed if holder.elapsed is not none else 'unknown') ~ ' seconds')]) }}
-{% call callout('info', 'Nothing to do here') %}<p>Wait for this run to finish. External runs are managed by their command-line process or scheduler.</p>{% endcall %}
+{% call callout('info', 'Nothing to do here') %}<p>Wait for this task to finish. It is managed outside this dashboard.</p>{% endcall %}
 {% endcall %}
 {% else %}
-{% set record_titles = {'stale': 'Run record · stale', 'unknown': 'Status unclear', 'unavailable': 'Could not be read'} %}
+{% set record_titles = {'stale': 'Task record · stale', 'unknown': 'Status unclear', 'unavailable': 'Could not be read'} %}
 {% set record_title = record_titles.get(holder.state, 'Status unclear') %}
 {% if holder.state == 'stale' %}
-{% set record_description = 'This record is from a command that is no longer running.' %}
+{% set record_description = 'This record is from a task that is no longer running.' %}
 {% elif holder.state == 'unknown' %}
-{% set record_description = 'It could not be confirmed whether this command is still running.' %}
+{% set record_description = 'It could not be confirmed whether this task is still running.' %}
 {% else %}
-{% set record_description = 'The run status is unavailable because the lock could not be read.' %}
+{% set record_description = 'The task status is unavailable because its record could not be read.' %}
 {% endif %}
 {% call card(record_title, record_description) %}
 {{ definition_list([('Command', holder.command or 'Unavailable'), ('Account', holder.account or 'unknown'), ('Host', holder.host or 'unknown'), ('Process ID', holder.pid or 'unknown'), ('Started (UTC)', stamp(holder.started_at) if holder.started_at else 'unknown'), ('Elapsed', (holder.elapsed if holder.elapsed is not none else 'unknown') ~ ' seconds')]) }}
-{% if holder.state == 'stale' %}{% call callout('info') %}<p>No command from this record is running now. The record is kept for diagnosis.</p>{% endcall %}
-{% elif holder.state == 'unknown' %}{% call callout('warning', 'Run status is unclear') %}<p>It could not be confirmed that the command that wrote this record has stopped. Do not assume the storage is free.</p>{% endcall %}
-{% else %}{% call callout('warning', 'Run status is unavailable') %}<p>The run lock could not be read, so another command may still be running. Do not assume the storage is free.</p>{% endcall %}{% endif %}
+{% if holder.state == 'stale' %}{% call callout('info') %}<p>No task from this record is running now. The record is kept for diagnosis.</p>{% endcall %}
+{% elif holder.state == 'unknown' %}{% call callout('warning', 'Task status is unclear') %}<p>It could not be confirmed that the task that wrote this record has stopped. Another task may still be using the same data.</p>{% endcall %}
+{% else %}{% call callout('warning', 'Task status is unavailable') %}<p>The record of the other task could not be read. Another task may still be using the same data.</p>{% endcall %}{% endif %}
 {% endcall %}
 {% endif %}
 {% endfor %}
 
 {% call card('Schedule', 'Whether CVEBeacon runs by itself without someone opening this dashboard.') %}
 {% set can_schedule = accounts and 'manage_schedule' in permissions %}
+{% set schedule_label = 'Scheduled automatically' if schedule_summary in ['Scheduled by cron', 'Scheduled by Windows Task Scheduler'] else schedule_summary %}
 {% if schedule_summary == 'Schedule not installed' %}
 <p>{{ badge('Not installed', 'neutral') }}</p>
 <p>No automatic run is set up.{% if not can_schedule %} Ask an administrator to add one.{% endif %}</p>
 {% elif schedule_summary %}
-<p>{{ badge('Installed', 'success') }} {{ schedule_summary }}.</p>
+<p>{{ badge('Installed', 'success') }} {{ schedule_label }}.</p>
 <p class="muted">{% if can_schedule %}Check the Schedule page for the current times and the command it runs.{% else %}Ask an administrator for the current times and the command it runs.{% endif %}</p>
 {% else %}
 <p>{{ badge('Unknown', 'warning') }}</p>
@@ -49,10 +50,12 @@
 {% endcall %}
 
 {% if not has_inventory %}{{ inventory_notice() }}{% endif %}
-{% if not accounts %}{% call callout('warning', 'Operations need an account') %}<p>Create the first administrator with the local <a href="{{ url_for('bootstrap') }}">bootstrap form</a> or <code>cvebeacon users add NAME --admin</code>.</p>{% endcall %}{% endif %}
-{% if full_history %}{% call callout('warning', 'Full history is on') %}<p>The first watch sync can download years of public records and take hours. It starts only from the confirmed button in Run a job, which supplies the same confirmation as the command line's <code>--yes</code>.</p>{% endcall %}{% endif %}
+{% if not accounts %}{% call callout('warning', 'Operations need a user account') %}<p>Open the <a href="{{ url_for('bootstrap') }}">setup page</a> to create the first administrator.</p>
+{% call explain('Command-line option') %}<p>From a command line, an administrator can also create the first account with <code>cvebeacon users add NAME --admin</code>.</p>{% endcall %}
+{% endcall %}{% endif %}
+{% if full_history %}{% call callout('warning', 'Full history is on') %}<p>The first watch sync can download years of public records and take hours. It starts only from the confirmed button in Run a job.</p>{% endcall %}{% endif %}
 
-{% call callout('info', 'How jobs work') %}<p>Each job runs as a separate <code>cvebeacon</code> process, not inside this dashboard. Jobs that change the same data take turns: a manual job can wait in the queue for up to six hours from submission behind a scheduled or command-line run. Channel tests run separately, one at a time. Every job records its start and outcome in the account audit trail.</p>{% endcall %}
+{% call callout('info', 'How jobs work') %}<p>Each task runs as a separate program, not inside this dashboard. Tasks that change the same data take turns: a manual task can wait in the queue for up to six hours from submission behind a scheduled or command-line task. Channel tests run separately, one at a time. Every task records its start and outcome in the account audit trail.</p>{% endcall %}
 
 {% if accounts %}
 {% set operation_help = {
@@ -64,8 +67,8 @@
   'run': 'Scan the inventory, then run watch.',
 } %}
 {% call card('Run a job', 'Choose one action. The job starts in the background and you can follow it below.') %}
-{% call table_wrap('Operations available to run') %}<table>
-<thead><tr><th>Operation</th><th>What it does</th><th>Start it</th></tr></thead>
+{% call table_wrap('Tasks available to run') %}<table>
+<thead><tr><th>Task</th><th>What it does</th><th>Start it</th></tr></thead>
 <tbody>
 {% for operation, label in operation_labels.items() %}{% if operation in ['scan', 'run'] or watch_enabled %}{% set available = has_inventory if operation in ['scan', 'run'] else watch_enabled %}<tr><td>{{ label }}</td><td class="muted">{{ operation_help.get(operation, '') }}</td><td>
 {% if not available %}<span class="muted">Unavailable: no inventory is configured.</span>
@@ -100,7 +103,7 @@
 {% set status_variants = {'queued': 'neutral', 'running': 'info', 'succeeded': 'success', 'failed': 'danger', 'cancelled': 'neutral'} %}
 {% set status_labels = {'queued': 'Queued', 'running': 'Running', 'succeeded': 'Succeeded', 'failed': 'Failed', 'cancelled': 'Cancelled'} %}
 {% call table_wrap('Jobs in progress') %}<table>
-<thead><tr><th>Job ID</th><th>Operation</th><th>Status</th><th>Started by</th></tr></thead>
+<thead><tr><th>Job ID</th><th>Task</th><th>Status</th><th>Started by</th></tr></thead>
 <tbody>{% for job in active %}<tr>
 <td class="num"><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">{{ job.id }}</a></td>
 <td>{{ job.label }}</td>
