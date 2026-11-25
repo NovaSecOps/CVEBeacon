@@ -294,12 +294,16 @@ def _cvss_lines(view: WatchView, catalog: Mapping[str, str]) -> tuple[str, ...]:
         provider = _provider_label(entry.provider, entry, view, catalog)
         if entry.provider != "cna" and entry.source and entry.source.casefold() != provider.casefold():
             provider += f": {_clean(entry.source, 100)}"
-        label = translate(catalog, "cvss_score", score=f"{entry.score:g}",
-                          version=entry.version, provider=provider)
-        line = f"{label} · {_severity_text(entry.severity_band, catalog)}"
-        if entry.vector:
-            line += f" · {_clean(entry.vector)}"
-        lines.append(line)
+        lines.append(
+            translate(
+                catalog,
+                "cvss_score_line",
+                score=f"{entry.score:g}",
+                severity=_severity_text(entry.severity_band, catalog),
+                version=entry.version,
+                provider=provider,
+            )
+        )
     if view.cvss_severity_differs:
         lines.append(catalog["cvss_severity_differs"])
     return (catalog["cvss_scores"] + ":", *(lines or [catalog["cvss_not_scored"]]))
@@ -738,9 +742,16 @@ _HTML_FONT = (
 )
 _HTML_MUTED = "color:#475467;font-size:12px;"
 _HTML_LINK = "color:#0b57d0;text-decoration:underline;"
-_HTML_TD = "padding:4px 6px;vertical-align:top;border-bottom:1px solid #e4e7ec;"
+_HTML_WRAP = (
+    "overflow-wrap:anywhere;word-wrap:break-word;word-break:break-word;"
+)
+_HTML_TD = (
+    _HTML_WRAP
+    + "padding:4px 6px;vertical-align:top;border-bottom:1px solid #e4e7ec;"
+)
 _HTML_TH = (
-    "padding:6px;text-align:left;border-bottom:2px solid #d0d5dd;"
+    _HTML_WRAP
+    + "padding:6px;text-align:left;border-bottom:2px solid #d0d5dd;"
     "font-size:11px;letter-spacing:0.03em;text-transform:uppercase;"
     "color:#475467;"
 )
@@ -787,10 +798,10 @@ def _html_document(language: str, subject: str, fragment: str) -> str:
         'cellspacing="0" border="0" style="background-color:#f2f4f7;">\n'
         '<tr><td align="center" style="padding:16px;">\n'
         '<table role="presentation" width="100%" cellpadding="0" '
-        'cellspacing="0" border="0" style="max-width:720px;'
+        'cellspacing="0" border="0" style="max-width:600px;width:100%;'
         'background-color:#ffffff;border:1px solid #d0d5dd;'
         'border-radius:6px;">\n'
-        f'<tr><td style="padding:16px 18px;{_HTML_FONT}">\n'
+        f'<tr><td style="{_HTML_WRAP}padding:16px 18px;{_HTML_FONT}">\n'
         '<h1 style="font-size:18px;line-height:1.3;margin:0 0 12px 0;">'
         f"{_h(subject)}</h1>\n"
         f"{fragment}\n"
