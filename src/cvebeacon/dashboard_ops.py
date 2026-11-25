@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import shlex
+import stat
 import subprocess
 import threading
 import time
+import tomllib
+from pathlib import Path
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
 
 from . import scheduling
@@ -25,6 +29,37 @@ from .dashboard_jobs import (
 from .errors import CVEBeaconError, ConfigurationError
 from .locking import OperationLock, RunInProgress
 from .launching import command_prefix
+
+UPDATE_POLICY_PATH = Path("/etc/cvebeacon/update.toml")
+DEFAULT_UPDATE_UNITS = (
+    "cvebeacon.timer", "cvebeacon.service", "cvebeacon-dashboard.service"
+)
+UPDATE_UNIT_PATTERN = re.compile(r"cvebeacon[\w@.-]*\.(service|timer)")
+UPDATE_POLICY_FIELDS = {
+    "enabled", "prefix", "config", "data", "user", "repository",
+    "allow_prereleases", "signers", "units", "probe", "retention",
+    "wait_seconds", "dashboard_unit",
+}
+TIMER_CRON_BLOCK_REASON = (
+    "This server uses a systemd timer for monitoring, so a cron schedule cannot be installed here."
+)
+TIMER_STATUS_LABELS = {
+    "state": "Unknown",
+    "boot": "Unknown",
+    "next_run": "Unknown",
+    "last_run": "Unknown",
+    "last_result": "Unknown",
+    "scan_state": "unknown",
+}
+
+
+def _policy_file_is_administrator_owned(details) -> bool:
+    return (
+        details.st_uid == 0
+        and not details.st_mode & 0o022
+        and stat.S_ISREG(details.st_mode)
+        and details.st_size <= 16384
+    )
 
 
 def requires(permission):
@@ -76,8 +111,89 @@ def _record(action: str, detail: str | None = None) -> None:
     _manager().audit_action(action, _actor(), detail)
 
 
-def _schedule_overview(config: AppConfig) -> tuple[str | None, str]:
-    """Cache only a restricted installed-status label, never scheduler output."""
+def _policy_is_administrator_owned(path: Path) -> bool:
+    """Match the updater's root-owned, non-writable policy path requirement."""
+    path = Path(path).absolute()
+    try:
+        for candidate in (path, *path.parents):
+            details = candidate.lstat()
+            if details.st_uid != 0 or details.st_mode & 0o022 or stat.S_ISLNK(details.st_mode):
+                return False
+            if candidate == path:
+                if not _policy_file_is_administrator_owned(details):
+                    return False
+            elif not stat.S_ISDIR(details.st_mode):
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _update_timer_units(config: AppConfig) -> tuple[bool, tuple[str, str] | None]:
+    """Read only the admin policy fields needed to recognize its timer pair.
+
+    An unreadable protected policy is treated as managed when runtime update
+    checks are enabled. That fails closed for cron installation while allowing
+    the Schedule page to report unknown until the policy is made readable.
+    """
+    path = UPDATE_POLICY_PATH
+    if not _policy_is_administrator_owned(path):
+        return False, None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+    except PermissionError:
+        return bool(config.update.enabled), None
+    except OSError:
+        return False, None
+    try:
+        details = os.fstat(descriptor)
+        if not _policy_file_is_administrator_owned(details):
+            return False, None
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            raw = stream.read(16385)
+        if len(raw) > 16384:
+            return False, None
+        value = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return bool(config.update.enabled), None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(value, dict) or value.get("enabled", False) is not True:
+        return False, None
+    if set(value) - UPDATE_POLICY_FIELDS or not {"prefix", "config", "data", "user"} <= set(value):
+        return True, None
+    units = value.get("units", list(DEFAULT_UPDATE_UNITS))
+    if (
+        not isinstance(units, list)
+        or not units
+        or len(units) > 32
+        or any(not isinstance(unit, str) for unit in units)
+        or len(set(units)) != len(units)
+        or any(not UPDATE_UNIT_PATTERN.fullmatch(unit) or unit.startswith("cvebeacon-update") for unit in units)
+    ):
+        return True, None
+    dashboard_unit = value.get("dashboard_unit", "cvebeacon-dashboard.service")
+    if not isinstance(dashboard_unit, str) or dashboard_unit not in units or not dashboard_unit.endswith(".service"):
+        return True, None
+    timer_unit = next((unit for unit in units if unit == "cvebeacon.timer"), None)
+    service_unit = next((unit for unit in units if unit == "cvebeacon.service"), None)
+    if timer_unit is None or service_unit is None:
+        return True, None
+    return True, (timer_unit, service_unit)
+
+
+def _bounded_schedule_runner(runner):
+    def bounded(*args, **kwargs):
+        kwargs.setdefault("timeout", 2)
+        return runner(*args, **kwargs)
+    return bounded
+
+
+def _schedule_snapshot(config: AppConfig) -> dict:
+    """Cache mapped scheduler labels only; never retain scheduler output."""
     app = current_app
     guard = app.extensions.setdefault("operations_schedule_guard", threading.Lock())
     runner = _runner()
@@ -86,22 +202,56 @@ def _schedule_overview(config: AppConfig) -> tuple[str | None, str]:
         cache = app.extensions.get("operations_schedule_summary")
         if cache and cache[0] is runner and cache[1] == platform and time.monotonic() < cache[2]:
             return cache[3]
-        summary = None
-        scan_state = "unknown"
-        try:
-            def bounded_run(*args, **kwargs):
-                return runner(*args, **kwargs, timeout=2)
-            status = scheduling.status(run=bounded_run)
-            scan_state = scheduling.installed_scan_state(status, config.config_path, windows=platform == "windows")
-            if status == "not installed":
-                summary = "Schedule not installed"
+        bounded_run = _bounded_schedule_runner(runner)
+        managed = False
+        timer_units = None
+        timer_status = None
+        if platform == "linux":
+            managed, timer_units = _update_timer_units(config)
+        if managed:
+            timer_status = dict(TIMER_STATUS_LABELS)
+            if timer_units is not None:
+                timer_status = scheduling.systemd_timer_status(
+                    *timer_units, config.config_path, run=bounded_run
+                )
+            if timer_status["state"] == "On":
+                scan_state = timer_status["scan_state"]
+            elif timer_status["state"] == "Off":
+                scan_state = "none"
             else:
-                summary = "Scheduled by cron" if platform == "linux" else "Scheduled by Windows Task Scheduler"
-        except (CVEBeaconError, OSError, subprocess.TimeoutExpired):
-            pass
-        result = (summary, scan_state)
+                scan_state = "unknown"
+            summary = (
+                "Scheduled automatically" if scan_state in {"scan", "watch"}
+                else "Not scheduled" if scan_state == "none"
+                else "Unknown"
+            )
+        else:
+            try:
+                status = scheduling.status(run=bounded_run)
+                scan_state = scheduling.installed_scan_state(
+                    status, config.config_path, windows=platform == "windows"
+                )
+                if status == "not installed":
+                    summary, scan_state = "Not scheduled", "none"
+                elif scan_state in {"scan", "watch"}:
+                    summary = "Scheduled automatically"
+                else:
+                    summary = "Unknown"
+            except (CVEBeaconError, OSError, subprocess.SubprocessError):
+                summary, scan_state = "Unknown", "unknown"
+        result = {
+            "summary": summary,
+            "scan_state": scan_state,
+            "timer_managed": managed,
+            "timer_status": timer_status,
+        }
         app.extensions["operations_schedule_summary"] = (runner, platform, time.monotonic() + 30, result)
         return result
+
+
+def _schedule_overview(config: AppConfig) -> tuple[str, str]:
+    result = _schedule_snapshot(config)
+    return result["summary"], result["scan_state"]
 
 
 def schedule_scan_state(config: AppConfig) -> str:
@@ -261,19 +411,26 @@ def _schedule_context(
     fallback_command: str | None = None,
 ) -> dict:
     runner = _runner()
+    snapshot = _schedule_snapshot(config)
     status_text = ""
     status_error = None
-    try:
-        status_text = scheduling.status(run=runner)
-    except (CVEBeaconError, OSError) as exc:
-        status_error = str(exc)
+    if not snapshot["timer_managed"]:
+        try:
+            status_text = scheduling.status(run=_bounded_schedule_runner(runner))
+        except (CVEBeaconError, OSError, subprocess.SubprocessError) as exc:
+            status_error = str(exc)
     return {
         "error": error,
         "status_text": status_text,
         "status_error": status_error,
         "platform_name": scheduling.platform.system(),
         "fallback_command": fallback_command or _fallback_install_command(config),
-        "block_reason": _install_block_reason(),
+        "block_reason": (
+            TIMER_CRON_BLOCK_REASON if snapshot["timer_managed"]
+            else _install_block_reason()
+        ),
+        "timer_managed": snapshot["timer_managed"],
+        "timer_status": snapshot["timer_status"],
         "default_command": scheduling.default_command(
             inventory=config.effective_inventory is not None, watch=config.watch.enabled
         ),
@@ -461,6 +618,13 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
     @requires("manage_schedule")
     def schedule_install():
         require_accounts()
+        if (
+            scheduling.platform.system().casefold() == "linux"
+            and _update_timer_units(config)[0]
+        ):
+            return _render_schedule(
+                config, error=TIMER_CRON_BLOCK_REASON, status=409
+            )
         blocked = _install_block_reason()
         if blocked:
             return _render_schedule(

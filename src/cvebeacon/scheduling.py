@@ -47,6 +47,11 @@ $null = $folder.RegisterTask($TaskName, $xml, 6, $Account, $password, 1, $null)
 """
 
 SID_PATTERN = re.compile(r"S-\d+(?:-\d+)+", re.IGNORECASE)
+SYSTEMD_UNIT_PATTERN = re.compile(r"cvebeacon[\w@.-]*\.(service|timer)")
+SYSTEMD_TIME_PATTERN = re.compile(
+    r"(?:[A-Za-z]{3} )?(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)"
+    r"(?: [A-Za-z0-9_+:/-]{1,32})?"
+)
 
 ET.register_namespace("", TASK_NAMESPACE)
 
@@ -874,18 +879,216 @@ def installed_scan_state(summary: str, config_path: Path, *, windows: bool = Fal
             break
         try:
             parts = shlex.split(line, posix=not windows)
-            option = parts.index("--config")
-            path = Path(parts[option + 1].strip('"'))
-            if not path.is_absolute() or path.resolve() != config_path.resolve():
-                continue
-            tail = tuple(parts[option + 2:])
-        except (ValueError, IndexError, OSError):
+        except ValueError:
             continue
-        if tail in {("scan",), ("run",), ("run", "--yes")}:
-            known.add("scan")
-        elif tail in {("watch", "run"), ("watch", "run", "--yes")}:
-            known.add("watch")
+        action = _argv_scan_action(parts, config_path)
+        if action in {"scan", "watch"}:
+            known.add(action)
     return "scan" if "scan" in known else "watch" if "watch" in known else "unknown"
+
+
+def _argv_scan_action(parts: list[str], config_path: Path) -> str:
+    """Classify a command using the same config and action rules as schedule status."""
+    try:
+        option = parts.index("--config")
+        path = Path(parts[option + 1].strip('"'))
+        if not path.is_absolute() or path.resolve() != config_path.resolve():
+            return "unknown"
+        tail = tuple(parts[option + 2:])
+    except (ValueError, IndexError, OSError):
+        return "unknown"
+    if tail in {("scan",), ("run",), ("run", "--yes")}:
+        return "scan"
+    if tail in {("watch", "run"), ("watch", "run", "--yes")}:
+        return "watch"
+    return "unknown"
+
+
+def _systemd_properties(run, unit: str, properties: tuple[str, ...]) -> dict[str, str] | None:
+    """Read a fixed systemd property list without exposing command output."""
+    try:
+        result = run(
+            ["systemctl", "show", "--property=" + ",".join(properties), "--", unit],
+            capture_output=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    output = _command_text(getattr(result, "stdout", ""))
+    if len(output) > 32768:
+        return None
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        if len(line) > 8192 or "=" not in line:
+            return None
+        key, value = line.split("=", 1)
+        if key not in properties or key in values or any(ord(char) < 32 for char in key):
+            return None
+        values[key] = value
+    return values if set(values) == set(properties) else None
+
+
+def _timestamp(value: str):
+    """Parse systemd's display timestamp; return None for its explicit empty values."""
+    text = value.strip()
+    if text.casefold() in {"", "n/a", "never", "-", "0"}:
+        return None
+    match = SYSTEMD_TIME_PATTERN.fullmatch(text)
+    if match is None:
+        return False
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+
+
+def _time_label(value, *, empty: str) -> str:
+    parsed = _timestamp(value)
+    if parsed is None:
+        return empty
+    if parsed is False:
+        return "Unknown"
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+
+def _systemd_exec_argv(value: str) -> list[str] | None:
+    """Extract one argv vector from systemd's fixed ExecStart display property."""
+    if len(value) > 16384 or value.count("argv[]=") != 1:
+        return None
+    encoded = value.partition("argv[]=")[2]
+    marker = " ; ignore_errors="
+    if marker not in encoded:
+        return None
+    encoded = encoded.partition(marker)[0].strip()
+    try:
+        parts = shlex.split(encoded, posix=True)
+    except ValueError:
+        return None
+    if not parts or len(parts) > 128 or any(len(part) > 4096 for part in parts):
+        return None
+    return parts
+
+
+def _service_result(result: str, status: str) -> str:
+    code_text = status.strip()
+    if not re.fullmatch(r"\d{1,3}", code_text):
+        return "Unknown"
+    code = int(code_text)
+    if code > 255:
+        return "Unknown"
+    state = result.strip().casefold()
+    if state == "success":
+        return "Succeeded" if code == 0 else "Unknown"
+    if state == "exit-code":
+        return "Failed" if code != 0 else "Unknown"
+    return {
+        "timeout": "Timed out",
+        "watchdog": "Timed out",
+        "signal": "Stopped",
+        "core-dump": "Stopped",
+        "oom-kill": "Stopped after running out of memory",
+        "start-limit-hit": "Could not start",
+        "resources": "Could not start",
+        "protocol": "Could not start",
+        "exec-condition": "Could not start",
+        "exec-format": "Could not start",
+    }.get(state, "Unknown")
+
+
+def systemd_timer_status(
+    timer_unit: str,
+    service_unit: str,
+    config_path: Path,
+    *,
+    run=subprocess.run,
+) -> dict[str, str]:
+    """Return plain labels for one updater-managed systemd timer and service.
+
+    The caller supplies the units from a validated administrator policy. The
+    names are checked again here before they reach the argument vector.
+    """
+    unknown = {
+        "state": "Unknown", "boot": "Unknown", "next_run": "Unknown",
+        "last_run": "Unknown", "last_result": "Unknown", "scan_state": "unknown",
+    }
+    if (
+        not isinstance(timer_unit, str)
+        or not SYSTEMD_UNIT_PATTERN.fullmatch(timer_unit)
+        or not timer_unit.endswith(".timer")
+        or timer_unit.startswith("cvebeacon-update")
+        or not isinstance(service_unit, str)
+        or not SYSTEMD_UNIT_PATTERN.fullmatch(service_unit)
+        or not service_unit.endswith(".service")
+        or service_unit.startswith("cvebeacon-update")
+    ):
+        return unknown
+
+    timer = _systemd_properties(
+        run,
+        timer_unit,
+        ("ActiveState", "UnitFileState", "NextElapseUSecRealtime", "LastTriggerUSec"),
+    )
+    service = _systemd_properties(
+        run,
+        service_unit,
+        ("Result", "ExecMainStatus", "ExecMainExitTimestamp", "ExecStart"),
+    )
+    if timer is None:
+        timer_labels = {"state": "Unknown", "boot": "Unknown", "next_run": "Unknown"}
+        last_trigger = ""
+    else:
+        active = timer["ActiveState"].strip().casefold()
+        timer_labels = {
+            "state": "On" if active == "active" else "Off" if active in {"inactive", "failed"} else "Unknown",
+            "boot": {
+                "enabled": "Yes",
+                "enabled-runtime": "This boot only",
+                "disabled": "No",
+                "masked": "No",
+                "masked-runtime": "No",
+                "static": "No",
+                "indirect": "No",
+                "generated": "No",
+                "transient": "No",
+                "linked": "No",
+                "linked-runtime": "No",
+                "alias": "No",
+            }.get(timer["UnitFileState"].strip().casefold(), "Unknown"),
+            "next_run": _time_label(timer["NextElapseUSecRealtime"], empty="Not scheduled"),
+        }
+        last_trigger = timer["LastTriggerUSec"]
+
+    if service is None:
+        service_last_run = "Unknown"
+        service_result = "Unknown"
+        scan_state = "unknown"
+    else:
+        service_last_run = _time_label(service["ExecMainExitTimestamp"], empty="Never")
+        service_result = _service_result(service["Result"], service["ExecMainStatus"])
+        argv = _systemd_exec_argv(service["ExecStart"])
+        scan_state = _argv_scan_action(argv, config_path) if argv is not None else "unknown"
+
+    if service_last_run == "Never":
+        trigger_parsed = _timestamp(last_trigger)
+        if trigger_parsed is None:
+            last_run, last_result = "Never", "Never run"
+        elif trigger_parsed is False:
+            last_run, last_result = "Unknown", "Unknown"
+        else:
+            last_run, last_result = trigger_parsed.strftime("%Y-%m-%d %H:%M"), "Unknown"
+    else:
+        last_run, last_result = service_last_run, service_result
+    return {
+        **timer_labels,
+        "last_run": last_run,
+        "last_result": last_result,
+        "scan_state": scan_state if scan_state in {"scan", "watch"} else "unknown",
+    }
 
 def remove(*, system: str = "auto", run=subprocess.run) -> bool:
     resolved = _host_system(system)
