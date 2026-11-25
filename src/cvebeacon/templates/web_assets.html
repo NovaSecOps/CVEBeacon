@@ -8,7 +8,7 @@
 <div class="field"><label for="{{ prefix }}-path">Starting path</label><input id="{{ prefix }}-path" name="path" value="{{ entry.get('path', '/') }}" maxlength="2048" required><p class="help">Start from / unless the site lives in a subfolder.</p></div>
 <div class="field"><label for="{{ prefix }}-expires">Expiry <span class="optional">(optional)</span></label><input id="{{ prefix }}-expires" name="expires_at" value="{{ entry.get('expires_at', '') }}" placeholder="2027-11-01T00:00:00Z"><p class="help">Use ISO 8601 UTC, for example 2027-11-01T00:00:00Z. Leave blank for no expiry. The date must be in the future.</p></div>
 <div class="field field-check"><input id="{{ prefix }}-redirects" name="allow_redirects" type="checkbox" value="yes" {% if entry.get('allow_redirects', true) %}checked{% endif %}><label for="{{ prefix }}-redirects">Allow redirects to listed hosts and ports</label></div>
-<div class="field"><label for="{{ prefix }}-max-redirects">Maximum redirects</label><input id="{{ prefix }}-max-redirects" name="max_redirects" type="number" min="0" max="2" value="{{ entry.get('max_redirects', 2) }}" required><p class="help">0 to 2. Each redirect must stay on a listed host and port.</p></div>
+<div class="field"><label for="{{ prefix }}-max-redirects">Maximum redirects</label><input id="{{ prefix }}-max-redirects" name="max_redirects" type="number" min="0" max="10" value="{{ entry.get('max_redirects', 2) }}" required><p class="help">0 to 10. Each redirect must stay on a listed host and port.</p></div>
 <div class="field field-check"><input id="{{ prefix }}-private" name="allow_private_address" type="checkbox" value="yes" {% if entry.get('allow_private_address') %}checked{% endif %}><label for="{{ prefix }}-private">I authorise access to private addresses for this asset (including loopback)</label><p class="help">Only tick this if the client has approved checking an internal address.</p></div>
 {% if current_user.is_admin %}<div class="field"><label for="{{ prefix }}-ca">Client CA bundle path <span class="optional">(optional)</span></label><input id="{{ prefix }}-ca" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}"><p class="help">Changing the client CA bundle renews authorisation on every saved entry.</p></div>{% else %}<input type="hidden" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}">{% endif %}
 <div class="field field-check"><input id="{{ prefix }}-attest" name="attest" type="checkbox" value="yes" required><label for="{{ prefix }}-attest">I attest that this client authorises observation of this asset and the selected redirect and address policy.</label></div>
@@ -19,7 +19,7 @@
 {% if not available %}{% call callout('warning', 'Web detection is not available') %}<p>{{ notice }} The saved list below can still be viewed and edited, but detection buttons stay disabled until the optional Extensions package is installed.</p>{% endcall %}{% endif %}
 
 {% call card('Choose a client', 'Open a client to see their saved sites, or type a client name to start.') %}
-<form class="filters" method="get"><div class="field"><label for="web-client">Client name</label><input id="web-client" name="client" value="{{ client }}" required maxlength="256"><p class="help">Use the same name as on the Clients page.</p></div><div class="form-actions">{{ button('Open client') }}</div></form>
+<form class="filters" method="get"><div class="field"><label for="web-client">Client name</label><input id="web-client" name="client" value="{{ client }}" list="inventory-client-names" required maxlength="256"><datalist id="inventory-client-names">{% for name in inventory_clients %}<option value="{{ name }}">{% endfor %}</datalist><p class="help">Choose an existing inventory client or enter a new name.</p></div><div class="form-actions">{{ button('Open client') }}</div></form>
 {% if clients %}<p class="muted">Saved clients:</p><p>{% for name in clients %}<a href="{{ url_for('web.index', client=name) }}">{{ name }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
 {% endcall %}
 
@@ -46,9 +46,9 @@
 
 {% if accounts and 'manage_web_assets' in permissions %}
 {% call card('Add an authorised site', 'Record a site the client has authorised. The attestation box must be ticked before the site can be saved.') %}
-<details class="disclosure" id="add-asset"><summary>Add authorised site</summary><form method="post" class="stack" action="{{ url_for('web.save') }}">
+<details class="disclosure" id="add-asset" {% if prefill_entry %}open{% endif %}><summary>Add authorised site</summary><form method="post" class="stack" action="{{ url_for('web.save') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="add">
-{{ asset_fields({}, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
+{{ asset_fields(prefill_entry, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
 {% endcall %}
 {% if document.assets or snapshot or removed or run or products or reviews %}
 {% call card('Remove all sites and results', 'Delete every saved site and all saved detection results for this client. This cannot be undone.', tone='danger') %}
@@ -66,8 +66,16 @@
 {% call card('Latest detection', 'When detection last ran and what it saved.') %}
 {% if removed %}{% call callout('warning') %}<p>Results include assets removed since the last run. Run detection again to refresh retained results.</p>{% endcall %}{% endif %}
 {% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ watch_stamp(last_job.created_at) }} · {{ last_job.exit_meaning }}</p>{% endif %}
-{% if run %}<p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · {{ run.get('status', '') }} · requests: {{ run.get('request_count', '') }} · duration: {{ run.get('duration_seconds', '') }} seconds.</p>{% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
-{% if snapshot %}<p>Saved inventory: {{ watch_stamp(snapshot.generated_at) }} · {{ snapshot.status }} · {{ snapshot.record_count }} products. To include saved snapshots in normal scans, turn on web snapshots in the <a href="{{ url_for('config_editor.inventory') }}">Inventory settings</a>. A failed observation retains the previous inventory.</p>{% endif %}
+{% if run %}
+{% set site_count = run.get('asset_count', document.assets|length if document else 0) %}
+{% set fetched_count = run.get('fetched_count', 0) %}
+{% set product_count = run.get('products_recognized', 0) %}
+{% set version_count = run.get('products_with_version', 0) %}
+<p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · requests: {{ run.get('request_count', '') }} · duration: {{ run.get('duration_seconds', '') }} seconds.</p>
+<p>{% if fetched_count == 0 %}Could not fetch any of {{ site_count }} authorised site{{ '' if site_count == 1 else 's' }}.{% elif fetched_count < site_count %}Fetched {{ fetched_count }} of {{ site_count }} authorised sites.{% else %}Fetched all {{ site_count }} authorised site{{ '' if site_count == 1 else 's' }}.{% endif %} {{ product_count }} product{{ '' if product_count == 1 else 's' }} recognised; {{ version_count }} product{{ '' if version_count == 1 else 's' }} had a disclosed version.</p>
+{% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
+{% if snapshot %}<p>Saved results are from {% if run and run.get('snapshot_updated', false) %}this run{% else %}an earlier run{% endif %} ({{ watch_stamp(snapshot.generated_at) }}): {{ snapshot.record_count }} products. To include saved snapshots in normal scans, turn on web snapshots in the <a href="{{ url_for('config_editor.inventory') }}">Inventory settings</a>.</p>{% else %}<p>No saved inventory snapshot is available.</p>{% endif %}
+{% if versions_hidden %}<p class="help">Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory.</p>{% endif %}
 {% if truncated %}<p class="muted">Showing the first 1,000 entries per table. Full results remain in the private data directory.</p>{% endif %}
 <p class="muted">Response bodies and cookies are never stored or displayed.</p>
 {% endcall %}
@@ -81,8 +89,8 @@
 
 {% call card('Entries to review', 'Detection results that need a person to decide. Compare each one with the site before relying on it.') %}
 {% call table_wrap('Web detection entries to review') %}
-<table><thead><tr><th scope="col">Asset</th><th scope="col">Reason</th><th scope="col">Product</th><th scope="col">Conflicting versions</th><th scope="col">HTTP status</th><th scope="col">Retry after (seconds)</th></tr></thead><tbody>
-{% for item in reviews %}<tr><td>{{ item.get('asset_id', '') }}</td><td>{{ item.get('reason', '') }}</td><td>{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') }}</td><td>{{ item.get('status', '') }}</td><td class="num">{{ item.get('retry_after', '') }}</td></tr>{% else %}<tr><td colspan="6">No entries need review.</td></tr>{% endfor %}</tbody></table>
+<table><thead><tr><th scope="col">Asset</th><th scope="col">Reason</th><th scope="col">Detail</th><th scope="col">Product</th><th scope="col">Conflicting versions</th><th scope="col">HTTP status</th><th scope="col">Retry after (seconds)</th></tr></thead><tbody>
+{% for item in reviews %}<tr><td>{{ item.get('asset_id', '') }}</td><td>{{ reason_labels.get(item.get('reason', ''), 'Needs review') }}{% if item.get('reason') %}<br><span class="muted">{{ item.get('reason') }}</span>{% endif %}</td><td>{{ item.get('detail', '') }}{% if item.get('redirect_display') %}<p>This site redirects to {{ item.get('redirect_display') }}, which is not on the authorised list.{% if accounts and 'manage_web_assets' in permissions %} If the client authorises it, add it as a site.{% endif %}</p>{% if accounts and 'manage_web_assets' in permissions %}<a class="btn btn-secondary" href="{{ url_for('web.index', client=client, prefill_url=item.get('redirect_url')) }}#add-asset">Add this redirect target as an authorised site</a>{% endif %}{% endif %}</td><td>{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') }}</td><td>{{ item.get('status', '') }}</td><td class="num">{{ item.get('retry_after', '') }}</td></tr>{% else %}<tr><td colspan="7">No entries need review.</td></tr>{% endfor %}</tbody></table>
 {% endcall %}
 {% endcall %}
 {% elif not clients %}

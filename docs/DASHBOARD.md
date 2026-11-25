@@ -103,12 +103,15 @@ Operations observes existing lock files without creating storage. Missing locks 
 
 ## Client web technology detection
 
-Open **Web assets**, enter a client label, and save each authorised hostname,
-scheme, port and starting path. `view` permits reading allowlists and results;
+Open **Web assets**, choose an inventory client or enter a new client label,
+and save each authorised hostname, scheme, port and starting path. A typed name
+that matches an inventory client is saved with that client's exact name. `view`
+permits reading allowlists and results;
 `manage_web_assets` permits changes. Administrators have both capabilities. Only
 account sessions can change assets or start jobs. Every saved addition or change
 requires an explicit attestation and records the signed-in username and current
-UTC time; the browser cannot supply those values. Optional expiry, redirects and
+UTC time; the browser cannot supply those values. Redirects default to two and
+can be configured from zero through ten. Optional expiry, redirects and
 private-address authorisation follow the [companion policy](EXTENSIONS.md#web-technology-detection).
 Expired entries must be renewed before detection. **Remove all assets** lets
 you clear an expired list and rebuild it with fresh attestations; each removed
@@ -135,14 +138,25 @@ parents are supported. Adds, changes and removals enter the chained audit
 with the actor, client and hostname. Stale forms are refused. Snapshots,
 manifests and review metadata live in `<data>/web-inventory/`.
 
-The results page shows the latest job, observation timestamps, status, request
-attempt count, total duration, products, versions, evidence types and review
-reasons. Request counts include connection attempts and redirects. It never
-renders response bodies, cookie values or arbitrary response fields. A failed
-observation retains the last published inventory; its newer failure and review
-entries are shown separately. Unknown versions and conflicts remain visible
-for review. Tables show at most 1,000 entries each; complete records stay in the
-private files.
+The **Latest detection** card says how many authorised sites were fetched, how
+many products were recognised, how many disclosed a version, and whether saved
+results came from that run or an earlier run, with the snapshot time. A run that
+fetched sites but found no usable inventory versions succeeds and keeps the
+previous snapshot. A run where every site failed to fetch remains failed; its
+message gives the failed-site count and reason codes without naming a host.
+When versions are hidden, the page explains where to review those products.
+Entries to review translate reason codes into plain wording and retain the raw
+code in muted text. Redirect details explain why the hop was blocked. For an
+unlisted host and port, the page offers to pre-fill the add-site form; saving
+still requires a fresh authorisation attestation. Reaching the redirect limit
+points to the Maximum redirects field. Request counts include connection
+attempts and redirects. The page never renders response bodies, cookie values
+or arbitrary response fields. Tables show at most 1,000 entries each; complete
+records stay in the private files.
+
+The client's inventory page links to **Web assets** and shows the number of
+authorised sites saved for that client. Web asset filenames remain keyed by the
+existing trimmed, case-folded client label.
 
 To include detected products in ordinary scans, enable **web_snapshots** in
 **Configuration → inventory** (`edit_inventory`), or set:

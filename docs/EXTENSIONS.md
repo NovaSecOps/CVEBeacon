@@ -36,7 +36,7 @@ types, without storing response bodies or cookie values.
 
 ### What it sends
 
-- One `GET` to the configured path, plus at most two redirects that are
+- One `GET` to the configured path, plus at most ten redirects that are
   re-checked at every hop.
 - `User-Agent: CVEBeacon-web-detect/<version>`, `Accept:
   text/html,application/xhtml+xml`, `Accept-Language: en`, `Cache-Control:
@@ -81,13 +81,17 @@ option cannot silently fall back to a less safe default.
 - `authorized_by` and `authorized_at` are required. `expires_at` is optional.
   Timestamps are ISO 8601 UTC values. A future `authorized_at` is refused.
 - `allow_redirects` defaults to true and `max_redirects` to 2 (the hard maximum
-  is 2). The authorisation unit is the scheme, host and port of each listed
-  entry; the configured path is only the starting point. A redirect may use any
+  is 10). Values from 0 through 10 are accepted. The authorisation unit is the
+  scheme, host and port of each listed entry; the configured path is only the
+  starting point. A redirect may use any
   path and query on an allowlisted host and port, provided the path plus query
   is at most 2,048 characters, contains no credentials and has no fragment. The
   originating entry's `allow_redirects`, `max_redirects` and
   `allow_private_address` policy applies to every hop, and an HTTPS to HTTP
-  downgrade is refused.
+  downgrade is refused. A refused redirect records its fixed reason; an
+  unlisted target records only its scheme, host and port, never its path or
+  query. When the redirect limit is reached, the detail reports how many hops
+  were followed and points to the Maximum redirects setting.
 - Private, loopback, link-local, metadata, multicast, reserved, unspecified and
   NAT64 answers are refused. IPv4-mapped and IPv4-compatible IPv6 forms are also
   refused by default, even when the embedded address is public. Set
@@ -140,7 +144,8 @@ cvebeacon-ext web detect --client acme --assets acme-assets.json \
   `Retry-After`. `401`, `403` and `404` are never retried. Connection errors
   are retried at most twice with bounded backoff.
 - Bodies, cookies and `Set-Cookie` values are never written to output or
-  review files. Error details contain status categories, not response content.
+  review files. Error details use fixed, path-free messages, bounded counts
+  and status categories, not response content.
 
 ### Output and feeding the core inventory
 
@@ -163,14 +168,16 @@ product identity needs a version. Conflicting versions for one product become a
 WordPress does not imply MySQL or PHP.
 
 Version gaps and other review-only findings still publish a `partial` snapshot
-with the corresponding omissions, so the dashboard can show the product and
-ask for manual review. A run that hit a fetch failure is different: without
-`--allow-partial` the command writes the review file and fails, leaving any
-previous snapshot unchanged. With `--allow-partial` it publishes a `partial`
-snapshot whose `omissions` list the failures and review reasons. A run with no
-rows, including a run where every asset failed, never publishes an empty
-success. Treat `needs_review`, `coverage_unknown`, blocked and stale assets as
-unknown, not as clean.
+with the corresponding omissions when at least one usable inventory row was
+found. If one or more sites fetched successfully but no usable rows were found,
+the command exits successfully, records `no-usable-versions` in review metadata,
+prints the recognised product and version counts, and retains any earlier
+snapshot. If every site failed to fetch, or fetch failures are not accepted by
+`--allow-partial`, the command exits 2, reports the number of failed sites and
+their reason codes, and leaves any previous snapshot unchanged. With
+`--allow-partial`, successful rows are published in a `partial` snapshot and
+the review file records the failed sites. Treat `needs_review`,
+`coverage_unknown`, blocked and stale assets as unknown, not as clean.
 
 Validate or merge the result with the normal extension commands, then point the
 core inventory at it. The core remains the applicability authority:

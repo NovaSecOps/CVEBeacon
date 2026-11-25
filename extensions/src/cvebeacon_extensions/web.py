@@ -1,12 +1,13 @@
 """Passive, explicitly authorised web technology observation.
 
-One bounded GET per allowlisted asset, plus at most two re-checked redirects.
+One bounded GET per allowlisted asset, plus at most ten re-checked redirects.
 The HTTP and TLS client lives here because the core client is a general JSON
 source client; it is not exposed to untrusted response bodies.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
@@ -35,7 +36,8 @@ from cvebeacon.identity import validate_client_name
 
 from . import __version__
 from .contract import (ExtensionError, MAX_BYTES, _atomic, _regular, decode_json, json_bytes,
-                       label, output_lock, read_bytes, timestamp, utc_now, write_snapshot)
+                       label, output_lock, read_bytes, read_snapshot, timestamp, utc_now,
+                       write_snapshot)
 from .webrules import detect, page_from
 
 CONNECT_TIMEOUT = 5.0
@@ -47,7 +49,8 @@ WIRE_LIMIT = 4 * 1024 * 1024
 HEADER_LIMIT = 64 * 1024
 MAX_ASSETS = 1000
 MAX_WORKERS = 4
-MAX_REDIRECTS = 2
+DEFAULT_REDIRECTS = 2
+MAX_REDIRECTS = 10
 MAX_RETRIES = 2
 HOST_INTERVAL = 1.0
 USER_AGENT = f"CVEBeacon-web-detect/{__version__}"
@@ -55,11 +58,6 @@ USER_AGENT = f"CVEBeacon-web-detect/{__version__}"
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 BLOCKED_STATUSES = {429, 503}
 NO_RETRY_STATUSES = {401, 403, 404}
-FAILURE_REASONS = {
-    "unreachable", "tls-error", "blocked", "redirect-blocked", "timeout", "too-large",
-    "unsupported-encoding",
-}
-
 _NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _PATH = re.compile(r"/[!-~]*")
@@ -70,11 +68,14 @@ _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 class _FetchFailure(Exception):
     reason = "unreachable"
 
-    def __init__(self, detail: str, *, retry_after: int | None = None, status: int | None = None):
+    def __init__(self, detail: str, *, retry_after: int | None = None, status: int | None = None,
+                 redirect_target: dict | None = None, redirects_followed: int | None = None):
         super().__init__(detail)
         self.detail = detail
         self.retry_after = retry_after
         self.status = status
+        self.redirect_target = redirect_target
+        self.redirects_followed = redirects_followed
 
 
 class _ConnectionFailure(_FetchFailure):
@@ -133,7 +134,7 @@ class WebAsset:
     authorized_at: datetime
     expires_at: datetime | None = None
     allow_redirects: bool = True
-    max_redirects: int = MAX_REDIRECTS
+    max_redirects: int = DEFAULT_REDIRECTS
     allow_private_address: bool = False
 
 
@@ -345,7 +346,7 @@ def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> A
             if expires_at <= current:
                 raise ExtensionError(f"asset {index} authorisation has expired")
         allow_redirects = _boolean(raw, "allow_redirects", True)
-        max_redirects = raw.get("max_redirects", MAX_REDIRECTS)
+        max_redirects = raw.get("max_redirects", DEFAULT_REDIRECTS)
         if type(max_redirects) is not int or not 0 <= max_redirects <= MAX_REDIRECTS:
             raise ExtensionError(f"asset {index} max_redirects must be an integer from 0 to {MAX_REDIRECTS}")
         if not allow_redirects:
@@ -1108,7 +1109,8 @@ class Fetcher:
                 ord(character) < 33 or ord(character) > 126 for character in path):
             raise _RedirectFailure("redirect target has an invalid path")
         if (scheme, hostname, port) not in allowlist.endpoints:
-            raise _RedirectFailure("redirect target is not an allowlisted host and port")
+            raise _RedirectFailure("redirect target is not an allowlisted host and port",
+                                   redirect_target={"scheme": scheme, "host": hostname, "port": port})
         return Endpoint(scheme, hostname, port, path)
 
     def fetch(self, asset: WebAsset, allowlist: Allowlist, *, run_deadline: float | None = None) -> _FetchSuccess:
@@ -1126,15 +1128,22 @@ class Fetcher:
                 if not 200 <= response.status < 300:
                     raise _ConnectionFailure(f"HTTP {response.status}", status=response.status)
                 return _FetchSuccess(response, tuple(redirects), observed_at)
-            if not asset.allow_redirects or hop >= asset.max_redirects:
-                raise _RedirectFailure("redirect limit reached", status=response.status)
+            if not asset.allow_redirects:
+                raise _RedirectFailure("redirects are disabled for this entry", status=response.status,
+                                       redirects_followed=len(redirects))
+            if hop >= asset.max_redirects:
+                raise _RedirectFailure(
+                    f"redirect limit reached after {len(redirects)} redirects; check the Maximum redirects field",
+                    status=response.status, redirects_followed=len(redirects))
             locations = response.headers.get("location", ())
             if not locations:
                 raise _RedirectFailure("redirect response has no Location", status=response.status)
             target = self._redirect(current, locations[0], allowlist)
             redirects.append(target.url)
             current = target
-        raise _RedirectFailure("redirect limit reached")
+        raise _RedirectFailure(
+            f"redirect limit reached after {len(redirects)} redirects; check the Maximum redirects field",
+            redirects_followed=len(redirects))
 
 
 def _decode_html(body: bytes, headers: Mapping[str, tuple[str, ...]]) -> str:
@@ -1203,6 +1212,10 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             review["status"] = failure.status
         if failure.retry_after is not None:
             review["retry_after"] = failure.retry_after
+        if failure.redirect_target is not None:
+            review["redirect_target"] = failure.redirect_target
+        if failure.redirects_followed is not None:
+            review["redirects_followed"] = failure.redirects_followed
         return _AssetResult(asset, [], [review], {failure.reason}, None, failure)
     page = page_from(success.response.headers, _decode_html(success.response.body,
                                                            success.response.headers))
@@ -1265,6 +1278,40 @@ def _review_path(output: Path) -> Path:
     return Path(str(output) + ".review.json")
 
 
+def _saved_snapshot_time(output: Path, now: datetime) -> str:
+    try:
+        snapshot = read_snapshot(output, max_age_seconds=2**63 - 1, allow_partial=True, now=now)
+    except (ExtensionError, OSError, ValueError):
+        return ""
+    if snapshot.manifest.get("collector") != "web-detect":
+        return ""
+    return snapshot.manifest["generated_at"]
+
+
+def _fetch_failure_message(failures: list[_FetchFailure], site_count: int) -> str:
+    counts = Counter(failure.reason for failure in failures)
+    if len(counts) == 1 and next(iter(counts.values())) == 1:
+        causes = next(iter(counts))
+    else:
+        causes = ", ".join(f"{reason}: {count}" for reason, count in sorted(counts.items()))
+    site_word = "site" if site_count == 1 else "sites"
+    return (f"could not fetch {len(failures)} of {site_count} {site_word} ({causes}); "
+            "see the review entries")
+
+
+def _no_usable_message(products: list[dict], products_with_version: int,
+                       failures: list[_FetchFailure], site_count: int) -> str:
+    count = len(products)
+    if count == 0:
+        outcome = "no products were recognised"
+    elif products_with_version == 0:
+        outcome = f"{count} product{'s' if count != 1 else ''} recognised, none with a disclosed version"
+    else:
+        outcome = f"{count} product{'s' if count != 1 else ''} recognised, none with a consistent usable version"
+    suffix = f"; {_fetch_failure_message(failures, site_count)}" if failures else ""
+    return f"detection finished: {outcome}{suffix}; nothing was added to the inventory; see the review entries"
+
+
 def _publish_review(output: Path, client: str, source_id: str, reviews: list[dict], *,
                     products: list[dict], run: dict) -> None:
     data = json_bytes(dict(client=client, source_id=source_id, reviews=reviews, products=products, run=run))
@@ -1316,17 +1363,40 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                                    item.get("detail", "")))
     omissions = sorted({reason for result in results for reason in result.omissions})
     observed = [result.observed_at for result in results if result.observed_at is not None]
+    fetch_failures = [result.failure for result in results if result.failure is not None]
+    fetched_count = len(results) - len(fetch_failures)
+    products = [product for result in results for product in result.products]
+    products_with_version = sum(bool(product["versions"]) for product in products)
+    fetch_failure_disallows_run = bool(fetch_failures) and (fetched_count == 0 or not allow_partial)
+    if fetch_failure_disallows_run:
+        status = "failed"
+    elif not rows:
+        status = "no-usable-versions"
+    else:
+        status = "partial" if omissions else "success"
     with output_lock(output):
-        status = "failed" if not rows or (set(omissions) & FAILURE_REASONS and not allow_partial) else ("partial" if omissions else "success")
+        saved_snapshot_generated_at = _saved_snapshot_time(output, now())
+        run = dict(started_at=started_at, ended_at=now().isoformat(), status=status,
+                   request_count=fetcher.request_count,
+                   duration_seconds=max(0, clock() - started),
+                   asset_count=len(allowlist.assets), fetched_count=fetched_count,
+                   products_recognized=len(products), products_with_version=products_with_version,
+                   saved_snapshot_generated_at=saved_snapshot_generated_at, snapshot_updated=False)
         _publish_review(output, client, source_id, reviews,
-                        products=[product for result in results for product in result.products],
-                        run=dict(started_at=started_at, ended_at=now().isoformat(), status=status,
-                                 request_count=fetcher.request_count,
-                                 duration_seconds=max(0, clock() - started)))
+                        products=products, run=run)
+        if fetch_failure_disallows_run:
+            raise ExtensionError(_fetch_failure_message(fetch_failures, len(allowlist.assets)))
         if not rows:
-            raise ExtensionError("no technologies with usable identity; review output written")
-        if set(omissions) & FAILURE_REASONS and not allow_partial:
-            raise ExtensionError("web detection with fetch failures requires --allow-partial; review output written")
-        return write_snapshot(output, rows, source_id=source_id, collector="web-detect",
-                              observed_at=min(observed).isoformat() if observed else None,
-                              omissions=omissions, lock=False)
+            message = _no_usable_message(products, products_with_version, fetch_failures,
+                                         len(allowlist.assets))
+            print(message)
+            return None
+        if fetch_failures:
+            print(_fetch_failure_message(fetch_failures, len(allowlist.assets)))
+        manifest = write_snapshot(output, rows, source_id=source_id, collector="web-detect",
+                                  observed_at=min(observed).isoformat() if observed else None,
+                                  omissions=omissions, lock=False)
+        run["saved_snapshot_generated_at"] = manifest["generated_at"]
+        run["snapshot_updated"] = True
+        _publish_review(output, client, source_id, reviews, products=products, run=run)
+        return manifest
