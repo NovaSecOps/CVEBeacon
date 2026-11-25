@@ -224,10 +224,29 @@ def test_samples_raise_the_body_limit_only_for_client_inventory_uploads():
     assert re.search(r"request_body @other_requests\s*\{\s*max_size 6MB\s*\}", caddy)
 
 
-def test_nginx_inventory_location_proxies_with_reference_limits(tmp_path):
+REAL_CONNECT = socket.socket.__mro__[1].connect
+
+
+def loopback_only_connect(sock, address):
+    # The suite blocks network access; this test talks only to its own
+    # loopback nginx and backend.
+    if not (isinstance(address, tuple) and address[0] == "127.0.0.1"):
+        raise AssertionError("deterministic tests must not access the network")
+    return REAL_CONNECT(sock, address)
+
+
+def loopback_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host != "127.0.0.1":
+        raise AssertionError("deterministic tests must not access the network")
+    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port))]
+
+
+def test_nginx_inventory_location_proxies_with_reference_limits(tmp_path, monkeypatch):
     nginx = shutil.which("nginx")
     if nginx is None:
         pytest.skip("nginx is not installed")
+    monkeypatch.setattr(socket.socket, "connect", loopback_only_connect)
+    monkeypatch.setattr(socket, "getaddrinfo", loopback_only_getaddrinfo)
 
     class BackendHandler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -333,7 +352,7 @@ def test_nginx_inventory_location_proxies_with_reference_limits(tmp_path):
 
         def request(path, length, *, send_body=False):
             connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=20)
-            connection.putrequest("POST", path)
+            connection.putrequest("POST", path, skip_host=True)
             connection.putheader("Host", "cvebeacon.example.com")
             connection.putheader("Content-Length", str(length))
             connection.putheader("X-Forwarded-For", "198.51.100.42")
