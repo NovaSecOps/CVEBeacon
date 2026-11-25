@@ -219,7 +219,7 @@ sudo find -P /opt/cvebeacon -type d -exec chmod 0750 {} +
 sudo find -P /opt/cvebeacon -type f ! -perm /111 -exec chmod 0640 {} +
 sudo find -P /opt/cvebeacon -type f -perm /111 -exec chmod 0750 {} +
 sudo install -d -m 0755 /etc/cvebeacon
-sudo install -m 0600 deploy/systemd/update-policy.example /etc/cvebeacon/update.toml
+sudo install -o root -g root -m 0600 deploy/systemd/update-policy.example /etc/cvebeacon/update.toml
 ```
 
 Keep runtime config readable by the service (`0600` service-owned, or `0640`
@@ -238,6 +238,20 @@ Then run:
 ```console
 sudo /opt/cvebeacon/.venv/bin/cvebeacon update adopt
 ```
+
+Adoption records its completed result in the root-only
+`/opt/cvebeacon/update-result.json` and prints a JSON result. To confirm a prior
+adoption without running it again, inspect that file and check that `result` is
+`adopted` and `version` is the expected release. Check the launcher separately
+by running it through the selected release link:
+
+```console
+sudo cat /opt/cvebeacon/update-result.json
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon --help
+```
+
+The second command exercises the selected command launcher independently of the
+adoption result check.
 
 Adoption creates `releases/VERSION/.venv` pointing to the original venv and
 atomically creates `current`. Keeping the original venv in place preserves its

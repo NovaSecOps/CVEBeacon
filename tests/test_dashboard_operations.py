@@ -6,6 +6,7 @@ from dataclasses import replace
 import os
 import re
 import stat
+import subprocess
 import sys
 import textwrap
 import time
@@ -13,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from cvebeacon import cli, dashboard, scheduling
-from cvebeacon.config import load_config
+from cvebeacon import cli, dashboard, dashboard_ops, scheduling
+from cvebeacon.config import UpdateConfig, load_config
 from cvebeacon.dashboard_jobs import (
     MAX_LOG_BYTES,
     MAX_LOG_TAIL,
@@ -98,6 +99,14 @@ def new_accounts(config):
     return users
 
 
+def _allow_test_account_storage(monkeypatch):
+    # The task sandbox presents / as owned by nobody; account storage tests
+    # otherwise stop before reaching the dashboard route under test.
+    monkeypatch.setattr(
+        UserStore, "_trusted_directory_chain", staticmethod(lambda directory: ())
+    )
+
+
 @pytest.fixture
 def ops(tmp_path):
     config = make_config(tmp_path)
@@ -130,6 +139,371 @@ def fake_scheduler(state):
         return _Result()
 
     return run, calls
+
+
+def _systemd_output(config_path, command=("run",), *, timer_state="active",
+                    unit_file_state="enabled", result="success", exit_status=0,
+                    next_run="Thu 2026-11-26 07:00:00 WET",
+                    last_trigger="Wed 2026-11-25 07:00:00 WET",
+                    last_exit="Wed 2026-11-25 07:04:00 WET"):
+    timer = (
+        f"ActiveState={timer_state}\nUnitFileState={unit_file_state}\n"
+        f"NextElapseUSecRealtime={next_run}\nLastTriggerUSec={last_trigger}\n"
+    )
+    argv = scheduling.shlex.join((
+        "/opt/cvebeacon/current/.venv/bin/cvebeacon",
+        "--config", str(config_path), *command,
+    ))
+    service = (
+        f"Result={result}\nExecMainStatus={exit_status}\n"
+        f"ExecMainExitTimestamp={last_exit}\n"
+        f"ExecStart={{ path=/opt/cvebeacon/current/.venv/bin/cvebeacon ; "
+        f"argv[]={argv} ; ignore_errors=no ; start_time=[n/a] ; "
+        "stop_time=[n/a] ; pid=0 ; code=exited ; status=0/0 }\n"
+    )
+    return timer, service
+
+
+def _systemd_runner(config_path, *, command=("run",), timer_state="active",
+                    unit_file_state="enabled", result="success", exit_status=0,
+                    next_run="Thu 2026-11-26 07:00:00 WET",
+                    last_trigger="Wed 2026-11-25 07:00:00 WET",
+                    last_exit="Wed 2026-11-25 07:04:00 WET"):
+    timer, service = _systemd_output(
+        config_path, command, timer_state=timer_state,
+        unit_file_state=unit_file_state, result=result,
+        exit_status=exit_status, next_run=next_run,
+        last_trigger=last_trigger, last_exit=last_exit,
+    )
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((list(args), kwargs))
+        return _Result(stdout=timer if args[-1] == "cvebeacon.timer" else service)
+
+    return run, calls
+
+
+def _policy_file(tmp_path, *, units=("cvebeacon.timer", "cvebeacon.service",
+                                    "cvebeacon-dashboard.service"), enabled=True):
+    path = tmp_path / "update.toml"
+    encoded_units = ", ".join(f'"{unit}"' for unit in units)
+    path.write_text(
+        f"enabled = {str(enabled).lower()}\n"
+        'prefix = "/opt/cvebeacon"\n'
+        'config = "/var/lib/cvebeacon/cvebeacon.toml"\n'
+        'data = "/var/lib/cvebeacon"\n'
+        'user = "cvebeacon"\n'
+        f"units = [{encoded_units}]\n"
+        'dashboard_unit = "cvebeacon-dashboard.service"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_systemd_timer_probe_maps_active_enabled_status_and_scan(tmp_path):
+    config = make_config(tmp_path)
+    runner, calls = _systemd_runner(config.config_path, command=("run",))
+
+    result = scheduling.systemd_timer_status(
+        "cvebeacon.timer", "cvebeacon.service", config.config_path, run=runner
+    )
+
+    assert result == {
+        "state": "On",
+        "boot": "Yes",
+        "next_run": "2026-11-26 07:00",
+        "last_run": "2026-11-25 07:04",
+        "last_result": "Succeeded",
+        "scan_state": "scan",
+    }
+    assert len(calls) == 2
+    assert all(call[1]["timeout"] == 2 for call in calls)
+    assert calls[0][0] == [
+        "systemctl", "show",
+        "--property=ActiveState,UnitFileState,NextElapseUSecRealtime,LastTriggerUSec",
+        "--", "cvebeacon.timer",
+    ]
+    assert calls[1][0] == [
+        "systemctl", "show",
+        "--property=Result,ExecMainStatus,ExecMainExitTimestamp,ExecStart",
+        "--", "cvebeacon.service",
+    ]
+    assert not any("/opt/cvebeacon" in str(call) for call in result.values())
+
+
+def test_systemd_timer_probe_maps_inactive_disabled_and_watch(tmp_path):
+    config = make_config(tmp_path)
+    runner, _ = _systemd_runner(
+        config.config_path, command=("watch", "run"), timer_state="inactive",
+        unit_file_state="disabled",
+    )
+
+    result = scheduling.systemd_timer_status(
+        "cvebeacon.timer", "cvebeacon.service", config.config_path, run=runner
+    )
+
+    assert result["state"] == "Off"
+    assert result["boot"] == "No"
+    assert result["scan_state"] == "watch"
+
+
+@pytest.mark.parametrize("mode", ["missing", "malformed", "another_config"])
+def test_systemd_timer_probe_shows_unknown_for_unmatched_service(mode, tmp_path):
+    config = make_config(tmp_path)
+    timer, service = _systemd_output(
+        tmp_path / "another.toml" if mode == "another_config" else config.config_path,
+        command=("watch", "run"),
+    )
+    if mode == "missing":
+        service = "\n".join(
+            line for line in service.splitlines()
+            if not line.startswith("ExecStart=")
+        ) + "\n"
+    elif mode == "malformed":
+        service = service.replace(" ; ignore_errors=no", "", 1)
+
+    def runner(args, **kwargs):
+        return _Result(stdout=timer if args[-1] == "cvebeacon.timer" else service)
+
+    result = scheduling.systemd_timer_status(
+        "cvebeacon.timer", "cvebeacon.service", config.config_path, run=runner
+    )
+
+    assert result == {
+        "state": "Unknown", "boot": "Unknown", "next_run": "Unknown",
+        "last_run": "Unknown", "last_result": "Unknown", "scan_state": "unknown",
+    }
+
+
+def test_systemd_timer_probe_maps_failed_result_and_never_run(tmp_path):
+    config = make_config(tmp_path)
+    failed, _ = _systemd_runner(
+        config.config_path, result="exit-code", exit_status=2,
+    )
+    failed_result = scheduling.systemd_timer_status(
+        "cvebeacon.timer", "cvebeacon.service", config.config_path, run=failed
+    )
+    assert failed_result["last_result"] == "Failed"
+
+    never, _ = _systemd_runner(
+        config.config_path, next_run="n/a", last_trigger="n/a", last_exit="n/a",
+    )
+    never_result = scheduling.systemd_timer_status(
+        "cvebeacon.timer", "cvebeacon.service", config.config_path, run=never
+    )
+    assert never_result["last_run"] == "Never"
+    assert never_result["last_result"] == "Never run"
+    assert never_result["next_run"] == "Not scheduled"
+
+
+@pytest.mark.parametrize("mode", ["timeout", "garbage"])
+def test_systemd_timer_probe_fails_closed(mode, tmp_path):
+    config = make_config(tmp_path)
+
+    def run(args, **kwargs):
+        if mode == "timeout":
+            raise subprocess.TimeoutExpired(args, 2)
+        return _Result(stdout="not systemctl output")
+
+    result = scheduling.systemd_timer_status(
+        "cvebeacon.timer", "cvebeacon.service", config.config_path, run=run
+    )
+
+    assert result == {
+        "state": "Unknown", "boot": "Unknown", "next_run": "Unknown",
+        "last_run": "Unknown", "last_result": "Unknown",
+        "scan_state": "unknown",
+    }
+
+
+def test_missing_timer_policy_uses_cron_and_does_not_query_systemd(tmp_path, monkeypatch):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    config = make_config(tmp_path)
+    app = dashboard.create_app(config)
+    runner, calls = _systemd_runner(config.config_path)
+    app.extensions["dashboard_schedule_runner"] = runner
+    policy = tmp_path / "missing-update.toml"
+    monkeypatch.setattr(dashboard_ops, "UPDATE_POLICY_PATH", policy)
+
+    with app.app_context():
+        assert dashboard_ops.schedule_scan_state(config) == "none"
+    assert not any(call[0][0] == "systemctl" for call in calls)
+
+
+def test_policy_presence_ignores_contents_and_blocks_cron_for_custom_units(
+    tmp_path, monkeypatch
+):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    _allow_test_account_storage(monkeypatch)
+    config = replace(
+        make_config(tmp_path), update=UpdateConfig(enabled=False)
+    )
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    policy = _policy_file(
+        tmp_path,
+        units=("custom.timer", "custom.service", "cvebeacon-dashboard.service"),
+        enabled=False,
+    )
+    monkeypatch.setattr(dashboard_ops, "UPDATE_POLICY_PATH", policy)
+    monkeypatch.setattr(dashboard_ops, "_policy_is_administrator_owned", lambda path: True)
+    monkeypatch.setattr(dashboard_ops, "_policy_file_is_administrator_owned", lambda details: True)
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append((list(args), kwargs))
+        return _Result(returncode=1)
+
+    app.extensions["dashboard_schedule_runner"] = runner
+
+    def unexpected_open(*args, **kwargs):
+        raise AssertionError("the dashboard must not read the updater policy")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(dashboard_ops.os, "open", unexpected_open)
+        with app.app_context():
+            snapshot = dashboard_ops._schedule_snapshot(config)
+
+    assert snapshot["timer_managed"] is True
+    assert snapshot["summary"] == "Unknown"
+    assert snapshot["scan_state"] == "unknown"
+    assert snapshot["timer_status"] == {
+        "state": "Unknown", "boot": "Unknown", "next_run": "Unknown",
+        "last_run": "Unknown", "last_result": "Unknown", "scan_state": "unknown",
+    }
+    assert [call[0][-1] for call in calls] == [
+        "cvebeacon.timer", "cvebeacon.service",
+    ]
+
+    client = app.test_client()
+    login(client)
+    page = client.get("/operations/schedule")
+    assert page.status_code == 200
+    assert "Monitoring timer" in page.text
+    assert "Unknown" in page.text
+    denied = submit(
+        client, "/operations/schedule/install", mode="interval", every="4",
+        command="watch",
+    )
+    assert denied.status_code == 409
+    assert dashboard_ops.TIMER_CRON_BLOCK_REASON in denied.text
+    assert not any(call[0][0] == "crontab" for call in calls)
+
+
+def test_schedule_page_shows_systemd_timer_and_refuses_cron_install(tmp_path, monkeypatch):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    config = make_config(tmp_path)
+    _allow_test_account_storage(monkeypatch)
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    runner, calls = _systemd_runner(config.config_path, command=("watch", "run"))
+    app.extensions["dashboard_schedule_runner"] = runner
+    policy = _policy_file(tmp_path)
+    monkeypatch.setattr(dashboard_ops, "UPDATE_POLICY_PATH", policy)
+    monkeypatch.setattr(dashboard_ops, "_policy_is_administrator_owned", lambda path: True)
+    monkeypatch.setattr(dashboard_ops, "_policy_file_is_administrator_owned", lambda details: True)
+    monkeypatch.setattr(dashboard_ops, "_running_as_root", lambda: False)
+    client = app.test_client()
+    login(client)
+
+    page = client.get("/operations/schedule")
+    assert page.status_code == 200
+    assert "Monitoring timer" in page.text
+    assert "On" in page.text and "Starts at boot" in page.text
+    assert "2026-11-26 07:00" in page.text
+    assert "2026-11-25 07:04" in page.text
+    assert "Succeeded" in page.text
+    assert "This schedule is managed on the server. Change it with systemd, not from this page." in page.text
+    assert "Install schedule" not in page.text
+    assert "permission denied" not in page.text.casefold()
+    assert "/opt/cvebeacon/current" not in page.text
+    assert "ExecStart=" not in page.text
+    assert not any(call[0][0] == "crontab" for call in calls)
+
+    denied = submit(
+        client, "/operations/schedule/install", mode="interval", every="4",
+        command="watch",
+    )
+    assert denied.status_code == 409
+    assert dashboard_ops.TIMER_CRON_BLOCK_REASON in denied.text
+    assert not any(call[0][0] == "crontab" for call in calls)
+
+
+def test_home_and_operations_use_the_same_active_timer_state(tmp_path, monkeypatch):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    config = make_config(tmp_path)
+    _allow_test_account_storage(monkeypatch)
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    runner, calls = _systemd_runner(config.config_path, command=("run",))
+    app.extensions["dashboard_schedule_runner"] = runner
+    policy = _policy_file(tmp_path)
+    monkeypatch.setattr(dashboard_ops, "UPDATE_POLICY_PATH", policy)
+    monkeypatch.setattr(dashboard_ops, "_policy_is_administrator_owned", lambda path: True)
+    monkeypatch.setattr(dashboard_ops, "_policy_file_is_administrator_owned", lambda details: True)
+    client = app.test_client()
+    login(client)
+
+    operations = client.get("/operations/")
+    home = client.get("/")
+
+    assert "Scheduled automatically" in operations.text
+    assert "A schedule is installed for this configuration" in home.text
+    assert len(calls) == 2
+    cached = app.extensions["operations_schedule_summary"][3]
+    assert cached["summary"] == "Scheduled automatically"
+    assert "/opt/cvebeacon" not in repr(cached)
+    assert "argv" not in repr(cached)
+
+
+def test_timer_remove_control_remains_available_for_managed_cron(tmp_path, monkeypatch):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    config = make_config(tmp_path)
+    _allow_test_account_storage(monkeypatch)
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    systemd, _ = _systemd_runner(config.config_path)
+    cron_state = {
+        "text": (
+            scheduling.CRON_BEGIN
+            + f"\n0 */4 * * * cvebeacon --config {config.config_path} scan\n"
+            + scheduling.CRON_END + "\n"
+        )
+    }
+
+    def runner(args, **kwargs):
+        if args[:2] == ["systemctl", "show"]:
+            return systemd(args, **kwargs)
+        if args == ["crontab", "-l"]:
+            return _Result(stdout=cron_state["text"])
+        if args == ["crontab", "-"]:
+            cron_state["text"] = kwargs["input"].decode("utf-8")
+            return _Result()
+        return _Result(returncode=1)
+
+    app.extensions["dashboard_schedule_runner"] = runner
+    policy = _policy_file(tmp_path)
+    monkeypatch.setattr(dashboard_ops, "UPDATE_POLICY_PATH", policy)
+    monkeypatch.setattr(dashboard_ops, "_policy_is_administrator_owned", lambda path: True)
+    monkeypatch.setattr(dashboard_ops, "_policy_file_is_administrator_owned", lambda details: True)
+    client = app.test_client()
+    login(client)
+
+    page = client.get("/operations/schedule")
+
+    assert "Remove a managed cron schedule" in page.text
+    assert "The systemd timer will continue to run." in page.text
+    removed = submit(client, "/operations/schedule/remove", confirm="remove")
+    assert removed.status_code == 303
+    assert scheduling.CRON_BEGIN not in cron_state["text"]
+
+
 
 
 def fake_job(script, *arguments):
