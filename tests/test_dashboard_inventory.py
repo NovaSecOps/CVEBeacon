@@ -9,7 +9,7 @@ import re
 from openpyxl import Workbook
 import pytest
 
-from cvebeacon import dashboard_inventory, inventory_journal
+from cvebeacon import dashboard_inventory, inventory_journal, managed_inventory
 from cvebeacon.dashboard import create_app
 from cvebeacon.inventory import load_inventory
 from cvebeacon.inventory_preview import FIELDS, preview_upload
@@ -673,6 +673,8 @@ def test_dashboard_creates_private_inventory_directory_and_journal(deployment, m
         staged.append(set(changes))
 
     monkeypatch.setattr(dashboard_inventory, "stage_change", check_staged)
+    # Uploads publish through the shared managed inventory transaction.
+    monkeypatch.setattr(managed_inventory, "stage_change", check_staged)
     detail = add(manager)
     assert submit(manager, detail, upload(manager, detail)).status_code == 303
     newer = CSV.replace(b"private-asset", b"newer-asset")

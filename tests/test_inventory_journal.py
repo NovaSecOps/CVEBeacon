@@ -2,7 +2,6 @@
 
 import hashlib
 import os
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,16 +11,20 @@ from cvebeacon.inventory import load_inventory
 from cvebeacon.managed_inventory import client_key, encode_records, profiles
 from cvebeacon.models import Asset
 from cvebeacon.private_storage import private_directory, private_file
-from test_dashboard import setup
-from test_dashboard_accounts import PASSWORD, accounts as account_fixture
+from cvebeacon.watch.users import BOOTSTRAP, UserStore
+from test_dashboard_watch import PASSWORD
+from watch_support import write_config
 
 
 @pytest.fixture
-def storage(account_fixture):
-    config, users, _, _ = account_fixture
-    config = replace(config, inventory=None)
+def storage(tmp_path):
+    data = tmp_path / "data"
+    private_directory(data, owner_only=True)
+    config = write_config(data, inventory=False)
     directory = config.inventory_directory
     private_directory(directory, owner_only=True)
+    users = UserStore(config.watch.users_database)
+    users.add("admin", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
     actor = users.authenticate("admin", PASSWORD)
     name = "Sample client"
     key = client_key(name)
