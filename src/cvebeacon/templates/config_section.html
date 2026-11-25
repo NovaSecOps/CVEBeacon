@@ -77,7 +77,7 @@
 
 {% if section == 'channels' %}{% call card('Add a channel', 'Choose the kind of channel first. The form then shows only the fields that channel needs.') %}
 <p>Choosing a type reloads the form. Each channel lists its known fields. Leave the last row's name blank to skip it.</p>
-{% if has_endpoint('config_editor.channel_wizard') %}<p>{{ link_button('Guided setup', url_for('config_editor.channel_wizard'), kind='secondary') }}</p>{% endif %}
+{% if has_endpoint('config_editor.channel_wizard') and 'edit_channels' in permissions %}<p>{{ link_button('Guided setup', url_for('config_editor.channel_wizard'), kind='secondary') }}</p>{% endif %}
 <form method="get"><div class="field"><label for="new-channel-type">New channel type</label><select name="new_type" id="new-channel-type">{% for kind in channel_types %}<option>{{ kind }}</option>{% endfor %}</select></div>{{ button("Choose type for blank row", kind="secondary") }}</form>
 {% endcall %}{% endif %}
 

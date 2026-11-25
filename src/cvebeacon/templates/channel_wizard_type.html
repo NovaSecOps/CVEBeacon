@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% set nav_active = 'config_editor.index' %}
+{% from 'ui.html' import page_header, card, callout, button, link_button, steps %}
+{% block title %}{{ title }} · CVEBeacon{% endblock %}
+{% block content %}
+{% call page_header(title, lead) %}
+  {{ link_button('Back to alert channels', url_for('config_editor.channels'), kind='secondary') }}
+{% endcall %}
+{{ steps(step_labels, current=current) }}
+{% if read_only %}{% call callout('warning', 'Read-only configuration') %}<p>The dashboard service cannot write to the configuration directory. You can inspect these values, but saving is disabled. Ask the operator to enable editing for the dashboard service, then restart the other services after a save.</p>{% endcall %}{% endif %}
+
+{% call card('Where should alerts go?', 'Choose one kind of channel. You can add more later.') %}
+<form method="get" action="{{ url_for('config_editor.channel_wizard') }}" class="stack">
+  <fieldset>
+    <legend>Where should alerts go?</legend>
+    {% for item in types %}
+    <div class="field">
+      <div class="field field-check">
+        <input id="kind-{{ item.kind }}" type="radio" name="kind" value="{{ item.kind }}"{% if item.available %} required{% else %} disabled{% endif %} aria-describedby="kind-{{ item.kind }}-note">
+        <label for="kind-{{ item.kind }}">{{ item.title }}</label>
+      </div>
+      <p class="help" id="kind-{{ item.kind }}-note">{{ item.text }}{% if item.note %} {{ item.note }}{% endif %}</p>
+    </div>
+    {% endfor %}
+    {% for item in advanced %}
+    <div class="field">
+      <p><strong>{{ item.title }}</strong> {{ item.text }}. <a href="{{ url_for('config_editor.channels', new_type=item.kind) }}">Open the full form</a>.</p>
+    </div>
+    {% endfor %}
+  </fieldset>
+  <p class="help">Prefer all options? The full form lists every setting.</p>
+  <div class="form-actions">{{ button('Continue', disabled=read_only) }}{{ link_button('Open the full form', url_for('config_editor.channels'), kind='secondary') }}</div>
+</form>
+{% endcall %}
+{% endblock %}

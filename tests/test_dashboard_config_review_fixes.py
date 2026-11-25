@@ -215,7 +215,7 @@ def test_real_second_preview_adopts_reference(accounts, second_app):
     assert staged.exists()
 
 
-def test_expired_pending_references_are_retained(accounts):
+def test_pending_reference_is_retained_until_its_last_review_expires(accounts):
     config, _, app, client = accounts
     login(client, "admin")
     response = preview(client, "sources", g0_nvd_api_key_env="",
@@ -227,11 +227,14 @@ def test_expired_pending_references_are_retained(accounts):
                       g0_nvd_api_key_file=str(staged))
     second = editor.pending[form(adopted.text, "confirm")["preview"]]
     pending.expires = 0
-    second.expires = 0
-    old = time.time() - dc.PREVIEW_SECONDS - 30
-    os.utime(staged, (old, old))
     editor.cleanup()
     assert staged.exists()
+    assert form(response.text, "confirm")["preview"] not in editor.pending
+    assert form(adopted.text, "confirm")["preview"] in editor.pending
+    second.expires = 0
+    editor.cleanup()
+    assert not staged.exists()
+    assert form(adopted.text, "confirm")["preview"] not in editor.pending
 
 
 @pytest.mark.parametrize("key", ["url_env", "url_file"])
