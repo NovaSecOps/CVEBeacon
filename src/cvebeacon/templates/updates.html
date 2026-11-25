@@ -4,7 +4,7 @@
 {% block content %}
 {{ page_header('Updates', 'Check whether a newer CVEBeacon release is available and, as an administrator, request an update.') }}
 {% call callout('info', 'How updates work') %}<p>CVEBeacon can check for new versions and, if you allow it, install them. It checks the release signature and makes a backup first.</p>{% endcall %}
-{% if not enabled %}{% call callout('warning', 'Updates are disabled') %}<p>An administrator can turn on update checks in the configuration. See the <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">upgrade guide</a>.</p>{% endcall %}{% endif %}
+{% if not enabled %}{% call callout('warning', 'Updates are disabled') %}<p>An administrator can turn on release checks in the configuration. Installing an update from this page also needs the updater to be set up on the server by an administrator. See the <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">upgrade guide</a>.</p>{% endcall %}{% endif %}
 {% if notice %}{% call callout('warning', 'This installation cannot use the updater') %}<p>{{ notice }} See the <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/UPGRADING.md">upgrade instructions</a>.</p>{% endcall %}{% endif %}
 {% call card('Current status', 'The version this installation runs and what the last release check found.') %}
 <p>Current version: <strong>{{ current }}</strong></p>

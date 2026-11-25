@@ -15,7 +15,7 @@
 <li>the configured state databases, including monitoring and inventory state, watch history, account records and dashboard job history;</li>
 <li>other SQLite databases CVEBeacon owns in its data directory;</li>
 <li>the configuration file; and</li>
-<li>referenced password and key files, only when you choose to include them.</li>
+<li>password and key files the configuration refers to, only when you choose to include them. Missing files and symbolic links are skipped, and the backup stops if a chosen file cannot be copied.</li>
 </ul>
 <p>Dashboard-managed inventory files are not included. Copy the private inventory directory separately.</p>
 <p>Databases are copied while CVEBeacon keeps running. Each file gets a recorded checksum; use Verify to check them.</p>

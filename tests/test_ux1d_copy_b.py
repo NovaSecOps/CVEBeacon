@@ -197,7 +197,8 @@ def test_backups_describe_coverage_and_managed_inventory_separately(tmp_path, mo
         "dashboard job history",
         "other SQLite databases CVEBeacon owns in its data directory",
         "the configuration file",
-        "referenced password and key files, only when you choose to include them.",
+        "password and key files the configuration refers to, only when you choose to include them.",
+        "Missing files and symbolic links are skipped, and the backup stops if a chosen file cannot be copied.",
         "Dashboard-managed inventory files are not included",
         "Copy the private inventory directory separately",
     ):
@@ -320,6 +321,30 @@ def test_every_role_capability_has_a_plain_description_and_matches_its_boundary(
     assert descriptions["view_audit"].strip() == (
         "Read the account activity log and export the full history of CVEs reported to clients."
     )
+    assert descriptions["edit_system"].strip() == (
+        "See where CVEBeacon stores its data and reports, and change backup retention and "
+        "download settings. Only an administrator can change the storage locations."
+    )
+    visible = page_text(response.text)
+    assert (
+        "Editing a configuration section needs View and that section's Edit permission. "
+        "Managing inventories needs View and Manage inventory. Changing channel passwords "
+        "or tokens also needs Manage secrets."
+    ) in visible
+
+
+def test_disabled_updates_separate_release_checks_from_installing(tmp_path, monkeypatch):
+    _, _, _, client = admin_app(tmp_path, monkeypatch)
+    response = client.get("/updates/")
+    assert response.status_code == 200
+    visible = page_text(response.text)
+    assert "Updates are disabled" in visible
+    assert (
+        "An administrator can turn on release checks in the configuration. Installing an "
+        "update from this page also needs the updater to be set up on the server by an "
+        "administrator."
+    ) in visible
+    assert "turn on update checks in the configuration" not in visible
 
 
 def test_audit_uses_record_check_wording_and_no_raw_action_titles(tmp_path, monkeypatch):
