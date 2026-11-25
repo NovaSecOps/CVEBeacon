@@ -17,6 +17,7 @@ import unicodedata
 
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, send_file, url_for
 
+from . import web_assets
 from .clients import client_name, client_page
 from .dashboard import _text, requires
 from .dashboard_ops import require_accounts, schedule_scan_state
@@ -233,6 +234,14 @@ def create_blueprint(config):
         warning = None
         data = None
         count = None
+        web_asset_count = None
+        try:
+            allowlist_path = (config.database_path.parent / "web-assets" /
+                              (web_assets.client_key(profile["name"]) + ".json"))
+            allowlist, _ = web_assets.read_allowlist(allowlist_path, profile["name"])
+            web_asset_count = len(allowlist["assets"])
+        except (OSError, ValueError, ConfigurationError, StateError):
+            pass
         try:
             if path is not None and config.managed_inventory and not directory.is_symlink() and (
                     path.exists() or path.is_symlink()):
@@ -247,6 +256,7 @@ def create_blueprint(config):
         return render_template(
             "client_inventory.html", key=key, profile=profile, scan=scan,
             summary=summaries[0] if summaries else None, count=count, upload=upload,
+            web_asset_count=web_asset_count,
             enabled=config.managed_inventory and path is not None, error=error, notice=notice, warning=warning,
             pasted_text=pasted_text, paste_format=paste_format,
             scan_schedule=schedule_scan_state(config) if count is not None else None,

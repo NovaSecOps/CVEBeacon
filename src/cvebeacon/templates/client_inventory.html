@@ -17,6 +17,7 @@
 {{ link_button('Upload inventory', '#upload-inventory') }}
 {% endif %}
 {{ link_button('Back to Clients', url_for('watch.clients'), kind='secondary') }}
+<a class="btn btn-secondary btn-small" href="{{ url_for('web.index', client=profile.name) }}">Web assets{% if web_asset_count is not none %} · {{ web_asset_count }} authorised site{{ '' if web_asset_count == 1 else 's' }}{% endif %}</a>
 {% endcall %}
 
 {% if error %}{% call callout('danger', 'Inventory action could not be completed') %}<p>{{ error }}</p>{% endcall %}{% endif %}

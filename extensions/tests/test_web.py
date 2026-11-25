@@ -28,6 +28,7 @@ from cvebeacon_extensions.web import (
     Endpoint,
     Fetcher,
     StdlibTransport,
+    _BlockedFailure,
     _ConnectionFailure,
     _DeadlineReader,
     _FetchFailure,
@@ -71,7 +72,7 @@ def write_allowlist(tmp_path, assets=None, name="assets.json", **top):
     document = {"client": "acme", "assets": [asset()] if assets is None else assets}
     document.update(top)
     path = tmp_path / name
-    path.write_text(json.dumps(document), encoding="utf-8")
+    path.write_text(json.dumps(document), encoding="utf-8", newline="\n")
     return path
 
 
@@ -386,11 +387,15 @@ def test_prefix_compatible_versions_prefer_the_most_specific(tmp_path):
 
 
 def test_disjoint_versions_still_require_review(tmp_path):
-    with pytest.raises(ExtensionError, match="no technologies"):
-        run(tmp_path, [asset()],
-            [response(headers={"server": ["nginx/1.25.3", "nginx/1.26.0"]})],
-            allow_partial=True)
-    reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
+    manifest, output, _, _ = run(
+        tmp_path, [asset()],
+        [response(headers={"server": ["nginx/1.25.3", "nginx/1.26.0"]})],
+        allow_partial=True)
+    assert manifest is None
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "no-usable-versions"
+    assert not output.exists()
+    reviews = detail["reviews"]
     assert reviews[0]["reason"] == "version-conflict"
 
 
@@ -424,12 +429,17 @@ def test_allowlist_accepts_hostname_and_url_forms(tmp_path):
          "max_redirects": 1, "allow_redirects": True, "allow_private_address": True},
         {"url": "https://third.example/login", "authorized_by": "Owner",
          "authorized_at": "2026-11-01T00:00:00Z"},
+        asset(hostname="fourth.example", max_redirects=0),
+        asset(hostname="fifth.example", max_redirects=10),
     ])
     loaded = load_allowlist(path, client="acme", now=NOW)
     assert loaded.assets[0].endpoint.url == "https://example.com/status"
+    assert loaded.assets[0].max_redirects == 2
     assert loaded.assets[1].endpoint.url == "http://second.example:8080/"
     assert loaded.assets[1].max_redirects == 1
     assert loaded.assets[2].endpoint.url == "https://third.example/login"
+    assert loaded.assets[3].max_redirects == 0
+    assert loaded.assets[4].max_redirects == 10
 
 
 @pytest.mark.parametrize("change", [
@@ -444,7 +454,7 @@ def test_allowlist_accepts_hostname_and_url_forms(tmp_path):
     {"url": "https://example.com/?a=1"},
     {"url": "https://user:pass@example.com/"},
     {"scheme": "ftp"},
-    {"max_redirects": 3},
+    {"max_redirects": 11},
     {"allow_redirects": "yes"},
     {"allow_private_address": 1},
     {"path": "/has space"},
@@ -790,6 +800,9 @@ def test_redirect_limit_and_disabled_redirects(tmp_path):
                    allow_partial=True, resolver=Resolver({"example.com": [PUBLIC]}),
                    transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
     assert len(transport.calls) == 3
+    detail = json.loads(Path(str(tmp_path / "snapshot.json") + ".review.json").read_bytes())
+    assert "after 2 redirects" in detail["reviews"][0]["detail"]
+    assert "Maximum redirects" in detail["reviews"][0]["detail"]
     path = write_allowlist(tmp_path, [asset(allow_redirects=False)], name="assets2.json")
     transport = Transport([response(302, {"location": "/a"})])
     with pytest.raises(ExtensionError):
@@ -797,6 +810,48 @@ def test_redirect_limit_and_disabled_redirects(tmp_path):
                    allow_partial=True, resolver=Resolver({"example.com": [PUBLIC]}),
                    transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
     assert len(transport.calls) == 1
+
+
+def test_unlisted_bare_or_www_redirect_records_only_target_authority(tmp_path):
+    path = write_allowlist(tmp_path, [asset()])
+    secret_path = "/private/path?token=not-for-review"
+    body_secret = "PRIVATE_RESPONSE_BODY"
+    transport = Transport([response(302, {"location": f"https://www.example.com{secret_path}"},
+                                    body=body_secret.encode("utf-8"))])
+    with pytest.raises(ExtensionError, match="could not fetch 1 of 1 site \\(redirect-blocked\\)") as error:
+        detect_web(path, tmp_path / "redirect.json", client="acme", source_id="acme-web",
+                   allow_partial=True, resolver=Resolver({"example.com": [PUBLIC]}),
+                   transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
+    detail = json.loads(Path(str(tmp_path / "redirect.json") + ".review.json").read_bytes())
+    review = detail["reviews"][0]
+    assert review["detail"] == "redirect target is not an allowlisted host and port"
+    assert review["redirect_target"] == {"scheme": "https", "host": "www.example.com", "port": 443}
+    assert secret_path not in json.dumps(review)
+    assert body_secret not in json.dumps(review)
+    assert "www.example.com" not in str(error.value)
+
+
+def test_ten_redirects_succeed_and_eleven_are_refused(tmp_path):
+    hops = [response(302, {"location": f"/{index}"}) for index in range(1, 11)]
+    path = write_allowlist(tmp_path, [asset(max_redirects=10)])
+    transport = Transport([*hops, response(headers={"server": "nginx/1.25.3"})])
+    manifest = detect_web(path, tmp_path / "ten-hops.json", client="acme", source_id="acme-web",
+                          allow_partial=False, resolver=Resolver({"example.com": [PUBLIC]}),
+                          transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
+    assert manifest["status"] == "success"
+    assert len(transport.calls) == 11
+
+    path = write_allowlist(tmp_path, [asset(max_redirects=10)], name="eleven-assets.json")
+    transport = Transport([response(302, {"location": f"/{index}"}) for index in range(1, 12)])
+    with pytest.raises(ExtensionError, match="could not fetch 1 of 1 site \\(redirect-blocked\\)") as error:
+        detect_web(path, tmp_path / "eleven-hops.json", client="acme", source_id="acme-web",
+                   allow_partial=True, resolver=Resolver({"example.com": [PUBLIC]}),
+                   transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
+    detail = json.loads(Path(str(tmp_path / "eleven-hops.json") + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "failed"
+    assert detail["reviews"][0]["reason"] == "redirect-blocked"
+    assert len(transport.calls) == 11
+    assert "example.com" not in str(error.value)
 
 
 def test_header_and_body_limits_and_gzip_bomb():
@@ -1258,10 +1313,15 @@ def test_review_and_snapshot_share_the_output_lock(tmp_path):
 
 
 
-def test_no_technologies_is_reviewed_and_never_published_as_empty_success(tmp_path):
-    with pytest.raises(ExtensionError, match="no technologies"):
-        run(tmp_path, [asset()], [response(body=b"<html>nothing here</html>")], allow_partial=True)
-    reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
+def test_no_technologies_is_reviewed_and_never_published_as_empty_success(tmp_path, capsys):
+    manifest, output, _, _ = run(
+        tmp_path, [asset()], [response(body=b"<html>nothing here</html>")], allow_partial=True)
+    assert manifest is None
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "no-usable-versions"
+    assert "detection finished: no products were recognised" in capsys.readouterr().out
+    assert not output.exists()
+    reviews = detail["reviews"]
     assert reviews[0]["reason"] == "no-technologies"
 
 
@@ -1278,12 +1338,183 @@ def test_versionless_review_publishes_partial_without_fetch_failure(tmp_path):
     assert records[0]["cpe"].startswith("cpe:2.3:a:php:php:")
 
 
-def test_versionless_edge_technology_without_cpe_stays_in_review(tmp_path):
-    with pytest.raises(ExtensionError, match="no technologies"):
-        run(tmp_path, [asset()], [response(headers={"cf-ray": "8a1b2c3d4e5f6a7b-AMS"})],
-            allow_partial=True)
-    reviews = json.loads((tmp_path / "snapshot.json.review.json").read_bytes())["reviews"]
+def test_versionless_edge_technology_without_cpe_stays_in_review(tmp_path, capsys):
+    manifest, output, _, _ = run(
+        tmp_path, [asset()], [response(headers={"cf-ray": "8a1b2c3d4e5f6a7b-AMS"})],
+        allow_partial=True)
+    assert manifest is None
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "no-usable-versions"
+    line = capsys.readouterr().out
+    assert "1 product recognised, none with a disclosed version" in line
+    assert "cf-ray" not in line
+    assert not output.exists()
+    reviews = detail["reviews"]
     assert reviews[0]["reason"] == "version-unknown"
+
+
+def test_all_fetch_failures_are_counted_and_keep_previous_snapshot(tmp_path):
+    _, output, _, _ = run(tmp_path, [asset()], [response(headers={"server": "nginx/1.26.2"})])
+    before = (output.read_bytes(), manifest_path(output).read_bytes())
+    path = write_allowlist(tmp_path, [asset()], name="failed-assets.json")
+    with pytest.raises(ExtensionError, match="could not fetch 1 of 1 site \\(blocked\\)") as error:
+        detect_web(path, output, client="acme", source_id="acme-web", allow_partial=True,
+                   resolver=Resolver({"example.com": [PUBLIC]}), transport=Transport([response(403)]),
+                   now=lambda: NOW, host_interval=0, max_workers=1)
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "failed"
+    assert detail["run"]["fetched_count"] == 0
+    assert detail["reviews"][0]["reason"] == "blocked"
+    assert (output.read_bytes(), manifest_path(output).read_bytes()) == before
+    assert "example.com" not in str(error.value)
+
+
+def test_failure_message_counts_each_reason_without_site_names(tmp_path):
+    assets = [asset(hostname="alpha.example"), asset(hostname="beta.example"),
+              asset(hostname="gamma.example")]
+    path = write_allowlist(tmp_path, assets)
+    transport = Transport([
+        response(403),
+        response(302, {"location": "https://elsewhere.example/secret"}),
+        response(404),
+    ])
+    with pytest.raises(ExtensionError, match=(
+            "could not fetch 3 of 3 sites \\(blocked: 1, redirect-blocked: 1, unreachable: 1\\)")) as error:
+        detect_web(path, tmp_path / "counted.json", client="acme", source_id="acme-web",
+                   allow_partial=True, resolver=Resolver(), transport=transport,
+                   now=lambda: NOW, host_interval=0, max_workers=1)
+    message = str(error.value)
+    assert all(host not in message for host in ("alpha.example", "beta.example", "gamma.example"))
+
+
+def test_cli_all_fetch_failures_exit_two_with_counted_path_free_message(tmp_path, monkeypatch, capsys):
+    import cvebeacon_extensions.web as web_module
+    _, output, _, _ = run(tmp_path, [asset()], [response(headers={"server": "nginx/1.26.2"})])
+    before = (output.read_bytes(), manifest_path(output).read_bytes())
+    path = write_allowlist(tmp_path, [asset()])
+
+    class FailedFetcher:
+        request_count = 1
+        _clock = staticmethod(time.monotonic)
+
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch(self, *args, **kwargs):
+            raise _BlockedFailure("HTTP 403", status=403)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_module, "Fetcher", FailedFetcher)
+    code = main(["web", "detect", "--client", "acme", "--assets", str(path),
+                 "--output", str(output), "--source-id", "acme-web", "--allow-partial"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.err.strip() == "error: could not fetch 1 of 1 site (blocked); see the review entries"
+    assert "example.com" not in captured.err
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "failed"
+    assert (output.read_bytes(), manifest_path(output).read_bytes()) == before
+
+
+@pytest.mark.parametrize(("observed_response", "expected_outcome", "expected_reason", "product_count"), [
+    (response(body=b"<html>nothing here</html>"), "no products were recognised", "no-technologies", 0),
+    (response(headers={"cf-ray": "8a1b2c3d4e5f6a7b-AMS"}),
+     "1 product recognised, none with a disclosed version", "version-unknown", 1),
+    (response(headers={"server": ["nginx/1.25.3", "nginx/1.26.2"]}),
+     "1 product recognised, none with a consistent usable version", "version-conflict", 1),
+])
+def test_cli_no_usable_versions_exit_zero_and_retain_snapshot(
+        tmp_path, monkeypatch, capsys, observed_response, expected_outcome,
+        expected_reason, product_count):
+    import cvebeacon_extensions.web as web_module
+    _, output, _, _ = run(tmp_path, [asset()], [response(headers={"server": "nginx/1.26.2"})])
+    before = (output.read_bytes(), manifest_path(output).read_bytes())
+    path = write_allowlist(tmp_path, [asset()])
+
+    class EmptyFetcher:
+        request_count = 1
+        _clock = staticmethod(time.monotonic)
+
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch(self, *args, **kwargs):
+            return web_module._FetchSuccess(observed_response, (), NOW)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_module, "Fetcher", EmptyFetcher)
+    code = main(["web", "detect", "--client", "acme", "--assets", str(path),
+                 "--output", str(output), "--source-id", "acme-web"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.err == ""
+    assert captured.out.strip() == (
+        f"detection finished: {expected_outcome}; nothing was added to the inventory; "
+        "see the review entries")
+    assert "example.com" not in captured.out
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "no-usable-versions"
+    assert detail["run"]["products_recognized"] == product_count
+    assert detail["reviews"][0]["reason"] == expected_reason
+    assert (output.read_bytes(), manifest_path(output).read_bytes()) == before
+
+
+def test_cli_partial_fetches_keep_successful_rows_and_report_reason_count(tmp_path, monkeypatch, capsys):
+    import cvebeacon_extensions.web as web_module
+    path = write_allowlist(tmp_path, [asset(), asset(hostname="second.example")])
+    output = tmp_path / "snapshot.json"
+
+    class MixedFetcher:
+        request_count = 0
+        _clock = staticmethod(time.monotonic)
+
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch(self, endpoint, *args, **kwargs):
+            self.request_count += 1
+            if endpoint.endpoint.hostname == "second.example":
+                raise _BlockedFailure("HTTP 403", status=403)
+            return web_module._FetchSuccess(response(headers={"server": "nginx/1.25.3"}), (), NOW)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_module, "Fetcher", MixedFetcher)
+    code = main(["web", "detect", "--client", "acme", "--assets", str(path),
+                 "--output", str(output), "--source-id", "acme-web", "--allow-partial"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "could not fetch 1 of 2 sites (blocked); see the review entries" in captured.out
+    assert "second.example" not in captured.out
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert detail["run"]["status"] == "partial"
+    assert read_snapshot(output, allow_partial=True).records[0]["product"] == "nginx"
+
+
+def test_no_usable_versions_retains_snapshot_and_records_saved_time(tmp_path, capsys):
+    _, output, _, _ = run(tmp_path, [asset()], [response(headers={"server": "nginx/1.26.2"})])
+    before = (output.read_bytes(), manifest_path(output).read_bytes())
+    path = write_allowlist(tmp_path, [asset()], name="unknown-assets.json")
+    manifest = detect_web(path, output, client="acme", source_id="acme-web", allow_partial=True,
+                          resolver=Resolver({"example.com": [PUBLIC]}),
+                          transport=Transport([response(headers={"cf-ray": "8a1b2c3d4e5f6a7b-AMS"})]),
+                          now=lambda: NOW, host_interval=0, max_workers=1)
+    line = capsys.readouterr().out
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    assert manifest is None
+    assert "1 product recognised" in line and "none with a disclosed version" in line
+    assert "nothing was added to the inventory" in line
+    assert "example.com" not in line
+    assert detail["run"]["status"] == "no-usable-versions"
+    assert detail["run"]["fetched_count"] == 1
+    assert detail["run"]["saved_snapshot_generated_at"] == NOW.isoformat()
+    assert detail["run"]["snapshot_updated"] is False
+    assert (output.read_bytes(), manifest_path(output).read_bytes()) == before
 
 
 def test_partial_run_requires_explicit_opt_in_and_preserves_previous_snapshot(tmp_path):
@@ -1293,10 +1524,11 @@ def test_partial_run_requires_explicit_opt_in_and_preserves_previous_snapshot(tm
     before = (output.read_bytes(), manifest_path(output).read_bytes())
     path = write_allowlist(tmp_path, [asset(), asset(hostname="second.example")], name="assets2.json")
     transport = Transport([response(headers={"server": "nginx/1.25.3"}), response(403)])
-    with pytest.raises(ExtensionError, match="allow-partial"):
+    with pytest.raises(ExtensionError, match="could not fetch 1 of 2 sites \\(blocked\\)") as error:
         detect_web(path, output, client="acme", source_id="acme-web", allow_partial=False,
                    resolver=Resolver({"example.com": [PUBLIC], "second.example": [PUBLIC]}),
                    transport=transport, now=lambda: NOW, host_interval=0, max_workers=1)
+    assert "second.example" not in str(error.value)
     assert (output.read_bytes(), manifest_path(output).read_bytes()) == before
 
 
@@ -1413,6 +1645,11 @@ def test_review_persists_request_counts_durations_and_only_evidence_types(tmp_pa
         mapping={"example.com": [PUBLIC], "second.example": [PUBLIC]})
     detail = json.loads(Path(str(output) + ".review.json").read_bytes())
     assert detail["run"]["status"] == "partial"
+    assert detail["run"]["asset_count"] == 2
+    assert detail["run"]["fetched_count"] == 1
+    assert detail["run"]["products_recognized"] == 1
+    assert detail["run"]["products_with_version"] == 1
+    assert detail["run"]["snapshot_updated"] is True
     assert detail["run"]["request_count"] == len(transport.calls) == 2
     assert detail["run"]["duration_seconds"] >= 0
     assert detail["run"]["started_at"] == detail["run"]["ended_at"] == NOW.isoformat()
@@ -1426,9 +1663,10 @@ def test_review_persists_request_counts_durations_and_only_evidence_types(tmp_pa
 def test_failed_run_refreshes_metadata_and_retains_previous_snapshot(tmp_path):
     _, output, _, _ = run(tmp_path, [asset()], [response(headers={"server": "nginx/1.26.2"})])
     before = (output.read_bytes(), manifest_path(output).read_bytes())
-    with pytest.raises(ExtensionError, match="no technologies"):
+    with pytest.raises(ExtensionError, match="could not fetch 1 of 1 site \\(blocked\\)"):
         run(tmp_path, [asset()], [response(403)])
     detail = json.loads(Path(str(output) + ".review.json").read_bytes())
     assert detail["run"]["status"] == "failed" and detail["run"]["request_count"] == 1
+    assert detail["run"]["saved_snapshot_generated_at"] == NOW.isoformat()
     assert detail["products"] == [] and detail["reviews"][0]["reason"] == "blocked"
     assert (output.read_bytes(), manifest_path(output).read_bytes()) == before

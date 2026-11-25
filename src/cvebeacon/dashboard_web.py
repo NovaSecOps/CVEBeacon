@@ -9,16 +9,36 @@ from urllib.parse import urlsplit
 
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
 
+from .clients import client_name, client_page
 from .dashboard import _text, requires
 from .dashboard_jobs import JobQueueFull, build_command
 from .dashboard_ops import require_accounts
 from .errors import CVEBeaconError, ConfigurationError
 from .locking import OperationLock, RunInProgress
+from .managed_inventory import client_key as inventory_client_key, normalized_client, profiles
 from .publication import PublicationTimeout
 from . import web_assets
 from .web_assets import (COMPANION_NOTICE, client_label, directories,
                          paths, read_allowlist, save_allowlist, validate_allowlist)
 from .web_inventory import decode_json, read_bytes, read_web_snapshot
+
+_RUN_STATUSES = {"success", "partial", "failed", "no-usable-versions"}
+_FETCH_FAILURE_REASONS = {
+    "unreachable", "tls-error", "blocked", "redirect-blocked", "timeout", "too-large",
+    "unsupported-encoding",
+}
+_REASON_LABELS = {
+    "unreachable": "Could not reach site",
+    "tls-error": "TLS certificate or handshake problem",
+    "blocked": "Request blocked",
+    "redirect-blocked": "Too many redirects or redirect not allowed",
+    "timeout": "Request timed out",
+    "too-large": "Page too large",
+    "unsupported-encoding": "Unsupported response encoding",
+    "no-technologies": "No products recognised",
+    "version-unknown": "Version not disclosed",
+    "version-conflict": "Conflicting versions",
+}
 
 
 def _host(entry):
@@ -68,20 +88,39 @@ def _review_metadata(detail, client):
         return (isinstance(value, str) and len(value) <= 8192
                 and not any(0xD800 <= ord(char) <= 0xDFFF for char in value))
     for item in products + reviews:
-        for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence", "reason"):
+        for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence", "reason", "detail"):
             if field in item and not text(item[field]):
                 raise ValueError("invalid review text")
         for field in ("versions", "evidence_types"):
             if field in item and (not isinstance(item[field], list)
                                   or any(not text(value) for value in item[field])):
                 raise ValueError("invalid review list")
-        for field in ("status", "retry_after"):
+        for field in ("status", "retry_after", "redirects_followed"):
             if field in item and (type(item[field]) is not int or item[field] < 0):
                 raise ValueError("invalid review number")
+        if "redirect_target" in item:
+            target = item["redirect_target"]
+            if (not isinstance(target, dict) or set(target) != {"scheme", "host", "port"}
+                    or target.get("scheme") not in {"http", "https"}
+                    or not text(target.get("host")) or type(target.get("port")) is not int
+                    or not 1 <= target["port"] <= 65535):
+                raise ValueError("invalid redirect target")
     if run is not None:
         for field in ("started_at", "ended_at", "status"):
             if field in run and not text(run[field]):
                 raise ValueError("invalid run text")
+        if "status" in run and run["status"] not in _RUN_STATUSES:
+            raise ValueError("invalid run status")
+        for field in ("asset_count", "fetched_count", "products_recognized", "products_with_version"):
+            if field in run and (type(run[field]) is not int or run[field] < 0):
+                raise ValueError("invalid run count")
+        if (run.get("asset_count", 0) < run.get("fetched_count", 0)
+                or run.get("products_recognized", 0) < run.get("products_with_version", 0)):
+            raise ValueError("invalid run counts")
+        if "saved_snapshot_generated_at" in run and not text(run["saved_snapshot_generated_at"]):
+            raise ValueError("invalid saved snapshot timestamp")
+        if "snapshot_updated" in run and type(run["snapshot_updated"]) is not bool:
+            raise ValueError("invalid snapshot update state")
         if "request_count" in run and (type(run["request_count"]) is not int or run["request_count"] < 0):
             raise ValueError("invalid run request count")
         if "duration_seconds" in run and (type(run["duration_seconds"]) not in (int, float)
@@ -91,16 +130,79 @@ def _review_metadata(detail, client):
     return products, reviews, run
 
 
+def _inventory_clients(config):
+    """Use the names shown on Clients, including dashboard-managed profiles."""
+    names = {}
+    if config.managed_inventory:
+        try:
+            for profile in profiles(config.inventory_directory, config.watch.users_database):
+                name = normalized_client(profile["name"])
+                names.setdefault(inventory_client_key(name), name)
+        except (CVEBeaconError, OSError, ValueError):
+            pass
+    try:
+        _, summaries, _ = client_page(config.database_path, limit=1000)
+        for summary in summaries:
+            name = normalized_client(summary.name)
+            names.setdefault(inventory_client_key(name), name)
+    except (CVEBeaconError, OSError, ValueError):
+        pass
+    return sorted(names.values(), key=str.casefold)
+
+
+def _canonical_client(config, value, candidates=None):
+    name = normalized_client(value)
+    wanted = inventory_client_key(name)
+    for candidate in candidates if candidates is not None else _inventory_clients(config):
+        if inventory_client_key(candidate) == wanted:
+            return candidate
+    scanned = client_name(config.database_path, name)
+    return normalized_client(scanned) if scanned is not None else name
+
+
+def _redirect_target_urls(target):
+    if not isinstance(target, dict):
+        return None, None
+    scheme, host, port = target.get("scheme"), target.get("host"), target.get("port")
+    if (scheme not in {"http", "https"} or not isinstance(host, str)
+            or type(port) is not int or not 1 <= port <= 65535):
+        return None, None
+    if not host or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:" for character in host):
+        return None, None
+    authority = f"[{host}]" if ":" in host else host
+    display = f"{scheme}://{authority}:{port}"
+    return display, display + "/"
+
+
+def _prefill_entry(value):
+    if not value:
+        return {}
+    try:
+        parsed = urlsplit(value)
+        scheme, hostname = parsed.scheme.casefold(), parsed.hostname
+        port = parsed.port or (443 if scheme == "https" else 80)
+        if (scheme not in {"http", "https"} or not hostname or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment
+                or parsed.path not in {"", "/"} or not 1 <= port <= 65535):
+            raise ValueError("invalid prefill URL")
+        return {"hostname": hostname, "scheme": scheme, "port": port, "path": "/"}
+    except (TypeError, ValueError):
+        raise ValueError("invalid prefill URL") from None
+
+
 def create_web_blueprint(config):
     blueprint = Blueprint("web", __name__, url_prefix="/web-assets")
 
     def manager():
         return current_app.extensions["dashboard_jobs"]
 
-    def render(client="", *, error=None, status=200):
+    def render(client="", *, error=None, status=200, prefill_url=""):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot = [], [], None, None
         last_job, truncated, removed = None, False, False
+        inventory_clients = _inventory_clients(config)
+        prefill_entry = _prefill_entry(prefill_url) if prefill_url else {}
+        versions_hidden = False
         available = web_assets.companion_available()
         try:
             assets_dir, _ = directories(config)
@@ -131,6 +233,23 @@ def create_web_blueprint(config):
                     detail = decode_json(read_bytes(review_path))
                     products, reviews, run = _review_metadata(detail, client)
                     truncated = len(products) > 1000 or len(reviews) > 1000
+                    versions_hidden = any(item.get("reason") == "version-unknown" for item in reviews)
+                    for item in reviews:
+                        display, target_url = _redirect_target_urls(item.get("redirect_target"))
+                        if display is not None:
+                            item["redirect_display"] = display
+                            item["redirect_url"] = target_url
+                    if run is not None:
+                        run = dict(run)
+                        failed_assets = {item.get("asset_id") for item in reviews
+                                         if item.get("reason") in _FETCH_FAILURE_REASONS and item.get("asset_id")}
+                        asset_count = len(document["assets"])
+                        run.setdefault("asset_count", asset_count)
+                        run.setdefault("fetched_count", max(0, asset_count - len(failed_assets)))
+                        run.setdefault("products_recognized", len(products))
+                        run.setdefault("products_with_version", sum(bool(item.get("versions")) for item in products))
+                        run.setdefault("saved_snapshot_generated_at", snapshot["generated_at"] if snapshot else "")
+                        run.setdefault("snapshot_updated", False)
                     products, reviews = products[:1000], reviews[:1000]
                 last_job = next((job for job in manager().store.recent(200)
                                  if job.operation in {"web-detect", "web-plan"}
@@ -139,18 +258,23 @@ def create_web_blueprint(config):
                                       or (client.startswith("-") and job.argv[-2:] == ("--", client)))), None)
         except (CVEBeaconError, ValueError, OSError, TypeError, KeyError):
             error = error or "Web asset storage could not be read; review the local files"
-        return render_template("web_assets.html", clients=sorted(clients, key=str.casefold), client=client,
+        return render_template("web_assets.html", clients=sorted(clients, key=str.casefold),
+                               inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
                                run=run, snapshot=snapshot, available=available, notice=COMPANION_NOTICE,
-                               last_job=last_job, truncated=truncated, removed=removed, error=error), status
+                               last_job=last_job, truncated=truncated, removed=removed, error=error,
+                               versions_hidden=versions_hidden, reason_labels=_REASON_LABELS,
+                               prefill_entry=prefill_entry, prefill_url=prefill_url), status
 
     @blueprint.get("")
     @requires("view")
     def index():
         label = _text(request.args, "client", limit=256)
+        prefill_url = _text(request.args, "prefill_url", limit=2048)
         try:
-            return render(client_label(label) if label else "")
-        except ConfigurationError:
+            return render(_canonical_client(config, client_label(label)) if label else "",
+                          prefill_url=prefill_url)
+        except (ConfigurationError, ValueError):
             abort(400)
 
     @blueprint.post("/save")
@@ -158,7 +282,8 @@ def create_web_blueprint(config):
     def save():
         require_accounts()
         try:
-            client = client_label(_text(request.form, "client", required=True))
+            client = client_label(_canonical_client(
+                config, _text(request.form, "client", required=True)))
         except ConfigurationError:
             abort(400)
         action = _text(request.form, "action", required=True)
@@ -196,7 +321,7 @@ def create_web_blueprint(config):
                     raise ConfigurationError("Attest authorisation before saving this asset")
                 try:
                     port = int(_text(request.form, "port", required=True, limit=5))
-                    redirects = int(_text(request.form, "max_redirects", required=True, limit=1))
+                    redirects = int(_text(request.form, "max_redirects", required=True, limit=2))
                 except ValueError:
                     abort(400)
                 entry = {"hostname": _text(request.form, "hostname", required=True),
@@ -316,7 +441,8 @@ def create_web_blueprint(config):
     def run_job():
         require_accounts()
         try:
-            client = client_label(_text(request.form, "client", required=True))
+            client = client_label(_canonical_client(
+                config, _text(request.form, "client", required=True)))
         except ConfigurationError:
             abort(400)
         action = _text(request.form, "action", required=True)

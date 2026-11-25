@@ -2,12 +2,14 @@
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import html
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -15,6 +17,8 @@ from cvebeacon import dashboard, web_assets
 from cvebeacon.dashboard_jobs import build_command
 from cvebeacon.errors import ConfigurationError
 from cvebeacon.locking import OperationLock, RunInProgress, operation_lock_paths
+from cvebeacon.models import Asset, QueryResult
+from cvebeacon.state import StateStore
 from cvebeacon.web_assets import client_key, paths, read_allowlist, save_allowlist, validate_allowlist
 from cvebeacon.watch.permissions import PERMISSIONS
 from test_dashboard import setup
@@ -122,7 +126,7 @@ def test_csrf_shared_mode_and_unknown_actions(web, setup):
 
 @pytest.mark.parametrize("changes", [
     {"hostname": "https://bad.invalid"}, {"port": "0"}, {"path": "/?secret=1"},
-    {"scheme": "ftp"}, {"max_redirects": "3"}, {"expires_at": "2000-01-01T00:00:00Z"},
+    {"scheme": "ftp"}, {"max_redirects": "11"}, {"expires_at": "2000-01-01T00:00:00Z"},
 ])
 def test_forms_use_the_companion_validator(web, changes):
     config, _, _, client = web
@@ -139,7 +143,7 @@ def test_validator_parity_with_td1_and_plan_only(web, monkeypatch):
     path, _ = paths(config, "Acme")
     base, _ = read_allowlist(path, "Acme")
     for change in ({"authorized_by": ""}, {"expires_at": "yesterday"}, {"allow_private_address": "true"},
-                   {"max_redirects": 5}, {"hostname": "bad/host"}, {"path": "/bad#fragment"}, {"unexpected": 1}):
+                   {"max_redirects": 11}, {"hostname": "bad/host"}, {"path": "/bad#fragment"}, {"unexpected": 1}):
         document = json.loads(json.dumps(base))
         document["assets"][0].update(change)
         temporary = web_assets.temporary_json(path.parent, document)
@@ -160,6 +164,14 @@ def test_validator_parity_with_td1_and_plan_only(web, monkeypatch):
     assert argv[-1] == "--plan" and "--allow-partial" in argv
     assert kwargs["stdin"] == subprocess.DEVNULL and kwargs["timeout"] == 30
     assert not list(path.parent.glob(".web-assets-*.tmp"))
+
+
+def test_form_offers_ten_redirects_with_updated_help(web):
+    config, _, _, client = web
+    assert save(client, max_redirects="10").status_code == 303
+    page = client.get("/web-assets?client=Acme")
+    assert 'name="max_redirects" type="number" min="0" max="10"' in page.text
+    assert "0 to 10. Each redirect must stay on a listed host and port." in page.text
 
 
 def test_fixed_jobs_and_missing_companion(web, monkeypatch):
@@ -246,22 +258,151 @@ def test_results_render_only_metadata(web):
     generated = snapshot(output.parent, name=output.stem, partial=True)
     assert generated == output
     secret = "PRIVATE_RESPONSE_BODY_OR_COOKIE"
+    saved_time = "2026-11-05T12:00:00+00:00"
     save_allowlist(Path(str(output) + ".review.json"), {
         "client": "Acme", "body": secret, "cookies": secret,
         "run": dict(started_at="2026-11-05T12:00:00Z", ended_at="2026-11-05T12:00:01Z",
-                    status="partial", request_count=2, duration_seconds=1.0, body=secret),
+                    status="partial", request_count=2, duration_seconds=1.0, body=secret,
+                    asset_count=2, fetched_count=1, products_recognized=1,
+                    products_with_version=1, saved_snapshot_generated_at=saved_time,
+                    snapshot_updated=False),
         "products": [dict(hostname="example.invalid", vendor="nginx", product="nginx", versions=["1.26.2"],
                           evidence_types=["header"], category="server", confidence="high", body=secret)],
-        "reviews": [dict(asset_id="web-acme", reason=reason, detail=secret, body=secret) for reason in
+        "reviews": [dict(asset_id="web-acme", reason=reason, detail="fixed safe detail", body=secret) for reason in
                     ("unreachable", "blocked", "version-unknown", "version-conflict")],
     })
     response = client.get("/web-assets?client=Acme")
     assert response.status_code == 200, response.text
-    for value in ("1.26.2", "nginx", "header", "partial", "requests: 2", "duration: 1.0", "version-conflict"):
+    for value in ("1.26.2", "nginx", "header", "Fetched 1 of 2 authorised sites",
+                  "1 product recognised", "1 product had a disclosed version", "requests: 2",
+                  "duration: 1.0", "Conflicting versions", "version-conflict"):
         assert value in response.text
     assert secret not in response.text
     assert "turn on web snapshots in the" in response.text
     assert "Inventory settings" in response.text
+
+
+@pytest.mark.parametrize(("run_status", "asset_count", "fetched_count", "recognized", "versioned",
+                          "saved_time", "outcome", "saved_word"), [
+    ("failed", 1, 0, 0, 0, "2026-11-05T12:00:00+00:00", "Could not fetch any of 1 authorised site", "earlier run"),
+    ("partial", 2, 1, 1, 1, "2026-11-25T11:00:00+00:00", "Fetched 1 of 2 authorised sites", "this run"),
+    ("no-usable-versions", 1, 1, 3, 0, "2026-11-05T12:00:00+00:00", "Fetched all 1 authorised site", "earlier run"),
+    ("success", 1, 1, 1, 1, "2026-11-25T11:00:00+00:00", "Fetched all 1 authorised site", "this run"),
+])
+def test_latest_detection_card_describes_fetch_products_and_saved_snapshot(
+        web, run_status, asset_count, fetched_count, recognized, versioned, saved_time, outcome, saved_word):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    reviews = [{"asset_id": "web-acme", "reason": "version-unknown", "product": "nginx/"}]
+    products = [dict(asset_id="web-nginx", hostname="example.invalid", vendor="nginx", product="nginx",
+                     versions=["1.26.2"] if versioned else [], evidence_types=["header"],
+                     category="server", confidence="high") for _ in range(recognized)]
+    save_allowlist(Path(str(output) + ".review.json"), {
+        "client": "Acme", "products": products, "reviews": reviews,
+        "run": dict(started_at="2026-11-25T10:59:00Z", ended_at="2026-11-25T11:00:00Z",
+                    status=run_status, request_count=2, duration_seconds=1.0,
+                    asset_count=asset_count, fetched_count=fetched_count,
+                    products_recognized=recognized, products_with_version=versioned,
+                    saved_snapshot_generated_at=saved_time,
+                    snapshot_updated=(saved_word == "this run")),
+    })
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert outcome in page.text
+    assert f"{recognized} product{'s' if recognized != 1 else ''} recognised" in page.text
+    assert f"{versioned} product{'s' if versioned != 1 else ''} had a disclosed version" in page.text
+    assert f"Saved results are from an {saved_word}" in page.text if saved_word == "earlier run" else f"Saved results are from {saved_word}" in page.text
+    assert "2026-11-25" in page.text
+
+
+def test_reason_labels_and_hidden_version_hint(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    reasons = ("version-unknown", "redirect-blocked", "unreachable", "tls-error", "blocked",
+               "timeout", "too-large", "unsupported-encoding", "no-technologies", "version-conflict")
+    save_allowlist(Path(str(output) + ".review.json"), {
+        "client": "Acme", "products": [],
+        "reviews": [dict(asset_id=f"web-{index}", reason=reason, detail="fixed safe detail")
+                    for index, reason in enumerate(reasons)],
+    })
+    page = client.get("/web-assets?client=Acme")
+    for label in ("Version not disclosed", "Too many redirects or redirect not allowed",
+                  "Could not reach site", "TLS certificate or handshake problem", "Request blocked",
+                  "Request timed out", "Page too large", "Unsupported response encoding",
+                  "No products recognised", "Conflicting versions"):
+        assert label in page.text
+    for reason in reasons:
+        assert f'<span class="muted">{reason}</span>' in page.text
+    assert "Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory." in page.text
+
+
+def test_redirect_detail_prefills_add_site_form_without_saving(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    detail = "redirect target is not an allowlisted host and port"
+    target = {"scheme": "https", "host": "www.example.invalid", "port": 443}
+    save_allowlist(Path(str(output) + ".review.json"), {
+        "client": "Acme", "products": [], "reviews": [dict(
+            asset_id="web-example", reason="redirect-blocked", detail=detail,
+            redirect_target=target)],
+    })
+    page = client.get("/web-assets?client=Acme")
+    assert detail in page.text
+    assert "This site redirects to https://www.example.invalid:443, which is not on the authorised list. If the client authorises it, add it as a site." in page.text
+    match = re.search(r'<a[^>]+href="([^"]+)"[^>]*>Add this redirect target as an authorised site</a>', page.text)
+    assert match
+    href = html.unescape(match[1])
+    query = parse_qs(urlsplit(href).query)
+    assert query["prefill_url"] == ["https://www.example.invalid:443/"]
+    form = client.get(href)
+    assert form.status_code == 200
+    assert 'id="add-asset" open' in form.text
+    assert 'name="hostname" value="www.example.invalid"' in form.text
+    assert 'name="scheme"' in form.text
+    assert 'name="port"' in form.text and 'value="443"' in form.text
+    assert 'name="attest" type="checkbox" value="yes" required' in form.text
+    allowlist, _ = paths(config, "Acme")
+    assert len(read_allowlist(allowlist, "Acme")[0]["assets"]) == 1
+
+
+def test_inventory_client_picker_canonicalizes_case_variant_and_links_web_assets(web):
+    config, _, _, client = web
+    StateStore(config.database_path).record_scan([QueryResult(
+        Asset("inventory-asset", vendor="Example", product="Widget", version="1", client="Acme Corp"), (), ())])
+    page = client.get("/web-assets?client=acme%20corp")
+    assert page.status_code == 200
+    assert '<option value="Acme Corp">' in page.text
+    version = re.search(r'name="version" value="([^"]+)"', page.text)[1]
+    response = client.post("/web-assets/save", data={
+        "csrf": csrf(client), "version": version, "client": "acme corp", "action": "add",
+        "hostname": "example.invalid", "scheme": "https", "port": "443", "path": "/",
+        "max_redirects": "2", "allow_redirects": "yes", "attest": "yes",
+    })
+    assert response.status_code == 303
+    allowlist, _ = paths(config, "Acme Corp")
+    document, _ = read_allowlist(allowlist, "Acme Corp")
+    assert document["client"] == "Acme Corp"
+    assert len(document["assets"]) == 1
+    detail = client.get(f"/watch/clients/{client_key('Acme Corp')}?name=Acme%20Corp")
+    assert detail.status_code == 200
+    assert 'class="btn btn-secondary btn-small"' in detail.text
+    assert "Web assets" in detail.text and "1 authorised site" in detail.text
+
+
+def test_inventory_detail_has_compact_web_assets_link_and_site_count(web):
+    config, _, _, client = web
+    StateStore(config.database_path).record_scan([QueryResult(
+        Asset("inventory-asset", vendor="Example", product="Widget", version="1", client="Acme"), (), ())])
+    assert save(client).status_code == 303
+    detail = client.get(f"/watch/clients/{client_key('Acme')}?name=Acme")
+    assert detail.status_code == 200
+    assert 'class="btn btn-secondary btn-small"' in detail.text
+    assert 'href="/web-assets?client=Acme"' in detail.text
+    assert "Web assets · 1 authorised site" in detail.text
 
 
 def test_nonadmin_can_enable_snapshot_boolean(web):
