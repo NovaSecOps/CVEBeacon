@@ -1576,6 +1576,8 @@ def test_plan_prints_requests_and_sends_nothing(tmp_path, capsys):
 
 def test_golden_snapshot_and_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, "utc_now", lambda: NOW)
+    # The golden files are fixed bytes; keep them independent of the release version.
+    monkeypatch.setattr(contract, "__version__", "0.1.0")
     assets = [asset(hostname="one.example"), asset(hostname="two.example")]
     responses = [
         response(headers={"server": "nginx/1.25.3", "content-type": "text/html"},

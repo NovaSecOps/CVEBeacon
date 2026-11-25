@@ -17,6 +17,16 @@ from cvebeacon.locking import RunLock
 from test_updater import transaction, signed, value
 from watch_support import write_config
 
+
+@pytest.fixture(autouse=True)
+def _feed_versions_assume_running_0_1_0(monkeypatch):
+    # The fake release feeds in this module are built around a running 0.1.0.
+    import cvebeacon.updater as updater_module
+
+    real = updater_module.installed_version
+    monkeypatch.setattr(updater_module, "installed_version",
+                        lambda name: "0.1.0" if name == "cvebeacon" else real(name))
+
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native apply and durable state recovery are Linux-only")
 
 
