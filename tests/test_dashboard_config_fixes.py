@@ -15,6 +15,7 @@ from cvebeacon.watch.permissions import PERMISSIONS
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
 from test_dashboard import setup  # noqa: F401 - registers the shared fixture
 from test_dashboard_accounts import PASSWORD, accounts as account_fixture, login
+from test_dashboard_config import preview
 
 
 BASE = """[inventory]
@@ -67,14 +68,6 @@ def form(page, action="preview"):
         match = re.search(r'value="([^"]*)"', selected[0])
         data[name] = html.unescape(match[1] if match else selected[1])
     return data
-
-
-def preview(client, section="http", **changes):
-    page = client.get("/config/" + section)
-    assert page.status_code == 200, page.text
-    data = form(page.text)
-    data.update(changes)
-    return client.post("/config/" + section, data=data)
 
 
 def confirm(client, response, section="http", **changes):
