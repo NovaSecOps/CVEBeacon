@@ -73,15 +73,30 @@
 </div>
 
 {% if can_manage %}
-{% call card('Upload inventory', 'Choose a file listing the software you run for this client.', id='upload-inventory') %}
+{% call card('Upload inventory', 'Choose a file or paste rows listing the software you run for this client.', id='upload-inventory') %}
 {{ steps(['Choose a file', 'Review and save'], current=1) }}
 <form method="post" class="stack" enctype="multipart/form-data" action="{{ url_for('client_inventory.upload', key=key, name=profile.name) }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <div class="field">
     <label for="inventory">Inventory file</label>
-    <input type="file" id="inventory" name="inventory" accept=".csv,.xlsx,.json,.yaml,.yml" aria-describedby="inventory-help" required>
-    <p class="help" id="inventory-help">Choose a CSV, Excel (.xlsx), JSON or YAML file up to 32 MiB. The limit also applies to Excel files after decompression. Split larger workbooks into smaller uploads.</p>
+    <input type="file" id="inventory" name="inventory" accept=".csv,.xlsx,.json,.yaml,.yml" aria-describedby="inventory-help">
+    <p class="help" id="inventory-help">Upload a CSV, Excel (.xlsx), JSON or YAML file up to 32 MiB, or paste CSV, JSON or YAML rows up to 100 KB. The limit also applies to Excel files after decompression. Split larger workbooks into smaller uploads.</p>
   </div>
+  <p class="help">Choose exactly one source: a file or pasted text.</p>
+  <div class="field">
+    <label for="pasted-rows">Or paste rows</label>
+    <textarea id="pasted-rows" name="pasted_rows" rows="8" aria-describedby="inventory-help">{{ pasted_text }}</textarea>
+  </div>
+  <div class="field">
+    <label for="paste-format">Pasted rows format</label>
+    <select id="paste-format" name="paste_format" aria-describedby="inventory-help">
+      <option value="csv" {% if paste_format == 'csv' %}selected{% endif %}>CSV</option>
+      <option value="json" {% if paste_format == 'json' %}selected{% endif %}>JSON</option>
+      <option value="yaml" {% if paste_format == 'yaml' %}selected{% endif %}>YAML</option>
+    </select>
+  </div>
+  <p class="help">Paste up to 100 KB, or upload a file for larger inventories.</p>
+  {{ link_button('Download a CSV template', url_for('client_inventory.inventory_template'), kind='secondary') }}
   <div class="form-actions">{{ button('Preview inventory', kind='secondary' if can_scan else 'primary') }}</div>
 </form>
 {% endcall %}

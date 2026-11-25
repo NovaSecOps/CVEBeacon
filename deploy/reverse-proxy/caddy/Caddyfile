@@ -37,9 +37,14 @@ cvebeacon.example.com {
 		-Server
 	}
 
-	# The dashboard accepts statement uploads up to 5 MiB. Six megabytes
-	# leaves room for multipart framing.
-	request_body {
+	# Client inventory uploads can reach 32 MiB. Give their route 34 MB for
+	# the request limit and multipart framing; every other request stays at 6 MB.
+	@inventory_upload path_regexp ^/watch/clients/[^/]+/upload$
+	@other_requests not path_regexp ^/watch/clients/[^/]+/upload$
+	request_body @inventory_upload {
+		max_size 34MB
+	}
+	request_body @other_requests {
 		max_size 6MB
 	}
 

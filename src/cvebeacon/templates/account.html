@@ -2,7 +2,7 @@
 {% from 'ui.html' import page_header, card, callout, field, button, table_wrap %}
 {% block title %}My account · CVEBeacon{% endblock %}
 {% block content %}
-{{ page_header('My account', 'Signed in as ' ~ current_user.identity ~ '. Change your password or end your sessions here.') }}
+{{ page_header('My account', 'Signed in as ' ~ current_user.identity ~ '. Change your password or sign out everywhere here.') }}
 {% if error %}{% call callout('danger', 'Your password was not changed') %}{{ error }}{% endcall %}{% endif %}
 {% call card('Change password', 'Choose a new password of at least 12 characters. You will be logged out afterwards and can sign in with the new one.') %}
 <form method="post" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="password">
@@ -10,8 +10,8 @@
 {{ field('New password', 'password', type='password', required=true, minlength=12, maxlength=1024, autocomplete='new-password', help='At least 12 characters. A short sentence works well.') }}
 <div class="form-actions">{{ button('Change password and log out') }}</div></form>
 {% endcall %}
-{% call card('Sessions in this server process', 'Where you are currently signed in. Age and idle time are shown in seconds.') %}
-{% call table_wrap('Active sessions') %}<table><thead><tr><th>Age (seconds)</th><th>Idle (seconds)</th></tr></thead><tbody>{% for age, idle in sessions %}<tr><td class="num">{{ age }}</td><td class="num">{{ idle }}</td></tr>{% endfor %}</tbody></table>{% endcall %}
-<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="logout_all">{{ button('Log out of all sessions', kind='secondary', confirm='Log out of all sessions, including this one?') }}</form>
+{% call card('Where you are signed in', 'Each row is one sign-in on this server. Times are shown in seconds.') %}
+{% call table_wrap('Active sign-ins') %}<table><thead><tr><th>Signed in for (seconds)</th><th>Idle for (seconds)</th></tr></thead><tbody>{% for age, idle in sessions %}<tr><td class="num">{{ age }}</td><td class="num">{{ idle }}</td></tr>{% endfor %}</tbody></table>{% endcall %}
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="logout_all">{{ button('Log out everywhere', kind='secondary', confirm='Log out everywhere, including this browser?') }}</form>
 {% endcall %}
 {% endblock %}

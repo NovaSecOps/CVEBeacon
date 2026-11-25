@@ -260,7 +260,8 @@ def test_results_render_only_metadata(web):
     for value in ("1.26.2", "nginx", "header", "partial", "requests: 2", "duration: 1.0", "version-conflict"):
         assert value in response.text
     assert secret not in response.text
-    assert "web_snapshots = true" in response.text
+    assert "turn on web snapshots in the" in response.text
+    assert "Inventory settings" in response.text
 
 
 def test_nonadmin_can_enable_snapshot_boolean(web):

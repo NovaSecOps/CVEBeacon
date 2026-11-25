@@ -632,7 +632,7 @@ share one block and a `Rule: a, b` line.
 [NEW] CVE-2026-1234 · CVSS 9.8 v3.1 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA ✓ EU – · Exploitation: active (NVD SSVC)
   Published 2026-10-30 · first seen 2026-11-04
   CVSS scores:
-  CVSS 9.8 v3.1 (CNA: Acme) · critical
+  9.8 critical · CVSS 3.1 · CNA: Acme
   Acme Widget before 4.2.1 allows unauthenticated remote code execution…
   Rule: critical-or-likely · https://nvd.nist.gov/vuln/detail/CVE-2026-1234
 ```
@@ -682,7 +682,7 @@ kev-watch: 4 matches
 [NEW] CVE-2026-1234 · CVSS 9.8 v3.1 (CNA: Acme), NVD pending · EPSS 0.62 · KEV: CISA – EU – · Exploitation: unknown
   Published 2026-10-30 · first seen 2026-11-04
   CVSS scores:
-  CVSS 9.8 v3.1 (CNA: Acme) · critical
+  9.8 critical · CVSS 3.1 · CNA: Acme
   Acme Widget before 4.2.1 allows unauthenticated remote code execution…
 and 8 more. Run `cvebeacon watch events` to list all.
 ```
@@ -733,13 +733,15 @@ is a simple table with inline styles only: there are no images, web fonts,
 scripts, tracking pixels, or remote stylesheets, and it stays readable in dark
 mode and in Outlook.
 
-Every alert channel includes a **CVSS scores** block with each available base
-score, version, severity, provider, and vector when supplied. Entries run from
-v4.0 through v2.0. Within each version they are ordered NVD, CNA, CISA ADP,
-EUVD, then other providers. Severity uses the provider's rating when available
-or the version's scale when it is missing. If severity differs across
-versions, the block includes a note. Exploitation lists available sources
-beside the strongest status. Missing evidence is shown as unknown.
+Every alert channel includes a compact **CVSS scores** block with each
+available base score, severity, version, and provider. CVSS vectors are
+available on the dashboard CVE page and in webhook payloads; they are not
+included in emails or chat messages. Entries run from v4.0 through v2.0.
+Within each version they are ordered NVD, CNA, CISA ADP, EUVD, then other
+providers. Severity uses the provider's rating when available or the version's
+scale when it is missing. If severity differs across versions, the block
+includes a note. Exploitation lists available sources beside the strongest
+status. Missing evidence is shown as unknown.
 
 Every dynamic value is HTML-escaped, and links use only the fixed NVD, CVE.org,
 EUVD, and CISA KEV URL builders with percent-quoted identifiers. A CVE
