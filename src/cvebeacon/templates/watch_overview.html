@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% set nav_active = 'watch.overview' %}
 {% from 'watch_macros.html' import value, stamp %}
-{% from 'ui.html' import page_header, card, stat, stat_grid, callout, table_wrap, badge %}
+{% from 'ui.html' import page_header, card, stat, stat_grid, callout, table_wrap, badge, explain %}
 {% block title %}Watch overview · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Watch overview', 'What CVEBeacon is watching, where the data comes from, and whether alerts were delivered.', url_for('watch.events'), 'Review alerts') }}
@@ -24,8 +24,8 @@
   {{ stat(status.reported, 'Reported to clients', 'Report marks that are currently active.', href=url_for('watch.reported')) }}
 {% endcall %}
 
-{% call card('How alerts arrive', 'A watch rule creates an alert when it matches a CVE. The alert is sent by the next watch job.') %}
-<p>Rule evaluation creates alert events; delivery happens on <code>watch notify</code> or the next <code>watch run</code>. Unsent alerts stay queued and appear in the delivery table below.</p>
+{% call card('How alerts arrive', 'A watch rule creates an alert when it matches a CVE. The alert is sent the next time CVEBeacon runs.') %}
+<p>Alerts are queued when a rule matches. They are sent the next time CVEBeacon runs, or when you press Deliver pending alerts on the <a href="{{ url_for('operations.index') }}">Operations page</a>. Unsent alerts stay queued and appear in the delivery table below.</p>
 {% call callout('info', 'What an empty list does not mean') %}
 <p>No alert means no stored rule matched. It is not proof that a flaw is absent, not exploited, or not present in your systems.</p>
 {% endcall %}
@@ -53,7 +53,7 @@
 {% call card('Alert delivery', 'Where queued alerts are in the delivery process.') %}
 {% call table_wrap('Channel delivery health') %}
 <table>
-<thead><tr><th scope="col">Channel</th><th scope="col" class="num">Pending</th><th scope="col" class="num">Sending</th><th scope="col" class="num">Failed</th><th scope="col" class="num">Given up</th><th scope="col" class="num">Ambiguous</th><th scope="col">Last success</th></tr></thead>
+<thead><tr><th scope="col">Channel</th><th scope="col" class="num">Pending</th><th scope="col" class="num">Sending</th><th scope="col" class="num">Failed</th><th scope="col" class="num">Gave up</th><th scope="col" class="num">Unsure</th><th scope="col">Last success</th></tr></thead>
 <tbody>{% for row in deliveries %}<tr>
   <td>{{ row.channel }}</td>
   <td class="num">{{ row.pending }}</td>
@@ -65,17 +65,26 @@
 </tr>{% else %}<tr><td colspan="7">No channels are configured and no deliveries are recorded.</td></tr>{% endfor %}</tbody>
 </table>
 {% endcall %}
-<p class="help">Pending means queued but not sent yet. Ambiguous means the remote service may or may not have received the alert; check it before sending again.</p>
+<p class="help">Pending means queued but not sent yet. Unsure means the service may or may not have received the alert. Check the destination before sending again.</p>
 {% endcall %}
 
-{% call card('Initial load', 'How the first history window was filled when this instance started.') %}
+{% call card('First load', 'How the first history window was filled when this instance started.') %}
+{% set first_load_labels = {
+  'baseline': 'Existing flaws recorded silently',
+  'backfill': 'Recent flaws alerted',
+  'full': 'Everything stored',
+  'not initialized': 'Not started yet',
+} %}
 <dl>
-  <dt>Mode</dt><dd>{{ initial.mode }}</dd>
-  <dt>Initial window start</dt><dd>{{ value(initial.window_start, 'not set') }}</dd>
-  <dt>Initialized at</dt><dd>{{ stamp(initial.initialized_at) }}</dd>
-  <dt>Initial sync completed</dt><dd>{{ stamp(initial.sync_completed_at) }}{% if initial.sync_pending %} {{ badge('Pending', 'warning') }}{% endif %}</dd>
-  <dt>Initial evaluation completed</dt><dd>{{ stamp(initial.evaluated_at) }}{% if initial.evaluation_pending %} {{ badge('Pending', 'warning') }}{% endif %}</dd>
+  <dt>What the first load did</dt><dd>{{ first_load_labels.get(initial.mode, 'Not known') }}</dd>
+  <dt>Window start</dt><dd>{{ value(initial.window_start, 'not set') }}</dd>
+  <dt>First load started</dt><dd>{{ stamp(initial.initialized_at) }}</dd>
+  <dt>Data download finished</dt><dd>{{ stamp(initial.sync_completed_at) }}{% if initial.sync_pending %} {{ badge('Pending', 'warning') }}{% endif %}</dd>
+  <dt>First alert check finished</dt><dd>{{ stamp(initial.evaluated_at) }}{% if initial.evaluation_pending %} {{ badge('Pending', 'warning') }}{% endif %}</dd>
 </dl>
+{% call explain('What do the first-load modes mean?') %}
+<p><strong>Baseline</strong> records existing flaws silently, so the first load does not raise alerts for old flaws. <strong>Backfill</strong> alerts on flaws from the last few days. <strong>Full</strong> stores everything and can alert on it.</p>
+{% endcall %}
 {% endcall %}
 
 {% call card('Database details', 'Technical information for support and troubleshooting.') %}
@@ -84,6 +93,7 @@
 <dl>
   <dt>Path</dt><dd class="break">{{ status.database }}</dd>
   <dt>Schema version</dt><dd>{{ value(meta.get('schema_version'), 'unknown') }}</dd>
+  <dt>First load mode (stored value)</dt><dd>{{ value(meta.get('initial_mode'), 'not set') }}</dd>
   <dt>NVD cursor</dt><dd>{{ value(meta.get('nvd_cursor'), 'not set') }}</dd>
   <dt>EUVD cursor</dt><dd>{{ value(meta.get('euvd_cursor'), 'not set') }}{% if euvd_progress %} · {{ euvd_progress }}{% endif %}</dd>
   <dt>CVE List cursor</dt><dd>{{ value(meta.get('cve_list_cursor'), 'not set') }}</dd>

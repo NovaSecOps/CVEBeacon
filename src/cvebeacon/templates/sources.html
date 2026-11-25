@@ -3,8 +3,8 @@
 {% from 'macros.html' import health_table %}
 {% block title %}Sources · CVEBeacon{% endblock %}
 {% block content %}
-{{ page_header('Source status', 'See when CVEBeacon last read each vulnerability source and whether that read succeeded.') }}
-{% call callout('info', 'How to read this page') %}<p>A <strong>source</strong> is a public vulnerability database that CVEBeacon reads, such as NVD or the {{ term('KEV', 'the list of flaws known to be actively exploited') }} catalogues. These are cached observations from the latest recorded scan, not live availability checks. “ok” means that check succeeded at its recorded time; observations older than 24 hours are labelled stale. Failed or degraded checks indicate unavailable or incomplete evidence. Disabled sources provide no coverage.</p>{% endcall %}
+{{ page_header('Sources', 'Public databases CVEBeacon reads, and whether the last read worked.') }}
+{% call callout('info', 'How to read this page') %}<p>A <strong>source</strong> is a public vulnerability database that CVEBeacon reads, such as NVD or a {{ term('KEV', 'the list of flaws known to be actively exploited') }} list. This page shows what was recorded at the latest check, not whether the service can be reached now. A check marked OK succeeded at its recorded time; results older than 24 hours are marked stale. Failed or degraded checks mean the evidence is unavailable or incomplete. A disabled source gives no coverage.</p>{% endcall %}
 {% if data.inventory_error %}{% call callout('warning', 'Inventory unavailable') %}<p>Current asset coverage cannot be established; inspect scanner configuration and logs.</p>{% endcall %}{% endif %}
 {% if not data.latest %}
 {% call callout('warning', 'No scan results recorded') %}<p>Coverage is unknown. Run a scan so the sources can be checked.</p>{% endcall %}
