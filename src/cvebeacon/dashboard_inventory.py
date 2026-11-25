@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
-from io import BytesIO
+from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import secrets
@@ -32,6 +33,7 @@ from .private_storage import private_directory
 from .web_inventory import MAX_BYTES, read_bytes
 
 UPLOAD_REQUEST_BYTES = MAX_BYTES + 64 * 1024
+MAX_PASTE_BYTES = 100_000
 PREVIEW_TTL = 10 * 60
 _PREVIEW_SLOT = BoundedSemaphore(1)
 MANAGE = ("view", "manage_inventory")
@@ -226,7 +228,7 @@ def create_blueprint(config):
     def detail_url(key, profile, **kwargs):
         return url_for(".detail", key=key, name=profile["name"], **kwargs)
 
-    def render_detail(key, profile, *, error=None, notice=None, status=200):
+    def render_detail(key, profile, *, error=None, notice=None, status=200, pasted_text="", paste_format="csv"):
         path = active_path(key)
         warning = None
         data = None
@@ -246,6 +248,7 @@ def create_blueprint(config):
             "client_inventory.html", key=key, profile=profile, scan=scan,
             summary=summaries[0] if summaries else None, count=count, upload=upload,
             enabled=config.managed_inventory and path is not None, error=error, notice=notice, warning=warning,
+            pasted_text=pasted_text, paste_format=paste_format,
             scan_schedule=schedule_scan_state(config) if count is not None else None,
             revision=_revision(data), present=data is not None,
             history=[item.name.split(".")[1] for item in versions(path)[:HISTORY_LIMIT]]
@@ -306,6 +309,27 @@ def create_blueprint(config):
         }
         return render_detail(key, profile, notice=notices.get(request.args.get("result")))
 
+    @bp.get("/inventory-template")
+    @requires("view")
+    def inventory_template():
+        example = {
+            "asset_id": "example-asset-001",
+            "vendor": "Example Vendor",
+            "product": "Example Product",
+            "version": "1.0.0",
+            "category": "example-software",
+            "system_id": "example-system",
+        }
+        output = StringIO(newline="")
+        writer = csv.writer(output, lineterminator="\r\n")
+        writer.writerow(FIELDS)
+        writer.writerow([example.get(field, "") for field in FIELDS])
+        response = send_file(
+            BytesIO(output.getvalue().encode("utf-8")), mimetype="text/csv",
+            as_attachment=True, download_name="inventory-template.csv", max_age=0,
+        )
+        return response
+
     def preview_page(key, profile, preview, token, mode, *, error=None, status=200):
         return render_template(
             "client_inventory_preview.html", key=key, profile=profile, preview=preview,
@@ -320,26 +344,77 @@ def create_blueprint(config):
         path = active_path(key)
         if path is None:
             abort(409)
+        keep_pasted_text = ""
+        paste_format = "csv"
         try:
             files = request.files.getlist("inventory")
-            if len(files) != 1 or not files[0].filename:
-                raise ConfigurationError("Choose an inventory file to upload.")
-            suffix = Path(files[0].filename).suffix.casefold()
-            if suffix.removeprefix(".") not in SUPPORTED_FORMATS and suffix != ".yml":
-                raise ConfigurationError("Choose a CSV, XLSX, JSON or YAML file.")
-            data = files[0].stream.read(MAX_BYTES + 1)
-            if len(data) > MAX_BYTES:
-                raise ConfigurationError("That file is too large. Choose a file up to 32 MiB.")
+            pasted_values = request.form.getlist("pasted_rows")
+            format_values = request.form.getlist("paste_format")
+            pasted_text = pasted_values[0] if len(pasted_values) == 1 else ""
+            pasted_data = None
+            paste_encoding_error = False
+            paste_too_large = False
+            if pasted_values:
+                try:
+                    encoded_values = [value.encode("utf-8") for value in pasted_values]
+                except UnicodeEncodeError:
+                    paste_encoding_error = True
+                else:
+                    paste_too_large = sum(map(len, encoded_values)) > MAX_PASTE_BYTES
+                    if len(pasted_values) == 1:
+                        pasted_data = encoded_values[0]
+                    if len(pasted_values) == 1 and not paste_too_large:
+                        keep_pasted_text = pasted_text
+            chosen_format = None
+            if len(format_values) == 1:
+                selected_format = format_values[0].strip().casefold()
+                if selected_format in {"csv", "json", "yaml"}:
+                    paste_format = chosen_format = selected_format
+            if paste_too_large:
+                raise ConfigurationError(
+                    "Your pasted text was not kept because it is over 100 KB. Paste less, or upload a file."
+                )
+            if paste_encoding_error:
+                raise ConfigurationError("Paste rows as UTF-8 text.")
+            if len(files) > 1 or len(pasted_values) > 1:
+                raise ConfigurationError("Choose a file or paste rows, not both.")
+            has_file = len(files) == 1 and bool(files[0].filename)
+            has_paste = bool(pasted_text.strip())
+            if has_file and has_paste:
+                raise ConfigurationError("Choose a file or paste rows, not both.")
+            if not has_file and not has_paste:
+                raise ConfigurationError("Choose a file or paste rows.")
+            if has_file:
+                suffix = Path(files[0].filename).suffix.casefold()
+                if suffix.removeprefix(".") not in SUPPORTED_FORMATS and suffix != ".yml":
+                    raise ConfigurationError("Choose a CSV, XLSX, JSON or YAML file.")
+                data = files[0].stream.read(MAX_BYTES + 1)
+                if len(data) > MAX_BYTES:
+                    raise ConfigurationError("That file is too large. Choose a file up to 32 MiB.")
+            else:
+                if len(format_values) != 1:
+                    raise ConfigurationError("Choose CSV, JSON or YAML for pasted rows.")
+                # Use only a valid submitted choice; the display default must not stand in for it.
+                suffix = {"csv": ".csv", "json": ".json", "yaml": ".yaml"}.get(chosen_format)
+                if suffix is None:
+                    raise ConfigurationError("Choose CSV, JSON or YAML for pasted rows.")
+                data = pasted_data
             if directory.exists() or directory.is_symlink():
                 private_directory(directory, owner_only=True)
             previous = _revision(_current(path))
             preview = _preview(data, suffix, profile["name"])
             token = pending_uploads.add(PendingUpload(g.sid, key, data, suffix, previous, monotonic() + PREVIEW_TTL))
-            return preview_page(key, profile, preview, token, "replace")
+            return preview_page(key, profile, preview, token, "add")
         except ConfigurationError as exc:
-            return render_detail(key, profile, error=str(exc), status=400)
+            return render_detail(
+                key, profile, error=str(exc), status=400,
+                pasted_text=keep_pasted_text, paste_format=paste_format,
+            )
         except (OSError, StateError, ValueError):
-            return render_detail(key, profile, error="The upload could not be read. Check storage and retry.", status=503)
+            return render_detail(
+                key, profile, error="The upload could not be read. Check storage and retry.", status=503,
+                pasted_text=keep_pasted_text, paste_format=paste_format,
+            )
 
     @bp.post("/<key>/review")
     @requires(MANAGE)
@@ -381,12 +456,14 @@ def create_blueprint(config):
                     try:
                         original = read_inventory(previous, client=profile["name"])
                     except (InventoryValidationError, ValueError) as exc:
-                        raise ConfigurationError("The current inventory is unreadable. Choose Replace to start again.") from exc
+                        raise ConfigurationError(
+                            "The current inventory is unreadable. Choose Replace only if you intend to discard it."
+                        ) from exc
                     seen = {asset.asset_id.casefold() for asset in original}
                     if any(asset.asset_id.casefold() in seen for asset in assets):
                         raise ConfigurationError(
                             "An uploaded asset ID is already in this client's inventory. "
-                            "Use unique IDs or choose Replace."
+                            "Use unique IDs to add rows, or choose Replace if you intend to remove assets not in this file."
                         )
                     assets = original + assets
                 if len(assets) > MAX_CONTRACT_ROWS:

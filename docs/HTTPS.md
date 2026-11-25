@@ -137,8 +137,10 @@ session lifetimes.
 
 The sample redirects HTTP to HTTPS, enables TLS 1.2 and 1.3 with Mozilla
 intermediate ECDHE ciphers, adds HSTS and the other security headers, limits
-request bodies to 6 MB, and allows 300 seconds for slow manual queries and
-report generation.
+ordinary request bodies to 6 MB and client inventory uploads to 34 MB, and
+allows 300 seconds for slow manual queries and report generation.
+The nested upload location repeats `proxy_pass` because nginx does not inherit
+that directive there; its other proxy settings are inherited from the parent.
 
 ### Caddy
 
@@ -153,8 +155,8 @@ report generation.
 4. Run `sudo caddy validate --config /etc/caddy/Caddyfile` and reload Caddy.
 
 Caddy's reverse proxy has no short default response timeout, and the sample sets
-explicit 300-second response-header, read and write timeouts and a 6 MB body
-limit.
+explicit 300-second response-header, read and write timeouts, a 6 MB body limit
+for ordinary requests and a 34 MB limit for client inventory uploads.
 
 ### HSTS
 
@@ -270,8 +272,10 @@ time out.
   `cvebeacon users add NAME --admin` before opening the proxy.
 - **Trusting forwarded addresses.** The dashboard ignores them. Per-client login
   throttling behind one proxy is shared by design; do not weaken or bypass it.
-- **A proxy body limit below 5 MiB.** Statement uploads fail with `413`. The
-  samples use 6 MB, which covers the dashboard's 5 MiB upload plus framing.
+- **A proxy body limit below the upload size.** Statement uploads need at least
+  5 MiB plus framing. Client inventory uploads need 32 MiB plus multipart
+  framing at `/watch/clients/<key>/upload`. The samples keep other requests at
+  6 MB and allow 34 MB on that inventory route.
 - **Short proxy timeouts.** Manual queries and report generation can run for
   several minutes. Both samples allow 300 seconds; keep equivalent limits in any
   other proxy.

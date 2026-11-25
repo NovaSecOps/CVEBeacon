@@ -108,7 +108,7 @@ def register_watch(app, config: AppConfig) -> None:
         elif request.endpoint == "client_inventory.upload":
             request.max_content_length = UPLOAD_REQUEST_BYTES
             request.max_form_memory_size = 128 * 1024
-            request.max_form_parts = 4
+            request.max_form_parts = 8
         elif request.endpoint == "config_editor.rules" and request.method == "POST":
             # Reject before the shared CSRF guard reads the body.
             if not app.extensions["dashboard_users"].dashboard_accounts():
