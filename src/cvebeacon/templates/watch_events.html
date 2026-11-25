@@ -1,13 +1,13 @@
 {% extends 'base.html' %}
 {% from 'watch_macros.html' import day, stamp, cvss_scores, event_kind %}
 {% from 'ui.html' import page_header, card, field, button, link_button, callout, table_wrap, badge, empty_state, term, pagination %}
-{% block title %}Watch events · CVEBeacon{% endblock %}
+{% block title %}Alerts · CVEBeacon{% endblock %}
 {% macro page_url(number) -%}
 {{ url_for('watch.events', page=number, rule=filters.rule, kind=filters.kind, initial=filters.initial, since=filters.since, until=filters.until, cve=filters.cve, pending=filters.pending, client=filters.client) }}
 {%- endmacro %}
 {% block content %}
-{{ page_header('Watch events', 'Alerts created when a watched CVE matched a rule. Open a CVE to see its detail and reporting history.') }}
-<p class="help">Events exclude report and unreport notices. First seen is the date this instance first stored the CVE. {{ term('CVSS', 'a 0-10 severity score') }} scores stay next to their version and provider.</p>
+{{ page_header('Alerts', 'Alerts created when a watched CVE matched a rule. Open a CVE to see its detail and reporting history.') }}
+<p class="help">Alerts exclude report and unreport notices. First seen is the date this instance first stored the CVE. {{ term('CVSS', 'a 0-10 severity score') }} scores stay next to their version and provider.</p>
 
 {% call card('Filter alerts', 'Narrow the list by rule, client, date or CVE. Leave a field empty to include everything.') %}
 <details class="disclosure" {% if filters.rule or filters.kind or filters.initial or filters.pending or filters.since or filters.until or filters.cve or filters.client %}open{% endif %}>
@@ -16,16 +16,16 @@
   <div class="explorer-fields">
     <div class="field"><label for="event-rule">Rule</label><input id="event-rule" name="rule" value="{{ filters.rule }}" maxlength="64" list="watch-rule-names"></div>
     <datalist id="watch-rule-names">{% for name in rule_names %}<option value="{{ name }}">{% endfor %}</datalist>
-    <div class="field"><label for="event-kind">Kind</label><select id="event-kind" name="kind"><option value="">Any</option>{% for kind in kinds %}<option value="{{ kind }}" {% if filters.kind == kind %}selected{% endif %}>{{ event_kind(kind) }}</option>{% endfor %}</select></div>
+    <div class="field"><label for="event-kind">Type of alert</label><select id="event-kind" name="kind"><option value="">Any</option>{% for kind in kinds %}<option value="{{ kind }}" {% if filters.kind == kind %}selected{% endif %}>{{ event_kind(kind) }}</option>{% endfor %}</select></div>
     <div class="field"><label for="event-client">Client</label><select id="event-client" name="client"><option value="">Any</option>{% for name in client_names %}<option value="{{ name }}" {% if filters.client == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
     {{ field('CVE', 'cve', value=filters.cve, maxlength=32, placeholder='CVE-2026-1234') }}
     {{ field('From date', 'since', type='date', value=filters.since) }}
     {{ field('To date', 'until', type='date', value=filters.until) }}
-    {% for name, label in [('initial','First check'),('pending','Pending delivery')] %}
+    {% for name, label in [('initial','From the first check'),('pending','Pending delivery')] %}
     <div class="field"><label for="event-{{ name }}">{{ label }}</label><select id="event-{{ name }}" name="{{ name }}"><option value="">Any</option><option value="yes" {% if filters[name] == 'yes' %}selected{% endif %}>Yes</option><option value="no" {% if filters[name] == 'no' %}selected{% endif %}>No</option></select></div>
     {% endfor %}
   </div>
-  <p class="help">First check means the alert came from the first baseline check, not a later change. Pending delivery means the alert is queued and not sent yet.</p>
+  <p class="help">Raised during the first check after installation, not by a later change. Pending delivery means the alert is queued and not sent yet.</p>
   <div class="form-actions">{{ button('Apply filters') }} {{ link_button('Clear filters', url_for('watch.events'), kind='secondary') }}</div>
 </form>
 </details>
@@ -36,7 +36,7 @@
 
 {% set active = [] %}
 {% if filters.rule %}{% set _ = active.append('rule “' ~ filters.rule ~ '”') %}{% endif %}
-{% if filters.kind %}{% set _ = active.append('kind: ' ~ event_kind(filters.kind)) %}{% endif %}
+{% if filters.kind %}{% set _ = active.append('type: ' ~ event_kind(filters.kind)) %}{% endif %}
 {% if filters.client %}{% set _ = active.append('client: ' ~ filters.client) %}{% endif %}
 {% if filters.since %}{% set _ = active.append('from ' ~ filters.since) %}{% endif %}
 {% if filters.until %}{% set _ = active.append('through ' ~ filters.until) %}{% endif %}
@@ -47,15 +47,15 @@
 
 {% if rows %}
 <p class="help">Newest alerts are shown first.</p>
-{% call table_wrap('Matching watch events') %}
+{% call table_wrap('Matching alerts') %}
 <table>
-<thead><tr><th scope="col">Time</th><th scope="col">Rule</th><th scope="col">CVE</th><th scope="col">CVSS scores</th><th scope="col">Kind</th><th scope="col">First check</th><th scope="col">Published</th><th scope="col">First seen</th><th scope="col">Reported</th></tr></thead>
+<thead><tr><th scope="col">Time</th><th scope="col">Rule</th><th scope="col">CVE</th><th scope="col">CVSS scores</th><th scope="col">Type of alert</th><th scope="col">From the first check</th><th scope="col">Published</th><th scope="col">First seen</th><th scope="col">Reported</th></tr></thead>
 <tbody>{% for row in rows %}<tr>
   <td>{{ stamp(row.created_at) }}</td>
   <td>{{ row.rule }}</td>
   <td class="nowrap"><a href="{{ url_for('watch.cve', cve_id=row.cve_id) }}">{{ row.cve_id }}</a></td>
   <td>{{ cvss_scores(row.cvss_scores) }}{% if row.cvss_severity_differs %}<p class="help">Severity differs between CVSS versions</p>{% endif %}</td>
-  <td>{{ event_kind(row.kind) }} <span class="muted">({{ row.kind }})</span></td>
+  <td>{{ event_kind(row.kind) }}</td>
   <td>{{ 'Yes' if row.initial else 'No' }}</td>
   <td>{{ day(row.published) }}</td>
   <td>{{ day(row.first_seen) }}</td>

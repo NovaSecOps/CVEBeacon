@@ -1,17 +1,17 @@
 {% extends 'base.html' %}
 {% set nav_active = 'operations.index' %}
 {% from 'watch_macros.html' import stamp %}
-{% from 'ui.html' import page_header, callout, empty_state, table_wrap, badge, link_button %}
+{% from 'ui.html' import page_header, callout, empty_state, table_wrap, badge, link_button, explain %}
 {% block title %}Job history · CVEBeacon{% endblock %}
 {% block content %}
-{% call page_header('Job history', 'Every operation the dashboard has started. Open a job to see its log and result.') %}{{ link_button('Back to Operations', url_for('operations.index'), kind='secondary') }}{% endcall %}
+{% call page_header('Job history', 'Every task the dashboard has started. Open a job to see its log and result.') %}{{ link_button('Back to Operations', url_for('operations.index'), kind='secondary') }}{% endcall %}
 {% call callout('info', 'How long jobs are kept') %}<p>This page shows the most recent {{ max_jobs }} jobs. Older job rows and their logs are removed automatically. Each start and outcome is also in the account audit trail.</p>{% endcall %}
 {% if jobs %}
 {% set status_variants = {'queued': 'neutral', 'running': 'info', 'succeeded': 'success', 'failed': 'danger', 'cancelled': 'neutral'} %}
 {% set status_labels = {'queued': 'Queued', 'running': 'Running', 'succeeded': 'Succeeded', 'failed': 'Failed', 'cancelled': 'Cancelled'} %}
 <p class="muted">{{ jobs | length }} job{{ '' if jobs | length == 1 else 's' }} shown, newest first.</p>
 {% call table_wrap('Recent jobs') %}<table>
-<thead><tr><th>Job ID</th><th>Operation</th><th>Status</th><th>Started by</th><th>Timing</th><th>Result</th><th>Detail</th></tr></thead>
+<thead><tr><th>Job ID</th><th>Task</th><th>Status</th><th>Started by</th><th>Timing</th><th>Result</th><th>Detail</th></tr></thead>
 <tbody>
 {% for job in jobs %}<tr>
 <td class="num"><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">{{ job.id }}</a></td>
@@ -19,7 +19,7 @@
 <td>{{ badge(status_labels.get(job.status, job.status), status_variants.get(job.status, 'neutral')) }}{% if job.id in queue_details %}<br><span class="muted">{{ queue_details[job.id] }}</span>{% endif %}</td>
 <td>{{ job.started_by }}</td>
 <td><span class="muted">Queued</span> <span class="nowrap">{{ stamp(job.created_at) }}</span><br><span class="muted">Started</span> <span class="nowrap">{{ stamp(job.started_at) if job.started_at else 'Not started' }}</span><br><span class="muted">Ended</span> <span class="nowrap">{{ stamp(job.ended_at) if job.ended_at else 'Not finished' }}</span></td>
-<td>{% if job.exit_code is not none %}<span class="num nowrap">{{ job.exit_code }}</span> {{ job.exit_meaning }}{% endif %}</td>
+<td>{% if job.exit_code is not none %}{{ job.exit_meaning }}{% call explain('Technical details') %}<p>Result code: <code class="num">{{ job.exit_code }}</code></p>{% endcall %}{% endif %}</td>
 <td class="break">{{ job.message or '' }}</td>
 </tr>{% endfor %}
 </tbody></table>{% endcall %}

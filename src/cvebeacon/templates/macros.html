@@ -1,12 +1,13 @@
-{% from 'ui.html' import callout, table_wrap, applicability_badge, badge, term %}
+{% from 'ui.html' import callout, table_wrap, applicability_badge, badge, term, explain %}
 {% macro inventory_notice() %}
-{% call callout('info', 'No inventory is configured.') %}
-<p>Inventory views and inventory scan operations are unavailable in watch-only mode.</p>
-<p>KEV, critical-severity and custom rule alerting still work without an inventory, so <code>[inventory]</code> is optional for watch mode.</p>
-<p>To start scanning, <a href="{{ url_for('watch.clients') }}">open Clients</a> and upload an inventory, or add an <code>[inventory]</code> section to the configuration:</p>
+{% call callout('info') %}
+<p>No software list is set up yet. Add a client and upload their software list on the <a href="{{ url_for('watch.clients') }}">Clients page</a>. Alerts about public flaws still work without it.</p>
+{% call explain('Configuration file option') %}
+<p>An inventory can also be added to the configuration file:</p>
 <pre>[inventory]
 path = "inventory.csv"</pre>
-<p>See <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/USER_GUIDE.md#3-initial-configuration">docs/USER_GUIDE.md</a> for inventory formats and column mappings.</p>
+<p>See the <a href="https://github.com/NovaSecOps/CVEBeacon/blob/main/docs/USER_GUIDE.md#3-initial-configuration">user guide</a> for inventory formats and column mappings.</p>
+{% endcall %}
 {% endcall %}
 {% endmacro %}
 
@@ -65,7 +66,7 @@ path = "inventory.csv"</pre>
 <table>
 <thead><tr><th>Asset</th><th>Source</th><th>Last check result</th><th>Freshness</th><th>Checked / source timestamp</th><th>Detail</th></tr></thead>
 <tbody>
-{% for row in rows %}{% set variant = {'ok': 'success', 'degraded': 'warning', 'failed': 'danger', 'disabled': 'neutral'}.get(row.status, 'neutral') %}{% set status_label = {'ok': 'OK', 'degraded': 'Degraded', 'failed': 'Failed', 'disabled': 'Disabled'}.get(row.status, row.status | capitalize) %}{% set freshness = {'stale': 'Stale', 'cached observation': 'Cached observation', 'query observation': 'Query observation'}.get(row.freshness, row.freshness or 'Query observation') %}<tr>
+{% for row in rows %}{% set variant = {'ok': 'success', 'degraded': 'warning', 'failed': 'danger', 'disabled': 'neutral'}.get(row.status, 'neutral') %}{% set status_label = {'ok': 'OK', 'degraded': 'Degraded', 'failed': 'Failed', 'disabled': 'Disabled'}.get(row.status, row.status | capitalize) %}{% set freshness = {'stale': 'Stale', 'cached observation': 'From an earlier check', 'query observation': 'Checked for this view'}.get(row.freshness, 'Not known') %}<tr>
 <td>{{ row.asset_id }}</td>
 <td>{{ row.source }}</td>
 <td>{{ badge(status_label, variant) }}</td>

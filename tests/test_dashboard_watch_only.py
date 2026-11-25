@@ -25,7 +25,7 @@ INVENTORY_PAGES = (
 )
 WORKING_PAGES = (
     ("/watch", "Watch overview"),
-    ("/watch/events", "Watch events"),
+    ("/watch/events", "Alerts"),
     ("/watch/clients", "Client allocation requires an inventory scan"),
     ("/operations/", "Run a job"),
     ("/operations/jobs", "Job history"),
@@ -35,7 +35,7 @@ WORKING_PAGES = (
     ("/roles", "Roles"),
     ("/account", "My account"),
     ("/audit", "Audit"),
-    ("/sources", "Source status"),
+    ("/sources", "Sources"),
 )
 
 
@@ -81,7 +81,7 @@ def test_create_app_accepts_watch_only_config(watch_only):
     app = dashboard.create_app(watch_only)
     response = app.test_client().get("/")
     assert response.status_code == 200
-    assert "No inventory is configured." in response.text
+    assert "No software list is set up yet." in response.text
 
 
 def test_serve_accepts_watch_only_config(watch_only, monkeypatch):
@@ -114,8 +114,8 @@ def test_inventory_pages_explain_the_missing_configuration(watch_only_client, pa
     response = client.get(path)
     assert response.status_code == 200
     text = response.text
-    assert "No inventory is configured." in text
-    assert 'href="/watch/clients">open Clients</a>' in text
+    assert "No software list is set up yet." in text
+    assert 'href="/watch/clients">Clients page</a>' in text
     assert "[inventory]" in text
     assert 'path = "inventory.csv"' in text
     assert "docs/USER_GUIDE.md" in text
@@ -144,11 +144,8 @@ def test_operations_offers_watch_jobs_and_disables_inventory_jobs(watch_only_cli
 def test_overview_explains_watch_alerting_without_inventory(watch_only_client):
     _, _, client = watch_only_client
     text = client.get("/").text
-    assert (
-        "KEV, critical-severity and custom rule alerting still work without an "
-        "inventory" in text
-    )
-    assert "<code>[inventory]</code> is optional for watch mode" in text
+    assert "Alerts about public flaws still work without it." in text
+    assert "[inventory]" in text
 
 
 def test_shell_groups_main_and_account_navigation(watch_only_client):
@@ -307,7 +304,7 @@ def test_inventory_source_operations_are_refused(watch_only_client, path, values
         data={"csrf": csrf(client, "/operations/"), **values},
     )
     assert response.status_code == 400
-    assert "No inventory is configured." in response.text
+    assert "No software list is set up yet." in response.text
     assert "Traceback" not in response.text
 
 
@@ -334,7 +331,7 @@ def test_inventory_configuration_keeps_inventory_pages(tmp_path):
     login(client)
     findings = client.get("/findings").text
     assert "Latest known findings" in findings
-    assert "No inventory is configured." not in findings
+    assert "No software list is set up yet." not in findings
     operations = client.get("/operations/").text
     assert "Scan inventory" in operations
     assert "Unavailable: no inventory is configured." not in operations

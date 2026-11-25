@@ -171,7 +171,7 @@ def test_legacy_live_pid_cannot_identify_a_new_acquisition(tmp_path, monkeypatch
         assert "account" not in snapshot and "command" not in snapshot
         assert "previous-account" not in str(holder)
         assert "cancel" not in str(RunInProgress(holder))
-        assert page.status_code == 200 and "Active run" in page.text
+        assert page.status_code == 200 and "Another task is running" in page.text
         assert "previous-account" not in page.text and "watch run" not in page.text
         assert "Cancel job" not in page.text
     finally:
