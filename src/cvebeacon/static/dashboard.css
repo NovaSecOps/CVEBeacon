@@ -537,6 +537,14 @@ details.disclosure > summary { font-weight: 600; }
 .criterion { vertical-align: top; }
 .criterion-controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: end; }
 
+/* Rule builder table (UX-1d WP-P6). Layout only; no new colour pairs. */
+.criteria-table { width: 100%; }
+.criteria-table th[scope="row"] { font-weight: 600; text-align: left; }
+.criteria-table .field { margin: 0; }
+.criteria-table .help { margin: var(--space-1) 0 0; }
+.criteria-more { margin-top: var(--space-3); }
+.criterion-unused { color: var(--text-muted); }
+
 /* --------------------------------------------- 5. Legacy classes (still used) */
 
 .muted { color: var(--text-muted); }

@@ -441,10 +441,7 @@ def test_redaction_covers_normalized_rule_names(accounts):
     _, _, _, client = accounts
     login(client, "admin")
     label = " S3cretLabel "
-    page = client.get("/config/rules")
-    data = form(page.text)
-    data.update(g0_name=label, g0_condition="{ kev = true }", g0_channels="[]")
-    response = client.post("/config/rules", data=data)
+    response = preview(client, "rules", g0_name=label, g0_condition="{ kev = true }", g0_channels="[]")
     assert response.status_code == 400
     assert "S3cretLabel" not in response.text
     assert "s3cretlabel" not in response.text
