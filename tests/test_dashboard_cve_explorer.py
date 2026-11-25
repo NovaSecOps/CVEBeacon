@@ -140,7 +140,9 @@ def test_explorer_preserves_repeated_filters_across_pagination(tmp_path):
     login(client, "reader")
     page = client.get("/watch/cves?q=Synthetic&source=nvd&source=epss&cvss_version=4.0&cvss_version=3.1"
                       "&cvss_provider=nvd&cvss_min=9.5&exploitation=active&severity=critical"
-                      "&since=2026-11-01&modified_until=2026-11-02&kev=neither")
+                      "&since=2026-11-01&modified_until=2026-11-02&kev=neither"
+                      "&vendor_names=Acme&vendor_names=Other"
+                      "&product_names=widget&product_names=Gadget")
     assert page.status_code == 200
     assert "51 CVEs · Page 1" in page.text
     assert "Active filters:" in page.text
@@ -156,15 +158,27 @@ def test_explorer_preserves_repeated_filters_across_pagination(tmp_path):
     assert filters["source"] == ["nvd", "epss"]
     assert filters["cvss_version"] == ["4.0", "3.1"]
     assert filters["modified_until"] == ["2026-11-02"]
+    assert filters["vendor_names"] == ["Acme", "Other"]
+    assert filters["product_names"] == ["widget", "Gadget"]
     assert filters["page"] == ["2"]
     following = client.get(target)
     assert "51 CVEs · Page 2" in following.text
     assert 'name="cvss_version" value="3.1" checked' in following.text
+    assert re.search(r'name="vendor_names"[^>]*>(.*?)</textarea>', following.text, re.S)[1] == "Acme\nOther"
+    assert re.search(r'name="product_names"[^>]*>(.*?)</textarea>', following.text, re.S)[1] == "widget\nGadget"
     assert "CVE-2026-010000" in following.text
     for query in ("cvss_provider=nvd%27%29%20OR%201%3D1--", "epss_min=nan",
                   "cvss_min=9&cvss_max=8", "since=2026-11-02&until=2026-11-01",
                   "client=x%0Ay", "source=nvd&" * 7, "ignored=" + "x" * 8200):
         assert client.get("/watch/cves?" + query).status_code == 400
+    for field, value in (
+        ("vendor_names", "\n".join(["php"] * 21)),
+        ("product_names", "x" * 121),
+        ("vendor_names", "php\x01group"),
+        ("product_names", "php\u200egroup"),
+    ):
+        response = client.get("/watch/cves", query_string={field: value})
+        assert response.status_code == 400
     app.extensions["dashboard_jobs"].shutdown()
 
 

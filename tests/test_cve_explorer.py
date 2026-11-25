@@ -206,6 +206,106 @@ def test_explorer_rejects_invalid_filter_bounds_and_tokens(tmp_path):
             store.search(**filters)
 
 
+def test_vendor_and_product_filters_match_rule_leaves_across_nvd_and_euvd(tmp_path):
+    from cvebeacon.watch.records import CVSSEntry, EUVDUpdate, Product
+    from cvebeacon.watch.rules import evaluate_condition, parse_rules
+
+    identifiers = tuple(f"CVE-2026-{number:05d}" for number in range(12001, 12006))
+    first, second, no_data, euvd_only, underscored = identifiers
+    store = WatchStore(tmp_path / "watch.db")
+    catalogs = ("nvd", "euvd")
+    store.upsert_nvd([
+        WatchRecord(
+            first, "published", cvss=(CVSSEntry("nvd", "nvd", "3.1", 9.5),),
+            products=(Product("PHP Group", "PHP_Core"),), ssvc_exploitation="active",
+        ),
+        WatchRecord(second, "published", products=(Product("Other Vendor", "PHP_Core"),)),
+        WatchRecord(no_data, "published"),
+        WatchRecord(euvd_only, "published"),
+        WatchRecord(underscored, "published", products=(Product("Big_Corp", "Widget_Server"),)),
+    ], catalogs=catalogs)
+    store.replace_euvd_items([
+        EUVDUpdate((euvd_only,), "EUVD-2026-12004", "2026-11-01",
+                   CVSSEntry("euvd", "euvd", "3.1", 8.0), "2026-11-02",
+                   (Product("php group", "PHP_Core"),)),
+        EUVDUpdate((euvd_only,), "EUVD-2026-12005", None,
+                   CVSSEntry("euvd", "euvd", "4.0", 9.9), "2026-11-03",
+                   (Product("Other Vendor", "Other_Product"),)),
+    ], catalogs=catalogs)
+
+    vendors = ("pHp GrOuP", "big_corp")
+    products = ("php_core", "widget_server")
+    vendor_results = {item.cve_id for item in store.search(vendor_names=("PHP GROUP",), limit=100).records}
+    product_results = {item.cve_id for item in store.search(product_names=("PHP_core",), limit=100).records}
+    both = store.search(vendor_names=vendors, product_names=products, limit=100)
+    assert vendor_results == {first, euvd_only}
+    assert product_results == {first, second, euvd_only}
+    assert {item.cve_id for item in both.records} == {first, euvd_only, underscored}
+    assert store.search(product_names=("Widget Server",)).total == 0
+    assert {item.cve_id for item in store.search(product_names=("widget_server",), limit=100).records} == {underscored}
+    assert {item.cve_id for item in store.search(
+        vendor_names=("php group",), product_names=("PHP_core",), cvss_min=9, cvss_max=9.7,
+        exploitation="active", limit=100,
+    ).records} == {first}
+
+    rule = parse_rules([{
+        "name": "vendor-and-product", "channels": ["sink"],
+        "condition": {"all": [{"vendor": list(vendors)}, {"product": list(products)}]},
+    }])[0]
+    rule_results = {
+        identifier for identifier in identifiers
+        if evaluate_condition(store.view(identifier, catalogs=catalogs), rule.condition, rule)[0]
+    }
+    assert {item.cve_id for item in both.records} == rule_results
+    baseline = store.search(limit=100)
+    empty = store.search(vendor_names=(), product_names=(), limit=100)
+    assert (empty.total, empty.records) == (baseline.total, baseline.records)
+
+
+def test_vendor_product_filters_reject_out_of_bounds_and_control_format_names(tmp_path):
+    import pytest
+    from cvebeacon.errors import StateError
+
+    store = WatchStore(tmp_path / "watch.db")
+    for filters, message in (
+        ({"vendor_names": ["php"] * 21}, "20 vendor names of at most 120 characters"),
+        ({"product_names": ["x" * 121]}, "20 product names of at most 120 characters"),
+        ({"vendor_names": ["php\x01group"]}, "20 vendor names of at most 120 characters"),
+        ({"product_names": ["php\u200egroup"]}, "20 product names of at most 120 characters"),
+    ):
+        with pytest.raises(StateError, match=message):
+            store.search(**filters)
+
+
+def test_vendor_and_product_filters_each_match_exact_names(tmp_path):
+    from cvebeacon.watch.records import Product
+
+    first, second = "CVE-2026-13001", "CVE-2026-13002"
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_nvd([
+        WatchRecord(first, "published", products=(Product("PHP Group", "PHP_Core"),)),
+        WatchRecord(second, "published", products=(Product("Other Vendor", "PHP_Core"),)),
+    ])
+    cases = (
+        ({"vendor_names": ("php group",)}, {first}),
+        ({"product_names": ("PHP_core",)}, {first, second}),
+    )
+    for filters, expected in cases:
+        assert {item.cve_id for item in store.search(**filters, limit=100).records} == expected
+
+
+def test_empty_vendor_and_product_filters_preserve_search_results(tmp_path):
+    from cvebeacon.watch.records import Product
+
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_nvd([
+        WatchRecord("CVE-2026-14001", "published", products=(Product("PHP", "Server"),)),
+    ])
+    baseline = store.search(limit=100)
+    empty = store.search(vendor_names=(), product_names=(), limit=100)
+    assert (empty.total, empty.records) == (baseline.total, baseline.records)
+
+
 def test_euvd_qualified_filters_include_all_effective_advisory_scores(tmp_path):
     from cvebeacon.watch.records import CVSSEntry, EUVDUpdate
 
