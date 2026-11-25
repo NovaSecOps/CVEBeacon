@@ -902,6 +902,29 @@ cvss_providers = ["cna", "nvd", "cisa-adp", "euvd", "other"]
 - `old_cves`: `"digest"` (default), `"alert"`, or `"ignore"`; see
   [old CVEs](#old-cves).
 
+### Dashboard rule editor
+
+In **Configuration → Alert rules**, conditions that fit the visual builder
+open as a list of criteria. The builder supports one value for each criterion:
+known-exploited list, exploitation status, minimum or maximum CVSS, EPSS,
+vendor, product, description keyword, CWE, reporting organisation, or record
+status (`published`, `rejected`, or `reserved`). Choose whether any or all of
+the included criteria must match. Excluded criteria always prevent an alert.
+
+The builder handles a single criterion, a flat `any` or `all` group, and a
+separate exclusion. It cannot represent nested groups, repeated criteria,
+multiple criteria in one condition table, version- or provider-qualified CVSS
+limits, or values containing commas or control characters. Those conditions
+open in text mode with a short explanation and are not rewritten by the
+builder. Choose **Edit as text** to use the full syntax; **Use the builder** is
+offered when the current condition can be represented without changing it.
+
+**Check against recent CVEs** tests the current form against the 100 most
+recently modified CVEs in the local watch database. It shows a match count and
+up to ten matching IDs. This read-only check does not create alert events or
+change delivery state. It is a small preview, not a statement about all stored
+or future CVEs.
+
 A condition is a small boolean tree. A node is a table holding exactly one of
 `all`, `any`, or `not`, or one or more leaf keys. Several leaf keys in one table
 are ANDed:
@@ -952,7 +975,7 @@ Leaf keys:
 - `cwe`: CWE identifiers. `79`, `cwe-79`, and `CWE-79` are accepted and stored
   as `CWE-79`; anything else is rejected.
 - `cna`: case-insensitive exact match against `source_identifier`.
-- `status = "published" | "rejected"`.
+- `status = "published" | "rejected" | "reserved"`.
 
 Scalar CVSS leaves retain their scoring behavior. Within each provider they
 prefer 3.x or 4.0 to 2.0 and pick the highest modern score. Event reasons
