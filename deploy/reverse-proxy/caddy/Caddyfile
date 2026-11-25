@@ -53,6 +53,10 @@ cvebeacon.example.com {
 	# `cvebeacon users add NAME --admin` before exposing the dashboard.
 	respond /bootstrap 404
 
+	# The updater probes the dashboard directly on loopback. Keep /healthz
+	# private; expose a separate check deliberately for external uptime monitoring.
+	respond /healthz 404
+
 	reverse_proxy 127.0.0.1:8787 {
 		# The dashboard validates this Host header and ignores forwarded
 		# headers. Send the backend address and clear client-supplied
