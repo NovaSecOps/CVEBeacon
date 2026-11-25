@@ -11,6 +11,17 @@ cvebeacon setup --config /etc/cvebeacon/cvebeacon.toml
 cvebeacon setup --config cvebeacon.toml --force
 ```
 
+When setting up through the dashboard, follow the **Getting started** list on
+Home: start watch data, test an alert channel, choose a rule, add a client
+software list, install a schedule, and make a backup. **Done** means the listed
+condition is recorded; it does not guarantee complete vulnerability coverage
+or that a person received a test alert. See the [dashboard guide](DASHBOARD.md).
+
+For guided channel setup, open **Configuration → Alert channels → Guided
+setup**, choose the channel type, enter its details, review the change and save
+it. You can then send a test message. Use the full channel form for additional
+settings.
+
 Every question that has a default shows it in brackets; Enter accepts it.
 Required fields show an example and must be answered. `--force` skips the
 overwrite question but still creates the backup. Ctrl-C or end of input before

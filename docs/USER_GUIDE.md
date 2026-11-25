@@ -32,6 +32,24 @@ A platform-specific standalone executable needs no separate Python installation.
 
 ## 3. Initial configuration
 
+### Set up from the dashboard
+
+If you use the dashboard, start on **Home** and follow its **Getting started**
+checklist. It guides you through turning on watch data and completing the first
+sync, setting up and testing an alert channel, choosing a rule, adding a client
+software list, installing a schedule, and making a backup. The list reflects
+recorded settings and activity; it is not a coverage guarantee. **Done** means
+only that the condition for that step is recorded. A successful channel test
+means the destination service accepted the message, so check the destination
+yourself. The dashboard keeps the last 200 finished jobs in history; older
+channel tests eventually leave that history. See the [dashboard guide](DASHBOARD.md)
+for details.
+
+To add an alert destination, open **Configuration → Alert channels → Guided
+setup**. Choose the channel type, enter its details, review and save the
+change, then send a test. Use the full channel form for options not shown in
+the guided setup.
+
 Copy `cvebeacon.example.toml` to `cvebeacon.toml`. Relative inventory, database, and output paths resolve from the configuration file’s directory. The minimum configuration is:
 
 ```toml
@@ -96,8 +114,9 @@ value directly. Aliases and merge keys are refused.
 1. In the dashboard, open **Clients → Add client**. Enter the name and any
    notes or contact details you want to keep with it.
 2. On the client page, choose **Upload inventory** and select a CSV, XLSX, JSON
-   or YAML file up to 32 MiB, or paste CSV, JSON or YAML rows up to 100 KB.
-   The upload card links to a CSV template. For CSV, use UTF-8 and
+   or YAML file up to 32 MiB, or paste text up to 100 KB and choose CSV, JSON
+   or YAML in the format selector. **Download a CSV template** provides the
+   field headings and an example row. For CSV, use UTF-8 and
    comma-separated columns. Excel uses the first sheet, with column names in
    the first row. For JSON and YAML, use a list of records or put one list
    under a top-level field such as `assets`. Use text for versions, including
