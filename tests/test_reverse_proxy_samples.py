@@ -22,7 +22,11 @@ CADDY = ROOT / "deploy" / "reverse-proxy" / "caddy" / "Caddyfile"
 GUIDE = ROOT / "docs" / "HTTPS.md"
 SAMPLES = (NGINX, CADDY)
 DOCUMENTATION_FILES = frozenset(
-    {"cvebeacon.conf", "cvebeacon.toml", "fullchain.pem", "internal-ca.crt", "privkey.pem"}
+    {
+        "organisation-ca.pem", "organisation-certificate.pfx", "organisation-chain.pem",
+        "cvebeacon.conf", "cvebeacon.toml", "dashboard-cert.pem",
+        "dashboard-key.pem", "fullchain.pem", "internal-ca.crt", "privkey.pem",
+    }
 )
 HOSTNAME = re.compile(
     r"(?<![A-Za-z0-9_.-])"
@@ -176,6 +180,17 @@ def test_samples_block_proxy_bootstrap():
     assert re.search(r"(?m)^\s*respond /bootstrap 404\s*$", _text(CADDY))
 
 
+def test_samples_block_proxy_healthz():
+    nginx_text = _text(NGINX)
+    nginx = _block(nginx_text, "location = /healthz {")
+    caddy = _text(CADDY)
+    assert "return 404;" in nginx
+    assert re.search(r"(?m)^\s*respond /healthz 404\s*$", caddy)
+    for text in (nginx_text, caddy):
+        assert "updater probes the dashboard directly on loopback" in text
+        assert "separate check deliberately for external uptime monitoring" in text
+
+
 def test_samples_set_security_headers():
     for path in SAMPLES:
         text = _text(path)
@@ -247,9 +262,11 @@ def test_nginx_inventory_location_proxies_with_reference_limits(tmp_path, monkey
         pytest.skip("nginx is not installed")
     monkeypatch.setattr(socket.socket, "connect", loopback_only_connect)
     monkeypatch.setattr(socket, "getaddrinfo", loopback_only_getaddrinfo)
+    backend_paths = []
 
     class BackendHandler(BaseHTTPRequestHandler):
         def do_POST(self):
+            backend_paths.append(self.path)
             remaining = int(self.headers.get("Content-Length", "0"))
             while remaining:
                 chunk = self.rfile.read(min(64 * 1024, remaining))
@@ -269,6 +286,12 @@ def test_nginx_inventory_location_proxies_with_reference_limits(tmp_path, monkey
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        def do_GET(self):
+            backend_paths.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def log_message(self, format, *args):
             pass
@@ -350,9 +373,9 @@ def test_nginx_inventory_location_proxies_with_reference_limits(tmp_path, monkey
             stdout, stderr = process.communicate(timeout=3)
             pytest.fail(f"nginx did not start: {stdout}\n{stderr}")
 
-        def request(path, length, *, send_body=False):
+        def request(path, length=0, *, send_body=False, method="POST"):
             connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=20)
-            connection.putrequest("POST", path, skip_host=True)
+            connection.putrequest(method, path, skip_host=True)
             connection.putheader("Host", "cvebeacon.example.com")
             connection.putheader("Content-Length", str(length))
             connection.putheader("X-Forwarded-For", "198.51.100.42")
@@ -378,6 +401,10 @@ def test_nginx_inventory_location_proxies_with_reference_limits(tmp_path, monkey
             "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Port",
             "X-Forwarded-Proto", "X-Real-IP", "Forwarded",
         ))
+
+        health_status, _ = request("/healthz", method="GET")
+        assert health_status == 404
+        assert "/healthz" not in backend_paths
 
         too_large = 34 * 1024 * 1024 + 1
         assert request("/watch/clients/acme/upload", too_large)[0] == 413

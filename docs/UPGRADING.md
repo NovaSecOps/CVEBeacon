@@ -127,6 +127,70 @@ Never run the privileged updater inside a container.
 
 ## Manual upgrades
 
+### Release signing key
+
+The release signing key is an ED25519 key with fingerprint
+`SHA256:Pe4UwQlazZWtwypCbAKnaoewMnTalXe1n+LceV/xdbE`. This fingerprint is
+published here and in the release notes so it can be checked independently of
+the downloaded files.
+
+### Authenticate the signer before downloading
+
+For a manual upgrade, `SIGNERS_FILE` must be the same trusted allowed-signers
+file selected by the updater's `Policy.signers`: the packaged file by default,
+or the administrator's root-owned override when one is configured. Before
+downloading, compare its key fingerprint with the published fingerprint above.
+A checksum file downloaded beside the artifacts proves their consistency, but
+is not enough to authenticate the signer. For a first install or recovery
+without a trusted installed signer file, obtain the allowed-signers entry from
+the repository on GitHub at the release tag, independently of the release
+download. Check its fingerprint against the published fingerprint above, then
+use it as `SIGNERS_FILE`. Do not use a signer file from an unverified release
+archive.
+
+Run the preflight with the Python interpreter from the current CVEBeacon
+environment, and keep this shell session open for the verification steps below.
+The command selects the packaged file by default; if the updater policy has a
+root-owned `signers` override, set `SIGNERS_FILE` to that same file. For a first
+install or recovery, set it to the allowed-signers entry obtained from the
+GitHub repository at the release tag instead:
+
+```console
+# Default for a normal install; use the configured override or GitHub tag entry when applicable.
+SIGNERS_FILE=$(python -c 'from pathlib import Path; import cvebeacon.updater; print(Path(cvebeacon.updater.__file__).with_name("release-allowed-signers"))')
+TRUSTED_FINGERPRINT='SHA256:Pe4UwQlazZWtwypCbAKnaoewMnTalXe1n+LceV/xdbE'
+verify_signer_preflight() {
+  if [ -z "${SIGNERS_FILE:-}" ] || [ ! -r "$SIGNERS_FILE" ]; then
+    printf 'The selected release signer file is not readable.\n' >&2
+    return 1
+  fi
+  if ! awk '$1 !~ /^#/ { print $(NF-1), $NF }' "$SIGNERS_FILE" > release-signing-public-key.pub; then
+    printf 'Could not read a key from the selected release signer file.\n' >&2
+    return 1
+  fi
+  if [ ! -s release-signing-public-key.pub ]; then
+    printf 'The selected release signer file contains no key.\n' >&2
+    return 1
+  fi
+  if ! FINGERPRINT_OUTPUT=$(ssh-keygen -lf release-signing-public-key.pub); then
+    printf 'Could not read the selected release signing key.\n' >&2
+    return 1
+  fi
+  ACTUAL_FINGERPRINT=$(printf '%s\n' "$FINGERPRINT_OUTPUT" | awk '{print $2}')
+  if [ "$ACTUAL_FINGERPRINT" != "$TRUSTED_FINGERPRINT" ]; then
+    printf 'The selected signer file does not match the published fingerprint.\n' >&2
+    return 1
+  fi
+  return 0
+}
+SIGNER_PREFLIGHT_OK=0
+if verify_signer_preflight; then
+  SIGNER_PREFLIGHT_OK=1
+else
+  printf 'Preflight failed; do not continue.\n' >&2
+fi
+```
+
 1. Disable the scheduler you actually use. Remove a managed cron schedule with
    `cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml schedule remove --yes`,
    or stop the systemd timer. Then wait for every running CVEBeacon process and
@@ -153,14 +217,22 @@ Never run the privileged updater inside a container.
    It contains client profiles, current uploads and retained versions. Keep its
    owner-only permissions and restore it with the matching account database.
 3. Obtain the release from the configured GitHub repository. Verify
-   `SHA256SUMS.sig` against an independently pinned public key, then verify
-   every artifact against `SHA256SUMS`:
+   `SHA256SUMS.sig` with the same trusted `SIGNERS_FILE`, then verify every
+   artifact against `SHA256SUMS`. Run this block in the same shell as the
+   preflight above:
 
    ```console
-   ssh-keygen -Y verify -f /etc/cvebeacon/release-allowed-signers \
-     -I cvebeacon-release -n cvebeacon-release \
-     -s SHA256SUMS.sig < SHA256SUMS
-   sha256sum --check SHA256SUMS
+   if [ "${SIGNER_PREFLIGHT_OK:-0}" = 1 ]; then
+     if ssh-keygen -Y verify -f "$SIGNERS_FILE" \
+       -I cvebeacon-release -n cvebeacon-release \
+       -s SHA256SUMS.sig < SHA256SUMS; then
+       sha256sum --check SHA256SUMS
+     else
+       printf 'Signature verification failed; do not continue.\n' >&2
+     fi
+   else
+     printf 'Signer preflight did not succeed; release verification was skipped.\n' >&2
+   fi
    ```
 
 4. Create a fresh venv and install the verified wheels with
@@ -288,8 +360,9 @@ monitoring timer only when its schedule is wanted.
 
 ## Enable checking and applying
 
-The packaged `release-allowed-signers` pins the release public key. Obtain that
-key through an authenticated channel and compare its fingerprint independently.
+The packaged `release-allowed-signers` pins the release public key. Compare its
+fingerprint with the published fingerprint in the **Release signing key**
+section above.
 The packaged file is the default, or set `signers` in the administrator policy
 to a root-owned override with this format:
 

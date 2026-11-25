@@ -7,8 +7,15 @@ dashboard itself on loopback.
 
 Sample configurations are shipped for
 [nginx](../deploy/reverse-proxy/nginx/cvebeacon.conf) and
-[Caddy](../deploy/reverse-proxy/caddy/Caddyfile). Replace every example
-hostname, certificate path and email address before using them.
+[Caddy](../deploy/reverse-proxy/caddy/Caddyfile). Treat every example
+hostname, address, bind, certificate path and email address as a placeholder.
+Replace `cvebeacon.example.com` with the dashboard's hostname, certificate
+paths with the files on your server, and `you@example.com` with the ACME
+contact address. `127.0.0.1` and `[::1]` stand for the server's loopback
+addresses; keep the dashboard on loopback when the proxy is on the same
+server. `0.0.0.0` is shown only as an unsafe wildcard bind. The documentation
+address `203.0.113.10` is a placeholder; replace it with your server's
+internal address for the reachability test below.
 
 ## When HTTPS is needed
 
@@ -48,6 +55,50 @@ service private.
   name), and that hostname must resolve to the proxy.
 - Internal certificates expire too. Track renewal the same way as public
   certificates.
+
+### Certificate from your organisation's own CA
+
+Your organisation's certificate authority can issue a certificate for the
+dashboard hostname and deliver it as a PFX/PKCS#12 file. Extract its chain and
+private key on the proxy server. Replace the example paths with your
+certificate directory and bundle path, and replace `proxy` with the group your
+proxy process runs under. The commands prompt for the bundle's password. They
+create the private key as root-only first, then let only root and the proxy
+group read the installed files:
+
+```console
+sudo install -d -o root -g proxy -m 0750 /path/to/cvebeacon-certs
+sudo sh -c 'umask 077; openssl pkcs12 -in /path/to/organisation-certificate.pfx -clcerts -nokeys -out /path/to/cvebeacon-certs/dashboard-cert.pem'
+sudo sh -c 'umask 077; openssl pkcs12 -in /path/to/organisation-certificate.pfx -cacerts -nokeys -out /path/to/cvebeacon-certs/organisation-chain.pem'
+sudo sh -c 'umask 077; openssl pkcs12 -in /path/to/organisation-certificate.pfx -nocerts -noenc -out /path/to/cvebeacon-certs/dashboard-key.pem'
+sudo sh -c 'umask 077; cat /path/to/cvebeacon-certs/dashboard-cert.pem /path/to/cvebeacon-certs/organisation-chain.pem > /path/to/cvebeacon-certs/fullchain.pem'
+sudo chown root:proxy /path/to/cvebeacon-certs/fullchain.pem /path/to/cvebeacon-certs/dashboard-key.pem
+sudo chmod 0640 /path/to/cvebeacon-certs/fullchain.pem /path/to/cvebeacon-certs/dashboard-key.pem
+sudo rm /path/to/cvebeacon-certs/dashboard-cert.pem /path/to/cvebeacon-certs/organisation-chain.pem
+```
+
+Check that the public key derived from the certificate matches the one from
+the private key. The two hashes must be identical:
+
+OpenSSL versions older than 3.0 use `-nodes` instead of `-noenc`.
+
+```console
+openssl x509 -in /path/to/cvebeacon-certs/fullchain.pem -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum
+openssl pkey -in /path/to/cvebeacon-certs/dashboard-key.pem -pubout -outform DER | sha256sum
+```
+
+Check that the certificate covers the hostname clients use. Replace the
+placeholder hostname with the dashboard's actual hostname:
+
+```console
+openssl x509 -in /path/to/cvebeacon-certs/fullchain.pem -noout -checkhost cvebeacon.example.com
+```
+
+Point nginx's `ssl_certificate` and `ssl_certificate_key`, or Caddy's `tls`, at
+the full chain and key. Client trust is managed separately: install your
+organisation's CA in the trust store on every client that uses the dashboard.
+Installing the certificate on the proxy does not make client browsers trust
+the issuing CA.
 
 ### Public Let's Encrypt certificate
 
@@ -103,6 +154,31 @@ proxy. Never publish a dashboard whose account store is still empty. The shipped
 samples return `404` for `/bootstrap` as an extra guard; create the first
 administrator with `cvebeacon users add NAME --admin`, or remove that guard
 temporarily while bootstrapping from a trusted local connection.
+
+## Keep the updater health endpoint private
+
+The dashboard's `/healthz` response includes its process ID, which the updater
+checks through a direct loopback request. Keep this endpoint off the public
+proxy by returning 404 for the exact path. The updater's check still reaches
+the dashboard directly. If external uptime monitoring is needed, expose a
+separate check deliberately.
+
+For Caddy, add an exact path response inside the site block:
+
+```caddyfile
+cvebeacon.example.com {
+    respond /healthz 404
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+For nginx, add an exact-match location in the server block:
+
+```nginx
+location = /healthz {
+    return 404;
+}
+```
 
 ## Enable secure cookies
 
@@ -245,7 +321,58 @@ curl -I --max-time 3 http://203.0.113.10:8787/
 ```
 
 Replace `203.0.113.10` with the proxy host's address. That request must fail or
-time out.
+time out. `203.0.113.10` is a documentation-range placeholder; replace it
+with your server's internal address.
+
+## Troubleshooting
+
+Check the three connections in order so each result points to one part of the
+path:
+
+1. **Proxy listener on the server.** From the server, send HTTPS to the local
+   proxy address while keeping the dashboard hostname for TLS:
+
+   ```console
+   curl --max-time 5 --resolve cvebeacon.example.com:443:127.0.0.1 \
+     --cacert /path/to/organisation-ca.pem -sS -o /dev/null -w '%{http_code}\n' \
+     https://cvebeacon.example.com/
+   ```
+
+   For a publicly trusted certificate, omit `--cacert`. A connection refusal
+   or timeout points to the proxy service or listener. An HTTP response means
+   the local listener answered.
+2. **Client network reachability.** From a client machine, check TCP port 443:
+
+   ```console
+   nc -vz -w 3 cvebeacon.example.com 443
+   ```
+
+   A failed connection points to name resolution, routing or a firewall between
+   that client and the proxy.
+3. **Certificate trust on that client.** Open the dashboard in the browser, or
+   check the certificate chain from the same client with `openssl s_client`:
+
+   ```console
+   openssl s_client -connect cvebeacon.example.com:443 \
+     -servername cvebeacon.example.com -verify_return_error \
+     -CAfile /path/to/organisation-ca.pem </dev/null
+   ```
+
+   Trust is per client. A browser on a managed machine may trust your
+   organisation's CA while `curl` on another host reports a certificate error
+   and prints
+   `000`, because that client has no trusted issuer and received no HTTP
+   response. For a certificate issued by your organisation's CA, that trust
+   error means the client needs that CA; it does not mean the network route is
+   broken. Test by passing the CA to curl:
+
+   ```console
+   curl --cacert /path/to/organisation-ca.pem --max-time 20 -sS \
+     -o /dev/null -w '%{http_code}\n' https://cvebeacon.example.com/
+   ```
+
+   Install the organisation's CA through normal device management so browsers
+   and other clients trust it without a per-command option.
 
 ## Common mistakes
 

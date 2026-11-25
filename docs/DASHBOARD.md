@@ -18,6 +18,46 @@ The dashboard is optional. Scheduled scans and watches remain separate short-liv
 
 With no configured file or dashboard inventory, `web_snapshots` disabled (the default), and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
 
+## Home setup checklist
+
+Home shows a **Getting started** checklist based on the current configuration
+and recorded activity. It does not save or dismiss checklist state. The list
+opens when a step is unfinished or needs attention and otherwise starts
+collapsed.
+
+The steps cover getting watch data, setting up and testing an alert channel,
+choosing an alert rule, adding a client software list, installing a schedule,
+and making a backup. A **Done** badge means only that the condition for that
+step is recorded. It does not mean CVEBeacon found every flaw. For example,
+the watch step needs a recent sync without recorded failures, and the rule step
+needs an enabled rule assigned to an enabled channel. If client uploads are
+disabled, that step is marked unavailable; if state cannot be read, the step
+says it could not be checked.
+
+The channel step uses the latest recorded test for each enabled channel. A
+successful test means the destination service accepted the message; open the
+destination and confirm that it arrived. Failed tests need attention. Test
+results come from dashboard job history, which retains the last 200 finished
+jobs, including failures and cancellations, so older tests eventually leave
+the history.
+The step is Done when at least one enabled channel's latest test was accepted
+and no enabled channel's latest test failed. If several channels are enabled,
+the count shows how many have an accepted latest test; every channel does not
+need a test for the step to be marked Done.
+
+To add an alert destination, open **Configuration → Alert channels → Guided
+setup**. Choose a channel type, fill in its fields, review the proposed change,
+and confirm it. The wizard then offers a test. The full form remains available
+for options the guided setup does not cover. A successful test reports service
+acceptance, not receipt by a person.
+
+The **Test a channel** card on **Operations** can also send a labelled test
+without changing alert delivery state. A test runs one at a time in its own
+job lane and can finish while a scan or watch run is active. Its result page
+shows whether it is waiting, sending, accepted, failed or cancelled, and links
+to the job log. An accepted message still needs to be checked at its
+destination.
+
 ## Views and investigation
 
 - **Overview:** last successful full scan, most recent attempted scan, current inventory count, latest known affected/review findings, coverage gaps, KEV counts, recent material changes, notification acceptance/failure, and source observations.
@@ -147,7 +187,13 @@ in **Affected clients** alert lines.
 
 ## Native schedule
 
-The **Schedule** page requires `manage_schedule`. Without an updater-managed systemd timer, it shows `schedule status` and can install or remove the same native Windows task or managed Linux crontab block as `cvebeacon schedule install` and `cvebeacon schedule remove`. The form accepts an interval or fixed local times, the `scan`, `watch` or `both` command, and the Windows `--run-logged-out` option. With an enabled administrator-owned updater policy listing `cvebeacon.timer` and `cvebeacon.service`, it shows a read-only **Monitoring timer** card with the timer state, boot setting, next run, last run and result. The dashboard does not install cron for this setup; change the timer with systemd. The cron removal action remains separate and removes only the dashboard-managed cron block.
+The **Schedule** page requires `manage_schedule`. Without an updater-managed systemd timer, it shows `schedule status` and can install or remove the same native Windows task or managed Linux crontab block as `cvebeacon schedule install` and `cvebeacon schedule remove`. The form accepts an interval or fixed local times, the `scan`, `watch` or `both` command, and the Windows `--run-logged-out` option. When the administrator-owned updater policy file passes the dashboard's ownership checks, it shows a read-only **Monitoring timer** card with the timer state, boot setting, next run, last run and result. The dashboard does not install cron for this setup; change the timer with systemd. The cron removal action remains separate and removes only the dashboard-managed cron block.
+
+The **Updates** page shows the installed version, any available version and
+the last check. When an administrator checks for updates, the page says
+`Version <version> is available.` or `Checked just now. You have the latest
+release (<version>).` A failed check says `The release check failed. Try again
+later.` A check result reports the advertised release; it does not install it.
 
 Schedule changes require an audited intent before installation or removal. An outcome audit failure returns an error and retains the pending audit for retry; check schedule status before repeating the action. Audit history is append-only and grows independently of job retention.
 
@@ -225,11 +271,15 @@ Open **Clients → Add client**, enter a name and optional notes and contact, th
 open **Upload inventory** on the new client page. Choose a CSV, Excel (.xlsx),
 JSON or YAML file up to 32 MiB. For Excel, the 32 MiB limit also applies to
 each decompressed part and the workbook's total expanded data. Split a larger
-workbook into smaller uploads. On the preview, match your column names to
-fields such as **Asset ID**, **Vendor**, **Product** and **Version**. Select
-**Check column mapping** to review row warnings and errors before saving. Use
-**Replace this client's inventory** to switch to a new list, or **Add to it**
-to keep the current assets and add new IDs.
+workbook into smaller uploads. You can also paste CSV, JSON or YAML rows up to
+100 KB. Choose exactly one source, a file or pasted text; larger lists need a
+file. **Download a CSV template** provides the expected field names and an
+example row. On the preview, match your column names to fields such as **Asset
+ID**, **Vendor**, **Product** and **Version**. Select **Check column mapping**
+to review row warnings and errors before saving. **Add these assets to the
+current inventory** is selected by default and keeps existing assets while
+adding the new IDs. Choose **Replace this client's inventory** only when the
+file is the full list; assets missing from it are removed.
 
 The client page shows the asset count, the last inventory change and who made it, and
 findings from the latest successful scan. Use it to download the current
@@ -533,6 +583,27 @@ errors identify the setting without repeating the resolved target path. The
 condition editor lists valid leaves, values and examples from
 the parser's schema; for example, `kev` accepts `"cisa"`, `"eu"` or `"any"`, and
 `kev = true` reports the exact condition path and accepted values.
+Field labels use plain words such as **Watch for new flaws**, **Data sources**
+and **Inventory file**; the corresponding setting key appears beside the
+label in muted text.
+
+Alert rules open in the builder when their condition fits its fixed criteria.
+It can combine included criteria with **Any one** or **All**, then apply
+exclusions that always prevent an alert. It covers known-exploited lists,
+exploitation status, minimum and maximum CVSS scores, EPSS, vendor, product,
+description keywords, CWE, reporting organisation and record status. Use
+**Edit as text** for the full condition syntax. Conditions with nested groups,
+repeated criteria, multiple criteria in one condition table, version- or
+provider-specific score limits, or values the
+builder cannot split safely open in text mode with an explanation. **Use the
+builder** is offered when the text condition can be represented without
+changing it.
+
+**Check against recent CVEs** is a read-only preview against the 100 most
+recently modified stored CVEs. It reports the match count and shows up to ten
+matching IDs; it does not queue or send alerts or change watch state. A rule
+configuration with more than 101 rules is read-only in the dashboard editor;
+edit that configuration file directly.
 Unrecognized configuration fields must be reviewed outside the editor before
 editing; they are never silently copied or discarded. Column mappings must use
 only the known canonical or optional inventory fields, so an unknown column is
