@@ -139,6 +139,8 @@ The sample redirects HTTP to HTTPS, enables TLS 1.2 and 1.3 with Mozilla
 intermediate ECDHE ciphers, adds HSTS and the other security headers, limits
 ordinary request bodies to 6 MB and client inventory uploads to 34 MB, and
 allows 300 seconds for slow manual queries and report generation.
+The nested upload location repeats `proxy_pass` because nginx does not inherit
+that directive there; its other proxy settings are inherited from the parent.
 
 ### Caddy
 
