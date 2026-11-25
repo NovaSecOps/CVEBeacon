@@ -185,7 +185,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
                 if not auth.valid(session.get("auth_id")):
                     session.clear()
                     return redirect(url_for("login"), code=303)
-        if request.endpoint == "client_inventory.upload" and (
+        if request.endpoint in {"client_inventory.upload", "client_inventory.inventory_upload"} and (
             not g.accounts or not {"view", "manage_inventory"} <= g.permissions
         ):
             abort(403)

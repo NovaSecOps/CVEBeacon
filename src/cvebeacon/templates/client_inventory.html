@@ -1,23 +1,28 @@
 {% extends 'base.html' %}
-{% set nav_active = 'watch.clients' %}
+{% set nav_active = 'client_inventory.index' if is_unassigned else 'watch.clients' %}
 {% from 'watch_macros.html' import stamp %}
-{% from 'ui.html' import applicability_badge, button, card, callout, empty_state, link_button, page_header, steps, table_wrap, term %}
+{% from 'ui.html' import applicability_badge, button, card, callout, empty_state, link_button, page_header, pagination, steps, table_wrap, term %}
 {% block title %}{{ profile.name }} · CVEBeacon{% endblock %}
 {% block content %}
 {% set can_manage = enabled and accounts and 'manage_inventory' in permissions %}
 {% set can_scan = count is not none and enabled and accounts and 'run' in permissions %}
-{% call page_header(profile.name, 'Review this client’s software inventory and the findings from their latest successful scan.') %}
+{% call page_header(profile.name, 'Review this inventory and its saved rows. No client is assigned.' if is_unassigned else 'Review this client’s software inventory and the findings from their latest successful scan.') %}
 {% if can_scan %}
 <form method="post" action="{{ url_for('operations.run_job') }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="operation" value="scan">
   {{ button('Run a scan now') }}
 </form>
+{% elif can_manage and is_unassigned %}
+{{ link_button('Add inventory', upload_href) }}
 {% elif can_manage %}
 {{ link_button('Upload inventory', '#upload-inventory') }}
 {% endif %}
-{{ link_button('Back to Clients', url_for('watch.clients'), kind='secondary') }}
+{{ link_button('All inventory', all_inventory_url, kind='secondary') }}
+{% if not is_unassigned %}{{ link_button('Back to Clients', url_for('watch.clients'), kind='secondary') }}{% endif %}
+{% if not is_unassigned %}
 <a class="btn btn-secondary btn-small" href="{{ url_for('web.index', client=profile.name) }}">Web assets{% if web_asset_count is not none %} · {{ web_asset_count }} authorised site{{ '' if web_asset_count == 1 else 's' }}{% endif %}</a>
+{% endif %}
 {% endcall %}
 
 {% if error %}{% call callout('danger', 'Inventory action could not be completed') %}<p>{{ error }}</p>{% endcall %}{% endif %}
@@ -38,19 +43,34 @@
 {% endif %}
 
 {% if count is not none %}
-{% call card('Current inventory', 'The uploaded list of software you monitor for this client.') %}
+{% call card('Current inventory', 'The uploaded list of software you monitor.' if is_unassigned else 'The uploaded list of software you monitor for this client.') %}
 <dl>
   <dt>Assets in the uploaded inventory</dt><dd>{{ count }}</dd>
   {% if upload %}<dt>Last inventory change</dt><dd>{{ stamp(upload[1]) }} by {{ upload[0] }}</dd>{% endif %}
 </dl>
 <p class="help">The next scan uses this version. The previous versions stay available below.</p>
 <div class="form-actions">
-  {{ link_button('Download current inventory', url_for('client_inventory.download', key=key, name=profile.name), kind='secondary') }}
-  {% if can_manage and can_scan %}{{ link_button('Upload inventory', '#upload-inventory', kind='secondary') }}{% endif %}
+  {{ link_button('Download current inventory', download_href, kind='secondary') }}
+  {% if can_manage and can_scan and not is_unassigned %}{{ link_button('Upload inventory', '#upload-inventory', kind='secondary') }}{% endif %}
 </div>
 {% endcall %}
 {% elif not warning %}
 {{ empty_state('No inventory yet', 'No inventory has been uploaded for this client. Upload a list of their software to get started.' if can_manage else 'No inventory has been uploaded for this client.') }}
+{% endif %}
+
+{% if count is not none %}
+{% call card('Inventory rows') %}
+<p>Showing rows {{ row_start }}–{{ row_end }} of {{ count }}.</p>
+{% call table_wrap('Inventory rows') %}
+<table>
+  <thead><tr><th scope="col">Asset ID</th><th scope="col">Vendor</th><th scope="col">Product</th><th scope="col">Version</th><th scope="col">Client</th></tr></thead>
+  <tbody>{% for asset in assets %}
+  <tr><th scope="row" class="break">{{ asset.asset_id }}</th><td>{{ asset.vendor }}</td><td>{{ asset.product }}</td><td>{{ asset.version }}</td><td>{{ asset.client or 'No client' }}</td></tr>
+  {% else %}<tr><td colspan="5">No rows are saved in this inventory.</td></tr>{% endfor %}</tbody>
+</table>
+{% endcall %}
+{% if row_pages > 1 %}{{ pagination(row_page, row_previous, row_next, noun='inventory rows') }}{% endif %}
+{% endcall %}
 {% endif %}
 
 {% if count is not none and enabled %}
@@ -103,7 +123,7 @@
 {% endcall %}
 {% endif %}
 
-{% if summary %}
+{% if summary and not is_unassigned %}
 {% call card('Latest findings for ' ~ profile.name) %}
 <p class="muted">{{ summary.assets }} assets in the latest successful scan, completed {{ stamp(scan.completed_at) }}.</p>
 {% if summary.findings %}
@@ -125,7 +145,7 @@
 <p class="muted">A scan reports only what it could check. Missing results are not proof that the client is unaffected.</p>
 <div class="form-actions">{{ link_button('View alerts for this client', url_for('watch.events', client=summary.name), kind='secondary') }}</div>
 {% endcall %}
-{% else %}
+{% elif not is_unassigned %}
 {{ empty_state('No scan results for ' ~ profile.name, 'Run a successful inventory scan to see findings for this client.') }}
 {% endif %}
 
@@ -137,8 +157,8 @@
   <tbody>{% for version in history %}
   <tr>
     <td><time>{{ version_stamp(version) }}</time></td>
-    {% if can_manage %}
-    <td><form method="post" action="{{ url_for('client_inventory.change', key=key, name=profile.name) }}">
+{% if can_manage and not is_unassigned %}
+    <td><form method="post" action="{{ change_href }}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="revision" value="{{ revision }}">
       <input type="hidden" name="version" value="{{ version }}">
@@ -156,11 +176,11 @@
 {% call card('Remove inventory', tone='danger') %}
 <details class="disclosure">
 <summary>Remove this inventory</summary>
-<form method="post" class="stack" action="{{ url_for('client_inventory.change', key=key, name=profile.name) }}">
+<form method="post" class="stack" action="{{ change_href }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="revision" value="{{ revision }}">
   <p>The next scan will skip this upload. You can restore it from version history.</p>
-  <label for="remove-confirm"><input id="remove-confirm" type="checkbox" name="confirm" value="remove" required> Remove this client's current upload</label>
+  <label for="remove-confirm"><input id="remove-confirm" type="checkbox" name="confirm" value="remove" required> {% if is_unassigned %}Remove this inventory with no client assigned{% else %}Remove this client's current upload{% endif %}</label>
   <div class="form-actions">{{ button('Remove inventory', kind='danger', name='action', value='remove') }}</div>
 </form>
 </details>
