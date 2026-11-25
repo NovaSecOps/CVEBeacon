@@ -905,7 +905,8 @@ cvss_providers = ["cna", "nvd", "cisa-adp", "euvd", "other"]
 ### Dashboard rule editor
 
 In **Configuration → Alert rules**, conditions that fit the visual builder
-open as a list of criteria. The builder supports one value for each criterion:
+open as a list of criteria. The builder supports one occurrence of each
+criterion; list criteria accept comma-separated values:
 known-exploited list, exploitation status, minimum or maximum CVSS, EPSS,
 vendor, product, description keyword, CWE, reporting organisation, or record
 status (`published`, `rejected`, or `reserved`). Choose whether any or all of
