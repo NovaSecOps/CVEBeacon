@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+{% set nav_active = 'operations.index' %}
+{% from 'ui.html' import page_header, card, callout, explain, button, link_button %}
+{% block title %}{% if job %}Test result for "{{ channel_name }}"{% else %}Test channel "{{ channel_name }}"{% endif %} · CVEBeacon{% endblock %}
+{% block head %}{% if job and job.active %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
+{% block content %}
+{% set can_test = accounts and 'test_channel' in permissions %}
+{% set can_edit_channels = accounts and 'edit_channels' in permissions %}
+{% set can_edit_rules = accounts and 'edit_rules' in permissions %}
+{% set channels_url = url_for('config_editor.channels') if has_endpoint('config_editor.channels') and can_edit_channels else url_for('operations.index') %}
+{% if job %}
+{% call page_header('Test result for "' ~ channel_name ~ '"', 'Whether the test message was accepted by the service.') %}
+{{ link_button('Back to alert channels' if can_edit_channels and has_endpoint('config_editor.channels') else 'Back to Operations', channels_url, kind='secondary') }}
+{% endcall %}
+{% call card('Test result') %}
+{% if job.status == 'queued' %}
+{% call callout('info') %}<p>The test is waiting to start.</p>{% if queue_detail %}<p class="muted">{{ queue_detail }}</p>{% endif %}{% endcall %}
+{% elif job.status == 'running' %}
+{% call callout('info') %}<p>Sending the test message to "{{ channel_name }}"...</p>{% endcall %}
+{% elif job.status == 'succeeded' %}
+{% call callout('success', 'The test message was accepted') %}
+<p>The test message was accepted by "{{ channel_name }}" ({{ channel_type }}). Accepted means the service took the message. Open the destination and check that it arrived before you rely on this channel.</p>
+<div class="form-actions">
+{% if can_edit_channels and has_endpoint('config_editor.channels') %}{{ link_button('Back to alert channels', url_for('config_editor.channels'), kind='secondary') }}{% endif %}
+{% if can_edit_rules and has_endpoint('config_editor.rules') %}{{ link_button('Choose alert rules', url_for('config_editor.rules'), kind='secondary') }}{% endif %}
+{{ link_button('Go to Home', url_for('overview'), kind='secondary') }}
+</div>
+{% endcall %}
+{% elif job.status == 'failed' and job.exit_code == 3 %}
+{% call callout('danger') %}
+<p>The test message was not delivered.</p>
+<p>Check that the address or webhook is correct, that the secret is still valid, and that this server can reach the service.</p>
+<div class="form-actions">
+{% if can_test %}<form method="post" action="{{ url_for('operations.channel_test_submit', name=channel_name) }}"><input type="hidden" name="csrf" value="{{ csrf }}">{{ button('Send the test again', kind='secondary') }}</form>{% endif %}
+{% if can_edit_channels and has_endpoint('config_editor.channels') %}{{ link_button('Edit the channel', url_for('config_editor.channels'), kind='secondary') }}{% endif %}
+</div>
+{% if not can_test %}<p class="help">Ask someone who may send tests.</p>{% endif %}
+{% if not can_edit_channels %}<p class="help">Ask someone who may edit alert channels.</p>{% endif %}
+{% endcall %}
+{% elif job.status == 'failed' %}
+{% call callout('danger') %}<p>{% if job.exit_code is none %}The test stopped before it finished, for example because the dashboard restarted. Send the test again.{% else %}The test could not run. {{ job.exit_meaning }}.{% endif %}</p>{% endcall %}
+{% elif job.status == 'cancelled' %}
+{% call callout('info') %}<p>The test was cancelled.</p>{% endcall %}
+{% endif %}
+<p><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">View the job</a></p>
+{% endcall %}
+{% call explain('Technical details') %}
+<p><a href="{{ url_for('operations.job_detail', job_id=job.id) }}">Open job {{ job.id }}</a></p>
+<pre>{{ log or 'No output yet.' }}</pre>
+{% endcall %}
+{% else %}
+{% call page_header('Test channel "' ~ channel_name ~ '"', 'Send a test message to check that the channel can deliver. Nothing is sent until you press the button.') %}
+{{ link_button('Back to alert channels' if can_edit_channels and has_endpoint('config_editor.channels') else 'Back to Operations', channels_url, kind='secondary') }}
+{% endcall %}
+{% call card('Test "' ~ channel_name ~ '"', 'A test message is marked as a test and does not change delivery state.') %}
+{% if not accounts %}
+{% call callout('warning', 'Operations need an account') %}<p>Sending a test needs a user account. Create the first administrator with the local <a href="{{ url_for('bootstrap') }}">bootstrap form</a>.</p>{% endcall %}
+{% elif can_test %}
+<form method="post" action="{{ url_for('operations.channel_test_submit', name=channel_name) }}" class="stack">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="form-actions">{{ button('Send a test message') }}{{ link_button('Skip for now', channels_url, kind='secondary') }}</div>
+</form>
+{% else %}
+<p class="help">Ask someone who may send tests.</p>
+{% endif %}
+{% endcall %}
+{% endif %}
+{% endblock %}

@@ -1,8 +1,12 @@
 {% extends 'base.html' %}{% from 'macros.html' import status, health_table, inventory_notice %}
-{% from 'ui.html' import page_header, card, stat, stat_grid, callout, empty_state, definition_list, table_wrap, badge %}
+{% from 'ui.html' import page_header, card, stat, stat_grid, callout, empty_state, definition_list, table_wrap, badge, setup_checklist %}
 {% block title %}Home · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Home', 'A summary of what CVEBeacon is watching, when it last checked, and what needs your attention.', url_for('findings') if inventory_configured else none, 'Review findings' if inventory_configured else none) }}
+{% if setup %}
+{% if not accounts %}{% call callout('info') %}<p>Changing settings from the dashboard needs user accounts. <a href="{{ url_for('bootstrap') }}">Create the first administrator</a>.</p>{% endcall %}{% endif %}
+{{ setup_checklist(setup.items, setup.done, setup.total, open=setup.open, unknown=setup.unknown) }}
+{% endif %}
 {% if inventory_configured %}{{ status(data) }}
 <p class="muted">Counts describe latest known observations matching the current inventory, not a guarantee of current coverage. Data becomes stale after 24 hours.</p>
 {% set tiles = {
