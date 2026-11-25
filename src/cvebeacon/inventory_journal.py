@@ -17,12 +17,14 @@ from .web_inventory import decode_json, read_bytes
 LOG = logging.getLogger("cvebeacon")
 
 MARKER = ".inventory-pending"
+UNASSIGNED_KEY = "unassigned"
 PARTS = {kind: f"{MARKER}-{kind}" for kind in ("current", "profile", "archive")}
 TARGETS = {
-    "current": re.compile(r"[a-f0-9]{64}\.json"),
-    "profile": re.compile(r"[a-f0-9]{64}\.client"),
-    "archive": re.compile(r"[a-f0-9]{64}\.[0-9]{8}T[0-9]{12}Z\.json"),
+    "current": re.compile(r"(?P<key>(?:[a-f0-9]{64}|unassigned))\.json"),
+    "profile": re.compile(r"(?P<key>[a-f0-9]{64})\.client"),
+    "archive": re.compile(r"(?P<key>(?:[a-f0-9]{64}|unassigned))\.[0-9]{8}T[0-9]{12}Z\.json"),
 }
+VALID_KEY = re.compile(r"(?:[a-f0-9]{64}|unassigned)")
 
 
 def remove_file(path):
@@ -44,17 +46,21 @@ def stage_change(directory, db, users, actor, event, key, detail, changes):
     """Stage all bytes before committing the audit transaction; publish nothing here."""
     if pending_exists(directory):
         raise StateError("A client inventory change is awaiting recovery.")
+    if not isinstance(key, str) or not VALID_KEY.fullmatch(key):
+        raise StateError("Invalid inventory change target.")
+    targets = {}
+    for kind, (path, data) in changes.items():
+        match = TARGETS.get(kind).fullmatch(path.name) if kind in TARGETS else None
+        if path.parent != directory or match is None or match.group("key") != key:
+            raise StateError("Invalid inventory change target.")
+        targets[kind] = [path.name, data is not None]
     action = event + ":" + json.dumps(detail, ensure_ascii=True, separators=(",", ":"))
     row_id = users._append_audit(
         db, action, actor.username, datetime.now(timezone.utc).isoformat(), actor=actor.username,
     )
-    targets = {}
     for kind, (path, data) in changes.items():
-        if path.parent != directory or not TARGETS[kind].fullmatch(path.name):
-            raise StateError("Invalid inventory change target.")
         if data is not None:
             replace_bytes(directory / PARTS[kind], data)
-        targets[kind] = [path.name, data is not None]
     chain = db.execute("SELECT chain FROM cb_user_audit WHERE id=?", (row_id,)).fetchone()["chain"]
     marker = {"row": row_id, "chain": chain, "key": key, "targets": targets}
     replace_bytes(directory / MARKER, json.dumps(marker, ensure_ascii=True).encode("ascii"))
@@ -65,11 +71,13 @@ def _read_marker(directory):
         marker = decode_json(read_bytes(directory / MARKER, 16384))
         row, chain, key, targets = (marker[field] for field in ("row", "chain", "key", "targets"))
         if (type(row) is not int or not 0 < row <= 2**63 - 1
-                or not re.fullmatch(r"[a-f0-9]{64}", chain) or not re.fullmatch(r"[a-f0-9]{64}", key)
+                or not re.fullmatch(r"[a-f0-9]{64}", chain) or not isinstance(key, str)
+                or not VALID_KEY.fullmatch(key)
                 or not isinstance(targets, dict) or not targets):
             raise ValueError
         for kind, (name, publish) in targets.items():
-            if not TARGETS[kind].fullmatch(name) or name[:64] != key or type(publish) is not bool:
+            match = TARGETS[kind].fullmatch(name)
+            if match is None or match.group("key") != key or type(publish) is not bool:
                 raise ValueError
         return row, chain, targets
     except (KeyError, ValueError, TypeError, IndexError) as exc:

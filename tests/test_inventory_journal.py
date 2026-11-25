@@ -1,5 +1,6 @@
 """Recover pending inventory changes according to the durable audit decision."""
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -206,3 +207,98 @@ def test_unsafe_orphan_staging_path_does_not_block_current_inventory(storage, ca
     assert sentinel.read_text(encoding="utf-8") == "private content"
     assert "Skipping an unsafe orphaned inventory staging file" in caplog.text
     assert "private content" not in caplog.text
+
+
+def test_unassigned_journal_recovery_after_interrupted_publish(storage, monkeypatch):
+    config, directory, users, actor, _, _ = storage
+    current = directory / "unassigned.json"
+    archived = directory / "unassigned.20261119T120000000000Z.json"
+    previous = _data("before", "")
+    journal.replace_bytes(current, previous)
+    with users.transaction() as db:
+        journal.stage_change(
+            directory, db, users, actor, "inventory_saved", "unassigned",
+            {"client": "", "row_count": 1, "mode": "replace"},
+            {"archive": (archived, previous), "current": (current, _data("after", ""))},
+        )
+    real_replace = journal.replace_bytes
+
+    def fail_after_current(path: Path, data: bytes):
+        real_replace(path, data)
+        if path == current:
+            raise OSError("simulated interrupted directory sync")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(journal, "replace_bytes", fail_after_current)
+        with pytest.raises(OSError):
+            load_inventory(config.inventory_for_management())
+    assert journal.pending_exists(directory)
+    assert [asset.asset_id for asset in load_inventory(config.inventory_for_management())] == ["after"]
+    assert archived.read_bytes() == previous
+    assert not journal.pending_exists(directory)
+    assert sum(entry.action.startswith('inventory_saved:{"client":""') for entry in users.audit_entries()) == 1
+
+
+def test_unassigned_journal_accepts_current_but_rejects_profile_target(storage):
+    from cvebeacon.errors import StateError
+
+    _, directory, users, actor, _, _ = storage
+    current = directory / "unassigned.json"
+    with users.transaction() as db:
+        journal.stage_change(
+            directory, db, users, actor, "inventory_saved", "unassigned",
+            {"client": "", "row_count": 1, "mode": "replace"},
+            {"current": (current, _data("reserved", ""))},
+        )
+    assert journal.pending_exists(directory)
+    journal.recover(directory, users.path)
+    assert current.read_bytes() == _data("reserved", "")
+
+    with users.transaction() as db:
+        with pytest.raises(StateError, match="Invalid inventory change target"):
+            journal.stage_change(
+                directory, db, users, actor, "inventory_saved", "unassigned",
+                {"client": "", "row_count": 1, "mode": "replace"},
+                {"profile": (directory / "unassigned.client", b"{}")},
+            )
+
+
+def test_reserved_publisher_add_revision_archive_and_restore(storage):
+    from cvebeacon.errors import ConfigurationError
+    from cvebeacon.managed_inventory import (
+        HISTORY_LIMIT, publish_unassigned_inventory, prune, read_unassigned_inventory, versions,
+    )
+
+    config, directory, users, actor, _, _ = storage
+    current = directory / "unassigned.json"
+    before = Asset("before", "Vendor", "Product", "1")
+    publish_unassigned_inventory(
+        config, [before], expected_revision="empty", users=users, proof=actor, mode="replace",
+    )
+    first_revision = hashlib.sha256(current.read_bytes()).hexdigest()
+    added = Asset("added", "Vendor", "Product", "1")
+    publish_unassigned_inventory(
+        config, [added], expected_revision=first_revision, users=users, proof=actor, mode="add",
+    )
+    assert [asset.asset_id for asset in read_unassigned_inventory(current.read_bytes())] == ["before", "added"]
+    history = versions(current)
+    assert len(history) == 1
+    assert [asset.asset_id for asset in read_unassigned_inventory(history[0].read_bytes())] == ["before"]
+
+    after_revision = hashlib.sha256(current.read_bytes()).hexdigest()
+    with pytest.raises(ConfigurationError, match="changed"):
+        publish_unassigned_inventory(
+            config, [Asset("stale", "Vendor", "Product", "1")], expected_revision=first_revision,
+            users=users, proof=actor, mode="replace",
+        )
+    publish_unassigned_inventory(
+        config, read_unassigned_inventory(history[0].read_bytes()), expected_revision=after_revision,
+        users=users, proof=actor, mode="restore",
+    )
+    assert [asset.asset_id for asset in read_unassigned_inventory(current.read_bytes())] == ["before"]
+    assert len(versions(current)) == 2
+    for index in range(HISTORY_LIMIT + 2):
+        archived = directory / f"unassigned.20261119T120000{index:06d}Z.json"
+        journal.replace_bytes(archived, _data(f"history-{index}", ""))
+    prune(current)
+    assert len(versions(current)) == HISTORY_LIMIT
