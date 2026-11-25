@@ -896,3 +896,39 @@ def test_save_shows_path_free_publication_timeout_guidance(web, monkeypatch):
     assert response.status_code == 400
     assert "Atomic publication" in response.text and "close open readers and retry" in response.text
     assert "SECRET_PATH" not in response.text
+
+
+def test_legacy_allowlist_label_stays_reachable_without_a_new_file(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    saved, _ = paths(config, "Acme")
+    document, _ = read_allowlist(saved, "Acme")
+    legacy_label = "Ａcme"  # fullwidth A: normalises to "Acme" for inventory grouping
+    legacy, _ = paths(config, legacy_label)
+    assert legacy != saved
+    save_allowlist(legacy, {**document, "client": legacy_label})
+    saved.unlink()
+    page = client.get("/web-assets", query_string={"client": legacy_label})
+    assert page.status_code == 200
+    assert "example.invalid" in page.text
+    assert not saved.exists()
+
+
+def test_redirect_prefill_action_needs_manage_web_assets(web):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    save_allowlist(Path(str(output) + ".review.json"), {
+        "client": "Acme", "products": [], "reviews": [dict(
+            asset_id="web-example", reason="redirect-blocked",
+            detail="redirect target is not an allowlisted host and port",
+            redirect_target={"scheme": "https", "host": "www.example.invalid", "port": 443})],
+    })
+    grant(users, ["view"])
+    client.post("/logout", data={"csrf": csrf(client)})
+    login(client, "reader")
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert "This site redirects to https://www.example.invalid:443" in page.text
+    assert "Add this redirect target as an authorised site" not in page.text
+    assert "If the client authorises it, add it as a site." not in page.text

@@ -151,6 +151,14 @@ def _inventory_clients(config):
 
 
 def _canonical_client(config, value, candidates=None):
+    # An allowlist saved before names were matched to inventory clients stays
+    # reachable under the label it was saved with; never fork it into a new file.
+    try:
+        existing, _ = paths(config, value)
+        if existing.exists() or existing.is_symlink():
+            return value
+    except (CVEBeaconError, OSError, ValueError):
+        pass
     name = normalized_client(value)
     wanted = inventory_client_key(name)
     for candidate in candidates if candidates is not None else _inventory_clients(config):
