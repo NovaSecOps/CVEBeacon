@@ -135,15 +135,23 @@ published signing record. A checksum file downloaded beside the artifacts
 proves their consistency, but is not enough to authenticate the signer. Set
 the fingerprint from that trusted record and compare it with the packaged
 signer pin. This preflight stops if the variable still contains its
-placeholder text:
+placeholder text. Run it with the Python interpreter from the current CVEBeacon
+environment, and keep this shell session open for the verification steps
+below:
 
 ```console
 TRUSTED_FINGERPRINT='REPLACE_WITH_AUTHENTICATED_FINGERPRINT'
-if [ -z "$TRUSTED_FINGERPRINT" ] || [ "$TRUSTED_FINGERPRINT" = 'REPLACE_WITH_AUTHENTICATED_FINGERPRINT' ]; then
+if [ -z "$TRUSTED_FINGERPRINT" ] || \
+   [ "$TRUSTED_FINGERPRINT" = 'REPLACE_WITH_AUTHENTICATED_FINGERPRINT' ]; then
   echo 'Set TRUSTED_FINGERPRINT from the authenticated signing record first.' >&2
   exit 1
 fi
-awk '$1 !~ /^#/ { print $(NF-1), $NF }' /etc/cvebeacon/release-allowed-signers > release-signing-public-key.pub
+SIGNERS_FILE=$(python -c 'from pathlib import Path; import cvebeacon.updater; print(Path(cvebeacon.updater.__file__).with_name("release-allowed-signers"))')
+if [ ! -r "$SIGNERS_FILE" ]; then
+  echo 'The packaged release signer file is not readable.' >&2
+  exit 1
+fi
+awk '$1 !~ /^#/ { print $(NF-1), $NF }' "$SIGNERS_FILE" > release-signing-public-key.pub
 ACTUAL_FINGERPRINT=$(ssh-keygen -lf release-signing-public-key.pub | awk '{print $2}')
 if [ "$ACTUAL_FINGERPRINT" != "$TRUSTED_FINGERPRINT" ]; then
   echo 'The packaged signing key does not match the trusted fingerprint.' >&2
@@ -181,7 +189,7 @@ fi
    every artifact against `SHA256SUMS`:
 
    ```console
-   ssh-keygen -Y verify -f /etc/cvebeacon/release-allowed-signers \
+   ssh-keygen -Y verify -f "$SIGNERS_FILE" \
      -I cvebeacon-release -n cvebeacon-release \
      -s SHA256SUMS.sig < SHA256SUMS
    sha256sum --check SHA256SUMS
