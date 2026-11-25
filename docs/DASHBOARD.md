@@ -40,6 +40,10 @@ destination and confirm that it arrived. Failed tests need attention. Test
 results come from dashboard job history, which retains the last 200 finished
 jobs, including failures and cancellations, so older tests eventually leave
 the history.
+The step is Done when at least one enabled channel's latest test was accepted
+and no enabled channel's latest test failed. If several channels are enabled,
+the count shows how many have an accepted latest test; every channel does not
+need a test for the step to be marked Done.
 
 To add an alert destination, open **Configuration → Alert channels → Guided
 setup**. Choose a channel type, fill in its fields, review the proposed change,
@@ -169,7 +173,7 @@ in **Affected clients** alert lines.
 
 ## Native schedule
 
-The **Schedule** page requires `manage_schedule`. Without an updater-managed systemd timer, it shows `schedule status` and can install or remove the same native Windows task or managed Linux crontab block as `cvebeacon schedule install` and `cvebeacon schedule remove`. The form accepts an interval or fixed local times, the `scan`, `watch` or `both` command, and the Windows `--run-logged-out` option. With an enabled administrator-owned updater policy listing `cvebeacon.timer` and `cvebeacon.service`, it shows a read-only **Monitoring timer** card with the timer state, boot setting, next run, last run and result. The dashboard does not install cron for this setup; change the timer with systemd. The cron removal action remains separate and removes only the dashboard-managed cron block.
+The **Schedule** page requires `manage_schedule`. Without an updater-managed systemd timer, it shows `schedule status` and can install or remove the same native Windows task or managed Linux crontab block as `cvebeacon schedule install` and `cvebeacon schedule remove`. The form accepts an interval or fixed local times, the `scan`, `watch` or `both` command, and the Windows `--run-logged-out` option. When the administrator-owned updater policy file passes the dashboard's ownership checks, it shows a read-only **Monitoring timer** card with the timer state, boot setting, next run, last run and result. The dashboard does not install cron for this setup; change the timer with systemd. The cron removal action remains separate and removes only the dashboard-managed cron block.
 
 The **Updates** page shows the installed version, any available version and
 the last check. When an administrator checks for updates, the page says
@@ -575,7 +579,8 @@ exclusions that always prevent an alert. It covers known-exploited lists,
 exploitation status, minimum and maximum CVSS scores, EPSS, vendor, product,
 description keywords, CWE, reporting organisation and record status. Use
 **Edit as text** for the full condition syntax. Conditions with nested groups,
-repeated criteria, version- or provider-specific score limits, or values the
+repeated criteria, multiple criteria in one condition table, version- or
+provider-specific score limits, or values the
 builder cannot split safely open in text mode with an explanation. **Use the
 builder** is offered when the text condition can be represented without
 changing it.
