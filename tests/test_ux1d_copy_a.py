@@ -332,6 +332,8 @@ def test_queued_job_cancel_copy(signed_in):
     )
     text = client.get(f"/operations/jobs/{queued.id}").text
     assert "Cancelling removes this queued job before it starts." in text
+    assert 'data-confirm="Cancel this job? It will be removed before it starts."' in text
+    assert "The job will be asked to stop." not in text
     assert "How cancellation works" not in text
     assert "SIGINT" not in text
     assert "Result</dt>" in text
@@ -353,6 +355,7 @@ def test_running_job_cancellation_discloses_signal_and_cleanup(signed_in):
     ) in text
     assert "SIGINT" in text
     assert "SIGINT" not in visible(text)
+    assert 'data-confirm="Cancel this job? The job will be asked to stop."' in text
 
 
 def test_job_result_codes_are_in_technical_details(signed_in):

@@ -34,7 +34,7 @@
 {% if job.active and 'run' in (permissions | default([])) %}
 {% if job.status == 'queued' %}
 {% call card('Cancel this job', 'Cancelling removes this queued job before it starts.') %}
-<form method="post" action="{{ url_for('operations.cancel_job', job_id=job.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}">{{ button('Cancel job', kind='danger', confirm='Cancel this job? The job will be asked to stop.') }}</form>
+<form method="post" action="{{ url_for('operations.cancel_job', job_id=job.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}">{{ button('Cancel job', kind='danger', confirm='Cancel this job? It will be removed before it starts.') }}</form>
 {% endcall %}
 {% else %}
 {% call card('Cancel this job', 'Cancelling asks the job to stop and clean up. The result shows whether it finished cleanly.') %}
