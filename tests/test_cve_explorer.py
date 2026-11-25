@@ -235,28 +235,48 @@ def test_vendor_and_product_filters_match_rule_leaves_across_nvd_and_euvd(tmp_pa
 
     vendors = ("pHp GrOuP", "big_corp")
     products = ("php_core", "widget_server")
-    vendor_results = {item.cve_id for item in store.search(vendor_names=("PHP GROUP",), limit=100).records}
-    product_results = {item.cve_id for item in store.search(product_names=("PHP_core",), limit=100).records}
-    both = store.search(vendor_names=vendors, product_names=products, limit=100)
+    vendor_results = {item.cve_id for item in store.search(
+        catalogs=catalogs, vendor_names=("PHP GROUP",), limit=100,
+    ).records}
+    product_results = {item.cve_id for item in store.search(
+        catalogs=catalogs, product_names=("PHP_core",), limit=100,
+    ).records}
+    both = store.search(catalogs=catalogs, vendor_names=vendors,
+                        product_names=products, limit=100)
     assert vendor_results == {first, euvd_only}
     assert product_results == {first, second, euvd_only}
     assert {item.cve_id for item in both.records} == {first, euvd_only, underscored}
-    assert store.search(product_names=("Widget Server",)).total == 0
-    assert {item.cve_id for item in store.search(product_names=("widget_server",), limit=100).records} == {underscored}
+    assert store.search(catalogs=catalogs, product_names=("Widget Server",)).total == 0
     assert {item.cve_id for item in store.search(
+        catalogs=catalogs, product_names=("widget_server",), limit=100,
+    ).records} == {underscored}
+    assert {item.cve_id for item in store.search(
+        catalogs=catalogs,
         vendor_names=("php group",), product_names=("PHP_core",), cvss_min=9, cvss_max=9.7,
         exploitation="active", limit=100,
     ).records} == {first}
 
-    rule = parse_rules([{
-        "name": "vendor-and-product", "channels": ["sink"],
-        "condition": {"all": [{"vendor": list(vendors)}, {"product": list(products)}]},
-    }])[0]
-    rule_results = {
-        identifier for identifier in identifiers
-        if evaluate_condition(store.view(identifier, catalogs=catalogs), rule.condition, rule)[0]
-    }
-    assert {item.cve_id for item in both.records} == rule_results
+    for rule_filters, condition in (
+        ({"vendor_names": ("PHP GROUP",)}, {"vendor": ["PHP GROUP"]}),
+        ({"product_names": ("PHP_core",)}, {"product": ["PHP_core"]}),
+        ({"vendor_names": vendors, "product_names": products},
+         {"all": [{"vendor": list(vendors)}, {"product": list(products)}]}),
+    ):
+        rule = parse_rules([{
+            "name": "vendor-and-product", "channels": ["sink"],
+            "condition": condition,
+        }])[0]
+        rule_results = {
+            identifier for identifier in identifiers
+            if evaluate_condition(store.view(identifier, catalogs=catalogs),
+                                 rule.condition, rule)[0]
+        }
+        explorer_results = {
+            item.cve_id for item in store.search(
+                catalogs=catalogs, **rule_filters, limit=100,
+            ).records
+        }
+        assert explorer_results == rule_results
     baseline = store.search(limit=100)
     empty = store.search(vendor_names=(), product_names=(), limit=100)
     assert (empty.total, empty.records) == (baseline.total, baseline.records)
@@ -304,6 +324,107 @@ def test_empty_vendor_and_product_filters_preserve_search_results(tmp_path):
     baseline = store.search(limit=100)
     empty = store.search(vendor_names=(), product_names=(), limit=100)
     assert (empty.total, empty.records) == (baseline.total, baseline.records)
+
+
+def test_name_filters_work_for_every_valid_catalog_combination(tmp_path):
+    from itertools import combinations
+    from cvebeacon.config import WATCH_SOURCES
+    from cvebeacon.watch.records import Product
+
+    store = WatchStore(tmp_path / "watch.db")
+    identifier = "CVE-2026-14101"
+    store.upsert_nvd([WatchRecord(
+        identifier, "published", products=(Product("PHP Group", "PHP Core"),),
+    )])
+    optional = tuple(source for source in WATCH_SOURCES if source != "nvd")
+    catalog_sets = tuple(
+        ("nvd", *selected)
+        for count in range(len(optional) + 1)
+        for selected in combinations(optional, count)
+    )
+    for catalogs in catalog_sets:
+        result = store.search(
+            catalogs=catalogs, vendor_names=("php group",),
+            product_names=("php core",), limit=100,
+        )
+        assert result.total == 1, catalogs
+        assert result.records[0].cve_id == identifier, catalogs
+
+
+def test_name_filter_results_match_watch_view_at_the_500_name_cap(tmp_path):
+    from cvebeacon.watch.records import Product
+    from cvebeacon.watch.rules import evaluate_condition, parse_rules
+
+    identifier = "CVE-2026-14102"
+    catalogs = ("nvd",)
+    store = WatchStore(tmp_path / "watch.db")
+    products = tuple(Product("Vendor", f"product-{index:03d}") for index in range(600))
+    store.upsert_nvd([WatchRecord(identifier, "published", products=products)])
+    view = store.view(identifier, catalogs=catalogs)
+    cases = (("product-499", True), ("product-500", False))
+    for product, expected in cases:
+        rule = parse_rules([{
+            "name": "product-cap", "channels": ["sink"],
+            "condition": {"product": [product]},
+        }])[0]
+        rule_match = evaluate_condition(view, rule.condition, rule)[0]
+        explorer_match = store.search(
+            catalogs=catalogs, product_names=(product,), limit=100,
+        ).total == 1
+        assert rule_match is expected
+        assert explorer_match is rule_match
+
+
+def test_name_filter_search_skips_malformed_stored_json_rows(tmp_path):
+    import sqlite3
+    from cvebeacon.watch.records import EUVDUpdate, Product
+
+    catalogs = ("nvd", "euvd")
+    malformed_products, clean_nvd, malformed_euvd, clean_euvd = (
+        f"CVE-2026-{number:05d}" for number in range(14103, 14107)
+    )
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_nvd([
+        WatchRecord(malformed_products, "published", products=(Product("Vendor", "Widget"),)),
+        WatchRecord(clean_nvd, "published", products=(Product("Vendor", "Widget"),)),
+        WatchRecord(malformed_euvd, "published"),
+        WatchRecord(clean_euvd, "published"),
+    ], catalogs=catalogs)
+    store.replace_euvd_items([
+        EUVDUpdate((malformed_euvd,), "EUVD-2026-14105", None,
+                   vendors=(Product("Vendor", "Widget"),)),
+        EUVDUpdate((clean_euvd,), "EUVD-2026-14106", None,
+                   vendors=(Product("Vendor", "Widget"),)),
+    ], catalogs=catalogs)
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_cve SET products_json='{bad-json' WHERE cve_id=?",
+                   (malformed_products,))
+        db.execute("UPDATE watch_euvd_item SET vendors_json='{bad-json' WHERE euvd_id=?",
+                   ("EUVD-2026-14105",))
+
+    result = store.search(catalogs=catalogs, product_names=("Widget",), limit=100)
+    assert result.total == 2
+    assert {item.cve_id for item in result.records} == {clean_nvd, clean_euvd}
+
+
+def test_name_filter_search_skips_oversized_stored_json(tmp_path):
+    import json
+    import sqlite3
+    from cvebeacon.watch.records import Product
+
+    identifier = "CVE-2026-14107"
+    store = WatchStore(tmp_path / "watch.db")
+    store.upsert_nvd([WatchRecord(
+        identifier, "published", products=(Product("Vendor", "Widget"),),
+    )])
+    oversized = json.dumps([{"vendor": "Vendor", "product": "x" * 2_600_000}])
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE watch_cve SET products_json=? WHERE cve_id=?",
+                   (oversized, identifier))
+
+    result = store.search(vendor_names=("Vendor",), limit=100)
+    assert result.total == 0
+    assert result.records == ()
 
 
 def test_euvd_qualified_filters_include_all_effective_advisory_scores(tmp_path):
