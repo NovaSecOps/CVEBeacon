@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time as clock
 import tomllib
+from weakref import WeakSet
 
 from flask import Blueprint, abort, g, redirect, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
@@ -50,6 +51,7 @@ _VALIDATING = ContextVar("config_validation", default=False)
 _RELOADING = ContextVar("config_reload", default=None)
 _CONFIG_LOCKS = {}
 _CONFIG_LOCKS_GUARD = threading.Lock()
+_EDITORS = {}
 
 
 def _config_thread_lock(path):
@@ -539,6 +541,30 @@ def safe_error(error, document, path):
     return message
 
 
+def _channel_loader_field_key(error, document):
+    """Return a fixed field key for loader errors used by the channel wizard."""
+    channels = get_table(document, "watch.channels")
+    message = str(error)
+    for name, row in channels.items():
+        if not isinstance(name, str) or not isinstance(row, dict):
+            continue
+        marker = f"watch channel {name!r} "
+        if not message.startswith(marker):
+            continue
+        detail = message[len(marker):]
+        kind = str(row.get("type", "")).casefold()
+        keys = {
+            "smtp": {"port"},
+            "telegram": {"chat_id"},
+            "matrix": {"homeserver"},
+            "webhook": {"url"},
+        }.get(kind, set())
+        for key in keys:
+            if detail.startswith(key + " "):
+                return key
+    return None
+
+
 def _private_directory(path):
     if path.is_symlink():
         raise ConfigurationError("Protected directory must not be a symbolic link")
@@ -883,6 +909,8 @@ class Pending:
     lockout: bool
     references: tuple[Path, ...] = ()
     created: float = field(default_factory=clock.time)
+    origin: tuple[str, str | None] = ("full", None)
+    baseline_document: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -900,11 +928,14 @@ class Editor:
         self.host = host
         self.lock = threading.RLock()
         self.pending = {}
+        self.temporary = set()
         self.target = app.wsgi_app
         self.active_app = app
         self.jobs = app.extensions.get("dashboard_jobs")
         self.backup_dir = self.path.parent / ("." + self.path.name + ".backups")
         self.secret_dir = config.watch.users_database.parent / "dashboard-secrets"
+        with _CONFIG_LOCKS_GUARD:
+            _EDITORS.setdefault(str(self.path.resolve()), WeakSet()).add(self)
 
     def __call__(self, environ, start_response):
         # Select an immutable generation without serializing unrelated requests
@@ -976,7 +1007,11 @@ class Editor:
                 raise ConfigurationError("The dashboard requires inventory.path or watch.enabled")
             return config, content
         except ConfigurationError as error:
-            raise ConfigurationError(safe_error(error, document, temporary)) from None
+            sanitized = ConfigurationError(safe_error(error, document, temporary))
+            field_key = _channel_loader_field_key(error, document)
+            if field_key is not None:
+                sanitized.field_key = field_key
+            raise sanitized from None
         except (TypeError, ValueError, AttributeError):
             raise ConfigurationError("Invalid configuration value type") from None
         finally:
@@ -1003,6 +1038,7 @@ class Editor:
             if self.path.is_symlink() or not self.path.is_file():
                 return None
             try:
+                read_regular(self.path)
                 configs.append(load_config(self.path))
             except (OSError, CVEBeaconError, ValueError, TypeError):
                 return None
@@ -1039,8 +1075,9 @@ class Editor:
         live = self._live_staged_paths()
         if live is None:
             return
-        active = {path for pending in self.pending.values()
-                  for path in (*pending.staged, *pending.references)}
+        active = self._active_temporary_paths()
+        if active is None:
+            return
         now = clock.time()
         data_directory = self.config.watch.users_database.parent
         directories = {
@@ -1058,38 +1095,109 @@ class Editor:
                 for path in directory.iterdir():
                     if not path.name.startswith(STAGE_PREFIX):
                         continue
-                    if path in active or path.resolve() in live:
+                    resolved = _resolved_regular_temp(path)
+                    if resolved is None or resolved in active or resolved in live:
                         continue
                     try:
                         age = now - path.lstat().st_mtime
                     except OSError:
                         continue
                     if age > PREVIEW_SECONDS:
-                        path.unlink(missing_ok=True)
+                        _unlink_regular_temp(path, resolved)
             except OSError:
                 continue
+
+    def _active_temporary_paths(self):
+        active = set()
+        key = str(self.path.resolve())
+        with _CONFIG_LOCKS_GUARD:
+            editors = tuple(_EDITORS.get(key, ()))
+        now = clock.monotonic()
+        for editor in editors:
+            for pending in editor.pending.values():
+                if pending.expires < now:
+                    continue
+                for path in (*pending.staged, *pending.references):
+                    resolved = _resolved_regular_temp(path)
+                    if resolved is not None:
+                        active.add(resolved)
+                    elif path.exists() or path.is_symlink():
+                        # An unexpected active path makes deletion unsafe.
+                        return None
+        return active
 
     def cleanup(self):
         with _config_writer_lock(self.path):
             for identifier, pending in list(self.pending.items()):
                 if pending.expires < clock.monotonic():
-                    self.discard(identifier)
+                    self._discard_locked(identifier)
+            self._cleanup_owned_temporaries()
             self._cleanup_orphans()
 
     def discard(self, identifier, *, committed=False):
+        with _config_writer_lock(self.path):
+            self._discard_locked(identifier)
+
+    def discard_staged(self, paths):
+        """Remove newly written temporary secrets without touching references."""
+        paths = tuple(paths)
+        if not paths:
+            return
+        with _config_writer_lock(self.path):
+            # Track first: when reference discovery is incomplete the removal
+            # is skipped, and a later cleanup must retry it.
+            self.temporary.update(paths)
+            self._remove_temporary_paths(paths)
+
+    def _discard_locked(self, identifier):
         pending = self.pending.pop(identifier, None)
         if not pending:
             return
-        active = {path for identifier2, pending2 in self.pending.items()
-                  if identifier2 != identifier
-                  for path in (*pending2.staged, *pending2.references)}
+        self._remove_temporary_paths(pending.staged, tracked_only=True)
+
+    def _remove_temporary_paths(self, paths, *, tracked_only=False):
+        active = self._active_temporary_paths()
         live = self._live_staged_paths()
-        if live is None:
+        if live is None or active is None:
             return
-        for path in pending.staged:
-            if (path.name.startswith(STAGE_PREFIX) and path not in active
-                    and path.resolve() not in live):
-                path.unlink(missing_ok=True)
+        for path in paths:
+            if tracked_only and path not in self.temporary:
+                continue
+            if not path.name.startswith((STAGE_PREFIX, SECRET_PREFIX)):
+                continue
+            resolved = _resolved_regular_temp(path)
+            if resolved is None:
+                continue
+            if resolved in live:
+                self.temporary.discard(path)
+                continue
+            if resolved in active:
+                continue
+            _unlink_regular_temp(path, resolved)
+            if _resolved_regular_temp(path) is None:
+                self.temporary.discard(path)
+
+    def _cleanup_owned_temporaries(self):
+        active = self._active_temporary_paths()
+        live = self._live_staged_paths()
+        if active is None or live is None:
+            return
+        key = str(self.path.resolve())
+        with _CONFIG_LOCKS_GUARD:
+            editors = tuple(_EDITORS.get(key, ()))
+        for editor in editors:
+            for path in tuple(editor.temporary):
+                resolved = _resolved_regular_temp(path)
+                if resolved is None:
+                    continue
+                if resolved in live:
+                    editor.temporary.discard(path)
+                    continue
+                if resolved in active:
+                    continue
+                _unlink_regular_temp(path, resolved)
+                if _resolved_regular_temp(path) is None:
+                    editor.temporary.discard(path)
 
     def _check_direct_urls(self, current, candidate, *, rollback):
         if rollback:
@@ -1130,7 +1238,8 @@ class Editor:
         new_target = effective_reference_path(candidate_config, replacement.reference)
         return old_target is not None and old_target == new_target == replacement.target
 
-    def preview(self, section, document, version, staged=(), replacements=(), *, current_document, current_config):
+    def preview(self, section, document, version, staged=(), replacements=(), *,
+                current_document, current_config, origin=("full", None)):
         if self.read_only():
             raise ConfigurationError("The configuration directory is read-only")
         self.cleanup()
@@ -1205,8 +1314,25 @@ class Editor:
         identifier = secrets.token_hex(32)
         self.pending[identifier] = Pending(g.sid, section, version, document,
                                           clock.monotonic() + PREVIEW_SECONDS, tuple(staged),
-                                          tuple(replacements), lockout, tuple(references))
+                                          tuple(replacements), lockout, tuple(references),
+                                          origin=origin,
+                                          baseline_document=(deepcopy(current_document)
+                                                            if origin[0] == "wizard"
+                                                            and current_document is not None else None))
+        self.temporary.update(staged)
         return identifier, lockout
+
+    def pending_review(self, identifier, section, origin):
+        """Return an unexpired review only to its owner and originating flow."""
+        pending = self.pending.get(identifier) if identifier else None
+        if pending is None or pending.owner != g.sid or pending.section != section:
+            return None
+        if pending.expires < clock.monotonic():
+            self.discard(identifier)
+            return None
+        if pending.origin != origin:
+            return None
+        return pending
 
     def backups(self):
         if not self.backup_dir.exists():
@@ -1215,16 +1341,38 @@ class Editor:
         return sorted((path.name for path in self.backup_dir.iterdir()
                        if _backup_name(path.name)), reverse=True)[:KEEP_BACKUPS]
 
-    def commit(self, identifier, section, users, permission, confirmed):
-        if self.read_only():
-            raise ConfigurationError("The configuration directory is read-only")
+    def commit(self, identifier, section, users, permission, confirmed, *,
+               origin=("full", None)):
         self.cleanup()
         with _config_writer_lock(self.path):
-            return self._commit_locked(identifier, section, users, permission, confirmed)
+            pending = self.pending.get(identifier)
+            # A wrong flow is a bad request, but does not consume the review.
+            if (pending is not None and pending.owner == g.sid
+                    and pending.section == section and pending.origin != origin):
+                abort(400)
+            retryable_lockout = bool(
+                pending is not None and pending.owner == g.sid
+                and pending.section == section and pending.origin == origin
+                and pending.lockout and not confirmed
+            )
+            try:
+                if self.read_only():
+                    raise ConfigurationError("The configuration directory is read-only")
+                return self._commit_locked(identifier, section, users, permission,
+                                           confirmed, origin=origin)
+            except BaseException:
+                current = self.pending.get(identifier)
+                if (not retryable_lockout and current is pending and pending is not None
+                        and pending.owner == g.sid and pending.section == section
+                        and pending.origin == origin):
+                    self._discard_locked(identifier)
+                raise
 
-    def _commit_locked(self, identifier, section, users, permission, confirmed):
+    def _commit_locked(self, identifier, section, users, permission, confirmed, *, origin):
         pending = self.pending.get(identifier)
         if not pending or pending.owner != g.sid or pending.section != section:
+            abort(400)
+        if pending.origin != origin:
             abort(400)
         if pending.lockout and not confirmed:
             raise ConfigurationError("Confirm the access and session changes before saving")
@@ -1458,7 +1606,7 @@ class Editor:
             logging.getLogger("cvebeacon").warning("Configuration saved; backup retention cleanup failed")
         # Cleanup after the commit cannot undo a successful save.
         try:
-            self.discard(identifier, committed=True)
+            self._discard_locked(identifier)
         except OSError:
             logging.getLogger("cvebeacon").warning("Configuration saved; staged secret cleanup failed")
 
@@ -1892,6 +2040,31 @@ def _same_path(left, right):
         return False
 
 
+def _resolved_regular_temp(path):
+    """Resolve an editor temporary file without following symbolic links."""
+    try:
+        details = path.lstat()
+        if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1
+                or getattr(details, "st_file_attributes", 0) & 0x400):
+            return None
+        return path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _unlink_regular_temp(path, resolved):
+    if not path.name.startswith((STAGE_PREFIX, SECRET_PREFIX)):
+        return
+    # Re-check immediately before unlinking so a replaced path or symlink is
+    # retained. Comparing the resolved path protects aliases in every store.
+    if _resolved_regular_temp(path) != resolved:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _inside(path, directory):
     try:
         path.relative_to(directory)
@@ -2181,13 +2354,21 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
 
 
 def parse_form(editor, section, document, current_config, permissions, *, can_admin=False, count=None,
-               form=None):
+               form=None, append_channels=False):
     form = request.form if form is None else form
+    if append_channels and section != "channels":
+        abort(400)
     can_manage = "manage_secrets" in permissions
+    if append_channels:
+        count = 1
+        parse_document = {"watch": {"channels": {}}}
+    else:
+        parse_document = document
     if count is None:
         count = form_row_count(form)
-    row_types = [form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
-    groups = groups_for(section, document, count=count, row_types=row_types,
+    row_types = ([form.get("g0_type")] if append_channels else
+                 [form.get(f"g{index}_type") for index in range(count)]) if section == "channels" else None
+    groups = groups_for(section, parse_document, count=count, row_types=row_types,
                         can_manage=can_manage, can_admin=can_admin)
     rows, staged, replacements, secret_requests = [], [], [], []
     expected = {"csrf", "version", "action", "row_count"}
@@ -2361,26 +2542,38 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 row for row in rows if row is not None and row.get("vendor")
             ]
         else:
-            channels = {}
-            for row in rows:
-                if row is None:
-                    continue
-                row = dict(row)
+            if append_channels:
+                if len(rows) != 1 or rows[0] is None:
+                    abort(400)
+                row = dict(rows[0])
                 name = row.pop("name", "")
-                if name:
-                    if name in channels:
-                        raise ConfigurationError("watch.channels.name must be unique; duplicate channel name")
-                    channels[name] = row
-            candidate.setdefault("watch", {})["channels"] = channels
+                channels = candidate.setdefault("watch", {}).setdefault("channels", {})
+                if (not name or any(existing.casefold() == name.casefold()
+                                    for existing in channels)):
+                    raise ConfigurationError(
+                        "watch.channels.name must be unique; duplicate channel name"
+                    )
+                channels[name] = row
+            else:
+                channels = {}
+                for row in rows:
+                    if row is None:
+                        continue
+                    row = dict(row)
+                    name = row.pop("name", "")
+                    if name:
+                        if name in channels:
+                            raise ConfigurationError("watch.channels.name must be unique; duplicate channel name")
+                        channels[name] = row
+                candidate.setdefault("watch", {})["channels"] = channels
         referenced = {value for value in secret_references(candidate).values() if isinstance(value, str)}
         for path in list(staged):
             if path.name.startswith(SECRET_PREFIX) and str(path) not in referenced:
-                path.unlink(missing_ok=True)
+                editor.discard_staged((path,))
                 staged.remove(path)
         return candidate, staged, replacements
     except BaseException:
-        for path in staged:
-            path.unlink(missing_ok=True)
+        editor.discard_staged(staged)
         raise
 
 
@@ -2600,7 +2793,8 @@ def register_config(app, config, *, host):
                 rule_action = section == "rules" and _rule_form_action(request.form)
                 if action == "confirm":
                     ended = editor.commit(request.form.get("preview"), section, app.extensions["dashboard_users"],
-                                          {permission}, request.form.get("lockout") == "yes")
+                                          {permission}, request.form.get("lockout") == "yes",
+                                          origin=("full", None))
                     return redirect(url_for("login") if ended else
                                     url_for("config_editor." + section, saved=1), code=303)
                 if action != "preview" and not rule_action:
@@ -2636,8 +2830,11 @@ def register_config(app, config, *, host):
                     preview, lockout = editor.preview(
                         section, candidate, version, staged, replacements,
                         current_document=document, current_config=current_config,
+                        origin=("full", None),
                     )
                     staged = []
+                    if editor.pending_review(preview, section, ("full", None)) is None:
+                        abort(400)
                     diff = "\n".join(difflib.unified_diff(
                         dumps(redacted(project_document(document, section))).splitlines(),
                         dumps(redacted(project_document(candidate, section))).splitlines(),
@@ -2668,8 +2865,7 @@ def register_config(app, config, *, host):
                 raise
             error, status = exc.description, exc.code
         finally:
-            for path in staged:
-                path.unlink(missing_ok=True)
+            editor.discard_staged(staged)
         if groups is not None and (
                 retained_form is not None or status == 400 and request.form.get("action") == "preview"):
             if retained_form is not None:
@@ -2744,7 +2940,10 @@ def register_config(app, config, *, host):
                 preview, lockout = editor.preview(
                     "rollback", candidate, version,
                     current_document=document, current_config=current_config,
+                    origin=("full", None),
                 )
+                if editor.pending_review(preview, "rollback", ("full", None)) is None:
+                    abort(400)
                 if not current_invalid:
                     diff = "\n".join(difflib.unified_diff(dumps(redacted(document)).splitlines(),
                                                          dumps(redacted(candidate)).splitlines(),

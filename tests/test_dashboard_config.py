@@ -339,7 +339,7 @@ def test_file_secret_never_round_trips_and_rule_can_use_channel(accounts, monkey
         assert secret not in backup.read_text(encoding="utf-8")
 
 
-def test_invalid_preview_removes_temporary_and_expiration_retains_generated_secret(accounts):
+def test_invalid_preview_and_expiration_remove_generated_secret(accounts):
     _, _, app, client = accounts
     login(client, "admin")
     editor = app.extensions["dashboard_config"]
@@ -351,7 +351,8 @@ def test_invalid_preview_removes_temporary_and_expiration_retains_generated_secr
     path = pending.staged[0]
     pending.expires = 0
     editor.cleanup()
-    assert path.exists()
+    assert form(response.text, "confirm")["preview"] not in editor.pending
+    assert not path.exists()
 
 
 @pytest.mark.parametrize("link", ["config", "backup-dir", "secret-dir", "hardlink"])
