@@ -25,9 +25,8 @@ SEVERITY_MINIMA = {"critical": 9, "high": 7, "medium": 4, "low": 0.1, "none": 0}
 SEVERITY_BANDS = (*SEVERITY_MINIMA, "unknown")
 MAX_NAME_FILTER_ITEMS = 20
 MAX_NAME_FILTER_LENGTH = 120
-# 1,000 name pairs at roughly 2.5 KB each, including JSON and Unicode bytes.
-MAX_STORED_NAME_JSON_BYTES = 2_500_000
 MAX_STORED_NAME_PAIRS = 1_000
+MAX_STORED_EUVD_NAME_PAIRS = 50
 
 
 @dataclass(frozen=True)
@@ -89,18 +88,16 @@ def _name_filter(values, label):
     return tuple(unique.values())
 
 
-def _load_name_json(value):
-    """Load a bounded JSON array from stored name data; bad data means no names."""
-    if not isinstance(value, str) or len(value) > MAX_STORED_NAME_JSON_BYTES:
+def _load_name_json(value, *, limit=MAX_STORED_NAME_PAIRS):
+    """Load stored name data; bad data means no names."""
+    if not isinstance(value, str):
         return None
     try:
-        if len(value.encode("utf-8")) > MAX_STORED_NAME_JSON_BYTES:
-            return None
         result = json.loads(value)
     except (UnicodeError, ValueError, RecursionError):
         return None
     return (result if isinstance(result, list)
-            and len(result) <= MAX_STORED_NAME_PAIRS else None)
+            and len(result) <= limit else None)
 
 
 def _array_field_names(items, field):
@@ -113,8 +110,8 @@ def _array_field_names(items, field):
 
 
 def _effective_name_match(products_json, euvd_json, field, names_json):
-    products = _load_name_json(products_json)
-    euvd = _load_name_json(euvd_json)
+    products = _load_name_json(products_json, limit=MAX_STORED_NAME_PAIRS)
+    euvd = _load_name_json(euvd_json, limit=MAX_STORED_EUVD_NAME_PAIRS)
     names = _load_name_json(names_json)
     if names is None:
         return 0
@@ -141,17 +138,18 @@ class _EuvdNames:
         rank = candidate.rank()
         if self.rank is None or rank > self.rank:
             self.rank = rank
-            self.values = _load_name_json(vendors_json) or []
+            self.values = _load_name_json(
+                vendors_json, limit=MAX_STORED_EUVD_NAME_PAIRS,
+            ) or []
 
     def finalize(self):
         return json.dumps(self.values, ensure_ascii=False, separators=(",", ":"))
 
 
 def _json_array_is_valid(expression):
-    """SQL predicate that checks size and JSON type before any JSON operation."""
+    """SQL predicate that checks JSON type before any JSON operation."""
     return (
         f"CASE WHEN typeof({expression})!='text' THEN 0 "
-        f"WHEN length(CAST({expression} AS BLOB)) > {MAX_STORED_NAME_JSON_BYTES} THEN 0 "
         f"WHEN json_valid({expression}) THEN json_type({expression})='array' ELSE 0 END"
     )
 
@@ -163,8 +161,35 @@ def _json_array_or_empty(expression):
 def _json_or_empty_object(expression):
     return (
         f"CASE WHEN typeof({expression})!='text' THEN '{{}}' "
-        f"WHEN length(CAST({expression} AS BLOB)) > {MAX_STORED_NAME_JSON_BYTES} THEN '{{}}' "
         f"WHEN json_valid({expression}) THEN {expression} ELSE '{{}}' END"
+    )
+
+
+def _name_filter_gate(names, catalogs):
+    """Return a safe SQL superset gate for simple ASCII name filters."""
+    if not names or any(
+        not name.isascii()
+        or any(quote in name for quote in ("'", '"'))
+        or "\\" in name
+        or any(ord(char) < 32 or ord(char) == 127 for char in name)
+        for name in names
+    ):
+        return None, ()
+    bypass = [
+        "typeof(c.products_json)!='text'",
+        "length(c.products_json)!=length(CAST(c.products_json AS BLOB))",
+        "instr(c.products_json,char(92))>0",
+        "c.provider_only",
+        "c.official_record IS NOT NULL",
+    ]
+    if "euvd" in catalogs:
+        bypass.extend((
+            "EXISTS(SELECT 1 FROM watch_euvd_alias a WHERE a.cve_id=c.cve_id)",
+            "EXISTS(SELECT 1 FROM watch_euvd_override ov WHERE ov.cve_id=c.cve_id)",
+        ))
+    text_checks = " OR ".join("instr(lower(c.products_json),?)>0" for _ in names)
+    return "(" + " OR ".join((*bypass, "(" + text_checks + ")")) + ")", tuple(
+        name.lower() for name in names
     )
 
 
@@ -439,6 +464,7 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
                 if not names:
                     continue
                 names_json = json.dumps(names, ensure_ascii=False)
+                gate, gate_values = _name_filter_gate(names, catalogs)
                 euvd = "'[]'"
                 if "euvd" in catalogs:
                     override_items = (
@@ -461,9 +487,10 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
                         "JOIN watch_euvd_item i ON i.euvd_id=a.euvd_id "
                         "WHERE a.cve_id=c.cve_id),'[]') END"
                     )
-                where.append(
-                    f"watch_rule_name_match({products_json},{euvd},?,?)"
-                )
+                match = f"watch_rule_name_match({products_json},{euvd},?,?)"
+                where.append(f"CASE WHEN {gate} THEN {match} ELSE 0 END" if gate else match)
+                if gate:
+                    values.extend(gate_values)
                 values.extend((field, names_json))
         orders = {"published": "c.effective_published", "modified": "c.effective_last_modified", "cvss": score,
                   "epss": epss, "kev": kev_sql}
