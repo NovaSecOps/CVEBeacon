@@ -5,7 +5,8 @@ from pathlib import Path
 
 from .config import WATCH_INITIAL_MODES, WATCH_SOURCES, INVENTORY_FORMATS
 from .watch.catalog import SUPPORTED_LANGUAGES
-from .watch.channels import CHANNEL_TYPES, GROUPING_MODES, MESSAGE_FORMATS, SMTP_SECURITY, SMTP_DEFAULT_PORTS, TEAMS_BOT_FORMATS
+from .watch.channels import (CHANNEL_TYPES, COMMON_KEYS, GROUPING_MODES, MESSAGE_FORMATS,
+                             SMTP_SECURITY, SMTP_DEFAULT_PORTS, TEAMS_BOT_FORMATS, TYPE_KEYS)
 from .watch.records import CVSS_PROVIDERS
 from .watch.reported import IDENTITY_MODES
 from .watch.rules import EVENT_KINDS, OLD_CVES_MODES
@@ -108,6 +109,172 @@ EXAMPLES = {"condition": {"kev": "cisa"}, "channels": ["email"],
             "to": "alerts@example.com, security@example.com", "cc": "copy@example.com",
             "bcc": "copy@example.com", "recipients": "alerts@example.com",
             "name": "example", "cpe": "cpe:2.3:a:example:widget:*:*:*:*:*:*:*:*"}
+
+# Plain-language labels for every field identity in dashboard_config.FIELD_METADATA.
+# The raw setting key stays visible separately where these labels are rendered.
+_BASE_FIELD_LABELS = {
+    "watch.enabled": "Watch for new flaws",
+    "watch.database": "Watch data file",
+    "watch.sources": "Data sources",
+    "watch.initial": "First run",
+    "watch.backfill_days": "Days to look back on the first run",
+    "watch.overlap_minutes": "Overlap between checks (minutes)",
+    "watch.language": "Message language",
+    "sources.osv_enabled": "OSV",
+    "sources.nvd_enabled": "NVD",
+    "sources.cve_enabled": "CVE list",
+    "sources.euvd_enabled": "EU vulnerability database",
+    "sources.cisa_kev_enabled": "CISA known-exploited list",
+    "sources.eu_kev_enabled": "EU known-exploited list",
+    "sources.epss_enabled": "EPSS exploit scores",
+    "sources.nvd_api_key_env": "NVD API key (environment variable)",
+    "sources.nvd_api_key_file": "NVD API key (file)",
+    "sources.minimum_request_interval": "Minimum time between requests (seconds)",
+    "watch.reporting.identity": "Who may mark a CVE as reported",
+    "inventory.path": "Inventory file",
+    "inventory.format": "Inventory file format",
+    "inventory.worksheet": "Worksheet name",
+    "inventory.header_row": "Header row",
+    "inventory.records_path": "Records path",
+    "inventory.delimiter": "Column separator",
+    "inventory.encoding": "Text encoding",
+    "inventory.columns": "Column names",
+    "inventory.web_snapshots": "Include saved web snapshots in scans",
+    "inventory.managed": "Include client lists saved in the dashboard",
+    "dashboard.password_hash_env": "Password hash (environment variable)",
+    "dashboard.session_lifetime_seconds": "Maximum sign-in age (seconds)",
+    "dashboard.secure_cookie": "Secure sign-in cookie only",
+    "dashboard.session_idle_seconds": "Sign out after idle time (seconds)",
+    "http.connect_timeout": "Connection timeout (seconds)",
+    "http.read_timeout": "Read timeout (seconds)",
+    "http.retries": "Retries",
+    "http.backoff_seconds": "Wait between retries (seconds)",
+    "http.user_agent": "User agent",
+    "state.database": "State database file",
+    "output.directory": "Reports folder",
+    "backup.directory": "Backup folder",
+    "backup.retention_days": "Keep backups for (days)",
+    "backup.keep_min": "Always keep newest backups",
+    "backup.compress": "Compress dashboard downloads",
+    "notifications.teams.enabled": "Teams scan reports",
+    "notifications.teams.webhook_env": "Teams webhook (environment variable)",
+    "notifications.email.enabled": "Email scan reports",
+    "notifications.email.tenant_id_env": "Microsoft 365 tenant ID (environment variable)",
+    "notifications.email.client_id_env": "Microsoft 365 application ID (environment variable)",
+    "notifications.email.client_secret_env": "Microsoft 365 application secret (environment variable)",
+    "notifications.email.sender": "Send scan reports from",
+    "notifications.email.recipients": "Send scan reports to",
+    "watch.rules.name": "Rule name",
+    "watch.rules.condition": "Alert condition",
+    "watch.rules.channels": "Send alerts to",
+    "watch.rules.events": "Alert types",
+    "watch.rules.cvss_providers": "Score providers",
+    "watch.rules.enabled": "Rule enabled",
+    "watch.rules.old_cves": "Older CVEs",
+    "product_mappings.vendor": "Vendor name",
+    "product_mappings.product": "Product name",
+    "product_mappings.cpe": "CPE name",
+}
+_CHANNEL_KEY_LABELS = {
+    "type": "Channel type",
+    "name": "Name",
+    "enabled": "Enabled",
+    "grouping": "Group messages",
+    "max_items": "Maximum items per message",
+    "min_interval_seconds": "Minimum seconds between messages",
+    "timeout_seconds": "Request timeout (seconds)",
+    "allow_insecure": "Allow an unencrypted connection",
+    "notify_reported": "Include CVEs already marked as reported",
+    "language": "Message language",
+}
+_CHANNEL_TYPE_LABELS = {
+    "smtp": {
+        "host": "Mail server address",
+        "port": "Mail server port",
+        "security": "Connection security",
+        "username": "Mail account username",
+        "password_env": "Mail password (environment variable)",
+        "password_file": "Mail password (file)",
+        "from": "Send from",
+        "to": "Send to",
+        "cc": "Copy to",
+        "bcc": "Hidden copy to",
+        "format": "Message format",
+    },
+    "graph": {
+        "tenant_id": "Directory (tenant) ID",
+        "client_id": "Application (client) ID",
+        "client_secret_env": "Application secret (environment variable)",
+        "client_secret_file": "Application secret (file)",
+        "sender": "Send from",
+        "to": "Send to",
+        "cc": "Copy to",
+        "bcc": "Hidden copy to",
+        "format": "Message format",
+    },
+    "teams": {
+        "webhook_url_env": "Teams webhook address (environment variable)",
+        "webhook_url_file": "Teams webhook address (file)",
+    },
+    "teams_bot": {
+        "tenant_id": "Directory (tenant) ID",
+        "app_id": "Application (client) ID",
+        "client_secret_file": "Application secret (file)",
+        "recipients": "Recipients",
+        "conversation_references": "Conversation references",
+        "service_url": "Teams service address",
+        "format": "Message format",
+    },
+    "slack": {
+        "webhook_url_env": "Webhook address (environment variable)",
+        "webhook_url_file": "Webhook address (file)",
+    },
+    "discord": {
+        "webhook_url_env": "Webhook address (environment variable)",
+        "webhook_url_file": "Webhook address (file)",
+    },
+    "telegram": {
+        "bot_token_env": "Bot token (environment variable)",
+        "bot_token_file": "Bot token (file)",
+        "chat_id": "Chat ID",
+    },
+    "matrix": {
+        "homeserver": "Server address",
+        "room_id": "Room ID",
+        "access_token_env": "Access token (environment variable)",
+        "access_token_file": "Access token (file)",
+    },
+    "ntfy": {
+        "server": "Server address",
+        "topic": "Topic",
+        "token_env": "Access token (environment variable)",
+        "token_file": "Access token (file)",
+        "priority": "Priority",
+    },
+    "gotify": {
+        "server": "Server address",
+        "app_token_env": "Application token (environment variable)",
+        "app_token_file": "Application token (file)",
+        "priority": "Priority",
+    },
+    "webhook": {
+        "url": "Webhook address",
+        "url_env": "Webhook address (environment variable)",
+        "url_file": "Webhook address (file)",
+        "header_name": "Extra header name",
+        "header_value_env": "Extra header value (environment variable)",
+        "header_value_file": "Extra header value (file)",
+    },
+}
+FIELD_LABELS = {
+    **_BASE_FIELD_LABELS,
+    **{
+        f"watch.channels.{kind}.{key}": _CHANNEL_TYPE_LABELS.get(kind, {}).get(
+            key, _CHANNEL_KEY_LABELS.get(key, key.replace("_", " ").capitalize()))
+        for kind in CHANNEL_TYPES
+        for key in COMMON_KEYS | TYPE_KEYS[kind] | {"name"}
+    },
+}
 
 
 def metadata(path, key, default, kind, *, channel_type=None):

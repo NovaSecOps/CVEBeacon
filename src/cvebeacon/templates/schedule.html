@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% from 'ui.html' import page_header, card, callout, badge, button, link_button, term %}
+{% from 'ui.html' import page_header, card, callout, badge, button, link_button, term, explain %}
 {% block title %}Schedule · CVEBeacon{% endblock %}
 {% block head %}<script src="{{ url_for('static', filename='schedule.js') }}" defer></script>{% endblock %}
 {% block content %}
@@ -9,49 +9,50 @@
 
 {% call card('Current status', 'What this server currently has installed for CVEBeacon.') %}
 {% if status_error %}
-{% call callout('warning', 'Schedule status is unavailable') %}<p>{{ status_error }}</p><p>Check that the scheduler command is available to the account running the dashboard.</p>{% endcall %}
+{% call callout('warning', 'Schedule status is unavailable') %}<p>{{ status_error }}</p><p>Check that this computer allows the dashboard account to manage scheduled tasks.</p>{% endcall %}
 {% elif status_text == 'not installed' %}
 <p>{{ badge('Not installed', 'neutral') }}</p>
 <p>CVEBeacon does not run automatically yet. Install a schedule below, or ask an administrator to do it.</p>
 {% elif status_text %}
 <p>{{ badge('Installed', 'success') }}</p>
-<p>CVEBeacon is set to run automatically. The exact times and command are in the technical output below.</p>
+<p>CVEBeacon is set to run automatically. The exact times and what it runs are in the technical details below.</p>
 {% else %}
 <p>{{ badge('Unknown', 'warning') }}</p>
-<p>The scheduler returned no status. Check the technical output before relying on automatic runs.</p>
+<p>No schedule status was returned. Check the technical details before relying on automatic runs.</p>
 {% endif %}
-{% if status_text %}<details class="disclosure"><summary>Technical status output</summary><pre>{{ status_text }}</pre></details>{% endif %}
-<p class="muted">Platform: {{ platform_name }}. The schedule runs a separate <code>cvebeacon</code> command, not the dashboard process. Installation and removal are recorded in the account audit trail.</p>
+{% if status_text %}<details class="disclosure"><summary>Technical details</summary><p>Platform: {{ platform_name }}.</p><pre>{{ status_text }}</pre></details>{% endif %}
+<p class="muted">The schedule starts CVEBeacon separately from this dashboard. Installation and removal are recorded in the account audit trail.</p>
 {% endcall %}
 
 {% if block_reason %}
 {% call callout('warning', 'The dashboard cannot install a schedule here') %}<p>{{ block_reason }}</p><p>Use the command-line fallback below from the intended account instead.</p>{% endcall %}
 {% call card('Install or update') %}<p>The dashboard will not install a schedule in this setup.</p>{% endcall %}
 {% else %}
-{% call card('Install or update', 'Choose when CVEBeacon should run and which work it should do. Installing replaces any schedule the dashboard set up before.') %}
+{% call card('Install or update', 'Choose how often CVEBeacon should run and what it should do. Installing replaces any schedule the dashboard set up before.') %}
 <form method="post" class="stack" action="{{ url_for('operations.schedule_install') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}">
-<div class="field"><label for="schedule-mode">Schedule type</label>
-<select id="schedule-mode" name="mode" aria-describedby="schedule-mode-help"><option value="interval">Interval</option><option value="times">Fixed local times</option></select>
-<p class="help" id="schedule-mode-help">An interval repeats through the day. Fixed times use the server local clock.</p></div>
-<div class="field"><label for="schedule-every">Interval in hours</label>
+<div class="field"><label for="schedule-mode">How often</label>
+<select id="schedule-mode" name="mode" aria-describedby="schedule-mode-help"><option value="interval">Every N hours</option><option value="times">At fixed times</option></select>
+<p class="help" id="schedule-mode-help">Choose a number of hours between runs, or fixed times each day. Fixed times use this computer's clock.</p></div>
+<div class="field"><label for="schedule-every">Hours between runs</label>
 <input id="schedule-every" name="every" type="number" min="2" max="24" value="4" aria-describedby="schedule-every-help">
-<p class="help" id="schedule-every-help">Choose 2 to 24 hours. On Linux the interval must divide 24 hours evenly.</p></div>
-<div class="field"><label for="schedule-times">Times</label>
+<p class="help" id="schedule-every-help">Choose 2 to 24 hours. On Linux, the number of hours must divide 24 evenly.</p></div>
+<div class="field"><label for="schedule-times">Times of day</label>
 <input id="schedule-times" name="times" placeholder="07:00,19:00" maxlength="200" aria-describedby="schedule-times-help">
-<p class="help" id="schedule-times-help">Comma-separated 24-hour times, for example 07:00,19:00. Fixed times use the host local clock.</p></div>
-<div class="field"><label for="schedule-command">Command</label>
-<select id="schedule-command" name="command" aria-describedby="schedule-command-help">{% if has_inventory %}<option value="scan">Scan inventory</option>{% endif %}{% if watch_enabled %}<option value="watch" {% if not has_inventory %}selected{% endif %}>Watch for alerts</option>{% endif %}{% if allow_combined %}<option value="both" {% if default_command == 'both' %}selected{% endif %}>Both</option>{% endif %}</select>
-<p class="help" id="schedule-command-help">Scan checks the inventory for known flaws. Watch fetches public records and sends alerts for watched {{ term('CVEs', 'public IDs for known security flaws') }}. Both runs scan and watch together.</p>{% if allow_combined and not has_inventory %}<p class="help">Choose Both to run watch jobs now and add scans automatically after the first inventory upload.</p>{% endif %}</div>
-<details class="disclosure"><summary>Windows logged-out options (optional)</summary>
-<div class="field field-check"><input id="schedule-logged-out" name="run_logged_out" type="checkbox" value="yes"><label for="schedule-logged-out">Run while nobody is logged in (Windows only)</label></div>
+<p class="help" id="schedule-times-help">Comma-separated 24-hour times, for example 07:00,19:00. Fixed times use this computer's clock.</p></div>
+<div class="field"><label for="schedule-command">What to run</label>
+<select id="schedule-command" name="command" aria-describedby="schedule-command-help">{% if has_inventory %}<option value="scan">Check software (scan)</option>{% endif %}{% if watch_enabled %}<option value="watch" {% if not has_inventory %}selected{% endif %}>Watch for new flaws</option>{% endif %}{% if allow_combined %}<option value="both" {% if default_command == 'both' %}selected{% endif %}>Both</option>{% endif %}</select>
+<p class="help" id="schedule-command-help">Check software compares the inventory with known flaws. Watch fetches public records and sends alerts for watched {{ term('CVEs', 'public IDs for known security flaws') }}. Both runs the two together.</p>{% if allow_combined and not has_inventory %}<p class="help">Choose Both to run watch jobs now and add software checks after the first inventory upload.</p>{% endif %}</div>
+{% call explain('Windows only') %}
+<p>Use these options only on Windows when the schedule must run while nobody is signed in.</p>
+<div class="field field-check"><input id="schedule-logged-out" name="run_logged_out" type="checkbox" value="yes"><label for="schedule-logged-out">Run while nobody is signed in</label></div>
 <div class="field"><label for="schedule-account">Windows account</label>
 <input id="schedule-account" name="account" maxlength="256" autocomplete="off" disabled aria-describedby="schedule-account-help">
 <p class="help" id="schedule-account-help">The account that will own the scheduled task. Only needed for a logged-out Windows task.</p></div>
-<div class="field"><label for="schedule-password">Account password (Windows logged-out only; not kept by the dashboard)</label>
+<div class="field"><label for="schedule-password">Account password</label>
 <input id="schedule-password" name="password" type="password" maxlength="1024" autocomplete="off" disabled aria-describedby="schedule-password-help">
 <p class="help" id="schedule-password-help">A Windows logged-out task stores the password with the operating system task service. The dashboard passes it to the existing installer and does not keep or log it.</p></div>
-</details>
+{% endcall %}
 <div class="form-actions">{{ button('Install schedule') }}</div>
 </form>
 {% endcall %}
@@ -62,8 +63,8 @@
 {% endcall %}
 
 <details class="disclosure"{% if block_reason %} open{% endif %}><summary>Command-line fallback</summary>
-<p>Use the same command from the account that should own the schedule when the dashboard runs under a different account or service identity. The command is exactly equivalent to installing it from this page.</p>
+<p>Use this command from the account that should own the schedule when the dashboard runs under a different account or service identity. It installs the same schedule as this page.</p>
 <pre>{{ fallback_command }}</pre>
-<p class="muted">When <code>--password-stdin</code> appears, the command reads the Windows account password from one line on standard input and does not accept it as an argument. The scheduled command is short-lived and takes the same storage locks as dashboard jobs. If another run holds a required lock it exits with an error instead of changing data concurrently.</p>
+<p class="muted">When <code>--password-stdin</code> appears, the command reads the Windows account password from one line on standard input and does not accept it as an argument. The scheduled run is short-lived and uses the same data as dashboard tasks. If another task is using data it needs, it stops with an error instead of changing data at the same time.</p>
 </details>
 {% endblock %}

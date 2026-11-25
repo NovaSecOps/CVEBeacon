@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
+import re
 from typing import Any
 
 import pytest
@@ -8,6 +10,7 @@ from cvebeacon.watch.messages import (
     DeliveryEvent,
     build_messages,
     split_message,
+    teams_adaptive_card,
     webhook_payload,
 )
 from cvebeacon.watch.records import CVSSEntry, WatchView
@@ -686,21 +689,21 @@ def test_kev_due_is_escaped_like_other_dynamic_text():
     assert "Due 2026-\\[11\\]-20" in text
 
 
-@pytest.mark.parametrize("channel", ["smtp", "graph", "teams", "slack", "discord",
+@pytest.mark.parametrize("channel", ["smtp", "graph", "teams", "teams_bot", "slack", "discord",
                                     "telegram", "matrix", "ntfy", "gotify", "webhook"])
 @pytest.mark.parametrize(("entries", "expected_lines"), [
     ((), ("CVSS scores:", "CVSS not scored")),
     ((CVSSEntry("cna", "example.com", "3.1", 9.8),),
-     ("CVSS scores:", "CVSS 9.8 v3.1 (CNA: example.com) · critical")),
+     ("CVSS scores:", "9.8 critical · CVSS 3.1 · CNA: example.com")),
     ((CVSSEntry("nvd", "nvd", "2.0", 9.8),
       CVSSEntry("cna", "example.com", "3.1", 9.8),
       CVSSEntry("euvd", "euvd", "3.0", 6.2),
       CVSSEntry("cisa-adp", "", "4.0", 8.5, "CVSS:4.0/AV:N"),
       CVSSEntry("nvd", "nvd", "4.0", 9.9)),
-     ("CVSS scores:", "CVSS 9.9 v4.0 (NVD) · critical",
-      "CVSS 8.5 v4.0 (CISA-ADP) · high · CVSS:4.0/AV:N",
-      "CVSS 9.8 v3.1 (CNA: example.com) · critical",
-      "CVSS 6.2 v3.0 (EUVD) · medium", "CVSS 9.8 v2.0 (NVD) · high",
+     ("CVSS scores:", "9.9 critical · CVSS 4.0 · NVD",
+      "8.5 high · CVSS 4.0 · CISA-ADP",
+      "9.8 critical · CVSS 3.1 · CNA: example.com",
+      "6.2 medium · CVSS 3.0 · EUVD", "9.8 high · CVSS 2.0 · NVD",
       "Severity differs between CVSS versions")),
 ])
 def test_cvss_score_block_golden_by_channel(channel, entries, expected_lines):
@@ -740,6 +743,156 @@ def test_webhook_keeps_legacy_scores_and_adds_full_versioned_scores():
     assert result["cvss_note"] == "Severity differs between CVSS versions"
 
 
+@pytest.mark.parametrize(
+    ("channel", "format"),
+    (
+        ("smtp", "text"),
+        ("smtp", "html"),
+        ("graph", "html"),
+        ("teams", "text"),
+        ("teams_bot", "text"),
+        ("slack", "text"),
+        ("discord", "text"),
+        ("telegram", "text"),
+        ("matrix", "text"),
+        ("ntfy", "text"),
+        ("gotify", "text"),
+    ),
+)
+@pytest.mark.parametrize(("language", "high", "critical"),
+                         (("en", "high", "critical"),
+                          ("pt-PT", "alta", "crítica")))
+def test_human_score_lines_are_compact_and_keep_each_vectored_score(
+    channel, format, language, high, critical
+):
+    entries = (
+        CVSSEntry(
+            "nvd", "nvd", "4.0", 9.3,
+            "CVSS:4.0/AV:N/AC:H/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H",
+        ),
+        CVSSEntry(
+            "cna", "security@example.com", "3.1", 7.5,
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        ),
+    )
+    item = event(current=view(cvss=entries))
+    message, = build_messages(
+        (item,),
+        channel_type=channel,
+        grouping="run",
+        max_items=20,
+        names={item.rule: item.rule},
+        language=language,
+        format=format,
+    )
+    body = message.body if channel in {"smtp", "graph"} else message.text
+    heading = "CVSS scores:" if language == "en" else "Pontuações CVSS:"
+    start = body.index(heading + "\n") + len(heading + "\n")
+    lines = body[start:].splitlines()
+    assert lines[:2] == [
+        f"  9.3 {critical} · CVSS 4.0 · NVD",
+        f"  7.5 {high} · CVSS 3.1 · CNA: example.com",
+    ]
+    rendered = [body]
+    if channel in {"smtp", "graph"} and format == "html":
+        rendered.append(message.html)
+        assert "9.3 " + critical + " · CVSS 4.0 · NVD" in message.html
+        assert "7.5 " + high + " · CVSS 3.1 · CNA: example.com" in message.html
+    assert all("CVSS:4.0/" not in part for part in rendered)
+    assert all("CVSS:3.1/" not in part for part in rendered)
+    if channel in {"teams", "teams_bot"}:
+        card = teams_adaptive_card(message)
+        card_text = card["attachments"][0]["content"]["body"][0]["text"]
+        assert "9.3 " + critical + " · CVSS 4.0 · NVD" in card_text
+        assert "CVSS:4.0/" not in card_text
+
+
+def test_webhook_keeps_both_vectored_scores_unchanged():
+    version_4 = CVSSEntry(
+        "nvd", "nvd", "4.0", 9.3,
+        "CVSS:4.0/AV:N/AC:H/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H",
+    )
+    version_3 = CVSSEntry(
+        "cna", "security@example.com", "3.1", 7.5,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    )
+    current = view(cvss=(version_3,), additional_cvss=(version_4,))
+    result = webhook_payload((event(current=current),), {})["events"][0]["view"]
+    assert result["cvss"] == [
+        {"provider": "cna", "source": "security@example.com", "version": "3.1",
+         "score": 7.5, "vector": version_3.vector},
+    ]
+    assert result["cvss_scores"] == [
+        {"provider": "nvd", "source": "nvd", "version": "4.0",
+         "score": 9.3, "vector": version_4.vector, "severity": "critical"},
+        {"provider": "cna", "source": "security@example.com", "version": "3.1",
+         "score": 7.5, "vector": version_3.vector, "severity": "high"},
+    ]
+
+
+class _LongTokenParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.cells: list[bool] = []
+        self.long_runs: list[tuple[str, bool]] = []
+        self.in_head = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "head":
+            self.in_head = True
+        elif tag == "td":
+            style = dict(attrs).get("style", "")
+            self.cells.append(all(
+                css in style
+                for css in (
+                    "overflow-wrap:anywhere",
+                    "word-wrap:break-word",
+                    "word-break:break-word",
+                )
+            ))
+
+    def handle_endtag(self, tag):
+        if tag == "head":
+            self.in_head = False
+        elif tag == "td" and self.cells:
+            self.cells.pop()
+
+    def handle_data(self, data):
+        if self.in_head:
+            return
+        for run in re.findall(r"\S+", data):
+            if len(run) > 40:
+                self.long_runs.append((run, any(self.cells)))
+
+
+def test_html_email_is_fluid_wrapped_and_has_no_unsupported_content():
+    token = "ProductIdentifier" * 8
+    rule = "RuleIdentifier" * 8
+    item = event(rule=rule, current=view(description=token))
+    message, = build_messages(
+        (item,),
+        channel_type="smtp",
+        grouping="run",
+        max_items=20,
+        names={rule: rule},
+        format="html",
+    )
+    markup = message.html
+    assert re.search(
+        r'<table[^>]*width="100%"[^>]*style="[^"]*max-width:600px;',
+        markup,
+    )
+    assert 'name="viewport"' in markup
+    assert "overflow-wrap:anywhere" in markup
+    assert "word-wrap:break-word" in markup
+    assert "word-break:break-word" in markup
+    assert not re.search(r"<(?:details|script|img|style|link)\b", markup, re.I)
+    parser = _LongTokenParser()
+    parser.feed(markup)
+    assert parser.long_runs
+    assert all(wrapped for _, wrapped in parser.long_runs)
+
+
 def test_qualified_alert_title_and_webhook_use_the_stored_matching_score():
     selected = CVSSEntry("nvd", "nvd", "3.1", 7.0)
     newer = CVSSEntry("nvd", "nvd", "4.0", 9.9)
@@ -754,7 +907,7 @@ def test_qualified_alert_title_and_webhook_use_the_stored_matching_score():
     assert "CVSS 7 v3.1 (NVD) · EPSS" in headers[0]
     assert "CVSS 9.9 v4.0 (NVD) · EPSS" in headers[1]
     assert "CVSS 7 v3.1 (NVD) · EPSS" in message.html
-    assert "CVSS 9.9 v4.0 (NVD) · critical" in message.body
+    assert "9.9 critical · CVSS 4.0 · NVD" in message.body
     document = webhook_payload((item,), {})
     assert document["events"][0]["view"]["cvss_selected"] == selected.as_dict()
 
