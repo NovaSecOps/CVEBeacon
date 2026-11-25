@@ -2731,6 +2731,12 @@ def _rule_builder_render_context(section, document, count):
     }
 
 
+def _field_labels_render_context():
+    from .dashboard_config_fields import FIELD_LABELS
+
+    return {"field_labels": FIELD_LABELS}
+
+
 def register_config(app, config, *, host):
     """Register isolated routes and a dispatcher for immutable reloads."""
     from .dashboard import requires
@@ -2846,6 +2852,7 @@ def register_config(app, config, *, host):
                                     can_admin=g.user.is_admin)
                 return render_template("config_section.html", section=section,
                                        groups=groups,
+                                       **_field_labels_render_context(),
                                        **_rule_builder_render_context(
                                            section, document, len(groups)),
                                        version=version, preview=preview, diff=diff, lockout=lockout,
@@ -2885,6 +2892,7 @@ def register_config(app, config, *, host):
                     control["value"] = retained
                     control["checked"] = submitted == "true" or submitted == "" and control["spec"].default is True
             return render_template("config_section.html", section=section, groups=groups,
+                                   **_field_labels_render_context(),
                                    **_rule_builder_render_context(
                                        section, document, len(groups)),
                                    version=version, error=error, events=EVENT_KINDS,

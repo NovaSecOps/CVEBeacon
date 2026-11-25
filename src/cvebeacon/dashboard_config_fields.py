@@ -78,22 +78,22 @@ HELP = {
     "security": "SMTP transport security. Unencrypted SMTP also requires allow_insecure.",
     "grouping": "Group notifications per run or per event.",
     "priority": "Notification priority; higher numbers are more urgent.",
-    "condition": "TOML condition table. Combine leaves with any, all or not; see the valid leaves below.",
+    "condition": "Describe the conditions this rule should match.",
     "identity": "Who may record reporting: open, registered users, or authenticated users.",
     "enabled": "Enable this section or row.",
     "allow_insecure": "Allow unencrypted transport only on a trusted connection.",
     "notify_reported": "Include CVEs already marked as reported.",
     "language": "Language used for delivered messages.",
-    "sources": "TOML array of source names; nvd is required.",
-    "channels": "TOML array of existing channel names.",
-    "events": "TOML array of event triggers.",
-    "cvss_providers": "TOML array of accepted score providers.",
-    "columns": "TOML table mapping inventory field names to input column names.",
+    "sources": "List of source names; nvd is required.",
+    "channels": "List of existing channel names.",
+    "events": "List of event triggers.",
+    "cvss_providers": "List of accepted score providers.",
+    "columns": "Match software list fields to their column headings.",
     "managed": "Include current client inventories saved from the dashboard.",
-    "to": "Comma-separated email addresses or a TOML array. Spaces and duplicate addresses are removed.",
-    "cc": "Optional copy recipients, separated by commas or entered as a TOML array.",
-    "bcc": "Optional hidden-copy recipients, separated by commas or entered as a TOML array.",
-    "recipients": "Comma-separated email addresses or a TOML array.",
+    "to": "Comma-separated email addresses or a list. Spaces and duplicate addresses are removed.",
+    "cc": "Optional copy recipients, separated by commas or entered as a list.",
+    "bcc": "Optional hidden-copy recipients, separated by commas or entered as a list.",
+    "recipients": "Comma-separated email addresses or a list.",
     "session_lifetime_seconds": "Absolute session lifetime in seconds.",
     "session_idle_seconds": "End sessions after this many seconds without a request.",
     "secure_cookie": "Send session cookies only over HTTPS.",
@@ -333,17 +333,17 @@ def metadata(path, key, default, kind, *, channel_type=None):
     elif key.endswith("_env"):
         help_text = "Environment variable name, never its secret contents. Changing references requires manage_secrets."
     elif key.endswith("_file"):
-        help_text = "Protected secret file reference. Path changes require an administrator; contents are never displayed."
+        help_text = "Owner-only secret file reference. Path changes require an administrator; contents are never displayed."
     elif key.endswith("_enabled"):
         help_text = "Enable this vulnerability source."
     elif not help_text:
         help_text = ("Number of seconds." if key.endswith(("_seconds", "_timeout"))
-                     else "Enter " + key.replace("_", " ") + " as " + ("a TOML value." if kind == "toml" else "plain text."))
+                     else "Enter " + key.replace("_", " ") + " as " + ("a list or table, as in the example." if kind == "toml" else "plain text."))
     minimum_exclusive = identity in {"http.connect_timeout", "http.read_timeout", "http.backoff_seconds", "sources.minimum_request_interval"}
     if minimum_exclusive:
         help_text += " Must be greater than zero."
     if identity == "notifications.email.recipients":
-        help_text = "Legacy recipient names or addresses, separated by commas or entered as a TOML array. Existing ordering and duplicates are retained."
+        help_text = "Legacy recipient names or addresses, separated by commas or entered as a list. Existing ordering and duplicates are retained."
     example = EXAMPLES.get(key, choices[0] if choices else default if default is not None else "example")
     if path == "backup" and key == "directory":
         example = "backups"
