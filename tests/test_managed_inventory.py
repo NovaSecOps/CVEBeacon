@@ -1,7 +1,10 @@
 """Dashboard-managed inventory participates in the normal inventory loader."""
 
 from dataclasses import asdict
+from datetime import datetime, timezone
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -9,7 +12,7 @@ from cvebeacon.config import load_config
 from cvebeacon.inventory import load_inventory
 from cvebeacon.models import Asset
 from cvebeacon.private_storage import private_directory
-from cvebeacon.web_assets import replace_bytes
+from cvebeacon.web_assets import replace_bytes, save_allowlist
 from cvebeacon.managed_inventory import client_key
 
 
@@ -170,6 +173,113 @@ def test_unsafe_inventory_directory_is_reported(tmp_path, caplog):
     config.inventory_directory.write_text("ordinary file", encoding="utf-8")
     assert config.effective_inventory is None
     assert "inventory storage is not a directory" in caplog.text
+
+
+def test_reserved_inventory_loads_with_configured_file_and_client_files(tmp_path):
+    configured = tmp_path / "configured.json"
+    configured.write_text(json.dumps([asdict(Asset("configured", "v", "p", "1"))]), encoding="utf-8", newline="\n")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"[state]\ndatabase='state.db'\n[inventory]\npath='{configured.name}'\n", encoding="utf-8", newline="\n",
+    )
+    config = load_config(config_path)
+    clients = [write_managed(config.inventory_directory, "First client", "client-1"),
+               write_managed(config.inventory_directory, "Second client", "client-2")]
+    legacy_bytes = [path.read_bytes() for path in clients]
+    no_client = Asset("personal", "v", "p", "1")
+    replace_bytes(config.inventory_directory / "unassigned.json", json.dumps([asdict(no_client)]).encode("utf-8"))
+
+    assert {asset.asset_id for asset in load_inventory(config.effective_inventory)} == {
+        "configured", "client-1", "client-2", "personal",
+    }
+    assert [path.read_bytes() for path in clients] == legacy_bytes
+    assert not list(config.inventory_directory.glob("*.client"))
+
+
+def test_reserved_inventory_alone_activates_effective_inventory(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[state]\ndatabase='state.db'\n[watch]\nenabled=true\n", encoding="utf-8", newline="\n")
+    config = load_config(path)
+    private_directory(config.inventory_directory, owner_only=True)
+    reserved = Asset("personal", "v", "p", "1")
+    replace_bytes(config.inventory_directory / "unassigned.json", json.dumps([asdict(reserved)]).encode("utf-8"))
+
+    assert config.effective_inventory.managed_directory == config.inventory_directory
+    assert load_inventory(config.effective_inventory) == [reserved]
+
+
+@pytest.mark.parametrize("labels", [("", ""), ("Example", "Example")])
+def test_reserved_reader_accepts_blank_or_one_uniform_label(labels):
+    from cvebeacon.managed_inventory import read_unassigned_inventory
+
+    rows = [asdict(Asset(f"asset-{index}", "v", "p", "1", client=label))
+            for index, label in enumerate(labels)]
+    assert [asset.client for asset in read_unassigned_inventory(json.dumps(rows).encode("utf-8"))] == list(labels)
+
+
+def test_reserved_reader_rejects_mixed_labels():
+    from cvebeacon.managed_inventory import read_unassigned_inventory
+
+    rows = [asdict(Asset("one", "v", "p", "1")), asdict(Asset("two", "v", "p", "1", client="Example"))]
+    with pytest.raises(ValueError, match="same client"):
+        read_unassigned_inventory(json.dumps(rows).encode("utf-8"))
+
+
+@pytest.mark.parametrize("source", ["configured", "client", "web snapshot"])
+def test_reserved_ids_are_unique_case_insensitively_across_sources(tmp_path, source):
+    from cvebeacon.errors import InventoryValidationError
+
+    configured = tmp_path / "configured.json"
+    configured.write_text(json.dumps([asdict(Asset("configured", "v", "p", "1"))]), encoding="utf-8", newline="\n")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"[state]\ndatabase='state.db'\n[inventory]\npath='{configured.name}'\nweb_snapshots=true\n",
+        encoding="utf-8", newline="\n",
+    )
+    config = load_config(config_path)
+    private_directory(config.inventory_directory, owner_only=True)
+    if source == "configured":
+        configured.write_text(json.dumps([asdict(Asset("duplicate", "v", "p", "1"))]), encoding="utf-8", newline="\n")
+    elif source == "client":
+        write_managed(config.inventory_directory, "Example", "duplicate")
+    else:
+        web_directory = config.database_path.parent / "web-inventory"
+        private_directory(web_directory, owner_only=True)
+        snapshot = web_directory / "assets.json"
+        rows = [dict(asset_id="duplicate", vendor="v", product="p", version="1", client="Web")]
+        timestamp = datetime.now(timezone.utc).isoformat()
+        save_allowlist(snapshot, rows)
+        manifest = dict(
+            contract="cvebeacon.inventory.v1", collector="web-detect", collector_version="0.1.0",
+            source_id="web", generated_at=timestamp, observed_at=timestamp,
+            sha256=hashlib.sha256(snapshot.read_bytes()).hexdigest(), record_count=1,
+            status="success", omissions=[],
+        )
+        save_allowlist(Path(str(snapshot) + ".manifest.json"), manifest)
+    duplicate = Asset("DUPLICATE", "v", "p", "1")
+    replace_bytes(config.inventory_directory / "unassigned.json", json.dumps([asdict(duplicate)]).encode("utf-8"))
+
+    with pytest.raises(InventoryValidationError, match="An asset ID is shared"):
+        load_inventory(config.effective_inventory, snapshot_directory=config.database_path.parent / "web-inventory")
+
+
+def test_client_named_unassigned_does_not_collide_with_reserved_stem(tmp_path):
+    from cvebeacon.managed_inventory import archive_path, inventory_files, is_managed_file, profiles
+
+    directory = tmp_path / "inventories"
+    private_directory(directory, owner_only=True)
+    client_path = write_managed(directory, "unassigned", "named-client")
+    reserved_path = directory / "unassigned.json"
+    replace_bytes(reserved_path, json.dumps([asdict(Asset("no-client", "v", "p", "1"))]).encode("utf-8"))
+
+    assert client_path != reserved_path
+    assert {path.name for path in inventory_files(directory)} == {client_path.name, "unassigned.json"}
+    archived = archive_path(reserved_path)
+    assert is_managed_file(reserved_path)
+    assert is_managed_file(archived)
+    assert not is_managed_file(directory / "unassigned.client")
+    assert not is_managed_file(directory / "unassigned-extra.json")
+    assert profiles(directory) == ()
 
 
 def test_scan_explains_missing_requested_report_when_inventory_is_partial(tmp_path, monkeypatch, capsys):
