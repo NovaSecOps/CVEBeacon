@@ -318,6 +318,8 @@ def test_systemd_timer_probe_fails_closed(mode, tmp_path):
 
 
 def test_missing_timer_policy_uses_cron_and_does_not_query_systemd(tmp_path, monkeypatch):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     app = dashboard.create_app(config)
     runner, calls = _systemd_runner(config.config_path)
@@ -333,6 +335,8 @@ def test_missing_timer_policy_uses_cron_and_does_not_query_systemd(tmp_path, mon
 def test_policy_presence_ignores_contents_and_blocks_cron_for_custom_units(
     tmp_path, monkeypatch
 ):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     _allow_test_account_storage(monkeypatch)
     config = replace(
         make_config(tmp_path), update=UpdateConfig(enabled=False)
@@ -390,6 +394,8 @@ def test_policy_presence_ignores_contents_and_blocks_cron_for_custom_units(
 
 
 def test_schedule_page_shows_systemd_timer_and_refuses_cron_install(tmp_path, monkeypatch):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     _allow_test_account_storage(monkeypatch)
     new_accounts(config)
@@ -428,6 +434,8 @@ def test_schedule_page_shows_systemd_timer_and_refuses_cron_install(tmp_path, mo
 
 
 def test_home_and_operations_use_the_same_active_timer_state(tmp_path, monkeypatch):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     _allow_test_account_storage(monkeypatch)
     new_accounts(config)
@@ -454,6 +462,8 @@ def test_home_and_operations_use_the_same_active_timer_state(tmp_path, monkeypat
 
 
 def test_timer_remove_control_remains_available_for_managed_cron(tmp_path, monkeypatch):
+    # Timer detection is Linux-only; read the fakes as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     _allow_test_account_storage(monkeypatch)
     new_accounts(config)
