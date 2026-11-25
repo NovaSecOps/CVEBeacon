@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import stat
 from datetime import datetime
 
@@ -266,7 +267,7 @@ def test_operations_shows_installed_cron_to_viewer(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     new_accounts(config)
     app = dashboard.create_app(config)
-    state = {"text": scheduling.CRON_BEGIN + f"\n0 */4 * * * cvebeacon --config {config.config_path} watch run\n" + scheduling.CRON_END}
+    state = {"text": scheduling.CRON_BEGIN + f"\n0 */4 * * * cvebeacon --config {shlex.quote(str(config.config_path))} watch run\n" + scheduling.CRON_END}
     app.extensions["dashboard_schedule_runner"] = fake_scheduler(state)[0]
     monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     client = app.test_client()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import sqlite3
 
 import pytest
@@ -215,7 +216,9 @@ def test_home_inventory_notice_is_plain_language(watch_only):
     assert "[inventory]" not in visible(text)
 
 
-def test_operations_account_less_copy(watch_only):
+def test_operations_account_less_copy(watch_only, monkeypatch):
+    # The fake scheduler output is cron output; read it as Linux on every runner.
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     _, _, client = watch_only
     response = client.get("/operations/")
     assert response.status_code == 200
@@ -406,12 +409,13 @@ def test_jobs_and_operations_tables_say_task(signed_in):
         assert "<th>Operation</th>" not in text, path
 
 
-def test_operations_shows_a_plain_schedule_summary(tmp_path):
+def test_operations_shows_a_plain_schedule_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path, inventory=False)
     app = dashboard.create_app(config)
     installed = (
         scheduling.CRON_BEGIN
-        + f"\n0 */4 * * * cvebeacon --config {config.config_path} watch run\n"
+        + f"\n0 */4 * * * cvebeacon --config {shlex.quote(str(config.config_path))} watch run\n"
         + scheduling.CRON_END
     )
     app.extensions["dashboard_schedule_runner"] = fake_scheduler(installed)
