@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 
 import pytest
 
 from cvebeacon import dashboard, scheduling
+from cvebeacon.locking import RunLock, run_lock_path
 from cvebeacon.models import (
     Applicability,
     Asset,
@@ -15,6 +17,7 @@ from cvebeacon.models import (
     Vulnerability,
 )
 from cvebeacon.state import StateStore
+from cvebeacon.watch.store import DELIVERY_MAX_ATTEMPTS
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
 from watch_support import write_config
 
@@ -50,13 +53,19 @@ def fake_scheduler(text=""):
 
 
 def visible(html: str) -> str:
-    """Remove text that the design allows to be technical."""
-    without_details = re.sub(
-        r"<details\b[^>]*>.*?</details>", "", html, flags=re.S | re.I
-    )
+    """Remove only the contents of the approved explain disclosures."""
     return re.sub(
-        r"<code\b[^>]*>.*?</code>", "", without_details, flags=re.S | re.I
+        r'(<div\b(?=[^>]*\bclass=["\'][^"\']*\bexplain-body\b)[^>]*>).*?(</div>)',
+        r"\1\2",
+        html,
+        flags=re.S | re.I,
     )
+
+
+def assert_no_banned_technical_words(html: str) -> None:
+    text = visible(html).casefold()
+    for word in BANNED_OUTSIDE_DETAILS:
+        assert word.casefold() not in text, word
 
 
 def h1(html: str) -> str:
@@ -148,9 +157,16 @@ def test_banned_technical_words_stay_inside_disclosures(signed_in, tmp_path):
     for path in pages:
         response = client.get(path)
         assert response.status_code == 200, path
-        text = visible(response.text).casefold()
-        for word in BANNED_OUTSIDE_DETAILS:
-            assert word.casefold() not in text, (path, word)
+        assert_no_banned_technical_words(response.text)
+
+
+@pytest.mark.parametrize(
+    "html",
+    ("<code>cron</code>", "<pre>cron</pre>", "<details><code>cron</code></details>"),
+)
+def test_banned_technical_word_outside_explain_is_flagged(html):
+    with pytest.raises(AssertionError, match="cron"):
+        assert_no_banned_technical_words(html)
 
 
 def test_home_uses_plain_names_for_changes_and_delivery(signed_in):
@@ -210,9 +226,21 @@ def test_operations_account_less_copy(watch_only):
     assert 'href="/bootstrap"' in text
     assert "cvebeacon users add" in text
     assert "cvebeacon users add" not in visible(text)
+    assert "Not scheduled" in text
 
 
-def test_watch_overview_copy(signed_in):
+def test_watch_overview_alert_timing_and_operations_link(signed_in):
+    _, _, client = signed_in
+    text = client.get("/watch").text
+    assert (
+        "Alerts are queued when a rule matches. They go out the next time "
+        "watch monitoring runs, or when you choose <strong>Deliver pending alerts</strong> "
+        "on <a href=\"/operations/\">Operations</a>."
+    ) in text
+    assert 'href="/operations/">Operations</a>' in text
+
+
+def test_watch_overview_backfill_copy(signed_in):
     config, _, client = signed_in
     from cvebeacon.watch.store import WatchStore
 
@@ -226,22 +254,49 @@ def test_watch_overview_copy(signed_in):
             "initial_evaluated_at": "2026-11-03T12:11:00+00:00",
         }
     )
-
     text = client.get("/watch").text
-    assert (
-        "Alerts are queued when a rule matches. They are sent the next time "
-        "CVEBeacon runs, or when you press Deliver pending alerts on the"
-    ) in text
+    assert "First load" in text
+    assert "Alerts for flaws in the window shown above" in text
+    assert "Backfill</strong> sends alerts for flaws published in the window shown above." in text
+    assert "last few days" not in text
+    assert "backfill" in text
+    assert '<summary>Technical details</summary>' in text
+    assert '<dt>First load mode (stored value)</dt><dd>backfill</dd>' in text
+
+
+def test_gave_up_is_counted_inside_failed(signed_in):
+    config, _, client = signed_in
+    from cvebeacon.watch.store import WatchStore
+
+    watch_store = WatchStore(config.watch.database)
+    watch_store.initialize()
+    with watch_store.transaction() as db:
+        cursor = db.execute(
+            "INSERT INTO watch_event(rule,cve_id,kind,reasons_json,details_json,"
+            "occurrence,initial,created_at) VALUES (?,?,?,?,?,?,0,?)",
+            ("fixture", "CVE-2026-9999", "new", "[]", "{}", "fixture", "2026-11-03T12:00:00Z"),
+        )
+        db.execute(
+            "INSERT INTO watch_delivery(event_id,channel,status,attempts,last_error,updated_at) "
+            "VALUES (?, 'fixture', 'failed', ?, 'failure', '2026-11-03T12:00:00Z')",
+            (cursor.lastrowid, DELIVERY_MAX_ATTEMPTS),
+        )
+    status = next(row for row in watch_store.delivery_status() if row.channel == "fixture")
+    assert status.failed == 1 and status.given_up == 1
+    text = client.get("/watch").text
+    assert "Gave up is counted inside Failed." in text
+    assert "<td class=\"num\">1</td>" in text
+
+
+def test_watch_overview_delivery_help(signed_in):
+    _, _, client = signed_in
+    text = client.get("/watch").text
     assert "Gave up" in text
     assert "Unsure" in text
     assert (
         "Unsure means the service may or may not have received the alert. "
         "Check the destination before sending again."
     ) in text
-    assert "First load" in text
-    assert "Recent flaws alerted" in text
-    assert "backfill" not in visible(text).casefold()
-    assert "backfill" in text
 
 
 def test_watch_events_copy(signed_in):
@@ -269,22 +324,72 @@ def test_sources_copy(signed_in):
     assert "catalogues" not in text.casefold()
 
 
-def test_job_page_copy(signed_in):
+def test_queued_job_cancel_copy(signed_in):
     _, app, client = signed_in
-    job = app.extensions["dashboard_jobs"].store.create(
+    store = app.extensions["dashboard_jobs"].store
+    queued = store.create(
         "watch-refresh", "admin", ["cvebeacon", "watch", "refresh", "CVE-2026-0001"]
     )
-    text = client.get(f"/operations/jobs/{job.id}").text
-    assert "Result code" in text
+    text = client.get(f"/operations/jobs/{queued.id}").text
+    assert "Cancelling removes this queued job before it starts." in text
+    assert "How cancellation works" not in text
+    assert "SIGINT" not in text
+    assert "Result</dt>" in text
+    assert "Result code" not in text
     assert "Exit code" not in text
+
+
+def test_running_job_cancellation_discloses_signal_and_cleanup(signed_in):
+    _, app, client = signed_in
+    store = app.extensions["dashboard_jobs"].store
+    running = store.create(
+        "watch-refresh", "admin", ["cvebeacon", "watch", "refresh", "CVE-2026-0001"]
+    )
+    assert store.mark_running(running.id)
+    text = client.get(f"/operations/jobs/{running.id}").text
     assert (
         "Cancelling asks the job to stop and clean up. The result shows whether "
         "it finished cleanly."
     ) in text
     assert "SIGINT" in text
     assert "SIGINT" not in visible(text)
-    assert "Deliver pending alerts" in text
-    assert "watch notify" not in visible(text)
+
+
+def test_job_result_codes_are_in_technical_details(signed_in):
+    _, app, client = signed_in
+    store = app.extensions["dashboard_jobs"].store
+    failed = store.create("scan", "admin", ["cvebeacon", "scan"])
+    store.finish(failed.id, "failed", exit_code=2, message="bad")
+    detail = client.get(f"/operations/jobs/{failed.id}").text
+    history = client.get("/operations/jobs").text
+    for page in (detail, history):
+        assert "Failed" in page
+        assert "Validation or operational failure" in page
+        assert "<summary>Technical details</summary>" in page
+        assert "Result code: <code class=\"num\">2</code>" in page
+        assert "Result code:" not in visible(page)
+        assert re.search(r'<span class="num(?: nowrap)?">2</span>', visible(page)) is None
+
+
+def test_job_page_alert_timing_copy(signed_in):
+    _, app, client = signed_in
+    job = app.extensions["dashboard_jobs"].store.create(
+        "watch-refresh", "admin", ["cvebeacon", "watch", "refresh", "CVE-2026-0001"]
+    )
+    text = client.get(f"/operations/jobs/{job.id}").text
+    assert "the next time watch monitoring runs" in text
+    assert "when you choose <strong>Deliver pending alerts</strong> on Operations." in text
+
+
+def test_operations_hides_raw_external_command_in_technical_details(signed_in):
+    config, _, client = signed_in
+    with RunLock(run_lock_path(config), command="watch run"):
+        text = client.get("/operations/").text
+    assert "Another task is running" in text
+    assert "watch run" in text
+    assert "watch run" not in visible(text)
+    assert "<summary>Technical details</summary>" in text
+    assert "Command: <code>watch run</code>" in text
 
 
 def test_jobs_and_operations_tables_say_task(signed_in):
@@ -303,7 +408,7 @@ def test_operations_shows_a_plain_schedule_summary(tmp_path):
     app = dashboard.create_app(config)
     installed = (
         scheduling.CRON_BEGIN
-        + "\n0 */4 * * * cvebeacon watch run\n"
+        + f"\n0 */4 * * * cvebeacon --config {config.config_path} watch run\n"
         + scheduling.CRON_END
     )
     app.extensions["dashboard_schedule_runner"] = fake_scheduler(installed)
@@ -313,6 +418,7 @@ def test_operations_shows_a_plain_schedule_summary(tmp_path):
         assert response.status_code == 200
         assert "Scheduled automatically" in response.text
         assert "cron" not in visible(response.text).casefold()
+        assert "Not scheduled" not in response.text
     finally:
         app.extensions["dashboard_jobs"].shutdown()
 

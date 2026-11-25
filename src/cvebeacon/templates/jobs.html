@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% set nav_active = 'operations.index' %}
 {% from 'watch_macros.html' import stamp %}
-{% from 'ui.html' import page_header, callout, empty_state, table_wrap, badge, link_button %}
+{% from 'ui.html' import page_header, callout, empty_state, table_wrap, badge, link_button, explain %}
 {% block title %}Job history · CVEBeacon{% endblock %}
 {% block content %}
 {% call page_header('Job history', 'Every task the dashboard has started. Open a job to see its log and result.') %}{{ link_button('Back to Operations', url_for('operations.index'), kind='secondary') }}{% endcall %}
@@ -19,7 +19,7 @@
 <td>{{ badge(status_labels.get(job.status, job.status), status_variants.get(job.status, 'neutral')) }}{% if job.id in queue_details %}<br><span class="muted">{{ queue_details[job.id] }}</span>{% endif %}</td>
 <td>{{ job.started_by }}</td>
 <td><span class="muted">Queued</span> <span class="nowrap">{{ stamp(job.created_at) }}</span><br><span class="muted">Started</span> <span class="nowrap">{{ stamp(job.started_at) if job.started_at else 'Not started' }}</span><br><span class="muted">Ended</span> <span class="nowrap">{{ stamp(job.ended_at) if job.ended_at else 'Not finished' }}</span></td>
-<td>{% if job.exit_code is not none %}<span class="num nowrap">{{ job.exit_code }}</span> {{ job.exit_meaning }}{% endif %}</td>
+<td>{% if job.exit_code is not none %}{{ job.exit_meaning }}{% call explain('Technical details') %}<p>Result code: <code class="num">{{ job.exit_code }}</code></p>{% endcall %}{% endif %}</td>
 <td class="break">{{ job.message or '' }}</td>
 </tr>{% endfor %}
 </tbody></table>{% endcall %}

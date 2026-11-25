@@ -24,8 +24,8 @@
   {{ stat(status.reported, 'Reported to clients', 'Report marks that are currently active.', href=url_for('watch.reported')) }}
 {% endcall %}
 
-{% call card('How alerts arrive', 'A watch rule creates an alert when it matches a CVE. The alert is sent the next time CVEBeacon runs.') %}
-<p>Alerts are queued when a rule matches. They are sent the next time CVEBeacon runs, or when you press Deliver pending alerts on the <a href="{{ url_for('operations.index') }}">Operations page</a>. Unsent alerts stay queued and appear in the delivery table below.</p>
+{% call card('How alerts arrive', 'A watch rule creates an alert when it matches a CVE. The alert goes out the next time watch monitoring runs.') %}
+<p>Alerts are queued when a rule matches. They go out the next time watch monitoring runs, or when you choose <strong>Deliver pending alerts</strong> on <a href="{{ url_for('operations.index') }}">Operations</a>. Unsent alerts stay queued and appear in the delivery table below.</p>
 {% call callout('info', 'What an empty list does not mean') %}
 <p>No alert means no stored rule matched. It is not proof that a flaw is absent, not exploited, or not present in your systems.</p>
 {% endcall %}
@@ -65,13 +65,13 @@
 </tr>{% else %}<tr><td colspan="7">No channels are configured and no deliveries are recorded.</td></tr>{% endfor %}</tbody>
 </table>
 {% endcall %}
-<p class="help">Pending means queued but not sent yet. Unsure means the service may or may not have received the alert. Check the destination before sending again.</p>
+<p class="help">Pending means queued but not sent yet. Gave up is counted inside Failed. Unsure means the service may or may not have received the alert. Check the destination before sending again.</p>
 {% endcall %}
 
 {% call card('First load', 'How the first history window was filled when this instance started.') %}
 {% set first_load_labels = {
   'baseline': 'Existing flaws recorded silently',
-  'backfill': 'Recent flaws alerted',
+  'backfill': 'Alerts for flaws in the window shown above',
   'full': 'Everything stored',
   'not initialized': 'Not started yet',
 } %}
@@ -83,7 +83,7 @@
   <dt>First alert check finished</dt><dd>{{ stamp(initial.evaluated_at) }}{% if initial.evaluation_pending %} {{ badge('Pending', 'warning') }}{% endif %}</dd>
 </dl>
 {% call explain('What do the first-load modes mean?') %}
-<p><strong>Baseline</strong> records existing flaws silently, so the first load does not raise alerts for old flaws. <strong>Backfill</strong> alerts on flaws from the last few days. <strong>Full</strong> stores everything and can alert on it.</p>
+<p><strong>Baseline</strong> records existing flaws silently, so the first load does not raise alerts for old flaws. <strong>Backfill</strong> sends alerts for flaws published in the window shown above. <strong>Full</strong> stores everything and can alert on it.</p>
 {% endcall %}
 {% endcall %}
 

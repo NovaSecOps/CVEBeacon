@@ -266,12 +266,50 @@ def test_operations_shows_installed_cron_to_viewer(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     new_accounts(config)
     app = dashboard.create_app(config)
-    state = {"text": scheduling.CRON_BEGIN + "\n0 */4 * * * cvebeacon watch run\n" + scheduling.CRON_END}
+    state = {"text": scheduling.CRON_BEGIN + f"\n0 */4 * * * cvebeacon --config {config.config_path} watch run\n" + scheduling.CRON_END}
     app.extensions["dashboard_schedule_runner"] = fake_scheduler(state)[0]
     monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     client = app.test_client()
     login(client, "viewer")
     try:
         assert "Scheduled automatically" in client.get("/operations/").text
+    finally:
+        app.extensions["dashboard_jobs"].shutdown()
+
+
+def test_operations_reports_unknown_for_unrecognized_cron(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    state = {"text": scheduling.CRON_BEGIN + "\n0 */4 * * * cvebeacon watch run\n" + scheduling.CRON_END}
+    app.extensions["dashboard_schedule_runner"] = fake_scheduler(state)[0]
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    client = app.test_client()
+    login(client, "viewer")
+    try:
+        text = client.get("/operations/").text
+        assert "Unknown" in text
+        assert "Could not confirm an automatic schedule for this configuration." in text
+        assert "Scheduled automatically" not in text
+    finally:
+        app.extensions["dashboard_jobs"].shutdown()
+
+
+def test_operations_reports_unknown_when_schedule_check_is_unavailable(tmp_path):
+    config = make_config(tmp_path)
+    new_accounts(config)
+    app = dashboard.create_app(config)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("synthetic scheduler unavailable")
+
+    app.extensions["dashboard_schedule_runner"] = unavailable
+    client = app.test_client()
+    login(client, "viewer")
+    try:
+        text = client.get("/operations/").text
+        assert "Unknown" in text
+        assert "Could not confirm an automatic schedule for this configuration." in text
+        assert "Scheduled automatically" not in text
     finally:
         app.extensions["dashboard_jobs"].shutdown()
