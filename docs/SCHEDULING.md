@@ -171,12 +171,22 @@ Linux user cron requires an installed, running cron service. It uses the host's 
 
 The repository ships `deploy/systemd/cvebeacon-dashboard.service`, which runs the
 dashboard on `127.0.0.1` as the service user with `NoNewPrivileges=yes`. Under
-that setting `crontab` cannot use its setuid or setgid helper, so the dashboard
-Schedule page cannot read or update the user crontab and shows a permission
-error. Install the schedule from the CLI as the service user, or use the
-reference `deploy/systemd/cvebeacon.timer` and `cvebeacon.service` units (or the
-examples in the deployment guide's [Schedule it](DEPLOY.md#schedule-it)
-section).
+that setting `crontab` cannot use its setuid or setgid helper. For cron installs,
+the Schedule page cannot read or update the user's crontab under this hardened
+unit. When the root-owned updater policy file exists, the page reads only the
+reference units `cvebeacon.timer` and `cvebeacon.service` with `systemctl show`
+and displays the timer state, boot setting, next run, last run and result. If an
+installation uses custom unit names, the reference-unit status is Unknown. The
+page does not try to read the crontab for updater-managed installs. Use systemd
+to change the timer; the dashboard refuses to install a competing cron schedule.
+Its separate cron removal action removes only a CVEBeacon-managed crontab block
+and leaves the systemd timer running.
+
+Without an updater-managed timer, the Schedule page uses the native Windows task
+or managed Linux crontab status and retains its existing controls. For a
+systemd-managed schedule without the updater, use the reference
+`deploy/systemd/cvebeacon.timer` and `cvebeacon.service` units (or the examples
+in the deployment guide's [Schedule it](DEPLOY.md#schedule-it) section).
 
 To manage the schedule from the dashboard instead, the drop-in must restore both
 the privilege transition and write access to the distribution's cron spool:

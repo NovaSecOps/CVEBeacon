@@ -7,6 +7,16 @@
 
 {% if error %}{% call callout('danger', 'The schedule action failed') %}<p>{{ error }}</p>{% endcall %}{% endif %}
 
+{% if timer_managed %}
+{% call card('Monitoring timer', 'The updater-managed systemd timer that runs CVEBeacon monitoring.') %}
+<p>{{ badge(timer_status.state, 'success' if timer_status.state == 'On' else 'neutral' if timer_status.state == 'Off' else 'warning') }}</p>
+<p>Starts at boot: {{ timer_status.boot }}</p>
+<p>Next run: {{ timer_status.next_run }}</p>
+<p>Last run: {{ timer_status.last_run }}</p>
+<p>Last result: {{ timer_status.last_result }}</p>
+<p class="muted">This schedule is managed on the server. Change it with systemd, not from this page.</p>
+{% endcall %}
+{% else %}
 {% call card('Current status', 'What this server currently has installed for CVEBeacon.') %}
 {% if status_error %}
 {% call callout('warning', 'Schedule status is unavailable') %}<p>{{ status_error }}</p><p>Check that this computer allows the dashboard account to manage scheduled tasks.</p>{% endcall %}
@@ -23,8 +33,13 @@
 {% if status_text %}<details class="disclosure"><summary>Technical details</summary><p>Platform: {{ platform_name }}.</p><pre>{{ status_text }}</pre></details>{% endif %}
 <p class="muted">The schedule starts CVEBeacon separately from this dashboard. Installation and removal are recorded in the account audit trail.</p>
 {% endcall %}
+{% endif %}
 
-{% if block_reason %}
+{% if timer_managed %}
+{% if not error %}
+{% call callout('info', 'Use systemd to change this schedule') %}<p>{{ block_reason }}</p>{% endcall %}
+{% endif %}
+{% elif block_reason %}
 {% call callout('warning', 'The dashboard cannot install a schedule here') %}<p>{{ block_reason }}</p><p>Use the command-line fallback below from the intended account instead.</p>{% endcall %}
 {% call card('Install or update') %}<p>The dashboard will not install a schedule in this setup.</p>{% endcall %}
 {% else %}
@@ -58,13 +73,20 @@
 {% endcall %}
 {% endif %}
 
+{% if timer_managed %}
+{% call card('Remove a managed cron schedule', 'This removes only the dashboard-managed cron entry. The systemd timer will continue to run.', tone='danger') %}
+<form method="post" action="{{ url_for('operations.schedule_remove') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="confirm" value="remove">{{ button('Remove managed cron schedule', kind='danger', confirm='Remove the managed cron schedule? The systemd timer will continue to run.') }}</form>
+{% endcall %}
+{% else %}
 {% call card('Remove the schedule', 'Removing stops all automatic runs. You can install a schedule again later.', tone='danger') %}
 <form method="post" action="{{ url_for('operations.schedule_remove') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="confirm" value="remove">{{ button('Remove the CVEBeacon schedule', kind='danger', confirm='Remove the schedule? CVEBeacon will stop running automatically.') }}</form>
 {% endcall %}
-
+{% endif %}
+{% if not timer_managed %}
 <details class="disclosure"{% if block_reason %} open{% endif %}><summary>Command-line fallback</summary>
 <p>Use this command from the account that should own the schedule when the dashboard runs under a different account or service identity. It installs the same schedule as this page.</p>
 <pre>{{ fallback_command }}</pre>
 <p class="muted">When <code>--password-stdin</code> appears, the command reads the Windows account password from one line on standard input and does not accept it as an argument. The scheduled run is short-lived and uses the same data as dashboard tasks. If another task is using data it needs, it stops with an error instead of changing data at the same time.</p>
 </details>
+{% endif %}
 {% endblock %}
