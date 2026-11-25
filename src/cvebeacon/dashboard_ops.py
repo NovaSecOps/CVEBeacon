@@ -115,7 +115,7 @@ def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
                          if not record["dashboard"] or record["state"] != "active"]
     except CVEBeaconError:
         external_runs = [{"state": "unavailable", "dashboard": False, "elapsed": None}]
-    schedule, _ = _schedule_overview(config)
+    schedule, schedule_state = _schedule_overview(config)
     channels = tuple(
         channel.name for channel in config.watch.channels if channel.enabled
     )
@@ -124,6 +124,7 @@ def _operations_context(config: AppConfig, *, error: str | None = None) -> dict:
         "active": manager.store.active(),
         "external_runs": external_runs,
         "schedule_summary": schedule,
+        "schedule_state": schedule_state,
         "queue_details": manager.queue_details(),
         "full_history": full_history_confirmation_required(config),
         "channels": channels,

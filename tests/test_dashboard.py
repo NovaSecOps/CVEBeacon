@@ -88,7 +88,7 @@ def test_empty_database_is_unknown_and_server_is_safe(setup):
     response = client.get("/")
     assert response.status_code == 200
     assert "No scan results recorded" in response.text
-    assert "Coverage unknown assets" in response.text
+    assert "Assets with no recent scan result" in response.text
     assert not client.application.debug
     assert response.headers["Cache-Control"] == "no-store"
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
@@ -101,7 +101,7 @@ def test_populated_overview_reports_findings_and_delivery(setup):
     store.mark_delivery("teams", ids, accepted=False, error="private delivery error")
     response = client.get("/")
     assert response.status_code == 200
-    assert "CVE-2026-1234" in response.text and "failed" in response.text
+    assert "CVE-2026-1234" in response.text and "Failed" in response.text
     assert "private delivery error" not in response.text
     assert "Last successful full scan" in response.text and "None recorded" not in response.text
 
@@ -221,7 +221,7 @@ def test_stale_scan_and_source_cannot_appear_current(setup):
         db.execute("UPDATE source_health SET checked_at=?", (old,))
     assert "Stale scan data" in client.get("/").text
     assert "stale" in client.get("/sources").text
-    assert "not live availability checks" in client.get("/sources").text
+    assert "not whether the service can be reached now" in client.get("/sources").text
 
 
 def test_unfinished_or_failed_attempt_overrides_old_success(setup):

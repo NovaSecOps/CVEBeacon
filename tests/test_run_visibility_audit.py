@@ -184,27 +184,31 @@ def test_bad_lock_does_not_hide_operations(tmp_path):
         page = client.get("/operations/")
         assert page.status_code == 200 and "unavailable" in page.text.lower()
         assert "Could not be read" in page.text
-        assert "Do not assume the storage is free" in page.text
+        assert "Another task may still be using the same data." in page.text
         assert target.read_text(encoding="utf-8") == "preserve"
     finally:
         app.extensions["dashboard_jobs"].shutdown()
 
 
-@pytest.mark.parametrize("xml", [
-    '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal>'
-    '<UserId>synthetic-private-account</UserId></Principal></Principals><Actions><Exec>'
-    '<Command>/opt/private/cvebeacon</Command><Arguments>SYNTHETIC_SCHEDULE_SECRET</Arguments>'
-    '</Exec></Actions></Task>',
-    '<Task broken SYNTHETIC_SCHEDULE_SECRET /opt/private/cvebeacon synthetic-private-account',
+@pytest.mark.parametrize(("xml", "recognized"), [
+    ('<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal>'
+     '<UserId>synthetic-private-account</UserId></Principal></Principals><Actions><Exec>'
+     '<Command>/opt/private/cvebeacon</Command><Arguments>--config {config} watch run</Arguments>'
+     '</Exec></Actions><Description>SYNTHETIC_SCHEDULE_SECRET</Description></Task>', True),
+    ('<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal>'
+     '<UserId>synthetic-private-account</UserId></Principal></Principals><Actions><Exec>'
+     '<Command>/opt/private/cvebeacon</Command><Arguments>SYNTHETIC_SCHEDULE_SECRET</Arguments>'
+     '</Exec></Actions></Task>', False),
+    ('<Task broken SYNTHETIC_SCHEDULE_SECRET /opt/private/cvebeacon synthetic-private-account', False),
 ])
-def test_windows_operations_schedule_is_restricted_and_cached(tmp_path, monkeypatch, xml):
+def test_windows_operations_schedule_is_restricted_and_cached(tmp_path, monkeypatch, xml, recognized):
     config = make_config(tmp_path)
     new_accounts(config)
     app = dashboard.create_app(config)
     calls = []
     def scheduler(*args, **kwargs):
         calls.append(args)
-        return _Result(stdout=xml)
+        return _Result(stdout=xml.replace("{config}", str(config.config_path)))
     app.extensions["dashboard_schedule_runner"] = scheduler
     monkeypatch.setattr(scheduling.platform, "system", lambda: "Windows")
     client = app.test_client()
@@ -213,7 +217,11 @@ def test_windows_operations_schedule_is_restricted_and_cached(tmp_path, monkeypa
         assert client.get("/operations/schedule").status_code == 403
         for _ in range(2):
             text = client.get("/operations/").text
-            assert "Scheduled by Windows Task Scheduler" in text
+            if recognized:
+                assert "Scheduled automatically" in text
+            else:
+                assert "Unknown" in text
+                assert "Scheduled automatically" not in text
             assert "SYNTHETIC_SCHEDULE_SECRET" not in text
             assert "/opt/private" not in text and "synthetic-private-account" not in text
         assert len(calls) == 1

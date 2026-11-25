@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% set nav_active = 'operations.index' %}
 {% from 'watch_macros.html' import stamp %}
-{% from 'ui.html' import page_header, card, callout, button, link_button, badge %}
+{% from 'ui.html' import page_header, card, callout, button, link_button, badge, explain %}
 {% block title %}Job {{ job.id }} · CVEBeacon{% endblock %}
 {% block head %}{% if job.active %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
 {% block content %}
@@ -25,20 +25,30 @@
 <dt>Queued</dt><dd>{{ stamp(job.created_at) }}</dd>
 <dt>Started</dt><dd>{{ stamp(job.started_at) if job.started_at else 'Not started' }}</dd>
 <dt>Ended</dt><dd>{{ stamp(job.ended_at) if job.ended_at else 'Not finished' }}</dd>
-<dt>Exit code</dt><dd>{% if job.exit_code is not none %}<span class="num">{{ job.exit_code }}</span> — {{ job.exit_meaning }}{% elif job.active %}Not finished yet{% else %}Not recorded{% endif %}</dd>
+<dt>Result</dt><dd>{% if job.exit_code is not none %}{{ job.exit_meaning }}{% elif job.active %}Not finished yet{% else %}Not recorded{% endif %}</dd>
 </dl>
+{% if job.exit_code is not none %}{% call explain('Technical details') %}<p>Result code: <code class="num">{{ job.exit_code }}</code></p>{% endcall %}{% endif %}
 {% endcall %}
 </div>
 
 {% if job.active and 'run' in (permissions | default([])) %}
-{% call card('Cancel this job', 'Cancelling asks the command to stop. The result shows whether it had time to clean up.') %}
-<form method="post" action="{{ url_for('operations.cancel_job', job_id=job.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}">{{ button('Cancel job', kind='danger', confirm='Cancel this job? The command will be asked to stop.') }}</form>
-<p class="muted">Cancel sends the documented interrupt: SIGINT to the command's process group on Linux, or Ctrl+Break on Windows. The command gets three seconds for cleanup, followed by termination and a two-second grace period before a forced kill. Forced termination is shown in the result. A Windows console is required.</p>
+{% if job.status == 'queued' %}
+{% call card('Cancel this job', 'Cancelling removes this queued job before it starts.') %}
+<form method="post" action="{{ url_for('operations.cancel_job', job_id=job.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}">{{ button('Cancel job', kind='danger', confirm='Cancel this job? It will be removed before it starts.') }}</form>
 {% endcall %}
+{% else %}
+{% call card('Cancel this job', 'Cancelling asks the job to stop and clean up. The result shows whether it finished cleanly.') %}
+<form method="post" action="{{ url_for('operations.cancel_job', job_id=job.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}">{{ button('Cancel job', kind='danger', confirm='Cancel this job? The job will be asked to stop.') }}</form>
+{% call explain('How cancellation works') %}
+<p>On Linux, CVEBeacon sends SIGINT to the task's process group. On Windows, it sends Ctrl+Break. The task gets three seconds for cleanup, followed by termination and a two-second grace period before a forced stop. A forced stop is shown in the result. A Windows console is required.</p>
+{% endcall %}
+{% endcall %}
+{% endif %}
 {% endif %}
 
 {% if job.operation == 'watch-refresh' %}
-{% call card('Deliver queued alerts', 'A refresh only queues deliveries. They go out on the next watch notify or watch run.') %}
+{% call card('Deliver queued alerts', 'A refresh only queues deliveries. They go out the next time watch monitoring runs.') %}
+<p>They also go out when you choose <strong>Deliver pending alerts</strong> on Operations.</p>
 {% if accounts and 'run' in permissions %}<form method="post" action="{{ url_for('operations.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="operation" value="watch-notify">{{ button('Deliver now') }}</form>{% endif %}
 {% endcall %}
 {% endif %}
