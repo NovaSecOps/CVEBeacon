@@ -423,5 +423,7 @@ def publish_unassigned_inventory(
             config, path, assets, expected_revision=expected_revision, users=users, proof=proof,
             mode=mode, restore_stamp=restore_stamp, precondition=precondition, after_publish=after_publish,
         )
-    except InventoryRevisionConflict:
-        raise
+    except InventoryRevisionConflict as exc:
+        raise InventoryRevisionConflict(
+            "This inventory changed. Review the current inventory before continuing."
+        ) from exc
