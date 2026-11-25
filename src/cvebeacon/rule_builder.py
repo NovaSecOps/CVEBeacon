@@ -14,6 +14,7 @@ import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Iterable, Mapping
+from unicodedata import category
 
 from .errors import ConfigurationError
 from .watch.rules import (
@@ -58,6 +59,7 @@ REASON_QUALIFIED = (
     "which the form cannot show."
 )
 REASON_COMMA = "A value contains a comma, which the form cannot split reliably."
+REASON_CONTROL = "This rule contains a line break or control character. Edit it as text."
 REASON_UNREADABLE = "This rule uses a condition the form cannot read."
 REASONS = (
     REASON_MULTIPLE_KEYS,
@@ -65,6 +67,7 @@ REASONS = (
     REASON_NESTED,
     REASON_QUALIFIED,
     REASON_COMMA,
+    REASON_CONTROL,
     REASON_UNREADABLE,
 )
 
@@ -245,8 +248,24 @@ class BuildResult:
         return None
 
 
+def _contains_control(raw: Any) -> bool:
+    pending = [raw]
+    visited = set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            if any(category(character) == "Cc" for character in item):
+                return True
+        elif isinstance(item, (dict, list)) and id(item) not in visited:
+            visited.add(id(item))
+            pending.extend(item.values() if isinstance(item, dict) else item)
+    return False
+
+
 def read_condition(raw: Any) -> ConditionRead:
     """Classify a stored condition as a builder model or text mode with a reason."""
+    if _contains_control(raw):
+        return ConditionRead(None, REASON_CONTROL)
     try:
         condition = parse_condition(raw)
     except ConfigurationError:

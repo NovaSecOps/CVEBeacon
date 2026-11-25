@@ -58,6 +58,9 @@ from .watch.store import EventDeliveries, WatchStore
 from .watch.sync import euvd_progress
 
 STATE_KEY = "dashboard_watch"
+# The 262,014-byte quote-heavy TOML fixture posts 1,461,491 URL-encoded bytes.
+# Keep about 43% headroom for the rules editor alone.
+RULES_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_STATEMENT_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_REQUEST_BYTES = MAX_STATEMENT_UPLOAD_BYTES + 64 * 1024
 EVENT_PAGE_SIZE = 50
@@ -106,6 +109,16 @@ def register_watch(app, config: AppConfig) -> None:
             request.max_content_length = UPLOAD_REQUEST_BYTES
             request.max_form_memory_size = 128 * 1024
             request.max_form_parts = 4
+        elif request.endpoint == "config_editor.rules" and request.method == "POST":
+            # Reject before the shared CSRF guard reads the body.
+            if not app.extensions["dashboard_users"].dashboard_accounts():
+                abort(403)
+            # A body-less request still reaches the shared sign-in and CSRF guards.
+            if (request.mimetype != "application/x-www-form-urlencoded"
+                    and (request.mimetype or request.content_length)):
+                abort(400, "Use the configuration form to submit rules.")
+            request.max_content_length = RULES_REQUEST_BYTES
+            request.max_form_memory_size = RULES_REQUEST_BYTES
         else:
             request.max_content_length = 8192
             request.max_form_memory_size = 8192

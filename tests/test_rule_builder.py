@@ -874,3 +874,13 @@ def test_public_copy_never_uses_banned_words():
         lowered = text.casefold()
         for word in BANNED_WORDS:
             assert word not in lowered, (word, text)
+
+
+@pytest.mark.parametrize("control", ["\r", "\n", "\t", "\0", "\x7f", "\x85"])
+@pytest.mark.parametrize("as_list", [True, False])
+def test_control_characters_force_text_mode(control, as_list):
+    # The loader can strip controls at the edges before the builder sees them.
+    raw = {"keyword": [f"alpha{control}beta"]} if as_list else {"kev": f"cisa{control}"}
+    read = read_condition(raw)
+    assert read.model is None
+    assert read.reason == "This rule contains a line break or control character. Edit it as text."
