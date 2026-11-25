@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+import json
 import re
 from typing import Any
 
 import pytest
 
 from cvebeacon.clients import ClientImpact, ClientImpacts, UnassignedAssetImpacts
+from cvebeacon.watch.delivery import _webhook_body
 from cvebeacon.watch.messages import (
     DeliveryEvent,
     build_messages,
@@ -173,21 +175,83 @@ def test_mixed_and_digest_messages_show_both_impact_lines_and_teams_card():
     assert card_text == message.text
 
 
-def test_no_client_summary_is_in_report_notice_text_and_html():
-    item = event("reported", details={"by": "analyst"})
-    message = build_messages(
-        (item,),
-        channel_type="smtp",
-        grouping="event",
-        max_items=20,
-        names={item.rule: item.rule},
-        language="pt-PT",
-        format="html",
-        unassigned_assets={item.cve_id: UnassignedAssetImpacts(1, 0)},
-    )[0]
-    line = "Os seus ativos sem cliente: 1 afetados, 0 a rever"
-    assert line in message.body
-    assert line in message.html
+@pytest.mark.parametrize("kind", ("reported", "unreported"))
+@pytest.mark.parametrize(
+    ("channel", "format"),
+    tuple(
+        (channel, "text")
+        for channel in (
+            "smtp",
+            "graph",
+            "teams",
+            "teams_bot",
+            "slack",
+            "discord",
+            "telegram",
+            "matrix",
+            "ntfy",
+            "gotify",
+        )
+    )
+    + (("smtp", "html"), ("graph", "html")),
+)
+def test_notice_messages_match_base_with_client_and_no_client_impacts(
+    kind, channel, format
+):
+    item = event(
+        kind,
+        details={"by": "analyst", "note": "Ticket OPS-42"},
+    )
+    clients = {
+        item.cve_id: ClientImpacts(
+            (ClientImpact("Acme", 1, "affected"),)
+        )
+    }
+    no_client = {item.cve_id: UnassignedAssetImpacts(1, 0)}
+    options = {
+        "channel_type": channel,
+        "grouping": "event",
+        "max_items": 20,
+        "names": {item.rule: item.rule},
+        "format": format,
+        "clients": clients,
+    }
+
+    # Without no-client data, this is the 80631e7 notice output. Supplying
+    # mixed client and no-client impacts must leave every rendered byte alone.
+    base = build_messages((item,), **options)
+    actual = build_messages(
+        (item,), **options, unassigned_assets=no_client
+    )
+    assert actual == base
+    assert len(actual) == 1
+    assert "Your assets with no client" not in actual[0].body
+    assert "Affected clients:" not in actual[0].body
+
+
+@pytest.mark.parametrize("kind", ("reported", "unreported"))
+def test_notice_webhook_body_matches_base_with_client_and_no_client_impacts(kind):
+    item = event(
+        kind,
+        details={"by": "analyst", "note": "Ticket OPS-42"},
+    )
+    clients = {
+        item.cve_id: ClientImpacts(
+            (ClientImpact("Acme", 1, "affected"),)
+        )
+    }
+    no_client = {item.cve_id: UnassignedAssetImpacts(1, 0)}
+
+    base = _webhook_body((item,), {item.rule: item.rule}, clients)
+    actual = _webhook_body(
+        (item,), {item.rule: item.rule}, clients, no_client
+    )
+    assert actual == base
+    entry = json.loads(actual)["events"][0]
+    assert entry["affected_clients"] == [
+        {"name": "Acme", "assets": 1, "status": "affected"}
+    ]
+    assert "unassigned_assets" not in entry
 
 
 def test_zero_no_client_counts_do_not_change_message_output():

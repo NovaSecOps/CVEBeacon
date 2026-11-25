@@ -1296,8 +1296,6 @@ def _notice_text(
     event: DeliveryEvent,
     style: str,
     catalog: Mapping[str, str],
-    language: str,
-    unassigned_impacts: UnassignedAssetImpacts,
 ) -> str:
     label = _notice_label(event, catalog)
     by_text = _dynamic(_notice_by(event, catalog), style, 450)
@@ -1315,9 +1313,6 @@ def _notice_text(
         by=by_text,
         at=stamp,
     )
-    summary = _unassigned_line(unassigned_impacts, style, language)
-    if summary:
-        line += "\n  " + summary
     note = event.details.get("note")
     if isinstance(note, str) and note.strip():
         line += "\n  " + _dynamic(note, style, 500)
@@ -1327,8 +1322,6 @@ def _notice_text(
 def _notice_html(
     event: DeliveryEvent,
     catalog: Mapping[str, str],
-    language: str,
-    unassigned_impacts: UnassignedAssetImpacts,
 ) -> str:
     key = (
         "notice_unreported"
@@ -1346,11 +1339,6 @@ def _notice_html(
     parts = [
         f'<p style="margin:0 0 8px 0;"><strong>{_h(line)}</strong></p>'
     ]
-    summary = format_unassigned_assets(unassigned_impacts, language=language)
-    if summary:
-        parts.append(
-            f'<p style="margin:0 0 8px 0;{_HTML_MUTED}">{_h(summary)}</p>'
-        )
     note = event.details.get("note")
     if isinstance(note, str) and note.strip():
         parts.append(
@@ -1460,19 +1448,12 @@ def build_messages(
             )
     for notice in notices:
         subject = _notice_subject(notice, catalog)
-        no_client_impacts = unassigned_impacts_for(
-            unassigned_assets, notice.cve_id
-        )
-        body = _notice_text(
-            notice, style, catalog, language, no_client_impacts
-        )
+        body = _notice_text(notice, style, catalog)
         markup = (
             _html_document(
                 language,
                 subject,
-                _notice_html(
-                    notice, catalog, language, no_client_impacts
-                ),
+                _notice_html(notice, catalog),
             )
             if with_html
             else ""
@@ -1697,7 +1678,7 @@ def webhook_payload(
                 omitted = impacts.omitted + len(impacts.clients) - len(shown)
                 if omitted:
                     entry["affected_clients_omitted"] = omitted
-        if no_client_impacts:
+        if no_client_impacts and event.kind not in NOTICE_KINDS:
             entry["unassigned_assets"] = {
                 "affected": no_client_impacts.affected,
                 "needs_review": no_client_impacts.needs_review,
