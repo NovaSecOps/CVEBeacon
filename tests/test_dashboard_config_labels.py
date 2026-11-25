@@ -187,3 +187,34 @@ def test_field_labels_are_passed_to_get_error_preview_and_rule_renders(accounts,
 
     assert len(rendered) >= 4
     assert all(context.get("field_labels") == FIELD_LABELS for context in rendered)
+
+
+def test_text_mode_lists_every_alert_type_with_its_plain_label(accounts):
+    from cvebeacon.watch.rules import EVENT_KINDS
+
+    _, _, _, client = accounts
+    markup = _rule_text_page(client)
+    disclosure = markup[markup.index("How conditions are written"):]
+    for kind, label in {
+        "match": "New match",
+        "kev_added": "Added to a known-exploited list",
+        "exploitation_active": "Becomes actively exploited",
+        "severity_increase": "Severity score increases",
+        "epss_increase": "Exploitation chance increases",
+        "nvd_score_added": "A score is added",
+        "rejected": "Record is rejected",
+    }.items():
+        assert f'<li><code>&#34;{kind}&#34;</code>: {label}</li>' in disclosure or (
+            f'<li><code>"{kind}"</code>: {label}</li>' in disclosure
+        ), kind
+    assert set(EVENT_KINDS) == {
+        "match", "kev_added", "exploitation_active", "severity_increase",
+        "epss_increase", "nvd_score_added", "rejected",
+    }
+
+
+def test_guided_setup_secret_help_avoids_banned_wording():
+    from cvebeacon import dashboard_channel_wizard
+
+    assert "protected" not in dashboard_channel_wizard.SECRET_HELP
+    assert "private file" in dashboard_channel_wizard.SECRET_HELP

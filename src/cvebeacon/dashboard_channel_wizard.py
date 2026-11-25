@@ -47,7 +47,7 @@ NAME_HELP = (
     "underscore; up to 64 characters."
 )
 SECRET_HELP = (
-    "Paste it here. CVEBeacon stores it in a protected file and never shows it "
+    "Paste it here. CVEBeacon stores it in a private file and never shows it "
     "again."
 )
 SECRET_AGAIN = "For safety, enter the secret again."
