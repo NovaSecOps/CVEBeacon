@@ -43,7 +43,7 @@ from .clients import (
 from .dashboard import _text, requires
 from .errors import CVEBeaconError, ConfigurationError, StateError
 from .locking import RunInProgress, RunLock, run_lock_path
-from .watch.explorer import EXPLOITATION_FILTERS, KEV_FILTERS, SEVERITY_BANDS, SOURCES
+from .watch.explorer import EXPLOITATION_FILTERS, KEV_FILTERS, SEVERITY_BANDS, SOURCES, _name_filter
 from .watch.messages import CVE_URL, EUVD_URL, NVD_URL
 from .watch.records import CVSS_PROVIDERS, CVSS_VERSIONS
 from .watch.reported import format_timestamp, identity_label, normalize_cve_id
@@ -493,6 +493,14 @@ def explorer():
     dates = {field: _date_filter(field) for field in EXPLORER_DATES}
     filters.update({field: value.isoformat() if value else "" for field, value in dates.items()})
 
+    for field in ("vendor_names", "product_names"):
+        lines = [line for value in request.args.getlist(field) for line in value.split("\n")]
+        label = "vendor" if field == "vendor_names" else "product"
+        try:
+            filters[field] = _name_filter(lines, label)
+        except StateError as exc:
+            abort(400, description=str(exc))
+
     client_lines = request.args.getlist("client_names")
     if len(client_lines) > 1:
         abort(400)
@@ -510,7 +518,9 @@ def explorer():
         result = store.search(query=filters["q"], **{field: filters[field] for field in EXPLORER_CHOICES},
                               has_events=filters["has_events"],
                               reported=filters["reported"], sort=filters["sort"] or "modified",
-                              client_ids=selected, limit=50, offset=(page - 1) * 50,
+                              client_ids=selected, vendor_names=filters["vendor_names"],
+                              product_names=filters["product_names"],
+                              limit=50, offset=(page - 1) * 50,
                               catalogs=config.watch.sources, **bounds, **dates)
     except StateError as exc:
         abort(400, description=str(exc))

@@ -8,12 +8,14 @@ from contextlib import closing
 import json
 import re
 import sqlite3
+import unicodedata
 
 from ..clients import MAX_CLIENT_CVES
 from ..errors import StateError
 from ..sources.common import cve_id
 from . import explorer_index
-from .records import CVSS_PROVIDERS, CVSS_VERSIONS, SSVC_EXPLOITATION
+from .records import CVSS_PROVIDERS, CVSS_VERSIONS, EUVDUpdate, SSVC_EXPLOITATION, _names
+from .rules import _first_match
 
 SOURCES = ("nvd", "euvd", "cve_list", "cisa_kev", "eu_kev", "epss")
 MAX_QUERY = 256
@@ -21,6 +23,10 @@ KEV_FILTERS = ("cisa", "eu", "either", "neither")
 EXPLOITATION_FILTERS = (*SSVC_EXPLOITATION, "unknown")
 SEVERITY_MINIMA = {"critical": 9, "high": 7, "medium": 4, "low": 0.1, "none": 0}
 SEVERITY_BANDS = (*SEVERITY_MINIMA, "unknown")
+MAX_NAME_FILTER_ITEMS = 20
+MAX_NAME_FILTER_LENGTH = 120
+MAX_STORED_NAME_PAIRS = 1_000
+MAX_STORED_EUVD_NAME_PAIRS = 50
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,165 @@ def _date_range(low, high, label):
         raise StateError(f"{label} start date follows its end date")
 
 
+def _name_filter(values, label):
+    message = (f"Enter up to {MAX_NAME_FILTER_ITEMS} {label} names of at most "
+               f"{MAX_NAME_FILTER_LENGTH} characters each")
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        values = (values,)
+    if not isinstance(values, (tuple, list)):
+        raise StateError(message)
+    names = []
+    for value in values:
+        if not isinstance(value, str):
+            raise StateError(message)
+        name = value.strip()
+        if not name:
+            continue
+        if (len(name) > MAX_NAME_FILTER_LENGTH
+                or any(unicodedata.category(char) in {"Cc", "Cf"} for char in name)):
+            raise StateError(message)
+        names.append(name)
+    if len(names) > MAX_NAME_FILTER_ITEMS:
+        raise StateError(message)
+    unique = {}
+    for name in names:
+        unique.setdefault(name.casefold(), name)
+    return tuple(unique.values())
+
+
+def _load_name_json(value, *, limit=MAX_STORED_NAME_PAIRS):
+    """Load stored name data; bad data means no names."""
+    if not isinstance(value, str):
+        return None
+    try:
+        result = json.loads(value)
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    return (result if isinstance(result, list)
+            and len(result) <= limit else None)
+
+
+def _array_field_names(items, field):
+    if items is None:
+        return ()
+    return tuple(
+        text for item in items if isinstance(item, dict)
+        if (text := str(item.get(field) or "").strip())
+    )
+
+
+def _effective_name_match(products_json, euvd_json, field, names_json):
+    products = _load_name_json(products_json, limit=MAX_STORED_NAME_PAIRS)
+    euvd = _load_name_json(euvd_json, limit=MAX_STORED_EUVD_NAME_PAIRS)
+    names = _load_name_json(names_json)
+    if names is None:
+        return 0
+    values = _names((*_array_field_names(products or [], field),
+                     *_array_field_names(euvd or [], field)), limit=500)
+    return int(any(_first_match(values, name) is not None for name in names
+                   if isinstance(name, str)))
+
+
+class _EuvdNames:
+    """Return vendor data from the highest-ranked EUVD item for one CVE."""
+
+    def __init__(self):
+        self.rank = None
+        self.values = []
+
+    def step(self, euvd_id, exploited_since, date_updated, vendors_json):
+        candidate = EUVDUpdate(
+            (),
+            euvd_id if isinstance(euvd_id, str) else None,
+            exploited_since if isinstance(exploited_since, str) else None,
+            date_updated=date_updated if isinstance(date_updated, str) else None,
+        )
+        rank = candidate.rank()
+        if self.rank is None or rank > self.rank:
+            self.rank = rank
+            self.values = _load_name_json(
+                vendors_json, limit=MAX_STORED_EUVD_NAME_PAIRS,
+            ) or []
+
+    def finalize(self):
+        return json.dumps(self.values, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_array_is_valid(expression):
+    """SQL predicate that checks JSON type before any JSON operation."""
+    return (
+        f"CASE WHEN typeof({expression})!='text' THEN 0 "
+        f"WHEN json_valid({expression}) THEN json_type({expression})='array' ELSE 0 END"
+    )
+
+
+def _json_array_or_empty(expression):
+    return f"CASE WHEN ({_json_array_is_valid(expression)}) THEN {expression} ELSE '[]' END"
+
+
+def _json_or_empty_object(expression):
+    return (
+        f"CASE WHEN typeof({expression})!='text' THEN '{{}}' "
+        f"WHEN json_valid({expression}) THEN {expression} ELSE '{{}}' END"
+    )
+
+
+def _name_filter_gate(names, catalogs):
+    """Return a safe SQL superset gate for simple ASCII name filters."""
+    if not names or any(
+        not name.isascii()
+        or any(quote in name for quote in ("'", '"'))
+        or "\\" in name
+        or any(ord(char) < 32 or ord(char) == 127 for char in name)
+        for name in names
+    ):
+        return None, ()
+    bypass = [
+        "typeof(c.products_json)!='text'",
+        "length(c.products_json)!=length(CAST(c.products_json AS BLOB))",
+        "instr(c.products_json,char(92))>0",
+        "c.provider_only",
+        "c.official_record IS NOT NULL",
+    ]
+    if "euvd" in catalogs:
+        bypass.extend((
+            "EXISTS(SELECT 1 FROM watch_euvd_alias a WHERE a.cve_id=c.cve_id)",
+            "EXISTS(SELECT 1 FROM watch_euvd_override ov WHERE ov.cve_id=c.cve_id)",
+        ))
+    text_checks = " OR ".join("instr(lower(c.products_json),?)>0" for _ in names)
+    return "(" + " OR ".join((*bypass, "(" + text_checks + ")")) + ")", tuple(
+        name.lower() for name in names
+    )
+
+
+def _effective_products_json(catalogs):
+    allowed = (set(catalogs) if catalogs else
+               {"nvd", "cve_list", "euvd", "cisa_kev", "eu_kev"})
+
+    def provider(source):
+        return (
+            "(SELECT json_extract(" + _json_or_empty_object("p.record_json") + ","
+            "'$.products_json') FROM watch_provider p "
+            f"WHERE p.cve_id=c.cve_id AND p.source='{source}')"
+        )
+
+    provider_priority = ("cve_list", "euvd", "cisa_kev", "eu_kev")
+    choices = [provider(source) for source in provider_priority if source in allowed]
+    inherited = ("COALESCE(" + ",".join((*choices, "'[]'")) + ")"
+                 if choices else "'[]'")
+    official = provider("cve_list") if "cve_list" in allowed else "NULL"
+    valid_products = _json_array_is_valid("c.products_json")
+    return (
+        "(CASE WHEN EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=c.cve_id) "
+        f"THEN {inherited} "
+        f"WHEN NOT ({valid_products}) THEN c.products_json "
+        "WHEN json_array_length(c.products_json)>0 THEN c.products_json "
+        f"ELSE COALESCE({official},c.products_json,'[]') END)"
+    )
+
+
 def _range_conditions(where, values, field, low, high):
     for value, operator in ((low, ">="), (high, "<=")):
         if value is not None:
@@ -66,7 +231,8 @@ def _in(values):
 
 
 def search(store, *, query="", source="", kev="", severity="", since=None, until=None,
-           has_events="", reported="", client_ids=None, sort="modified", limit=50, offset=0,
+           has_events="", reported="", client_ids=None, vendor_names=None, product_names=None,
+           sort="modified", limit=50, offset=0,
            use_fts=True, catalogs=SOURCES, exploitation="", epss_min=None, epss_max=None,
            cvss_min=None, cvss_max=None, cvss_version="", cvss_provider="",
            modified_since=None, modified_until=None, count_total=True):
@@ -93,6 +259,8 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
         client_ids = tuple(islice(client_ids, MAX_CLIENT_CVES + 1))
         if len(client_ids) > MAX_CLIENT_CVES:
             raise StateError("Client filter exceeds the local result limit")
+    vendor_names = _name_filter(vendor_names, "vendor")
+    product_names = _name_filter(product_names, "product")
     with store.read() as db, closing(sqlite3.connect(":memory:")) as matcher:
         active = tuple(name for name in SOURCES if name in catalogs)
         enabled = "(" + ",".join("'" + name + "'" for name in active) + ")" if active else "('')"
@@ -288,6 +456,42 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
             db.execute("CREATE TEMP TABLE selected_cves(cve_id TEXT PRIMARY KEY)")
             db.executemany("INSERT OR IGNORE INTO selected_cves VALUES (?)", ((i,) for i in client_ids))
             where.append("c.cve_id IN (SELECT cve_id FROM selected_cves)")
+        if vendor_names or product_names:
+            db.create_function("watch_rule_name_match", 4, _effective_name_match)
+            db.create_aggregate("watch_rule_euvd_names", 4, _EuvdNames)
+            products_json = _effective_products_json(catalogs)
+            for field, names in (("vendor", vendor_names), ("product", product_names)):
+                if not names:
+                    continue
+                names_json = json.dumps(names, ensure_ascii=False)
+                gate, gate_values = _name_filter_gate(names, catalogs)
+                euvd = "'[]'"
+                if "euvd" in catalogs:
+                    override_items = (
+                        "json_each(" + _json_array_or_empty("ov.items_json") + ")"
+                    )
+                    override_value = (
+                        "CASE WHEN json_valid(j.value) THEN j.value ELSE '{}' END"
+                    )
+                    euvd = (
+                        "CASE WHEN EXISTS(SELECT 1 FROM watch_euvd_override ov "
+                        "WHERE ov.cve_id=c.cve_id) THEN COALESCE((SELECT "
+                        "watch_rule_euvd_names(json_extract(" + override_value + ",'$.euvd_id'),"
+                        "json_extract(" + override_value + ",'$.exploited_since'),"
+                        "json_extract(" + override_value + ",'$.date_updated'),"
+                        "json_extract(" + override_value + ",'$.vendors_json')) "
+                        "FROM watch_euvd_override ov," + override_items + " j "
+                        "WHERE ov.cve_id=c.cve_id),'[]') ELSE COALESCE((SELECT "
+                        "watch_rule_euvd_names(i.euvd_id,i.exploited_since,"
+                        "i.date_updated,i.vendors_json) FROM watch_euvd_alias a "
+                        "JOIN watch_euvd_item i ON i.euvd_id=a.euvd_id "
+                        "WHERE a.cve_id=c.cve_id),'[]') END"
+                    )
+                match = f"watch_rule_name_match({products_json},{euvd},?,?)"
+                where.append(f"CASE WHEN {gate} THEN {match} ELSE 0 END" if gate else match)
+                if gate:
+                    values.extend(gate_values)
+                values.extend((field, names_json))
         orders = {"published": "c.effective_published", "modified": "c.effective_last_modified", "cvss": score,
                   "epss": epss, "kev": kev_sql}
         if sort not in orders:
