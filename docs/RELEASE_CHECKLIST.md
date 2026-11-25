@@ -110,11 +110,13 @@ environment directly.
 1. Merge the version bump to `main` and confirm the validation workflows pass.
 2. Create and push the annotated tag from the release commit. Pushing the tag
    starts the release workflow; it does not publish anything by itself.
-3. Approve the `release` environment deployment requests for the container
-   publish job and the draft release job. Approval is required before any
-   image push or release creation. Container publishing is serialized across
-   all release tags: one shared concurrency group with cancellation disabled
-   covers the registry check through the image push. Queued publish runs
+3. Approve the `release` environment deployment requests for all three gated
+   jobs: `release-signing` (signing the release artifacts), `container-publish`
+   (publishing the image), and `release` (creating the draft release). Approval
+   is required before signing, an image push or draft creation. Container
+   publishing is serialized across all release tags: one shared concurrency
+   group with cancellation disabled covers the registry check through the
+   image push. Queued publish runs
    execute one at a time, and a newer queued run can replace an older waiting
    run, so publish tags one at a time.
 4. Wait for the `verify`, `python-dist`, `windows-exe`, `container-publish` and
@@ -149,7 +151,25 @@ environment directly.
 
 8. Publish the draft release only after the checks above pass. Publishing is a
    separate manual action; the workflow never publishes a release.
-9. Confirm the release page lists every asset and the source archives.
+9. Check release availability as three separate results:
+
+   - **Transport:** check the `curl` exit status. A connection failure or
+     timeout means the request did not complete.
+   - **HTTP status:** make one bounded request to the release page:
+
+     ```console
+     curl --max-time 20 -sS -o /dev/null -w '%{http_code}\n' \
+       https://github.com/NovaSecOps/CVEBeacon/releases/tag/vVERSION
+     ```
+
+     Record both the printed code and the command's exit status. `000` means
+     there was no HTTP response; it does not mean the release is unpublished.
+   - **Publication state:** check the release record separately and confirm it
+     is published, not a draft. An HTTP response alone does not establish that
+     state.
+
+   Confirm the published release page lists every asset and the source
+   archives.
 10. Announce the release only after the GHCR package visibility and the
     release assets are confirmed.
 

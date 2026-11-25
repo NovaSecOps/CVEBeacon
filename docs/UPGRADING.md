@@ -127,6 +127,30 @@ Never run the privileged updater inside a container.
 
 ## Manual upgrades
 
+### Authenticate the signer before downloading
+
+Before downloading a release, obtain the trusted signing fingerprint through
+an authenticated channel independent of the download, such as the project's
+published signing record. A checksum file downloaded beside the artifacts
+proves their consistency, but is not enough to authenticate the signer. Set
+the fingerprint from that trusted record and compare it with the packaged
+signer pin. This preflight stops if the variable still contains its
+placeholder text:
+
+```console
+TRUSTED_FINGERPRINT='REPLACE_WITH_AUTHENTICATED_FINGERPRINT'
+if [ -z "$TRUSTED_FINGERPRINT" ] || [ "$TRUSTED_FINGERPRINT" = 'REPLACE_WITH_AUTHENTICATED_FINGERPRINT' ]; then
+  echo 'Set TRUSTED_FINGERPRINT from the authenticated signing record first.' >&2
+  exit 1
+fi
+awk '$1 !~ /^#/ { print $(NF-1), $NF }' /etc/cvebeacon/release-allowed-signers > release-signing-public-key.pub
+ACTUAL_FINGERPRINT=$(ssh-keygen -lf release-signing-public-key.pub | awk '{print $2}')
+if [ "$ACTUAL_FINGERPRINT" != "$TRUSTED_FINGERPRINT" ]; then
+  echo 'The packaged signing key does not match the trusted fingerprint.' >&2
+  exit 1
+fi
+```
+
 1. Disable the scheduler you actually use. Remove a managed cron schedule with
    `cvebeacon --config /var/lib/cvebeacon/cvebeacon.toml schedule remove --yes`,
    or stop the systemd timer. Then wait for every running CVEBeacon process and
@@ -153,7 +177,7 @@ Never run the privileged updater inside a container.
    It contains client profiles, current uploads and retained versions. Keep its
    owner-only permissions and restore it with the matching account database.
 3. Obtain the release from the configured GitHub repository. Verify
-   `SHA256SUMS.sig` against an independently pinned public key, then verify
+   `SHA256SUMS.sig` against the independently pinned public key, then verify
    every artifact against `SHA256SUMS`:
 
    ```console

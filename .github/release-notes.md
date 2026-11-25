@@ -2,6 +2,13 @@
 Release notes template. The release workflow fills in the version, date and
 container image digest, then creates a draft release. Review the draft, the
 asset list and the checksums before publishing it.
+
+## Publishing checklist
+- [ ] Confirm the version and notes in this draft.
+- [ ] Confirm `SHA256SUMS` covers every uploaded artifact except itself and
+      `SHA256SUMS.sig`.
+- [ ] Confirm the GHCR manifest digest matches `{{IMAGE_DIGEST}}`.
+- [ ] Publish only after `docs/RELEASE_CHECKLIST.md` passes.
 -->
 
 # CVEBeacon {{VERSION}}
@@ -76,11 +83,3 @@ instead of replacing it.
 - Read the [container guide](https://github.com/novasecops/cvebeacon/blob/main/docs/CONTAINERS.md)
   and [user guide](https://github.com/novasecops/cvebeacon/blob/main/docs/USER_GUIDE.md)
   for configuration changes.
-
-## Publishing checklist
-
-- [ ] Confirm the version and notes in this draft.
-- [ ] Confirm `SHA256SUMS` covers every uploaded artifact except itself and
-      `SHA256SUMS.sig`.
-- [ ] Confirm the GHCR manifest digest matches `{{IMAGE_DIGEST}}`.
-- [ ] Publish only after `docs/RELEASE_CHECKLIST.md` passes.
