@@ -248,21 +248,39 @@ def test_paste_requires_exactly_one_source(deployment):
     detail = add(browser)
     neither = paste_upload(browser, detail, "")
     assert neither.status_code == 400 and "Choose a file or paste rows." in neither.text
+    marker = "BOTH-SOURCES-MARKER <keep>&"
     both = paste_upload(
         browser, detail,
-        "asset_id,vendor,product,version\npasted-asset,Example,Widget,1.0\n", file=CSV,
+        f"asset_id,vendor,product,version\npasted-asset,Example,Widget,1.0\n{marker}",
+        "json", file=CSV,
     )
     assert both.status_code == 400 and "Choose a file or paste rows, not both." in both.text
+    assert "BOTH-SOURCES-MARKER &lt;keep&gt;&amp;" in both.text
+    assert 'option value="json" selected' in both.text
+
+
+def test_safe_parse_error_keeps_paste_and_format_escaped(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    marker = "SAFE-PASTE-MARKER <tag>&"
+    text = f'["{marker}",]'
+    response = paste_upload(browser, detail, text, "json")
+    assert response.status_code == 400
+    assert "SAFE-PASTE-MARKER &lt;tag&gt;&amp;" in response.text
+    assert "<tag>" not in response.text
+    assert 'option value="json" selected' in response.text
 
 
 def test_paste_over_100_kb_is_rejected_with_guidance(deployment):
     _, _, _, browser = deployment
     detail = add(browser)
-    text = "é" * (MAX_PASTE_BYTES // 2 + 1)
+    marker = "OVER-LIMIT-PASTE-MARKER"
+    text = "é" * (MAX_PASTE_BYTES // 2) + marker
     assert len(text.encode("utf-8")) > MAX_PASTE_BYTES
     oversized = paste_upload(browser, detail, text)
     assert oversized.status_code == 400
-    assert "Paste up to 100 KB, or upload a file for larger inventories." in oversized.text
+    assert "Your pasted text was not kept because it is over 100 KB. Paste less, or upload a file." in oversized.text
+    assert marker not in oversized.text
 
 
 def test_largest_allowed_paste_fits_multipart_limits_and_previews(deployment):

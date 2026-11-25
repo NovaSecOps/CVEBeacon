@@ -85,14 +85,14 @@
   <p class="help">Choose exactly one source: a file or pasted text.</p>
   <div class="field">
     <label for="pasted-rows">Or paste rows</label>
-    <textarea id="pasted-rows" name="pasted_rows" rows="8" aria-describedby="inventory-help"></textarea>
+    <textarea id="pasted-rows" name="pasted_rows" rows="8" aria-describedby="inventory-help">{{ pasted_text }}</textarea>
   </div>
   <div class="field">
     <label for="paste-format">Pasted rows format</label>
     <select id="paste-format" name="paste_format" aria-describedby="inventory-help">
-      <option value="csv" selected>CSV</option>
-      <option value="json">JSON</option>
-      <option value="yaml">YAML</option>
+      <option value="csv" {% if paste_format == 'csv' %}selected{% endif %}>CSV</option>
+      <option value="json" {% if paste_format == 'json' %}selected{% endif %}>JSON</option>
+      <option value="yaml" {% if paste_format == 'yaml' %}selected{% endif %}>YAML</option>
     </select>
   </div>
   <p class="help">Paste up to 100 KB, or upload a file for larger inventories.</p>
