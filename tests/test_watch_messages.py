@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from cvebeacon.clients import ClientImpact, ClientImpacts, UnassignedAssetImpacts
 from cvebeacon.watch.messages import (
     DeliveryEvent,
     build_messages,
@@ -108,6 +109,107 @@ def test_every_channel_shows_published_and_first_seen_dates(channel):
     assert "Published 2026-10-30 · first seen 2026-11-04" in text
 
 
+@pytest.mark.parametrize(
+    ("channel", "format"),
+    tuple(
+        (name, "text")
+        for name in (
+            "smtp",
+            "graph",
+            "teams",
+            "teams_bot",
+            "slack",
+            "discord",
+            "telegram",
+            "matrix",
+            "ntfy",
+            "gotify",
+        )
+    )
+    + (("smtp", "html"), ("graph", "html")),
+)
+def test_no_client_summary_is_rendered_for_every_channel(channel, format):
+    item = event()
+    message = build_messages(
+        (item,),
+        channel_type=channel,
+        grouping="run",
+        max_items=20,
+        names={item.rule: item.rule},
+        format=format,
+        unassigned_assets={
+            item.cve_id: UnassignedAssetImpacts(2, 1)
+        },
+    )[0]
+    line = "Your assets with no client: 2 affected, 1 needs review"
+    visible = message.body if channel in {"smtp", "graph"} else message.text
+    assert line in visible
+    if format == "html":
+        assert line in message.html
+    assert "Unassigned" not in visible
+
+
+def test_mixed_and_digest_messages_show_both_impact_lines_and_teams_card():
+    item = event(initial=True)
+    impacts = {
+        item.cve_id: ClientImpacts(
+            (ClientImpact("Acme", 1, "affected"),)
+        )
+    }
+    no_client = {item.cve_id: UnassignedAssetImpacts(2, 1)}
+    message = build_messages(
+        (item,),
+        channel_type="teams_bot",
+        grouping="run",
+        max_items=20,
+        names={item.rule: item.rule},
+        clients=impacts,
+        unassigned_assets=no_client,
+    )[0]
+    assert "Affected clients: Acme" in message.text
+    assert "Your assets with no client: 2 affected, 1 needs review" in message.text
+    card = teams_adaptive_card(message)
+    card_text = card["attachments"][0]["content"]["body"][0]["text"]
+    assert card_text == message.text
+
+
+def test_no_client_summary_is_in_report_notice_text_and_html():
+    item = event("reported", details={"by": "analyst"})
+    message = build_messages(
+        (item,),
+        channel_type="smtp",
+        grouping="event",
+        max_items=20,
+        names={item.rule: item.rule},
+        language="pt-PT",
+        format="html",
+        unassigned_assets={item.cve_id: UnassignedAssetImpacts(1, 0)},
+    )[0]
+    line = "Os seus ativos sem cliente: 1 afetados, 0 a rever"
+    assert line in message.body
+    assert line in message.html
+
+
+def test_zero_no_client_counts_do_not_change_message_output():
+    item = event()
+    baseline = build_messages(
+        (item,),
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={item.rule: item.rule},
+    )[0]
+    zero = build_messages(
+        (item,),
+        channel_type="slack",
+        grouping="run",
+        max_items=20,
+        names={item.rule: item.rule},
+        unassigned_assets={item.cve_id: UnassignedAssetImpacts()},
+    )[0]
+    assert zero.text == baseline.text
+
+
 def test_missing_published_date_is_shown_as_unknown():
     text = body_for(event(current=view(published=None)))
     assert "Published unknown · first seen 2026-11-04" in text
@@ -141,6 +243,22 @@ def test_initial_digest_shows_published_and_first_seen_dates():
         since="2026-10-27",
     )[0]
     assert "Published 2026-10-30 · first seen 2026-11-04" in message.text
+
+
+def test_initial_digest_renders_no_client_summary_in_email_html_and_text():
+    item = event(initial=True)
+    message = build_messages(
+        (item,),
+        channel_type="smtp",
+        grouping="run",
+        max_items=20,
+        names={item.rule: item.rule},
+        format="html",
+        unassigned_assets={item.cve_id: UnassignedAssetImpacts(2, 1)},
+    )[0]
+    line = "Your assets with no client: 2 affected, 1 needs review"
+    assert line in message.body
+    assert line in message.html
 
 
 def test_kev_added_label_and_detail():

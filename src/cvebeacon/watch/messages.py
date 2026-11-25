@@ -15,8 +15,11 @@ from .records import CVSSEntry, DeliveryEvent, InitialDigest, WatchView
 from ..clients import (
     ClientImpact,
     ClientImpacts,
+    UnassignedAssetImpacts,
     format_affected_clients,
+    format_unassigned_assets,
     impacts_for,
+    unassigned_impacts_for,
 )
 from .reported import (
     NOTICE_KINDS,
@@ -169,6 +172,14 @@ def _client_line(
         limit=10,
         escape=_client_escape(style),
     )
+
+
+def _unassigned_line(
+    impacts: UnassignedAssetImpacts,
+    style: str,
+    language: str,
+) -> str:
+    return _dynamic(format_unassigned_assets(impacts, language=language), style)
 
 
 def _dynamic(value: Any, style: str, limit: int | None = None) -> str:
@@ -467,6 +478,7 @@ class _EventFacts:
     description: str
     extras: tuple[str, ...]
     client_impacts: ClientImpacts
+    unassigned_impacts: UnassignedAssetImpacts
     language: str
     reported: str
     rules: tuple[str, ...]
@@ -479,6 +491,7 @@ def _event_facts(
     catalog: Mapping[str, str],
     language: str,
     clients: Mapping[str, ClientImpacts | Sequence[ClientImpact]] | None = None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
 ) -> _EventFacts:
     event = group[0]
     view = event.view
@@ -516,6 +529,9 @@ def _event_facts(
         description=_clean(view.description, DESCRIPTION_LIMIT),
         extras=tuple(extras),
         client_impacts=impacts_for(clients, event.cve_id),
+        unassigned_impacts=unassigned_impacts_for(
+            unassigned_assets, event.cve_id
+        ),
         language=language,
         reported=(
             format_reported(event.reported, language)
@@ -558,6 +574,12 @@ def _event_lines(
     if facts.client_impacts:
         lines.append(
             "  " + _client_line(facts.client_impacts, style, facts.language)
+        )
+    if facts.unassigned_impacts:
+        lines.append(
+            "  " + _unassigned_line(
+                facts.unassigned_impacts, style, facts.language
+            )
         )
     if facts.reported:
         lines.append("  " + _dynamic(facts.reported, style))
@@ -832,6 +854,11 @@ def _html_event_block(facts: _EventFacts, catalog: Mapping[str, str]) -> str:
             f'<tr><td style="{_HTML_TD}">'
             f'{_h(format_affected_clients(facts.client_impacts, language=facts.language, limit=10))}</td></tr>'
         )
+    if facts.unassigned_impacts:
+        rows.append(
+            f'<tr><td style="{_HTML_TD}">'
+            f'{_h(format_unassigned_assets(facts.unassigned_impacts, language=facts.language))}</td></tr>'
+        )
     if facts.reported:
         rows.append(
             f'<tr><td style="{_HTML_TD}">{_h(facts.reported)}</td></tr>'
@@ -919,6 +946,11 @@ def _html_digest_fragment(
                 f'<span style="{_HTML_MUTED}">'
                 f'{_h(format_affected_clients(item.client_impacts, language=item.language, limit=10))}</span>'
             )
+        if item.unassigned_impacts:
+            cell.append(
+                f'<span style="{_HTML_MUTED}">'
+                f'{_h(format_unassigned_assets(item.unassigned_impacts, language=item.language))}</span>'
+            )
         if item.reported:
             cell.append(
                 f'<span style="{_HTML_MUTED}">{_h(item.reported)}</span>'
@@ -1001,13 +1033,16 @@ def _event_body_and_html(
     byte_limit: bool = False,
     with_html: bool = False,
     clients: Mapping[str, ClientImpacts] | None = None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
 ) -> tuple[str, str]:
     listed = _group_events(sort_events(events), style, catalog)
     current = max_items
     while True:
         shown = listed if current is None else listed[:current]
         facts = [
-            _event_facts(group, names, catalog, language, clients)
+            _event_facts(
+                group, names, catalog, language, clients, unassigned_assets
+            )
             for group in shown
         ]
         lines: list[str] = []
@@ -1105,6 +1140,7 @@ def _initial_body_and_html(
     total_cves: int | None = None,
     with_html: bool = False,
     clients: Mapping[str, ClientImpacts] | None = None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
 ) -> tuple[str, str]:
     ordered = sort_events(events)
     groups = _group_events(ordered, style, catalog)
@@ -1124,7 +1160,9 @@ def _initial_body_and_html(
     while True:
         shown = groups[:current]
         facts = [
-            _event_facts(group, names, catalog, language, clients)
+            _event_facts(
+                group, names, catalog, language, clients, unassigned_assets
+            )
             for group in shown
         ]
         rule_pairs = _rule_count_pairs(totals, names, catalog)
@@ -1255,7 +1293,11 @@ def _notice_by(event: DeliveryEvent, catalog: Mapping[str, str]) -> str:
 
 
 def _notice_text(
-    event: DeliveryEvent, style: str, catalog: Mapping[str, str]
+    event: DeliveryEvent,
+    style: str,
+    catalog: Mapping[str, str],
+    language: str,
+    unassigned_impacts: UnassignedAssetImpacts,
 ) -> str:
     label = _notice_label(event, catalog)
     by_text = _dynamic(_notice_by(event, catalog), style, 450)
@@ -1273,6 +1315,9 @@ def _notice_text(
         by=by_text,
         at=stamp,
     )
+    summary = _unassigned_line(unassigned_impacts, style, language)
+    if summary:
+        line += "\n  " + summary
     note = event.details.get("note")
     if isinstance(note, str) and note.strip():
         line += "\n  " + _dynamic(note, style, 500)
@@ -1280,7 +1325,10 @@ def _notice_text(
 
 
 def _notice_html(
-    event: DeliveryEvent, catalog: Mapping[str, str]
+    event: DeliveryEvent,
+    catalog: Mapping[str, str],
+    language: str,
+    unassigned_impacts: UnassignedAssetImpacts,
 ) -> str:
     key = (
         "notice_unreported"
@@ -1298,6 +1346,11 @@ def _notice_html(
     parts = [
         f'<p style="margin:0 0 8px 0;"><strong>{_h(line)}</strong></p>'
     ]
+    summary = format_unassigned_assets(unassigned_impacts, language=language)
+    if summary:
+        parts.append(
+            f'<p style="margin:0 0 8px 0;{_HTML_MUTED}">{_h(summary)}</p>'
+        )
     note = event.details.get("note")
     if isinstance(note, str) and note.strip():
         parts.append(
@@ -1318,6 +1371,7 @@ def build_messages(
     language: str = DEFAULT_LANGUAGE,
     format: str = "text",
     clients: Mapping[str, ClientImpacts] | None = None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
 ) -> tuple[OutgoingMessage, ...]:
     """Build the messages one channel should send for the selected events.
 
@@ -1379,6 +1433,7 @@ def build_messages(
             total_cves=initial.cves,
             with_html=with_html,
             clients=clients,
+            unassigned_assets=unassigned_assets,
         )
         parts = _partials(
             subject,
@@ -1405,10 +1460,19 @@ def build_messages(
             )
     for notice in notices:
         subject = _notice_subject(notice, catalog)
-        body = _notice_text(notice, style, catalog)
+        no_client_impacts = unassigned_impacts_for(
+            unassigned_assets, notice.cve_id
+        )
+        body = _notice_text(
+            notice, style, catalog, language, no_client_impacts
+        )
         markup = (
             _html_document(
-                language, subject, _notice_html(notice, catalog)
+                language,
+                subject,
+                _notice_html(
+                    notice, catalog, language, no_client_impacts
+                ),
             )
             if with_html
             else ""
@@ -1460,6 +1524,7 @@ def build_messages(
             byte_limit=byte_limit,
             with_html=with_html,
             clients=clients,
+            unassigned_assets=unassigned_assets,
         )
         parts = _partials(
             subject,
@@ -1506,6 +1571,7 @@ def webhook_payload(
     events: Sequence[DeliveryEvent],
     names: Mapping[str, str],
     clients: Mapping[str, ClientImpacts] | None = None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
 ) -> dict[str, Any]:
     """Return the stable version 2 webhook document.
 
@@ -1518,6 +1584,9 @@ def webhook_payload(
     for event in (*alerts, *_sorted_notices(events)):
         view = event.view
         impacts = impacts_for(clients, event.cve_id)
+        no_client_impacts = unassigned_impacts_for(
+            unassigned_assets, event.cve_id
+        )
         entry: dict[str, Any] = {
             "rule": _display_name(event, names),
             "cve_id": event.cve_id,
@@ -1628,6 +1697,11 @@ def webhook_payload(
                 omitted = impacts.omitted + len(impacts.clients) - len(shown)
                 if omitted:
                     entry["affected_clients_omitted"] = omitted
+        if no_client_impacts:
+            entry["unassigned_assets"] = {
+                "affected": no_client_impacts.affected,
+                "needs_review": no_client_impacts.needs_review,
+            }
         output.append(entry)
         if event.kind in NOTICE_KINDS:
             notice = {

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from cvebeacon.clients import UnassignedAssetImpacts
 from cvebeacon.errors import ConfigurationError
 from cvebeacon.watch.catalog import (
     CATALOGS,
@@ -161,6 +162,28 @@ def test_pt_pt_renders_every_message_channel_family():
         assert "Exploração: desconhecida" in body, channel
         assert "Regra: critical-or-likely" in body, channel
         assert "https://nvd.nist.gov/vuln/detail/CVE-2026-1234" in body, channel
+
+
+def test_no_client_summary_is_localized_for_every_language():
+    for language, expected in (
+        ("en", "Your assets with no client: 2 affected, 1 needs review"),
+        ("pt-PT", "Os seus ativos sem cliente: 2 afetados, 1 a rever"),
+    ):
+        item = event()
+        message = build_messages(
+            (item,),
+            channel_type="smtp",
+            grouping="event",
+            max_items=20,
+            names={item.rule: item.rule},
+            language=language,
+            format="html",
+            unassigned_assets={
+                item.cve_id: UnassignedAssetImpacts(2, 1)
+            },
+        )[0]
+        assert expected in message.body
+        assert expected in visible_html(message.html)
 
 
 def test_webhook_alert_payload_stays_language_independent():
