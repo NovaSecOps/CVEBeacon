@@ -365,10 +365,11 @@ def create_blueprint(config):
                         pasted_data = encoded_values[0]
                     if len(pasted_values) == 1 and not paste_too_large:
                         keep_pasted_text = pasted_text
+            chosen_format = None
             if len(format_values) == 1:
                 selected_format = format_values[0].strip().casefold()
                 if selected_format in {"csv", "json", "yaml"}:
-                    paste_format = selected_format
+                    paste_format = chosen_format = selected_format
             if paste_too_large:
                 raise ConfigurationError(
                     "Your pasted text was not kept because it is over 100 KB. Paste less, or upload a file."
@@ -393,7 +394,8 @@ def create_blueprint(config):
             else:
                 if len(format_values) != 1:
                     raise ConfigurationError("Choose CSV, JSON or YAML for pasted rows.")
-                suffix = {"csv": ".csv", "json": ".json", "yaml": ".yaml"}.get(paste_format)
+                # Use only a valid submitted choice; the display default must not stand in for it.
+                suffix = {"csv": ".csv", "json": ".json", "yaml": ".yaml"}.get(chosen_format)
                 if suffix is None:
                     raise ConfigurationError("Choose CSV, JSON or YAML for pasted rows.")
                 data = pasted_data

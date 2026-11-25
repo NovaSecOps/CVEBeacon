@@ -243,6 +243,20 @@ def test_pasted_json_and_yaml_use_the_inventory_preview(deployment, format, text
     assert f"pasted-{format}" in response.text
 
 
+@pytest.mark.parametrize("format", ["xml", "", "csv,json"])
+def test_paste_with_an_unknown_format_is_refused_not_parsed_as_csv(deployment, format):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    response = paste_upload(
+        browser, detail,
+        "asset_id,vendor,product,version\npasted-asset,Example Vendor,Example Product,1.0.0\n",
+        format,
+    )
+    assert response.status_code == 400
+    assert "Choose CSV, JSON or YAML for pasted rows." in response.text
+    assert "Ready to import." not in response.text
+
+
 def test_paste_requires_exactly_one_source(deployment):
     _, _, _, browser = deployment
     detail = add(browser)
