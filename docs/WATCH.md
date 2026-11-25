@@ -668,6 +668,12 @@ highest CVSS, then EPSS. A run message has a title such as
 `CVEBeacon: 3 new, 1 KEV added (critical-or-likely)`; an event message uses
 `CVEBeacon: [KEV ADDED] CVE-2026-1234`.
 
+When a matching scan finding belongs to an asset without a client label, each
+alert or digest CVE block adds a localized line such as
+`Your assets with no client: 2 affected, 1 needs review`. It reports counts
+only; asset IDs and names are not included. A CVE with both labeled and
+client-less assets shows the affected-clients and no-client lines separately.
+
 Initial events (`initial = 1`) are never sent one by one. They become one digest
 per channel per run. The digest covers every selected initial row, whatever its
 prior status: pending rows, due failed rows, and ambiguous rows when
@@ -721,7 +727,8 @@ as the plain-text part, not from a second content path, and both carry the
 same facts. An alert shows a header line per CVE with
 its label and CVSS, the EPSS, KEV, and exploitation fields, the publication and
 first-seen line, the CVSS scores, the affected-clients line when clients match,
-the reported line when present, the description, the matching rules, and the links. A digest shows a heading, a section per rule with its
+the no-client asset counts when present, the reported line when present, the
+description, the matching rules, and the links. A digest shows a heading, a section per rule with its
 counts, and a compact table with the CVE, severity, EPSS, KEV, exploitation,
 published, and first-seen columns. A screenshot of an HTML alert would show one
 light card with a bold header such as
@@ -787,6 +794,7 @@ The generic webhook receives a stable JSON document:
         {"name": "Acme", "assets": 2, "status": "affected"},
         {"name": "Globex", "assets": 1, "status": "needs_review"}
       ],
+      "unassigned_assets": {"affected": 2, "needs_review": 1},
       "view": {
         "published": "2026-10-30T14:00:00.000",
         "first_seen": "2026-11-04T09:15:00+00:00",
@@ -852,17 +860,21 @@ serialized UTF-8 body fits 32,768 bytes. When names are left out,
 `affected_clients_omitted` gives their count, even if all details are omitted.
 The reduction only removes client details; a document that is larger than
 the limit even without them is sent unchanged, client details included, as
-documents were sent before client correlation existed. The field
-and the count are absent when no client is affected, so documents without
-clients are byte-identical to earlier version-2 output. Notice events can carry
-the same field. Clients come only from local state and are never sent to public
-sources.
+documents were sent before client correlation existed. A separate
+`unassigned_assets` object contains only `affected` and `needs_review` integer
+counts, and is present only when at least one count is non-zero. It never
+contains asset IDs or names. Its bytes are included in the serialized-size
+check while client details are trimmed. Both impact fields are absent when
+their corresponding counts are zero; documents without either impact remain
+byte-identical to earlier version-2 output. Notice events can carry both
+fields. Client labels and no-client counts come only from local state and are
+never sent to public sources.
 
 Client correlation opens the live inventory database with SQLite `mode=ro` and
 reads one transaction. SQLite may need writable directory access to create WAL
 sidecars, even for this read-only connection. If the database cannot be read
-(including a read-only directory without usable sidecars), the clients line is
-omitted. Use a consistent writer-prepared backup when read-only storage is needed;
+(including a read-only directory without usable sidecars), the client and
+no-client impact lines and fields are omitted. Use a consistent writer-prepared backup when read-only storage is needed;
 live databases are never opened as immutable snapshots.
 
 ### Privacy
