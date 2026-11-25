@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from cvebeacon import cli, dashboard, dashboard_ops, scheduling
-from cvebeacon.config import load_config
+from cvebeacon.config import UpdateConfig, load_config
 from cvebeacon.dashboard_jobs import (
     MAX_LOG_BYTES,
     MAX_LOG_TAIL,
@@ -248,17 +248,32 @@ def test_systemd_timer_probe_maps_inactive_disabled_and_watch(tmp_path):
     assert result["scan_state"] == "watch"
 
 
-def test_systemd_timer_probe_rejects_an_execstart_for_another_config(tmp_path):
+@pytest.mark.parametrize("mode", ["missing", "malformed", "another_config"])
+def test_systemd_timer_probe_shows_unknown_for_unmatched_service(mode, tmp_path):
     config = make_config(tmp_path)
-    runner, _ = _systemd_runner(
-        tmp_path / "another.toml", command=("watch", "run"),
+    timer, service = _systemd_output(
+        tmp_path / "another.toml" if mode == "another_config" else config.config_path,
+        command=("watch", "run"),
     )
+    if mode == "missing":
+        service = "\n".join(
+            line for line in service.splitlines()
+            if not line.startswith("ExecStart=")
+        ) + "\n"
+    elif mode == "malformed":
+        service = service.replace(" ; ignore_errors=no", "", 1)
+
+    def runner(args, **kwargs):
+        return _Result(stdout=timer if args[-1] == "cvebeacon.timer" else service)
 
     result = scheduling.systemd_timer_status(
         "cvebeacon.timer", "cvebeacon.service", config.config_path, run=runner
     )
 
-    assert result["scan_state"] == "unknown"
+    assert result == {
+        "state": "Unknown", "boot": "Unknown", "next_run": "Unknown",
+        "last_run": "Unknown", "last_result": "Unknown", "scan_state": "unknown",
+    }
 
 
 def test_systemd_timer_probe_maps_failed_result_and_never_run(tmp_path):
@@ -302,35 +317,76 @@ def test_systemd_timer_probe_fails_closed(mode, tmp_path):
     }
 
 
-def test_timer_policy_is_required_validated_and_does_not_query_unlisted_units(
-    tmp_path, monkeypatch
-):
+def test_missing_timer_policy_uses_cron_and_does_not_query_systemd(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     app = dashboard.create_app(config)
     runner, calls = _systemd_runner(config.config_path)
     app.extensions["dashboard_schedule_runner"] = runner
     policy = tmp_path / "missing-update.toml"
     monkeypatch.setattr(dashboard_ops, "UPDATE_POLICY_PATH", policy)
-    monkeypatch.setattr(dashboard_ops, "_policy_is_administrator_owned", lambda path: True)
-    monkeypatch.setattr(dashboard_ops, "_policy_file_is_administrator_owned", lambda details: True)
 
     with app.app_context():
         assert dashboard_ops.schedule_scan_state(config) == "none"
     assert not any(call[0][0] == "systemctl" for call in calls)
 
-    _policy_file(tmp_path, units=(
-        "cvebeacon.timer", "untrusted.service", "cvebeacon-dashboard.service",
-    ))
-    policy.write_text(
-        (tmp_path / "update.toml").read_text(encoding="utf-8"), encoding="utf-8"
-    )
-    runner, calls = _systemd_runner(config.config_path)
-    app.extensions["dashboard_schedule_runner"] = runner
-    app.extensions.pop("operations_schedule_summary", None)
 
-    with app.app_context():
-        assert dashboard_ops.schedule_scan_state(config) == "unknown"
-    assert not any(call[0][0] == "systemctl" for call in calls)
+def test_policy_presence_ignores_contents_and_blocks_cron_for_custom_units(
+    tmp_path, monkeypatch
+):
+    _allow_test_account_storage(monkeypatch)
+    config = replace(
+        make_config(tmp_path), update=UpdateConfig(enabled=False)
+    )
+    new_accounts(config)
+    app = dashboard.create_app(config)
+    policy = _policy_file(
+        tmp_path,
+        units=("custom.timer", "custom.service", "cvebeacon-dashboard.service"),
+        enabled=False,
+    )
+    monkeypatch.setattr(dashboard_ops, "UPDATE_POLICY_PATH", policy)
+    monkeypatch.setattr(dashboard_ops, "_policy_is_administrator_owned", lambda path: True)
+    monkeypatch.setattr(dashboard_ops, "_policy_file_is_administrator_owned", lambda details: True)
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append((list(args), kwargs))
+        return _Result(returncode=1)
+
+    app.extensions["dashboard_schedule_runner"] = runner
+
+    def unexpected_open(*args, **kwargs):
+        raise AssertionError("the dashboard must not read the updater policy")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(dashboard_ops.os, "open", unexpected_open)
+        with app.app_context():
+            snapshot = dashboard_ops._schedule_snapshot(config)
+
+    assert snapshot["timer_managed"] is True
+    assert snapshot["summary"] == "Unknown"
+    assert snapshot["scan_state"] == "unknown"
+    assert snapshot["timer_status"] == {
+        "state": "Unknown", "boot": "Unknown", "next_run": "Unknown",
+        "last_run": "Unknown", "last_result": "Unknown", "scan_state": "unknown",
+    }
+    assert [call[0][-1] for call in calls] == [
+        "cvebeacon.timer", "cvebeacon.service",
+    ]
+
+    client = app.test_client()
+    login(client)
+    page = client.get("/operations/schedule")
+    assert page.status_code == 200
+    assert "Monitoring timer" in page.text
+    assert "Unknown" in page.text
+    denied = submit(
+        client, "/operations/schedule/install", mode="interval", every="4",
+        command="watch",
+    )
+    assert denied.status_code == 409
+    assert dashboard_ops.TIMER_CRON_BLOCK_REASON in denied.text
+    assert not any(call[0][0] == "crontab" for call in calls)
 
 
 def test_schedule_page_shows_systemd_timer_and_refuses_cron_install(tmp_path, monkeypatch):

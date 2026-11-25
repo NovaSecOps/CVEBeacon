@@ -219,12 +219,8 @@ sudo find -P /opt/cvebeacon -type d -exec chmod 0750 {} +
 sudo find -P /opt/cvebeacon -type f ! -perm /111 -exec chmod 0640 {} +
 sudo find -P /opt/cvebeacon -type f -perm /111 -exec chmod 0750 {} +
 sudo install -d -m 0755 /etc/cvebeacon
-sudo install -o root -g cvebeacon -m 0640 deploy/systemd/update-policy.example /etc/cvebeacon/update.toml
+sudo install -o root -g root -m 0600 deploy/systemd/update-policy.example /etc/cvebeacon/update.toml
 ```
-
-The policy remains root-owned and is not writable by the service group. Its
-group-read permission lets the dashboard validate the monitoring timer and show
-its status.
 
 Keep runtime config readable by the service (`0600` service-owned, or `0640`
 owned by root and the service primary group). A root-owned `0600` systemd

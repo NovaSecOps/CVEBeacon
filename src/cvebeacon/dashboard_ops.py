@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import json
-import re
+import os
 import shlex
 import stat
 import subprocess
 import threading
 import time
-import tomllib
 from pathlib import Path
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
 
@@ -31,15 +29,9 @@ from .locking import OperationLock, RunInProgress
 from .launching import command_prefix
 
 UPDATE_POLICY_PATH = Path("/etc/cvebeacon/update.toml")
-DEFAULT_UPDATE_UNITS = (
-    "cvebeacon.timer", "cvebeacon.service", "cvebeacon-dashboard.service"
+REFERENCE_UPDATE_UNITS = (
+    "cvebeacon.timer", "cvebeacon.service",
 )
-UPDATE_UNIT_PATTERN = re.compile(r"cvebeacon[\w@.-]*\.(service|timer)")
-UPDATE_POLICY_FIELDS = {
-    "enabled", "prefix", "config", "data", "user", "repository",
-    "allow_prereleases", "signers", "units", "probe", "retention",
-    "wait_seconds", "dashboard_unit",
-}
 TIMER_CRON_BLOCK_REASON = (
     "This server uses a systemd timer for monitoring, so a cron schedule cannot be installed here."
 )
@@ -54,12 +46,7 @@ TIMER_STATUS_LABELS = {
 
 
 def _policy_file_is_administrator_owned(details) -> bool:
-    return (
-        details.st_uid == 0
-        and not details.st_mode & 0o022
-        and stat.S_ISREG(details.st_mode)
-        and details.st_size <= 16384
-    )
+    return details.st_uid == 0 and stat.S_ISREG(details.st_mode)
 
 
 def requires(permission):
@@ -112,77 +99,30 @@ def _record(action: str, detail: str | None = None) -> None:
 
 
 def _policy_is_administrator_owned(path: Path) -> bool:
-    """Match the updater's root-owned, non-writable policy path requirement."""
+    """Detect the root-owned policy without reading it; require trusted parents."""
     path = Path(path).absolute()
     try:
-        for candidate in (path, *path.parents):
+        details = path.lstat()
+        if not _policy_file_is_administrator_owned(details):
+            return False
+        for candidate in path.parents:
             details = candidate.lstat()
-            if details.st_uid != 0 or details.st_mode & 0o022 or stat.S_ISLNK(details.st_mode):
-                return False
-            if candidate == path:
-                if not _policy_file_is_administrator_owned(details):
-                    return False
-            elif not stat.S_ISDIR(details.st_mode):
+            if (
+                details.st_uid != 0
+                or details.st_mode & 0o022
+                or not stat.S_ISDIR(details.st_mode)
+            ):
                 return False
     except OSError:
         return False
     return True
 
 
-def _update_timer_units(config: AppConfig) -> tuple[bool, tuple[str, str] | None]:
-    """Read only the admin policy fields needed to recognize its timer pair.
-
-    An unreadable protected policy is treated as managed when runtime update
-    checks are enabled. That fails closed for cron installation while allowing
-    the Schedule page to report unknown until the policy is made readable.
-    """
-    path = UPDATE_POLICY_PATH
-    if not _policy_is_administrator_owned(path):
+def _update_timer_units() -> tuple[bool, tuple[str, str] | None]:
+    """Use policy-file presence as the managed signal and fixed reference units."""
+    if not _policy_is_administrator_owned(UPDATE_POLICY_PATH):
         return False, None
-    try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
-    except PermissionError:
-        return bool(config.update.enabled), None
-    except OSError:
-        return False, None
-    try:
-        details = os.fstat(descriptor)
-        if not _policy_file_is_administrator_owned(details):
-            return False, None
-        with os.fdopen(descriptor, "rb") as stream:
-            descriptor = -1
-            raw = stream.read(16385)
-        if len(raw) > 16384:
-            return False, None
-        value = tomllib.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
-        return bool(config.update.enabled), None
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    if not isinstance(value, dict) or value.get("enabled", False) is not True:
-        return False, None
-    if set(value) - UPDATE_POLICY_FIELDS or not {"prefix", "config", "data", "user"} <= set(value):
-        return True, None
-    units = value.get("units", list(DEFAULT_UPDATE_UNITS))
-    if (
-        not isinstance(units, list)
-        or not units
-        or len(units) > 32
-        or any(not isinstance(unit, str) for unit in units)
-        or len(set(units)) != len(units)
-        or any(not UPDATE_UNIT_PATTERN.fullmatch(unit) or unit.startswith("cvebeacon-update") for unit in units)
-    ):
-        return True, None
-    dashboard_unit = value.get("dashboard_unit", "cvebeacon-dashboard.service")
-    if not isinstance(dashboard_unit, str) or dashboard_unit not in units or not dashboard_unit.endswith(".service"):
-        return True, None
-    timer_unit = next((unit for unit in units if unit == "cvebeacon.timer"), None)
-    service_unit = next((unit for unit in units if unit == "cvebeacon.service"), None)
-    if timer_unit is None or service_unit is None:
-        return True, None
-    return True, (timer_unit, service_unit)
+    return True, REFERENCE_UPDATE_UNITS
 
 
 def _bounded_schedule_runner(runner):
@@ -207,7 +147,7 @@ def _schedule_snapshot(config: AppConfig) -> dict:
         timer_units = None
         timer_status = None
         if platform == "linux":
-            managed, timer_units = _update_timer_units(config)
+            managed, timer_units = _update_timer_units()
         if managed:
             timer_status = dict(TIMER_STATUS_LABELS)
             if timer_units is not None:
@@ -620,7 +560,7 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
         require_accounts()
         if (
             scheduling.platform.system().casefold() == "linux"
-            and _update_timer_units(config)[0]
+            and _update_timer_units()[0]
         ):
             return _render_schedule(
                 config, error=TIMER_CRON_BLOCK_REASON, status=409

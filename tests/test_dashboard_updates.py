@@ -99,6 +99,36 @@ def test_update_check_feedback_is_shown_on_updates_page(
     assert expected in page.text
 
 
+def test_disabled_update_check_does_not_use_cached_status_or_audit(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        UserStore, "_trusted_directory_chain", staticmethod(lambda directory: ())
+    )
+    config = replace(
+        make_config(tmp_path), update=UpdateConfig(enabled=False)
+    )
+    users = new_accounts(config)
+    app = dashboard.create_app(config)
+    client = app.test_client()
+    updater.atomic_json(
+        config.watch.database.parent / updater.STATUS,
+        {"current": "0.1.0", "available": "0.1.1", "last_check": "2026-11-24T00:00:00+00:00"},
+    )
+
+    def unexpected_check(*args, **kwargs):
+        pytest.fail("a disabled release check must not call the updater")
+
+    monkeypatch.setattr(dashboard_update, "check", unexpected_check)
+    login(client)
+    response = submit(client, "/updates/check")
+    assert response.status_code == 303
+    page = client.get("/updates/")
+    assert "Release checks are turned off. An administrator can turn them on in the configuration." in page.text
+    assert "Version 0.1.1 is available." not in page.text
+    assert not any(entry.action == "update_check" for entry in users.audit_entries())
+
+
 def test_request_needs_account_admin_and_valid_csrf(updates):
     config, _, client = updates
     login(client)

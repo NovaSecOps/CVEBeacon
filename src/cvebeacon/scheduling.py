@@ -1064,14 +1064,14 @@ def systemd_timer_status(
         last_trigger = timer["LastTriggerUSec"]
 
     if service is None:
-        service_last_run = "Unknown"
-        service_result = "Unknown"
-        scan_state = "unknown"
-    else:
-        service_last_run = _time_label(service["ExecMainExitTimestamp"], empty="Never")
-        service_result = _service_result(service["Result"], service["ExecMainStatus"])
-        argv = _systemd_exec_argv(service["ExecStart"])
-        scan_state = _argv_scan_action(argv, config_path) if argv is not None else "unknown"
+        return unknown
+    argv = _systemd_exec_argv(service["ExecStart"])
+    scan_state = _argv_scan_action(argv, config_path) if argv is not None else "unknown"
+    if scan_state not in {"scan", "watch"}:
+        return unknown
+
+    service_last_run = _time_label(service["ExecMainExitTimestamp"], empty="Never")
+    service_result = _service_result(service["Result"], service["ExecMainStatus"])
 
     if service_last_run == "Never":
         trigger_parsed = _timestamp(last_trigger)

@@ -16,7 +16,7 @@ from cvebeacon.locking import RunLock
 from cvebeacon.update_transaction import ensure_ready
 from test_updater import transaction, signed, value
 from watch_support import write_config
-from test_dashboard_updates import updates
+from test_dashboard_updates import feedback_updates, updates
 from test_dashboard_operations import login, submit
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native update durability uses Linux filesystem and service semantics")
@@ -176,17 +176,16 @@ def test_check_returns_data_when_status_is_a_directory(tmp_path, signed):
     assert u.check(config, http=signed[0].http)["available"] == "0.1.1"
 
 
-def test_dashboard_check_handles_storage_oserrors(updates, monkeypatch):
+def test_dashboard_check_handles_storage_oserrors(feedback_updates, monkeypatch):
     from cvebeacon import dashboard_update
-    _, _, client = updates
+    _, users, client = feedback_updates
     login(client)
     monkeypatch.setattr(dashboard_update, "check", lambda *args: (_ for _ in ()).throw(PermissionError("synthetic storage error")))
     response = submit(client, "/updates/check")
-    assert response.status_code == 400
-    assert "Release check failed." in response.text
-    assert "The release feed or local storage may be unavailable" in response.text
-    assert "Return to the form, check what you entered" not in response.text
-    assert ">Status 400<" in response.text
+    assert response.status_code == 303
+    page = client.get("/updates/")
+    assert "The release check failed. Try again later." in page.text
+    assert not any(entry.action == "update_check" for entry in users.audit_entries())
 
 
 def test_tampered_snapshot_config_never_replaces_the_live_config(tmp_path):

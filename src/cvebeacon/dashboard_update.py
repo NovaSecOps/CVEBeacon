@@ -21,6 +21,12 @@ def create_blueprint(config):
     @requires("admin")
     def check_now():
         require_accounts()
+        if not config.update.enabled:
+            flash(
+                "Release checks are turned off. An administrator can turn them on in the configuration.",
+                "update_check_failed",
+            )
+            return redirect(url_for("updates.index"), code=303)
         try:
             result = check(config)
             current_app.extensions["dashboard_users"].record_action("update_check", username=g.user.username, actor=g.user.username)
