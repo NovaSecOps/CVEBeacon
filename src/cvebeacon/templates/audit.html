@@ -28,8 +28,8 @@
   'backup_create_requested': 'Backup requested',
   'backup_verify_requested': 'Backup check requested',
   'backup_restore_requested': 'Restore requested',
-  'backup_prune_requested': 'Prune requested',
-  'backup_prune': 'Prune done',
+  'backup_prune_requested': 'Expired backup deletion requested',
+  'backup_prune': 'Expired backups deleted',
   'backup_download_requested': 'Download requested',
   'backup_download': 'Download done',
   'job_started': 'Job started',
@@ -45,17 +45,17 @@
   'schedule_remove_skipped': 'Schedule removal skipped',
 } %}
 {% block content %}
-{{ page_header('Account audit', 'A chronological log of the actions CVEBeacon recorded, with a check that recorded rows still match their checksums.') }}
+{{ page_header('Audit', 'A chronological log of the actions CVEBeacon recorded, with a record check that earlier entries have not changed.') }}
 {% if broken is none %}
-{% call callout('success', 'Record chain verified') %}<p>Chain verified: every recorded row still matches its tamper-evident checksum. The check detects edits to recorded rows. It does not cover removal of the newest rows, or changes made directly in other account tables.</p>{% endcall %}
+{% call callout('success', 'Record check passed') %}<p>Every entry still matches its stored checksum, so edits to earlier entries would be noticed. The check does not cover removal of the newest rows, or changes made directly in other account tables.</p>{% endcall %}
 {% else %}
-{% call callout('danger', 'The log does not match its checksum') %}<p>Chain verification failed at row {{ broken }}. Rows may have been edited or damaged outside the normal recording process. Treat the log as untrustworthy and investigate before relying on it.</p>{% endcall %}
+{% call callout('danger', 'The log does not match its stored checksum') %}<p>Record check failed at row {{ broken }}. Rows may have been edited or damaged outside the normal recording process. Treat the log as untrustworthy and investigate before relying on it.</p>{% endcall %}
 {% endif %}
 {% call table_wrap('Account audit entries') %}
-<table><thead><tr><th>Time</th><th>Action</th><th>Account</th><th>Actor</th></tr></thead><tbody>
-{% for entry in entries %}{% set parts = entry.action.split(':', 1) %}{% set label = action_labels.get(parts[0]) %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{% if label %}<span title="{{ entry.action }}">{{ label }}</span><br>{% endif %}<code class="muted">{{ entry.action }}</code></td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
+<table><thead><tr><th>Time</th><th>What happened</th><th>Account</th><th>Actor</th></tr></thead><tbody>
+{% for entry in entries %}{% set parts = entry.action.split(':', 1) %}{% set label = action_labels.get(parts[0]) %}<tr><td>{{ watch_stamp(entry.at) }}</td><td>{% if label %}{{ label }}{% if parts|length > 1 %} <span class="muted">{{ parts[1] }}</span>{% endif %}{% else %}Other recorded action <details class="disclosure"><summary>Technical details</summary><code class="muted">{{ entry.action }}</code></details>{% endif %}</td><td>{{ entry.username }}</td><td>{{ entry.actor or '' }}</td></tr>
 {% else %}<tr><td colspan="4">No audit entries recorded yet. Entries appear when accounts are created, changed or used.</td></tr>{% endfor %}
 </tbody></table>
 {% endcall %}
-<p class="muted">Actions are recorded by CVEBeacon itself: the dashboard, the command-line tool and background jobs. An action with an empty Actor was not attributed to a signed-in administrator, such as a sign-in attempt or a command-line command. The text after the action name gives a short detail such as the affected job, version, setting or record. Actions never recorded — for example changes made directly in the databases — are not in this log, and the chain check can only verify the rows that are here.</p>
+<p class="muted">Actions are recorded by CVEBeacon itself: the dashboard, the command-line tool and background jobs. An empty Actor means the action was not attributed to a signed-in administrator, such as a sign-in attempt or a command-line command. The short note after the action gives the affected job, version, setting or record. Changes made directly in the account data files are not recorded, and the record check can only cover the rows that are here.</p>
 {% endblock %}

@@ -8,8 +8,8 @@
 {% call card('Profile', 'Display name, email address and role.') %}
 <form method="post" class="stack">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="save">
-{{ field('Display name', 'display_name', maxlength=100, value=target.display_name or '', optional=true) }}
-{{ field('Email', 'email', type='email', maxlength=254, value=target.email or '', optional=true) }}
+{{ field('Display name', 'display_name', maxlength=100, value=target.display_name or '', optional=true, help='Shown in place of the username where a friendlier name helps.') }}
+{{ field('Email', 'email', type='email', maxlength=254, value=target.email or '', optional=true, help='Optional. For contacting the person about their account.') }}
 <div class="field"><label for="f-role">Role</label>
 <p class="help" id="f-role-help">A role is a named bundle of permissions. Changing the role signs this account out everywhere.</p>
 <select id="f-role" name="role" aria-describedby="f-role-help">{% for name in roles %}<option value="{{ name }}" {% if name == role %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
@@ -18,7 +18,7 @@
 <div class="form-actions">{{ button('Save user') }}{{ link_button('Cancel', url_for('user_list'), kind='secondary') }}</div>
 </form>
 {% endcall %}
-{% call card('Reset password', 'Set a new password for this person and share it privately. This signs their current sessions out.') %}
+{% call card('Reset password', 'Set a new password for this person and share it privately. This signs them out everywhere.') %}
 <form method="post" class="stack">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="password">
 {{ field('New password', 'password', type='password', minlength=12, maxlength=1024, required=true, autocomplete='new-password', help='At least 12 characters. A short sentence works well.') }}

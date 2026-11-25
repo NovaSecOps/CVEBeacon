@@ -67,7 +67,7 @@
 {% if removed %}{% call callout('warning') %}<p>Results include assets removed since the last run. Run detection again to refresh retained results.</p>{% endcall %}{% endif %}
 {% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ watch_stamp(last_job.created_at) }} · {{ last_job.exit_meaning }}</p>{% endif %}
 {% if run %}<p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · {{ run.get('status', '') }} · requests: {{ run.get('request_count', '') }} · duration: {{ run.get('duration_seconds', '') }} seconds.</p>{% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
-{% if snapshot %}<p>Saved inventory: {{ watch_stamp(snapshot.generated_at) }} · {{ snapshot.status }} · {{ snapshot.record_count }} products. Enable <code>[inventory] web_snapshots = true</code> in <a href="{{ url_for('config_editor.inventory') }}">inventory configuration</a> to include saved snapshots in normal scans. A failed observation retains the previous inventory.</p>{% endif %}
+{% if snapshot %}<p>Saved inventory: {{ watch_stamp(snapshot.generated_at) }} · {{ snapshot.status }} · {{ snapshot.record_count }} products. To include saved snapshots in normal scans, turn on web snapshots in the <a href="{{ url_for('config_editor.inventory') }}">Inventory settings</a>. A failed observation retains the previous inventory.</p>{% endif %}
 {% if truncated %}<p class="muted">Showing the first 1,000 entries per table. Full results remain in the private data directory.</p>{% endif %}
 <p class="muted">Response bodies and cookies are never stored or displayed.</p>
 {% endcall %}
