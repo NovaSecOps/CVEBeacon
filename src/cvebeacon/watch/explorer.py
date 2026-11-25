@@ -26,7 +26,7 @@ SEVERITY_BANDS = (*SEVERITY_MINIMA, "unknown")
 @dataclass(frozen=True)
 class SearchResult:
     records: tuple
-    total: int
+    total: int | None
     fts: bool = False
 
 
@@ -69,7 +69,7 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
            has_events="", reported="", client_ids=None, sort="modified", limit=50, offset=0,
            use_fts=True, catalogs=SOURCES, exploitation="", epss_min=None, epss_max=None,
            cvss_min=None, cvss_max=None, cvss_version="", cvss_provider="",
-           modified_since=None, modified_until=None):
+           modified_since=None, modified_until=None, count_total=True):
     if not isinstance(query, str) or len(query) > MAX_QUERY:
         raise StateError("Search must be at most 256 characters")
     query = query.strip()
@@ -293,7 +293,9 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
         if sort not in orders:
             raise StateError("Unknown sort order")
         condition = " WHERE " + " AND ".join(where) if where else ""
-        total = db.execute(cte + "SELECT count(*)" + search_from + condition, values).fetchone()[0]
+        total = None
+        if count_total:
+            total = db.execute(cte + "SELECT count(*)" + search_from + condition, values).fetchone()[0]
         rows = db.execute(cte + "SELECT c.cve_id" + search_from + condition + " ORDER BY " + orders[sort] + " DESC,c.cve_id DESC LIMIT ? OFFSET ?", (*values, limit, offset)).fetchall()
         return SearchResult(tuple(store._view(db, row[0], catalogs) for row in rows), total, fts)
 

@@ -1,5 +1,211 @@
-{#- Rule builder hook. The visual rule builder replaces this body.
-    Included from config_section.html for the condition, channels and events
-    controls of each rule. It receives the current `field`, `group` and
-    `index` and may render an ordinary control with config_control(field, index). -#}
-{{ config_control(field, index) }}
+{#- Rule builder hook.  Included from config_section.html for the condition,
+    channels and events controls of each rule.
+
+    The condition include renders all three controls for the rule so that the
+    channels and events includes below it render nothing.  A text-mode rule
+    calls config_control() to keep the ordinary textarea markup.
+
+    The server never builds a condition in the browser: this template only
+    shows the stored (or re-posted) values, and dashboard_rule_builder.py is
+    the only translator.  The optional rule_builder.js only tidies the rows. -#}
+{% from 'ui.html' import callout, table_wrap, explain %}
+{% set criteria = [
+  {'key': 'kev', 'label': 'On a list of flaws known to be exploited', 'kind': 'enum', 'input': 'select',
+   'help': 'KEV lists are published by CISA (US) and the EU. A flaw on a list is being attacked in the real world.'},
+  {'key': 'exploitation', 'label': 'Exploitation status', 'kind': 'enum', 'input': 'select',
+   'help': 'Active means a source reports attacks now.'},
+  {'key': 'cvss_min', 'label': 'Severity score is at least', 'kind': 'number', 'input': 'number',
+   'help': 'A 0-10 severity score (CVSS). 9 and above is Critical. CVEs with no score yet never match.'},
+  {'key': 'cvss_max', 'label': 'Severity score is at most', 'kind': 'number', 'input': 'number',
+   'help': 'CVEs with no score yet never match.'},
+  {'key': 'epss_min', 'label': 'Exploitation chance is at least', 'kind': 'number', 'input': 'number',
+   'help': 'EPSS is the estimated chance of exploitation in the next 30 days. 0.5 means 50%. CVEs with no value yet never match.'},
+  {'key': 'vendor', 'label': 'Vendor is one of', 'kind': 'text', 'input': 'text',
+   'help': 'Names must match exactly (capital letters do not matter). Example: Example Corp, Widget Inc.'},
+  {'key': 'product', 'label': 'Product is one of', 'kind': 'text', 'input': 'text',
+   'help': 'Names must match exactly (capital letters do not matter). Example: Example Corp, Widget Inc.'},
+  {'key': 'keyword', 'label': 'Description contains', 'kind': 'text', 'input': 'text',
+   'help': 'Any of these words or phrases anywhere in the description.'},
+  {'key': 'cwe', 'label': 'Weakness type is', 'kind': 'text', 'input': 'text',
+   'help': 'CWE numbers, for example 79 or CWE-787.'},
+  {'key': 'cna', 'label': 'Reported by', 'kind': 'text', 'input': 'text',
+   'help': 'The organisation that published the record (its CNA name).'},
+  {'key': 'status', 'label': 'Record status', 'kind': 'enum', 'input': 'select',
+   'help': 'Rejected and reserved records are skipped unless you choose them here.'}
+] %}
+{% set criteria_by_key = {} %}
+{% for item in criteria %}{% set _ = criteria_by_key.update({item.key: item}) %}{% endfor %}
+{% set choice_labels = {
+  'cisa': 'CISA list', 'eu': 'EU list', 'any': 'Either list',
+  'poc': 'Exploit code exists or active', 'active': 'Actively exploited',
+  'published': 'Published', 'rejected': 'Rejected', 'reserved': 'Reserved'
+} %}
+{% set event_labels = {
+  'match': 'New match',
+  'kev_added': 'Added to a known-exploited list',
+  'exploitation_active': 'Becomes actively exploited',
+  'severity_increase': 'Severity score increases',
+  'epss_increase': 'Exploitation chance increases',
+  'nvd_score_added': 'A score is added',
+  'rejected': 'Record is rejected'
+} %}
+
+{% macro error_target(key, index) %}{% if key == 'criteria' or key == 'condition' %}rule-{{ index }}-criteria{% elif key == 'channels' %}rule-{{ index }}-channels{% elif key == 'events' %}rule-{{ index }}-events{% elif key == 'join' %}b{{ index }}_join{% else %}b{{ index }}_{{ key }}_value{% endif %}{% endmacro %}
+
+{% if field.key == 'condition' %}
+{% set stored = rule_builder_rows.get(index, {}) if rule_builder_rows is defined else {} %}
+{% set ui = none %}
+{% set ui_state = g.get('rule_builder') if g is defined else none %}
+{% if ui_state and ui_state.get('rows') and index in ui_state.get('rows') %}{% set ui = ui_state.get('rows').get(index) %}{% endif %}
+{% set mode = ui.get('mode') if ui else stored.get('mode', 'builder') %}
+{% set join = ui.get('join') if ui else stored.get('join', 'any') %}
+{% set uses = ui.get('uses', {}) if ui else stored.get('uses', {}) %}
+{% set values = ui.get('values', {}) if ui else stored.get('values', {}) %}
+{% set errors = ui.get('errors', {}) if ui else {} %}
+{% set reason = stored.get('reason', '') %}
+{% set summary = ui.get('summary', '') if ui else stored.get('summary', '') %}
+{% set withheld = ui and ui.get('withheld') %}
+{% if rules_over_limit and index == 0 and field.key == 'condition' %}
+  {% call callout('warning', 'Read-only rule list') %}
+  <p>This page can edit up to {{ rules_row_limit }} rules. This configuration has more; edit the file directly.</p>
+  {% endcall %}
+{% endif %}
+{% set channels_field = namespace(value=none) %}
+{% set events_field = namespace(value=none) %}
+{% for control in group.controls %}
+  {% if control.key == 'channels' %}{% set channels_field.value = control %}{% endif %}
+  {% if control.key == 'events' %}{% set events_field.value = control %}{% endif %}
+{% endfor %}
+
+{% if errors %}
+  {% call callout('danger', 'The rule was not saved') %}
+  <ul>{% for key, message in errors.items() %}<li><a href="#{{ error_target(key, index) }}">{{ message }}</a></li>{% endfor %}</ul>
+  {% endcall %}
+{% endif %}
+
+<input type="hidden" name="b{{ index }}_mode" value="{{ mode }}">
+{% if not read_only %}
+  {% if mode == 'builder' %}
+    <div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="edit_as_text" value="{{ index }}">Edit as text</button></div>
+  {% elif stored.get('mode') == 'builder' and group.data.get('condition') and (not ui or ui.get('representable')) and not withheld %}
+    <div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="use_builder" value="{{ index }}">Use the builder</button></div>
+  {% endif %}
+{% endif %}
+
+{% if mode == 'text' %}
+  {% if reason %}{% call callout('info', 'Edited as text') %}<p>{{ reason }}</p>{% endcall %}{% endif %}
+  {{ config_control(field, index) }}
+  {% if channels_field.value %}{{ config_control(channels_field.value, index) }}{% endif %}
+  {% if events_field.value %}{{ config_control(events_field.value, index) }}{% endif %}
+{% else %}
+  <fieldset class="criteria" id="rule-{{ index }}-criteria">
+    <legend>When should this rule alert?</legend>
+    <div class="field">
+      <label for="b{{ index }}_join">Match</label>
+      <select id="b{{ index }}_join" name="b{{ index }}_join"{% if read_only %} disabled{% endif %}{% if errors.get('join') or errors.get('criteria') %} aria-invalid="true"{% endif %} aria-describedby="b{{ index }}_join-help{% if errors.get('join') %} b{{ index }}_join-error{% endif %}{% if errors.get('criteria') %} b{{ index }}_criteria-error{% endif %}">
+        <option value="any"{% if join != 'all' %} selected{% endif %}>Any one of the included criteria</option>
+        <option value="all"{% if join == 'all' %} selected{% endif %}>All of the included criteria</option>
+      </select>
+      <p class="help" id="b{{ index }}_join-help">Excluded criteria always apply on top: if one is true, no alert is sent.</p>
+      {% if errors.get('join') %}<p class="field-error" id="b{{ index }}_join-error">{{ errors.get('join') }}</p>{% endif %}
+      {% if errors.get('criteria') %}<p class="field-error" id="b{{ index }}_criteria-error">{{ errors.get('criteria') }}</p>{% endif %}
+    </div>
+    {% call table_wrap('Criteria for rule ' ~ (index + 1)) %}
+    <table class="criteria-table">
+      <thead><tr><th scope="col">Criterion</th><th scope="col">Use</th><th scope="col">Value</th></tr></thead>
+      <tbody>
+      {% for criterion in criteria %}
+        {% set key = criterion.key %}
+        {% set use = uses.get(key, '') %}
+        {% set value = values.get(key, '') %}
+        {% set error = errors.get(key) %}
+        {% set schema = condition_schema.get(key, {}) %}
+        <tr class="criterion" data-criterion="{{ key }}">
+          <th scope="row">{{ criterion.label }}<p class="help" id="b{{ index }}_{{ key }}_help">{{ criterion.help }}{% if criterion.input == 'number' %} Enter a value from {{ schema.minimum }} to {{ schema.maximum }}.{% endif %}</p></th>
+          <td><label class="visually-hidden" for="b{{ index }}_{{ key }}_use">Use {{ criterion.label }}</label>
+            <select id="b{{ index }}_{{ key }}_use" name="b{{ index }}_{{ key }}_use" data-rule-use{% if read_only %} disabled{% endif %}>
+              <option value=""{% if not use %} selected{% endif %}>Not used</option>
+              <option value="include"{% if use == 'include' %} selected{% endif %}>Include</option>
+              <option value="exclude"{% if use == 'exclude' %} selected{% endif %}>Exclude (never alert)</option>
+            </select></td>
+          <td><div class="criterion-controls">
+            <label class="visually-hidden" for="b{{ index }}_{{ key }}_value">Value for {{ criterion.label }}</label>
+            {% if criterion.input == 'select' %}
+              {% set schema_choices = schema.get('choices', ()) %}
+              {% set lower_choices = schema_choices|map('string')|map('lower')|list %}
+              <select id="b{{ index }}_{{ key }}_value" name="b{{ index }}_{{ key }}_value" data-rule-value{% if read_only %} disabled{% endif %} aria-describedby="b{{ index }}_{{ key }}_help{% if error %} b{{ index }}_{{ key }}_error{% endif %}"{% if error %} aria-invalid="true"{% endif %}>
+                {% for choice in schema_choices %}<option value="{{ choice }}"{% if value|string|lower == choice|string|lower %} selected{% endif %}>{{ choice_labels.get(choice, choice) }}</option>{% endfor %}
+                {% if value and value|string|lower not in lower_choices %}<option value="{{ value }}" selected>Submitted value</option>{% endif %}
+              </select>
+            {% elif criterion.input == 'number' %}
+              <input id="b{{ index }}_{{ key }}_value" name="b{{ index }}_{{ key }}_value" type="text" inputmode="decimal" value="{{ value }}" data-rule-value{% if read_only %} disabled{% endif %} aria-describedby="b{{ index }}_{{ key }}_help{% if error %} b{{ index }}_{{ key }}_error{% endif %}"{% if error %} aria-invalid="true"{% endif %}>
+            {% else %}
+              <input id="b{{ index }}_{{ key }}_value" name="b{{ index }}_{{ key }}_value" type="text" value="{{ value }}" data-rule-value{% if read_only %} disabled{% endif %} aria-describedby="b{{ index }}_{{ key }}_help{% if error %} b{{ index }}_{{ key }}_error{% endif %}"{% if error %} aria-invalid="true"{% endif %}>
+            {% endif %}
+            {% if error %}<p class="field-error" id="b{{ index }}_{{ key }}_error">{{ error }}</p>{% endif %}
+          </div></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endcall %}
+    {% if not withheld %}<p class="muted" id="rule-{{ index }}-summary">{{ summary }}</p>{% endif %}
+    <p class="help">An exclusion only applies when the information is known.</p>
+    {% call explain('How conditions are written') %}
+    <ul>{% for key, spec in condition_schema.items() %}<li><code>{{ key }} = {{ toml_value(spec.example) }}</code> — {% if spec.kind == 'enum' %}one of {{ spec.choices|join(', ') }}{% elif spec.kind == 'number' %}number from {{ spec.minimum }} to {{ spec.maximum }}{% elif spec.kind == 'cwe' %}array of CWE numbers or identifiers{% else %}nonempty array of strings{% endif %}{% if spec.qualifiers %}. For selected versions, use <code>{{ key }} = {{ toml_value(spec.qualified_example) }}</code>. Versions are {{ spec.qualifiers.versions|join(", ") }}.{% endif %}</li>{% endfor %}</ul>
+    <p>Text mode combines these with <code>any</code>, <code>all</code> or <code>not</code>.</p>
+    {% endcall %}
+  </fieldset>
+
+  {% set selected_channels = ui.get('channels') if ui and ui.get('channels') is not none else stored.get('channels', []) %}
+  <div class="field" id="rule-{{ index }}-channels">
+    <p><strong>Send to</strong></p>
+    {% if not channel_names %}
+      {% call callout('info', 'No alert channel yet') %}<p>No alert channel exists yet. Add one with the {% if has_endpoint('config_editor.channel_wizard') %}<a href="{{ url_for('config_editor.channel_wizard') }}">guided setup</a>{% else %}<a href="{{ url_for('config_editor.channels') }}">alert channel settings</a>{% endif %}.</p>{% endcall %}
+    {% else %}
+      {% for name in channel_names %}
+        <div class="field field-check"><input id="b{{ index }}_channels_{{ name }}" type="checkbox" name="b{{ index }}_channels" value="{{ name }}"{% if name in selected_channels %} checked{% endif %}{% if read_only %} disabled{% endif %} aria-describedby="rule-{{ index }}-channels-help{% if errors.get('channels') %} rule-{{ index }}-channels-error{% endif %}"{% if errors.get('channels') %} aria-invalid="true"{% endif %}><label for="b{{ index }}_channels_{{ name }}">{{ name }}</label></div>
+      {% endfor %}
+    {% endif %}
+    <p class="help" id="rule-{{ index }}-channels-help">Choose one or more alert channels. Alerts are queued when a rule matches and sent the next time CVEBeacon runs.</p>
+    {% if errors.get('channels') %}<p class="field-error" id="rule-{{ index }}-channels-error">{{ errors.get('channels') }}</p>{% endif %}
+  </div>
+
+  {% set selected_events = ui.get('events') if ui and ui.get('events') is not none else stored.get('events', events) %}
+  <div class="field" id="rule-{{ index }}-events">
+    <p><strong>Alert on</strong></p>
+    {% for kind in events %}
+      <div class="field field-check"><input id="b{{ index }}_events_{{ kind }}" type="checkbox" name="b{{ index }}_events" value="{{ kind }}"{% if kind in selected_events %} checked{% endif %}{% if read_only %} disabled{% endif %} aria-describedby="rule-{{ index }}-events-help{% if errors.get('events') %} rule-{{ index }}-events-error{% endif %}"{% if errors.get('events') %} aria-invalid="true"{% endif %}><label for="b{{ index }}_events_{{ kind }}">{{ event_labels.get(kind, kind) }}</label></div>
+    {% endfor %}
+    <p class="help" id="rule-{{ index }}-events-help">Choose the kinds of change that should create an alert.</p>
+    {% if errors.get('events') %}<p class="field-error" id="rule-{{ index }}-events-error">{{ errors.get('events') }}</p>{% endif %}
+  </div>
+
+{% endif %}
+
+{% if withheld %}<p class="muted">Some criterion values were withheld. Re-enter them before saving.</p>{% endif %}
+
+{% if not read_only and group.data.get('name') %}<div class="form-actions"><button type="submit" class="btn btn-secondary btn-small" name="match_rule" value="{{ index }}">Check against recent CVEs</button></div>{% endif %}
+
+{% if match and match.get('index') == index %}
+  {% call callout('info', 'Recent CVE check') %}
+  <p>This check uses this rule’s stored score providers.</p>
+  {% if match.get('error') %}
+    <p>{{ match.get('error') }}</p>
+  {% elif match.get('stored', 0) == 0 %}
+    <p>No CVEs are stored yet. Run the first sync (see Getting started) and check again.</p>
+  {% else %}
+    <p>{{ match.get('match_count', 0) }} of the {{ match.get('stored', 0) }} most recently changed stored CVEs match this rule.</p>
+    {% if match.get('matches') %}
+      <ul>
+      {% for item in match.get('matches') %}
+        <li>{% if has_endpoint('watch.cve') %}<a href="{{ url_for('watch.cve', cve_id=item.get('cve_id')) }}">{{ item.get('cve_id') }}</a>{% else %}{{ item.get('cve_id') }}{% endif %}{% if item.get('score') is not none %} · highest score {{ item.get('score') }}{% endif %}{% if item.get('reasons') %} · {{ item.get('reasons')|join('; ') }}{% endif %}</li>
+      {% endfor %}
+      </ul>
+    {% endif %}
+  {% endif %}
+  <p>This is a test against stored data only. It does not show alerts already sent, and CVEs missing a score or list entry never match conditions that need them. No match here does not mean a flaw is absent or unexploited.</p>
+  {% endcall %}
+{% endif %}
+
+{% endif %}
