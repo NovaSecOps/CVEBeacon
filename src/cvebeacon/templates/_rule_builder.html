@@ -40,15 +40,7 @@
   'poc': 'Exploit code exists or active', 'active': 'Actively exploited',
   'published': 'Published', 'rejected': 'Rejected', 'reserved': 'Reserved'
 } %}
-{% set event_labels = {
-  'match': 'New match',
-  'kev_added': 'Added to a known-exploited list',
-  'exploitation_active': 'Becomes actively exploited',
-  'severity_increase': 'Severity score increases',
-  'epss_increase': 'Exploitation chance increases',
-  'nvd_score_added': 'A score is added',
-  'rejected': 'Record is rejected'
-} %}
+{% import '_event_labels.html' as event_text %}{% set event_labels = event_text.labels %}
 
 {% macro error_target(key, index) %}{% if key == 'criteria' or key == 'condition' %}rule-{{ index }}-criteria{% elif key == 'channels' %}rule-{{ index }}-channels{% elif key == 'events' %}rule-{{ index }}-events{% elif key == 'join' %}b{{ index }}_join{% else %}b{{ index }}_{{ key }}_value{% endif %}{% endmacro %}
 
