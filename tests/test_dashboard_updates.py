@@ -6,11 +6,26 @@ import pytest
 from cvebeacon import dashboard, dashboard_update, updater
 from cvebeacon.config import UpdateConfig
 from cvebeacon.dashboard_config import check_document, dashboard_authority_changed
+from cvebeacon.watch.users import UserStore
 from test_dashboard_operations import login, make_config, new_accounts, submit
 
 
 @pytest.fixture
 def updates(tmp_path, monkeypatch):
+    config = replace(make_config(tmp_path), update=UpdateConfig(enabled=True))
+    users = new_accounts(config)
+    app = dashboard.create_app(config)
+    monkeypatch.setattr(dashboard_update, "unsupported_reason", lambda: None)
+    return config, users, app.test_client()
+
+
+@pytest.fixture
+def feedback_updates(tmp_path, monkeypatch):
+    # The task sandbox presents / as owned by nobody; this test exercises the
+    # update feedback route and does not depend on the storage ancestry check.
+    monkeypatch.setattr(
+        UserStore, "_trusted_directory_chain", staticmethod(lambda directory: ())
+    )
     config = replace(make_config(tmp_path), update=UpdateConfig(enabled=True))
     users = new_accounts(config)
     app = dashboard.create_app(config)
@@ -52,6 +67,36 @@ def test_update_check_is_attributed_to_the_administrator(updates, monkeypatch):
     entry = users.audit_entries()[-1]
     assert entry.action == "update_check"
     assert entry.actor == "admin"
+
+
+@pytest.mark.parametrize(
+    ("check_result", "failure", "expected"),
+    [
+        ({"current": "0.1.0", "available": None}, None,
+         "Checked just now. You have the latest release (0.1.0)."),
+        ({"current": "0.1.0", "available": "0.1.1"}, None,
+         "Version 0.1.1 is available."),
+        (None, updater.UpdateError("release check unavailable"),
+         "The release check failed. Try again later."),
+    ],
+)
+def test_update_check_feedback_is_shown_on_updates_page(
+    feedback_updates, monkeypatch, check_result, failure, expected
+):
+    _, _, client = feedback_updates
+    login(client)
+
+    def check(*args, **kwargs):
+        if failure:
+            raise failure
+        return check_result
+
+    monkeypatch.setattr(dashboard_update, "check", check)
+
+    response = submit(client, "/updates/check")
+    assert response.status_code == 303
+    page = client.get("/updates/")
+    assert expected in page.text
 
 
 def test_request_needs_account_admin_and_valid_csrf(updates):
