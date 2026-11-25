@@ -682,3 +682,15 @@ def test_dashboard_creates_private_inventory_directory_and_journal(deployment, m
     assert staged == [{"profile"}, {"current"}, {"archive", "current"}]
     assert not list(directory.glob(".inventory-pending*"))
     assert current(manager, detail)[0]["asset_id"] == "newer-asset"
+
+
+def test_restore_with_stale_revision_reports_the_change_before_checking_the_version(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    assert submit(browser, detail, upload(browser, detail)).status_code == 303
+    response = browser.post(detail.split("?")[0] + "/inventory", data={
+        "csrf": csrf(browser, detail), "revision": "0" * 64, "action": "restore",
+        "confirm": "", "version": "not-a-version",
+    })
+    assert response.status_code == 409
+    assert "This inventory changed." in response.text

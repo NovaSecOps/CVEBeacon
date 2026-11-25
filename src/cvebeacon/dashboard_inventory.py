@@ -470,9 +470,11 @@ def create_blueprint(config):
             restore_stamp = None
             precondition = None
             if action == "restore":
-                restore_stamp = _text(request.form, "version", required=True, limit=32)
-                if not VERSION.fullmatch(restore_stamp):
-                    abort(400)
+                def restore_stamp():
+                    stamp = _text(request.form, "version", required=True, limit=32)
+                    if not VERSION.fullmatch(stamp):
+                        abort(400)
+                    return stamp
             else:
                 def confirm_remove(previous):
                     if previous is None or _text(request.form, "confirm") != "remove":

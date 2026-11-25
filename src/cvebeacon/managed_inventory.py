@@ -291,6 +291,10 @@ def publish_managed_inventory(
         if precondition is not None and not precondition(previous):
             raise InventoryRevisionConflict()
 
+        # A caller may pass a reader so the version is read and validated only
+        # after the lock is held and the revision matches.
+        if callable(restore_stamp):
+            restore_stamp = restore_stamp()
         if restore_stamp is not None:
             if not VERSION.fullmatch(restore_stamp):
                 raise ConfigurationError("That version is no longer available.")
