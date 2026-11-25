@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,20 +12,16 @@ from cvebeacon.inventory import load_inventory
 from cvebeacon.managed_inventory import client_key, encode_records, profiles
 from cvebeacon.models import Asset
 from cvebeacon.private_storage import private_directory, private_file
-from cvebeacon.watch.users import BOOTSTRAP, UserStore
-from test_dashboard_watch import PASSWORD
-from watch_support import write_config
+from test_dashboard import setup
+from test_dashboard_accounts import PASSWORD, accounts as account_fixture
 
 
 @pytest.fixture
-def storage(tmp_path):
-    data = tmp_path / "data"
-    private_directory(data, owner_only=True)
-    config = write_config(data, inventory=False)
+def storage(account_fixture):
+    config, users, _, _ = account_fixture
+    config = replace(config, inventory=None)
     directory = config.inventory_directory
     private_directory(directory, owner_only=True)
-    users = UserStore(config.watch.users_database)
-    users.add("admin", password=PASSWORD, is_admin=True, authorization=BOOTSTRAP)
     actor = users.authenticate("admin", PASSWORD)
     name = "Sample client"
     key = client_key(name)
@@ -42,12 +39,6 @@ def _stage(storage, changes, *, commit=True, event="inventory_saved"):
 
 def _data(asset_id, label):
     return encode_records([Asset(asset_id, "Vendor", "Product", "1", client=label)])
-
-
-@pytest.fixture
-def test_user_store_parent(monkeypatch):
-    # These tests exercise journal behavior; other tests cover parent ownership.
-    monkeypatch.setattr(UserStore, "_trusted_directory_chain", staticmethod(lambda directory: ()))
 
 
 def test_rolled_back_profile_and_inventory_never_become_visible(storage):
@@ -215,7 +206,7 @@ def test_unsafe_orphan_staging_path_does_not_block_current_inventory(storage, ca
     assert "private content" not in caplog.text
 
 
-def test_unassigned_journal_recovery_after_interrupted_publish(test_user_store_parent, storage, monkeypatch):
+def test_unassigned_journal_recovery_after_interrupted_publish(storage, monkeypatch):
     config, directory, users, actor, _, _ = storage
     current = directory / "unassigned.json"
     archived = directory / "unassigned.20261119T120000000000Z.json"
@@ -245,10 +236,21 @@ def test_unassigned_journal_recovery_after_interrupted_publish(test_user_store_p
     assert sum(entry.action.startswith('inventory_saved:{"client":""') for entry in users.audit_entries()) == 1
 
 
-def test_unassigned_journal_rejects_a_profile_target(test_user_store_parent, storage):
+def test_unassigned_journal_accepts_current_but_rejects_profile_target(storage):
     from cvebeacon.errors import StateError
 
     _, directory, users, actor, _, _ = storage
+    current = directory / "unassigned.json"
+    with users.transaction() as db:
+        journal.stage_change(
+            directory, db, users, actor, "inventory_saved", "unassigned",
+            {"client": "", "row_count": 1, "mode": "replace"},
+            {"current": (current, _data("reserved", ""))},
+        )
+    assert journal.pending_exists(directory)
+    journal.recover(directory, users.path)
+    assert current.read_bytes() == _data("reserved", "")
+
     with users.transaction() as db:
         with pytest.raises(StateError, match="Invalid inventory change target"):
             journal.stage_change(
@@ -258,7 +260,7 @@ def test_unassigned_journal_rejects_a_profile_target(test_user_store_parent, sto
             )
 
 
-def test_reserved_publisher_add_revision_archive_and_restore(test_user_store_parent, storage):
+def test_reserved_publisher_add_revision_archive_and_restore(storage):
     from cvebeacon.errors import ConfigurationError
     from cvebeacon.managed_inventory import (
         HISTORY_LIMIT, publish_unassigned_inventory, prune, read_unassigned_inventory, versions,

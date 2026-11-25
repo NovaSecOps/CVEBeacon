@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 from io import BytesIO, StringIO
-import json
 from pathlib import Path
 import secrets
 from threading import BoundedSemaphore, Lock
@@ -22,13 +21,14 @@ from .clients import client_name, client_page
 from .dashboard import _text, requires
 from .dashboard_ops import require_accounts, schedule_scan_state
 from .errors import ConfigurationError, InventoryValidationError, StateError
-from .inventory import MAX_CONTRACT_ROWS, SUPPORTED_FORMATS, load_inventory
+from .inventory import SUPPORTED_FORMATS
 from .inventory_preview import FIELDS, FIELD_LABELS, preview_upload
 from .inventory_journal import recover, stage_change, sync_directory
 from .locking import OperationLock
 from .managed_inventory import (
-    HISTORY_LIMIT, KEY, ManagedInventoryCollision, VERSION, archive_path, client_key, encode_records,
-    normalized_client, read_inventory, read_profile, versions,
+    HISTORY_LIMIT, KEY, InventoryPermissionDenied, InventoryRevisionConflict, ManagedInventoryCollision, VERSION,
+    client_key, encode_profile, normalized_client, publish_managed_inventory, read_inventory, read_profile,
+    versions,
 )
 from .private_storage import private_directory
 from .web_inventory import MAX_BYTES, read_bytes
@@ -134,43 +134,6 @@ def _commit_change(config, event, key, detail, changes):
             stage_change(config.inventory_directory, db, users, actor, event, key, detail, changes)
     finally:
         recover(config.inventory_directory, users.path)
-
-
-def _publish(config, path, profile, previous, assets, mode):
-    """Validate the candidate and commit a recoverable inventory change."""
-    label = profile["name"]
-    data = encode_records(assets) if assets else None
-    if data is not None:
-        read_inventory(data, client=label)
-        try:
-            load_inventory(
-                config.inventory_for_management(), snapshot_directory=path.parent.parent / "web-inventory",
-                managed_candidate=(path, assets),
-            )
-        except ManagedInventoryCollision:
-            raise
-        except (InventoryValidationError, OSError, ValueError, StateError) as exc:
-            raise ConfigurationError(
-                "The other inventories could not be checked. Ask an administrator to check the inventory settings."
-            ) from exc
-
-    changes = {"current": (path, data)}
-    profile_path = path.with_suffix(".client")
-    if not profile_path.exists() and not profile_path.is_symlink():
-        changes["profile"] = (profile_path, _profile_bytes(profile))
-    if previous is not None:
-        try:
-            read_inventory(previous, client=label)
-        except (InventoryValidationError, ValueError):
-            pass  # A corrupt current file is replaceable without archiving it.
-        else:
-            changes["archive"] = (archive_path(path), previous)
-    _commit_change(config, "inventory_saved" if data is not None else "inventory_removed", path.stem,
-                   {"client": label, "row_count": len(assets), "mode": mode}, changes)
-
-
-def _profile_bytes(profile):
-    return (json.dumps(profile, ensure_ascii=True) + "\n").encode("ascii")
 
 
 def _require_writer(db):
@@ -296,7 +259,7 @@ def create_blueprint(config):
                 if path.exists() or path.is_symlink():
                     raise ConfigurationError("That client already exists. Open it from the Clients page.")
                 _commit_change(config, "client_added", key, {"client": profile["name"]},
-                               {"profile": (path, _profile_bytes(profile))})
+                               {"profile": (path, encode_profile(profile))})
             finally:
                 lock.release()
         except ConfigurationError as exc:
@@ -455,34 +418,17 @@ def create_blueprint(config):
             if preview.errors or not preview.assets:
                 return preview_page(key, profile, preview, token, mode, status=400,
                                     error="Fix the errors and make sure at least one row is ready before saving.")
-            lock = locked()
-            try:
-                private_directory(directory, owner_only=True)
-                previous = _current(path)
-                if pending_uploads.get(token, key) is None or _revision(previous) != pending.previous:
-                    return render_detail(key, profile, error="This inventory changed. Upload the file again.", status=409)
-                assets = preview.assets
-                if mode == "add" and previous is not None:
-                    try:
-                        original = read_inventory(previous, client=profile["name"])
-                    except (InventoryValidationError, ValueError) as exc:
-                        raise ConfigurationError(
-                            "The current inventory is unreadable. Choose Replace only if you intend to discard it."
-                        ) from exc
-                    seen = {asset.asset_id.casefold() for asset in original}
-                    if any(asset.asset_id.casefold() in seen for asset in assets):
-                        raise ConfigurationError(
-                            "An uploaded asset ID is already in this client's inventory. "
-                            "Use unique IDs to add rows, or choose Replace if you intend to remove assets not in this file."
-                        )
-                    assets = original + assets
-                if len(assets) > MAX_CONTRACT_ROWS:
-                    raise ConfigurationError("This inventory would exceed 100,000 rows. Import fewer rows.")
-                _publish(config, path, profile, previous, assets, mode)
-                pending_uploads.remove(token)
-            finally:
-                lock.release()
+            publish_managed_inventory(
+                config, path, preview.assets, expected_revision=pending.previous, users=_users(),
+                proof=g.entry.proof, mode=mode, client=profile["name"], profile=profile,
+                precondition=lambda previous: pending_uploads.get(token, key) is not None,
+                after_publish=lambda: pending_uploads.remove(token),
+            )
             return redirect(detail_url(key, profile, result="saved"), code=303)
+        except InventoryRevisionConflict:
+            return render_detail(key, profile, error="This inventory changed. Upload the file again.", status=409)
+        except InventoryPermissionDenied:
+            abort(403)
         except (ConfigurationError, ManagedInventoryCollision) as exc:
             if preview is None:
                 return render_detail(key, profile, error=str(exc), status=400)
@@ -521,32 +467,31 @@ def create_blueprint(config):
             abort(403)
         expected = _text(request.form, "revision", required=True, limit=64)
         try:
-            lock = locked()
-            try:
-                private_directory(directory, owner_only=True)
-                previous = _current(path)
-                if _revision(previous) != expected:
-                    raise ConfigurationError("This inventory changed. Review the current inventory before continuing.")
-                if action == "restore":
-                    stamp = _text(request.form, "version", required=True, limit=32)
-                    if not VERSION.fullmatch(stamp):
-                        abort(400)
-                    version = path.with_name(f"{key}.{stamp}.json")
-                    if version not in versions(path)[:HISTORY_LIMIT]:
-                        raise ConfigurationError("That version is no longer available.")
-                    try:
-                        assets = read_inventory(read_bytes(version), client=profile["name"])
-                    except (InventoryValidationError, ValueError) as exc:
-                        raise ConfigurationError(
-                            "That saved version cannot be used. Choose another version or upload the file again."
-                        ) from exc
-                else:
+            restore_stamp = None
+            precondition = None
+            if action == "restore":
+                restore_stamp = _text(request.form, "version", required=True, limit=32)
+                if not VERSION.fullmatch(restore_stamp):
+                    abort(400)
+            else:
+                def confirm_remove(previous):
                     if previous is None or _text(request.form, "confirm") != "remove":
                         raise ConfigurationError("Confirm that you want to remove this inventory.")
-                    assets = []
-                _publish(config, path, profile, previous, assets, action)
-            finally:
-                lock.release()
+                    return True
+
+                precondition = confirm_remove
+            publish_managed_inventory(
+                config, path, [], expected_revision=expected, users=_users(), proof=g.entry.proof,
+                mode=action, client=profile["name"], profile=profile, restore_stamp=restore_stamp,
+                precondition=precondition,
+            )
+        except InventoryRevisionConflict:
+            return render_detail(
+                key, profile, error="This inventory changed. Review the current inventory before continuing.",
+                status=409,
+            )
+        except InventoryPermissionDenied:
+            abort(403)
         except (ConfigurationError, ManagedInventoryCollision) as exc:
             return render_detail(key, profile, error=str(exc), status=409)
         except (OSError, ValueError, StateError, InventoryValidationError):
