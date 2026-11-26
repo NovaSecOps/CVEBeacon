@@ -1098,15 +1098,24 @@ _CANONICAL_ALIAS_KEYS = frozenset(REVIEWED_ALIASES.values())
 
 def _cpe_fields(cpe: str, *, keep_escapes: bool = False) -> tuple[str, ...]:
     fields = split_cpe23(cpe, keep_escapes=keep_escapes)
-    if len(fields) == 11 and all(field not in {"", "*", "-"} for field in fields[1:3]):
+    if (len(fields) == 11 and fields[0] in {"a", "o", "h"}
+            and all(fields) and all(field not in {"*", "-"} for field in fields[1:3])):
         return fields
     return ()
+
+
+def _cpe_scope(fields: tuple[str, ...]) -> tuple[str, ...]:
+    # The unqualified application identity also matches a reviewed detection
+    # with no CPE. Keep the scope of OS, hardware and qualified CPEs explicit.
+    if not fields or (fields[0] == "a" and all(field == "*" for field in fields[4:])):
+        return ()
+    return fields[0], *(field.casefold() for field in fields[4:])
 
 
 def canonical_cpe(cpe: str) -> str:
     """Use the reviewed vendor/product spelling and keep other CPE fields."""
     fields = _cpe_fields(cpe)
-    if not fields:
+    if not fields or fields[0] != "a":
         return cpe
     pair = (fields[1].casefold(), fields[2].casefold())
     canonical = REVIEWED_ALIASES.get(pair, pair)
@@ -1125,10 +1134,12 @@ def identity_key(detection: Detection) -> tuple[str, ...]:
     fields = _cpe_fields(detection.cpe)
     if fields:
         pair = (fields[1].casefold(), fields[2].casefold())
-    else:
-        pair = (detection.vendor.casefold(), detection.product.casefold())
-        if getattr(detection, "name_only", False) and detection.name and pair not in REVIEWED_ALIASES:
-            return "name", detection.name.casefold()
+        if fields[0] == "a":
+            pair = REVIEWED_ALIASES.get(pair, pair)
+        return "product", *pair, *_cpe_scope(_cpe_fields(detection.cpe, keep_escapes=True))
+    pair = (detection.vendor.casefold(), detection.product.casefold())
+    if getattr(detection, "name_only", False) and detection.name and pair not in REVIEWED_ALIASES:
+        return "name", detection.name.casefold()
     return "product", *REVIEWED_ALIASES.get(pair, pair)
 
 
@@ -1227,7 +1238,7 @@ def _cdn_detection(url: str):
 def _record(grouped: dict, *, vendor: str, product: str, category: str, confidence: str,
             evidence: str, versions=(), cpe="", name="", ecosystem="", package="",
             implied_by=(), evidence_items=(), rule_key=""):
-    key = (vendor.casefold(), product.casefold())
+    key = (vendor.casefold(), product.casefold(), *_cpe_scope(_cpe_fields(cpe, keep_escapes=True)))
     entry = grouped.setdefault(key, {
         "vendor": vendor, "product": product, "category": category,
         "cpe": "" if ecosystem == "npm" and package else cpe,
@@ -1360,7 +1371,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
     page = _bounded_page(page)
     if page is None:
         return ()
-    grouped: dict[tuple[str, str], dict] = {}
+    grouped: dict[tuple[str, ...], dict] = {}
     folded_resources = {
         id(resource): resource.text.casefold()
         for resource in page.resources
@@ -1447,7 +1458,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
                           package=retired.package, implied_by=retired.implied_by)
             for index, item in enumerate(retired.evidence):
                 _record(grouped, vendor=retired.vendor, product=retired.product,
-                        category=retired.category, confidence=retired.confidence,
+                        category=retired.category, confidence=retired.confidence, cpe=retired.cpe,
                         evidence="", evidence_items=(item,),
                         rule_key=f"retirejs:{index}:{item.kind}")
             grouped[key]["evidence_types"].update(retired.evidence_types)

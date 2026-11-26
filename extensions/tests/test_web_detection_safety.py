@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ import pytest
 from cvebeacon.identity import normalize_asset
 from cvebeacon.models import Asset
 from cvebeacon_extensions import retirejs, webrules
-from cvebeacon_extensions.web import Allowlist, Endpoint, WebAsset, _FetchSuccess, _Response, _observe
+from cvebeacon_extensions.web import Allowlist, Endpoint, WebAsset, _FetchSuccess, _Response, _merge_detections, _observe
 from cvebeacon_extensions.webrules import Detection, Resource, detect, page_from
 
 
@@ -94,6 +95,38 @@ def test_react_dom_next_marker_normalizes_to_the_registry_release():
 def test_version_capture_is_bounded_before_normalization():
     assert webrules.normalize_version("1.2.3" + "a" * 64) == ""
     assert webrules.normalize_version(" 1.2.3 ") == "1.2.3"
+
+
+@pytest.mark.parametrize("index,value", [
+    (0, "o"), (0, "h"), (4, "sp1"), (5, "enterprise"), (6, "en-us"),
+    (7, "professional"), (8, "linux"), (9, "x64"), (10, r"\*"),
+])
+def test_incompatible_cpe_fields_keep_versions_separate(index, value):
+    base = ["a", "f5", "nginx", "*", "*", "*", "*", "*", "*", "*", "*"]
+    distinct = base.copy()
+    distinct[1] = "nginx"
+    distinct[index] = value
+    merged = {}
+    _merge_detections(merged, (
+        Detection("f5", "nginx", "web-server", "cpe:2.3:" + ":".join(base), "high", ("1.2.3",)),
+        Detection("nginx", "nginx", "web-server", "cpe:2.3:" + ":".join(distinct), "high", ("2.0",)),
+    ))
+    assert {item.versions for item in merged.values()} == {("1.2.3",), ("2.0",)}
+
+
+def test_builtin_rules_do_not_combine_incompatible_cpes(monkeypatch):
+    compiled = tuple(
+        webrules._CompiledRule(webrules.Rule(
+            part, "fixture", "server", "web-server", "html", part,
+            cpe=f"cpe:2.3:{part}:fixture:server:*:*:*:*:*:*:*:*",
+        ), re.compile(part), None)
+        for part in ("a", "o")
+    )
+    monkeypatch.setattr(webrules, "_rule_index", lambda: compiled)
+    assert {item.cpe for item in detect(page_from({}, "ao"))} == {
+        "cpe:2.3:a:fixture:server:*:*:*:*:*:*:*:*",
+        "cpe:2.3:o:fixture:server:*:*:*:*:*:*:*:*",
+    }
 
 
 @pytest.mark.parametrize("url", [
