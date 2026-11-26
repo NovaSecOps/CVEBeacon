@@ -17,3 +17,6 @@ cvebeacon-ext = "cvebeacon_extensions.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cvebeacon_extensions = ["data/retirejs/*.json", "data/retirejs/*.md"]
