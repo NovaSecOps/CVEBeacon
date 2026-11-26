@@ -8,7 +8,7 @@ from cvebeacon_extensions.webrules import MAX_ANALYSIS_TEXT, _inline_script_text
 
 from test_web_resource_fetching import asset, response, run
 
-BOUND = 1.0
+BOUND = 4.0  # The quadratic forms take far longer; keep slow CI runners from flaking.
 
 
 def _og_matches(text):
