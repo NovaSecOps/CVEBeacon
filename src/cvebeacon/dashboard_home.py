@@ -98,7 +98,7 @@ def _path_fingerprint(path) -> tuple:
         except OSError:
             stamps.append(None)
         else:
-            stamps.append((details.st_mtime_ns, details.st_size))
+            stamps.append((details.st_mtime_ns, details.st_size, details.st_mode, details.st_uid))
     return tuple(stamps)
 
 
@@ -122,10 +122,12 @@ def _directory_fingerprint(path) -> tuple:
         try:
             details = candidate.lstat()
         except OSError:
-            entries.append((candidate.name, None, None))
+            entries.append((candidate.name, None, None, None, None))
         else:
-            entries.append((candidate.name, details.st_size, details.st_mtime_ns))
-    return (("", directory.st_size, directory.st_mtime_ns), tuple(entries))
+            entries.append((candidate.name, details.st_size, details.st_mtime_ns,
+                            details.st_mode, details.st_uid))
+    return (("", directory.st_size, directory.st_mtime_ns, directory.st_mode, directory.st_uid),
+            tuple(entries))
 
 
 def home_cache_key(config) -> tuple:

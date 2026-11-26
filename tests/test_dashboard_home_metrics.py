@@ -467,3 +467,54 @@ def test_home_cache_expires_and_failed_refresh_does_not_reuse_old_value():
     with pytest.raises(StateError):
         cache.get("config", failed_refresh)
     assert cache.get("config", lambda: "fresh") == "fresh"
+
+
+_POSIX_PERMISSIONS = pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX permission checks as a non-root user",
+)
+_COULD_NOT_CHECK = '<span class="stat-value">Could not check</span>'
+
+
+@_POSIX_PERMISSIONS
+def test_unreadable_web_snapshot_directory_shows_could_not_check(tmp_path):
+    config, _, client = make_home(tmp_path, web_snapshots=True)
+    _record_one_affected(config)
+    directory = config.database_path.parent / "web-inventory"
+    _write_web_snapshot(directory)
+    assert _COULD_NOT_CHECK not in home_kpis(client.get("/").text)
+    directory.chmod(0)
+    try:
+        kpis = home_kpis(client.get("/").text)
+    finally:
+        directory.chmod(0o700)
+    assert kpis.count(_COULD_NOT_CHECK) == 3
+
+
+@_POSIX_PERMISSIONS
+def test_unreadable_managed_inventory_directory_shows_could_not_check(tmp_path):
+    config, _, client = make_home(tmp_path)
+    _record_one_affected(config)
+    private_directory(config.inventory_directory, owner_only=True)
+    assert _COULD_NOT_CHECK not in home_kpis(client.get("/").text)
+    config.inventory_directory.chmod(0)
+    try:
+        response = client.get("/")
+    finally:
+        config.inventory_directory.chmod(0o700)
+    assert response.status_code == 200
+    assert home_kpis(response.text).count(_COULD_NOT_CHECK) == 3
+
+
+@_POSIX_PERMISSIONS
+def test_inventory_file_that_becomes_unreadable_bypasses_the_cache(tmp_path):
+    config, _, client = make_home(tmp_path)
+    _record_one_affected(config)
+    assert _COULD_NOT_CHECK not in home_kpis(client.get("/").text)
+    inventory = tmp_path / "inventory.csv"
+    inventory.chmod(0)
+    try:
+        kpis = home_kpis(client.get("/").text)
+    finally:
+        inventory.chmod(0o600)
+    assert kpis.count(_COULD_NOT_CHECK) == 3

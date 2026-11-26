@@ -251,7 +251,13 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
 
     @app.context_processor
     def inventory_state():
-        return {"inventory_configured": config.effective_inventory is not None}
+        try:
+            configured = config.effective_inventory is not None
+        except Exception as exc:
+            # Pages that read the inventory report the failure themselves.
+            LOG.error("inventory state could not be checked (%s)", type(exc).__name__)
+            configured = config.inventory is not None or config.managed_inventory
+        return {"inventory_configured": configured}
 
     @app.get("/healthz")
     @requires("public")
@@ -450,8 +456,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
             unavailable_home_context,
         )
 
-        inventory_config = config.effective_inventory
-        inventory_configured = inventory_config is not None
+        inventory_config = None
+        inventory_configured = config.inventory is not None or config.managed_inventory
         links = {
             "findings": url_for("findings", applicability="affected"),
             "review": url_for("findings", applicability="needs_review"),
@@ -473,6 +479,10 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
             return data, home
 
         try:
+            # Resolve inside the guard so an unreadable inventory directory
+            # shows Could not check instead of an error page or a cached count.
+            inventory_config = config.effective_inventory
+            inventory_configured = inventory_config is not None
             data, home = cached_home_context(app, lambda: home_cache_key(config), build)
         except Exception as exc:
             LOG.error("home metrics could not be checked (%s)", type(exc).__name__)
