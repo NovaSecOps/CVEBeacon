@@ -6,7 +6,7 @@ wheels, backups and the transaction journal belong to the administrator.
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from email.parser import BytesParser
 import hashlib
@@ -52,6 +52,7 @@ MAX_ARTIFACT = 256 * 1024 * 1024
 MAX_TOTAL = 1024 * 1024 * 1024
 PACKAGES = ("cvebeacon", "cvebeacon-extensions", "cvebeacon-automation")
 SAFE_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+OPERATION_ERRORS = (CVEBeaconError, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError)
 
 
 class UpdateError(CVEBeaconError):
@@ -462,6 +463,27 @@ def protected_tree(path):
             protected(entry.resolve(strict=True), directory=entry.is_dir())
 
 
+def service_account(login):
+    import pwd
+    if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", login):
+        raise UpdateError("invalid service account name")
+    account = pwd.getpwnam(login)
+    if account.pw_uid == 0:
+        raise UpdateError("the service account must be unprivileged")
+    return account
+
+
+def service_data(config, *, uid=None):
+    """Validate the directory independently of the config file's contents."""
+    data = Path(config).parent
+    protected(data.parent, directory=True)
+    info = data.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid == 0 or (uid is not None and info.st_uid != uid)
+            or info.st_mode & 0o022 or info.st_mode & 0o700 != 0o700):
+        raise UpdateError("data must be a real directory writable only by its service account")
+    return data
+
+
 @dataclass(frozen=True)
 class Policy:
     prefix: Path
@@ -476,6 +498,7 @@ class Policy:
     retention: int = 7
     wait_seconds: int = 86400
     dashboard_unit: str = "cvebeacon-dashboard.service"
+    _account: object = field(init=False, default=None, repr=False, compare=False)
 
     @classmethod
     def read(cls, path):
@@ -485,7 +508,7 @@ class Policy:
         value = tomllib.loads(read_bounded(path, 16384).decode("utf-8"))
         if value.pop("enabled", False) is not True:
             raise UpdateError("updates are disabled in administrator policy")
-        allowed = set(cls.__dataclass_fields__)
+        allowed = {entry.name for entry in fields(cls) if entry.init}
         if set(value) - allowed or not {"prefix", "config", "data", "user"} <= set(value):
             raise UpdateError("invalid administrator update policy fields")
         for key in ("prefix", "config", "data", "signers"):
@@ -513,21 +536,18 @@ class Policy:
         protected(policy.prefix, directory=True)
         protected(policy.signers)
         # Data and runtime config may be service-owned; never execute either.
-        import pwd
-        if not isinstance(policy.user, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", policy.user):
-            raise UpdateError("invalid service account name")
-        account = pwd.getpwnam(policy.user)
-        if account.pw_uid == 0:
-            raise UpdateError("the service account must be unprivileged")
-        if policy.data.is_symlink() or not policy.data.is_dir() or policy.data.stat().st_uid != account.pw_uid:
-            raise UpdateError("data must be a real service-owned directory")
-        protected(policy.data.parent, directory=True)
-        if (policy.data.is_relative_to(policy.prefix) or policy.data.stat().st_mode & 0o022
-                or policy.data.stat().st_mode & 0o700 != 0o700):
-            raise UpdateError("data must be separate from code and writable only by its service account")
+        account = service_account(policy.user)
         if policy.config.parent != policy.data:
             raise UpdateError("runtime config must be directly inside the data directory")
-        pending = read_record(policy.prefix)
+        service_data(policy.config, uid=account.pw_uid)
+        if policy.data.is_relative_to(policy.prefix):
+            raise UpdateError("data must be separate from code")
+        object.__setattr__(policy, "_account", account)
+        try:
+            pending = read_record(policy.prefix)
+        except OPERATION_ERRORS:
+            raise UpdateError("the update journal requires administrator recovery",
+                              reason_code="recovery-incomplete") from None
         if pending is not None and pending.get("config") == str(policy.config.parent.resolve() / policy.config.name):
             return policy  # Recovery may need to replace a missing or corrupt runtime config.
         info = policy.config.lstat()
@@ -558,14 +578,13 @@ class Native:
     """Small OS boundary; tests replace this with local fakes."""
     def __init__(self, policy):
         self.policy = policy
-        import pwd
-        self.account = pwd.getpwnam(policy.user)
+        self.account = policy._account or service_account(policy.user)
 
-    def run(self, args, *, service=False, timeout=600, accepted=(0,), completed=False, **kwargs):
+    def run(self, args, *, service=False, timeout=600, accepted=(0,), completed=False, env=SAFE_ENV, **kwargs):
         options = {}
         if service and os.geteuid() == 0:
             options.update(user=self.account.pw_uid, group=self.account.pw_gid, extra_groups=())
-        result = subprocess.run([str(a) for a in args], env=SAFE_ENV, cwd="/", stdin=subprocess.DEVNULL,
+        result = subprocess.run([str(a) for a in args], env=env, cwd="/", stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, umask=0o022, **options, **kwargs)
         if result.returncode not in accepted:
             raise UpdateError("update subprocess failed (details withheld); inspect the transaction journal")
@@ -615,17 +634,28 @@ class Native:
         self.run([venv / "bin/python", "-I", "-c", code, *directories], service=True)
 
     def managed_cron(self):
-        if shutil.which("crontab", path=SAFE_ENV["PATH"]) is not None:
-            # `crontab -u` reads the service user's spool while keeping the
-            # updater's root credentials, including access to setgid spools.
-            result = self.run(["crontab", "-l", "-u", self.account.pw_name], accepted=(0, 1), completed=True)
-            raw = result.stdout
-            if result.returncode and b"no crontab" not in (raw + result.stderr).lower():
-                raise UpdateError("cannot verify the service account's managed crontab",
-                                  reason_code="preflight-crontab-unreadable")
-            if b"# BEGIN CVEBEACON MANAGED" in raw:
-                raise UpdateError("remove the service account's managed cron schedule before adopting or applying updates",
-                                  reason_code="preflight-managed-crontab")
+        if shutil.which("crontab", path=SAFE_ENV["PATH"]) is None:
+            return
+        login = self.policy.user
+        try:
+            account = service_account(login)
+            if (account.pw_uid, account.pw_gid) != (self.account.pw_uid, self.account.pw_gid):
+                raise UpdateError("service account identity changed")
+            # Keep root credentials and use the exact login approved by policy.
+            result = self.run(["crontab", "-l", "-u", login], accepted=(0, 1), completed=True,
+                              env={**SAFE_ENV, "LC_ALL": "C"})
+            if result.returncode != 0:
+                diagnostic = b"no crontab for " + login.encode("ascii")
+                stdout, stderr = result.stdout.removesuffix(b"\n"), result.stderr.removesuffix(b"\n")
+                if result.returncode == 1 and (stdout, stderr) in {(b"", diagnostic), (diagnostic, b"")}:
+                    return
+                raise UpdateError("unexpected crontab diagnostic")
+        except OPERATION_ERRORS:
+            raise UpdateError("cannot verify the service account's managed crontab",
+                              reason_code="preflight-crontab-unreadable") from None
+        if b"# BEGIN CVEBEACON MANAGED" in result.stdout:
+            raise UpdateError("remove the service account's managed cron schedule before adopting or applying updates",
+                              reason_code="preflight-managed-crontab")
 
     def preflight(self, venv):
         self.service_access(venv)
@@ -705,8 +735,9 @@ for path in sys.argv[2:]:
             os.chown(path, self.account.pw_uid, self.account.pw_gid)
         sync_directory(path.parent)
 
-    def dashboard_pid(self):
-        raw = self.run(["systemctl", "show", self.policy.dashboard_unit, "--property=ActiveState,MainPID,ExecStart"])
+    def dashboard_pid(self, *, timeout):
+        raw = self.run(["systemctl", "show", self.policy.dashboard_unit, "--property=ActiveState,MainPID,ExecStart"],
+                       timeout=timeout)
         values = dict(line.split("=", 1) for line in raw.decode("utf-8").splitlines() if "=" in line)
         match = re.search(r"(?:^|[ {])path=([^ ;}]+)\s*;", values.get("ExecStart", ""))
         executable = str(self.policy.prefix / "current/.venv/bin/cvebeacon")
@@ -715,8 +746,18 @@ for path in sys.argv[2:]:
             raise UpdateError("the configured dashboard unit must run the current executable")
         return int(values["MainPID"])
 
-    def owns_listener(self, pid):
-        """Associate the loopback listener with the selected unit's process."""
+    @staticmethod
+    def process_start(pid):
+        # The comm field may contain spaces or parentheses. Field 22 is the
+        # start time in clock ticks since boot, after the closing parenthesis.
+        fields = Path(f"/proc/{pid}/stat").read_bytes().rpartition(b")")[2].split()
+        if len(fields) < 20:
+            raise UpdateError("cannot determine the dashboard process start time")
+        return int(fields[19])
+
+    def listener_sockets(self, pid):
+        """Find matching listening socket inodes held by the unit's process."""
+        listeners = set()
         sockets = set()
         for path in Path(f"/proc/{pid}/fd").iterdir():
             try:
@@ -742,29 +783,48 @@ for path in sys.argv[2:]:
                 packed = b"".join(int(encoded[i:i + 8], 16).to_bytes(4, sys.byteorder) for i in range(0, len(encoded), 8))
                 bound = ipaddress.ip_address(packed)
                 if int(local_port, 16) == port and (bound == address or bound.is_unspecified):
-                    return True
-        return False
+                    listeners.add(fields[9])
+        return listeners
+
+    def owns_listener(self, pid):
+        return bool(self.listener_sockets(pid))
 
     def probe(self, expected_version=None):
         expected_version = expected_version or (self.policy.prefix / "current").resolve().name
-        with httpx.Client(trust_env=False) as client, HttpClient(HttpConfig(retries=0), client=client) as http:
-            deadline = time.monotonic() + 120
-            delay = 0.5
-            while True:
-                try:
-                    pid = self.dashboard_pid()
-                    if not self.owns_listener(pid):
-                        raise UpdateError("the dashboard unit does not own the health listener")
-                    result = http.request_once("GET", self.policy.probe, body_limit=1024, timeout=2)
-                    if result.status_code == 200 and _json(result.body) == {"status": "ok", "version": expected_version, "pid": pid}:
+        deadline = time.monotonic() + 120
+
+        def timeout():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise UpdateError("dashboard health probe deadline elapsed")
+            return min(2, remaining)
+
+        delay = 0.5
+        while time.monotonic() < deadline:
+            try:
+                pid = self.dashboard_pid(timeout=timeout())
+                started = self.process_start(pid)
+                listeners = self.listener_sockets(pid)
+                if listeners:
+                    # A new client prevents an attempt from reusing a socket
+                    # connected to a previously observed process.
+                    with httpx.Client(trust_env=False) as client, HttpClient(HttpConfig(retries=0), client=client) as http:
+                        result = http.request_once("GET", self.policy.probe, body_limit=1024, timeout=timeout())
+                    if (result.status_code == 200
+                            and _json(result.body) == {"status": "ok", "version": expected_version, "pid": pid}
+                            and self.dashboard_pid(timeout=timeout()) == pid
+                            and listeners & self.listener_sockets(pid)
+                            and self.process_start(pid) == started
+                            and time.monotonic() < deadline):
                         return
-                except (OSError, ValueError, CVEBeaconError, httpx.HTTPError):
-                    pass
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise UpdateError("dashboard loopback health probe failed", reason_code="probe-unhealthy")
-                time.sleep(min(delay, remaining))
-                delay = min(delay * 2, 16)
+            except (OSError, ValueError, CVEBeaconError, subprocess.SubprocessError, httpx.HTTPError):
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 16)
+        raise UpdateError("dashboard loopback health probe failed", reason_code="probe-unhealthy")
 
 
 def sync_directory(path):

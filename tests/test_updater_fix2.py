@@ -337,7 +337,7 @@ def test_same_port_on_another_loopback_address_cannot_pass_health(tmp_path, monk
         child("127.0.0.1", port)
         native = object.__new__(u.Native)
         native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service", probe=f"http://127.0.0.1:{port}/healthz")
-        native.dashboard_pid = lambda: dashboard.pid
+        native.dashboard_pid = lambda *, timeout: dashboard.pid
         payload = {"status": "ok", "version": "99.0", "pid": dashboard.pid}
         class HTTP:
             def __enter__(self):
@@ -358,8 +358,9 @@ def test_same_port_on_another_loopback_address_cannot_pass_health(tmp_path, monk
 def test_health_probe_retries_with_backoff_until_the_dashboard_is_ready(tmp_path, monkeypatch):
     native = object.__new__(u.Native)
     native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service")
-    native.dashboard_pid = lambda: 42
-    native.owns_listener = lambda pid: True
+    native.dashboard_pid = lambda *, timeout: 42
+    native.process_start = lambda pid: 1
+    native.listener_sockets = lambda pid: {"1"}
     clock = {"now": 0.0, "sleeps": [], "attempts": 0}
 
     class Transport:

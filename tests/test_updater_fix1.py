@@ -316,8 +316,9 @@ def test_interrupted_restore_can_be_repeated_from_the_same_snapshot(transaction,
 def test_health_refuses_stale_or_unrelated_listeners(tmp_path, monkeypatch, payload, listener):
     native = object.__new__(u.Native)
     native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service")
-    native.dashboard_pid = lambda: 42
-    native.owns_listener = lambda pid: listener
+    native.dashboard_pid = lambda *, timeout: 42
+    native.process_start = lambda pid: 1
+    native.listener_sockets = lambda pid: {"1"} if listener else set()
     class Transport:
         def __enter__(self):
             return self
@@ -355,11 +356,19 @@ def test_unreadable_service_preflight_happens_before_quiescence_or_journal(trans
     assert not native.calls and not (updater.policy.prefix / "update-journal.json").exists()
 
 
-def test_managed_service_cron_prevents_native_adoption_preflight(tmp_path, monkeypatch):
-    native = object.__new__(u.Native)
-    native.account = SimpleNamespace(pw_name="service", pw_uid=1234, pw_gid=1234)
-    calls = []
+@pytest.fixture
+def cron_native(tmp_path, monkeypatch):
+    import pwd
+
+    account = SimpleNamespace(pw_name="service", pw_uid=1234, pw_gid=1234)
+    monkeypatch.setattr(pwd, "getpwnam", lambda login: account)
     monkeypatch.setattr(u.shutil, "which", lambda *args, **kwargs: "/usr/bin/crontab")
+    return u.Native(u.Policy(tmp_path, tmp_path / "config", tmp_path, "service"))
+
+
+def test_managed_service_cron_prevents_native_adoption_preflight(cron_native):
+    native = cron_native
+    calls = []
     def run(args, **kwargs):
         calls.append((args, kwargs))
         return SimpleNamespace(returncode=0, stdout=b"# BEGIN CVEBEACON MANAGED\nold-path job\n# END CVEBEACON MANAGED", stderr=b"")
@@ -370,18 +379,16 @@ def test_managed_service_cron_prevents_native_adoption_preflight(tmp_path, monke
     assert calls[0][1].get("service", False) is False
 
 
-def test_service_crontab_absence_is_checked_as_root_for_the_named_account(tmp_path, monkeypatch):
-    native = object.__new__(u.Native)
-    native.account = SimpleNamespace(pw_name="service")
+def test_service_crontab_absence_is_checked_as_root_for_the_named_account(cron_native):
+    native = cron_native
     calls = []
-    monkeypatch.setattr(u.shutil, "which", lambda *args, **kwargs: "/usr/bin/crontab")
     native.run = lambda args, **kwargs: (calls.append((args, kwargs)) or
                                          SimpleNamespace(returncode=1, stdout=b"", stderr=b"no crontab for service"))
 
     native.managed_cron()
 
     assert calls[0][0] == ["crontab", "-l", "-u", "service"]
-    assert calls[0][1] == {"accepted": (0, 1), "completed": True}
+    assert calls[0][1] == {"accepted": (0, 1), "completed": True, "env": {**u.SAFE_ENV, "LC_ALL": "C"}}
 
 
 def test_non_dict_release_assets_are_already_rejected(signed):
@@ -485,10 +492,8 @@ def test_failed_timer_restart_retains_committed_state_and_retry_entry(transactio
     assert not pending.exists() and "restore" not in native.calls
 
 
-def test_unknown_crontab_read_failure_is_not_treated_as_no_schedule(tmp_path, monkeypatch):
-    native = object.__new__(u.Native)
-    native.account = SimpleNamespace(pw_name="service")
-    monkeypatch.setattr(u.shutil, "which", lambda *args, **kwargs: "/usr/bin/crontab")
+def test_unknown_crontab_read_failure_is_not_treated_as_no_schedule(cron_native):
+    native = cron_native
     native.run = lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=b"", stderr=b"permission denied")
     with pytest.raises(u.UpdateError, match="cannot verify") as error:
         native.managed_cron()
