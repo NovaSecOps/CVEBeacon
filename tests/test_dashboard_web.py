@@ -222,7 +222,7 @@ def test_detection_companion_argument_list(web, monkeypatch):
     asset_path, output = paths(config, "Acme")
     calls = []
     child = MagicMock()
-    child.__enter__.return_value.wait.return_value = 0
+    child.wait.return_value = 0
     monkeypatch.setattr(web_assets.subprocess, "Popen",
                         lambda argv, **kwargs: calls.append((argv, kwargs)) or child)
     assert web_assets.run_detection(config, "Acme") == 0
@@ -597,7 +597,7 @@ def test_single_removal_warns_until_next_detection(web, monkeypatch):
     warning = "Results include assets removed since the last run"
     assert warning in client.get("/web-assets?client=Acme").text
     child = MagicMock()
-    wait = child.__enter__.return_value.wait
+    wait = child.wait
     wait.side_effect = [0, 2, 0]
     monkeypatch.setattr(web_assets.subprocess, "Popen", lambda *a, **k: child)
     assert web_assets.run_detection(config, "Acme", plan=True) == 0
@@ -1056,3 +1056,33 @@ def test_redirect_prefill_action_needs_manage_web_assets(web):
     assert "This site redirects to https://www.example.invalid:443" in page.text
     assert "Add this redirect target as an authorised site" not in page.text
     assert "If the client authorises it, add it as a site." not in page.text
+
+
+@pytest.mark.parametrize("field,value", [
+    ("review_truncated", "yes"), ("fingerprint_error", []), ("fingerprint_stopped", -1),
+    ("fingerprint_technologies", True), ("analysis_stopped", "1"),
+])
+def test_review_run_flags_are_validated_by_type(field, value):
+    from cvebeacon.dashboard_web import _review_metadata
+
+    with pytest.raises(ValueError):
+        _review_metadata({"client": "Acme", "run": {field: value}}, "Acme")
+
+
+@pytest.mark.parametrize("persisted_entry_count", [1, 1001])
+def test_dashboard_distinguishes_collection_truncation_from_display_limit(setup, persisted_entry_count):
+    config, _, client = setup
+    assets, output = paths(config, "Acme")
+    save_allowlist(assets, {"client": "Acme", "assets": []})
+    detail = {"client": "Acme", "reviews": [{}] * persisted_entry_count, "run": {
+        "status": "partial", "review_truncated": True, "fingerprint_error": True,
+        "fingerprint_stopped": 2, "analysis_stopped": 1,
+    }}
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert "The saved review reached its size limit" in page.text
+    assert "Fingerprint analysis stopped early for 2 sites" in page.text
+    assert "Fingerprint analysis encountered an error" in page.text
+    assert "Web analysis reached its time limit on 1 site" in page.text
+    assert ("Showing the first 1,000 saved entries per table" in page.text) == (persisted_entry_count > 1000)

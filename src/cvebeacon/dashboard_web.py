@@ -157,7 +157,8 @@ def _review_metadata(detail, client):
         if "status" in run and run["status"] not in _RUN_STATUSES:
             raise ValueError("invalid run status")
         for field in ("asset_count", "fetched_count", "products_recognized", "products_with_version",
-                      "resources_fetched", "resources_skipped"):
+                      "resources_fetched", "resources_skipped", "fingerprint_technologies",
+                      "fingerprint_stopped", "analysis_stopped"):
             if field in run and (type(run[field]) is not int or run[field] < 0):
                 raise ValueError("invalid run count")
         if (run.get("asset_count", 0) < run.get("fetched_count", 0)
@@ -165,8 +166,9 @@ def _review_metadata(detail, client):
             raise ValueError("invalid run counts")
         if "saved_snapshot_generated_at" in run and not text(run["saved_snapshot_generated_at"]):
             raise ValueError("invalid saved snapshot timestamp")
-        if "snapshot_updated" in run and type(run["snapshot_updated"]) is not bool:
-            raise ValueError("invalid snapshot update state")
+        for field in ("snapshot_updated", "review_truncated", "fingerprint_error"):
+            if field in run and type(run[field]) is not bool:
+                raise ValueError("invalid run flag")
         if "request_count" in run and (type(run["request_count"]) is not int or run["request_count"] < 0):
             raise ValueError("invalid run request count")
         if "resources_skipped_by_reason" in run:

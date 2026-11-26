@@ -77,7 +77,11 @@
 {% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
 {% if snapshot %}<p>Saved results are from {% if run and run.get('snapshot_updated', false) %}this run{% else %}an earlier run{% endif %} ({{ watch_stamp(snapshot.generated_at) }}): {{ snapshot.record_count }} products. To include saved snapshots in normal scans, turn on web snapshots in the <a href="{{ url_for('config_editor.inventory') }}">Inventory settings</a>.</p>{% else %}<p>No saved inventory snapshot is available.</p>{% endif %}
 {% if versions_hidden %}<p class="help">Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory.</p>{% endif %}
-{% if truncated %}<p class="muted">Showing the first 1,000 entries per table. Full results remain in the private data directory.</p>{% endif %}
+{% if run and run.get('review_truncated') %}<p class="muted">The saved review reached its size limit. Some entries were omitted.</p>{% endif %}
+{% if truncated %}<p class="muted">Showing the first 1,000 saved entries per table. Additional saved entries are in the private data directory.</p>{% endif %}
+{% if run and run.get('analysis_stopped') %}{% set count = run['analysis_stopped'] %}<p class="muted">Web analysis reached its time limit on {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
+{% if run and run.get('fingerprint_stopped') %}{% set count = run['fingerprint_stopped'] %}<p class="muted">Fingerprint analysis stopped early for {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
+{% if run and run.get('fingerprint_error') %}<p class="muted">Fingerprint analysis encountered an error. Saved results include the evidence collected successfully.</p>{% endif %}
 <p class="muted">Response bodies and cookies are never stored or displayed.</p>
 {% endcall %}
 

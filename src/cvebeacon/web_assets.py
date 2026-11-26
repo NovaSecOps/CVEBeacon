@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import stat
 import subprocess
 import sys
 
@@ -22,6 +23,7 @@ from .web_inventory import decode_json, read_bytes
 COMPANION_NOTICE = "Web detection requires the optional Extensions package. Install it to enable these actions."
 RUN_TIMEOUT = 60 * 60.0
 RUN_TIMEOUT_REASON = "detection stopped at the run time limit"
+CHILD_STOP_GRACE = 10
 
 
 def companion_available():
@@ -154,19 +156,29 @@ def run_detection(config, client, *, plan=False):
         raise ConfigurationError("Save an attested web asset before running detection")
     # The parent CLI holds the shared scan lock throughout the child process.
     fingerprints = fingerprint_directory(config)
-    command = companion_command(document["client"], assets, output, plan=plan,
-                                fingerprints=fingerprints if fingerprints.is_dir() else None)
-    with subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config)) as child:
+    try:
+        details = fingerprints.lstat()
+    except FileNotFoundError:
+        fingerprints = None
+    else:
+        if not stat.S_ISDIR(details.st_mode) or getattr(details, "st_file_attributes", 0) & 0x400:
+            fingerprints = None
+    command = companion_command(document["client"], assets, output, plan=plan, fingerprints=fingerprints)
+    # Popen's context manager waits without a timeout on exit.
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config))
+    try:
+        code = child.wait(timeout=RUN_TIMEOUT + 5 * 60)
+    except subprocess.TimeoutExpired as exc:
+        child.terminate()
         try:
-            code = child.wait(timeout=RUN_TIMEOUT + 5 * 60)
-        except subprocess.TimeoutExpired as exc:
-            child.terminate()
+            child.wait(timeout=CHILD_STOP_GRACE)
+        except subprocess.TimeoutExpired:
+            child.kill()
             try:
-                child.wait(timeout=10)
+                child.wait(timeout=CHILD_STOP_GRACE)
             except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
-            raise ConfigurationError(RUN_TIMEOUT_REASON) from exc
+                pass
+        raise ConfigurationError(RUN_TIMEOUT_REASON) from exc
     if not plan and code == 0:
         output.with_name(output.name + ".removed").unlink(missing_ok=True)
     return code
