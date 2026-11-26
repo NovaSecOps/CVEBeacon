@@ -100,13 +100,20 @@ The reference systemd timer checks every 15 minutes. Its service runs
 `schedule.json` file beside the state database to decide whether monitoring is
 due. With no file, it uses the shipped local times `07:00` and `19:00`. An
 interval is measured from the start of the previous scheduled run; fixed times
-use the server's local clock. A delayed timer start catches up at most one
-missed run, and the shared run lock still prevents overlapping writers. A
-not-due check exits successfully without scanning.
+use the server's local clock. Saving fixed times establishes eligibility for
+that local day. The default starts with the day of its first check. A later
+check catches up at most one missed run, including after
+midnight. If a fixed time repeats at a daylight-saving transition, its first
+occurrence defines the window. If the time falls in a gap, the window opens at
+the first valid instant after the change. The dashboard estimates the next run
+at the first eligible quarter-hour check. Systemd's timer accuracy, downtime
+and active monitoring can affect the actual start. A check with no due work
+exits successfully, and the shared run lock prevents overlapping writers.
 
-New reference units already use this timer. For an existing updater-managed
-installation, enable dashboard control once as root, using the selected
-executable and configuration path:
+New reference units already use this timer. On an existing installation, use
+the loaded service's executable and configuration path to enable dashboard
+control as root. This example uses an installation with an administrator
+update policy:
 
 ```console
 sudo /opt/cvebeacon/current/.venv/bin/cvebeacon \
@@ -114,16 +121,29 @@ sudo /opt/cvebeacon/current/.venv/bin/cvebeacon \
 sudo /opt/cvebeacon/current/.venv/bin/cvebeacon schedule timer-control status
 ```
 
-The command reads the current service `ExecStart` and refuses a command that is
-not the expected CVEBeacon `run` command. It records a simple existing daily
-time list or interval as the initial dashboard schedule; an unsupported
-calendar expression starts with `07:00` and `19:00`. It writes two root-only
-drop-ins, leaves both unit files untouched, changes the timer to a 15-minute
-tick, and keeps `Persistent=true`. The dashboard edits only `schedule.json`
-inside the data directory; it does not run privileged commands or write system
-unit files. Use **Operations → Schedule** to select an interval from 2 to 24
-hours or fixed local times. Saving requires review and is recorded in the
-account audit trail.
+For a standalone installation, add `--data-dir /var/lib/cvebeacon` after
+`enable`, using the administrator-approved directory that directly contains
+the configured state database. The command validates the loaded monitoring
+command, reads the runtime configuration as the service account and stores
+the initial schedule as that account.
+
+Conversion preserves simple daily local times down to the minute, including
+times from multiple calendar entries, within the editor's 12-time limit. A
+single midnight-based whole-hour step that divides 24 becomes an elapsed
+interval. Uneven hour steps become fixed times that preserve their daily
+pattern. Custom forms such as weekday filters, explicit time zones or subminute
+slots start with `07:00` and `19:00`. The command writes two private root-owned
+drop-ins. The base units stay in place, and the timer switches to a 15-minute
+tick with `Persistent=true`.
+
+Use **Operations → Schedule** to select an interval from 2 to 24 hours or fixed
+local times. Saving requires review and is recorded in the account audit
+trail. The service account owns both the cadence and the admission history in
+`schedule.json`. Checks skip when the recorded start is in the future and
+report an error when history is more than five minutes ahead. An account that
+can edit the file also has
+authority to start monitoring directly. Systemd unit changes require an
+administrator.
 
 The root-only commands are idempotent:
 
@@ -132,8 +152,10 @@ sudo cvebeacon schedule timer-control status
 sudo cvebeacon schedule timer-control disable
 ```
 
-`disable` removes only the two `dashboard-schedule.conf` drop-ins and reloads
-and restarts the timer so the original unit schedule takes effect again.
+`disable` removes the two `dashboard-schedule.conf` drop-ins and reloads the
+original unit configuration. It restarts a previously active timer and keeps
+an inactive timer stopped. If a switch is interrupted, repeat the command to
+recover the previous unit configuration before retrying the change.
 
 ## Single-flight lock
 
@@ -212,21 +234,20 @@ Linux user cron requires an installed, running cron service. It uses the host's 
 ## Dashboard service unit
 
 The repository ships `deploy/systemd/cvebeacon-dashboard.service`, which runs the
-dashboard on `127.0.0.1` as the service user with `NoNewPrivileges=yes`. For an
-updater-managed timer, the Schedule page reads the reference unit properties
-with `systemctl show`. Before timer control is enabled, it displays the current
-schedule and the one-time root command. Once enabled, it edits only the private
-schedule file in the data directory. This does not change the dashboard unit's
-privileges or give the dashboard a path to write systemd unit files. If an
-installation uses custom unit names, the reference-unit status is Unknown. The
-separate cron removal action removes only a CVEBeacon-managed crontab block and
-leaves the systemd timer running.
+dashboard on `127.0.0.1` as the service user with `NoNewPrivileges=yes`. The
+Schedule page recognizes the loaded `cvebeacon.timer` and `cvebeacon.service`
+when they target this configuration. This includes standalone installations.
+Before timer control is enabled, the page shows the current schedule and the
+one-time root command for eligible installations. With control enabled, the
+dashboard edits the private data-directory schedule and shows the last
+scheduled monitoring start separately from the last timer check.
 
-Without an updater-managed timer, the Schedule page uses the native Windows task
-or managed Linux crontab status and retains its existing controls. For a
-systemd-managed schedule, use the reference `deploy/systemd/cvebeacon.timer` and
-`cvebeacon.service` units (or the examples in the deployment guide's
-[Schedule it](DEPLOY.md#schedule-it) section).
+Other standalone installs use the native Windows task or managed Linux
+crontab editor. When an administrator update policy is present and the
+reference units are unavailable, the page reports Unknown. The separate
+cron removal action removes the CVEBeacon-managed crontab block. For
+systemd, use the repository's reference units or the deployment guide's
+[Schedule it](DEPLOY.md#schedule-it) section.
 
 For cron installations only, the following optional drop-in restores the
 privilege transition and write access to the distribution's cron spool:

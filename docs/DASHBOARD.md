@@ -91,7 +91,7 @@ Configurations sharing either storage location therefore coordinate even when th
 
 Windows operational storage must support protected owner-only ACLs, such as NTFS. The hard-link fallback does not relax ACL validation; storage without those privacy guarantees is unsupported.
 
-Operations observes existing lock files without creating storage. Missing locks are omitted; an unsafe or inaccessible lock is shown as unavailable without hiding the page. Kernel contention always means an active run, even when its identity is unavailable. A free lock's record for a dead local PID is labelled stale. Windows and remote-host PID liveness can remain unknown. Operations shows whether monitoring is “Scheduled automatically”, “Unknown” or “Not scheduled”. This label covers managed cron, Windows Task Scheduler and an updater-managed systemd timer. Status is cached for 30 seconds with a two-second command timeout. Full scheduler details remain on the Schedule page behind `manage_schedule`. Dashboard schedule changes invalidate the cache; the Operations overview does not predict the next execution time.
+Operations observes existing lock files without creating storage. Missing locks are omitted; an unsafe or inaccessible lock is shown as unavailable without hiding the page. Kernel contention always means an active run, even when its identity is unavailable. A free lock's record for a dead local PID is labelled stale. Windows and remote-host PID liveness can remain unknown. Operations shows whether monitoring is “Scheduled automatically”, “Unknown” or “Not scheduled”. This label covers managed cron, Windows Task Scheduler and a matching systemd timer. Status is cached for 30 seconds with a two-second command timeout. Full scheduler details remain on the Schedule page behind `manage_schedule`. Dashboard schedule changes invalidate the cache; the Operations overview does not predict the next execution time.
 
 **Queues and channel tests.** Manual jobs that need a held storage lock remain queued and show “waiting for &lt;holder&gt; to finish”. They wait up to six hours from submission before failing with the holder conflict message, and can be cancelled while waiting. If another run acquires the lock between the dashboard probe and child launch, the job returns to waiting within its original deadline. Only the child's explicit lock-contention outcome is retried; validation failures remain failures. Queued jobs show their position within their lane and the job ahead of them on Operations, job history and job detail pages. State-changing jobs run serially. Watch channel tests use a separate lane with one test at a time, so they can complete during a long scan or watch run. They retain the same job history, cancellation and audit behavior. Channel tests are offered only when watch is enabled. Web detection, including `--plan`, still takes the inventory lock and uses the main lane.
 
@@ -187,7 +187,22 @@ in **Affected clients** alert lines.
 
 ## Native schedule
 
-The **Schedule** page requires `manage_schedule`. Without an updater-managed systemd timer, it shows `schedule status` and can install or remove the same native Windows task or managed Linux crontab block as `cvebeacon schedule install` and `cvebeacon schedule remove`. The form accepts an interval or fixed local times, the `scan`, `watch` or `both` command, and the Windows `--run-logged-out` option. When the administrator-owned updater policy file passes the dashboard's ownership checks, the page reads the reference timer and service properties. Before dashboard control is enabled, it describes the current timer schedule and shows the exact one-time root command to enable it. The command adds root-only systemd drop-ins, changes the timer to a 15-minute tick and saves the schedule in private data-directory state. With control enabled, the page shows the next scheduled run and tick, and offers an audited editor with a confirmation step. The dashboard writes only the schedule data file and never runs privileged commands. Its separate cron removal action removes only the dashboard-managed cron block and leaves the systemd timer running.
+The **Schedule** page requires `manage_schedule`. The Linux dashboard checks
+whether the loaded reference `cvebeacon.timer` targets `cvebeacon.service` and
+whether that service runs monitoring for this configuration. Both standalone
+and updater-managed installations can use the timer editor. With legacy timer
+units, the page describes the current schedule and shows the one-time command
+an administrator can use to enable editing. The administrator command adds two
+private root-owned drop-ins and sets the 15-minute tick. The dashboard saves
+cadence settings in the data directory after confirmation and records the
+change in the audit trail. It shows the next eligible timer check and lists the
+last scheduled monitoring start separately from the last timer check.
+
+When no matching standalone timer or administrator updater policy is present,
+the page manages the native Windows task or Linux crontab block. The form
+accepts an interval or fixed local times, the `scan`, `watch` or `both` command,
+and the Windows `--run-logged-out` option. The separate cron removal action
+removes the dashboard-managed cron block.
 
 The **Updates** page shows the installed version, any available version and
 the last check. When an administrator checks for updates, the page says

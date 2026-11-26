@@ -349,30 +349,6 @@ units locally, reload systemd and restart the dashboard once. No database
 migration or monitor interruption happens during adoption itself. The updater
 never installs units or enables schedules automatically.
 
-### Enable dashboard control for an existing timer
-
-Existing installs with the original daily systemd timer can enable dashboard
-schedule editing with one root-only command. Use the executable and config path
-from the installed `cvebeacon.service` `ExecStart`:
-
-```console
-sudo /opt/cvebeacon/current/.venv/bin/cvebeacon \
-  --config /var/lib/cvebeacon/cvebeacon.toml schedule timer-control enable
-sudo /opt/cvebeacon/current/.venv/bin/cvebeacon schedule timer-control status
-```
-
-The command reads the current `ExecStart` and refuses an unexpected command. On
-first enable, a simple daily-time list or interval becomes the initial
-dashboard schedule; other calendar forms use the default `07:00` and `19:00`.
-It writes only the two `dashboard-schedule.conf` drop-ins, preserving the unit
-files. The timer then checks every 15 minutes, while `run --if-due` uses a
-private `schedule.json` beside the state data and starts at most one missed
-scheduled run. The dashboard changes only that private data file and does not
-gain access to systemd unit paths or privileged commands. Use the Schedule page
-to edit the saved times or interval after status reports dashboard control is
-enabled. To restore the existing unit behavior, run `schedule timer-control
-disable` as root; this removes only those two drop-ins.
-
 After copying the reviewed units to `/etc/systemd/system`, reload systemd and
 explicitly enable the dashboard unit to start at boot. Keep the reference
 `ExecStartPre=... update guard` startup fence in every configured writer unit,
@@ -382,6 +358,31 @@ temporarily prevent the updater's recovery restart.
 Manual Core invocations enforce the same fence. Enable
 `cvebeacon-update.path` only when requests should be processed, and the
 monitoring timer only when its schedule is wanted.
+
+### Enable dashboard control for an existing timer
+
+Existing installs can keep their base timer and service units and add dashboard
+schedule editing through two drop-ins. Use the loaded service's executable and
+configuration path. On an installation with the administrator update policy:
+
+```console
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon \
+  --config /var/lib/cvebeacon/cvebeacon.toml schedule timer-control enable
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon schedule timer-control status
+```
+
+For a standalone install, add `--data-dir /var/lib/cvebeacon` after `enable`
+and specify the directory that directly contains the configured state
+database. Updater-managed installations use the policy's data directory and
+service account. The switch reads the loaded command and validates the runtime
+configuration as the service account.
+
+Conversion preserves supported daily minute times and midnight-based hour
+steps as described in [scheduling](SCHEDULING.md#systemd-timer-schedule-control).
+Other calendars start with `07:00` and `19:00`. The drop-ins switch the timer to
+a 15-minute check, and the dashboard uses the private `schedule.json` to decide
+when monitoring is due. Run `schedule timer-control disable` as root to remove
+the drop-ins and restore the installed base unit configuration.
 
 ## Enable checking and applying
 
@@ -570,4 +571,5 @@ transaction's snapshot is never pruned. Retained venvs are not deleted
 automatically. A new apply refuses an existing staging release directory;
 recover and inspect it before removing only that failed staging directory.
 For a deliberate later rollback, stop writers and restore the matching snapshot
-and code together; never select older code against newer schemas.
+and code together. For a release predating `run --if-due`, also restore
+compatible timer and service settings before restarting the monitoring timer.

@@ -159,11 +159,11 @@ sudo systemctl enable --now cvebeacon-dashboard.service
 ```
 
 The unit sets `NoNewPrivileges=yes` and other hardening that keeps the service
-inside the data directory. For an updater-managed systemd timer, the Schedule
-page reads the current timer and service properties. Enable dashboard control
-once as root with `cvebeacon schedule timer-control enable`; it adds two
-root-only drop-ins while the dashboard continues to write schedule data only
-inside the data directory. For cron installs, use the CLI as the service user
+inside the data directory. The Schedule page discovers the loaded reference
+systemd timer and service when they point to this configuration, including on
+standalone installs. The examples above already enable dashboard control.
+For older timer units, follow the one-time conversion in [scheduling](SCHEDULING.md#systemd-timer-schedule-control).
+For cron installs, use the CLI as the service user
 (`sudo -u cvebeacon ... schedule install`) or follow the cron-specific option
 below.
 
