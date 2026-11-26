@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import queue
 import re
 import secrets
 import shutil
@@ -12,7 +11,6 @@ import sqlite3
 import stat
 import subprocess
 import sys
-import threading
 import time
 
 from .config import load_config
@@ -44,101 +42,80 @@ class BackupDatabaseBusy(SnapshotError):
     """A database remained locked for the bounded update-backup wait."""
 
 
-def busy_exit_status(error):
-    """Return a fixed worker status for SQLite lock contention only."""
-    if isinstance(error, BackupDatabaseBusy):
-        return 75
-    code = getattr(error, "sqlite_errorcode", None)
-    if isinstance(error, sqlite3.OperationalError) and isinstance(code, int):
-        if (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
-            return 75
-    return 1
+BACKUP_RETRY_SECONDS = 0.05
+BACKUP_BATCH_PAGES = 128
 
 
-def _backup_copy_worker(source, destination):
-    """Run one SQLite online copy; emit only busy/ready progress markers."""
+def _sqlite_busy(code):
+    return isinstance(code, int) and (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+
+
+class _BusyWait:
+    def __init__(self, wait_seconds):
+        self.wait_seconds = wait_seconds
+        self.since = None
+
+    def retry(self):
+        now = time.monotonic()
+        if self.since is None:
+            self.since = now
+        if now - self.since >= self.wait_seconds:
+            raise BackupDatabaseBusy("database remained busy during backup")
+
+    def run(self, operation):
+        while True:
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                if not _sqlite_busy(getattr(exc, "sqlite_errorcode", None)):
+                    raise
+                self.retry()
+                time.sleep(BACKUP_RETRY_SECONDS)
+
+    def progress(self, code, remaining, total):
+        if _sqlite_busy(code):
+            self.retry()
+        elif code in {sqlite3.SQLITE_OK, sqlite3.SQLITE_DONE}:
+            self.since = None
+
+
+def _backup_copy_worker(source, destination, *, wait_seconds):
+    """Bound continuous SQLite contention at the point of retry."""
     source, destination = Path(source), Path(destination)
-    state = None
-    with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=0.1)) as src:
-        with closing(sqlite3.connect(destination)) as dst:
-            def progress(code, remaining, total):
-                nonlocal state
-                current = b"busy" if (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} else b"ready"
-                if current != state:
-                    sys.stdout.buffer.write(current + b"\n")
-                    sys.stdout.buffer.flush()
-                    state = current
-            src.backup(dst, progress=progress)
-            if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+    src = _BusyWait(wait_seconds).run(
+        lambda: sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=BACKUP_RETRY_SECONDS)
+    )
+    with closing(src):
+        dst = _BusyWait(wait_seconds).run(
+            lambda: sqlite3.connect(destination, timeout=BACKUP_RETRY_SECONDS)
+        )
+        with closing(dst):
+            wait = _BusyWait(wait_seconds)
+            # A surfaced BUSY/LOCKED ends this backup handle. Retrying against
+            # the private destination is safe and shares the callback's clock.
+            wait.run(lambda: src.backup(dst, pages=BACKUP_BATCH_PAGES,
+                                        progress=wait.progress, sleep=BACKUP_RETRY_SECONDS))
+            integrity = _BusyWait(wait_seconds).run(lambda: dst.execute("PRAGMA integrity_check").fetchone())
+            if integrity[0] != "ok":
                 raise SnapshotError("SQLite snapshot integrity check failed")
     destination.chmod(0o600)
     sync_file(destination)
 
 
-def _stop_backup_worker(process):
-    if process.poll() is None:
-        try:
-            process.terminate()
-        except OSError:
-            if process.poll() is not None:
-                return
-            raise
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-
-
 def _copy_sqlite_bounded(source, destination, *, wait_seconds=BACKUP_BUSY_WAIT_SECONDS):
-    """Supervise busy retries without imposing a deadline on copy throughput."""
-    process = subprocess.Popen(
+    """Use a separate process so SQLite file closes cannot release caller locks."""
+    process = subprocess.run(
         [sys.executable, "-I", "-m", "cvebeacon.update_state", "--backup-copy",
-         str(source), str(destination)],
-        stdout=subprocess.PIPE,
+         str(source), str(destination), str(wait_seconds)],
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env={"PATH": os.defpath, "LANG": "C.UTF-8"},
         cwd=Path.cwd(),
     )
-    messages = queue.Queue()
-
-    def read_progress():
-        try:
-            for line in process.stdout:
-                messages.put(line.strip())
-        finally:
-            messages.put(None)
-
-    reader = threading.Thread(target=read_progress, daemon=True)
-    reader.start()
-    busy_since = None
-    try:
-        while process.poll() is None:
-            try:
-                message = messages.get(timeout=0.05)
-            except queue.Empty:
-                message = None
-            if message == b"busy":
-                if busy_since is None:
-                    busy_since = time.monotonic()
-            elif message == b"ready":
-                busy_since = None
-            if busy_since is not None and time.monotonic() - busy_since >= wait_seconds:
-                _stop_backup_worker(process)
-                raise BackupDatabaseBusy("database remained busy during backup")
-        return_code = process.wait()
-        reader.join()
-        if return_code == 75:
-            raise BackupDatabaseBusy("database remained busy during backup")
-        if return_code:
-            raise SnapshotError("SQLite snapshot operation failed")
-    except BaseException:
-        _stop_backup_worker(process)
-        reader.join()
-        raise
-    finally:
-        if process.stdout:
-            process.stdout.close()
+    if process.returncode == 75:
+        raise BackupDatabaseBusy("database remained busy during backup")
+    if process.returncode:
+        raise SnapshotError("SQLite snapshot operation failed")
 
 
 def databases(config, data, *, validate_known=True):
@@ -413,8 +390,8 @@ def migrate(config):
 
 
 def main():
-    if len(sys.argv) == 4 and sys.argv[1] == "--backup-copy":
-        _backup_copy_worker(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 5 and sys.argv[1] == "--backup-copy":
+        _backup_copy_worker(sys.argv[2], sys.argv[3], wait_seconds=float(sys.argv[4]))
         return
     action, config_path, data, directory, *expected = sys.argv[1:]
     data, source = Path(data).resolve(strict=True), Path(directory)
@@ -440,9 +417,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (BackupDatabaseBusy, sqlite3.OperationalError) as exc:
-        if busy_exit_status(exc) == 75:
-            raise SystemExit(75) from None
-        raise SystemExit("state snapshot operation failed") from None
+    except BackupDatabaseBusy:
+        raise SystemExit(75) from None
     except (CVEBeaconError, OSError, ValueError, KeyError, sqlite3.Error):
         raise SystemExit("state snapshot operation failed") from None

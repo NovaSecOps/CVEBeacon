@@ -565,11 +565,24 @@ def test_busy_backup_worker_exit_is_reported_as_a_fixed_reason(tmp_path):
 
 
 @pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_BUSY_SNAPSHOT])
-def test_update_state_marks_only_sqlite_contention_with_the_fixed_busy_exit(code):
+def test_update_state_only_confirms_sqlite_contention_after_the_wait(code, monkeypatch):
     error = sqlite3.OperationalError("private database detail")
     error.sqlite_errorcode = code
-    assert update_state.busy_exit_status(error) == 75
-    assert update_state.busy_exit_status(sqlite3.OperationalError("private database detail")) == 1
+    now = [0.0]
+    monkeypatch.setattr(update_state.time, "monotonic", lambda: now[0])
+
+    def blocked():
+        now[0] += 0.1
+        raise error
+
+    monkeypatch.setattr(update_state.time, "sleep", lambda seconds: None)
+    with pytest.raises(update_state.BackupDatabaseBusy):
+        update_state._BusyWait(0.2).run(blocked)
+    assert now[0] > 0.2
+    with pytest.raises(sqlite3.OperationalError):
+        update_state._BusyWait(0.2).run(
+            lambda: (_ for _ in ()).throw(sqlite3.OperationalError("private database detail"))
+        )
 
 
 def test_backup_refuses_external_database_or_symlink(tmp_path):
