@@ -601,3 +601,53 @@ def test_duplicate_extra_and_bad_count_list_fields_are_400_without_writes(accoun
         response = _post_pairs(client, "channels", pairs)
         assert response.status_code == 400
         assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "extra,section",
+    [
+        (_RULES + "cvss_providers = []\n" + _RULE_CHANNEL, "rules"),
+        (_RULES + 'cvss_providers = ["nvd", "INLINE-SYNTHETIC-PROVIDER"]\n' + _RULE_CHANNEL, "rules"),
+        (_BOT + 'hidden = "INLINE-SYNTHETIC-SECRET"\n', "channels"),
+    ],
+)
+def test_stored_list_values_the_loader_rejects_open_as_an_error_without_echo(accounts, extra, section):
+    # Structured views are built only from documents that pass the existing
+    # gate, so an invalid stored value is fixed in the file first.
+    path = _write_bot_config(accounts, extra) if section == "channels" else _write_config(accounts, extra)
+    _, _, _, client = accounts
+    login(client, "admin")
+    before = path.read_bytes()
+    response = client.get("/config/" + section)
+
+    assert response.status_code == 400
+    assert "inline-synthetic" not in response.text.casefold()
+    assert 'name="g0_' not in response.text
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "extra,expected",
+    [
+        ("", None),
+        ("[http]\nretries = 4\nconnect_timeout = 7.0\n\n", ["retries", "connect_timeout"]),
+    ],
+)
+def test_untouched_section_save_keeps_absent_tables_and_key_order(accounts, extra, expected):
+    path = _write_config(accounts, extra)
+    _, _, _, client = accounts
+    login(client, "admin")
+    before = _document(path)
+    page = client.get("/config/http")
+
+    assert page.status_code == 200, page.text
+    preview = _post_rendered(client, "http", page.text)
+    assert preview.status_code == 200, _response_detail(preview)
+    assert "Nothing has changed" in preview.text
+    _confirmed_document(client, path, "http", preview)
+    after = _document(path)
+    assert after == before
+    if expected is None:
+        assert "http" not in after
+    else:
+        assert list(after["http"]) == expected

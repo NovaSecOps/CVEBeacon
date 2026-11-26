@@ -558,9 +558,11 @@ checkboxes, and numeric settings show the validator's bounds. Required fields
 are marked; requirements on a blank final row apply only when that row is added.
 Defaults appear as placeholders and beneath the controls. Watch rules show
 `cvss_providers` as checkboxes; an untouched selection keeps its original order,
-including an absent key or explicit empty list, while an edited selection uses
-the provider metadata order. Unknown or repeated provider names use a TOML text
-field until corrected.
+including an absent key, while an edited selection uses the provider metadata
+order. Repeated or differently written provider names use a TOML text field and
+are kept as they are until edited. A stored value the loader rejects, such as an
+empty or unknown provider list or an unknown conversation reference field, opens
+as an error page; fix it in the file first.
 
 Email `to`, `cc` and `bcc` fields, legacy notification `recipients`, and Teams
 bot `recipients` use repeatable rows. The legacy notification list accepts
@@ -576,8 +578,7 @@ support up to 101 rows.
 Teams bot `conversation_references` use rows for the conversation ID and optional
 service URL. An unchanged row preserves an omitted `service_url`. The editor
 shows up to 101 rows so the loader remains responsible for rejecting more than
-its existing limit of 100 references. Unknown or non-text members use a TOML
-text field until corrected. Other arrays, column mappings and nested rule
+its existing limit of 100 references. Other arrays, column mappings and nested rule
 conditions accept TOML values. For example, use `["soc-email"]` for channels
 and `{ any = [{ cvss_min = 9.0 }, { epss_min = 0.5 }] }` for a condition.
 The final blank row adds a rule, mapping or channel. Choose the new channel type
