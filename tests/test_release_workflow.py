@@ -157,3 +157,13 @@ def test_all_publication_jobs_wait_for_a_pin_validation_gate_without_container_k
     assert "release-signing" in jobs["container-publish"]["needs"]
     assert "release-signing" in jobs["release"]["needs"]
     assert "RELEASE_SIGNING_KEY" not in str(jobs["container-publish"])
+
+
+def test_020_upgrade_notes_require_the_administrator_command():
+    guide = (ROOT / "docs" / "UPGRADING.md").read_text(encoding="utf-8")
+    template = (ROOT / ".github" / "release-notes.md").read_text(encoding="utf-8")
+    for notes in (guide, template):
+        boundary = " ".join(notes.split("**Upgrading from 0.2.0.**", 1)[1].split("\n\n", 1)[0].split())
+        assert "sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply" in boundary
+        assert "crontab" in boundary and "update service" in boundary
+        assert "Dashboard-triggered upgrades work from 0.2.1 onward" in boundary

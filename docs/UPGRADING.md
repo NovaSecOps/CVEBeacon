@@ -392,6 +392,12 @@ sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply
 sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply --version VERSION
 ```
 
+**Upgrading from 0.2.0.** Start the upgrade as an administrator with
+`sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply`. Replace
+`/opt/cvebeacon` with your installation prefix if needed. In 0.2.0, the
+dashboard request cannot read the service account's crontab inside the update
+service. Dashboard-triggered upgrades work from 0.2.1 onward.
+
 A check makes one bounded, anonymous HTTPS request to the GitHub releases API;
 it sends no token, inventory, configuration, user, host or local paths. Checking
 lists at most 30 recent releases. The administrator can select an explicit

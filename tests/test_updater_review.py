@@ -341,3 +341,35 @@ def test_unreadable_checkpoint_reread_does_not_overwrite_the_fence(transaction, 
     assert journal.read_bytes() == b"{"
     assert u.read_status(config)["last_update"]["reason"] == "recovery-incomplete"
     assert _audit(updater)[-1]["reason"] == "recovery-incomplete"
+
+
+def test_apply_runs_backup_with_the_020_interpreter_and_state_module(transaction, monkeypatch):
+    updater, native, config = transaction
+    prefix = updater.policy.prefix
+    (prefix / "releases/0.1.0").rename(prefix / "releases/0.2.0")
+    (prefix / "current").unlink()
+    (prefix / "current").symlink_to("releases/0.2.0", target_is_directory=True)
+    native.versions = {package: "0.2.0" for package in u.PACKAGES}
+    monkeypatch.setattr(updater.releases, "check", lambda *args: u.Release("0.2.1", "", ()))
+
+    def verify(release, directory, signers):
+        (directory / "synthetic.whl").touch()
+
+    monkeypatch.setattr(updater.releases, "verify", verify)
+    observed = []
+    executor = object.__new__(u.Native)
+    executor.policy = updater.policy
+
+    def run(argv, **kwargs):
+        assert (prefix / "current").resolve() == prefix / "releases/0.2.0"
+        assert kwargs["service"]
+        assert argv == [prefix / "releases/0.2.0/.venv/bin/python", "-I", "-m",
+                        "cvebeacon.update_state", "backup", config.config_path, updater.policy.data, argv[-1]]
+        observed.append(argv[-1])
+        update_state.backup(config, updater.policy.data, argv[-1])
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    executor.run = run
+    monkeypatch.setattr(native, "state", executor.state)
+    assert updater.apply("0.2.1")["result"] == "updated"
+    assert len(observed) == 1 and (observed[0] / "manifest.json").is_file()

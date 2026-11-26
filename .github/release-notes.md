@@ -70,6 +70,12 @@ instead of replacing it.
 
 ## Upgrade notes
 
+- **Upgrading from 0.2.0.** Start the upgrade as an administrator with
+  `sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply`. Replace
+  `/opt/cvebeacon` with your installation prefix if needed. In 0.2.0, the
+  dashboard request cannot read the service account's crontab inside the update
+  service. Dashboard-triggered upgrades work from 0.2.1 onward.
+
 - **Installs made from source before `0.1.0`.** Installs made before the first
   published release (`0.1.0`) carry only the fail-closed placeholder signing pin, so
   the updater cannot authenticate an update. Upgrade each such installation
