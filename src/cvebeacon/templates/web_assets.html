@@ -85,14 +85,44 @@
 <p class="muted">Response bodies and cookies are never stored or displayed.</p>
 {% endcall %}
 
+{% if document %}
+{% call card('Filter results', 'Narrow the detected products below. Filters apply to both views.') %}
+<form class="web-filters" method="get" action="{{ url_for('web.index') }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="view" value="{{ flt.view }}">
+<fieldset class="web-filter-confidence"><legend>Confidence</legend>{% for level in confidence_choices %}<span class="field field-check"><input id="f-conf-{{ level }}" type="checkbox" name="conf" value="{{ level }}" {% if level in flt.conf %}checked{% endif %}><label for="f-conf-{{ level }}">{{ level | title }}</label></span>{% endfor %}</fieldset>
+<div class="field"><label for="f-version">Version</label><select id="f-version" name="version">{% for value, label in [('any', 'Any'), ('with', 'With version'), ('without', 'Without version')] %}<option value="{{ value }}" {% if flt.version == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-inv">Inventory status</label><select id="f-inv" name="inv">{% for value, label in [('any', 'Any'), ('in', 'In inventory'), ('review', 'Review only')] %}<option value="{{ value }}" {% if flt.inv == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-category">Category</label><select id="f-category" name="category"><option value="">All categories</option>{% for name in categories %}<option value="{{ name }}" {% if flt.category == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-site">Site</label><select id="f-site" name="site"><option value="">All sites</option>{% for name in site_names %}<option value="{{ name }}" {% if flt.site == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-tech">Technology</label><input id="f-tech" name="tech" value="{{ flt.tech }}" maxlength="80"><p class="help">Part of a product name.</p></div>
+<div class="form-actions">{{ button('Apply filters') }}<a class="btn btn-secondary" href="{{ url_for('web.index', client=client, view=flt.view) }}">Clear filters</a></div></form>
+{% endcall %}
+{% endif %}
+
 {% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.') %}
+{% if products %}
+<ul class="web-chips" aria-label="Summary of detected products">
+{% for label, key, param in [('High confidence', 'high', {'conf': 'high'}), ('Medium confidence', 'medium', {'conf': 'medium'}), ('Low confidence', 'low', {'conf': 'low'}), ('With version', 'with_version', {'version': 'with'}), ('Without version', 'without_version', {'version': 'without'})] %}<li><a class="web-chip" href="{{ url_for('web.index', client=client, view=flt.view, **param) }}">{{ label }}: {{ chips[key] }}</a></li>{% endfor %}
+<li><span class="web-chip">Technologies: {{ chips.technologies }}</span></li><li><span class="web-chip">Sites: {{ chips.sites }}</span></li></ul>
+<p class="web-view-switch" aria-label="View">View:
+<a class="btn btn-secondary" href="{{ url_for('web.index', client=client, view='site', conf=flt.conf | sort, version=flt.version, inv=flt.inv, category=flt.category, site=flt.site, tech=flt.tech) }}" {% if flt.view == 'site' %}aria-current="page"{% endif %}>By site</a>
+<a class="btn btn-secondary" href="{{ url_for('web.index', client=client, view='tech', conf=flt.conf | sort, version=flt.version, inv=flt.inv, category=flt.category, site=flt.site, tech=flt.tech) }}" {% if flt.view == 'tech' %}aria-current="page"{% endif %}>By technology</a></p>
+<p class="muted">Showing {{ matched_count }} of {{ total_products }} products.{% if flt.active %} <a href="{{ url_for('web.index', client=client, view=flt.view) }}">Clear filters</a>{% endif %}{% if list_total > row_limit %} Showing the first {{ row_limit }}; refine the filters.{% endif %}</p>
+{% endif %}
+{% if flt.view == 'tech' %}
+{% call table_wrap('Detected products by technology') %}
+<table class="web-tech-table"><thead><tr><th scope="col">Technology</th><th scope="col">Sites</th><th scope="col">Versions seen</th><th scope="col">Confidence</th><th scope="col">Where</th></tr></thead><tbody>
+{% for group in tech_rows %}<tr><td class="web-product-cell"><strong>{{ group.name }}</strong><div class="web-product-tags">{% for category in group.categories %}<span class="badge badge-neutral">{{ category }}</span>{% endfor %}{% if group.in_inventory %}<span class="badge badge-success">In inventory</span>{% else %}<span class="badge badge-neutral">Review only</span>{% endif %}</div></td><td class="num">{{ group.site_count }}</td><td class="web-version-cell">{% for version, count in group.version_counts %}<span class="badge badge-info web-version-badge">{{ version }}</span> <span class="muted">x{{ count }}</span> {% endfor %}{% if group.undisclosed %}<span class="muted">version not disclosed x{{ group.undisclosed }}</span>{% endif %}</td><td class="web-confidence-cell"><span class="badge badge-{{ group.class }}">{{ group.label }}</span></td><td class="web-evidence-cell"><details class="web-evidence"><summary>Sites ({{ group.site_count }})</summary><div class="web-evidence-panel"><ul>{% for site, version, label, klass in group.site_rows %}<li>{{ site }} · {% if version %}<span class="badge badge-info web-version-badge">{{ version }}</span>{% else %}<span class="muted">version not disclosed</span>{% endif %} <span class="badge badge-{{ klass }}">{{ label }}</span></li>{% endfor %}</ul></div></details></td></tr>
+{% else %}<tr><td colspan="5">{% if products %}No products match these filters.{% else %}No products detected yet. Run detection after saving a site.{% endif %}</td></tr>{% endfor %}</tbody></table>
+{% endcall %}
+{% else %}
 {% call table_wrap('Detected products') %}
 <table class="web-products-table"><thead><tr><th scope="col">Product</th><th scope="col">Version</th><th scope="col">Confidence</th><th scope="col">Evidence</th></tr></thead><tbody>
-{% for hostname, site_products in products | groupby('hostname') %}<tr><th class="web-site-group" scope="rowgroup" colspan="4">{{ hostname or 'Site not recorded' }}</th></tr>
+{% for hostname, site_products in site_groups %}<tr><th class="web-site-group" scope="rowgroup" colspan="4">{{ hostname }}</th></tr>
 {% for item in site_products %}<tr><td class="web-product-cell"><strong>{{ item.get('display_name', '') }}</strong><div class="web-product-tags">{% for category in item.get('category_labels', []) %}<span class="badge badge-neutral">{{ category }}</span>{% endfor %}{% for label in item.get('evidence_labels', []) %}<span class="badge badge-neutral">{{ label }}</span>{% endfor %}{% if item.get('in_inventory') %}<span class="badge badge-success">In inventory</span>{% else %}<span class="badge badge-neutral">Review only</span>{% endif %}</div></td><td class="web-version-cell">{% if item.get('has_version') %}<span class="badge badge-info web-version-badge">{{ item.get('display_version', '') }}</span>{% else %}<span class="muted">Version not disclosed</span>{% endif %}</td><td class="web-confidence-cell"><span class="badge badge-{{ item.get('confidence_class', 'neutral') }}">{{ item.get('confidence_label', 'Unknown') }}</span></td><td class="web-evidence-cell"><details class="web-evidence"><summary>Evidence ({{ item.get('evidence', []) | length }})</summary><div class="web-evidence-panel">
 {% if item.get('evidence') %}<ul>{% for evidence in item.get('evidence', []) %}<li><p><strong>{{ evidence.get('kind', '') }}</strong> · {{ evidence.get('source', '') }}</p><pre>{{ evidence.get('excerpt', '') }}</pre>{% if evidence.get('sha256') %}<p class="muted">SHA-256 {{ evidence.get('sha256') }}{% if 'bytes' in evidence %} · {{ evidence.get('bytes') }} bytes{% endif %}</p>{% elif 'bytes' in evidence %}<p class="muted">{{ evidence.get('bytes') }} bytes</p>{% endif %}</li>{% endfor %}</ul>{% else %}<p>No excerpt was recorded.{% if item.get('implied_by') %} Inferred from {{ item.get('implied_by') | join(', ') }}.{% endif %}</p>{% endif %}</div></details></td></tr>{% endfor %}
-{% else %}<tr><td colspan="4">No products detected yet. Run detection after saving a site.</td></tr>{% endfor %}</tbody></table>
+{% else %}<tr><td colspan="4">{% if products %}No products match these filters.{% else %}No products detected yet. Run detection after saving a site.{% endif %}</td></tr>{% endfor %}</tbody></table>
 {% endcall %}
+{% endif %}
 {% endcall %}
 
 {% call card('Entries to review', 'Detection results that need a person to decide. Compare each one with the site before relying on it.') %}

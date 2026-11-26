@@ -53,6 +53,77 @@ _REASON_LABELS = {
 }
 
 
+_ROW_LIMIT = 500
+_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+_CONFIDENCE_CHOICES = ("high", "medium", "low")
+_NO_SITE = "Site not recorded"
+
+
+def _site_label(item):
+    return item.get("hostname") or _NO_SITE
+
+
+def _filter_args(args, categories, sites):
+    """Read the product filters from the query string; invalid values reset to the default."""
+    def single(name, limit=80):
+        value = args.get(name, "")
+        if not isinstance(value, str) or len(value) > limit or any(ord(c) < 32 for c in value):
+            return ""
+        return value.strip()
+
+    chosen = [value for value in args.getlist("conf")[:8] if value in _CONFIDENCE_CHOICES]
+    conf = set(chosen) if chosen else set(_CONFIDENCE_CHOICES)
+    version = single("version", 16)
+    inventory = single("inv", 16)
+    category = single("category")
+    site = single("site", 256)
+    return {
+        "conf": conf,
+        "version": version if version in {"with", "without"} else "any",
+        "inv": inventory if inventory in {"in", "review"} else "any",
+        "category": category if category in categories else "",
+        "site": site if site in sites else "",
+        "tech": single("tech"),
+        "view": "tech" if single("view", 8) == "tech" else "site",
+    }
+
+
+def _technology_rows(rows):
+    """One row per technology, in one pass over the already filtered product rows."""
+    groups = {}
+    for item in rows:
+        group = groups.setdefault(item["display_name"].casefold(), {
+            "name": item["display_name"], "sites": {}, "versions": {}, "categories": [],
+            "rank": 0, "label": "Unknown", "class": "neutral", "in_inventory": False,
+        })
+        site = _site_label(item)
+        versions = [v for v in item.get("versions", []) if v.strip()]
+        group["sites"].setdefault(site, []).append((", ".join(versions), item))
+        for version in versions or [""]:
+            group["versions"][version] = group["versions"].get(version, 0) + 1
+        for category in item["category_labels"]:
+            if category not in group["categories"]:
+                group["categories"].append(category)
+        rank = _CONFIDENCE_RANK.get(item.get("confidence", "").casefold(), 0)
+        if rank > group["rank"] or (rank == group["rank"] == 0):
+            group["rank"], group["label"], group["class"] = rank, item["confidence_label"], item["confidence_class"]
+        group["in_inventory"] = group["in_inventory"] or item["in_inventory"]
+    result = []
+    for group in groups.values():
+        group["site_count"] = len(group["sites"])
+        group["version_counts"] = sorted(
+            ((v, n) for v, n in group["versions"].items() if v), key=lambda pair: (-pair[1], pair[0]))
+        group["undisclosed"] = group["versions"].get("", 0)
+        group["site_rows"] = [
+            (site, version, entry["confidence_label"], entry["confidence_class"])
+            for site, entries in sorted(group["sites"].items(), key=lambda pair: pair[0].casefold())
+            for version, entry in entries
+        ]
+        result.append(group)
+    result.sort(key=lambda g: (-g["site_count"], g["name"].casefold()))
+    return result
+
+
 def _host(entry):
     try:
         host = entry.get("hostname") or urlsplit(entry.get("url", "")).hostname or ""
@@ -372,13 +443,50 @@ def create_web_blueprint(config):
             item.get("hostname", "").casefold(), item.get("category", "").casefold(),
             item["display_name"].casefold(),
         ))
+        categories = sorted({c for item in products for c in item["category_labels"]}, key=str.casefold)
+        site_names = sorted({_site_label(item) for item in products}, key=str.casefold)
+        flt = _filter_args(request.args, set(categories), set(site_names))
+        needle = flt["tech"].casefold()
+        chips = dict(high=0, medium=0, low=0, with_version=0, without_version=0)
+        matched, technologies, chip_sites = [], set(), set()
+        for item in products:
+            chip_sites.add(_site_label(item))
+            technologies.add(item["display_name"].casefold())
+            if item["confidence_class"] in chips:
+                chips[item["confidence_class"]] += 1
+            chips["with_version" if item["has_version"] else "without_version"] += 1
+            if ((item["confidence_class"] in flt["conf"] or (
+                    item["confidence_class"] == "neutral" and flt["conf"] == set(_CONFIDENCE_CHOICES)))
+                    and (flt["version"] == "any" or item["has_version"] == (flt["version"] == "with"))
+                    and (flt["inv"] == "any" or item["in_inventory"] == (flt["inv"] == "in"))
+                    and (not flt["category"] or flt["category"] in item["category_labels"])
+                    and (not flt["site"] or _site_label(item) == flt["site"])
+                    and (not needle or needle in item["display_name"].casefold())):
+                matched.append(item)
+        chips.update(technologies=len(technologies), sites=len(chip_sites))
+        flt["active"] = (flt["conf"] != set(_CONFIDENCE_CHOICES) or flt["version"] != "any"
+                         or flt["inv"] != "any" or bool(flt["category"] or flt["site"] or flt["tech"]))
+        tech_rows, site_groups = [], []
+        if flt["view"] == "tech":
+            tech_rows = _technology_rows(matched)
+            list_total = len(tech_rows)
+            tech_rows = tech_rows[:_ROW_LIMIT]
+        else:
+            list_total = len(matched)
+            for item in matched[:_ROW_LIMIT]:
+                if not site_groups or site_groups[-1][0] != _site_label(item):
+                    site_groups.append((_site_label(item), []))
+                site_groups[-1][1].append(item)
         return render_template("web_assets.html", clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
                                run=run, snapshot=snapshot, available=available, notice=COMPANION_NOTICE,
                                last_job=last_job, truncated=truncated, removed=removed, error=error,
                                versions_hidden=versions_hidden, reason_labels=_REASON_LABELS,
-                               prefill_entry=prefill_entry, prefill_url=prefill_url), status
+                               prefill_entry=prefill_entry, prefill_url=prefill_url, flt=flt, chips=chips,
+                               categories=categories, site_names=site_names, matched_count=len(matched),
+                               total_products=len(products), tech_rows=tech_rows, site_groups=site_groups,
+                               row_limit=_ROW_LIMIT, list_total=list_total, confidence_choices=_CONFIDENCE_CHOICES), status
 
     @blueprint.get("")
     @requires("view")
