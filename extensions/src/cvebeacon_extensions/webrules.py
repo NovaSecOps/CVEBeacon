@@ -1,18 +1,17 @@
-"""Reviewed direct-evidence rules for passive web technology detection.
+"""Direct-evidence rules for passive web technology detection.
 
-The patterns below were written from public product documentation and the
-response conventions those products document (Server and X-Powered-By values,
-cookie names, generator metadata, and published asset URLs). No fingerprint
-data was copied from another detector project.
+Rules maintained here are written from public product documentation and
+published banners. Retire.js signatures are bundled separately under
+Apache-2.0 with attribution in the Extensions NOTICE.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 import re
 from typing import Iterable, Mapping
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from cvebeacon.identity import normalize_asset
 from cvebeacon.models import Asset
@@ -33,6 +32,7 @@ CATEGORIES = {
 
 MAX_GENERATORS = 4096
 MAX_URLS = 16384
+MAX_CDN_DETECTIONS = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +47,17 @@ class Rule:
     version_pattern: str = ""
     cpe: str = ""
     confidence: str = "medium"
+    name: str = ""
+    ecosystem: str = ""
+    package: str = ""
+    hint: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Evidence:
+    kind: str
+    source: str
+    excerpt: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,13 +79,14 @@ class Detection:
     # Keys of the detections that imply this one. An implied-only detection is
     # listed for people to read and never becomes an inventory row.
     implied_by: tuple[str, ...] = ()
+    evidence: tuple[Evidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class Resource:
-    """A same-site script or stylesheet that the page referenced and the fetcher read."""
+    """A page-referenced resource the fetcher read or hashed."""
     url: str
-    kind: str  # script | style
+    kind: str  # script | style | manifest | robots | icon
     text: str
 
 
@@ -146,15 +158,18 @@ def _validated_cpe(value: str) -> str:
     return value
 
 
-def _rule(key, vendor, product, category, kind, pattern, *, subject="", version="", cpe="", confidence="medium"):
+def _rule(key, vendor, product, category, kind, pattern, *, subject="", version="", cpe="",
+          confidence="medium", name="", ecosystem="", package="", hint=""):
     if category not in CATEGORIES:
         raise ValueError(f"unknown rule category: {category}")
-    if kind not in {"header", "cookie", "meta", "url", "html"}:
+    if kind not in {"header", "cookie", "meta", "url", "html", "script", "style", "manifest", "robots"}:
         raise ValueError(f"unknown evidence kind: {kind}")
     if kind == "header" and not subject:
         raise ValueError(f"header rule {key} has no header name")
     if confidence not in {"high", "medium", "low"}:
         raise ValueError(f"unknown confidence: {confidence}")
+    if (ecosystem or package) and (ecosystem != "npm" or not package):
+        raise ValueError(f"rule {key} has an invalid package identity")
     pattern = _versioned(pattern)
     if version:
         version = _versioned(version)
@@ -162,8 +177,10 @@ def _rule(key, vendor, product, category, kind, pattern, *, subject="", version=
     re.compile(pattern, re.IGNORECASE)
     if version:
         re.compile(version, re.IGNORECASE)
+    if package:
+        cpe = ""
     return Rule(key, vendor, product, category, kind, pattern, subject.casefold(), version,
-                _validated_cpe(cpe), confidence)
+                _validated_cpe(cpe), confidence, name, ecosystem, package, hint.casefold())
 
 
 RULES: tuple[Rule, ...] = (
@@ -228,7 +245,7 @@ RULES: tuple[Rule, ...] = (
           cpe="cpe:2.3:a:laravel:laravel:*:*:*:*:*:*:*:*", confidence="high"),
     _rule("nextjs", "vercel", "next.js", "framework", "html", r"__next_data__",
           cpe="cpe:2.3:a:vercel:next.js:*:*:*:*:*:*:*:*", confidence="high"),
-    _rule("nuxt", "nuxt", "nuxt", "framework", "html", r"__nuxt__", confidence="medium"),
+    _rule("nuxt", "nuxt", "nuxt", "framework", "html", r"__nuxt(?:__)?", confidence="medium"),
     _rule("react", "facebook", "react", "js-library", "url",
           r"(?:^|/)react(?:-dom)?(?:@[^/]+)?(?:\.production)?(?:\.min)?\.js(?:\?|$)",
           version=r"react(?:-dom)?@(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
@@ -338,6 +355,339 @@ RULES: tuple[Rule, ...] = (
 )
 
 
+_EXISTING_IDENTITIES = {
+    "php-header": ("PHP", "", ""),
+    "php-session": ("PHP", "", ""),
+    "express": ("Express", "npm", "express"),
+    "laravel": ("Laravel", "", ""),
+    "nextjs": ("Next.js", "npm", "next"),
+    "nuxt": ("Nuxt", "npm", "nuxt"),
+    "react": ("React", "npm", "react"),
+    "angular": ("Angular", "npm", "@angular/core"),
+    "vue": ("Vue.js", "npm", "vue"),
+    "svelte": ("Svelte", "npm", "svelte"),
+    "jquery": ("jQuery", "npm", "jquery"),
+    "bootstrap": ("Bootstrap", "npm", "bootstrap"),
+    "wordpress": ("WordPress", "", ""),
+    "drupal": ("Drupal", "", ""),
+    "joomla": ("Joomla", "", ""),
+    "magento": ("Magento", "", ""),
+    "prestashop": ("PrestaShop", "", ""),
+    "typo3": ("TYPO3", "", ""),
+    "phpmyadmin": ("phpMyAdmin", "", ""),
+}
+RULES = tuple(
+    replace(rule, name=name, ecosystem=ecosystem, package=package,
+            cpe="" if package else rule.cpe)
+    for rule in RULES if rule.key in _EXISTING_IDENTITIES
+    for name, ecosystem, package in (_EXISTING_IDENTITIES[rule.key],)
+) + tuple(rule for rule in RULES if rule.key not in _EXISTING_IDENTITIES)
+
+
+EXPANDED_RULES: tuple[Rule, ...] = (
+    # Product banners and attributes published by front-end libraries.
+    _rule("expanded-angular-core", "angular", "angular", "js-library", "script",
+          r"@angular/core@(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"@angular/core@(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Angular", ecosystem="npm", package="@angular/core", confidence="high", hint="@angular/core@"),
+    _rule("expanded-angularjs-markup", "angular", "angularjs", "js-library", "html",
+          r"\bng-(?:app|controller|repeat|view|model|bind|init)\b",
+          name="AngularJS", ecosystem="npm", package="angular", confidence="high"),
+    _rule("expanded-angularjs-script", "angular", "angularjs", "js-library", "script",
+          r"AngularJS\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"AngularJS\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="AngularJS", ecosystem="npm", package="angular", confidence="high", hint="angularjs"),
+    _rule("expanded-gatsby-markup", "gatsbyjs", "gatsby", "framework", "html",
+          r"(?:id=[\"']___gatsby[\"']|window\.___gatsby)",
+          name="Gatsby", ecosystem="npm", package="gatsby", confidence="high"),
+    _rule("expanded-react-script", "facebook", "react", "js-library", "script",
+          r"@license\s+React\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"@license\s+React\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="React", ecosystem="npm", package="react", confidence="high", hint="@license react"),
+    _rule("expanded-react-markup", "facebook", "react", "js-library", "html",
+          r"\bdata-react(?:root|id)\s*=",
+          name="React", ecosystem="npm", package="react", confidence="high"),
+    _rule("expanded-vue-script", "vuejs", "vue.js", "js-library", "script",
+          r"Vue(?:\.js)?\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Vue(?:\.js)?\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Vue.js", ecosystem="npm", package="vue", confidence="high", hint="vue"),
+    _rule("expanded-vue-markup", "vuejs", "vue.js", "js-library", "html",
+          r"(?:\bdata-v-app\s*=|\bv-cloak\b)",
+          name="Vue.js", ecosystem="npm", package="vue", confidence="high"),
+    _rule("expanded-ember-script", "emberjs", "ember", "js-library", "script",
+          r"Ember\.VERSION\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Ember\.VERSION\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Ember", ecosystem="npm", package="ember-source", confidence="high", hint="ember.version"),
+    _rule("expanded-ember-markup", "emberjs", "ember", "js-library", "html",
+          r"\bember-view\b", name="Ember", ecosystem="npm", package="ember-source", confidence="medium"),
+    _rule("expanded-backbone-script", "backbonejs", "backbone", "js-library", "script",
+          r"Backbone\.VERSION\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Backbone\.VERSION\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Backbone.js", ecosystem="npm", package="backbone", confidence="high", hint="backbone.version"),
+    _rule("expanded-alpine-markup", "alpinejs", "alpinejs", "js-library", "html",
+          r"(?:^|\s)x-(?:data|init|show|bind|on|model|for|if|ref|text|html|transition)\s*=",
+          name="Alpine.js", ecosystem="npm", package="alpinejs", confidence="high"),
+    _rule("expanded-alpine-script", "alpinejs", "alpinejs", "js-library", "script",
+          r"Alpine\.version\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Alpine\.version\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Alpine.js", ecosystem="npm", package="alpinejs", confidence="high", hint="alpine.version"),
+    _rule("expanded-htmx-markup", "bigskysoftware", "htmx", "js-library", "html",
+          r"(?:^|\s)hx-(?:get|post|put|patch|delete|trigger|target|swap|boost)\s*=",
+          name="htmx", ecosystem="npm", package="htmx.org", confidence="high"),
+    _rule("expanded-htmx-script", "bigskysoftware", "htmx", "js-library", "script",
+          r"htmx\.version\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"htmx\.version\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="htmx", ecosystem="npm", package="htmx.org", confidence="high", hint="htmx.version"),
+    _rule("expanded-jquery-script", "jquery", "jquery", "js-library", "script",
+          r"jQuery\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"jQuery\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="jQuery", ecosystem="npm", package="jquery", confidence="high", hint="jquery"),
+    _rule("expanded-jquery-ui-script", "jquery", "jquery-ui", "js-library", "script",
+          r"jQuery\s+UI\s+-\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"jQuery\s+UI\s+-\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="jQuery UI", ecosystem="npm", package="jquery-ui", confidence="high", hint="jquery ui"),
+    _rule("expanded-jquery-migrate-script", "jquery", "jquery-migrate", "js-library", "script",
+          r"JQMIGRATE:\s+Migrate is installed, version\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"JQMIGRATE:\s+Migrate is installed, version\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="jQuery Migrate", ecosystem="npm", package="jquery-migrate", confidence="high", hint="jqmigrate:"),
+    _rule("expanded-lodash-script", "lodash", "lodash", "js-library", "script",
+          r"(?:\blodash\s+|_\.VERSION\s*=\s*[\"'])(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"(?:\blodash\s+|_\.VERSION\s*=\s*[\"'])(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Lodash", ecosystem="npm", package="lodash", confidence="high", hint="lodash"),
+    _rule("expanded-underscore-script", "underscorejs", "underscore", "js-library", "script",
+          r"(?:Underscore(?:\.js)?\s+(?:v)?|_\.VERSION\s*=\s*[\"'])(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"(?:Underscore(?:\.js)?\s+(?:v)?|_\.VERSION\s*=\s*[\"'])(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Underscore.js", ecosystem="npm", package="underscore", confidence="high", hint="underscore"),
+    _rule("expanded-moment-script", "momentjs", "moment", "js-library", "script",
+          r"moment\.js\s+version\s*:\s*(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"moment\.js\s+version\s*:\s*(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Moment.js", ecosystem="npm", package="moment", confidence="high", hint="moment.js version"),
+    _rule("expanded-axios-script", "axios", "axios", "js-library", "script",
+          r"Axios\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Axios\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Axios", ecosystem="npm", package="axios", confidence="high", hint="axios"),
+    _rule("expanded-chartjs-script", "chartjs", "chart.js", "js-library", "script",
+          r"Chart\.js\b",
+          version=r"Chart\.js\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Chart.js", ecosystem="npm", package="chart.js", confidence="high", hint="chart.js"),
+    _rule("expanded-d3-script", "d3js", "d3", "js-library", "script",
+          r"d3\.version\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"d3\.version\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="D3", ecosystem="npm", package="d3", confidence="high", hint="d3.version"),
+    _rule("expanded-swiper-script", "swiperjs", "swiper", "js-library", "script",
+          r"Swiper\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Swiper\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Swiper", ecosystem="npm", package="swiper", confidence="high", hint="swiper"),
+    _rule("expanded-select2-script", "select2", "select2", "js-library", "script",
+          r"Select2\s+(\d+(?:\.\d+){0,3}(?:-(?:alpha|beta|rc)\.?\d+)?)",
+          version=r"Select2\s+(\d+(?:\.\d+){0,3}(?:-(?:alpha|beta|rc)\.?\d+)?)(?!\d|\.\d)",
+          name="Select2", ecosystem="npm", package="select2", confidence="high", hint="select2"),
+    _rule("expanded-datatables-script", "datatables", "datatables.net", "js-library", "script",
+          r"DataTables\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"DataTables\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="DataTables", ecosystem="npm", package="datatables.net", confidence="high", hint="datatables"),
+    _rule("expanded-modernizr-script", "modernizr", "modernizr", "js-library", "script",
+          r"Modernizr\._version\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Modernizr\._version\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Modernizr", ecosystem="npm", package="modernizr", confidence="high", hint="modernizr._version"),
+    _rule("expanded-requirejs-script", "requirejs", "requirejs", "js-library", "script",
+          r"RequireJS\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"RequireJS\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="RequireJS", ecosystem="npm", package="requirejs", confidence="high", hint="requirejs"),
+    _rule("expanded-handlebars-script", "handlebarsjs", "handlebars", "js-library", "script",
+          r"Handlebars\.VERSION\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Handlebars\.VERSION\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Handlebars", ecosystem="npm", package="handlebars", confidence="high", hint="handlebars.version"),
+    _rule("expanded-rxjs-script", "reactivex", "rxjs", "js-library", "script",
+          r"\brxjs@(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"\brxjs@(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="RxJS", ecosystem="npm", package="rxjs", confidence="high", hint="rxjs@"),
+    _rule("expanded-core-js", "core-js", "core-js", "js-library", "script",
+          r"(?:__core-js_shared__|core-js.{0,80}(?:copyright|license))",
+          version=r"__core-js_shared__[\s\S]{0,200}?versions[\s\S]{0,100}?version\s*:\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="core-js", ecosystem="npm", package="core-js", confidence="high", hint="core-js"),
+    _rule("expanded-zonejs-script", "zone.js", "zone.js", "js-library", "script",
+          r"zone\.js\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"zone\.js\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="zone.js", ecosystem="npm", package="zone.js", confidence="high", hint="zone.js"),
+    _rule("expanded-webpack-runtime", "webpack", "webpack", "js-library", "script",
+          r"(?:webpackJsonp|webpackChunk(?!ed)[A-Za-z0-9_$]*\s*=|__webpack_require__)",
+          name="webpack", ecosystem="npm", package="webpack", confidence="high", hint="webpack"),
+    _rule("expanded-tslib", "microsoft", "tslib", "js-library", "url",
+          r"(?:^|/)tslib(?:/|[.-])", name="tslib", ecosystem="npm", package="tslib", confidence="high"),
+    _rule("expanded-typescript", "microsoft", "typescript", "js-library", "url",
+          r"(?:^|/)typescript@",
+          version=r"typescript@(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="TypeScript", ecosystem="npm", package="typescript", confidence="high"),
+    _rule("expanded-popper-script", "popperjs", "popper", "js-library", "script",
+          r"@popperjs/core\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"@popperjs/core\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Popper", ecosystem="npm", package="@popperjs/core", confidence="high", hint="@popperjs/core"),
+    _rule("expanded-bootstrap-script", "getbootstrap", "bootstrap", "js-library", "script",
+          r"Bootstrap\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Bootstrap\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Bootstrap", ecosystem="npm", package="bootstrap", confidence="high", hint="bootstrap"),
+    _rule("expanded-bootstrap-style", "getbootstrap", "bootstrap", "js-library", "style",
+          r"Bootstrap\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Bootstrap\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Bootstrap", ecosystem="npm", package="bootstrap", confidence="high", hint="bootstrap"),
+    _rule("expanded-font-awesome-style", "fontawesome", "font-awesome", "js-library", "style",
+          r"Font Awesome (?:Free|Pro)\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Font Awesome (?:Free|Pro)\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Font Awesome", ecosystem="npm", package="@fortawesome/fontawesome-free", confidence="high", hint="font awesome"),
+    _rule("expanded-font-awesome-url", "fontawesome", "font-awesome", "js-library", "url",
+          r"font-awesome/(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"font-awesome/(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Font Awesome", ecosystem="npm", package="@fortawesome/fontawesome-free", confidence="high"),
+    _rule("expanded-tailwind-style", "tailwindcss", "tailwindcss", "js-library", "style",
+          r"tailwindcss\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"tailwindcss\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Tailwind CSS", ecosystem="npm", package="tailwindcss", confidence="high", hint="tailwindcss"),
+    _rule("expanded-tailwind-url", "tailwindcss", "tailwindcss", "js-library", "url",
+          r"tailwindcss/(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"tailwindcss/(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Tailwind CSS", ecosystem="npm", package="tailwindcss", confidence="high"),
+    _rule("expanded-bulma-style", "bulma", "bulma", "js-library", "style",
+          r"Bulma\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Bulma\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Bulma", ecosystem="npm", package="bulma", confidence="high", hint="bulma"),
+    _rule("expanded-foundation-style", "zurb", "foundation-sites", "js-library", "style",
+          r"Foundation for Sites\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"Foundation for Sites\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Foundation", ecosystem="npm", package="foundation-sites", confidence="high", hint="foundation for sites"),
+    _rule("expanded-animate-style", "animatecss", "animate.css", "js-library", "style",
+          r"animate\.css\s+-\s+Version\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          version=r"animate\.css\s+-\s+Version\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="Animate.css", ecosystem="npm", package="animate.css", confidence="high", hint="animate.css"),
+    # Third-party services are recognised from link text alone; none is fetched.
+    _rule("expanded-google-maps", "google", "google-maps", "hosted-platform", "url",
+          r"(?:maps\.googleapis\.com/maps/api/|maps\.google\.com/maps/api/|google\.com/maps/embed)",
+          name="Google Maps", confidence="high"),
+    _rule("expanded-google-fonts", "google", "google-font-api", "hosted-platform", "url",
+          r"(?:fonts\.googleapis\.com/|fonts\.gstatic\.com/)", name="Google Font API", confidence="high"),
+    _rule("expanded-google-analytics", "google", "google-analytics", "hosted-platform", "url",
+          r"google-analytics\.com/(?:analytics\.js|ga\.js)", name="Google Analytics", confidence="high"),
+    _rule("expanded-google-tag-manager", "google", "tag-manager", "hosted-platform", "url",
+          r"googletagmanager\.com/gtm\.js", name="Google Tag Manager", confidence="high"),
+    _rule("expanded-google-recaptcha", "google", "recaptcha", "hosted-platform", "url",
+          r"google\.com/recaptcha/api\.js", name="Google reCAPTCHA", confidence="high"),
+    _rule("expanded-hcaptcha", "hcaptcha", "hcaptcha", "hosted-platform", "url",
+          r"js\.hcaptcha\.com/\d+/api\.js", name="hCaptcha", confidence="high"),
+    _rule("expanded-cloudflare-turnstile", "cloudflare", "turnstile", "hosted-platform", "url",
+          r"challenges\.cloudflare\.com/turnstile/v0/api\.js", name="Cloudflare Turnstile", confidence="high"),
+    _rule("expanded-cloudflare-web-analytics", "cloudflare", "web-analytics", "hosted-platform", "url",
+          r"static\.cloudflareinsights\.com/beacon\.min\.js", name="Cloudflare Web Analytics", confidence="high"),
+    _rule("expanded-facebook-pixel", "meta", "facebook-pixel", "hosted-platform", "url",
+          r"connect\.facebook\.net/[^/]{1,20}/fbevents\.js", name="Facebook Pixel", confidence="high"),
+    _rule("expanded-hotjar", "hotjar", "hotjar", "hosted-platform", "url",
+          r"(?:static|script)\.hotjar\.com/", name="Hotjar", confidence="high"),
+    _rule("expanded-microsoft-clarity", "microsoft", "clarity", "hosted-platform", "url",
+          r"clarity\.ms/tag/", name="Microsoft Clarity", confidence="high"),
+    _rule("expanded-matomo", "matomo", "matomo", "hosted-platform", "url",
+          r"/(?:matomo|piwik)\.js(?:\?|$)", name="Matomo", confidence="medium"),
+    _rule("expanded-stripe-js", "stripe", "stripe-js", "hosted-platform", "url",
+          r"js\.stripe\.com/v3(?:/|\?|$)", name="Stripe.js", ecosystem="npm",
+          package="@stripe/stripe-js", confidence="high"),
+    _rule("expanded-paypal", "paypal", "paypal-sdk", "hosted-platform", "url",
+          r"paypal\.com/sdk/js", name="PayPal", confidence="high"),
+    _rule("expanded-sentry-browser", "sentry", "sentry-browser", "hosted-platform", "url",
+          r"browser\.sentry-cdn\.com/(\d+(?:\.\d+){0,3})(?!\d|\.\d)/",
+          version=r"browser\.sentry-cdn\.com/(\d+(?:\.\d+){0,3})(?!\d|\.\d)/",
+          name="Sentry", ecosystem="npm", package="@sentry/browser", confidence="high"),
+    _rule("expanded-intercom", "intercom", "intercom", "hosted-platform", "url",
+          r"(?:widget\.intercom\.io/widget/|js\.intercomcdn\.com/)", name="Intercom",
+          ecosystem="npm", package="@intercom/messenger-js-sdk", confidence="high"),
+    _rule("expanded-zendesk", "zendesk", "zendesk", "hosted-platform", "url",
+          r"(?:static|ekr)\.zdassets\.com/", name="Zendesk", confidence="high"),
+    # Direct server-side evidence and framework-specific page markers.
+    _rule("expanded-symfony-header", "symfony", "symfony", "framework", "header",
+          r".+", subject="x-debug-token", name="Symfony", confidence="high"),
+    _rule("expanded-symfony-cookie", "symfony", "symfony", "framework", "cookie",
+          r"^(?:_symfony_session|sf_session)$", name="Symfony", confidence="high"),
+    _rule("expanded-codeigniter-header", "codeigniter", "codeigniter", "framework", "header",
+          r"^codeigniter(?:/(\d+(?:\.\d+){0,3}))?$", subject="x-powered-by",
+          version=r"^codeigniter/(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          name="CodeIgniter", confidence="high"),
+    _rule("expanded-codeigniter-cookie", "codeigniter", "codeigniter", "framework", "cookie",
+          r"^ci_session$", name="CodeIgniter", confidence="medium"),
+    _rule("expanded-django-cookie", "djangoproject", "django", "framework", "cookie",
+          r"^(?:csrftoken|django_language)$", name="Django", confidence="medium"),
+    _rule("expanded-rails-header", "rubyonrails", "rails", "framework", "header",
+          r"^\d+(?:\.\d+)?$", subject="x-runtime", name="Ruby on Rails", confidence="medium"),
+    _rule("expanded-livewire-markup", "livewire", "livewire", "framework", "html",
+          r"\bwire:(?:id|snapshot)\s*=", name="Livewire", confidence="high"),
+    _rule("expanded-inertia-markup", "inertiajs", "inertia.js", "js-library", "html",
+          r"data-page\s*=\s*[\"'][^\"']{0,200}(?:&quot;|\")component(?:&quot;|\")",
+          name="Inertia.js", ecosystem="npm", package="@inertiajs/core", confidence="high"),
+    _rule("expanded-wordpress-robots", "wordpress", "wordpress", "cms", "robots",
+          r"Disallow:\s*/wp-admin/|Allow:\s*/wp-admin/admin-ajax\.php",
+          name="WordPress", confidence="medium"),
+    _rule("expanded-drupal-robots", "drupal", "drupal", "cms", "robots",
+          r"Disallow:\s*/(?:core|modules|profiles|sites)/",
+          name="Drupal", confidence="medium"),
+    _rule("expanded-joomla-robots", "joomla", "joomla", "cms", "robots",
+          r"Disallow:\s*/administrator/",
+          name="Joomla", confidence="medium"),
+    _rule("expanded-angular-manifest", "angular", "angular", "js-library", "manifest",
+          r"ngsw-worker\.js", name="Angular", ecosystem="npm", package="@angular/core",
+          confidence="medium"),
+)
+RULES = RULES + EXPANDED_RULES
+
+
+_IMPLICATIONS = {
+    ("laravel", "laravel"): (("php", "php", "PHP", "language", "", ""),),
+    ("angular", "angular"): (("microsoft", "typescript", "TypeScript", "language", "npm", "typescript"),),
+    ("wordpress", "wordpress"): (("php", "php", "PHP", "language", "", ""),),
+    ("drupal", "drupal"): (("php", "php", "PHP", "language", "", ""),),
+    ("joomla", "joomla"): (("php", "php", "PHP", "language", "", ""),),
+    ("adobe", "magento"): (("php", "php", "PHP", "language", "", ""),),
+    ("prestashop", "prestashop"): (("php", "php", "PHP", "language", "", ""),),
+    ("typo3", "typo3"): (("php", "php", "PHP", "language", "", ""),),
+    ("phpmyadmin", "phpmyadmin"): (("php", "php", "PHP", "language", "", ""),),
+    ("symfony", "symfony"): (("php", "php", "PHP", "language", "", ""),),
+    ("codeigniter", "codeigniter"): (("php", "php", "PHP", "language", "", ""),),
+    ("vercel", "next.js"): (
+        ("facebook", "react", "React", "js-library", "npm", "react"),
+        ("nodejs", "node.js", "Node.js", "language", "", ""),
+    ),
+    ("gatsbyjs", "gatsby"): (("facebook", "react", "React", "js-library", "npm", "react"),),
+    ("nuxt", "nuxt"): (
+        ("vuejs", "vue.js", "Vue.js", "js-library", "npm", "vue"),
+        ("nodejs", "node.js", "Node.js", "language", "", ""),
+    ),
+    ("expressjs", "express"): (("nodejs", "node.js", "Node.js", "language", "", ""),),
+    ("livewire", "livewire"): (("laravel", "laravel", "Laravel", "framework", "", ""),),
+}
+
+
+_PACKAGE_PRODUCTS: dict[str, tuple[str, str, str, str]] = {}
+for _product_rule in RULES:
+    if _product_rule.ecosystem == "npm" and _product_rule.package:
+        _PACKAGE_PRODUCTS.setdefault(
+            _product_rule.package,
+            (_product_rule.vendor, _product_rule.product, _product_rule.name or _product_rule.product,
+             _product_rule.category),
+        )
+
+_CDNJS_PACKAGES = {
+    "angular": "angular", "angular.js": "angular",
+    "react": "react", "vue": "vue", "ember.js": "ember-source",
+    "backbone.js": "backbone", "alpinejs": "alpinejs", "htmx": "htmx.org",
+    "jquery": "jquery", "jquery-ui": "jquery-ui", "jquery-migrate": "jquery-migrate",
+    "lodash.js": "lodash", "underscore.js": "underscore", "moment.js": "moment",
+    "axios": "axios", "chart.js": "chart.js", "d3": "d3", "swiper": "swiper",
+    "select2": "select2", "datatables": "datatables.net", "modernizr": "modernizr",
+    "require.js": "requirejs", "handlebars.js": "handlebars", "rxjs": "rxjs",
+    "core-js": "core-js", "zone.js": "zone.js", "webpack": "webpack",
+    "popper.js": "@popperjs/core", "bootstrap": "bootstrap",
+    "font-awesome": "@fortawesome/fontawesome-free", "tailwindcss": "tailwindcss",
+    "bulma": "bulma", "foundation-sites": "foundation-sites", "animate.css": "animate.css",
+    "gatsby": "gatsby", "next.js": "next", "nuxt": "nuxt", "typescript": "typescript",
+    "tslib": "tslib", "svelte": "svelte",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class _CompiledRule:
     rule: Rule
@@ -395,7 +745,7 @@ def page_from(headers: Mapping[str, Iterable[str]], html: str,
     return Page(normalized, tuple(cookies), tuple(generators), tuple(urls), html, tuple(resources))
 
 
-def _values(rule: Rule, page: Page) -> tuple[str, ...]:
+def _values(rule: Rule, page: Page, cache: Mapping[str, tuple[str, ...]] | None = None) -> tuple[str, ...]:
     if rule.kind == "header":
         return _header_value(page.headers, rule.subject)
     if rule.kind == "cookie":
@@ -403,8 +753,16 @@ def _values(rule: Rule, page: Page) -> tuple[str, ...]:
     if rule.kind == "meta":
         return page.generators
     if rule.kind == "url":
-        return page.urls
+        if cache is not None and "url" in cache:
+            return cache["url"]
+        return ("\n".join(page.urls),) if page.urls else ()
     if rule.kind in {"script", "style"}:
+        if cache is not None and rule.kind in cache:
+            return cache[rule.kind]
+        resources = (resource.text for resource in page.resources if resource.kind == rule.kind)
+        joined = "\n".join(resources)
+        return (joined,) if joined else ()
+    if rule.kind in {"manifest", "robots"}:
         return tuple(resource.text for resource in page.resources if resource.kind == rule.kind)
     return (page.html,)
 
@@ -414,38 +772,232 @@ def _rule_index():
     return COMPILED_RULES
 
 
+def _npm_name(value: str) -> bool:
+    if len(value) > 214:
+        return False
+    if value.startswith("@"):
+        parts = value[1:].split("/", 1)
+        return (len(parts) == 2 and bool(parts[0]) and bool(parts[1])
+                and re.fullmatch(r"[a-z0-9._~-]+", parts[0]) is not None
+                and re.fullmatch(r"[a-z0-9._~-]+", parts[1]) is not None)
+    return re.fullmatch(r"[a-z0-9][a-z0-9._~-]*", value) is not None
+
+
+def _url_parts(value: str):
+    try:
+        text = "https:" + value if value.startswith("//") else value
+        parts = urlsplit(text)
+        host = (parts.hostname or "").casefold()
+        if parts.scheme.casefold() not in {"http", "https"}:
+            return None
+        return host, [unquote(segment) for segment in parts.path.split("/") if segment]
+    except (ValueError, UnicodeError):
+        return None
+
+
+def _npm_path(segments: list[str], start: int = 0) -> tuple[str, str] | None:
+    if start >= len(segments):
+        return None
+    first = segments[start]
+    if first.startswith("@"):
+        if start + 1 >= len(segments):
+            return None
+        package_name = first + "/" + segments[start + 1].split("@", 1)[0]
+        versioned_name = segments[start + 1]
+    else:
+        package_name, _, version = first.rpartition("@")
+        if not package_name or not version:
+            return None
+        versioned_name = first
+    if first.startswith("@"):
+        package, separator, version = versioned_name.rpartition("@")
+        if not separator or not version:
+            return None
+        package_name = first + "/" + package
+    if not _npm_name(package_name):
+        return None
+    normalized = normalize_version(version)
+    return (package_name, normalized) if normalized else None
+
+
+def _cdn_detection(url: str):
+    parsed = _url_parts(url)
+    if not parsed:
+        return None
+    host, segments = parsed
+    package_version = None
+    if host == "cdn.jsdelivr.net" and len(segments) >= 3 and segments[0] == "npm":
+        package_version = _npm_path(segments, 1)
+    elif host == "unpkg.com":
+        package_version = _npm_path(segments)
+    elif (host == "cdnjs.cloudflare.com" and len(segments) >= 4
+          and segments[:2] == ["ajax", "libs"]):
+        library, version = segments[2], normalize_version(segments[3])
+        if not library or not version or len(library) > 128:
+            return None
+        package = _CDNJS_PACKAGES.get(library.casefold(), "")
+        if package:
+            details = _PACKAGE_PRODUCTS.get(package)
+            if details:
+                vendor, product, name, category = details
+                return vendor, product, name, category, "npm", package, version
+        return "cdnjs", library, library, "js-library", "", "", version
+    if not package_version:
+        return None
+    package, version = package_version
+    details = _PACKAGE_PRODUCTS.get(package)
+    if details:
+        vendor, product, name, category = details
+        return vendor, product, name, category, "npm", package, version
+    return "npm", package, package, "js-library", "npm", package, version
+
+
+def _record(grouped: dict, *, vendor: str, product: str, category: str, confidence: str,
+            evidence: str, versions=(), cpe="", name="", ecosystem="", package="",
+            implied_by=(), evidence_items=(), rule_key=""):
+    key = (vendor.casefold(), product.casefold())
+    entry = grouped.setdefault(key, {
+        "vendor": vendor, "product": product, "category": category,
+        "cpe": "" if ecosystem == "npm" and package else cpe,
+        "confidence": confidence, "versions": set(), "evidence_types": set(),
+        "name": name, "ecosystem": ecosystem, "package": package,
+        "implied_by": set(), "evidence": [], "evidence_keys": set(),
+    })
+    entry["versions"].update(versions)
+    if evidence:
+        entry["evidence_types"].add(evidence)
+    entry["implied_by"].update(implied_by)
+    for item in evidence_items:
+        evidence_key = (rule_key, item.source)
+        if (evidence_key not in entry["evidence_keys"] and len(entry["evidence"]) < 20):
+            entry["evidence_keys"].add(evidence_key)
+            entry["evidence"].append(item)
+    if name and not entry["name"]:
+        entry["name"] = name
+    if ecosystem == "npm" and package:
+        entry["ecosystem"], entry["package"], entry["cpe"] = "npm", package, ""
+    if cpe and not entry["cpe"] and not entry["package"]:
+        entry["cpe"] = cpe
+    if category != "edge":
+        entry["category"] = category
+    if confidence == "high":
+        entry["confidence"] = "high"
+    return key
+
+
+def _apply_implications(grouped: dict) -> None:
+    pending = list(grouped)
+    processed = set()
+    while pending:
+        source_key = pending.pop()
+        if source_key in processed:
+            continue
+        processed.add(source_key)
+        source = grouped[source_key]
+        targets = _IMPLICATIONS.get(source_key, ())
+        source_name = source["name"] or f"{source['vendor']}/{source['product']}"
+        for vendor, product, name, category, ecosystem, package in targets:
+            target_key = (vendor.casefold(), product.casefold())
+            was_present = target_key in grouped
+            _record(grouped, vendor=vendor, product=product, name=name, category=category,
+                    confidence="low", evidence="" if was_present else "implied",
+                    ecosystem=ecosystem, package=package, rule_key="implied:" + source_name,
+                    implied_by=(source_name,))
+            if not was_present:
+                pending.append(target_key)
+
+
+def _rule_sources(rule: Rule, page: Page):
+    if rule.kind == "header":
+        for value in _header_value(page.headers, rule.subject):
+            yield f"header:{rule.subject}", value, None
+    elif rule.kind == "cookie":
+        for value in page.cookie_names:
+            yield f"cookie:{value}", value, None
+    elif rule.kind == "meta":
+        for value in page.generators:
+            yield "page", value, None
+    elif rule.kind == "url":
+        for value in page.urls:
+            yield "page", value, None
+    elif rule.kind == "html":
+        yield "page", page.html, None
+    elif rule.kind in {"script", "style", "manifest", "robots"}:
+        for resource in page.resources:
+            if resource.kind == rule.kind and resource.text:
+                yield resource.url, resource.text, resource.text.casefold()
+
+
 def detect(page: Page) -> tuple[Detection, ...]:
     grouped: dict[tuple[str, str], dict] = {}
     for compiled in _rule_index():
         rule = compiled.rule
         versions: set[str] = set()
         matched = False
-        for value in _values(rule, page):
-            if compiled.evidence.search(value):
-                matched = True
-                if compiled.version is not None:
-                    found = compiled.version.search(value)
-                    if found:
-                        version = normalize_version(found.group(1))
-                        if version:
-                            versions.add(version)
+        evidence_items = []
+        seen_sources = set()
+        for source, value, folded in _rule_sources(rule, page):
+            if rule.hint and folded is not None and rule.hint not in folded:
+                continue
+            found = compiled.evidence.search(value)
+            if not found or not found.group(0):
+                continue
+            matched = True
+            if compiled.version is not None:
+                version_match = compiled.version.search(value)
+                if version_match:
+                    version = normalize_version(version_match.group(1))
+                    if version:
+                        versions.add(version)
+            if source not in seen_sources:
+                seen_sources.add(source)
+                evidence_items.append(Evidence(rule.kind, source, found.group(0)[:160]))
         if not matched:
             continue
-        key = (rule.vendor.casefold(), rule.product.casefold())
-        entry = grouped.setdefault(key, {"vendor": rule.vendor, "product": rule.product,
-                                         "category": rule.category, "cpe": rule.cpe,
-                                         "confidence": rule.confidence, "versions": set(), "evidence_types": set()})
-        entry["versions"].update(versions)
-        entry["evidence_types"].add(rule.kind)
-        if rule.cpe and not entry["cpe"]:
-            entry["cpe"] = rule.cpe
-        if rule.category != "edge":
-            entry["category"] = rule.category
-        if rule.confidence == "high":
-            entry["confidence"] = "high"
+        _record(grouped, vendor=rule.vendor, product=rule.product, category=rule.category,
+                cpe=rule.cpe, confidence=rule.confidence, evidence=rule.kind,
+                versions=versions, name=rule.name, ecosystem=rule.ecosystem,
+                package=rule.package, evidence_items=evidence_items, rule_key=rule.key)
+
+    seen_cdn = set()
+    for url in page.urls:
+        match = _cdn_detection(url)
+        if not match:
+            continue
+        vendor, product, name, category, ecosystem, package, version = match
+        unique = (vendor.casefold(), product.casefold(), package, version)
+        if unique in seen_cdn:
+            continue
+        if len(seen_cdn) >= MAX_CDN_DETECTIONS:
+            break
+        seen_cdn.add(unique)
+        _record(grouped, vendor=vendor, product=product, name=name, category=category,
+                confidence="high", evidence="url", versions=(version,),
+                ecosystem=ecosystem, package=package,
+                evidence_items=(Evidence("url", "page", url[:160]),),
+                rule_key=f"cdn:{vendor}:{product}:{package}")
+
+    from . import retirejs
+
+    for retired in retirejs.detect(page):
+        key = _record(grouped, vendor=retired.vendor, product=retired.product,
+                      category=retired.category, confidence=retired.confidence,
+                      evidence="", versions=retired.versions, cpe=retired.cpe,
+                      name=retired.name, ecosystem=retired.ecosystem,
+                      package=retired.package, implied_by=retired.implied_by)
+        for index, item in enumerate(retired.evidence):
+            _record(grouped, vendor=retired.vendor, product=retired.product,
+                    category=retired.category, confidence=retired.confidence,
+                    evidence="", evidence_items=(item,),
+                    rule_key=f"retirejs:{index}:{item.kind}")
+        grouped[key]["evidence_types"].update(retired.evidence_types)
+
+    _apply_implications(grouped)
     return tuple(
         Detection(entry["vendor"], entry["product"], entry["category"], entry["cpe"],
                   entry["confidence"], tuple(sorted(entry["versions"])),
-                  tuple(sorted(entry["evidence_types"])))
+                  tuple(sorted(entry["evidence_types"])), entry["name"],
+                  entry["ecosystem"], entry["package"], tuple(sorted(entry["implied_by"])),
+                  tuple(entry["evidence"]))
         for _, entry in sorted(grouped.items())
     )

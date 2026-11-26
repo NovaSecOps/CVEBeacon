@@ -73,6 +73,7 @@
 {% set version_count = run.get('products_with_version', 0) %}
 <p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · requests: {{ run.get('request_count', '') }} · duration: {{ run.get('duration_seconds', '') }} seconds.</p>
 <p>{% if fetched_count == 0 %}Could not fetch any of {{ site_count }} authorised site{{ '' if site_count == 1 else 's' }}.{% elif fetched_count < site_count %}Fetched {{ fetched_count }} of {{ site_count }} authorised sites.{% else %}Fetched all {{ site_count }} authorised site{{ '' if site_count == 1 else 's' }}.{% endif %} {{ product_count }} product{{ '' if product_count == 1 else 's' }} recognised; {{ version_count }} product{{ '' if version_count == 1 else 's' }} had a disclosed version.</p>
+{% if 'resources_fetched' in run %}<p>Read {{ run.get('resources_fetched', 0) }} script and style files from the sites ({{ run.get('resources_skipped', 0) }} skipped).</p>{% endif %}
 {% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
 {% if snapshot %}<p>Saved results are from {% if run and run.get('snapshot_updated', false) %}this run{% else %}an earlier run{% endif %} ({{ watch_stamp(snapshot.generated_at) }}): {{ snapshot.record_count }} products. To include saved snapshots in normal scans, turn on web snapshots in the <a href="{{ url_for('config_editor.inventory') }}">Inventory settings</a>.</p>{% else %}<p>No saved inventory snapshot is available.</p>{% endif %}
 {% if versions_hidden %}<p class="help">Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory.</p>{% endif %}
@@ -82,8 +83,11 @@
 
 {% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.') %}
 {% call table_wrap('Detected products') %}
-<table><thead><tr><th scope="col">Host</th><th scope="col">Product</th><th scope="col">Versions</th><th scope="col">Evidence type</th><th scope="col">Category</th><th scope="col">Confidence</th></tr></thead><tbody>
-{% for item in products %}<tr><td>{{ item.get('hostname', '') }}</td><td>{{ item.get('vendor', '') }}/{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') or 'version unknown' }}</td><td>{{ item.get('evidence_types', []) | join(', ') }}</td><td>{{ item.get('category', '') }}</td><td>{{ item.get('confidence', '') }}</td></tr>{% else %}<tr><td colspan="6">No products detected yet. Run detection after saving a site.</td></tr>{% endfor %}</tbody></table>
+<table><thead><tr><th scope="col">Product</th><th scope="col">Version</th><th scope="col">Evidence</th><th scope="col">Category</th><th scope="col">Confidence</th></tr></thead><tbody>
+{% for hostname, site_products in products | groupby('hostname') %}<tr><th scope="rowgroup" colspan="5">{{ hostname or 'Site not recorded' }}</th></tr>
+{% for item in site_products %}<tr><td>{{ item.get('display_name', '') }}</td><td>{{ item.get('display_version', 'Version not disclosed') }}</td><td>{{ item.get('evidence_labels', []) | join(', ') }}<details class="disclosure"><summary>Evidence</summary>
+{% if item.get('evidence') %}<ul>{% for evidence in item.get('evidence', []) %}<li><p><strong>{{ evidence.get('kind', '') }}</strong> · {{ evidence.get('source', '') }}</p><pre>{{ evidence.get('excerpt', '') }}</pre>{% if evidence.get('sha256') %}<p class="muted">SHA-256 {{ evidence.get('sha256') }}{% if 'bytes' in evidence %} · {{ evidence.get('bytes') }} bytes{% endif %}</p>{% elif 'bytes' in evidence %}<p class="muted">{{ evidence.get('bytes') }} bytes</p>{% endif %}</li>{% endfor %}</ul>{% else %}<p>No excerpt was recorded.{% if item.get('implied_by') %} Inferred from {{ item.get('implied_by') | join(', ') }}.{% endif %}</p>{% endif %}</details></td><td>{{ item.get('category', '') }}</td><td>{{ item.get('confidence', '') }}</td></tr>{% endfor %}
+{% else %}<tr><td colspan="5">No products detected yet. Run detection after saving a site.</td></tr>{% endfor %}</tbody></table>
 {% endcall %}
 {% endcall %}
 

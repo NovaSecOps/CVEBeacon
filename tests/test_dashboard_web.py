@@ -625,6 +625,78 @@ def test_corrupt_review_fields_are_rejected_before_rendering(web, section, field
     assert "SECRET_BODY" not in page.text
 
 
+@pytest.mark.parametrize("section,field,value", [
+    ("products", "name", {"body": "not text"}),
+    ("products", "ecosystem", 7),
+    ("products", "package", None),
+    ("products", "implied_by", "Angular"),
+    ("products", "implied_by", ["Angular", 7]),
+    ("products", "evidence", "not a list"),
+    ("products", "evidence", [{"kind": 7, "source": "page", "excerpt": "x"}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x" * 161}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "sha256": "bad"}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "bytes": True}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "bytes": -1}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x"}] * 21),
+    ("run", "resources_fetched", -1),
+    ("run", "resources_skipped", True),
+])
+def test_new_review_fields_are_validated_before_rendering(web, section, field, value):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    detail = {"client": "Acme", "products": [], "reviews": []}
+    detail[section] = {field: value} if section == "run" else [{field: value}]
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert "review the local files" in page.text
+
+
+def test_detected_product_table_groups_sorts_and_uses_plain_evidence_labels(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    detail = {
+        "client": "Acme",
+        "products": [
+            {"hostname": "b.example", "vendor": "npm", "product": "package", "name": "Package",
+             "category": "js-library", "confidence": "high", "versions": ["1.2.3"],
+             "evidence_types": ["style"]},
+            {"hostname": "a.example", "vendor": "angular", "product": "angular", "name": "React",
+             "category": "framework", "confidence": "high", "versions": [],
+             "evidence_types": ["header", "cookie", "html", "url", "script"],
+             "ecosystem": "npm", "package": "react", "implied_by": ["Next.js"],
+             "evidence": [{"kind": "script", "source": "https://assets.example.invalid/react.js",
+                           "excerpt": "/*! @license React v18.2.0 */", "sha256": "a" * 64,
+                           "bytes": 512}]},
+            {"hostname": "a.example", "vendor": "angular", "product": "angular", "name": "Angular",
+             "category": "framework", "confidence": "low", "versions": [],
+             "evidence_types": ["implied"], "implied_by": ["TypeScript"]},
+            {"hostname": "a.example", "vendor": "lodash", "product": "lodash",
+             "category": "js-library", "confidence": "medium", "versions": ["4.17.21"],
+             "evidence_types": ["url"]},
+        ],
+        "reviews": [{"reason": "version-unknown"}],
+        "run": {"status": "success", "resources_fetched": 4, "resources_skipped": 2},
+    }
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    table = page.text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
+    assert table.index("a.example") < table.index("b.example")
+    assert table.index("Angular") < table.index("React") < table.index("lodash")
+    assert "Version not disclosed" in table and "4.17.21" in table
+    for label in ("response header", "cookie", "page markup", "linked file", "script file",
+                  "stylesheet", "Inferred from TypeScript", "Inferred from Next.js"):
+        assert label in table
+    for label in ("<summary>Evidence</summary>", "https://assets.example.invalid/react.js",
+                  "/*! @license React v18.2.0 */", "SHA-256", "512 bytes"):
+        assert label in table
+    assert "Read 4 script and style files from the sites (2 skipped)." in page.text
+    assert "Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory." in page.text
+
+
 
 def test_invalid_client_label_on_view_is_bad_request(web):
     assert web[3].get("/web-assets", query_string={"client": "x" * 200}).status_code == 400

@@ -6,7 +6,7 @@
   "observed_at": "2026-11-05T12:00:00+00:00",
   "omissions": [],
   "record_count": 5,
-  "sha256": "f57e7aee96394265c386d1b31952034026387c3bba126a4774b97251b6756328",
+  "sha256": "9a54cbdc8ba439b1cdc2ba9b9317b7867db8f301d181e3ccff056b51c6c94912",
   "source_id": "acme-web",
   "status": "success"
 }
