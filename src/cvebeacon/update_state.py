@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-from .config import load_config
+from .config import UPDATE_STATUS_DIR, load_config
 from .errors import CVEBeaconError
 from .inventory_journal import recover, remove_file
 from .managed_inventory import is_managed_file
@@ -28,6 +28,7 @@ from .snapshot import (
     sync_file,
 )
 from .state import StateStore
+from .updater import ADVISORY_MARKER, ADVISORY_MARKER_BYTES, read_bounded
 from .watch.store import WatchStore
 from .watch.users import UserStore
 from .web_assets import replace_bytes
@@ -126,6 +127,15 @@ def databases(config, data, *, validate_known=True):
             raise SnapshotError("all state databases must be inside the configured data directory")
     count = 0
     for parent, directories, files in os.walk(data, followlinks=False):
+        if Path(parent) == data and UPDATE_STATUS_DIR in directories:
+            advisory = data / UPDATE_STATUS_DIR
+            if not advisory.is_symlink():
+                try:
+                    initialized = read_bounded(advisory / ADVISORY_MARKER, 64) == ADVISORY_MARKER_BYTES
+                except (OSError, CVEBeaconError):
+                    initialized = False
+                if initialized:
+                    directories.remove(UPDATE_STATUS_DIR)
         for name in directories + files:
             count += 1
             if count > 20000:

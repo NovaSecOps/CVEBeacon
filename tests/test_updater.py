@@ -295,8 +295,8 @@ def test_apply_verifies_backs_up_migrates_switches_and_health_checks(transaction
     assert value(config.watch.database) == "new"
     assert native.calls == ["probe", "stop", "freeze", "backup", "install", "migrate", "start", "doctor", "probe", "start"]
     assert [row["step"] for row in updater.events] == ["check", "verify", "quiesce", "lock", "freeze", "backup", "install", "migrate", "switch", "start", "health"]
-    assert json.loads((updater.policy.data / u.STATUS).read_text())["last_update"]["result"] == "updated"
-    assert json.loads((updater.policy.data / u.STATUS).read_text())["last_check"]
+    assert json.loads((updater.policy.data / u.UPDATE_STATUS_DIR / u.STATUS).read_text(encoding="utf-8"))["value"]["last_update"]["result"] == "updated"
+    assert json.loads((updater.policy.data / u.UPDATE_STATUS_DIR / u.STATUS).read_text(encoding="utf-8"))["value"]["last_check"]
     assert len((updater.policy.prefix / "update-audit.jsonl").read_text().splitlines()) == len(updater.events)
 
 
@@ -309,7 +309,7 @@ def test_update_failures_record_fixed_reason_in_status_and_audit(transaction):
     with pytest.raises(u.UpdateError):
         updater.apply("0.1.1")
 
-    status = json.loads((config.config_path.parent / u.STATUS).read_text(encoding="utf-8"))
+    status = json.loads((config.config_path.parent / u.UPDATE_STATUS_DIR / u.STATUS).read_text(encoding="utf-8"))["value"]
     assert status["last_update"]["reason"] == "preflight-crontab-unreadable"
     audit = [json.loads(row) for row in (updater.policy.prefix / "update-audit.jsonl").read_text(encoding="utf-8").splitlines()]
     assert audit[-1]["reason"] == "preflight-crontab-unreadable"
@@ -326,7 +326,7 @@ def test_invalid_pending_recovery_record_has_a_fixed_failure_reason(transaction)
     with pytest.raises(u.UpdateError):
         updater.apply("0.1.1")
 
-    status = json.loads((config.config_path.parent / u.STATUS).read_text(encoding="utf-8"))
+    status = json.loads((config.config_path.parent / u.UPDATE_STATUS_DIR / u.STATUS).read_text(encoding="utf-8"))["value"]
     assert status["last_update"]["reason"] == "recovery-incomplete"
     audit = [json.loads(row) for row in (updater.policy.prefix / "update-audit.jsonl").read_text(encoding="utf-8").splitlines()]
     assert audit[-1]["step"] == "recovery" and audit[-1]["reason"] == "recovery-incomplete"
@@ -366,7 +366,7 @@ def test_update_failure_reasons_cover_check_signature_and_backup(transaction, ph
         with pytest.raises(u.UpdateError):
             updater.apply("0.1.1")
 
-    status = json.loads((config.config_path.parent / u.STATUS).read_text(encoding="utf-8"))
+    status = json.loads((config.config_path.parent / u.UPDATE_STATUS_DIR / u.STATUS).read_text(encoding="utf-8"))["value"]
     assert status["last_update"]["reason"] == reason
     audit = [json.loads(row) for row in (updater.policy.prefix / "update-audit.jsonl").read_text(encoding="utf-8").splitlines()]
     assert any(entry.get("reason") == reason for entry in audit)
@@ -422,7 +422,7 @@ def test_failure_restores_all_databases_config_and_old_link(transaction, failure
     assert result["result"] == "rolled-back"
     expected = {"migrate": "migrate-failed", "doctor": "doctor-failed", "health": "probe-unhealthy"}[failure]
     assert result["reason"] == expected
-    status = json.loads((updater.policy.data / u.STATUS).read_text(encoding="utf-8"))
+    status = json.loads((updater.policy.data / u.UPDATE_STATUS_DIR / u.STATUS).read_text(encoding="utf-8"))["value"]
     assert status["last_update"]["reason"] == expected
     audit = [json.loads(row) for row in (updater.policy.prefix / "update-audit.jsonl").read_text(encoding="utf-8").splitlines()]
     assert any(event.get("reason") == expected and event["result"] == "failed" for event in audit)

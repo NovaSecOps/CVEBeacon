@@ -309,6 +309,7 @@ def test_request_service_classifies_failures_and_keeps_details_private(transacti
     monkeypatch.setattr(u, "unsupported_reason", lambda: None)
     monkeypatch.setattr(u.Policy, "read", lambda path: updater.policy)
     monkeypatch.setattr(u, "Updater", lambda policy: updater)
+    monkeypatch.setattr(u.subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0))
     assert u.cli(args) == 0
     expected = {"malformed": "request-invalid", "unclaimable": "request-claim-failed", "timeout": "preflight-failed"}[failure]
     status = u.read_status(config)
@@ -500,38 +501,37 @@ def test_unreadable_checkpoint_reread_does_not_overwrite_the_fence(transaction, 
     assert _audit(updater)[-1]["reason"] == "recovery-incomplete"
 
 
-@pytest.mark.parametrize("safe", [False, True])
+@pytest.mark.parametrize("config_form", ["relative", "absolute"])
 @pytest.mark.parametrize("reason", ["policy-invalid", "recovery-incomplete"])
-def test_invalid_policy_reports_only_to_an_independently_validated_destination(transaction, monkeypatch, caplog, safe, reason):
+def test_invalid_policy_reports_only_to_the_system_journal(transaction, monkeypatch, caplog, config_form, reason):
     updater, _, config = transaction
     request = updater.policy.data / u.REQUEST
     u.atomic_json(request, {"version": "0.1.1", "user": "admin", "time": u.stamp()})
+    original = request.stat().st_ino, request.read_bytes()
     (updater.policy.data).chmod(0o700)
     args = SimpleNamespace(update_command="apply", from_request=True,
-                           config=str(config.config_path), policy="unused")
+                           config=str(config.config_path) if config_form == "absolute" else config.config_path.name,
+                           policy="unused")
     monkeypatch.setattr(u, "unsupported_reason", lambda: None)
     monkeypatch.setattr(os, "geteuid", lambda: 0)
 
     def policy(path):
         raise u.UpdateError("synthetic private policy error", reason_code=reason)
 
-    def protected(path, *, directory=False):
-        assert Path(path) == updater.policy.data.parent and directory
-        if not safe:
-            raise u.UpdateError("synthetic untrusted directory")
-        return Path(path)
-
     monkeypatch.setattr(u.Policy, "read", policy)
-    monkeypatch.setattr(u, "protected", protected)
+    stopped = []
+
+    def stop(argv, **kwargs):
+        stopped.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(u.subprocess, "run", stop)
     assert u.cli(args) == 0
     assert reason in caplog.text and "synthetic private policy error" not in caplog.text
     status = u.read_status(config)
-    if safe:
-        assert status["last_request"]["reason"] == reason
-        assert not request.exists()
-    else:
-        assert "last_request" not in status
-        assert request.exists()
+    assert "last_request" not in status
+    assert (request.stat().st_ino, request.read_bytes()) == original
+    assert stopped == [["systemctl", "stop", "cvebeacon-update.path"]]
 
 
 def test_apply_runs_backup_with_the_020_interpreter_and_state_module(transaction, monkeypatch):
@@ -580,7 +580,7 @@ def test_long_multilingual_notes_cannot_hide_diagnostic_status(transaction, monk
     status = u.read_status(config)
     assert status["last_update"]["reason"] == "verify-signature"
     assert status["notes"] and release.notes.startswith(status["notes"])
-    assert (config.config_path.parent / u.STATUS).stat().st_size <= 131072
+    assert (config.config_path.parent / u.UPDATE_STATUS_DIR / u.STATUS).stat().st_size <= 131072
 
 
 def test_every_consumed_request_gets_a_terminal_result(transaction):

@@ -170,7 +170,7 @@ def test_readonly_config_check_uses_writable_advisory_state(tmp_path, signed):
     try:
         assert u.check(config, http=signed[0].http)["available"] == "0.1.1"
         assert u.read_status(config)["available"] == "0.1.1"
-        assert (state / u.CHECK_STATUS).is_file()
+        assert (state / u.UPDATE_STATUS_DIR / u.CHECK_STATUS).is_file()
     finally:
         config_dir.chmod(0o700)
 
@@ -183,7 +183,7 @@ def test_check_returns_data_even_if_all_status_publication_fails(tmp_path, signe
 
 def test_check_returns_data_when_status_is_a_directory(tmp_path, signed):
     config = replace(write_config(tmp_path, inventory=False), update=UpdateConfig(enabled=True))
-    (config.config_path.parent / u.CHECK_STATUS).mkdir()
+    (u._advisory_directory(config.config_path.parent) / u.CHECK_STATUS).mkdir()
     assert u.check(config, http=signed[0].http)["available"] == "0.1.1"
 
 

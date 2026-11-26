@@ -9,6 +9,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from email.parser import BytesParser
+import errno
 import hashlib
 import ipaddress
 from importlib.metadata import version as installed_version
@@ -35,7 +36,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.requirements import Requirement
 from packaging.version import InvalidVersion, Version
 
-from .config import HttpConfig, UpdateConfig, load_config
+from .config import HttpConfig, UPDATE_STATUS_DIR, UpdateConfig, load_config
 from .errors import CVEBeaconError
 from .http import HttpClient
 from .locking import LOCK_NAME, RunInProgress, RunLock
@@ -51,6 +52,12 @@ REQUEST_STATUS = "update-request-status.json"
 ATTEMPT_STATUS = "update-attempt-status.json"
 MAX_STATUS = 131072
 MAX_NOTES = 65536
+MAX_LEGACY_STATUS = 12 * MAX_NOTES + 8192
+ADVISORY_FORMAT = "cvebeacon-update-advisory-v1"
+ADVISORY_FILES = {STATUS, CHECK_STATUS, REQUEST_STATUS, ATTEMPT_STATUS}
+ADVISORY_MARKER = ".cvebeacon-advisory-v1"
+ADVISORY_MARKER_BYTES = b"CVEBeacon update advisory\n"
+_JSON_TOKENS = re.compile(r'\\.|["{}\[\]]', re.DOTALL)
 MAX_REQUEST = 1024
 MAX_ASSETS = 256
 MAX_ARTIFACT = 256 * 1024 * 1024
@@ -159,8 +166,21 @@ def _json(raw):
             result[key] = value
         return result
     try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8-sig")
+        depth, quoted = 0, False
+        for match in _JSON_TOKENS.finditer(raw):
+            token = match[0]
+            if token == '"':
+                quoted = not quoted
+            elif not quoted and token in ("{", "["):
+                depth += 1
+                if depth > 32:
+                    raise ValueError("JSON exceeds the nesting limit")
+            elif not quoted and token in ("}", "]"):
+                depth -= 1
         return json.loads(raw, object_pairs_hook=unique)
-    except (ValueError, UnicodeError):
+    except (ValueError, RecursionError, MemoryError):
         raise UpdateError("invalid update JSON") from None
 
 
@@ -173,7 +193,7 @@ def read_bounded(path, limit):
     return raw
 
 
-def atomic_json(path, value, *, mode=0o644):
+def atomic_json(path, value, *, mode=0o644, advisory=False):
     """Replace a file through an anchored parent; never follow its old inode."""
     path = Path(path)
     if platform.system() == "Windows":
@@ -182,25 +202,50 @@ def atomic_json(path, value, *, mode=0o644):
         private_directory(path.parent)
         temporary = path.with_name(".update-" + uuid.uuid4().hex)
         try:
+            occupied = _previous_advisory(path) if advisory else None
             fd = private_file(temporary, create=True, exclusive=True)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(value, stream, ensure_ascii=True)
                 stream.flush()
                 os.fsync(stream.fileno())
-            replace_file(temporary, path)
+            if advisory and occupied is None:
+                os.rename(temporary, path)  # Windows rename fails if the name is now occupied.
+            else:
+                if advisory and _previous_advisory(path) != occupied:
+                    raise UpdateError("update status destination changed")
+                replace_file(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
         return
     parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     name = ".update-" + uuid.uuid4().hex
     try:
+        if advisory:
+            import fcntl
+            details = os.fstat(parent)
+            if details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) != 0o750:
+                raise UpdateError("invalid update status directory")
+            fcntl.flock(parent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            marker = os.open(ADVISORY_MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(marker, "rb") as stream:
+                if (not stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+                        or stream.read(64) != ADVISORY_MARKER_BYTES):
+                    raise UpdateError("unrecognized update status directory")
+            # Use the open directory for both inspection and publication.
+            occupied = _previous_advisory(path.name, parent=parent)
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             os.fchmod(stream.fileno(), mode)
             json.dump(value, stream, ensure_ascii=True)
             stream.flush()
             os.fsync(stream.fileno())
-        os.rename(name, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+        if advisory and occupied is None:
+            os.link(name, path.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+            os.unlink(name, dir_fd=parent)
+        else:
+            if advisory and _previous_advisory(path.name, parent=parent) != occupied:
+                raise UpdateError("update status destination changed")
+            os.rename(name, path.name, src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
     finally:
         try:
@@ -208,6 +253,39 @@ def atomic_json(path, value, *, mode=0o644):
         except FileNotFoundError:
             pass
         os.close(parent)
+
+
+def _advisory_value(value, filename):
+    if (isinstance(value, dict) and set(value) == {"format", "kind", "value"}
+            and value["format"] == ADVISORY_FORMAT and value["kind"] == filename
+            and isinstance(value["value"], dict)):
+        return value["value"]
+    raise UpdateError("unrecognized update status file")
+
+
+def _previous_advisory(path, *, parent=None):
+    try:
+        if parent is None:
+            fd = private_file(path, readonly=True, owner_only=True)
+        else:
+            details = os.stat(path, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                raise UpdateError("occupied update status destination")
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if parent is not None and (
+            (info.st_dev, info.st_ino) != (details.st_dev, details.st_ino)
+            or info.st_uid != os.geteuid() or info.st_nlink != 1 or info.st_mode & 0o022
+        ):
+            raise UpdateError("occupied update status destination")
+        raw = stream.read(MAX_STATUS + 1)
+    if len(raw) > MAX_STATUS:
+        raise UpdateError("update file exceeds the size limit")
+    _advisory_value(_json(raw), Path(path).name)
+    return info.st_dev, info.st_ino
 
 
 def read_request(path):
@@ -249,54 +327,95 @@ def control_paths(config_path):
     return directory / REQUEST, directory / STATUS
 
 
-def _read_status_file(path):
+def _read_status_file(path, *, legacy=False, limit=MAX_STATUS):
     try:
-        value = _json(read_bounded(path, MAX_STATUS))
+        value = _json(read_bounded(path, limit))
+        if not legacy:
+            return _advisory_value(value, path.name)
         return value if isinstance(value, dict) else {}
     except (OSError, CVEBeaconError):
         return {}
 
 
-def _latest_status(paths):
-    candidates = []
-    for path in paths:
-        value = _read_status_file(path)
-        if value:
-            try:
-                candidates.append((path.stat().st_mtime_ns, value))
-            except OSError:
-                pass
-    return max(candidates, key=lambda item: item[0])[1] if candidates else {}
-
-
 def status_time(entry, key="time"):
     try:
-        value = datetime.fromisoformat(entry[key])
-        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
-        return datetime.min.replace(tzinfo=timezone.utc)
+        value = entry[key]
+        if not isinstance(value, str) or len(value) > 40:
+            return None
+        parsed = datetime.fromisoformat(value)
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (KeyError, ValueError, OverflowError):
+        return None
+
+
+EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
+OUTCOMES = frozenset({
+    "adopted", "busy", "recovered; request again", "recovery-refused", "refused",
+    "refused; administrator review required", "rollback-failed", "rolled-back", "up-to-date", "updated",
+})
+LEGACY_WARNINGS = frozenset({
+    "completed update recovery could not verify the selected release",
+    "update committed; run update recover to finish finalization",
+    "update committed; temporary-file cleanup needs administrator review",
+})
+
+
+def _outcome(entry):
+    if not isinstance(entry, dict) or not isinstance(entry.get("result"), str) or entry["result"] not in OUTCOMES:
+        return {}
+    value = {"result": entry["result"], "version": diagnostic_version(entry.get("version"))}
+    if status_time(entry) is not None:
+        value["time"] = entry["time"]
+    for key in ("reason", "recovery_reason", "finalization_reason"):
+        if code := diagnostic_reason(entry.get(key)):
+            value[key] = code
+    warning = entry.get("warning")
+    if isinstance(warning, str) and warning in LEGACY_WARNINGS:
+        value["warning"] = warning
+    return value
+
+
+def _status_roots(config):
+    return tuple(dict.fromkeys((control_paths(config.config_path)[1].parent, config.watch.database.parent)))
 
 
 def read_status(config):
-    state = _latest_status(status_paths(config))
-    checked = _latest_status(status_paths(config, CHECK_STATUS))
-    last_update = state.get("last_update")
-    last_check = status_time(state, "last_check")
-    if isinstance(last_update, dict) and last_update.get("result") == "updated":
-        last_check = max(last_check, status_time(last_update))
-    if status_time(checked, "last_check") > last_check:
-        state.update(_check_fields(checked))
-    directory = control_paths(config.config_path)[1].parent
-    for filename, key in ((REQUEST_STATUS, "last_request"), (ATTEMPT_STATUS, "last_attempt")):
-        if entry := _read_status_file(directory / filename):
-            state[key] = entry
+    # Order by validated event time. On a tie prefer the new format, then the
+    # config directory, then a dedicated record over one embedded in a mirror.
+    checks, outcomes = [], {}
+    for priority, root in enumerate(_status_roots(config)):
+        for modern in (False, True):
+            directory = root / UPDATE_STATUS_DIR if modern else root
+            tie = (modern, -priority)
+            for filename in (STATUS, CHECK_STATUS, REQUEST_STATUS, ATTEMPT_STATUS):
+                if priority and filename not in (STATUS, CHECK_STATUS):
+                    continue  # Only a portable release check uses the fallback.
+                limit = MAX_LEGACY_STATUS if not modern and filename == STATUS else MAX_STATUS
+                value = _read_status_file(directory / filename, legacy=not modern, limit=limit)
+                if not value:
+                    continue
+                if filename in (STATUS, CHECK_STATUS):
+                    checked = _check_fields(value)
+                    if checked:
+                        updated = _outcome(value.get("last_update"))
+                        check_time = status_time(checked, "last_check") or EARLIEST
+                        if updated.get("result") == "updated" and "available" in checked:
+                            check_time = max(check_time, status_time(updated) or EARLIEST)
+                        checks.append(((check_time, *tie, filename == CHECK_STATUS), checked))
+                    if filename == CHECK_STATUS:
+                        continue
+                    entries = ((key, value.get(key)) for key in ("last_update", "last_request", "last_attempt"))
+                else:
+                    entries = (("last_request" if filename == REQUEST_STATUS else "last_attempt", value),)
+                for key, entry in entries:
+                    if outcome := _outcome(entry):
+                        when = status_time(outcome)
+                        rank = (when is not None, when or EARLIEST, *tie, filename != STATUS)
+                        if key not in outcomes or rank > outcomes[key][0]:
+                            outcomes[key] = rank, outcome
+    state = dict(max(checks, key=lambda item: item[0])[1]) if checks else {}
+    state.update({key: outcome for key, (_, outcome) in outcomes.items()})
     return state
-
-
-def status_paths(config, filename=STATUS):
-    # Check-only layouts can mount the config directory read-only.
-    directory = control_paths(config.config_path)[1].parent
-    return tuple(dict.fromkeys((directory / filename, Path(config.watch.database).resolve().parent / filename)))
 
 
 def _check_fields(state):
@@ -309,30 +428,82 @@ def _check_fields(state):
     return fields
 
 
+def _advisory_directory(data):
+    path = data / UPDATE_STATUS_DIR
+    private_directory(data)
+    if os.name == "nt":
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            created = True
+        else:
+            created = False
+        private_directory(path, owner_only=True)
+    else:
+        try:
+            path.mkdir(mode=0o750)
+        except FileExistsError:
+            created = False
+        else:
+            created = True
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            details = os.fstat(fd)
+            if details.st_uid != os.geteuid():
+                raise UpdateError("invalid update status owner")
+            if created:
+                os.fchmod(fd, 0o750)
+            elif stat.S_IMODE(details.st_mode) != 0o750:
+                raise UpdateError("invalid update status directory mode")
+        finally:
+            os.close(fd)
+    marker = path / ADVISORY_MARKER
+    if created:
+        with os.fdopen(private_file(marker, create=True, exclusive=True), "wb") as stream:
+            stream.write(ADVISORY_MARKER_BYTES)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name == "posix":
+            sync_directory(path)
+            sync_directory(data)
+    elif read_bounded(marker, 64) != ADVISORY_MARKER_BYTES:
+        raise UpdateError("unrecognized update status directory")
+    return path
+
+
 def _publish_status(path, state):
+    if path.name not in ADVISORY_FILES:
+        raise UpdateError("invalid update status name")
+    state = dict(state)
+    envelope = {"format": ADVISORY_FORMAT, "kind": path.name, "value": state}
     notes = state.get("notes")
     if isinstance(notes, str):
-        # Use the same serialization as atomic_json. ASCII escapes can expand
-        # a character to twelve bytes, including two escapes for non-BMP text.
-        if len(json.dumps(state, ensure_ascii=True)) > MAX_STATUS:
-            low, high = 0, min(len(notes), MAX_NOTES)
+        # Match atomic_json's ASCII representation, including surrogate pairs.
+        low, high = 0, min(len(notes), MAX_NOTES)
+        state["notes"] = notes[:high]
+        if len(json.dumps(envelope, ensure_ascii=True)) > MAX_STATUS:
             while low < high:
                 middle = (low + high + 1) // 2
                 state["notes"] = notes[:middle]
-                if len(json.dumps(state, ensure_ascii=True)) <= MAX_STATUS:
+                if len(json.dumps(envelope, ensure_ascii=True)) <= MAX_STATUS:
                     low = middle
                 else:
                     high = middle - 1
             state["notes"] = notes[:low]
-    atomic_json(path, state)
+    atomic_json(path, envelope, mode=0o640, advisory=True)
 
 
-def _publish_advisory(config_path, filename, entry):
+def _publish_advisory(policy, filename, entry):
     try:
-        path = control_paths(config_path)[1].with_name(filename)
-        atomic_json(path, entry)
-    except (OSError, CVEBeaconError):
-        log_warning("update attempt status is unavailable")
+        with _service_credentials(policy):
+            load_config(policy.config, allow_state_only=True)
+            directory = _advisory_directory(policy.data)
+            path = directory / filename
+            if filename == STATUS:
+                entry = {**_check_fields(_read_status_file(path)), **entry}
+            _publish_status(path, entry)
+    except (OSError, CVEBeaconError, RuntimeError):
+        log_warning("update advisory status is unavailable")
 
 
 def unsupported_reason():
@@ -528,13 +699,23 @@ def check(config, *, daily=False, http=None):
     checked = {"current": installed_version("cvebeacon"), "available": release.version if release else None,
                "notes": release.notes if release else "",
                "last_check": datetime.now(timezone.utc).isoformat(timespec="microseconds")}
-    for path in status_paths(config, CHECK_STATUS):
-        try:
-            private_directory(path.parent)
-            _publish_status(path, checked)
+    if getattr(os, "geteuid", lambda: -1)() != 0:
+        for root in _status_roots(config):
+            try:
+                directory = _advisory_directory(root)
+            except PermissionError:
+                continue  # A check-only config mount may be read-only.
+            except OSError as exc:
+                if exc.errno == errno.EROFS:
+                    continue
+                break
+            except CVEBeaconError:
+                break
+            try:
+                _publish_status(directory / CHECK_STATUS, checked)
+            except (OSError, CVEBeaconError):
+                pass  # Advisory publication cannot fail a successful release check.
             break
-        except (OSError, CVEBeaconError):
-            pass  # Advisory publication cannot fail a successful release check.
     return {**state, **checked}
 
 
@@ -574,15 +755,37 @@ def service_account(login):
     return account
 
 
-def service_data(config, *, uid=None):
+def service_data(config, *, uid):
     """Validate the directory independently of the config file's contents."""
     data = Path(config).parent
     protected(data.parent, directory=True)
     info = data.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid == 0 or (uid is not None and info.st_uid != uid)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid == 0 or info.st_uid != uid
             or info.st_mode & 0o022 or info.st_mode & 0o700 != 0o700):
         raise UpdateError("data must be a real directory writable only by its service account")
     return data
+
+
+@contextmanager
+def _service_credentials(policy):
+    # Only the privileged one-shot updater switches effective credentials.
+    if os.geteuid() != 0:
+        yield
+        return
+    account = policy._account
+    if account is None or policy.config.parent != policy.data:
+        raise UpdateError("validated service credentials are required")
+    service_data(policy.config, uid=account.pw_uid)
+    groups, gid = os.getgroups(), os.getegid()
+    try:
+        os.setgroups([])
+        os.setegid(account.pw_gid)
+        os.seteuid(account.pw_uid)
+        yield
+    finally:
+        os.seteuid(0)
+        os.setegid(gid)
+        os.setgroups(groups)
 
 
 @dataclass(frozen=True)
@@ -638,7 +841,7 @@ class Policy:
         protected(policy.signers)
         # Data and runtime config may be service-owned; never execute either.
         account = service_account(policy.user)
-        if policy.config.parent != policy.data:
+        if policy.config.parent != policy.data or policy.config.name == UPDATE_STATUS_DIR:
             raise UpdateError("runtime config must be directly inside the data directory")
         service_data(policy.config, uid=account.pw_uid)
         if policy.data.is_relative_to(policy.prefix):
@@ -794,18 +997,8 @@ for path in sys.argv[2:]:
     def acquire_lock(self, lock):
         # Opening storage with service credentials prevents privileged writes
         # through a raced data-directory entry. Only this one-shot CLI calls it.
-        if os.geteuid() != 0:
+        with _service_credentials(self.policy):
             return lock.acquire()
-        groups, gid = os.getgroups(), os.getegid()
-        try:
-            os.setgroups([])
-            os.setegid(self.account.pw_gid)
-            os.seteuid(self.account.pw_uid)
-            return lock.acquire()
-        finally:
-            os.seteuid(0)
-            os.setegid(gid)
-            os.setgroups(groups)
 
     def install(self, venv, artifacts, packages, target, *, python=None):
         self.run([python or sys.executable, "-I", "-S", "-m", "venv", venv])
@@ -982,8 +1175,10 @@ def consume_request(config_path):
     finally:
         try:
             claimed.unlink(missing_ok=True)
-        except IsADirectoryError:
-            pass  # Quarantine malformed directories; never recursively delete input.
+        except OSError:
+            # The watched name is already consumed. Leave quarantined input
+            # alone if it cannot be removed with service credentials.
+            log_warning("claimed update request could not be removed")
 
 
 class Updater:
@@ -1153,7 +1348,7 @@ class Updater:
             entry = diagnostic_result(self.target, result, reason="lock-failed")
             self.failure_reason = "lock-failed"
             self.event("request_busy" if busy else "lock", "refused" if busy else "failed", reason="lock-failed")
-            _publish_advisory(self.policy.config, REQUEST_STATUS if requested else ATTEMPT_STATUS, entry)
+            _publish_advisory(self.policy, REQUEST_STATUS if requested else ATTEMPT_STATUS, entry)
             raise
 
     def _read_pending(self, *, result):
@@ -1178,7 +1373,8 @@ class Updater:
             try:
                 if target is not None:
                     raise UpdateError("--version and --from-request are mutually exclusive", reason_code="request-invalid")
-                target = consume_request(self.policy.config)
+                with _service_credentials(self.policy):
+                    target = consume_request(self.policy.config)
             except OPERATION_ERRORS as exc:
                 reason = self._reason_code("request", exc)
                 if reason == "update-failed":
@@ -1193,7 +1389,7 @@ class Updater:
             self.failure_reason = "version-invalid"
             self.event("version", "failed", reason=self.failure_reason)
             filename = REQUEST_STATUS if requested else ATTEMPT_STATUS
-            _publish_advisory(self.policy.config, filename,
+            _publish_advisory(self.policy, filename,
                               diagnostic_result(None, "refused", reason=self.failure_reason))
             raise UpdateError("invalid or noncanonical release version", reason_code=self.failure_reason)
         self.target = target
@@ -1439,7 +1635,7 @@ class Updater:
             raise UpdateError("update recovery remains incomplete; writers are blocked until recovery succeeds") from None
 
     def _request_result(self, target, result, *, reason=None):
-        _publish_advisory(self.policy.config, REQUEST_STATUS, diagnostic_result(target, result, reason=reason))
+        _publish_advisory(self.policy, REQUEST_STATUS, diagnostic_result(target, result, reason=reason))
 
     def _result(self, target, result, *, warning=None, reason=None, recovery_reason=None, finalization_reason=None):
         value = diagnostic_result(target, result, reason=reason or self.failure_reason)
@@ -1453,17 +1649,11 @@ class Updater:
             atomic_json(self.policy.prefix / "update-result.json", value, mode=0o600)
         except OSError:
             log_warning("update result mirror is unavailable; retain the transaction record")
-        try:
-            path = control_paths(self.policy.config)[1]
-            status = _check_fields(_read_status_file(path))
-            status.update(getattr(self, "checked", {}))
-            status["last_update"] = value
-            status["current"] = diagnostic_version(target if result == "updated" else getattr(self, "previous_version", None))
-            if result == "updated":
-                status["available"] = None
-            _publish_status(path, status)
-        except (OSError, CVEBeaconError):
-            log_warning("advisory update status is unavailable")
+        status = {**getattr(self, "checked", {}), "last_update": value,
+                  "current": diagnostic_version(target if result == "updated" else getattr(self, "previous_version", None))}
+        if result == "updated":
+            status["available"] = None
+        _publish_advisory(self.policy, STATUS, status)
 
     def _retain_best_effort(self):
         try:
@@ -1521,6 +1711,18 @@ class Updater:
             return self._complete_adopt()
 
 
+def _suspend_requests(reason):
+    log_warning("update request watcher waiting for administrator: " + reason)
+    try:
+        subprocess.run(["systemctl", "stop", "cvebeacon-update.path"], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10, env=SAFE_ENV, cwd="/")
+    except (OSError, subprocess.SubprocessError):
+        # The unit's start limit bounds repeated failures if the stop fails.
+        return 2
+    return 0
+
+
 def _cli(args, config=None):
     action = args.update_command
     if action == "guard":
@@ -1540,30 +1742,15 @@ def _cli(args, config=None):
     requested = action == "apply" and args.from_request
     try:
         policy = Policy.read(args.policy)
+        if requested and Path(args.config) != policy.config:
+            raise UpdateError("request config must match the administrator policy")
     except OPERATION_ERRORS as exc:
         if os.geteuid() != 0:
             raise
         reason = "recovery-incomplete" if getattr(exc, "reason_code", None) == "recovery-incomplete" else "policy-invalid"
-        # The invalid policy cannot select either a privileged audit path or
-        # an advisory destination. Validate the separately configured data path.
-        config_path = Path(args.config)
-        if not config_path.is_absolute():
-            config_path = Path("/var/lib/cvebeacon/cvebeacon.toml")
-        log_warning("update refused: " + reason)
-        try:
-            service_data(config_path)
-        except OPERATION_ERRORS:
-            pass
-        else:
-            if requested:
-                try:
-                    consume_request(config_path)
-                except OPERATION_ERRORS:
-                    pass
-            _publish_advisory(config_path, REQUEST_STATUS if requested else ATTEMPT_STATUS,
-                              diagnostic_result(None, "refused", reason=reason))
         if requested:
-            return 0
+            return _suspend_requests(reason)
+        log_warning("update refused: " + reason)
         raise UpdateError("administrator update policy or journal requires review", reason_code=reason) from None
     updater = Updater(policy)
     if action == "adopt":
@@ -1576,6 +1763,8 @@ def _cli(args, config=None):
         except OPERATION_ERRORS:
             if not requested:
                 raise
+            if updater.failure_reason == "request-claim-failed":
+                return _suspend_requests(updater.failure_reason)
             return 0
 
     print(json.dumps(result, indent=2))
