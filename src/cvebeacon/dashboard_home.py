@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
+import stat
 from threading import RLock
 import time
 
 from .errors import CVEBeaconError
-from .inventory import load_inventory
-
 HOME_CACHE_EXTENSION = "dashboard_home_metrics_cache"
 HOME_CACHE_SECONDS = 30
 ALERT_DESCRIPTION = (
     "Counts queued, sending, failed or unsure Watch delivery rows; "
-    "this activity is not inventory-specific."
+    "this activity is not inventory-specific. "
+    "Delivery state does not confirm that a person received an alert."
 )
 
 _INVENTORY_CARDS = (
@@ -38,6 +37,13 @@ _INVENTORY_CARDS = (
         "The latest result does not establish coverage for these inventory items.",
         "coverage",
     ),
+)
+
+_SECONDARY_CARDS = (
+    ("Assets", "Assets", "Total assets in the current inventory."),
+    ("Assets to check", "Assets needing coverage review", "Assets whose latest scan needs coverage review."),
+    ("CISA KEV CVEs", "CISA KEV CVEs", "Unique CISA KEV CVEs matched to current inventory findings."),
+    ("EU KEV CVEs", "EU KEV CVEs", "Unique EU KEV CVEs matched to current inventory findings."),
 )
 
 
@@ -96,11 +102,50 @@ def _path_fingerprint(path) -> tuple:
     return tuple(stamps)
 
 
+def _directory_fingerprint(path) -> tuple:
+    """Fingerprint directory entries without reading inventory contents."""
+    if path is None:
+        return ()
+    path = Path(path)
+    try:
+        directory = path.lstat()
+    except OSError:
+        return ((None, None, None), ())
+    if not stat.S_ISDIR(directory.st_mode):
+        return (("", directory.st_size, directory.st_mtime_ns), ())
+    try:
+        candidates = sorted(path.iterdir(), key=lambda item: (item.name.casefold(), item.name))
+    except OSError:
+        return ((None, None, None), ())
+    entries = []
+    for candidate in candidates:
+        try:
+            details = candidate.lstat()
+        except OSError:
+            entries.append((candidate.name, None, None))
+        else:
+            entries.append((candidate.name, details.st_size, details.st_mtime_ns))
+    return (("", directory.st_size, directory.st_mtime_ns), tuple(entries))
+
+
 def home_cache_key(config) -> tuple:
-    """Include small file stamps so a new scan or inventory bypasses the TTL."""
+    """Include inventory settings and file stamps so input changes bypass the TTL."""
     inventory = getattr(config, "inventory", None)
     inventory_path = getattr(inventory, "path", None)
-    managed_directory = getattr(config, "inventory_directory", None)
+    managed_directory = getattr(config, "inventory_directory", None) if config.managed_inventory else None
+    snapshot_directory = config.database_path.parent / "web-inventory"
+    inventory_settings = None if inventory is None else (
+        str(inventory.path) if inventory.path is not None else None,
+        inventory.format,
+        inventory.worksheet,
+        inventory.header_row,
+        inventory.records_path,
+        inventory.delimiter,
+        inventory.encoding,
+        tuple(sorted(inventory.columns.items())),
+        bool(inventory.web_snapshots),
+        bool(config.managed_inventory),
+    )
     return (
         str(config.database_path),
         _path_fingerprint(config.database_path),
@@ -108,85 +153,10 @@ def home_cache_key(config) -> tuple:
         _path_fingerprint(config.watch.database),
         bool(config.watch.enabled),
         _path_fingerprint(inventory_path),
-        _path_fingerprint(managed_directory) if config.managed_inventory else (),
+        inventory_settings,
+        _directory_fingerprint(managed_directory),
+        _directory_fingerprint(snapshot_directory) if inventory and inventory.web_snapshots else (),
     )
-
-
-def build_home_snapshot(
-    config,
-    state_store,
-    watch_store,
-    *,
-    inventory_config,
-    inventory_configured: bool,
-    links: dict[str, str],
-    now: datetime | None = None,
-) -> tuple[dict, dict]:
-    """Read the existing scan snapshot and aggregate only fields Home renders."""
-    from .dashboard import _inventory_match, _old
-
-    data = state_store.dashboard_snapshot()
-    now = now or datetime.now(timezone.utc)
-    data["inventory_warnings"] = []
-    data["inventory_error"] = False
-    assets = {}
-    categories = Counter()
-    if inventory_config is not None:
-        try:
-            for asset in load_inventory(
-                inventory_config,
-                snapshot_directory=config.database_path.parent / "web-inventory",
-                managed_warnings=data["inventory_warnings"],
-            ):
-                assets[asset.asset_id] = asset
-                categories[asset.category or "Uncategorized"] += 1
-        except CVEBeaconError:
-            data["inventory_error"] = True
-    latest, attempt = data["latest"], data["attempt"]
-    data["stale"] = latest is None or _old(latest["completed_at"], now)
-    data["failed"] = (
-        bool(latest and latest["status"] != "completed")
-        or bool(attempt and attempt["status"] != "completed")
-    )
-    data["unfinished"] = bool(attempt and attempt["status"] == "running")
-
-    counts = {
-        "Affected findings": 0,
-        "Needs review": 0,
-        "Coverage unknown assets": 0,
-    }
-    if not data["inventory_error"]:
-        unseen = set(assets)
-        explicitly_unknown = 0
-        for item in data["assets"]:
-            asset_id = item["asset"]["asset_id"]
-            current = assets.get(asset_id)
-            if current is not None and _inventory_match(item["asset"], assets):
-                unseen.discard(asset_id)
-                explicitly_unknown += item.get("coverage") == "coverage_unknown"
-        counts["Coverage unknown assets"] = len(unseen) + explicitly_unknown
-        for row in data["findings"]:
-            if _inventory_match(row["finding"]["asset"], assets):
-                applicability = row["finding"]["applicability"]
-                if applicability in {"affected", "needs_review"}:
-                    counts["Affected findings" if applicability == "affected" else "Needs review"] += 1
-    data["counts"] = counts
-    data["categories"] = categories
-    for row in data["health"]:
-        row["freshness"] = "stale" if _old(row["checked_at"], now) else "cached observation"
-
-    # These row collections were only needed for the single aggregation pass.
-    data["assets"] = []
-    data["findings"] = []
-    home = build_home_context(
-        config,
-        data,
-        watch_store,
-        inventory_configured=inventory_configured,
-        links=links,
-        now=now,
-    )
-    return data, home
 
 
 def _age(timestamp: str, now: datetime) -> str | None:
@@ -262,9 +232,31 @@ def _inventory_card_value(state: str, counts: dict, count_key: str) -> int | str
     if state == "no_scan_recorded":
         return "No scan recorded"
     if state == "could_not_check":
-        return "Unknown"
+        return "Could not check"
     value = counts.get(count_key)
     return int(value) if isinstance(value, int) and value >= 0 else "Unknown"
+
+
+def _secondary_metrics(data: dict, inventory_state: str, *, freshness: str) -> list[dict]:
+    counts = data.get("counts") or {}
+    source_incomplete = bool(data.get("inventory_incomplete") or data.get("inventory_error"))
+    result = []
+    for title, count_key, description in _SECONDARY_CARDS:
+        if inventory_state == "not_configured":
+            value, help_text = "Add inventory", "Add inventory to see this number."
+        elif inventory_state == "could_not_check":
+            value = "Could not check"
+            help_text = "An inventory source could not be read." if source_incomplete else "Could not check."
+        elif title != "Assets" and not data.get("latest"):
+            value, help_text = "No scan recorded", f"{description} No scan recorded."
+        else:
+            count = counts.get(count_key)
+            value = int(count) if isinstance(count, int) and count >= 0 else "Could not check"
+            help_text = description + (freshness if title != "Assets" else "")
+            if title != "Assets" and value == "Could not check":
+                help_text += " Could not check."
+        result.append({"title": title, "value": value, "help": help_text})
+    return result
 
 
 def build_home_context(
@@ -280,9 +272,12 @@ def build_home_context(
     now = now or datetime.now(timezone.utc)
     latest = data.get("latest")
     scan_error = bool(data.get("home_scan_error"))
+    inventory_source_incomplete = bool(
+        data.get("inventory_incomplete") or data.get("inventory_error")
+    )
     if not inventory_configured:
         inventory_state = "not_configured"
-    elif scan_error or data.get("inventory_error"):
+    elif scan_error or inventory_source_incomplete:
         inventory_state = "could_not_check"
     elif not latest:
         inventory_state = "no_scan_recorded"
@@ -321,7 +316,10 @@ def build_home_context(
         elif inventory_state == "no_scan_recorded":
             help_text += " No scan recorded."
         elif inventory_state == "could_not_check":
-            help_text += " Could not check."
+            help_text = (
+                "An inventory source could not be read."
+                if inventory_source_incomplete else help_text + " Could not check."
+            )
         else:
             help_text += freshness
             if title == "Affected findings" and value == 0:
@@ -338,7 +336,7 @@ def build_home_context(
             "value": value,
             "help": help_text,
             "tone": tone,
-            "href": links[link_key],
+            "href": links["inventory"] if inventory_source_incomplete else links[link_key],
         })
 
     if scan_error:
@@ -412,8 +410,10 @@ def build_home_context(
     })
     return {
         "cards": cards,
+        "secondary": _secondary_metrics(data, inventory_state, freshness=freshness),
         "inventory_state": inventory_state,
         "scan_error": scan_error,
+        "inventory_incomplete": inventory_source_incomplete,
     }
 
 
@@ -425,10 +425,10 @@ def unavailable_home_context(*, inventory_configured: bool, watch_enabled: bool,
             value, help_text = "Add inventory", "Add inventory to see these numbers."
             tone = None
         else:
-            value, help_text = "Unknown", f"{description} Could not check."
+            value, help_text = "Could not check", f"{description} Could not check."
             tone = "warning"
         cards.append({"title": title, "value": value, "help": help_text,
-                      "tone": tone, "href": links[link_key]})
+                      "tone": tone, "href": links.get("inventory", links[link_key])})
     if not watch_enabled:
         alert_value, alert_help, alert_tone = "Watch mode is off", ALERT_DESCRIPTION, None
     else:
@@ -438,4 +438,16 @@ def unavailable_home_context(*, inventory_configured: bool, watch_enabled: bool,
     cards.append({"title": "Latest scan", "value": "Unknown",
                   "help": "The latest stored scan run and the most recent attempt. Could not check.",
                   "tone": "warning", "href": links["scan"]})
-    return {"cards": cards, "inventory_state": "could_not_check", "scan_error": True}
+    return {
+        "cards": cards,
+        "secondary": [
+            {
+                "title": title,
+                "value": "Add inventory" if not inventory_configured else "Could not check",
+                "help": "Add inventory to see this number." if not inventory_configured else "Could not check.",
+            }
+            for title, _count_key, _description in _SECONDARY_CARDS
+        ],
+        "inventory_state": "not_configured" if not inventory_configured else "could_not_check",
+        "scan_error": True,
+    }

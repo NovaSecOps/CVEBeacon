@@ -161,5 +161,7 @@ def append_snapshots(assets, directory: Path, *, errors: list[Exception] | None 
             seen.add(asset.asset_id.casefold())
         if manifest["status"] == "partial":
             LOG.warning("Using partial web snapshot %s; review its detection results", path.name)
+            if errors is not None:
+                errors.append(ValueError("web inventory snapshot is partial"))
         merged.extend(rows)
     return merged

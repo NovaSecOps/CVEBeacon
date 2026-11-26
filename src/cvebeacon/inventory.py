@@ -359,13 +359,14 @@ def validate_records(records: Iterable[Mapping[str, Any]]) -> list[Asset]:
 
 
 def load_inventory(config: InventoryConfig, *, snapshot_directory: Path | None = None,
-                   managed_warnings: list[str] | None = None, managed_candidate=None) -> list[Asset]:
+                   managed_warnings: list[str] | None = None, web_errors: list[Exception] | None = None,
+                   managed_candidate=None) -> list[Asset]:
     assets = _validate_rows(inventory_rows(config), config.columns) if config.path is not None else []
     if config.web_snapshots:
         if snapshot_directory is None:
             raise InventoryValidationError([ValidationIssue("web snapshots require the data directory")])
         from .web_inventory import append_snapshots
-        assets = append_snapshots(assets, snapshot_directory)
+        assets = append_snapshots(assets, snapshot_directory, errors=web_errors)
     if config.managed_directory is not None:
         from .managed_inventory import append_managed_inventory
         assets = append_managed_inventory(
