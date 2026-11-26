@@ -2310,6 +2310,7 @@ class _DetectionSummary:
     package: str = ""
     implied_by: tuple[str, ...] = ()
     evidence: tuple[_EvidenceRecord, ...] = ()
+    categories: tuple[str, ...] = ()
 
 
 def _detection_evidence(detection) -> tuple[_EvidenceRecord, ...]:
@@ -2345,14 +2346,21 @@ def _vendor_product_key(detection) -> tuple[str, ...]:
 
 
 def _detection_summary(detection) -> _DetectionSummary:
+    category = _review_text(detection.category)
+    categories = tuple(sorted(set(_review_values(
+        getattr(detection, "categories", (category,))
+    )) | {category}))
+    if any(value not in webrules.CATEGORIES for value in categories):
+        raise ExtensionError("invalid detection categories")
     return _DetectionSummary(
         _review_text(detection.vendor), _review_text(detection.product),
-        _review_text(detection.category), webrules.canonical_cpe(_review_text(detection.cpe)),
+        category, webrules.canonical_cpe(_review_text(detection.cpe)),
         _review_text(detection.confidence), _review_values(detection.versions),
         _review_values(detection.evidence_types), _review_text(getattr(detection, "name", "")),
         _review_text(getattr(detection, "ecosystem", "")),
         _review_text(getattr(detection, "package", "")),
         _review_values(getattr(detection, "implied_by", ())), _detection_evidence(detection),
+        categories,
     )
 
 
@@ -2374,6 +2382,8 @@ def _combine_detections(current: _DetectionSummary, incoming: _DetectionSummary)
     versions = tuple(sorted(set(current.versions) | set(incoming.versions)))
     evidence_types = tuple(sorted(set(current.evidence_types) | set(incoming.evidence_types)))
     implied_by = tuple(sorted(set(current.implied_by) | set(incoming.implied_by)))
+    categories = tuple(sorted(set(current.categories or (current.category,))
+                              | set(incoming.categories or (incoming.category,))))
     if max(len(versions), len(evidence_types), len(implied_by)) > 64:
         raise ValueError("too many merged detection values")
     category = incoming.category if _implied_only(current) and not _implied_only(incoming) else current.category
@@ -2382,7 +2392,7 @@ def _combine_detections(current: _DetectionSummary, incoming: _DetectionSummary)
         current.vendor, current.product, category, cpe,
         confidence, versions, evidence_types, current.name or incoming.name,
         current.ecosystem or incoming.ecosystem, current.package or incoming.package,
-        implied_by, tuple(evidence),
+        implied_by, tuple(evidence), categories,
     )
 
 
@@ -2783,6 +2793,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         product = dict(asset_id=row_id, hostname=asset.endpoint.hostname, vendor=detection.vendor,
                        product=detection.product, versions=list(detection.versions),
                        category=detection.category, evidence_types=list(detection.evidence_types),
+                       categories=list(detection.categories or (detection.category,)),
                        confidence=detection.confidence, evidence=_public_evidence(detection, file_metadata))
         if detection.name:
             product["name"] = detection.name
