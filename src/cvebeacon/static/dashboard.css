@@ -417,6 +417,7 @@ a.stat:hover { border-color: var(--accent); }
 .stat-critical { border-left: 4px solid var(--critical-text); }
 .stat-warning { border-left: 4px solid var(--warning-text); }
 .stat-success { border-left: 4px solid var(--success-text); }
+.home-kpis .stat-value, .home-kpis .stat-help { overflow-wrap: anywhere; }
 
 /* Badges: text label always present; colour is reinforcement only. */
 .badge {

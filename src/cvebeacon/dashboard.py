@@ -364,8 +364,69 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @requires("view")
     def overview():
         from .dashboard_setup import Viewer, gather
-        return render_template("overview.html", data=snapshot(),
-                               setup=gather(config, viewer=Viewer.from_flask(app)))
+        from .dashboard_home import (
+            build_home_snapshot,
+            cached_home_context,
+            home_cache_key,
+            unavailable_home_context,
+        )
+
+        inventory_config = config.effective_inventory
+        inventory_configured = inventory_config is not None
+        links = {
+            "findings": url_for("findings", applicability="affected"),
+            "review": url_for("findings", applicability="needs_review"),
+            "coverage": url_for("findings", applicability="coverage_unknown"),
+            "alerts": url_for("watch.events"),
+            "scan": url_for("overview") + "#scan-activity",
+        }
+
+        def build():
+            return build_home_snapshot(
+                config,
+                store,
+                app.extensions["dashboard_watch"]["store"],
+                inventory_config=inventory_config,
+                inventory_configured=inventory_configured,
+                links=links,
+            )
+
+        try:
+            data, home = cached_home_context(app, lambda: home_cache_key(config), build)
+        except Exception as exc:
+            LOG.error("home metrics could not be checked (%s)", type(exc).__name__)
+            data = {
+                "home_scan_error": True,
+                "inventory_warnings": [],
+                "inventory_error": False,
+                "latest": None,
+                "successful": None,
+                "attempt": None,
+                "stale": True,
+                "failed": False,
+                "unfinished": False,
+                "inventory": {},
+                "categories": {},
+                "findings": [],
+                "assets": [],
+                "health": [],
+                "coverage": [],
+                "counts": {},
+                "events": [],
+                "deliveries": [],
+                "delivery_counts": [],
+            }
+            home = unavailable_home_context(
+                inventory_configured=inventory_configured,
+                watch_enabled=config.watch.enabled,
+                links=links,
+            )
+        return render_template(
+            "overview.html",
+            data=data,
+            home=home,
+            setup=gather(config, viewer=Viewer.from_flask(app)),
+        )
 
     @app.get("/findings")
     @requires("view")

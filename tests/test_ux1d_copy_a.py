@@ -187,10 +187,11 @@ def test_home_uses_plain_names_for_changes_and_delivery(signed_in):
     store.mark_delivery("sink", event_ids, accepted=True)
 
     text = client.get("/").text
-    assert "Assets with no recent scan result" in text
+    assert "Assets with unknown coverage" in text
+    assert "Assets with no recent scan result" not in text
     assert "Coverage unknown assets" not in text
     assert "Assets needing coverage review" not in text
-    assert "Assets to check" in text
+    assert "Assets to check" not in text
     assert "Recent changes" in text
     assert "Recent material changes" not in text
     assert "New finding" in text
