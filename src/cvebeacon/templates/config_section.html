@@ -44,6 +44,50 @@
 <p class="help">{{ field.help }}{% if field.key != 'condition' and not (section == 'rules' and field.key in ['channels', 'events', 'cvss_providers']) %} Example: <code>{{ field.example }}</code>.{% endif %}</p>
 {% if field.key == 'condition' %}{% call explain('How conditions are written') %}<ul>{% for key, spec in condition_schema.items() %}<li><code>{{ key }} = {{ toml_value(spec.example) }}</code> — {% if spec.kind == 'enum' %}one of {{ spec.choices|join(', ') }}{% elif spec.kind == 'number' %}number from {{ spec.minimum }} to {{ spec.maximum }}{% elif spec.kind == 'cwe' %}array of CWE numbers or identifiers{% else %}nonempty array of strings{% endif %}{% if spec.qualifiers %}. For selected versions, use <code>{{ key }} = {{ toml_value(spec.qualified_example) }}</code>. Versions are {{ spec.qualifiers.versions|join(", ") }}. An optional <code>providers</code> array overrides the rule’s CVSS providers for this condition ({{ spec.qualifiers.providers|join(", ") }}).{% endif %}</li>{% endfor %}</ul><p>Combine with <code>{ any = [{ kev = "cisa" }, { cvss_min = 9.0 }] }</code>, <code>{ all = [{ kev = "eu" }, { epss_min = 0.5 }] }</code> or <code>{ not = { status = "rejected" } }</code>.</p><p>The <code>events</code> list takes these alert types:</p><ul>{% for kind in events %}<li><code>"{{ kind }}"</code>: {{ event_text.labels.get(kind, kind) }}</li>{% endfor %}</ul><p>Example: <code>{{ field.example }}</code>. Lists of channels, alert types and score providers use square brackets, for example <code>channels = ["email"]</code>, <code>events = ["match"]</code> and <code>cvss_providers = ["nvd"]</code>.</p>{% endcall %}{% endif %}
 {% if field.secret and field.allow_new_secret %}<label for="secret-{{ field.id }}">New secret value (optional)</label><input id="secret-{{ field.id }}" type="password" autocomplete="new-password" name="{{ field.id }}_new"><p class="help">{% if field.readonly or field.existing %}Replace the contents of the existing owner-only file. The reference stays unchanged.{% else %}A new owner-only file is staged in the restricted data folder. Its generated reference replaces this field.{% endif %} The value is never shown again. Abandoned previews expire after ten minutes.</p>{% endif %}</div>{% endmacro %}
+{% macro structured_control(field, index) %}{% set field_label = field_labels.get(field.identity, field.key | replace('_', ' ') | capitalize) %}{% set invalid = field_error_control is defined and field_error_control == field.id %}
+<div class="field structured-config-field">
+<fieldset id="control-{{ field.id }}"{% if invalid %} aria-invalid="true"{% endif %} aria-describedby="control-{{ field.id }}-help{% if field.structured.mode == 'text' %} control-{{ field.id }}-reason{% endif %}{% if invalid %} control-{{ field.id }}-error{% endif %}">
+<legend>{{ field_label }} <small class="muted">{{ field.key }}</small></legend>
+{% if field.structured.kind == 'sources' %}
+{% if field.structured.mode == 'checkboxes' %}
+<input type="hidden" name="{{ field.id }}_mode" value="checkboxes">
+{% for source in field.spec.item_choices %}<div class="field field-check"><input type="checkbox" id="control-{{ field.id }}-{{ source }}" name="{{ field.id }}_{{ source }}" value="{{ source }}" {% if source in field.structured.selected %}checked{% endif %} {% if source == 'nvd' %}required{% endif %} {% if field.readonly or read_only %}disabled{% endif %}><label for="control-{{ field.id }}-{{ source }}">{{ source }}{% if source == 'nvd' %} (required){% endif %}</label></div>{% endfor %}
+<p class="help" id="control-{{ field.id }}-help">Choose watch catalogs. This list does not change the separate scan-source toggles. NVD is required and must stay selected.</p>
+{% else %}
+<label for="control-{{ field.id }}-text">Watch catalog list (TOML)</label>
+<input type="hidden" name="{{ field.id }}_mode" value="text">
+<textarea name="{{ field.id }}" id="control-{{ field.id }}-text" rows="3" cols="60" {% if invalid %}aria-invalid="true" aria-describedby="control-{{ field.id }}-reason control-{{ field.id }}-help control-{{ field.id }}-error"{% endif %} {% if read_only or field.readonly %}readonly{% endif %}>{{ field.value }}</textarea>
+<p class="help" id="control-{{ field.id }}-reason">{{ field.structured.reason }}</p>
+<p class="help" id="control-{{ field.id }}-help">{{ field.help }}</p>
+{% endif %}
+{% elif field.structured.kind == 'columns' %}
+{% if field.structured.mode == 'rows' %}
+<input type="hidden" name="{{ field.id }}_mode" value="rows">
+<input type="hidden" name="{{ field.id }}_count" value="{{ field.structured.rows|length }}">
+<p class="help" id="control-{{ field.id }}-help">Choose a canonical field and enter the matching source heading. Headings are free text. <code>asset_id</code> is required.</p>
+<div class="column-mapping-rows">
+{% for row in field.structured.rows %}<div class="column-mapping-row">
+<div class="field"><label for="control-g0_column_key_{{ loop.index0 }}">Canonical field{% if row.key == 'asset_id' %} (required){% endif %}</label><select name="g0_column_key_{{ loop.index0 }}" id="control-g0_column_key_{{ loop.index0 }}" {% if read_only or field.readonly %}disabled{% endif %}>{% for key in field.structured.field_keys %}<option value="{{ key }}" {% if row.key == key %}selected{% endif %}>{{ key }}{% if key == 'asset_id' %} (required){% endif %}</option>{% endfor %}</select></div>
+<div class="field"><label for="control-g0_column_heading_{{ loop.index0 }}">Source heading</label><input type="text" name="g0_column_heading_{{ loop.index0 }}" id="control-g0_column_heading_{{ loop.index0 }}" value="{{ row.heading }}" {% if read_only or field.readonly %}readonly{% endif %}></div>
+<div class="field column-mapping-action"><span class="field-label">Action</span><button type="submit" class="btn btn-secondary" name="g0_columns_remove" value="{{ loop.index0 }}" {% if read_only or field.readonly %}disabled{% endif %}>Remove</button></div>
+</div>{% endfor %}
+{% if field.structured.rows|length < field.structured.limit %}<div class="column-mapping-row column-mapping-add">
+<div class="field"><label for="control-g0_column_add_key">Add mapping</label><select name="g0_column_add_key" id="control-g0_column_add_key" {% if read_only or field.readonly %}disabled{% endif %}><option value="" {% if not field.structured.add_key %}selected{% endif %}>Choose a canonical field</option>{% for key in field.structured.field_keys %}<option value="{{ key }}" {% if field.structured.add_key == key %}selected{% endif %}>{{ key }}{% if key == 'asset_id' %} (required){% endif %}</option>{% endfor %}</select></div>
+<div class="field"><label for="control-g0_column_add_heading">Source heading</label><input type="text" name="g0_column_add_heading" id="control-g0_column_add_heading" value="{{ field.structured.add_heading }}" {% if read_only or field.readonly %}readonly{% endif %}></div>
+<div class="field column-mapping-action"><span class="field-label">Action</span><button type="submit" class="btn btn-secondary" name="g0_columns_add" value="yes" {% if read_only or field.readonly %}disabled{% endif %}>Add mapping</button></div>
+</div>{% else %}<p class="help">All canonical and optional fields are mapped.</p>{% endif %}
+</div>
+{% else %}
+<label for="control-{{ field.id }}-text">Inventory column mapping table (TOML)</label>
+<input type="hidden" name="{{ field.id }}_mode" value="text">
+<textarea name="{{ field.id }}" id="control-{{ field.id }}-text" rows="3" cols="60" {% if invalid %}aria-invalid="true" aria-describedby="control-{{ field.id }}-reason control-{{ field.id }}-help control-{{ field.id }}-error"{% endif %} {% if read_only or field.readonly %}readonly{% endif %}>{{ field.value }}</textarea>
+<p class="help" id="control-{{ field.id }}-reason">{{ field.structured.reason }}</p>
+<p class="help" id="control-{{ field.id }}-help">{{ field.help }}</p>
+{% endif %}
+{% endif %}
+{% if invalid %}<p class="field-error" id="control-{{ field.id }}-error">{{ error }}</p>{% endif %}
+</fieldset>
+</div>{% endmacro %}
 {% block title %}{{ info[0] }} configuration · CVEBeacon{% endblock %}
 {% block head %}<script src="{{ url_for('static', filename='config.js') }}" defer></script>{% if section == 'rules' %}<script src="{{ url_for('static', filename='rule_builder.js') }}" defer></script>{% endif %}{% endblock %}
 {% block content %}
@@ -52,7 +96,7 @@
 {% endcall %}
 {{ steps(['Change settings', 'Review changes', 'Saved'], current=3 if saved else 2 if preview else 1) }}
 {% if saved %}{% call callout('success', 'Saved') %}<p>Saved. Settings take effect on the next run. Restart other running commands to use them.</p>{% endcall %}{% endif %}
-{% if error %}{% call callout('danger', 'Configuration could not be loaded or saved') %}<p>{{ error }}</p><p>Secret contents, unvalidated row labels and invalid credential references are not redisplayed. Re-enter changed row labels before submitting again.</p>{% endcall %}{% endif %}
+{% if error %}{% call callout('danger', 'Configuration could not be loaded or saved') %}<p>{{ error }}</p>{% if field_error_control %}<p><a href="#control-{{ field_error_control }}">Review the field with this error</a></p>{% endif %}<p>Secret contents, unvalidated row labels and invalid credential references are not redisplayed. Re-enter changed row labels before submitting again.</p>{% endcall %}{% endif %}
 {% if read_only %}{% call callout('warning', 'Read-only configuration') %}<p>The dashboard service cannot write to the configuration directory. You can inspect these values, but saving is disabled. Ask the operator to enable editing for the dashboard service, then restart the other services after a save.</p>{% endcall %}{% endif %}
 
 {% if preview %}
@@ -82,7 +126,7 @@
 {% call card(group_title) %}
 {% if group.readonly_reason %}<p class="help">{{ group.readonly_reason }}</p>{% endif %}
 {% if section in ['rules','channels','product-mappings'] %}<div class="field field-check"><input id="remove-{{ index }}" type="checkbox" name="remove{{ index }}" value="yes" {% if group.removed %}checked{% endif %} {% if read_only %}disabled{% endif %}><label for="remove-{{ index }}">Remove this row</label></div>{% endif %}
-{% for field in group.controls %}{% if section == 'rules' and field.key in ['condition', 'channels', 'events'] %}{% include '_rule_builder.html' %}{% else %}{{ config_control(field, index) }}{% endif %}{% endfor %}
+{% for field in group.controls %}{% if section == 'rules' and field.key in ['condition', 'channels', 'events'] %}{% include '_rule_builder.html' %}{% elif field.structured is defined %}{{ structured_control(field, index) }}{% else %}{{ config_control(field, index) }}{% endif %}{% endfor %}
 {% endcall %}
 {% endfor %}{% if not read_only %}<div class="form-actions">{{ button("Validate and preview") }}</div>{% endif %}</form>
 {% endif %}

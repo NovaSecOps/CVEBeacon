@@ -58,8 +58,11 @@ def form(page, action="preview"):
     data = {}
     for tag in re.findall(r"<input\b[^>]*>", source):
         attributes = dict(re.findall(r'([\w-]+)="([^"]*)"', tag))
-        if attributes.get("type") != "checkbox":
-            data[attributes["name"]] = html.unescape(attributes.get("value", ""))
+        if attributes.get("type") == "checkbox":
+            if "checked" in tag and attributes.get("name"):
+                data[attributes["name"]] = html.unescape(attributes.get("value", ""))
+            continue
+        data[attributes["name"]] = html.unescape(attributes.get("value", ""))
     for name, contents in re.findall(r'<textarea name="([^"]+)"[^>]*>(.*?)</textarea>', source, re.S):
         data[name] = html.unescape(contents)
     for name, contents in re.findall(r'<select name="([^"]+)"[^>]*>(.*?)</select>', source, re.S):
@@ -306,23 +309,33 @@ def test_serializer_accepts_loader_accepted_integers():
     assert tomllib.loads(dumps(document)) == document
 
 
-def test_inventory_rejects_unknown_column_keys_without_rendering(accounts):
-    config, _, _, client = accounts
+def test_inventory_unknown_column_keys_use_text_fallback_without_loss(accounts):
+    config, _, app, client = accounts
     config.config_path.write_text(
         BASE.replace(
             '[inventory]\npath = "inventory.csv"',
             '[inventory]\npath = "inventory.csv"\n\n[inventory.columns]\n'
             'asset_id = "asset_id"\nvendor = "vendor"\nproduct = "product"\n'
-            'version = "version"\nhidden = "INLINE-SYNTHETIC-SECRET"',
+            'version = "version"\nhidden = "future heading"',
         ),
         encoding="utf-8",
     )
     login(client, "admin")
-    before = config.config_path.read_bytes()
     response = client.get("/config/inventory")
-    assert response.status_code == 400
-    assert "INLINE-SYNTHETIC-SECRET" not in response.text
+    assert response.status_code == 200
+    assert 'name="g0_columns_mode" value="text"' in response.text
+    assert '"hidden" = "future heading"' in html.unescape(response.text)
+    before = config.config_path.read_bytes()
+    posted = form(response.text)
+    assert '"hidden" = "future heading"' in posted["g0_columns"]
+    preview_response = client.post("/config/inventory", data=posted)
+    assert preview_response.status_code == 200, preview_response.text
+    assert "Nothing has changed" in preview_response.text
+    pending = app.extensions["dashboard_config"].pending[form(preview_response.text, "confirm")["preview"]]
+    assert pending.document["inventory"]["columns"]["hidden"] == "future heading"
     assert config.config_path.read_bytes() == before
+    assert confirm(client, preview_response, "inventory").status_code == 303
+    assert '"hidden" = "future heading"' in config.config_path.read_text(encoding="utf-8")
 
 
 def test_rollback_compares_against_current_file_and_running_config(accounts, tmp_path):

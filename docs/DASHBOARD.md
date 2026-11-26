@@ -587,6 +587,18 @@ Field labels use plain words such as **Watch for new flaws**, **Data sources**
 and **Inventory file**; the corresponding setting key appears beside the
 label in muted text.
 
+Watch settings show `watch.sources` as catalog checkboxes. NVD is required.
+This controls the watch catalogs only; `[sources].*_enabled` remains the
+separate set of scan-source toggles. An untouched selection keeps its original
+order, while a changed selection is written in the loader's canonical order.
+Lists with repeated or unsupported catalog names use a TOML text field.
+
+Inventory column mappings use repeatable rows with a canonical field selector
+and a free-text source heading. Every canonical and optional field is offered;
+`asset_id` is required. Mappings with an unsupported shape, unknown field key
+or non-text heading use a TOML text field so the dashboard does not discard
+values the loader accepts. The loader still validates the resulting document.
+
 Alert rules open in the builder when their condition fits its fixed criteria.
 It can combine included criteria with **Any one** or **All**, then apply
 exclusions that always prevent an alert. It covers known-exploited lists,
@@ -605,9 +617,9 @@ matching IDs; it does not queue or send alerts or change watch state. A rule
 configuration with more than 101 rules is read-only in the dashboard editor;
 edit that configuration file directly.
 Unrecognized configuration fields must be reviewed outside the editor before
-editing; they are never silently copied or discarded. Column mappings must use
-only the known canonical or optional inventory fields, so an unknown column is
-never rendered or preserved. Channel types are matched case-insensitively after surrounding whitespace,
+editing; they are never silently copied or discarded. Column mappings with
+unknown keys use the text field described above and are kept intact until
+edited. Channel types are matched case-insensitively after surrounding whitespace,
 as the loader does; the submitted spelling is preserved. Existing generic webhook
 endpoint values are legacy direct values: they are hidden and retained only
 while the same direct value remains, including through a rename. New or

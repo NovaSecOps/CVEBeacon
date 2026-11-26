@@ -72,6 +72,10 @@ def _plain_label(markup, control):
         markup,
         re.S,
     )
+    if match is None and control["identity"] in {
+        "watch.sources", "inventory.columns",
+    }:
+        match = re.search(r"<legend>(.*?)</legend>", markup, re.S)
     assert match, control["identity"]
     return match.group(1)
 

@@ -24,11 +24,13 @@ import tomllib
 from weakref import WeakSet
 
 from flask import Blueprint, abort, g, redirect, render_template, request, url_for
+from werkzeug.datastructures import MultiDict
 from werkzeug.exceptions import HTTPException
 
 from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, BackupConfig, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
-                     TeamsConfig, WatchConfig, load_config, notification_recipients)
+                     TeamsConfig, WatchConfig, WATCH_SOURCES, load_config,
+                     notification_recipients)
 from .dashboard_config_fields import metadata
 from .errors import CVEBeaconError, ConfigurationError
 from .locking import (LOCK_NAME, run_lock_path, owner_storage_paths,
@@ -41,6 +43,7 @@ from .watch.users import UserStore
 
 MAX_CONFIG = 256 * 1024
 RULES_ROW_LIMIT = 101
+INVENTORY_COLUMN_ROW_LIMIT = len(CANONICAL_FIELDS) + len(OPTIONAL_FIELDS)
 KEEP_BACKUPS = 10
 PREVIEW_SECONDS = 600
 MAX_PENDING_PER_SESSION = 32
@@ -449,11 +452,9 @@ def check_document(document):
     if columns is not None:
         if not isinstance(columns, dict):
             raise ConfigurationError("inventory.columns must be a table")
-        allowed_columns = set(CANONICAL_FIELDS) | set(OPTIONAL_FIELDS)
-        if set(columns) - allowed_columns:
-            raise ConfigurationError("Unrecognized inventory column keys; review the file before editing")
-        if any(not isinstance(item, str) for item in columns.values()):
-            raise ConfigurationError("Inventory column mappings must be strings")
+        # The loader accepts extra column keys and stringifies non-string
+        # headings. The structured editor cannot represent either faithfully,
+        # so those tables stay visible in the TOML fallback.
     rules = get_table(document, "watch").get("rules", [])
     mappings = document.get("product_mappings", [])
     for rows, schema in ((rules, RULE_FIELDS), (mappings, MAPPING_FIELDS)):
@@ -563,6 +564,32 @@ def _channel_loader_field_key(error, document):
             if detail.startswith(key + " "):
                 return key
     return None
+
+
+def _config_loader_field_key(error, document):
+    """Map loader-owned source and column errors to their structured controls."""
+    message = str(error)
+    if message.startswith(("watch.sources ", "unknown watch source:")):
+        return "watch.sources"
+    if message.startswith(("inventory.columns ", "Inventory column mappings")):
+        return "inventory.columns"
+    return _channel_loader_field_key(error, document)
+
+
+def _field_error_control_id(section, identity):
+    if section == "watch" and identity == "watch.sources":
+        return "g0_sources"
+    if section == "inventory" and identity == "inventory.columns":
+        return "g0_columns"
+    return None
+
+
+def _field_error_message(identity, fallback):
+    if identity == "watch.sources":
+        return "Watch catalog settings are invalid. Include NVD and choose supported catalog names."
+    if identity == "inventory.columns":
+        return "Inventory column mappings are invalid. Include the required asset_id mapping and use a valid table."
+    return fallback
 
 
 def _private_directory(path):
@@ -1008,7 +1035,7 @@ class Editor:
             return config, content
         except ConfigurationError as error:
             sanitized = ConfigurationError(safe_error(error, document, temporary))
-            field_key = _channel_loader_field_key(error, document)
+            field_key = _config_loader_field_key(error, document)
             if field_key is not None:
                 sanitized.field_key = field_key
             raise sanitized from None
@@ -2167,6 +2194,7 @@ class FieldValidationError(ConfigurationError):
         # Callers that build their own form (the guided setup wizard) need to
         # attach the message to the control that failed.  The text stays fixed.
         self.key = control.get("key") if isinstance(control, dict) else None
+        self.identity = control.get("identity") if isinstance(control, dict) else None
         self.reason = reason
         if not isinstance(control, dict) or control.get("identity") not in FIELD_METADATA:
             super().__init__("Invalid configuration field; use the expected format")
@@ -2191,6 +2219,7 @@ class FieldValidationError(ConfigurationError):
             "value": "must be " + expected,
             "required": "is required; expected " + required,
             "enabled_required": "is required when enabled; expected " + enabled_format,
+            "duplicate_mapping": "must map each canonical inventory field only once",
         }.get(reason, "must use the expected format")
         super().__init__(label + " " + guidance)
 
@@ -2249,6 +2278,62 @@ def _display(item):
 
 def _secret_directory(config):
     return config.watch.users_database.parent / "dashboard-secrets"
+
+
+def _watch_sources_view(raw):
+    present = raw is not _SESSION_ABSENT
+    item = raw if present else list(WATCH_SOURCES)
+    if not isinstance(item, (list, tuple)) or not all(isinstance(source, str) for source in item):
+        return {"kind": "sources", "mode": "text", "present": present,
+                "reason": "This value is not a list of catalog names. Edit it as TOML text.",
+                "selected": (), "raw": deepcopy(item) if present else None}
+    selected = []
+    for source in item:
+        normalized = source.strip().casefold()
+        if normalized not in WATCH_SOURCES:
+            return {"kind": "sources", "mode": "text", "present": present,
+                    "reason": "This list contains an unsupported catalog name. Edit it as TOML text.",
+                    "selected": (), "raw": deepcopy(item) if present else None}
+        if normalized in selected:
+            return {"kind": "sources", "mode": "text", "present": present,
+                    "reason": "This list contains a repeated catalog name. Edit it as TOML text.",
+                    "selected": (), "raw": deepcopy(item) if present else None}
+        selected.append(normalized)
+    if "nvd" not in selected:
+        return {"kind": "sources", "mode": "text", "present": present,
+                "reason": "NVD is required. Edit this list as TOML text.",
+                "selected": (), "raw": deepcopy(item) if present else None}
+    return {"kind": "sources", "mode": "checkboxes", "present": present,
+            "reason": None, "selected": tuple(selected),
+            "raw": deepcopy(item) if present else None}
+
+
+def _inventory_columns_view(raw):
+    present = raw is not _SESSION_ABSENT
+    item = raw if present else {name: name for name in CANONICAL_FIELDS}
+    if not isinstance(item, dict):
+        return {"kind": "columns", "mode": "text", "present": present,
+                "reason": "This value is not a mapping table. Edit it as TOML text.",
+                "rows": [], "raw": deepcopy(item) if present else None,
+                "add_key": "", "add_heading": ""}
+    allowed = {*CANONICAL_FIELDS, *OPTIONAL_FIELDS}
+    if set(item) - allowed:
+        return {"kind": "columns", "mode": "text", "present": present,
+                "reason": "This mapping has field names the row editor cannot represent. Edit it as TOML text.",
+                "rows": [], "raw": deepcopy(item) if present else None,
+                "add_key": "", "add_heading": ""}
+    if any(not isinstance(heading, str) for heading in item.values()):
+        return {"kind": "columns", "mode": "text", "present": present,
+                "reason": "This mapping has non-text headings. Edit it as TOML text.",
+                "rows": [], "raw": deepcopy(item) if present else None,
+                "add_key": "", "add_heading": ""}
+    return {"kind": "columns", "mode": "rows", "present": present,
+            "reason": None,
+            "rows": [{"key": key, "heading": heading} for key, heading in item.items()],
+            "raw": deepcopy(item) if present else None,
+            "add_key": "", "add_heading": "",
+            "field_keys": (*CANONICAL_FIELDS, *OPTIONAL_FIELDS),
+            "limit": INVENTORY_COLUMN_ROW_LIMIT}
 
 
 def groups_for(section, document, *, new_type="smtp", row_types=None, count=None,
@@ -2324,22 +2409,29 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                     "client_secret_file": "Owner-only file containing the app secret",
                 }.get(key, "")
             path_value = key in {"database", "directory", "path"} or key.endswith("_file")
-            controls.append({"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
-                             "kind": spec.kind, "choices": spec.choices, "required": spec.required,
-                             "help": help_text or spec.help, "example": _display(spec.example), "requirement": spec.requirement,
-                             "minimum": spec.minimum, "maximum": spec.maximum, "step": spec.step,
-                             "checked": item is True or item is None and spec.default is True,
-                             "identity": f"{path}.{key}", "spec": spec,
-                             "error_identity": f"{path}.{key}" + (f" (row {index + 1})" if section == "channels" else ""),
-                             "secret": key.endswith("_file"),
-                             "existing": bool(item),
-                             "readonly": (readonly_channel or readonly_dashboard
-                                          or readonly_notifications or direct_url) or
-                             (reference and not can_manage) or
-                             (path_value and not can_admin),
-                             "allow_new_secret": (
-                                 key.endswith("_file") and can_manage
-                                 and (can_admin or bool(item)))})
+            control = {"key": key, "id": f"g{index}_{key}", "value": text, "default": hint,
+                       "kind": spec.kind, "choices": spec.choices, "required": spec.required,
+                       "help": help_text or spec.help, "example": _display(spec.example), "requirement": spec.requirement,
+                       "minimum": spec.minimum, "maximum": spec.maximum, "step": spec.step,
+                       "checked": item is True or item is None and spec.default is True,
+                       "identity": f"{path}.{key}", "spec": spec,
+                       "error_identity": f"{path}.{key}" + (f" (row {index + 1})" if section == "channels" else ""),
+                       "secret": key.endswith("_file"),
+                       "existing": bool(item),
+                       "readonly": (readonly_channel or readonly_dashboard
+                                    or readonly_notifications or direct_url) or
+                       (reference and not can_manage) or
+                       (path_value and not can_admin),
+                       "allow_new_secret": (
+                           key.endswith("_file") and can_manage
+                           and (can_admin or bool(item)))}
+            if section == "watch" and key == "sources":
+                control["structured"] = _watch_sources_view(
+                    data[key] if key in data else _SESSION_ABSENT)
+            elif section == "inventory" and key == "columns":
+                control["structured"] = _inventory_columns_view(
+                    data[key] if key in data else _SESSION_ABSENT)
+            controls.append(control)
         output.append({"label": label, "controls": controls, "data": data, "prefix": prefix,
                        "readonly_reason": (
                            "This channel carries a credential or secret reference. "
@@ -2351,6 +2443,245 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                              "changing them requires manage_secrets."
                              if readonly_notifications else None)))})
     return output
+
+
+def _posted_one(form, name):
+    values = form.getlist(name)
+    if len(values) != 1:
+        abort(400)
+    return values[0]
+
+
+def _copy_form(form):
+    copied = MultiDict()
+    for name, values in form.lists():
+        copied.setlist(name, list(values))
+    return copied
+
+
+def _structured_control(groups, key):
+    return next(control for group in groups for control in group["controls"]
+                if control["key"] == key and "structured" in control)
+
+
+def _parse_column_rows(form, view):
+    mode = _posted_one(form, "g0_columns_mode")
+    if mode != "rows" or view["mode"] != "rows":
+        abort(400)
+    count_text = _posted_one(form, "g0_columns_count")
+    if re.fullmatch(r"(?:0|[1-9][0-9]{0,2})", count_text) is None:
+        abort(400)
+    count = int(count_text)
+    if count > INVENTORY_COLUMN_ROW_LIMIT:
+        abort(400)
+    expected = {"g0_columns_mode", "g0_columns_count",
+                "g0_column_add_key", "g0_column_add_heading"}
+    rows = []
+    allowed = {*CANONICAL_FIELDS, *OPTIONAL_FIELDS}
+    for index in range(count):
+        key_name = f"g0_column_key_{index}"
+        heading_name = f"g0_column_heading_{index}"
+        expected.update((key_name, heading_name))
+        key = _posted_one(form, key_name)
+        heading = _posted_one(form, heading_name)
+        if key not in allowed:
+            abort(400)
+        rows.append({"key": key, "heading": heading})
+    add_key = _posted_one(form, "g0_column_add_key")
+    add_heading = _posted_one(form, "g0_column_add_heading")
+    if add_key and add_key not in allowed:
+        abort(400)
+    add_values = form.getlist("g0_columns_add")
+    remove_values = form.getlist("g0_columns_remove")
+    if len(add_values) > 1 or len(remove_values) > 1 or add_values and remove_values:
+        abort(400)
+    action = None
+    if add_values:
+        if add_values[0] != "yes":
+            abort(400)
+        action = "add"
+        expected.add("g0_columns_add")
+    elif remove_values:
+        if re.fullmatch(r"(?:0|[1-9][0-9]{0,2})", remove_values[0]) is None:
+            abort(400)
+        action = ("remove", int(remove_values[0]))
+        expected.add("g0_columns_remove")
+    if any(name not in expected for name in form if name.startswith(("g0_columns", "g0_column_"))):
+        abort(400)
+    for name in expected:
+        values = form.getlist(name)
+        if name in {"g0_columns_add", "g0_columns_remove"}:
+            continue
+        if len(values) != 1:
+            abort(400)
+    return rows, add_key, add_heading, action
+
+
+def _mapping_from_rows(rows, control):
+    mapping = {}
+    for row in rows:
+        key, heading = row["key"], row["heading"]
+        if key not in {*CANONICAL_FIELDS, *OPTIONAL_FIELDS} or not isinstance(heading, str):
+            abort(400)
+        if key in mapping:
+            raise FieldValidationError(control, "duplicate_mapping")
+        mapping[key] = heading
+    return mapping
+
+
+def _prepare_structured_config_form(section, document, form, *, count):
+    """Translate the two structured controls before the existing parser runs."""
+    if section not in {"watch", "inventory"}:
+        return form, None
+    if count != 1:
+        abort(400)
+    groups = groups_for(section, document, count=count)
+    copied = _copy_form(form)
+    if section == "watch":
+        control = _structured_control(groups, "sources")
+        view = control["structured"]
+        mode = _posted_one(form, "g0_sources_mode")
+        checkbox_names = {f"g0_sources_{source}": source for source in WATCH_SOURCES}
+        if mode == "checkboxes":
+            if view["mode"] != "checkboxes" or "g0_sources" in form:
+                abort(400)
+            selected = []
+            for name, source in checkbox_names.items():
+                values = form.getlist(name)
+                if len(values) > 1 or values and values[0] != source:
+                    abort(400)
+                if values:
+                    selected.append(source)
+            if set(selected) == set(view["selected"]):
+                replacement = value(view["raw"]) if view["present"] else ""
+            else:
+                replacement = value([source for source in WATCH_SOURCES if source in selected])
+            draft = {**view, "selected": tuple(selected)}
+            for name in checkbox_names:
+                copied.pop(name, None)
+            copied.setlist("g0_sources", [replacement])
+        elif mode == "text":
+            if view["mode"] != "text" or any(name in form for name in checkbox_names):
+                abort(400)
+            _posted_one(form, "g0_sources")
+            draft = None
+        else:
+            abort(400)
+        copied.pop("g0_sources_mode", None)
+        return copied, {"g0_sources": draft} if draft is not None else None
+
+    control = _structured_control(groups, "columns")
+    view = control["structured"]
+    mode = _posted_one(form, "g0_columns_mode")
+    if mode == "text":
+        if view["mode"] != "text" or any(
+                name.startswith(("g0_column_", "g0_columns_")) and name != "g0_columns_mode"
+                for name in form):
+            abort(400)
+        _posted_one(form, "g0_columns")
+        copied.pop("g0_columns_mode", None)
+        return copied, None
+    if mode != "rows" or view["mode"] != "rows":
+        abort(400)
+    if "g0_columns" in form:
+        abort(400)
+    rows, add_key, add_heading, action = _parse_column_rows(form, view)
+    if action is not None:
+        abort(400)
+    if add_key or add_heading:
+        if not add_key:
+            raise FieldValidationError(control, "required")
+        if len(rows) >= INVENTORY_COLUMN_ROW_LIMIT:
+            abort(400)
+        rows = [*rows, {"key": add_key, "heading": add_heading}]
+        add_key, add_heading = "", ""
+    mapping = _mapping_from_rows(rows, control)
+    original_rows = view["rows"]
+    unchanged = rows == original_rows
+    if unchanged:
+        replacement = value(view["raw"]) if view["present"] else ""
+    else:
+        replacement = value(mapping)
+    draft = {**view, "rows": rows, "add_key": add_key, "add_heading": add_heading}
+    copied.pop("g0_columns_mode", None)
+    for name in list(copied.keys()):
+        if name.startswith(("g0_columns_", "g0_column_")):
+            copied.pop(name, None)
+    copied.setlist("g0_columns", [replacement])
+    return copied, {"g0_columns": draft}
+
+
+def _inventory_columns_action(form):
+    present = [name for name in ("g0_columns_add", "g0_columns_remove") if name in form]
+    if len(present) > 1:
+        abort(400)
+    if not present:
+        return None
+    return present[0]
+
+
+def _handle_inventory_columns_action(document, form, *, can_manage=False, can_admin=False):
+    if form_row_count(form) != 1 or form.get("action") != "preview":
+        abort(400)
+    groups = groups_for("inventory", document, count=1,
+                        can_manage=can_manage, can_admin=can_admin)
+    control = _structured_control(groups, "columns")
+    view = control["structured"]
+    rows, add_key, add_heading, action = _parse_column_rows(form, view)
+    if action is None:
+        abort(400)
+    posted_row_count = len(rows)
+    if isinstance(action, tuple):
+        _, remove_index = action
+        if remove_index >= len(rows):
+            abort(400)
+        rows = [row for index, row in enumerate(rows) if index != remove_index]
+    else:
+        if not add_key or len(rows) >= INVENTORY_COLUMN_ROW_LIMIT:
+            abort(400)
+        rows = [*rows, {"key": add_key, "heading": add_heading}]
+        add_key, add_heading = "", ""
+    _mapping_from_rows(rows, control)
+    expected = {"csrf", "version", "action", "row_count",
+                "g0_columns_mode", "g0_columns_count",
+                "g0_column_add_key", "g0_column_add_heading"}
+    for group in groups:
+        expected.update(item["id"] for item in group["controls"] if item is not control)
+    for index in range(posted_row_count):
+        expected.update((f"g0_column_key_{index}", f"g0_column_heading_{index}"))
+    if isinstance(action, tuple):
+        expected.add("g0_columns_remove")
+    else:
+        expected.add("g0_columns_add")
+    if set(form) - expected or any(len(form.getlist(name)) != 1 for name in form):
+        abort(400)
+    required = {"csrf", "version", "action", "row_count",
+                "g0_columns_mode", "g0_columns_count",
+                "g0_column_add_key", "g0_column_add_heading"}
+    required.update(item["id"] for group in groups for item in group["controls"] if item is not control)
+    required.update((f"g0_column_key_{index}" for index in range(posted_row_count)))
+    required.update((f"g0_column_heading_{index}" for index in range(posted_row_count)))
+    if not required <= set(form):
+        abort(400)
+    control["structured"] = {**view, "rows": rows,
+                             "add_key": add_key, "add_heading": add_heading}
+    _retain_action_controls(groups, form, "inventory")
+    return groups
+
+
+def _retain_action_controls(groups, form, section):
+    for group in groups:
+        for control in group["controls"]:
+            if "structured" in control:
+                continue
+            submitted = form.get(control["id"], control["value"])
+            retained = retained_form_value(control, submitted, section)
+            if retained is not None:
+                control["value"] = retained
+                control["checked"] = (
+                    submitted == "true"
+                    or submitted == "" and control["spec"].default is True
+                )
 
 
 def parse_form(editor, section, document, current_config, permissions, *, can_admin=False, count=None,
@@ -2780,6 +3111,8 @@ def register_config(app, config, *, host):
         version = None
         match = None
         retained_form = None
+        structured_draft = None
+        field_error_control = None
         status = 400
         try:
             document, _, _, version, current_config = editor.read()
@@ -2809,6 +3142,23 @@ def register_config(app, config, *, host):
                     abort(409, "The configuration changed. Reload and try again."
                           if section == "rules" else "Configuration changed; reload the form")
                 count = form_row_count()
+                if section == "inventory" and _inventory_columns_action(request.form):
+                    groups = _handle_inventory_columns_action(
+                        document, request.form,
+                        can_manage="manage_secrets" in g.permissions,
+                        can_admin=g.user.is_admin,
+                    )
+                    return render_template(
+                        "config_section.html", section=section, groups=groups,
+                        **_field_labels_render_context(),
+                        **_rule_builder_render_context(section, document, len(groups)),
+                        version=version, preview=None, diff=None, lockout=False,
+                        match=None, channel_types=sorted(TYPE_KEYS), events=EVENT_KINDS,
+                        leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
+                        channel_names=[channel.name for channel in current_config.watch.channels],
+                        toml_value=value, saved=False,
+                        read_only=editor.read_only() or rules_over_limit,
+                    ), 200
                 if rule_action:
                     from .dashboard_rule_builder import match_preview, retain_rule_action_form
 
@@ -2825,6 +3175,9 @@ def register_config(app, config, *, host):
                     groups = groups_for(section, document, count=count, row_types=row_types,
                                         can_manage="manage_secrets" in g.permissions, can_admin=g.user.is_admin)
                     prepared = request.form
+                    if section in {"watch", "inventory"}:
+                        prepared, structured_draft = _prepare_structured_config_form(
+                            section, document, request.form, count=count)
                     if section == "rules":
                         # The visual builder rewrites its posted fields into the
                         # same values the text form sends, before the checks run.
@@ -2863,10 +3216,14 @@ def register_config(app, config, *, host):
                                        read_only=editor.read_only() or rules_over_limit)
         except FieldValidationError as exc:
             error = str(exc)
+            field_error_control = _field_error_control_id(section, exc.identity)
         except ConfigurationError as exc:
             credential_inputs = [text for key, text in request.form.items()
                                  if key.endswith(("_env", "_file", "_new"))]
-            error = safe_error(exc, [document or {}, credential_inputs], editor.path)
+            field_key = getattr(exc, "field_key", None)
+            error = _field_error_message(
+                field_key, safe_error(exc, [document or {}, credential_inputs], editor.path))
+            field_error_control = _field_error_control_id(section, field_key)
         except HTTPException as exc:
             if exc.code not in {400, 409}:
                 raise
@@ -2881,6 +3238,9 @@ def register_config(app, config, *, host):
             for index, group in enumerate(groups):
                 group["removed"] = form.get(f"remove{index}") == "yes"
                 for control in group["controls"]:
+                    if structured_draft and control["id"] in structured_draft:
+                        control["structured"] = structured_draft[control["id"]]
+                        continue
                     submitted = form.get(control["id"], control["value"])
                     if retained_form is not None and control["key"] == "name":
                         # Rule actions keep valid labels without redisplaying unvalidated ones.
@@ -2897,6 +3257,7 @@ def register_config(app, config, *, host):
                                        section, document, len(groups)),
                                    version=version, error=error, events=EVENT_KINDS,
                                    leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA, toml_value=value,
+                                       field_error_control=field_error_control,
                                    match=match, channel_types=sorted(TYPE_KEYS),
                                    channel_names=[channel.name for channel in current_config.watch.channels],
                                    read_only=editor.read_only() or rules_over_limit), status
