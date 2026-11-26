@@ -79,6 +79,16 @@ inventory assets marked for coverage review; it is not part of Assets with
 unknown coverage. Scan-dependent values show **No scan recorded** when there is
 no scan, and show the stored value with a stale-data warning after 24 hours.
 
+Below these counts, **Affected findings by severity** shows the current CVSS
+severity mix for findings marked affected in the current inventory. Its
+horizontal bars and data table show counts for Critical (9 and above), High (7
+and above), Medium (4 and above), Low (above 0), None (0), and Unknown score
+(no score). A missing score is not counted as zero. This is a snapshot of
+current findings, not a history or trend. A valid inventory with no affected
+findings says **No affected findings recorded for this inventory.** The chart
+uses the same inventory, scan, and stale-data states as the first three cards;
+it does not show bars or zero counts when the data cannot be checked.
+
 When no inventory is configured, the first three cards explain that inventory
 is needed. When no scan is recorded, they say so instead of showing zero. A
 partly read or unreadable inventory source shows **Could not check** for all
@@ -86,6 +96,8 @@ three inventory cards and links to the Inventory page. Counts from a scan older
 than 24 hours remain visible with the scan time, age, and **Stale scan data**
 warning. A zero for affected findings means no affected finding was recorded
 for the current inventory; it does not establish complete coverage.
+Readable partial web snapshots are counted, while an unreadable inventory
+source leaves the chart and inventory card counts unknown.
 
 The alerts card counts Watch delivery rows that are queued, sending, failed or
 unsure. It excludes accepted rows and includes “gave up” rows within the failed
