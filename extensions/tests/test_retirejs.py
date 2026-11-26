@@ -3,12 +3,13 @@
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from cvebeacon_extensions.webrules import Evidence, Resource, detect, page_from
-from cvebeacon_extensions import retirejs
+from cvebeacon_extensions import retirejs, webrules
 
 
 def _load_update_tool():
@@ -60,6 +61,39 @@ def test_filename_extractor_reads_resource_basenames():
     assert item.versions == ("3.7.1",)
     assert item.evidence[0].source == "https://assets.example.invalid/jquery-3.7.1.min.js"
     assert item.evidence[0].excerpt == "jquery-3.7.1.min.js"
+
+
+@pytest.mark.parametrize("extractor", ["uri", "filename"])
+def test_unknown_url_signature_cannot_contribute_to_a_content_identity(monkeypatch, extractor):
+    signature = retirejs._Signature(
+        f"fixture:{extractor}", "fixture", "npm", "unreviewed-widget", "Fixture",
+        "npm", "unreviewed-widget", "js-library", extractor,
+        re.compile(r"widget-(?P<retire_version>\d+\.\d+\.\d+)\.js"), True,
+    )
+    content = retirejs._Signature(
+        "fixture:filecontent", "fixture", "npm", "unreviewed-widget", "Fixture",
+        "npm", "unreviewed-widget", "js-library", "filecontent",
+        re.compile(r"fixture=(?P<retire_version>\d+\.\d+\.\d+)"), True,
+    )
+    monkeypatch.setattr(retirejs, "SIGNATURES", (signature, content))
+    monkeypatch.setattr(retirejs, "_FILECONTENT_FALLBACK", (content,))
+    url = "https://assets.example.invalid/widget-9.8.7.js"
+    page = page_from({}, "", [Resource(url, "script", "fixture=1.2.3")])
+    for detections in (retirejs.detect(page), detect(page)):
+        review = next(item for item in detections if item.evidence_types == ("url",))
+        assert (review.ecosystem, review.package, review.versions) == ("", "", ())
+        assert review.evidence == (Evidence("url", url, "widget-9.8.7.js"),)
+        identified = next(item for item in detections if item.package == "unreviewed-widget")
+        assert identified.versions == ("1.2.3",)
+
+
+def test_unmapped_bundled_url_signature_keeps_evidence_without_versions():
+    url = "https://assets.example.invalid/retire-example-9.9.9.min.js"
+    page = page_from({}, "", [Resource(url, "script", "")])
+    item = _named(retirejs.detect(page), "Retire Example")
+    assert (item.ecosystem, item.package, item.versions) == ("", "", ())
+    assert item.evidence == (Evidence("url", url, "retire-example-9.9.9.min.js"),)
+    assert {sig.package for sig in retirejs.SIGNATURES if sig.package} <= webrules.REVIEWED_PACKAGES
 
 
 def test_filecontent_extractor_matches_script_text():

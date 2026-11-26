@@ -749,6 +749,13 @@ for _product_rule in RULES:
         )
 _PACKAGE_PRODUCTS.setdefault("react-dom", ("facebook", "react-dom", "React DOM", "js-library"))
 
+# npm identities backed by the bundled Retire.js signatures as well as the
+# built-in rules. Extending this set permits URL-only npm detections.
+REVIEWED_PACKAGES = frozenset(_PACKAGE_PRODUCTS) | {
+    "alasql", "dompurify", "dwr", "easyxdm", "froala-editor", "highlight.js", "jplayer",
+    "mootools", "mustache", "pdfjs-dist", "protobufjs", "quill", "three", "tinymce", "yui",
+}
+
 _CDNJS_PACKAGES = {
     "angular": "angular", "angular.js": "angular",
     "react": "react", "vue": "vue", "ember.js": "ember-source",
@@ -1193,8 +1200,7 @@ def _npm_path(segments: list[str], start: int = 0) -> tuple[str, str] | None:
         package_name = first + "/" + package
     if not _npm_name(package_name):
         return None
-    normalized = normalize_version(version)
-    return (package_name, normalized) if normalized else None
+    return package_name, normalize_version(version)
 
 
 def _cdn_detection(url: str):
@@ -1204,8 +1210,10 @@ def _cdn_detection(url: str):
     host, segments = parsed
     package_version = None
     if host == "cdn.jsdelivr.net" and len(segments) >= 3 and segments[0] == "npm":
+        cdn = "jsdelivr"
         package_version = _npm_path(segments, 1)
     elif host == "unpkg.com":
+        cdn = "unpkg"
         package_version = _npm_path(segments)
     elif (host == "cdnjs.cloudflare.com" and len(segments) >= 4
           and segments[:2] == ["ajax", "libs"]):
@@ -1215,7 +1223,7 @@ def _cdn_detection(url: str):
                 or ".." in library):
             return None
         package = _CDNJS_PACKAGES.get(library.casefold(), "")
-        if package:
+        if package in REVIEWED_PACKAGES:
             if not version:
                 return None
             details = _PACKAGE_PRODUCTS.get(package)
@@ -1228,6 +1236,10 @@ def _cdn_detection(url: str):
     if not package_version:
         return None
     package, version = package_version
+    if package not in REVIEWED_PACKAGES:
+        return cdn, "", f"Unidentified {cdn} library", "js-library", "", "", ""
+    if not version:
+        return None
     details = _PACKAGE_PRODUCTS.get(package)
     if details:
         vendor, product, name, category = details
@@ -1423,7 +1435,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
             if not match:
                 continue
             vendor, product, name, category, ecosystem, package, version = match
-            unique = (vendor.casefold(), product.casefold(), package, version)
+            unique = (vendor, package, version) if package else (vendor, url)
             if unique in seen_cdn:
                 continue
             if len(seen_cdn) >= MAX_CDN_DETECTIONS:
@@ -1433,7 +1445,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
                     confidence="high", evidence="url", versions=(version,) if version else (),
                     ecosystem=ecosystem, package=package,
                     evidence_items=(Evidence("url", "page", url[:160]),),
-                    rule_key=f"cdn:{vendor}:{product}:{package}")
+                    rule_key=f"cdn:{len(seen_cdn)}")
 
     if not _deadline_passed(deadline, clock):
         for resource in page.resources:

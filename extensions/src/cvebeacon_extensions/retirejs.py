@@ -16,6 +16,7 @@ from .webrules import (
     Page,
     MAX_PAGE_RESOURCES,
     MAX_URLS,
+    REVIEWED_PACKAGES,
     _bounded_page,
     _deadline_passed,
     _PACKAGE_PRODUCTS,
@@ -379,11 +380,15 @@ def _filecontent_candidates(text: str) -> set[_Signature]:
 
 def _append(findings: dict, signature: _Signature, kind: str, source: str,
             excerpt: str, version: str = ""):
-    identity = (signature.vendor.casefold(), signature.product.casefold())
+    vendor, product = signature.vendor, signature.product
+    ecosystem, package = signature.ecosystem, signature.package
+    if kind == "url" and (ecosystem != "npm" or package not in REVIEWED_PACKAGES):
+        vendor, product = "retirejs", signature.component
+        ecosystem, package, version = "", "", ""
+    identity = (vendor.casefold(), product.casefold())
     item = findings.setdefault(identity, {
-        "vendor": signature.vendor, "product": signature.product,
-        "name": signature.name, "ecosystem": signature.ecosystem,
-        "package": signature.package, "category": signature.category,
+        "vendor": vendor, "product": product, "name": signature.name,
+        "ecosystem": ecosystem, "package": package, "category": signature.category,
         "versions": set(), "evidence_types": set(), "confidence": "medium",
         "evidence": [], "evidence_keys": set(),
     })

@@ -155,6 +155,9 @@ def test_unknown_cdnjs_stays_private_when_inventory_rows_are_normalized():
     body = (
         b'<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>'
         b'<script src="https://cdnjs.cloudflare.com/ajax/libs/unknown-widget/2.4.1/widget.js"></script>'
+        b'<script src="https://unpkg.com/@scope/widget@2.4.1/dist/widget.js"></script>'
+        b'<script src="https://cdn.jsdelivr.net/npm/unreviewed-widget@3.4.5/widget.js"></script>'
+        b'<script src="https://unpkg.com/dompurify@3.2.0/dist/purify.min.js"></script>'
     )
 
     class Fetcher:
@@ -172,7 +175,7 @@ def test_unknown_cdnjs_stays_private_when_inventory_rows_are_normalized():
         version=row["version"], system_id=row["system_id"], ecosystem=row["ecosystem"],
         purl=row["purl"], cpe=row["cpe"], client=row["client"],
     )) for row in result.rows]
-    assert [row.purl for row in rows] == ["pkg:npm/react@18.3.1"]
+    assert {row.purl for row in rows} == {"pkg:npm/react@18.3.1", "pkg:npm/dompurify@3.2.0"}
 
     cdnjs = next(item for item in result.products if item["vendor"] == "cdnjs")
     assert cdnjs["product"] == ""
@@ -182,6 +185,11 @@ def test_unknown_cdnjs_stays_private_when_inventory_rows_are_normalized():
     assert "unknown-widget" in cdnjs["evidence"][0]["excerpt"]
     assert any(item.get("reason") == "version-unknown" and item.get("product") == "cdnjs/"
                for item in result.reviews)
+    for vendor, excerpt in (("unpkg", "@scope/widget@2.4.1"), ("jsdelivr", "unreviewed-widget@3.4.5")):
+        item = next(item for item in result.products if item["vendor"] == vendor)
+        assert item["product"] == "" and item["versions"] == []
+        assert "ecosystem" not in item and "package" not in item
+        assert excerpt in item["evidence"][0]["excerpt"]
 
 
 def test_every_builtin_rule_has_a_display_name_and_identity_keys_are_stable():
