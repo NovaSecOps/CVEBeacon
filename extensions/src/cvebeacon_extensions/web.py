@@ -7,7 +7,7 @@ source client; it is not exposed to untrusted response bodies.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import email.utils
 import hashlib
 import http.client
+from html.parser import HTMLParser
 import ipaddress
 from pathlib import Path
 import queue
@@ -38,12 +39,12 @@ from . import __version__
 from .contract import (ExtensionError, MAX_BYTES, _atomic, _regular, decode_json, json_bytes,
                        label, output_lock, read_bytes, read_snapshot, timestamp, utc_now,
                        write_snapshot)
-from .webrules import detect, package_url, page_from
+from .webrules import Resource, detect, package_url, page_from
 
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
 ASSET_TIMEOUT = 20.0
-RUN_TIMEOUT = 15 * 60.0
+RUN_TIMEOUT = 60 * 60.0
 BODY_LIMIT = 2 * 1024 * 1024
 WIRE_LIMIT = 4 * 1024 * 1024
 HEADER_LIMIT = 64 * 1024
@@ -54,6 +55,19 @@ MAX_REDIRECTS = 10
 MAX_RETRIES = 2
 HOST_INTERVAL = 1.0
 USER_AGENT = f"CVEBeacon-web-detect/{__version__}"
+
+# Browser-referenced resources: at most 300 unique, authorised files per site,
+# each with at most 10 MiB decoded and 20 MiB on the wire, and at most 96 MiB
+# decoded across the site's files. The resource phase has a 180-second budget,
+# with at least 100 ms between same-host requests. A 5-second run-deadline
+# margin prevents starting a file that could delay the page's own result.
+RESOURCE_MAX_FILES = 300
+RESOURCE_FILE_LIMIT = 10 * 1024 * 1024
+RESOURCE_WIRE_LIMIT = 20 * 1024 * 1024
+RESOURCE_SITE_LIMIT = 96 * 1024 * 1024
+RESOURCE_SITE_TIMEOUT = 180.0
+RESOURCE_MIN_HOST_INTERVAL = 0.1
+RESOURCE_RUN_DEADLINE_GUARD = 5.0
 
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 BLOCKED_STATUSES = {429, 503}
@@ -162,6 +176,7 @@ class _FetchSuccess:
     response: _Response
     redirects: tuple[str, ...]
     observed_at: datetime
+    final_endpoint: Endpoint | None = None
 
 
 def _client(value: object) -> str:
@@ -370,16 +385,15 @@ def format_plan(allowlist: Allowlist) -> str:
     lines = [f"client: {allowlist.client}", f"assets: {len(allowlist.assets)}"]
     normal = 0
     worst = 0
-    for asset in allowlist.assets:
+    for index, asset in enumerate(allowlist.assets, 1):
         maximum = 1 + (asset.max_redirects if asset.allow_redirects else 0)
         normal += maximum
         worst += maximum * (1 + MAX_RETRIES)
-        lines.append(
-            f"{asset.endpoint.url} GET host={asset.endpoint.hostname} port={asset.endpoint.port} "
-            f"path={asset.endpoint.path} max_requests={maximum}"
-        )
-    lines.append(f"planned requests: {len(allowlist.assets)} assets, {normal} requests on "
+        lines.append(f"asset {index}: GET max_requests={maximum}")
+    lines.append(f"planned page requests: {len(allowlist.assets)} assets, {normal} requests on "
                  f"the normal path, up to {worst} including connection retries")
+    lines.append(f"browser-referenced resources: up to {RESOURCE_MAX_FILES} additional authorised "
+                 "files per site; each uses the same redirect, retry and address checks")
     return "\n".join(lines)
 
 
@@ -589,7 +603,7 @@ class _BodyDecoder:
             part = self._decompress(data, remaining - len(output) + 1)
             output.extend(part)
             if len(output) > remaining:
-                raise _TooLargeFailure("decompressed body exceeds 2 MiB")
+                raise _TooLargeFailure("decompressed body exceeds its byte limit")
             if self._object.unconsumed_tail:
                 data = self._object.unconsumed_tail
             elif self._object.eof:
@@ -604,7 +618,7 @@ class _BodyDecoder:
         except zlib.error as exc:
             raise _UnsupportedEncodingFailure("invalid compressed response body") from exc
         if len(part) > remaining:
-            raise _TooLargeFailure("decompressed body exceeds 2 MiB")
+            raise _TooLargeFailure("decompressed body exceeds its byte limit")
         if not self._object.eof:
             raise _UnsupportedEncodingFailure("compressed response body ended before the stream was complete")
         if self._object.unused_data:
@@ -634,7 +648,7 @@ def read_body(reader, content_encoding: str, *, deadline: float | None = None,
         if decoder is None:
             output.extend(chunk)
             if len(output) > limit:
-                raise _TooLargeFailure("response body exceeds 2 MiB")
+                raise _TooLargeFailure("response body exceeds its byte limit")
         else:
             output.extend(decoder.feed(chunk, limit - len(output)))
     if decoder is not None:
@@ -743,15 +757,17 @@ class _DeadlineReader:
 
 
 class _BoundHTTPResponse(http.client.HTTPResponse):
-    def __init__(self, sock: socket.socket, *, deadline: float, clock: Callable[[], float]):
+    def __init__(self, sock: socket.socket, *, deadline: float, clock: Callable[[], float],
+                 wire_limit: int = WIRE_LIMIT):
         super().__init__(sock, method="GET")
         self.fp.close()
         self.fp = _DeadlineReader(sock, deadline=deadline, clock=clock, limit=HEADER_LIMIT,
                                   message="response headers exceed 64 KiB")
+        self._wire_limit = wire_limit
 
     def begin(self) -> None:
         super().begin()
-        self.fp.set_limit(WIRE_LIMIT, "response body exceeds the wire limit")
+        self.fp.set_limit(self._wire_limit, "response body exceeds the wire limit")
 
     def _read_next_chunk_size(self) -> int:
         # int(line, 16) accepts signed values, which would turn the following
@@ -857,7 +873,9 @@ class StdlibTransport:
         socket_.settimeout(min(READ_TIMEOUT, remaining))
 
     def fetch(self, endpoint: Endpoint, address: str, *, ca_bundle: Path | None,
-              deadline: float, user_agent: str) -> _Response:
+              deadline: float, user_agent: str,
+              request_headers: Mapping[str, str] | None = None,
+              body_limit: int = BODY_LIMIT, wire_limit: int = WIRE_LIMIT) -> _Response:
         now = self._clock()
         remaining = deadline - now
         if remaining <= 0:
@@ -884,7 +902,7 @@ class StdlibTransport:
             connection.connect()
             setup_complete = True
             self._timeout(connection.sock, deadline)
-            connection.request("GET", endpoint.path, headers={
+            headers = {
                 "Host": endpoint.authority,
                 "User-Agent": user_agent,
                 "Accept": "text/html,application/xhtml+xml",
@@ -892,8 +910,16 @@ class StdlibTransport:
                 "Accept-Encoding": "gzip, deflate",
                 "Cache-Control": "no-cache",
                 "Connection": "close",
-            })
-            response = _BoundHTTPResponse(connection.sock, deadline=deadline, clock=self._clock)
+            }
+            if request_headers:
+                for name, value in request_headers.items():
+                    if (name.casefold() not in {"accept", "referer"}
+                            or any(character in name + value for character in "\r\n")):
+                        raise _FetchFailure("request header is not authorised")
+                    headers[name] = value
+            connection.request("GET", endpoint.path, headers=headers)
+            response = _BoundHTTPResponse(connection.sock, deadline=deadline, clock=self._clock,
+                                          wire_limit=wire_limit)
             response.begin()
             items = response.getheaders()
             _check_header_size(items)
@@ -904,7 +930,7 @@ class StdlibTransport:
                 # any body decoding can fail.
                 return _Response(response.status, headers, b"")
             body = read_body(response, _content_encoding(headers), deadline=deadline,
-                             clock=self._clock,
+                             clock=self._clock, limit=body_limit, wire_limit=wire_limit,
                              before_read=lambda: self._timeout(connection.sock, deadline))
             return _Response(response.status, headers, body)
         except ssl.SSLError as exc:
@@ -938,8 +964,10 @@ class _Pacer:
         self._last: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def wait(self, hostname: str, deadline: float | None = None) -> None:
-        if self._interval <= 0:
+    def wait(self, hostname: str, deadline: float | None = None, *,
+             minimum_interval: float = 0.0) -> None:
+        interval = max(self._interval, minimum_interval)
+        if interval <= 0:
             return
         while True:
             now = self._clock()
@@ -948,7 +976,7 @@ class _Pacer:
                 raise _TimeoutFailure("pacing exceeded the asset time limit")
             with self._lock:
                 previous = self._last.get(hostname)
-                delay = self._interval - (now - previous) if previous is not None else 0.0
+                delay = interval - (now - previous) if previous is not None else 0.0
                 if delay <= 0:
                     self._last[hostname] = now
                     return
@@ -967,6 +995,18 @@ class _Pacer:
                 return
 
 
+@dataclass(slots=True)
+class _ResourceSiteState:
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    started_at: float | None = None
+    deadline: float | None = None
+    requested_files: int = 0
+    decoded_bytes: int = 0
+    seen_urls: set[str] = field(default_factory=set)
+    file_metadata: dict[str, tuple[str, int]] = field(default_factory=dict)
+    file_detections: dict[str, tuple[object, ...]] = field(default_factory=dict)
+
+
 class Fetcher:
     def __init__(self, *, resolver=None, transport=None, sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic, now: Callable[[], datetime] = utc_now,
@@ -982,6 +1022,8 @@ class Fetcher:
         self.request_count = 0
         self._blocked: dict[str, int | None] = {}
         self._lock = threading.Lock()
+        self._host_locks: dict[str, threading.Lock] = {}
+        self._resource_sites: dict[tuple[str, str, int], _ResourceSiteState] = {}
 
     def close(self) -> None:
         self._resolver_pool.close()
@@ -993,6 +1035,15 @@ class Fetcher:
     def _block(self, hostname: str, retry_after: int | None) -> None:
         with self._lock:
             self._blocked[hostname] = retry_after
+
+    def _host_lock(self, hostname: str) -> threading.Lock:
+        with self._lock:
+            return self._host_locks.setdefault(hostname, threading.Lock())
+
+    def _resource_site(self, endpoint: Endpoint) -> _ResourceSiteState:
+        key = (endpoint.scheme, endpoint.hostname, endpoint.port)
+        with self._lock:
+            return self._resource_sites.setdefault(key, _ResourceSiteState())
 
     @staticmethod
     def _retry_after(value: str | None) -> int | None:
@@ -1037,7 +1088,10 @@ class Fetcher:
         return accepted[0]
 
     def _request(self, endpoint: Endpoint, asset: WebAsset, deadline: float,
-                 ca_bundle: Path | None) -> _Response:
+                 ca_bundle: Path | None, *,
+                 request_headers: Mapping[str, str] | None = None,
+                 body_limit: int = BODY_LIMIT, wire_limit: int = WIRE_LIMIT,
+                 minimum_host_interval: float = 0.0) -> _Response:
         attempt = 0
         while True:
             if self._clock() >= deadline:
@@ -1048,17 +1102,27 @@ class Fetcher:
                 raise _BlockedFailure(detail, retry_after=blocked)
             try:
                 address = self._address(endpoint, asset, deadline)
-                self._pacer.wait(endpoint.hostname, deadline)
-                blocked = self._blocked_info(endpoint.hostname)
-                if blocked is not False:
-                    raise _BlockedFailure("host stopped after a rate-limit response",
-                                          retry_after=blocked)
-                if self._clock() >= deadline:
-                    raise _TimeoutFailure("asset exceeded the total time limit")
-                with self._lock:
-                    self.request_count += 1
-                response = self.transport.fetch(endpoint, address, ca_bundle=ca_bundle,
-                                                deadline=deadline, user_agent=USER_AGENT)
+                with self._host_lock(endpoint.hostname):
+                    self._pacer.wait(endpoint.hostname, deadline,
+                                     minimum_interval=minimum_host_interval)
+                    blocked = self._blocked_info(endpoint.hostname)
+                    if blocked is not False:
+                        raise _BlockedFailure("host stopped after a rate-limit response",
+                                              retry_after=blocked)
+                    if self._clock() >= deadline:
+                        raise _TimeoutFailure("asset exceeded the total time limit")
+                    with self._lock:
+                        self.request_count += 1
+                    kwargs = {}
+                    if request_headers is not None:
+                        kwargs["request_headers"] = request_headers
+                    if body_limit != BODY_LIMIT:
+                        kwargs["body_limit"] = body_limit
+                    if wire_limit != WIRE_LIMIT:
+                        kwargs["wire_limit"] = wire_limit
+                    response = self.transport.fetch(endpoint, address, ca_bundle=ca_bundle,
+                                                    deadline=deadline, user_agent=USER_AGENT,
+                                                    **kwargs)
             except _ConnectionFailure as exc:
                 if attempt >= MAX_RETRIES or self._clock() >= deadline:
                     raise
@@ -1113,7 +1177,11 @@ class Fetcher:
                                    redirect_target={"scheme": scheme, "host": hostname, "port": port})
         return Endpoint(scheme, hostname, port, path)
 
-    def fetch(self, asset: WebAsset, allowlist: Allowlist, *, run_deadline: float | None = None) -> _FetchSuccess:
+    def fetch(self, asset: WebAsset, allowlist: Allowlist, *,
+              run_deadline: float | None = None,
+              request_headers: Mapping[str, str] | None = None,
+              body_limit: int = BODY_LIMIT, wire_limit: int = WIRE_LIMIT,
+              minimum_host_interval: float = 0.0) -> _FetchSuccess:
         deadline = self._clock() + ASSET_TIMEOUT
         if run_deadline is not None:
             deadline = min(deadline, run_deadline)
@@ -1123,11 +1191,14 @@ class Fetcher:
         for hop in range(asset.max_redirects + 1):
             if self._clock() >= deadline:
                 raise _TimeoutFailure("asset exceeded the total time limit")
-            response = self._request(current, asset, deadline, allowlist.ca_bundle)
+            response = self._request(current, asset, deadline, allowlist.ca_bundle,
+                                     request_headers=request_headers,
+                                     body_limit=body_limit, wire_limit=wire_limit,
+                                     minimum_host_interval=minimum_host_interval)
             if response.status not in REDIRECT_STATUSES:
                 if not 200 <= response.status < 300:
                     raise _ConnectionFailure(f"HTTP {response.status}", status=response.status)
-                return _FetchSuccess(response, tuple(redirects), observed_at)
+                return _FetchSuccess(response, tuple(redirects), observed_at, current)
             if not asset.allow_redirects:
                 raise _RedirectFailure("redirects are disabled for this entry", status=response.status,
                                        redirects_followed=len(redirects))
@@ -1161,6 +1232,552 @@ def _decode_html(body: bytes, headers: Mapping[str, tuple[str, ...]]) -> str:
     return body.decode("utf-8", errors="replace")
 
 
+_SCRIPT_MIME_TYPES = {
+    "application/ecmascript", "application/javascript", "application/x-ecmascript",
+    "application/x-javascript", "text/ecmascript", "text/javascript",
+    "text/javascript1.0", "text/javascript1.1", "text/javascript1.2",
+    "text/javascript1.3", "text/javascript1.4", "text/javascript1.5",
+    "text/jscript", "text/livescript", "text/x-ecmascript", "text/x-javascript",
+}
+_HTML_MIME_TYPES = {"text/html", "application/xhtml+xml"}
+_UNFETCHABLE_SCHEMES = {"blob", "data", "javascript"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ResourceReference:
+    url: str
+    kind: str
+    module: bool = False
+
+
+def _strip_css_comments(text: str) -> str:
+    result = []
+    index = 0
+    quote = ""
+    while index < len(text):
+        character = text[index]
+        if quote:
+            result.append(character)
+            if character == "\\" and index + 1 < len(text):
+                index += 1
+                result.append(text[index])
+            elif character == quote:
+                quote = ""
+            index += 1
+        elif character in {"'", '"'}:
+            quote = character
+            result.append(character)
+            index += 1
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end < 0:
+                break
+            result.extend("\n" for value in text[index:end + 2] if value == "\n")
+            index = end + 2
+        else:
+            result.append(character)
+            index += 1
+    return "".join(result)
+
+
+_CSS_IMPORT = re.compile(
+    r"@import\s+(?:url\(\s*)?(?:['\"]([^'\"]+)['\"]|([^\s);]+))\s*\)?",
+    re.IGNORECASE,
+)
+_CSS_URL = re.compile(r"url\(\s*(?:['\"]([^'\"]+)['\"]|([^\s)]+))\s*\)", re.IGNORECASE)
+
+
+def _css_references(text: str) -> list[_ResourceReference]:
+    clean = _strip_css_comments(text)
+    references = []
+    for match in _CSS_IMPORT.finditer(clean):
+        value = match.group(1) or match.group(2)
+        if value:
+            references.append(_ResourceReference(value.strip(), "style"))
+    return references
+
+
+def _js_tokens(text: str) -> list[tuple[str, str]]:
+    """Tokenize enough JavaScript to find literal module specifiers safely."""
+    tokens: list[tuple[str, str]] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        character = text[index]
+        if character.isspace():
+            index += 1
+            continue
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            index = length if end < 0 else end + 1
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+            index += 1
+            value = []
+            interpolated = False
+            valid = True
+            while index < length and text[index] != quote:
+                current = text[index]
+                if quote == "`" and text.startswith("${", index):
+                    interpolated = True
+                if current == "\\":
+                    if index + 1 >= length:
+                        valid = False
+                        break
+                    escaped = text[index + 1]
+                    if escaped in {"\\", "'", '"', "`", "/"}:
+                        value.append(escaped)
+                    elif escaped in {"\n", "\r"}:
+                        pass
+                    else:
+                        valid = False
+                    index += 2
+                    continue
+                value.append(current)
+                index += 1
+            if index >= length or text[index] != quote:
+                break
+            index += 1
+            tokens.append(("string" if valid and not interpolated else "other-string",
+                           "".join(value) if valid and not interpolated else ""))
+            continue
+        if character.isalpha() or character in "_$":
+            start = index
+            index += 1
+            while index < length and (text[index].isalnum() or text[index] in "_$"):
+                index += 1
+            tokens.append(("identifier", text[start:index]))
+            continue
+        tokens.append(("punctuation", character))
+        index += 1
+    return tokens
+
+
+def _module_references(text: str) -> list[_ResourceReference]:
+    tokens = _js_tokens(text)
+    references = []
+    for index, (kind, value) in enumerate(tokens):
+        if kind != "identifier" or value not in {"import", "export"}:
+            continue
+        if value == "import" and index + 1 < len(tokens):
+            if tokens[index + 1][0] == "string":
+                references.append(_ResourceReference(tokens[index + 1][1], "script", True))
+                continue
+            if (index + 3 < len(tokens) and tokens[index + 1] == ("punctuation", "(")
+                    and tokens[index + 2][0] == "string"
+                    and tokens[index + 3] == ("punctuation", ")")):
+                references.append(_ResourceReference(tokens[index + 2][1], "script", True))
+                continue
+        for offset in range(index + 1, min(len(tokens), index + 128)):
+            token_kind, token_value = tokens[offset]
+            if token_value == ";" or (offset > index + 1 and token_kind == "identifier"
+                                        and token_value in {"import", "export"}):
+                break
+            if token_kind == "identifier" and token_value == "from":
+                if offset + 1 < len(tokens) and tokens[offset + 1][0] == "string":
+                    references.append(_ResourceReference(tokens[offset + 1][1], "script", True))
+                break
+    return references
+
+
+_RUNTIME_MARKER = re.compile(r"__webpack_require__|webpackChunk|webpackJsonp|__vite__|vitePreload",
+                             re.IGNORECASE)
+
+
+def _runtime_references(text: str, module: bool) -> list[_ResourceReference]:
+    if not _RUNTIME_MARKER.search(text):
+        return []
+    references = []
+    for kind, value in _js_tokens(text):
+        if kind != "string" or not value or "\\" in value:
+            continue
+        lowered = value.casefold()
+        if lowered.endswith(".map"):
+            continue
+        if re.search(r"\.(?:m?js|css)(?:[?#].*)?$", lowered):
+            # A generated expression such as ``chunkId + ".js"`` is not a
+            # literal path and must not become a guessed request.
+            if lowered in {".js", ".mjs", ".css"}:
+                continue
+            resource_kind = "style" if re.search(r"\.css(?:[?#].*)?$", lowered) else "script"
+            references.append(_ResourceReference(value, resource_kind, module))
+    return references
+
+
+class _ResourceLinkParser(HTMLParser):
+    """Collect supported browser script and stylesheet references in document order."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.base_href: str | None = None
+        self.links: list[_ResourceReference] = []
+        self.declares_icon = False
+        self.template_depth = 0
+        self.noscript_depth = 0
+        self.style_depth = 0
+
+    @staticmethod
+    def _attributes(attrs) -> dict[str, str]:
+        values = {}
+        for name, value in attrs:
+            if name and value is not None:
+                values.setdefault(name.casefold(), value)
+        return values
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag == "template":
+            self.template_depth += 1
+            return
+        if tag == "noscript":
+            self.noscript_depth += 1
+            return
+        if self.template_depth or self.noscript_depth:
+            return
+        attributes = self._attributes(attrs)
+        if attributes.get("style"):
+            self.links.extend(_css_references(attributes["style"]))
+        if tag == "style":
+            self.style_depth += 1
+            return
+        if tag == "base":
+            if self.base_href is None and "href" in attributes:
+                self.base_href = attributes["href"]
+            return
+        if tag == "script":
+            src = attributes.get("src")
+            script_type = attributes.get("type", "").split(";", 1)[0].strip().casefold()
+            if src is not None and (not script_type or script_type == "module"
+                                    or script_type in _SCRIPT_MIME_TYPES):
+                self.links.append(_ResourceReference(src, "script", script_type == "module"))
+            return
+        if tag == "link" and "href" in attributes:
+            rel = set(attributes.get("rel", "").casefold().split())
+            href = attributes["href"]
+            if "icon" in rel or "apple-touch-icon" in rel or "mask-icon" in rel:
+                self.declares_icon = True
+                self.links.append(_ResourceReference(href, "icon"))
+            elif "manifest" in rel:
+                self.links.append(_ResourceReference(href, "manifest"))
+            elif "stylesheet" in rel:
+                self.links.append(_ResourceReference(href, "style"))
+            elif "modulepreload" in rel:
+                self.links.append(_ResourceReference(href, "script", True))
+            elif "preload" in rel:
+                kind = attributes.get("as", "").casefold()
+                if kind in {"script", "style"}:
+                    self.links.append(_ResourceReference(href, kind, kind == "script"))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "template" and self.template_depth:
+            self.template_depth -= 1
+        elif tag == "noscript" and self.noscript_depth:
+            self.noscript_depth -= 1
+        elif tag == "style" and self.style_depth:
+            self.style_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self.style_depth and not self.template_depth and not self.noscript_depth:
+            self.links.extend(_css_references(data))
+
+
+@dataclass(frozen=True, slots=True)
+class _ResourceCandidate:
+    endpoint: Endpoint
+    url: str
+    kind: str
+    module: bool
+    authorization: WebAsset
+
+
+def _url_origin(value: str) -> tuple[str, str, int]:
+    parts = urlsplit(value)
+    scheme = parts.scheme.casefold()
+    if scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("unsupported URL")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("URL contains credentials")
+    hostname = _hostname(parts.hostname)
+    return scheme, hostname, _port(parts.port, scheme)
+
+
+def _resource_endpoint(value: str, allowlist: Allowlist) -> Endpoint:
+    parts = urlsplit(value)
+    scheme, hostname, port = _url_origin(value)
+    path = parts.path or "/"
+    path_and_query = path + (("?" + parts.query) if parts.query else "")
+    if (len(path_and_query) > 2048 or not _PATH.fullmatch(path)
+            or any(ord(character) < 33 or ord(character) > 126 for character in path_and_query)):
+        raise ValueError("invalid resource path")
+    if (scheme, hostname, port) not in allowlist.endpoints:
+        raise PermissionError("resource origin is not authorised")
+    return Endpoint(scheme, hostname, port, path_and_query)
+
+
+def _resource_policy(endpoint: Endpoint, page_asset: WebAsset,
+                     allowlist: Allowlist) -> WebAsset | None:
+    origin = (endpoint.scheme, endpoint.hostname, endpoint.port)
+    page_asset_origin = (page_asset.endpoint.scheme, page_asset.endpoint.hostname,
+                         page_asset.endpoint.port)
+    if origin == page_asset_origin:
+        return page_asset
+    return next((asset for asset in allowlist.assets
+                 if (asset.endpoint.scheme, asset.endpoint.hostname, asset.endpoint.port) == origin),
+                None)
+
+
+def _resource_candidate(reference: _ResourceReference, base_url: str, page_asset: WebAsset,
+                        allowlist: Allowlist, state: _ResourceSiteState, queue,
+                        skipped: Counter, cached_detections: list[tuple[object, ...]]) -> None:
+    if not reference.url.strip():
+        skipped["invalid-url"] += 1
+        return
+    try:
+        absolute = urljoin(base_url, reference.url.strip())
+        parts = urlsplit(absolute)
+        scheme = parts.scheme.casefold()
+        if scheme in _UNFETCHABLE_SCHEMES or scheme not in {"http", "https"}:
+            skipped["unsupported-scheme"] += 1
+            return
+        if parts.username is not None or parts.password is not None:
+            skipped["credentials"] += 1
+            return
+        absolute = parts._replace(fragment="").geturl()
+        origin = _url_origin(absolute)
+    except (ExtensionError, ValueError, UnicodeError):
+        skipped["invalid-url"] += 1
+        return
+    if origin not in allowlist.endpoints:
+        skipped["external-origin"] += 1
+        return
+    if parts.path.casefold().endswith(".map"):
+        skipped["source-map"] += 1
+        return
+    try:
+        endpoint = _resource_endpoint(absolute, allowlist)
+    except PermissionError:
+        skipped["external-origin"] += 1
+        return
+    except (ExtensionError, ValueError, UnicodeError):
+        skipped["invalid-url"] += 1
+        return
+    resource_url = endpoint.url
+    if resource_url in state.seen_urls:
+        skipped["duplicate"] += 1
+        if resource_url in state.file_detections:
+            cached_detections.append(state.file_detections[resource_url])
+        return
+    state.seen_urls.add(resource_url)
+    policy = _resource_policy(endpoint, page_asset, allowlist)
+    if policy is None:
+        skipped["unauthorised"] += 1
+        return
+    if state.requested_files + len(queue) >= RESOURCE_MAX_FILES:
+        skipped["file-limit"] += 1
+        return
+    queue.append(_ResourceCandidate(endpoint, resource_url, reference.kind,
+                                    reference.module, policy))
+
+
+def _resource_references(html: str) -> tuple[_ResourceLinkParser, Counter]:
+    parser = _ResourceLinkParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        return parser, Counter({"invalid-html": 1})
+    return parser, Counter()
+
+
+def _decode_resource(body: bytes, headers: Mapping[str, tuple[str, ...]]) -> str:
+    content_type = " ".join(headers.get("content-type", ()))
+    charset = _CHARSET.search(content_type)
+    if charset:
+        try:
+            return body.decode(charset.group(1), errors="replace")
+        except (LookupError, UnicodeError):
+            pass
+    return body.decode("utf-8", errors="replace")
+
+
+def _resource_content_type(headers: Mapping[str, tuple[str, ...]], kind: str) -> tuple[str, bool, bool]:
+    values = headers.get("content-type", ())
+    media_type = values[0].split(";", 1)[0].strip().casefold() if values else ""
+    if media_type in _HTML_MIME_TYPES:
+        return media_type, False, True
+    allowed = {"text/plain", "application/octet-stream"}
+    if kind == "style":
+        allowed.add("text/css")
+    if kind == "script":
+        allowed.update(_SCRIPT_MIME_TYPES)
+    elif kind == "manifest":
+        allowed.update({"application/json", "application/manifest+json", "text/json"})
+    elif kind == "icon":
+        allowed.update({"image/x-icon", "image/vnd.microsoft.icon", "image/png", "image/svg+xml"})
+    return media_type, media_type in allowed, False
+
+
+def _looks_like_html(body: bytes) -> bool:
+    sample = body[:512].lstrip(b"\xef\xbb\xbf\t\r\n\f ").lower()
+    return sample.startswith((b"<!doctype html", b"<html", b"<head", b"<body"))
+
+
+def _fetch_resources(html: str, page_success: _FetchSuccess, page_asset: WebAsset,
+                     allowlist: Allowlist, fetcher: Fetcher, *,
+                     run_deadline: float,
+                     on_detections: Callable[[Iterable[object]], None]) -> tuple[int, Counter, dict[str, tuple[str, int]]]:
+    page_endpoint = page_success.final_endpoint or page_asset.endpoint
+    page_url = page_endpoint.url
+    state = fetcher._resource_site(page_endpoint)
+    with state.lock:
+        now = fetcher._clock()
+        if state.started_at is None:
+            state.started_at = now
+            state.deadline = min(now + RESOURCE_SITE_TIMEOUT, run_deadline)
+        else:
+            state.deadline = min(state.deadline or run_deadline, run_deadline)
+        site_deadline = state.deadline
+        parser, skipped = _resource_references(html)
+        base_url = page_url
+        if parser.base_href is not None:
+            try:
+                proposed = urljoin(page_url, parser.base_href)
+                origin = _url_origin(proposed)
+                if origin == (page_endpoint.scheme, page_endpoint.hostname, page_endpoint.port):
+                    base_url = urlsplit(proposed)._replace(fragment="").geturl()
+            except (ExtensionError, ValueError, UnicodeError):
+                pass
+
+        queue = deque()
+        cached: list[tuple[object, ...]] = []
+        for reference in parser.links:
+            _resource_candidate(reference, base_url, page_asset, allowlist, state,
+                                queue, skipped, cached)
+        authority = f"[{page_endpoint.hostname}]" if ":" in page_endpoint.hostname else page_endpoint.hostname
+        site_root = f"{page_endpoint.scheme}://{authority}"
+        if page_endpoint.port != page_endpoint.default_port:
+            site_root += f":{page_endpoint.port}"
+        if not parser.declares_icon:
+            _resource_candidate(_ResourceReference(site_root + "/favicon.ico", "icon"),
+                                page_url, page_asset, allowlist, state, queue, skipped, cached)
+        _resource_candidate(_ResourceReference(site_root + "/robots.txt", "robots"),
+                            page_url, page_asset, allowlist, state, queue, skipped, cached)
+        for detections in cached:
+            on_detections(detections)
+
+        resources_fetched = 0
+        while queue:
+            now = fetcher._clock()
+            if run_deadline - now <= RESOURCE_RUN_DEADLINE_GUARD:
+                skipped["run-deadline"] += len(queue)
+                break
+            if now >= site_deadline:
+                skipped["site-time-budget"] += len(queue)
+                break
+            if state.requested_files >= RESOURCE_MAX_FILES:
+                skipped["file-limit"] += len(queue)
+                break
+            remaining_site_bytes = RESOURCE_SITE_LIMIT - state.decoded_bytes
+            if remaining_site_bytes <= 0:
+                skipped["site-limit"] += len(queue)
+                break
+            candidate = queue.popleft()
+            state.requested_files += 1
+            body_limit = min(RESOURCE_FILE_LIMIT, remaining_site_bytes)
+            site_limit_is_tighter = remaining_site_bytes <= RESOURCE_FILE_LIMIT
+            request_headers = {
+                "Accept": "text/css,*/*;q=0.1" if candidate.kind == "style" else "*/*",
+                "Referer": page_url,
+            }
+            resource_asset = WebAsset(
+                candidate.endpoint, candidate.authorization.authorized_by,
+                candidate.authorization.authorized_at, candidate.authorization.expires_at,
+                candidate.authorization.allow_redirects, candidate.authorization.max_redirects,
+                candidate.authorization.allow_private_address,
+            )
+            try:
+                success = fetcher.fetch(
+                    resource_asset, allowlist, run_deadline=site_deadline,
+                    request_headers=request_headers, body_limit=body_limit,
+                    wire_limit=RESOURCE_WIRE_LIMIT,
+                    minimum_host_interval=RESOURCE_MIN_HOST_INTERVAL,
+                )
+            except _TooLargeFailure:
+                state.decoded_bytes += remaining_site_bytes if site_limit_is_tighter else body_limit
+                skipped["site-limit" if site_limit_is_tighter else "too-large"] += 1
+                continue
+            except _FetchFailure as failure:
+                if fetcher._clock() >= site_deadline:
+                    skipped["site-time-budget"] += 1
+                elif failure.status is not None and failure.reason == "unreachable":
+                    skipped["http-status"] += 1
+                else:
+                    skipped[failure.reason] += 1
+                continue
+            except Exception:
+                skipped["unreachable"] += 1
+                continue
+
+            body = success.response.body
+            if len(body) > body_limit:
+                state.decoded_bytes += remaining_site_bytes if site_limit_is_tighter else body_limit
+                reason = "site-limit" if site_limit_is_tighter and len(body) > remaining_site_bytes else "too-large"
+                skipped[reason] += 1
+                continue
+            state.decoded_bytes += len(body)
+            if run_deadline - fetcher._clock() <= RESOURCE_RUN_DEADLINE_GUARD:
+                skipped["run-deadline"] += 1
+                continue
+            if fetcher._clock() > site_deadline:
+                skipped["site-time-budget"] += 1
+                continue
+            if success.response.status != 200:
+                skipped["http-status"] += 1
+                continue
+            media_type, accepted_type, is_html = _resource_content_type(
+                success.response.headers, candidate.kind)
+            if is_html or _looks_like_html(body):
+                skipped["html-response"] += 1
+                continue
+            if not accepted_type:
+                skipped["wrong-content-type"] += 1
+                continue
+
+            digest = hashlib.sha256(body).hexdigest()
+            state.file_metadata[candidate.url] = (digest, len(body))
+            text = "" if candidate.kind == "icon" else _decode_resource(body, success.response.headers)
+            resource = Resource(candidate.url, candidate.kind, text)
+            try:
+                detections = tuple(detect(page_from(success.response.headers, html,
+                                                    resources=[resource])))
+            except Exception:
+                detections = ()
+                skipped["analysis-error"] += 1
+            state.file_detections[candidate.url] = detections
+            on_detections(detections)
+            resources_fetched += 1
+
+            nested = []
+            if candidate.kind == "style":
+                nested.extend(_css_references(text))
+            elif candidate.kind == "script" and candidate.module:
+                nested.extend(_module_references(text))
+            if candidate.kind == "script":
+                nested.extend(_runtime_references(text, candidate.module))
+            cached = []
+            for reference in nested:
+                _resource_candidate(reference, candidate.url, page_asset, allowlist,
+                                    state, queue, skipped, cached)
+            for old_detections in cached:
+                on_detections(old_detections)
+
+        return resources_fetched, skipped, dict(state.file_metadata)
+
+
 def _system_id(client: str, endpoint: Endpoint) -> str:
     value = f"{client}\0{endpoint.hostname}".encode("utf-8")
     return "web-" + hashlib.sha256(value).hexdigest()[:16]
@@ -1184,6 +1801,101 @@ def _preferred_version(versions: tuple[str, ...]) -> str | None:
     return longest
 
 
+@dataclass(frozen=True, slots=True)
+class _EvidenceRecord:
+    kind: str
+    source: str
+    excerpt: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DetectionSummary:
+    vendor: str
+    product: str
+    category: str
+    cpe: str
+    confidence: str
+    versions: tuple[str, ...]
+    evidence_types: tuple[str, ...]
+    name: str = ""
+    ecosystem: str = ""
+    package: str = ""
+    implied_by: tuple[str, ...] = ()
+    evidence: tuple[_EvidenceRecord, ...] = ()
+
+
+def _detection_evidence(detection) -> tuple[_EvidenceRecord, ...]:
+    result = []
+    seen = set()
+    allowed_kinds = {"header", "cookie", "meta", "url", "html", "script", "style", "implied"}
+    for item in getattr(detection, "evidence", ()):
+        try:
+            raw_kind, source, excerpt = item.kind, item.source, item.excerpt
+        except AttributeError:
+            continue
+        kind = str(raw_kind)
+        if kind not in allowed_kinds:
+            kind = "url"
+        evidence = _EvidenceRecord(kind, str(source), str(excerpt)[:160])
+        key = (evidence.kind, evidence.source, evidence.excerpt)
+        if key not in seen:
+            result.append(evidence)
+            seen.add(key)
+        if len(result) >= 20:
+            break
+    return tuple(result)
+
+
+def _merge_detections(target: dict[tuple[str, str], _DetectionSummary], detections) -> None:
+    confidence_rank = {"low": 0, "medium": 1, "high": 2}
+    for detection in detections:
+        key = (str(detection.vendor).casefold(), str(detection.product).casefold())
+        incoming_evidence = _detection_evidence(detection)
+        current = target.get(key)
+        if current is None:
+            target[key] = _DetectionSummary(
+                detection.vendor, detection.product, detection.category, detection.cpe,
+                detection.confidence, tuple(sorted(set(detection.versions))),
+                tuple(sorted(set(detection.evidence_types))), getattr(detection, "name", ""),
+                getattr(detection, "ecosystem", ""), getattr(detection, "package", ""),
+                tuple(sorted(set(getattr(detection, "implied_by", ())))), incoming_evidence[:20],
+            )
+            continue
+        evidence = list(current.evidence)
+        evidence_seen = {(item.kind, item.source, item.excerpt) for item in evidence}
+        for item in incoming_evidence:
+            identity = (item.kind, item.source, item.excerpt)
+            if identity not in evidence_seen and len(evidence) < 20:
+                evidence.append(item)
+                evidence_seen.add(identity)
+        confidence = detection.confidence
+        if confidence_rank.get(current.confidence, 0) > confidence_rank.get(confidence, 0):
+            confidence = current.confidence
+        target[key] = _DetectionSummary(
+            current.vendor, current.product, getattr(detection, "category", current.category),
+            current.cpe or getattr(detection, "cpe", ""), confidence,
+            tuple(sorted(set(current.versions) | set(detection.versions))),
+            tuple(sorted(set(current.evidence_types) | set(detection.evidence_types))),
+            current.name or getattr(detection, "name", ""),
+            current.ecosystem or getattr(detection, "ecosystem", ""),
+            current.package or getattr(detection, "package", ""),
+            tuple(sorted(set(current.implied_by) | set(getattr(detection, "implied_by", ())))),
+            tuple(evidence),
+        )
+
+
+def _public_evidence(detection: _DetectionSummary,
+                     file_metadata: Mapping[str, tuple[str, int]]) -> list[dict]:
+    result = []
+    for evidence in detection.evidence[:20]:
+        item = dict(kind=evidence.kind, source=evidence.source, excerpt=evidence.excerpt[:160])
+        file_info = file_metadata.get(evidence.source)
+        if file_info is not None:
+            item["sha256"], item["bytes"] = file_info
+        result.append(item)
+    return result
+
+
 @dataclass(slots=True)
 class _AssetResult:
     asset: WebAsset
@@ -1193,6 +1905,9 @@ class _AssetResult:
     observed_at: datetime | None
     failure: _FetchFailure | None = None
     products: list[dict] = field(default_factory=list)
+    resources_fetched: int = 0
+    resources_skipped: int = 0
+    resources_skipped_by_reason: dict[str, int] = field(default_factory=dict)
 
 
 def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
@@ -1212,20 +1927,28 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             review["status"] = failure.status
         if failure.retry_after is not None:
             review["retry_after"] = failure.retry_after
-        if failure.redirect_target is not None:
-            review["redirect_target"] = failure.redirect_target
         if failure.redirects_followed is not None:
             review["redirects_followed"] = failure.redirects_followed
         return _AssetResult(asset, [], [review], {failure.reason}, None, failure)
-    page = page_from(success.response.headers, _decode_html(success.response.body,
-                                                           success.response.headers))
-    detections = detect(page)
+    html = _decode_html(success.response.body, success.response.headers)
+    merged: dict[tuple[str, str], _DetectionSummary] = {}
+    _merge_detections(merged, detect(page_from(success.response.headers, html)))
+    try:
+        resources_fetched, resources_skipped, file_metadata = _fetch_resources(
+            html, success, asset, allowlist, fetcher, run_deadline=run_deadline,
+            on_detections=lambda values: _merge_detections(merged, values))
+    except Exception:
+        # Resource collection is optional evidence. A parser or auxiliary file
+        # failure must leave the page observation usable and path-free.
+        resources_fetched, resources_skipped, file_metadata = 0, Counter({"unreachable": 1}), {}
+    detections = tuple(merged.values())
     products = []
     for item in detections:
         product = dict(asset_id=_asset_id(allowlist.client, asset.endpoint, item.vendor, item.product),
                        hostname=asset.endpoint.hostname, vendor=item.vendor, product=item.product,
                        versions=list(item.versions), category=item.category,
-                       evidence_types=list(item.evidence_types), confidence=item.confidence)
+                       evidence_types=list(item.evidence_types), confidence=item.confidence,
+                       evidence=_public_evidence(item, file_metadata))
         if item.name:
             product["name"] = item.name
         if item.ecosystem and item.package:
@@ -1284,7 +2007,11 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             reviews.append(dict(detail, reason="version-unknown", product=display,
                                 category=detection.category, confidence=detection.confidence))
             omissions.add("version-unknown")
-    return _AssetResult(asset, rows, reviews, omissions, success.observed_at, products=products)
+    return _AssetResult(
+        asset, rows, reviews, omissions, success.observed_at, products=products,
+        resources_fetched=resources_fetched, resources_skipped=sum(resources_skipped.values()),
+        resources_skipped_by_reason=dict(resources_skipped),
+    )
 
 
 def _review_path(output: Path) -> Path:
@@ -1379,6 +2106,11 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     fetch_failures = [result.failure for result in results if result.failure is not None]
     fetched_count = len(results) - len(fetch_failures)
     products = [product for result in results for product in result.products]
+    resources_fetched = sum(result.resources_fetched for result in results)
+    resources_skipped = sum(result.resources_skipped for result in results)
+    resources_skipped_by_reason: Counter = Counter()
+    for result in results:
+        resources_skipped_by_reason.update(result.resources_skipped_by_reason)
     products_with_version = sum(bool(product["versions"]) for product in products)
     fetch_failure_disallows_run = bool(fetch_failures) and (fetched_count == 0 or not allow_partial)
     if fetch_failure_disallows_run:
@@ -1393,6 +2125,8 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                    request_count=fetcher.request_count,
                    duration_seconds=max(0, clock() - started),
                    asset_count=len(allowlist.assets), fetched_count=fetched_count,
+                   resources_fetched=resources_fetched, resources_skipped=resources_skipped,
+                   resources_skipped_by_reason=dict(sorted(resources_skipped_by_reason.items())),
                    products_recognized=len(products), products_with_version=products_with_version,
                    saved_snapshot_generated_at=saved_snapshot_generated_at, snapshot_updated=False)
         _publish_review(output, client, source_id, reviews,

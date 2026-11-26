@@ -97,7 +97,11 @@ class Transport:
         self.responses = list(responses)
         self.calls = []
 
-    def fetch(self, endpoint, address, *, ca_bundle, deadline, user_agent):
+    def fetch(self, endpoint, address, *, ca_bundle, deadline, user_agent, **kwargs):
+        if endpoint.path == "/favicon.ico":
+            return response(headers={"content-type": "image/x-icon"}, body=b"icon")
+        if endpoint.path == "/robots.txt":
+            return response(headers={"content-type": "text/plain"}, body=b"User-agent: *\n")
         self.calls.append((endpoint, address, ca_bundle, user_agent))
         item = self.responses.pop(0)
         if isinstance(item, Exception):
@@ -812,7 +816,7 @@ def test_redirect_limit_and_disabled_redirects(tmp_path):
     assert len(transport.calls) == 1
 
 
-def test_unlisted_bare_or_www_redirect_records_only_target_authority(tmp_path):
+def test_unlisted_redirect_does_not_record_target_authority(tmp_path):
     path = write_allowlist(tmp_path, [asset()])
     secret_path = "/private/path?token=not-for-review"
     body_secret = "PRIVATE_RESPONSE_BODY"
@@ -825,7 +829,8 @@ def test_unlisted_bare_or_www_redirect_records_only_target_authority(tmp_path):
     detail = json.loads(Path(str(tmp_path / "redirect.json") + ".review.json").read_bytes())
     review = detail["reviews"][0]
     assert review["detail"] == "redirect target is not an allowlisted host and port"
-    assert review["redirect_target"] == {"scheme": "https", "host": "www.example.com", "port": 443}
+    assert "redirect_target" not in review
+    assert "www.example.com" not in json.dumps(review)
     assert secret_path not in json.dumps(review)
     assert body_secret not in json.dumps(review)
     assert "www.example.com" not in str(error.value)
@@ -1106,15 +1111,22 @@ def test_auth_and_not_found_responses_are_not_retried(tmp_path, status, reason):
 
 
 def test_connection_errors_retry_twice_with_backoff(tmp_path):
+    clock = [0.0]
     sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
     manifest, output, resolver, transport = run(
         tmp_path, [asset()],
         [_ConnectionFailure("connection reset"), _ConnectionFailure("connection reset"),
          response(headers={"server": "nginx/1.25.3"})],
-        sleep=sleeps.append)
+        sleep=sleep, clock=lambda: clock[0])
     assert manifest["status"] == "success"
     assert len(transport.calls) == 3
-    assert len(sleeps) == 2
+    assert 0.375 <= sleeps[0] <= 0.625 and 0.75 <= sleeps[1] <= 1.25
+    assert sleeps[-1] == 0.1  # robots follows the icon after the host pacing interval
 
 
 def test_retry_backoff_is_clamped_to_the_asset_deadline(tmp_path):
@@ -1565,7 +1577,7 @@ def test_plan_prints_requests_and_sends_nothing(tmp_path, capsys):
     assert main(["web", "detect", "--client", "acme", "--assets", str(path),
                  "--output", str(output), "--source-id", "acme-web", "--plan"]) == 0
     printed = capsys.readouterr().out
-    assert "host=example.com" in printed and "port=443" in printed and "path=/status" in printed
+    assert "example.com" not in printed and "/status" not in printed and "https://" not in printed
     assert "max_requests=2" in printed
     assert "5 requests on the normal path" in printed
     assert f"up to {5 * (1 + MAX_RETRIES)} including connection retries" in printed
@@ -1652,7 +1664,8 @@ def test_review_persists_request_counts_durations_and_only_evidence_types(tmp_pa
     assert detail["run"]["products_recognized"] == 1
     assert detail["run"]["products_with_version"] == 1
     assert detail["run"]["snapshot_updated"] is True
-    assert detail["run"]["request_count"] == len(transport.calls) == 2
+    assert detail["run"]["request_count"] == 4
+    assert len(transport.calls) == 2  # fallback resources are answered by the fake transport
     assert detail["run"]["duration_seconds"] >= 0
     assert detail["run"]["started_at"] == detail["run"]["ended_at"] == NOW.isoformat()
     product = detail["products"][0]
