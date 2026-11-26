@@ -1,12 +1,11 @@
 """Read-only release status and administrator-only update requests."""
 from importlib.metadata import version
-import re
 
 from flask import Blueprint, abort, current_app, flash, g, redirect, render_template, request, url_for
 
 from .dashboard_ops import _text, requires, require_accounts
 from .errors import CVEBeaconError
-from .updater import check, read_status, request_update, unsupported_reason
+from .updater import MAX_NOTES, check, read_status, request_update, unsupported_reason
 
 
 UPDATE_REASON_TEXT = {
@@ -33,11 +32,40 @@ UPDATE_REASON_TEXT = {
 }
 
 
+def _strip_comments(notes):
+    """Scan once and discard complete or unterminated nested comments."""
+    notes = notes[:MAX_NOTES]
+    parts = []
+    cursor = depth = 0
+    while cursor < len(notes):
+        if depth == 0:
+            opening = notes.find("<!--", cursor)
+            if opening == -1:
+                parts.append(notes[cursor:])
+                break
+            parts.append(notes[cursor:opening])
+            cursor = opening
+        if notes.startswith("<!--", cursor):
+            cursor += 4
+            if notes.startswith(">", cursor):
+                cursor += 1
+            elif notes.startswith("->", cursor):
+                cursor += 2
+            else:
+                depth += 1
+        elif notes.startswith(("-->", "--!>"), cursor):
+            cursor += 4 if notes.startswith("--!>", cursor) else 3
+            depth -= 1
+        else:
+            cursor += 1
+    return "".join(parts).strip()
+
+
 def _display_status(config):
     status = read_status(config)
     notes = status.get("notes")
     if isinstance(notes, str):
-        status["notes"] = re.sub(r"<!--.*?(?:-->|$)", "", notes, flags=re.DOTALL).strip()
+        status["notes"] = _strip_comments(notes)
     for key in ("last_request", "last_update"):
         value = status.get(key)
         if isinstance(value, dict) and value.get("reason"):

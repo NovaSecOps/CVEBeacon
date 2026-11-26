@@ -197,3 +197,21 @@ def test_admin_revocation_after_request_guard_cannot_publish(updates, monkeypatc
     monkeypatch.setattr(dashboard_update, "request_update", revoke_then_request)
     assert submit(client, "/updates/request", version="0.1.1").status_code == 400
     assert not (config.watch.database.parent / updater.REQUEST).exists()
+
+
+@pytest.mark.parametrize(("notes", "visible"), [
+    ("before<!-- outer\n<!-- inner --> tail -->after", "beforeafter"),
+    ("before<!-- outer\n--!>after", "beforeafter"),
+    ("before<!-- outer\n<!-- unclosed", "before"),
+    ("before<!-- multiline\ncomment -->after", "beforeafter"),
+])
+def test_release_notes_comment_scan(updates, monkeypatch, notes, visible):
+    config, _, client = updates
+    monkeypatch.setattr(dashboard_update, "read_status", lambda config: {"notes": notes + "<b>escaped</b>"})
+    login(client, "viewer")
+    page = client.get("/updates/")
+    assert page.status_code == 200
+    assert f'<pre class="break">{visible}' in page.text
+    assert all(text not in page.text for text in ("outer", "inner", "tail --&gt;", "multiline", "<b>escaped"))
+    if "after" in visible:
+        assert "&lt;b&gt;escaped&lt;/b&gt;" in page.text
