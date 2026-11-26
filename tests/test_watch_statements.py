@@ -1806,3 +1806,27 @@ def test_statement_includes_supplemental_provider_scores():
     assert fields["cvss_max_version"] == "4.0"
     assert fields["cvss_max_provider"] == "CISA-ADP"
     assert fields["cvss_all"] == "9.6 v4.0 (CISA-ADP)\n7 v3.1 (NVD)"
+
+
+def test_cli_statement_includes_assets_with_no_client(tmp_path):
+    from cvebeacon.models import Applicability, Asset, Finding, QueryResult, Vulnerability
+    from cvebeacon.state import StateStore
+
+    config = write_config(tmp_path, sources=("nvd",))
+    populate(WatchStore(config.watch.database, clock=lambda: NOW))
+    asset = Asset("no-client-asset", "Acme", "Widget", "1")
+    StateStore(config.database_path).record_scan([QueryResult(
+        asset,
+        (Finding(asset, Vulnerability(cve_id="CVE-2026-0001"), Applicability.AFFECTED, "high", "test"),),
+        (),
+    )])
+    template = tmp_path / "template.md"
+    template.write_text("No client: ${unassigned_assets}\n", encoding="utf-8", newline="\n")
+    out = tmp_path / "statement.md"
+    assert cli.main([
+        "--config", str(config.config_path), "watch", "statement", "CVE-2026-0001",
+        "--template", str(template), "--out", str(out),
+    ]) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "1 affected" in text
+    assert "no-client-asset" not in text

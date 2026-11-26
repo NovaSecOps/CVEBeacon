@@ -21,7 +21,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .config import AppConfig, ConfigurationError, InventoryConfig, load_config
-from .clients import affected_clients, format_affected_clients
+from .clients import (
+    affected_clients,
+    affected_clients_and_unassigned,
+    format_affected_clients,
+    unassigned_impacts_for,
+)
 from .engine import QueryEngine
 from .errors import CVEBeaconError, InventoryValidationError, SourceError
 from .http import HttpClient
@@ -697,6 +702,10 @@ def _run_watch(args, config: AppConfig) -> int:
             print(line)
         return 0
     if args.watch_command == "statement":
+        # Client impacts and no-client counts come from the same scan run.
+        client_impacts, unassigned = affected_clients_and_unassigned(
+            config.database_path, (args.cve_id,)
+        )
         print(
             write_statement(
                 store,
@@ -705,9 +714,8 @@ def _run_watch(args, config: AppConfig) -> int:
                 template=args.template,
                 out=args.out,
                 force=args.force,
-                client_impacts=affected_clients(
-                    config.database_path, (args.cve_id,)
-                ).get(args.cve_id.upper(), ()),
+                client_impacts=client_impacts.get(args.cve_id.upper(), ()),
+                unassigned_impacts=unassigned_impacts_for(unassigned, args.cve_id),
             )
         )
         return 0
