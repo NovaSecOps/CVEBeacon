@@ -3,6 +3,7 @@
 Inventory assets may carry an optional ``client`` label. A watch CVE affects a
 client when the latest successful inventory scan recorded an ``affected`` or
 ``needs_review`` finding for that CVE on one of the client's assets.
+Assets without a client label are counted separately with the same statuses.
 
 Correlation reads the run-scoped snapshot written by ``StateStore.record_scan``
 (``scan_asset_clients`` and ``scan_findings``), never the mutable
@@ -61,6 +62,17 @@ class ClientImpacts:
 
     def __getitem__(self, index):
         return self.clients[index]
+
+
+@dataclass(frozen=True, slots=True)
+class UnassignedAssetImpacts:
+    """Counts of client-less assets affected by one CVE in a scan run."""
+
+    affected: int = 0
+    needs_review: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.affected or self.needs_review)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +181,30 @@ def _impact_rows(
     return _fetch(cursor, MAX_IMPACT_ROWS)
 
 
+def _unassigned_impact_rows(
+    db: sqlite3.Connection, run_id: str, names: Sequence[str]
+) -> list[sqlite3.Row]:
+    """Count client-less assets with indexed, per-CVE grouping."""
+    marks = ",".join("?" for _ in names)
+    cursor = db.execute(
+        "WITH per_asset AS ("
+        " SELECT sf.identifier AS identifier, sf.asset_id AS asset_id,"
+        " MIN(CASE sf.applicability WHEN 'affected' THEN 1 ELSE 2 END) AS rank"
+        " FROM scan_findings sf JOIN scan_asset_clients sac"
+        " ON sac.run_id = sf.run_id AND sac.asset_id = sf.asset_id"
+        " WHERE sf.run_id = ? AND sac.client_key = ''"
+        " AND sf.applicability IN ('affected','needs_review')"
+        " AND sf.identifier IN (" + marks + ")"
+        " GROUP BY sf.identifier, sf.asset_id"
+        ") SELECT identifier,"
+        " SUM(CASE rank WHEN 1 THEN 1 ELSE 0 END) AS affected,"
+        " SUM(CASE rank WHEN 2 THEN 1 ELSE 0 END) AS needs_review"
+        " FROM per_asset GROUP BY identifier ORDER BY identifier",
+        (run_id, *names),
+    )
+    return _fetch(cursor, len(names))
+
+
 def _affected_from_run(
     db: sqlite3.Connection, run_id: str, requested: Mapping[str, str]
 ) -> dict[str, ClientImpacts]:
@@ -209,6 +245,20 @@ def _affected_from_run(
     return output
 
 
+def _unassigned_from_run(
+    db: sqlite3.Connection, run_id: str, requested: Mapping[str, str]
+) -> dict[str, UnassignedAssetImpacts]:
+    names = tuple(requested)
+    output: dict[str, UnassignedAssetImpacts] = {}
+    for start in range(0, len(names), MAX_REQUESTED_CVES):
+        chunk = names[start : start + MAX_REQUESTED_CVES]
+        for row in _unassigned_impact_rows(db, run_id, chunk):
+            output[str(row["identifier"])] = UnassignedAssetImpacts(
+                int(row["affected"]), int(row["needs_review"])
+            )
+    return output
+
+
 def affected_clients(
     path: str | Path, cve_ids: Iterable[str]
 ) -> dict[str, ClientImpacts]:
@@ -228,6 +278,26 @@ def affected_clients(
         return _affected_from_run(db, scan.run_id, requested)
 
     return _read(path, read, {})
+
+
+def affected_clients_and_unassigned(
+    path: str | Path, cve_ids: Iterable[str]
+) -> tuple[dict[str, ClientImpacts], dict[str, UnassignedAssetImpacts]]:
+    """Return client impacts and no-client counts from the same successful run."""
+    requested = _requested_names(cve_ids)
+    if not requested:
+        return {}, {}
+
+    def read(db: sqlite3.Connection):
+        scan = _latest_successful_scan(db)
+        if scan is None:
+            return {}, {}
+        return (
+            _affected_from_run(db, scan.run_id, requested),
+            _unassigned_from_run(db, scan.run_id, requested),
+        )
+
+    return _read(path, read, ({}, {}))
 
 
 def affected_clients_on_connection(
@@ -477,6 +547,22 @@ def format_affected_clients(
     return translate(catalog_for(language), "affected_clients", clients=names)
 
 
+def format_unassigned_assets(
+    impacts: UnassignedAssetImpacts,
+    *,
+    language: str = DEFAULT_LANGUAGE,
+) -> str:
+    """Format the localized no-client asset summary, or an empty string."""
+    if not impacts:
+        return ""
+    return translate(
+        catalog_for(language),
+        "unassigned_assets_line",
+        affected=impacts.affected,
+        needs_review=impacts.needs_review,
+    )
+
+
 def impacts_for(
     clients: Mapping[str, ClientImpacts | Sequence[ClientImpact]] | None,
     cve_id: str,
@@ -487,6 +573,21 @@ def impacts_for(
     if isinstance(value, ClientImpacts):
         return value
     return ClientImpacts(tuple(value or ()))
+
+
+def unassigned_impacts_for(
+    impacts: Mapping[str, UnassignedAssetImpacts] | None,
+    cve_id: str,
+) -> UnassignedAssetImpacts:
+    """Return the bounded no-client counts for one CVE, if present."""
+    if not impacts:
+        return UnassignedAssetImpacts()
+    value = impacts.get(str(cve_id).strip().upper())
+    return (
+        value
+        if isinstance(value, UnassignedAssetImpacts)
+        else UnassignedAssetImpacts()
+    )
 
 
 def cve_findings(path: str | Path, identifier: str, *, limit: int = 100):

@@ -17,7 +17,11 @@ from urllib.parse import quote
 import httpx
 
 from ..config import AppConfig
-from ..clients import ClientImpacts, affected_clients
+from ..clients import (
+    ClientImpacts,
+    UnassignedAssetImpacts,
+    affected_clients_and_unassigned,
+)
 from ..errors import ConfigurationError
 from ..http import HttpClient, HttpResult
 from .channels import ChannelConfig, channel_map, validate_webhook_url
@@ -394,17 +398,20 @@ def _webhook_body(
     events: Sequence[DeliveryEvent],
     names: Mapping[str, str],
     clients: Mapping[str, ClientImpacts] | None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
 ) -> bytes:
     def serialize(document) -> bytes:
         return json.dumps(
             document, ensure_ascii=False, separators=(",", ":"), allow_nan=False
         ).encode("utf-8")
 
-    payload = webhook_payload(events, names, clients)
-    if clients and len(serialize(webhook_payload(events, names, None))) > CHANNEL_LIMITS["webhook"]:
-        # The budget governs only client details. When the document is over
-        # it even without them, trimming cannot help: send it unchanged, as
-        # documents were sent before client correlation existed.
+    payload = webhook_payload(events, names, clients, unassigned_assets)
+    if clients and len(
+        serialize(webhook_payload(events, names, None, unassigned_assets))
+    ) > CHANNEL_LIMITS["webhook"]:
+        # The budget governs only client details. When the document, including
+        # its compact no-client counts, is already over it, trimming cannot
+        # help: send the document unchanged.
         return serialize(payload)
     while True:
         body = serialize(payload)
@@ -453,9 +460,10 @@ def _send_webhook(
     timeout: float,
     names: Mapping[str, str],
     clients: Mapping[str, ClientImpacts] | None = None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
 ) -> None:
     url = _webhook_url(channel)
-    body = _webhook_body(events, names, clients)
+    body = _webhook_body(events, names, clients, unassigned_assets)
     headers: dict[str, str] = {"Content-Type": "application/json"}
     header_name = channel.options.get("header_name")
     if header_name:
@@ -728,6 +736,7 @@ def _send(
     names: Mapping[str, str],
     *,
     clients: Mapping[str, ClientImpacts] | None = None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] | None = None,
     store: WatchStore | None = None,
@@ -770,7 +779,9 @@ def _send(
     elif channel.type == "gotify":
         _send_gotify(channel, message, http, timeout)
     elif channel.type == "webhook":
-        _send_webhook(channel, events, http, timeout, names, clients)
+        _send_webhook(
+            channel, events, http, timeout, names, clients, unassigned_assets
+        )
     elif channel.type == "graph":
         _send_graph(channel, message, http, timeout)
     elif channel.type == "smtp":
@@ -817,6 +828,7 @@ def _channel_messages(
     since: str | None,
     language: str,
     clients: Mapping[str, ClientImpacts] | None = None,
+    unassigned_assets: Mapping[str, UnassignedAssetImpacts] | None = None,
     store: WatchStore | None = None,
 ) -> tuple[OutgoingMessage, ...]:
     saved = ()
@@ -837,6 +849,7 @@ def _channel_messages(
         language=language,
         format=channel.format,
         clients=clients,
+        unassigned_assets=unassigned_assets,
     )
 
 
@@ -914,6 +927,7 @@ def deliver_pending(
             sent: int,
             pace: bool,
             client_impacts: Mapping[str, ClientImpacts] | None = None,
+            unassigned_impacts: Mapping[str, UnassignedAssetImpacts] | None = None,
         ) -> tuple[int, int, DeliveryFailure | None, bool, bool]:
             try:
                 if channel.type == "teams_bot":
@@ -965,6 +979,7 @@ def deliver_pending(
                         timeout,
                         names,
                         clients=client_impacts,
+                        unassigned_assets=unassigned_impacts,
                         deadline=deadline,
                         monotonic=monotonic,
                         store=store,
@@ -1032,16 +1047,20 @@ def deliver_pending(
                     timeout = max(0.5, min(channel.timeout_seconds, remaining))
                     failure: DeliveryFailure | None = None
                     try:
+                        chunk_clients, chunk_unassigned = (
+                            affected_clients_and_unassigned(
+                                config.database_path,
+                                (event.cve_id for event in chunk),
+                            )
+                        )
                         _send_webhook(
                             channel,
                             chunk,
                             http,
                             timeout,
                             names,
-                            affected_clients(
-                                config.database_path,
-                                (event.cve_id for event in chunk),
-                            ),
+                            chunk_clients,
+                            chunk_unassigned,
                         )
                     except DeliveryFailure as exc:
                         failure = exc
@@ -1083,9 +1102,11 @@ def deliver_pending(
                        if channel.type == "teams_bot" else {}),
                 )
                 if digest is not None:
-                    digest_clients = affected_clients(
-                        config.database_path,
-                        (event.cve_id for event in digest.events),
+                    digest_clients, digest_unassigned = (
+                        affected_clients_and_unassigned(
+                            config.database_path,
+                            (event.cve_id for event in digest.events),
+                        )
                     )
                     try:
                         initial_messages = build_messages(
@@ -1099,6 +1120,7 @@ def deliver_pending(
                             language=language,
                             format=channel.format,
                             clients=digest_clients,
+                            unassigned_assets=digest_unassigned,
                         )
                     except MessageTooLarge:
                         store.mark_initial_failed(
@@ -1127,6 +1149,7 @@ def deliver_pending(
                                 messages_sent,
                                 pace_needed,
                                 digest_clients,
+                                digest_unassigned,
                             )
                             if expired:
                                 store.release_initial(channel.name, now=now)
@@ -1197,9 +1220,11 @@ def deliver_pending(
                 batches.append(alerts)
             for batch in batches:
                 index = _event_index(batch)
-                batch_clients = affected_clients(
-                    config.database_path,
-                    (event.cve_id for event in batch),
+                batch_clients, batch_unassigned = (
+                    affected_clients_and_unassigned(
+                        config.database_path,
+                        (event.cve_id for event in batch),
+                    )
                 )
                 claim_statuses = (
                     ("ambiguous",)
@@ -1215,6 +1240,7 @@ def deliver_pending(
                         since=since,
                         language=language,
                         clients=batch_clients,
+                        unassigned_assets=batch_unassigned,
                         store=store,
                     )
                 except MessageTooLarge:
@@ -1301,7 +1327,12 @@ def deliver_pending(
                         expired,
                         pace_needed,
                     ) = send_messages(
-                        group, covered, messages_sent, pace_needed, batch_clients
+                        group,
+                        covered,
+                        messages_sent,
+                        pace_needed,
+                        batch_clients,
+                        batch_unassigned,
                     )
                     if expired:
                         # Nothing left this run: undo the claim without an

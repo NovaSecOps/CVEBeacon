@@ -20,6 +20,10 @@ CATALOGS: dict[str, dict[str, str]] = {
         "unknown_date": "unknown",
         "date_line": "Published {published} · first seen {first_seen}",
         "affected_clients": "Affected clients: {clients}",
+        "unassigned_assets_line": (
+            "Your assets with no client: {affected} affected, "
+            "{needs_review} needs review"
+        ),
         "affected_clients_more": "and {count} more",
         "client_review_suffix": "{name} (review)",
         "reported_line": "Reported to clients by {by} at {at}",
@@ -144,6 +148,10 @@ CATALOGS: dict[str, dict[str, str]] = {
         "unknown_date": "data desconhecida",
         "date_line": "Publicado: {published} · visto pela primeira vez: {first_seen}",
         "affected_clients": "Clientes afetados: {clients}",
+        "unassigned_assets_line": (
+            "Os seus ativos sem cliente: {affected} afetados, "
+            "{needs_review} a rever"
+        ),
         "affected_clients_more": "e mais {count}",
         "client_review_suffix": "{name} (revisão)",
         "reported_line": "Comunicado aos clientes por {by} em {at}",

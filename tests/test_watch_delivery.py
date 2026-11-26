@@ -138,6 +138,7 @@ def test_success_marks_the_delivery_sent(tmp_path):
     assert payload["version"] == 2
     assert payload["events"][0]["cve_id"] == "CVE-2026-0001"
     assert "affected_clients" not in payload["events"][0]
+    assert "unassigned_assets" not in payload["events"][0]
 
 
 def test_webhook_lists_affected_clients(tmp_path):
@@ -189,6 +190,57 @@ def test_webhook_lists_affected_clients(tmp_path):
         {"name": "Acme", "assets": 1, "status": "affected"},
         {"name": "Globex", "assets": 1, "status": "needs_review"},
     ]
+
+
+def test_webhook_reports_no_client_assets_without_exposing_them(tmp_path):
+    config = make_config(tmp_path)
+    store = seed(config)
+    no_client = Asset("internal-fw-1", "Acme", "Widget", "1")
+    review = Asset("internal-fw-2", "Acme", "Widget", "2")
+    StateStore(config.database_path).record_scan(
+        [
+            QueryResult(
+                no_client,
+                (
+                    Finding(
+                        no_client,
+                        Vulnerability("CVE-2026-0001"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+            QueryResult(
+                review,
+                (
+                    Finding(
+                        review,
+                        Vulnerability("CVE-2026-0001"),
+                        Applicability.NEEDS_REVIEW,
+                        "limited",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+        ]
+    )
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    report = deliver(config, store, handler)
+    assert not report.failed
+    payload = json.loads(requests[0].content)
+    entry = payload["events"][0]
+    assert entry["unassigned_assets"] == {"affected": 1, "needs_review": 1}
+    assert "affected_clients" not in entry
+    assert "internal-fw-" not in requests[0].content.decode("utf-8")
+    assert "Unassigned" not in requests[0].content.decode("utf-8")
 
 
 def test_sending_is_committed_before_the_request(tmp_path):
@@ -2830,11 +2882,45 @@ def test_webhook_delivery_shrinks_clients_to_serialized_request_budget(tmp_path,
     store = seed(config, identifiers=identifiers, initial=initial)
     assets = [Asset(f"a{index}", "Acme", "Widget", "1",
         client=f"{index:04d}" + character * 116) for index in range(50)]
-    StateStore(config.database_path).record_scan([
-        QueryResult(asset, tuple(Finding(asset, Vulnerability(cve),
-            Applicability.AFFECTED, "high", "test") for cve in identifiers), ())
-        for asset in assets
-    ])
+    no_client_assets = [
+        Asset(f"fw{index}", "Acme", "Widget", "1") for index in range(3)
+    ]
+    StateStore(config.database_path).record_scan(
+        [
+            QueryResult(
+                asset,
+                tuple(
+                    Finding(
+                        asset,
+                        Vulnerability(cve),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    )
+                    for cve in identifiers
+                ),
+                (),
+            )
+            for asset in assets
+        ]
+        + [
+            QueryResult(
+                asset,
+                tuple(
+                    Finding(
+                        asset,
+                        Vulnerability(cve),
+                        Applicability.NEEDS_REVIEW,
+                        "limited",
+                        "test",
+                    )
+                    for cve in identifiers
+                ),
+                (),
+            )
+            for asset in no_client_assets
+        ]
+    )
     requests = []
     def handler(request):
         requests.append(request)
@@ -2847,6 +2933,7 @@ def test_webhook_delivery_shrinks_clients_to_serialized_request_budget(tmp_path,
     for event in json.loads(requests[0].content)["events"]:
         assert len(event.get("affected_clients", [])) + event["affected_clients_omitted"] == 50
         assert all(item["assets"] == 1 for item in event.get("affected_clients", []))
+        assert event["unassigned_assets"] == {"affected": 0, "needs_review": 3}
     assert all(row[1] == "sent" for row in rows(store))
 
 
