@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from cvebeacon import dashboard, web_assets
+from cvebeacon import dashboard, dashboard_web, web_assets
 from cvebeacon.dashboard_jobs import build_command
 from cvebeacon.errors import ConfigurationError
 from cvebeacon.locking import OperationLock, RunInProgress, operation_lock_paths
@@ -636,6 +636,11 @@ def test_corrupt_review_fields_are_rejected_before_rendering(web, section, field
     ("products", "package", None),
     ("products", "implied_by", "Angular"),
     ("products", "implied_by", ["Angular", 7]),
+    ("products", "categories", "framework"),
+    ("products", "categories", ["framework", 7]),
+    ("products", "categories", ["unknown-category"]),
+    ("products", "categories", ["application"] * 65),
+    ("products", "categories", ["x" * 8193]),
     ("products", "name", ""),
     ("products", "name", "x" * 257),
     ("products", "package", "react"),
@@ -682,7 +687,7 @@ def test_skip_reason_counts_must_sum_to_total(web):
     assert "review the local files" in page.text
 
 
-def test_detected_product_table_groups_sorts_and_uses_plain_evidence_labels(web):
+def test_detected_product_table_groups_sorts_and_uses_product_tags(web):
     config, _, _, client = web
     assert save(client).status_code == 303
     _, output = paths(config, "Acme")
@@ -704,6 +709,7 @@ def test_detected_product_table_groups_sorts_and_uses_plain_evidence_labels(web)
              "evidence_types": ["implied"], "implied_by": ["TypeScript"]},
             {"hostname": "a.example", "vendor": "lodash", "product": "lodash",
              "category": "js-library", "confidence": "medium", "versions": ["4.17.21"],
+             "categories": ["js-library", "web-server", "reverse-proxy"],
              "evidence_types": ["url"]},
         ],
         "reviews": [{"reason": "version-unknown"}],
@@ -712,18 +718,67 @@ def test_detected_product_table_groups_sorts_and_uses_plain_evidence_labels(web)
     web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
     page = client.get("/web-assets?client=Acme")
     assert page.status_code == 200
-    table = page.text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
+    table = (
+        page.text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
+    )
     assert table.index("a.example") < table.index("b.example")
     assert table.index("Angular") < table.index("React") < table.index("lodash")
-    assert "Version not disclosed" in table and "4.17.21" in table
-    for label in ("response header", "cookie", "page markup", "linked file", "script file",
-                  "stylesheet", "Inferred from TypeScript", "Inferred from Next.js"):
+    assert '<span class="badge badge-high">High</span>' in table
+    assert '<span class="badge badge-medium">Medium</span>' in table
+    assert '<span class="badge badge-low">Low</span>' in table
+    assert '<span class="badge badge-info web-version-badge">4.17.21</span>' in table
+    assert '<span class="muted">Version not disclosed</span>' in table
+    assert "In inventory" in table and "Review only" in table
+    assert '<summary>Evidence (1)</summary>' in table
+    assert '<summary>Evidence (0)</summary>' in table
+    assert re.search(r'<details class="web-evidence"(?![^>]*\bopen)', table)
+    assert 'class="badge badge-neutral">framework</span>' in table
+    for category in ("js-library", "web-server", "reverse-proxy"):
+        assert f'class="badge badge-neutral">{category}</span>' in table
+    for label in ("header", "cookie", "markup", "link", "script", "stylesheet",
+                  "Inferred from TypeScript", "Inferred from Next.js"):
         assert label in table
-    for label in ("<summary>Evidence</summary>", "https://assets.example.invalid/react.js",
+    for label in ("https://assets.example.invalid/react.js",
                   "/*! @license React v18.2.0 */", "SHA-256", "512 bytes"):
         assert label in table
     assert "Read 4 script and style files from the sites (2 skipped)." in page.text
     assert "Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory." in page.text
+
+
+def test_detected_product_with_cpe_is_marked_in_inventory(web, monkeypatch):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    detail = {
+        "client": "Acme",
+        "products": [{
+            "asset_id": "web-cpe-only", "hostname": "example.invalid", "vendor": "Example",
+            "product": "Widget", "name": "Widget", "category": "framework",
+            "confidence": "medium", "versions": [], "evidence_types": ["header"],
+        }],
+        "reviews": [],
+    }
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    cpe_asset = Asset("web-cpe-only", vendor="Example", product="Widget",
+                      cpe="cpe:2.3:a:example:widget:*:*:*:*:*:*:*:*")
+    monkeypatch.setattr(dashboard_web, "read_web_snapshot", lambda path: (
+        [cpe_asset], {"generated_at": "2026-11-25T00:00:00Z", "record_count": 1}))
+    page = client.get("/web-assets?client=Acme")
+    table = (
+        page.text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
+    )
+    assert "Widget" in table and "In inventory" in table
+    assert "Review only" not in table
+
+
+def test_web_assets_page_renders_without_inline_styles_or_scripts(web):
+    _, _, _, client = web
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert not re.search(r"(?i)\sstyle\s*=", page.text)
+    assert not re.search(r"(?is)<style\b", page.text)
+    assert not re.search(r"(?is)<script\b(?![^>]*\bsrc=)[^>]*>", page.text)
 
 
 def test_product_and_evidence_markup_sentinel_is_rendered_as_text(web):
