@@ -684,7 +684,7 @@ EXPANDED_RULES: tuple[Rule, ...] = (
     _rule("expanded-cdnjs-service", "cdnjs", "cdn", "edge", "url",
           r"cdnjs\.cloudflare\.com/", name="cdnjs", confidence="high"),
     _rule("expanded-open-graph", "open-graph", "open-graph", "application", "html",
-          r"<meta\b[^>]*\bproperty\s*=\s*[\"']og:[a-z][a-z0-9:_-]*[\"']",
+          r"\bproperty\s*=\s*[\"']og:[a-z][a-z0-9:_-]*[\"']",
           name="Open Graph", confidence="high"),
     _rule("expanded-priority-hints", "web-platform", "priority-hints", "application", "html",
           r"(?<![\w:-])fetchpriority\s*=\s*[\"']?(?:high|low|auto)\b",
@@ -1046,26 +1046,39 @@ def _html_tags(html: str):
         position = end
 
 
-_INLINE_SCRIPT_BLOCK = re.compile(r"<script\b([^>]*)>([\s\S]*?)</script\s*>", re.IGNORECASE)
+_SCRIPT_OPEN = re.compile(r"<script\b", re.IGNORECASE)
+_SCRIPT_CLOSE = re.compile(r"</script\s*>", re.IGNORECASE)
 _JAVASCRIPT_TYPES = frozenset({
     "module", "text/javascript", "application/javascript", "text/ecmascript",
     "application/ecmascript",
 })
 
 
-def _inline_script_text(html: str) -> str:
+def _inline_script_text(html: str, deadline=None, clock=None) -> str:
     scripts = []
     remaining = MAX_ANALYSIS_TEXT
-    for index, match in enumerate(_INLINE_SCRIPT_BLOCK.finditer(html)):
-        if index >= MAX_PAGE_RESOURCES or remaining <= 0:
+    position = 0
+    index = 0
+    while index < MAX_PAGE_RESOURCES and remaining > 0:
+        opening = _SCRIPT_OPEN.search(html, position)
+        if opening is None or _deadline_passed(deadline, clock):
             break
-        attributes = _tag_attributes(match.group(1), 0, len(match.group(1)))
+        attributes_start = opening.end()
+        tag_end = _tag_end(html, attributes_start)
+        if tag_end >= len(html):
+            break
+        closing = _SCRIPT_CLOSE.search(html, tag_end)
+        if closing is None:
+            break
+        position = closing.end()
+        index += 1
+        attributes = _tag_attributes(html, attributes_start, tag_end)
         if "src" in attributes:
             continue
         script_type = attributes.get("type", "").split(";", 1)[0].strip().casefold()
         if script_type and script_type not in _JAVASCRIPT_TYPES:
             continue
-        text = _scalar_text(match.group(2), remaining)
+        text = _scalar_text(html[tag_end:closing.start()], remaining)
         if text:
             scripts.append(text)
             remaining -= len(text)
@@ -1659,7 +1672,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
         for resource in page.resources
         if resource.kind in {"script", "style"} and resource.text
     }
-    inline_script = _inline_script_text(page.html)
+    inline_script = _inline_script_text(page.html, deadline, clock)
     folded_inline = inline_script.casefold()
     for compiled in _rule_index():
         if _deadline_passed(deadline, clock):

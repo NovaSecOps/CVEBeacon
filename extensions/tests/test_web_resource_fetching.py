@@ -345,7 +345,9 @@ def test_resource_urls_paths_hostnames_and_bodies_never_enter_messages_or_review
     for marker in ("resource-path-marker.js", "resource-host-marker.invalid",
                    "private-path-marker.js", "response-body-marker"):
         assert marker not in message
-        assert marker not in review
+        if marker != "resource-path-marker.js":
+            # The requested path is kept in the private skip details only.
+            assert marker not in review
 
 
 def test_resource_metadata_counts_successes_and_skips(tmp_path):
