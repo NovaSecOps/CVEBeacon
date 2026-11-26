@@ -418,6 +418,15 @@ a.stat:hover { border-color: var(--accent); }
 .stat-warning { border-left: 4px solid var(--warning-text); }
 .stat-success { border-left: 4px solid var(--success-text); }
 .home-kpis .stat-value, .home-kpis .stat-help { overflow-wrap: anywhere; }
+.home-secondary-row {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3);
+  margin: 0 0 var(--space-5); padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.home-secondary-item { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.home-secondary-value { font-size: 1.35rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.home-secondary-label { font-size: .9rem; font-weight: 650; }
+.home-secondary-help { color: var(--text-muted); font-size: .78rem; overflow-wrap: anywhere; }
 
 /* Badges: text label always present; colour is reinforcement only. */
 .badge {
@@ -590,6 +599,7 @@ details.disclosure > summary { font-weight: 600; }
   .stat-grid, .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat, .metrics section { padding: var(--space-3) var(--space-4); }
   .stat-value, .metrics strong { font-size: 1.6rem; }
+  .home-secondary-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .card, .panel { padding: var(--space-4); }
   .page-actions { width: 100%; }
   .form-actions .btn, .form-actions button { flex: 1 1 auto; }
