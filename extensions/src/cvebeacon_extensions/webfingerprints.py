@@ -166,6 +166,7 @@ class _Technology:
     excludes: tuple[str, ...] = ()
     requires: tuple[str, ...] = ()
     requires_categories: tuple[str, ...] = ()
+    categories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +239,7 @@ def _category_name(value: str) -> str:
     aliases = {
         "cms": "cms", "content management systems": "cms",
         "web servers": "web-server", "web server": "web-server",
+        "reverse proxy": "reverse-proxy", "reverse proxies": "reverse-proxy",
         "application servers": "application-server", "application server": "application-server",
         "programming languages": "language", "languages": "language",
         "javascript libraries": "js-library", "javascript library": "js-library",
@@ -1393,11 +1395,15 @@ def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
                         skipped_technologies["total pattern limit"] += 1
                         continue
                     vendor, product = _cpe_identity(cpe, name)
-                    category = next((categories[identifier] for identifier in category_ids if identifier in categories), "application")
+                    category_names = tuple(dict.fromkeys(
+                        categories[identifier] for identifier in category_ids if identifier in categories
+                    )) or ("application",)
+                    category = category_names[0]
                     relationships = _parse_relationships(data, skipped_patterns)
                     patterns.extend(local_patterns)
                     technologies.append(_Technology(name, cpe, vendor, product, category, category_ids,
-                                                     tuple(pattern.index for pattern in local_patterns), *relationships))
+                                                     tuple(pattern.index for pattern in local_patterns), *relationships,
+                                                     category_names))
                 except (ValueError, TypeError, OverflowError, RecursionError):
                     skipped_technologies["malformed technology"] += 1
         except OverflowError:
@@ -1940,6 +1946,7 @@ def _make_detection(record: _DetectionRecord):
         "vendor": technology.vendor,
         "product": technology.product,
         "category": _detect_category(technology),
+        "categories": technology.categories or (_detect_category(technology),),
         "cpe": technology.cpe,
         "confidence": confidence,
         "versions": tuple(sorted(record.versions)),
