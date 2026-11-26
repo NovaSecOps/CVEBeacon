@@ -18,12 +18,12 @@ supported inputs, permissions and conservative identity rules.
 ## Web technology detection
 
 `cvebeacon-ext web detect` observes explicitly authorised web assets with one
-ordinary `GET` per asset. It records only direct evidence in the response:
-`Server` and `X-Powered-By`-style headers, cookie names, generator metadata,
-script/link URLs and specific HTML markers. Results are inventory hints for
-review, not proof that a product is present, unpatched or exploitable. There is
-no active probing, crawling, subresource fetching, JavaScript execution,
-authentication or exploitation.
+ordinary `GET` per configured page and bounded `GET` requests for browser
+referenced resources. It records direct evidence from page headers, cookie
+names, generator metadata, URLs and HTML markers, and from successfully fetched
+resource text. Results are inventory hints for review, not proof that a product
+is present, unpatched or exploitable. There is no active probing, crawling,
+JavaScript execution, authentication or exploitation.
 
 The dashboard can manage client allowlists, preview requests, run the companion
 and display observation metadata. See [dashboard web assets](DASHBOARD.md#client-web-technology-detection).
@@ -36,13 +36,42 @@ types, without storing response bodies or cookie values.
 
 ### What it sends
 
-- One `GET` to the configured path, plus at most ten redirects that are
+- One `GET` to the configured page path, plus at most ten redirects that are
   re-checked at every hop.
+- After a page succeeds, requests may follow `<script src>`, stylesheet links,
+  module preloads, script or style preloads, CSS `@import`, literal static or
+  dynamic imports in module scripts, and literal chunk paths listed by fetched
+  webpack or Vite runtimes. A same-site `<base href>` is honoured. Repeated
+  URLs are fetched once; paths are never guessed.
+- The page's web manifest and declared icon are fetched. If it declares no
+  icon, `/favicon.ico` is requested. `/robots.txt` is requested once per site.
+  Manifest and robots text are available to detection; icon bytes are hashed
+  but its resource text is empty.
+- A referenced file is fetched only when its scheme, host and port match the
+  final page or another site in that client's allowlist. Other hosts, including
+  CDNs, are not fetched; page rules can inspect their URL text.
+- At most 300 files are fetched per site, each up to 10 MiB decoded and 20 MiB
+  on the wire, with at most 96 MiB decoded across the site's files. The
+  resource phase is limited to 180 seconds per site and the run is limited to
+  60 minutes. When the run deadline is near, resource fetching stops while the
+  page result is retained; a five-second margin prevents starting another file
+  close to that deadline. Oversized, refused, invalid-type and timed-out files
+  are skipped and counted by reason in the review run metadata without changing
+  the site's result.
 - `User-Agent: CVEBeacon-web-detect/<version>`, `Accept:
   text/html,application/xhtml+xml`, `Accept-Language: en`, `Cache-Control:
   no-cache`, `Accept-Encoding: gzip, deflate` and `Connection: close`.
+- Resource requests use `Accept: */*` for scripts or
+  `Accept: text/css,*/*;q=0.1` for styles, and set `Referer` to the final page
+  URL without its fragment. Requests are sequential within a site, serialized
+  per host, and paced at least 100 ms apart for the same host.
 - No client cookies, authentication headers, request body, `Range`, `POST`,
-  link following, subresource requests or path guessing.
+  source maps, images, fonts, media, frames or JavaScript execution. Third-party
+  resources are not fetched.
+- Fetched files are processed one at a time and never saved. The private review
+  file can include up to 20 evidence items per product, with excerpts capped at
+  160 characters. File evidence also includes SHA-256 of the decoded bytes and
+  their decoded size; icon evidence has the same hash and size.
 - TLS verification is always on with a minimum of TLS 1.2. An optional
   per-client CA bundle is trusted in addition to the system store; there is no
   insecure switch.
