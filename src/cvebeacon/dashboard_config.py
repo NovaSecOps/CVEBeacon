@@ -238,6 +238,20 @@ NUMBER_FIELDS = {"port", "max_items", "priority", "min_interval_seconds", "timeo
                  "session_lifetime_seconds", "session_idle_seconds", "retention_days", "keep_min"}
 COMPLEX_FIELDS = {"sources", "channels", "events", "cvss_providers", "condition", "columns",
                   "to", "cc", "bcc", "recipients", "conversation_references"}
+_PRESET_REQUIRED_COLUMNS = {key: key for key in CANONICAL_FIELDS}
+_PRESET_GENERAL_COLUMNS = {key: key for key in (*CANONICAL_FIELDS, *OPTIONAL_FIELDS)}
+_CONFIG_PRESETS = {
+    "watch-nvd-only": ("watch", "watch-sources", ["nvd"]),
+    "watch-all-catalogs": ("watch", "watch-sources", list(WATCH_SOURCES)),
+    "inventory-required-columns": ("inventory", "columns", _PRESET_REQUIRED_COLUMNS),
+    "inventory-general-inventory": ("inventory", "columns", _PRESET_GENERAL_COLUMNS),
+    "watch-quiet-baseline": ("watch", "fields", {"initial": "baseline"}),
+    "watch-backfill-7-days": ("watch", "fields", {"initial": "backfill", "backfill_days": 7}),
+    "watch-full-history": ("watch", "fields", {"initial": "full"}),
+    "backup-7-days": ("backup", "fields", {"retention_days": 7}),
+    "backup-30-days": ("backup", "fields", {"retention_days": 30}),
+    "backup-90-days": ("backup", "fields", {"retention_days": 90}),
+}
 
 
 # This security allowlist is deliberately independent of presentation metadata.
@@ -2690,6 +2704,136 @@ def _copy_form(form):
     return copied
 
 
+def _preset_definition(section, form):
+    if "preset" not in form:
+        return None
+    if form.get("action") != "preview":
+        abort(400)
+    name = _posted_one(form, "preset")
+    definition = _CONFIG_PRESETS.get(name)
+    if definition is None or definition[0] != section:
+        abort(400)
+    return name, definition
+
+
+def _apply_source_preset(document, form, copied, sources):
+    groups = groups_for("watch", document, count=1)
+    view = _structured_control(groups, "sources")["structured"]
+    mode = _posted_one(form, "g0_sources_mode")
+    if mode != view["mode"]:
+        abort(400)
+    if mode == "checkboxes":
+        for source in WATCH_SOURCES:
+            name = f"g0_sources_{source}"
+            values = form.getlist(name)
+            if len(values) > 1 or values and values[0] != source:
+                abort(400)
+            copied.pop(name, None)
+        for source in sources:
+            copied.setlist(f"g0_sources_{source}", [source])
+    elif mode == "text":
+        _posted_one(form, "g0_sources")
+    else:
+        abort(400)
+
+
+def _apply_column_preset(document, form, copied, patch):
+    groups = groups_for("inventory", document, count=1)
+    control = _structured_control(groups, "columns")
+    view = control["structured"]
+    mode = _posted_one(form, "g0_columns_mode")
+    if mode != view["mode"]:
+        abort(400)
+    if mode == "text":
+        _posted_one(form, "g0_columns")
+        return
+    if mode != "rows":
+        abort(400)
+
+    rows, add_key, add_heading, action = _parse_column_rows(form, view)
+    if action is not None:
+        abort(400)
+    old_count = int(_posted_one(form, "g0_columns_count"))
+    if add_key or add_heading:
+        if not add_key:
+            raise FieldValidationError(control, "required")
+        if len(rows) >= INVENTORY_COLUMN_ROW_LIMIT:
+            abort(400)
+        rows = [*rows, {"key": add_key, "heading": add_heading}]
+    rows_by_key = {row["key"]: row for row in rows}
+    for key, heading in patch.items():
+        if key in rows_by_key:
+            rows_by_key[key]["heading"] = heading
+        else:
+            row = {"key": key, "heading": heading}
+            rows.append(row)
+            rows_by_key[key] = row
+    if len(rows) > INVENTORY_COLUMN_ROW_LIMIT:
+        abort(400)
+
+    for index in range(old_count):
+        copied.pop(f"g0_column_key_{index}", None)
+        copied.pop(f"g0_column_heading_{index}", None)
+    copied.setlist("g0_columns_count", [str(len(rows))])
+    for index, row in enumerate(rows):
+        copied.setlist(f"g0_column_key_{index}", [row["key"]])
+        copied.setlist(f"g0_column_heading_{index}", [row["heading"]])
+    copied.setlist("g0_column_add_key", [""])
+    copied.setlist("g0_column_add_heading", [""])
+
+
+def _apply_config_preset(section, document, form, definition):
+    if definition is None:
+        return form
+    _, (target_section, kind, patch) = definition
+    if target_section != section:
+        abort(400)
+    if form_row_count(form) != 1:
+        abort(400)
+    copied = _copy_form(form)
+    copied.pop("preset", None)
+    if kind == "watch-sources":
+        _apply_source_preset(document, form, copied, patch)
+    elif kind == "columns":
+        _apply_column_preset(document, form, copied, patch)
+    else:
+        for key, item in patch.items():
+            name = "g0_" + key
+            if name not in form:
+                abort(400)
+            _posted_one(form, name)
+            copied.setlist(name, [str(item)])
+    return copied
+
+
+def _preset_uses_text_fallback(definition, form):
+    if definition is None:
+        return False
+    _, (section, kind, _) = definition
+    if kind == "watch-sources":
+        return section == "watch" and _posted_one(form, "g0_sources_mode") == "text"
+    if kind == "columns":
+        return section == "inventory" and _posted_one(form, "g0_columns_mode") == "text"
+    return False
+
+
+def _apply_text_fallback_preset(document, definition):
+    _, (_, kind, patch) = definition
+    if kind == "watch-sources":
+        document.setdefault("watch", {})["sources"] = deepcopy(patch)
+    elif kind == "columns":
+        inventory = document.setdefault("inventory", {})
+        if "columns" in inventory:
+            columns = inventory["columns"]
+            if not isinstance(columns, dict):
+                abort(400)
+        else:
+            columns = {}
+        merged = deepcopy(columns)
+        merged.update(deepcopy(patch))
+        inventory["columns"] = _ordered_patch(columns, merged)
+
+
 def _structured_control(groups, key):
     return next(control for group in groups for control in group["controls"]
                 if control["key"] == key and "structured" in control)
@@ -2941,7 +3085,8 @@ def _mapping_from_rows(rows, control):
     return mapping
 
 
-def _prepare_structured_config_form(section, document, form, *, count):
+def _prepare_structured_config_form(section, document, form, *, count,
+                                    preset_intent=None):
     """Translate the two structured controls before the existing parser runs."""
     if section not in {"watch", "inventory"}:
         return form, None
@@ -2949,6 +3094,7 @@ def _prepare_structured_config_form(section, document, form, *, count):
         abort(400)
     groups = groups_for(section, document, count=count)
     copied = _copy_form(form)
+    preset_kind = preset_intent[1][1] if preset_intent is not None else None
     if section == "watch":
         control = _structured_control(groups, "sources")
         view = control["structured"]
@@ -2964,7 +3110,7 @@ def _prepare_structured_config_form(section, document, form, *, count):
                     abort(400)
                 if values:
                     selected.append(source)
-            if set(selected) == set(view["selected"]):
+            if set(selected) == set(view["selected"]) and preset_kind != "watch-sources":
                 replacement = value(view["raw"]) if view["present"] else ""
             else:
                 replacement = value([source for source in WATCH_SOURCES if source in selected])
@@ -3010,7 +3156,7 @@ def _prepare_structured_config_form(section, document, form, *, count):
     mapping = _mapping_from_rows(rows, control)
     original_rows = view["rows"]
     unchanged = rows == original_rows
-    if unchanged:
+    if unchanged and preset_kind != "columns":
         replacement = value(view["raw"]) if view["present"] else ""
     else:
         replacement = value(mapping)
@@ -3559,6 +3705,8 @@ def register_config(app, config, *, host):
         structured_draft = None
         structured_values = {}
         field_error_control = None
+        preset_definition = None
+        preset_form = None
         status = 400
         try:
             document, _, _, version, current_config = editor.read()
@@ -3575,6 +3723,7 @@ def register_config(app, config, *, host):
                         "The configuration directory is read-only. Ask the operator to enable "
                         "editing for the dashboard service, then reload this page.")
                 action = request.form.get("action")
+                preset_definition = _preset_definition(section, request.form)
                 rule_action = section == "rules" and _rule_form_action(request.form)
                 if action == "confirm":
                     ended = editor.commit(request.form.get("preview"), section, app.extensions["dashboard_users"],
@@ -3588,6 +3737,9 @@ def register_config(app, config, *, host):
                     abort(409, "The configuration changed. Reload and try again."
                           if section == "rules" else "Configuration changed; reload the form")
                 count = form_row_count()
+                preset_form = _apply_config_preset(
+                    section, document, request.form, preset_definition,
+                )
                 if section == "inventory" and _inventory_columns_action(request.form):
                     groups = _handle_inventory_columns_action(
                         document, request.form,
@@ -3624,10 +3776,11 @@ def register_config(app, config, *, host):
                     row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
                     groups = groups_for(section, document, count=count, row_types=row_types,
                                         can_manage="manage_secrets" in g.permissions, can_admin=g.user.is_admin)
-                    prepared = request.form
+                    prepared = preset_form
                     if section in {"watch", "inventory"}:
                         prepared, structured_draft = _prepare_structured_config_form(
-                            section, document, request.form, count=count)
+                            section, document, prepared, count=count,
+                            preset_intent=preset_definition)
                     prepared, list_draft, structured_values, list_action = _prepare_list_controls(
                         groups, prepared)
                     if structured_draft is None:
@@ -3656,6 +3809,16 @@ def register_config(app, config, *, host):
                             can_admin=g.user.is_admin, count=count, form=prepared,
                             structured_values=structured_values,
                         )
+                        if _preset_uses_text_fallback(preset_definition, request.form):
+                            try:
+                                editor.validate(candidate)
+                            except ConfigurationError as exc:
+                                if getattr(exc, "field_key", None) is None:
+                                    field_key = _config_loader_field_key(exc, candidate)
+                                    if field_key is not None:
+                                        exc.field_key = field_key
+                                raise
+                            _apply_text_fallback_preset(candidate, preset_definition)
                         preview, lockout = editor.preview(
                             section, candidate, version, staged, replacements,
                             current_document=document, current_config=current_config,
@@ -3700,6 +3863,8 @@ def register_config(app, config, *, host):
             error, status = exc.description, exc.code
         finally:
             editor.discard_staged(staged)
+        if error is not None and preset_definition is not None and preset_form is not None:
+            retained_form = preset_form
         if groups is not None and (
                 retained_form is not None or status == 400 and request.form.get("action") == "preview"):
             if retained_form is not None:

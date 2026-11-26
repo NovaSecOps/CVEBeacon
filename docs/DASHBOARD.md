@@ -608,12 +608,31 @@ order, while a changed selection is written in the loader's canonical order.
 A list with a repeated catalog name uses a TOML text field and is kept as it
 is until edited.
 
+The Watch page offers **NVD only** and **All watch catalogs** presets. Both
+change only `watch.sources`; they leave scan-source toggles, credentials and
+request pacing unchanged. The **Quiet baseline** preset sets the first-load
+mode to `baseline`; **Backfill 7 days** sets `backfill` and a seven-day window;
+**Full history** sets only the mode to `full`, keeping the current backfill
+window. The first check in full history downloads much more data and takes longer.
+These presets use the same preview and confirmation as other configuration
+changes, and keep other edits already entered on the page.
+
 Inventory column mappings use repeatable rows with a canonical field selector
 and a free-text source heading. Every canonical and optional field is offered;
 `asset_id` is required. A mapping with a non-text heading uses a TOML text
 field so its values are kept as they are until edited. The loader still
 validates the resulting document. A stored value the loader rejects, such as
 an unknown catalog name, opens as an error page; fix it in the file first.
+The **CVEBeacon required columns** preset sets `asset_id`, `vendor`, `product`
+and `version` to their matching headings while keeping other mappings. The
+**CVEBeacon general inventory** preset sets those fields and every optional
+mapping to its matching heading. Both leave the inventory file and format
+settings unchanged.
+
+**Configuration → Backups** offers **7 days**, **30 days** and **90 days**
+presets for retention. They change only `backup.retention_days`, keeping the
+minimum retained count, compression setting and backup directory. Presets show
+the normal preview diff and require confirmation before saving.
 
 Alert rules open in the builder when their condition fits its fixed criteria.
 It can combine included criteria with **Any one** or **All**, then apply
