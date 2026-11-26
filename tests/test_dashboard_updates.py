@@ -255,3 +255,19 @@ def test_incomplete_recovery_and_finalization_offer_recover_even_after_a_newer_r
     page = client.get("/updates/").text
     assert "Run <code>cvebeacon update recover</code>" in page
     assert ("writes remain blocked" if recovery else "could not archive the completed transaction") in page
+
+
+@pytest.mark.parametrize("bad_date", [False, True])
+def test_recovery_uses_fixed_guidance_and_contains_out_of_range_dates(updates, bad_date):
+    config, _, client = updates
+    updater.atomic_json(config.config_path.parent / updater.STATUS, {"last_update": {
+        "result": "updated", "version": "0.2.1",
+        "time": "0001-01-01T00:00:00+01:00" if bad_date else "2026-01-01T00:00:00+00:00",
+        "warning": "sample unrelated message", "recovery_reason": "probe-unhealthy"}})
+    login(client, "viewer")
+    page = client.get("/updates/")
+    assert page.status_code == 200
+    assert "Last update: updated" in page.text
+    assert "The dashboard did not pass its health check after starting." in page.text
+    assert "sample unrelated message" not in page.text
+    assert ("2026-01-01 00:00 UTC" in page.text) is not bad_date

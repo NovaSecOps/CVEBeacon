@@ -5,7 +5,7 @@ from flask import Blueprint, abort, current_app, flash, g, redirect, render_temp
 
 from .dashboard_ops import _text, requires, require_accounts
 from .errors import CVEBeaconError
-from .updater import MAX_NOTES, check, read_status, request_update, status_time, unsupported_reason
+from .updater import EARLIEST, MAX_NOTES, check, diagnostic_version, read_status, request_update, status_time, unsupported_reason
 
 
 UPDATE_REASON_TEXT = {
@@ -79,6 +79,9 @@ def _display_status(config):
                                              "last_update", "last_request", "last_attempt") if key in persisted}
     notes = status.get("notes")
     status["notes"] = _strip_comments(notes) if isinstance(notes, str) else ""
+    status["available"] = diagnostic_version(status.get("available"))
+    checked = status_time(status, "last_check")
+    status["last_check"] = checked.strftime("%Y-%m-%d %H:%M UTC") if checked is not None else ""
     attempts = []
     for key in ("last_update", "last_request", "last_attempt"):
         value = status.get(key)
@@ -87,10 +90,12 @@ def _display_status(config):
             continue
         entry = dict(value)
         entry["reason_text"] = _reason_text(entry.get("reason"))
+        when = status_time(entry)
+        entry["time_display"] = when.strftime("%Y-%m-%d %H:%M UTC") if when is not None else ""
         status[key] = entry
-        attempts.append(entry)
+        attempts.append((when or EARLIEST, entry))
 
-    latest = max(attempts, key=status_time, default={})
+    _, latest = max(attempts, key=lambda item: item[0], default=(EARLIEST, {}))
     update = status.get("last_update", {})
     recovery = _reason_text(update.get("recovery_reason"))
     finalization = _reason_text(update.get("finalization_reason"))
@@ -100,16 +105,22 @@ def _display_status(config):
         if recovery != status["recovery_text"]:
             status["recovery_detail"] = recovery
     elif recovery:
-        status["recovery_text"] = warning if isinstance(warning, str) else recovery
+        status["recovery_text"] = recovery
     elif update.get("reason") == "recovery-incomplete":
         status["recovery_text"] = update["reason_text"]
+    elif not finalization and warning == "completed update recovery could not verify the selected release":
+        status["recovery_text"] = "Recovery could not verify the selected release."
 
-    if finalization or isinstance(warning, str) and not recovery:
-        status["finalization_text"] = finalization or warning
-        status["finalization_recover"] = (
-            update.get("finalization_reason") in ("finalize-timers-failed", "finalize-archive-failed")
-            or isinstance(warning, str) and warning.startswith("update committed; run update recover")
-        )
+    if finalization:
+        status["finalization_text"] = finalization
+        status["finalization_recover"] = update.get("finalization_reason") in (
+            "finalize-timers-failed", "finalize-archive-failed")
+    elif not status.get("recovery_text"):
+        if warning == "update committed; run update recover to finish finalization":
+            status["finalization_text"] = "The update was committed and finalization still needs to finish."
+            status["finalization_recover"] = True
+        elif warning == "update committed; temporary-file cleanup needs administrator review":
+            status["finalization_text"] = UPDATE_REASON_TEXT["finalize-cleanup-failed"]
 
     if latest.get("reason_text") and not (
         status.get("recovery_text") and (latest is update or latest.get("reason") == "recovery-incomplete")
