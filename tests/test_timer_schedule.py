@@ -350,4 +350,3 @@ def test_run_if_due_records_start_before_starting_monitoring(tmp_path, monkeypat
     assert len(starts) == 1
     assert starts[0] is not None
     assert starts[0].tzinfo is not None
-
