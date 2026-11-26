@@ -167,13 +167,20 @@ def test_partial_inventory_sources_hide_all_three_inventory_card_counts(tmp_path
     assert '<span class="stat-value">1</span>' not in kpis
 
 
-def test_partial_web_manifest_hides_inventory_card_counts(tmp_path):
+def test_partial_web_manifest_is_counted_like_the_scan_uses_it(tmp_path):
+    # A partial manifest is a readable snapshot whose detection was incomplete.
+    # Scans use it with a warning, so Home counts it and the checklist stays Done.
+    from cvebeacon.dashboard_setup import _inventory_info
+
     config, _, client = make_home(tmp_path, web_snapshots=True)
     _record_one_affected(config)
     _write_web_snapshot(config.database_path.parent / "web-inventory", partial=True)
     kpis = home_kpis(client.get("/").text)
-    assert kpis.count('<span class="stat-value">Could not check</span>') == 3
-    assert "An inventory source could not be read." in kpis
+    assert "Could not check" not in kpis
+    assert "An inventory source could not be read." not in kpis
+    assert '<span class="stat-value">1</span><span class="stat-label">Affected findings</span>' in kpis
+    info = _inventory_info(config)
+    assert info is not None and info.exists
 
 
 @pytest.mark.parametrize(
