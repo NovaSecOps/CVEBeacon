@@ -12,6 +12,10 @@ from cvebeacon_extensions import web, webfingerprints as wf, webrules
 from cvebeacon_extensions.webrules import Resource, page_from
 
 
+
+# The reader loads external collections on POSIX systems only (see load_fingerprints).
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="external fingerprint collections are POSIX-only")
+
 def write_json(path, value):
     path.write_text(json.dumps(value), encoding="utf-8", newline="\n")
 

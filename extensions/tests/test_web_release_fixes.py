@@ -3,6 +3,7 @@ browser path resolution and stable scoped row IDs."""
 
 import dataclasses
 import json
+import os
 
 import pytest
 
@@ -70,6 +71,7 @@ def test_an_unreadable_collection_file_makes_the_result_partial(tmp_path, monkey
     assert loaded is not None and count == 1 and error is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="external fingerprint collections are POSIX-only")
 def test_incomplete_collection_loads_are_not_cached(tmp_path, monkeypatch):
     root, _ = make_collection(tmp_path, {"Alpha": {"cats": [2], "html": ["alpha-marker"]}})
     real = webfingerprints._load_uncached
@@ -116,3 +118,11 @@ def test_scoped_cpe_rows_keep_their_ids_whatever_the_order(tmp_path, monkeypatch
     assert rows["a"] == plain
     assert rows["o"] != plain
     (tmp_path / "order").write_text(json.dumps(rows), encoding="utf-8", newline="\n")
+
+
+def test_windows_reports_external_collections_as_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setattr(webfingerprints.os, "name", "nt")
+    loaded = webfingerprints.load_fingerprints(tmp_path)
+    assert loaded.technology_count == 0 and loaded.incomplete
+    monkeypatch.setattr(webfingerprints, "load_fingerprints", lambda directory: loaded)
+    assert web._load_external_fingerprints(tmp_path) == (None, 0, True)

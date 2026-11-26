@@ -90,6 +90,10 @@ directory. The maintained community collection is licensed under GPL-3.0; that
 licence applies to the fingerprint data. Check the licence for any collection
 you choose to use and follow its terms.
 
+Reading an external collection is currently supported on Linux and other POSIX
+systems. On Windows the scan reports the collection as not supported and is
+marked partial; the built-in rules still run.
+
 The reader supports passive matching for response headers, cookie names, all
 HTML meta tags, script source URLs, script text, CSS, HTML, visible page text,
 the page URL, robots resources and a bounded static DOM selector subset. Static

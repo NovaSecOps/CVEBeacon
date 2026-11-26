@@ -1431,6 +1431,7 @@ INCOMPLETE_LOAD_REASONS = frozenset({
     "fingerprint directory unavailable", "untrusted fingerprint layout",
     "technology file changed during loading", "technology file unavailable",
     "technology file unavailable or untrusted", "categories file unavailable",
+    "fingerprint collections are not supported on this platform",
 })
 _LOAD_CACHE: dict[tuple, Fingerprints] = {}
 _LOAD_CACHE_ORDER: deque[tuple] = deque()
@@ -1444,10 +1445,16 @@ def load_fingerprints(directory: Path) -> Fingerprints:
     its ``technologies`` child. Malformed files and patterns are counted and
     skipped so an optional collection cannot abort a scan.
 
-    Windows handles reject reparse points and pin the directory chain during
-    loading. The reader does not evaluate effective Windows ACLs. The operator
-    must restrict write access to the collection and its directories.
+    External collections are read on POSIX systems only for now; on Windows the
+    load reports that the platform is not supported and the scan is partial.
+    The operator must restrict write access to the collection and its directories.
     """
+    if os.name == "nt":
+        # The trust checks rely on POSIX directory handles and no-follow opens.
+        stats = FingerprintStats(skipped_technologies=(
+            ("fingerprint collections are not supported on this platform", 1),))
+        return Fingerprints(Path(directory), (), (), MappingProxyType({}), MappingProxyType({}), stats,
+                            MappingProxyType({}), MappingProxyType({}))
     with ExitStack() as stack:
         try:
             snapshot = _snapshot_directory(Path(directory), stack)
