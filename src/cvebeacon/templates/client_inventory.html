@@ -55,10 +55,10 @@
 </div>
 {% endcall %}
 {% elif not warning %}
-{{ empty_state('No inventory yet', 'No inventory has been uploaded for this client. Upload a list of their software to get started.' if can_manage else 'No inventory has been uploaded for this client.') }}
+{% if is_unassigned %}{{ empty_state('No inventory yet', 'No inventory has been saved without a client. Add a list of the assets you want CVEBeacon to check.' if can_manage else 'No inventory has been saved without a client.') }}{% else %}{{ empty_state('No inventory yet', 'No inventory has been uploaded for this client. Upload a list of their software to get started.' if can_manage else 'No inventory has been uploaded for this client.') }}{% endif %}
 {% endif %}
 
-{% if count is not none %}
+{% if count is not none and is_unassigned %}
 {% call card('Inventory rows') %}
 <p>Showing rows {{ row_start }}–{{ row_end }} of {{ count }}.</p>
 {% call table_wrap('Inventory rows') %}
@@ -93,7 +93,11 @@
 {% endif %}
 </div>
 
-{% if can_manage %}
+{% if can_manage and is_unassigned %}
+{% call card('Add inventory', 'Add rows to this list, or replace it, from the Inventory page.', id='upload-inventory') %}
+<div class="form-actions">{{ link_button('Add inventory', url_for('client_inventory.inventory_add')) }}</div>
+{% endcall %}
+{% elif can_manage %}
 {% call card('Upload inventory', 'Choose a file or paste rows listing the software you run for this client.', id='upload-inventory') %}
 {{ steps(['Choose a file', 'Review and save'], current=1) }}
 <form method="post" class="stack" enctype="multipart/form-data" action="{{ url_for('client_inventory.upload', key=key, name=profile.name) }}">

@@ -994,3 +994,26 @@ def test_inventory_page_lists_configured_and_web_asset_rows(tmp_path):
     assert "Set in the configuration file" in page.text and "configured-row" not in page.text
     assert "Web asset results" in page.text and 'href="/web-assets">Web assets</a>' in page.text
     assert ">1</td>" in page.text
+
+
+def test_no_client_page_adds_through_the_inventory_page_not_a_client_route(deployment):
+    _, _, _, browser = deployment
+    empty = browser.get("/inventory/unassigned")
+    assert empty.status_code == 200
+    assert "No inventory has been saved without a client." in empty.text
+    assert "for this client" not in empty.text
+    assert general_submit(browser, general_upload(browser)).status_code == 303
+    page = browser.get("/inventory/unassigned")
+    assert 'href="/inventory/add"' in page.text
+    assert "/watch/clients/unassigned/upload" not in page.text
+    assert "Inventory rows" in page.text
+
+
+def test_client_inventory_page_keeps_its_previous_sections(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    assert submit(browser, detail, upload(browser, detail)).status_code == 303
+    page = browser.get(detail)
+    assert page.status_code == 200
+    assert "Inventory rows" not in page.text
+    assert "All inventory" in page.text
