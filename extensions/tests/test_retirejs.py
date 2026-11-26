@@ -80,7 +80,8 @@ def test_unknown_url_signature_cannot_contribute_to_a_content_identity(monkeypat
     url = "https://assets.example.invalid/widget-9.8.7.js"
     page = page_from({}, "", [Resource(url, "script", "fixture=1.2.3")])
     for detections in (retirejs.detect(page), detect(page)):
-        review = next(item for item in detections if item.evidence_types == ("url",))
+        review = next(item for item in detections if item.evidence_types == ("url",)
+                      and item.vendor not in webrules.REVIEW_ONLY_VENDORS)
         assert (review.ecosystem, review.package, review.versions) == ("", "", ())
         assert review.evidence == (Evidence("url", url, "widget-9.8.7.js"),)
         identified = next(item for item in detections if item.package == "unreviewed-widget")

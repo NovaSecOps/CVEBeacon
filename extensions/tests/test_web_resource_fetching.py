@@ -522,3 +522,24 @@ def test_requests_to_one_host_do_not_overlap_across_site_workers(tmp_path):
     run(tmp_path, [asset(path="/one"), asset(path="/two", port=444)], html, clock=clock,
         transport=transport, host_interval=0, max_workers=2)
     assert transport.maximum_active == 1
+
+
+def test_generic_banner_is_reported_without_a_row_or_review_entry(tmp_path):
+    html = '<script src="/lib.js"></script>'
+    files = [response(content_type="text/javascript", body=b"/*! Swiperish 8.4.5 | MIT */var a=1;")]
+    detail, _, output, _ = run(tmp_path, [asset()], html, files)
+    swiper = [p for p in detail["products"] if p.get("name") == "Swiperish"]
+    assert len(swiper) == 1
+    assert swiper[0]["versions"] == ["8.4.5"] and swiper[0]["confidence"] == "low"
+    assert swiper[0]["inventory"] is False
+    assert not any(r["reason"] in {"version-unknown", "version-conflict"}
+                   and "swiperish" in r.get("product", "").lower() for r in detail["reviews"])
+    assert not output.exists() or "swiperish" not in output.read_text(encoding="utf-8").lower()
+
+
+def test_specific_product_with_a_row_is_marked_in_inventory(tmp_path):
+    html = '<script src="/jquery-3.6.0.min.js"></script>'
+    files = [response(content_type="text/javascript", body=b"/*! jQuery v3.6.0 | (c) OpenJS Foundation */")]
+    detail, _, _, _ = run(tmp_path, [asset()], html, files)
+    jquery = [p for p in detail["products"] if p.get("name") == "jQuery"]
+    assert jquery and jquery[0]["versions"] == ["3.6.0"] and jquery[0]["inventory"] is True

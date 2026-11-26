@@ -504,6 +504,31 @@ main > table { background: var(--surface); border: 1px solid var(--border); }
 .web-evidence-panel li > p { margin-bottom: var(--space-1); }
 .web-evidence-panel pre { max-width: 100%; padding: var(--space-2); }
 
+/* Detected products: filters, summary chips and the by-technology view */
+.web-filters {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--space-3);
+  align-items: end;
+}
+.web-filters select, .web-filters input:not([type="checkbox"]) { width: 100%; }
+.web-filter-confidence { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.web-filters .form-actions { grid-column: 1 / -1; }
+.web-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); list-style: none; margin: 0 0 var(--space-3); padding: 0; }
+.web-chip {
+  display: inline-block; padding: 2px var(--space-3); border: 1px solid var(--border-strong);
+  border-radius: 999px; background: var(--surface-2); color: var(--text); font-size: .86rem; font-weight: 600;
+}
+a.web-chip, a.web-chip:visited { color: var(--link); text-decoration: underline; }
+a.web-chip:hover { border-color: var(--link); }
+.web-view-switch { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.web-view-switch [aria-current="page"] { border-color: var(--link); font-weight: 700; text-decoration: underline; }
+.web-tech-table { min-width: 50rem; table-layout: fixed; }
+.web-tech-table td { min-width: 0; overflow-wrap: anywhere; }
+.web-tech-table thead th:nth-child(1) { width: 30%; }
+.web-tech-table thead th:nth-child(2) { width: 9%; }
+.web-tech-table thead th:nth-child(3) { width: 25%; }
+.web-tech-table thead th:nth-child(4) { width: 14%; }
+.web-tech-table thead th:nth-child(5) { width: 22%; }
+
 /* Definition list: label and value pairs */
 dl { display: grid; grid-template-columns: minmax(160px, 240px) 1fr; gap: var(--space-3) var(--space-5); margin: 0 0 var(--space-4); }
 dt { font-weight: 650; color: var(--text); }
