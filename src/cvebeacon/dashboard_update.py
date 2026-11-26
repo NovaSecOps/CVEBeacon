@@ -5,7 +5,7 @@ from flask import Blueprint, abort, current_app, flash, g, redirect, render_temp
 
 from .dashboard_ops import _text, requires, require_accounts
 from .errors import CVEBeaconError
-from .updater import MAX_NOTES, check, read_status, request_update, unsupported_reason
+from .updater import MAX_NOTES, check, read_status, request_update, status_time, unsupported_reason
 
 
 UPDATE_REASON_TEXT = {
@@ -28,6 +28,14 @@ UPDATE_REASON_TEXT = {
     "start-failed": "The dashboard could not be started after the update.",
     "doctor-failed": "The local health checks did not pass after the update.",
     "recovery-incomplete": "Automatic recovery could not finish; writes remain blocked until recovery succeeds.",
+    "adopt-failed": "The updater could not finish adopting the installation.",
+    "finalize-timers-failed": "The updater could not restart the timers after committing the transaction.",
+    "finalize-archive-failed": "The updater could not archive the completed transaction.",
+    "finalize-cleanup-failed": "Update cleanup needs administrator review.",
+    "policy-invalid": "The administrator's update policy could not be loaded.",
+    "request-invalid": "The dashboard update request was invalid.",
+    "request-claim-failed": "The updater could not claim the dashboard update request.",
+    "version-invalid": "The updater requires a canonical release version.",
     "update-failed": "The updater could not complete the requested operation.",
 }
 
@@ -61,26 +69,53 @@ def _strip_comments(notes):
     return "".join(parts).strip()
 
 
+def _reason_text(code):
+    return UPDATE_REASON_TEXT.get(code) if isinstance(code, str) else None
+
+
 def _display_status(config):
-    status = read_status(config)
+    persisted = read_status(config)
+    status = {key: persisted[key] for key in ("notes", "available", "last_check",
+                                             "last_update", "last_request", "last_attempt") if key in persisted}
     notes = status.get("notes")
-    if isinstance(notes, str):
-        status["notes"] = _strip_comments(notes)
-    for key in ("last_request", "last_update"):
+    status["notes"] = _strip_comments(notes) if isinstance(notes, str) else ""
+    attempts = []
+    for key in ("last_update", "last_request", "last_attempt"):
         value = status.get(key)
-        if isinstance(value, dict) and value.get("reason"):
-            value = dict(value)
-            value["reason_text"] = UPDATE_REASON_TEXT.get(
-                value["reason"], "The updater could not complete the requested operation."
-            )
-            status[key] = value
-    latest = status.get("last_update")
-    request_status = status.get("last_request")
-    if (isinstance(latest, dict) and latest.get("reason_text")
-            and isinstance(request_status, dict) and not request_status.get("reason_text")):
-        request_status = dict(request_status)
-        request_status["reason_text"] = latest["reason_text"]
-        status["last_request"] = request_status
+        if not isinstance(value, dict):
+            status.pop(key, None)
+            continue
+        entry = dict(value)
+        entry["reason_text"] = _reason_text(entry.get("reason"))
+        status[key] = entry
+        attempts.append(entry)
+
+    latest = max(attempts, key=status_time, default={})
+    update = status.get("last_update", {})
+    recovery = _reason_text(update.get("recovery_reason"))
+    finalization = _reason_text(update.get("finalization_reason"))
+    warning = update.get("warning")
+    if recovery and update.get("result") == "rollback-failed":
+        status["recovery_text"] = UPDATE_REASON_TEXT["recovery-incomplete"]
+        if recovery != status["recovery_text"]:
+            status["recovery_detail"] = recovery
+    elif recovery:
+        status["recovery_text"] = warning if isinstance(warning, str) else recovery
+    elif update.get("reason") == "recovery-incomplete":
+        status["recovery_text"] = update["reason_text"]
+
+    if finalization or isinstance(warning, str) and not recovery:
+        status["finalization_text"] = finalization or warning
+        status["finalization_recover"] = (
+            update.get("finalization_reason") in ("finalize-timers-failed", "finalize-archive-failed")
+            or isinstance(warning, str) and warning.startswith("update committed; run update recover")
+        )
+
+    if latest.get("reason_text") and not (
+        status.get("recovery_text") and (latest is update or latest.get("reason") == "recovery-incomplete")
+    ):
+        status["failure"] = latest["reason_text"]
+        status["failure_action"] = "recover" if latest.get("reason") == "recovery-incomplete" else "apply"
     return status
 
 

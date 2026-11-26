@@ -6,7 +6,6 @@ import pytest
 from cvebeacon import dashboard, dashboard_update, updater
 from cvebeacon.config import UpdateConfig
 from cvebeacon.dashboard_config import check_document, dashboard_authority_changed
-from cvebeacon.watch.users import UserStore
 from test_dashboard_operations import login, make_config, new_accounts, submit
 
 
@@ -20,17 +19,8 @@ def updates(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def feedback_updates(tmp_path, monkeypatch):
-    # The task sandbox presents / as owned by nobody; this test exercises the
-    # update feedback route and does not depend on the storage ancestry check.
-    monkeypatch.setattr(
-        UserStore, "_trusted_directory_chain", staticmethod(lambda directory: ())
-    )
-    config = replace(make_config(tmp_path), update=UpdateConfig(enabled=True))
-    users = new_accounts(config)
-    app = dashboard.create_app(config)
-    monkeypatch.setattr(dashboard_update, "unsupported_reason", lambda: None)
-    return config, users, app.test_client()
+def feedback_updates(updates):
+    return updates
 
 
 def test_view_can_read_status_and_notes_are_escaped(updates):
@@ -123,9 +113,6 @@ def test_update_check_feedback_is_shown_on_updates_page(
 def test_disabled_update_check_does_not_use_cached_status_or_audit(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(
-        UserStore, "_trusted_directory_chain", staticmethod(lambda directory: ())
-    )
     config = replace(
         make_config(tmp_path), update=UpdateConfig(enabled=False)
     )
@@ -215,3 +202,54 @@ def test_release_notes_comment_scan(updates, monkeypatch, notes, visible):
     assert all(text not in page.text for text in ("outer", "inner", "tail --&gt;", "multiline", "<b>escaped"))
     if "after" in visible:
         assert "&lt;b&gt;escaped&lt;/b&gt;" in page.text
+
+
+@pytest.mark.parametrize(("older", "latest", "expected"), [
+    (("last_request", "busy", "lock-failed"), ("last_update", "updated", None), None),
+    (("last_update", "refused", "probe-unhealthy"), ("last_request", "busy", "lock-failed"), "acquire the required locks"),
+    (("last_request", "busy", "lock-failed"), ("last_attempt", "refused", "version-invalid"), "canonical release version"),
+])
+def test_latest_attempt_controls_primary_callout(updates, monkeypatch, older, latest, expected):
+    def attempt(row, time):
+        _, result, reason = row
+        return {"result": result, "reason": reason, "time": time}
+
+    _, _, client = updates
+    state = {older[0]: attempt(older, "2026-01-01T00:00:00+00:00"),
+             latest[0]: attempt(latest, "2026-01-01T00:00:01+00:00")}
+    monkeypatch.setattr(dashboard_update, "read_status", lambda config: state)
+    login(client, "viewer")
+    page = client.get("/updates/").text
+    if expected is None:
+        assert "The last update needs attention" not in page
+    else:
+        assert "The last update needs attention" in page
+        assert expected in page.split("The last update needs attention", 1)[1]
+
+
+@pytest.mark.parametrize("reason", [[], {"code": "check-network"}, "unknown-reason", None])
+def test_malformed_reason_ignores_injected_text_and_preserves_legacy_result(updates, monkeypatch, reason):
+    _, _, client = updates
+    state = {"last_request": {"result": "refused", "reason": reason, "reason_text": "synthetic injected text"}}
+    monkeypatch.setattr(dashboard_update, "read_status", lambda config: state)
+    login(client, "viewer")
+    page = client.get("/updates/")
+    assert page.status_code == 200
+    assert "Last request: refused" in page.text
+    assert "synthetic injected text" not in page.text
+    assert "The last update needs attention" not in page.text
+
+
+@pytest.mark.parametrize("followup", ["recovery_reason", "finalization_reason"])
+def test_incomplete_recovery_and_finalization_offer_recover_even_after_a_newer_request(updates, monkeypatch, followup):
+    _, _, client = updates
+    recovery = followup == "recovery_reason"
+    state = {"last_update": {"time": "2026-01-01T00:00:00+00:00",
+                              "result": "rollback-failed" if recovery else "updated",
+                              followup: "probe-unhealthy" if recovery else "finalize-archive-failed"},
+             "last_request": {"time": "2026-01-01T00:00:01+00:00", "result": "busy", "reason": "lock-failed"}}
+    monkeypatch.setattr(dashboard_update, "read_status", lambda config: state)
+    login(client, "viewer")
+    page = client.get("/updates/").text
+    assert "Run <code>cvebeacon update recover</code>" in page
+    assert ("writes remain blocked" if recovery else "could not archive the completed transaction") in page

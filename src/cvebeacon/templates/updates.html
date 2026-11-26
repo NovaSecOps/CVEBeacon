@@ -13,13 +13,14 @@
 <p>Current version: <strong>{{ current }}</strong></p>
 <p>Available version: {{ status.available or 'No newer version found yet' }}</p>
 <p>Last check: {{ watch_stamp(status.last_check) or 'Never' }}</p>
-{% if status.last_request or status.last_update %}<details class="disclosure"><summary>Technical details</summary>
+{% if status.last_request or status.last_update or status.last_attempt %}<details class="disclosure"><summary>Technical details</summary>
 {% if status.last_request %}<p class="muted">Last request: {{ status.last_request.reason_text or status.last_request.result }} ({{ status.last_request.version or 'unspecified version' }}) at {{ watch_stamp(status.last_request.time) }}</p>{% endif %}
-{% if status.last_update %}<p class="muted">Last update: {{ status.last_update.result }} ({{ status.last_update.version }}) at {{ watch_stamp(status.last_update.time) }}</p>{% endif %}
+{% if status.last_update %}<p class="muted">Last update: {{ status.last_update.result }} ({{ status.last_update.version or 'unspecified version' }}) at {{ watch_stamp(status.last_update.time) }}</p>{% endif %}
+{% if status.last_attempt %}<p class="muted">Last manual refusal: {{ status.last_attempt.reason_text or status.last_attempt.result }} ({{ status.last_attempt.version or 'unspecified version' }}) at {{ watch_stamp(status.last_attempt.time) }}</p>{% endif %}
 </details>{% endif %}
-{% set failure = status.last_update if status.last_update and status.last_update.reason_text else status.last_request if status.last_request and status.last_request.reason_text else none %}
-{% if failure %}{% call callout('danger', 'The last update needs attention') %}<p>{{ failure.reason_text }}</p><p>Run <code>cvebeacon update apply</code> as an administrator to see details.</p>{% endcall %}
-{% elif status.last_update and status.last_update.warning %}{% call callout('danger', 'The last update needs attention') %}<p>{{ status.last_update.warning }}</p>{% endcall %}{% endif %}
+{% if status.failure %}{% call callout('danger', 'The last update needs attention') %}<p>{{ status.failure }}</p><p>Run <code>cvebeacon update {{ status.failure_action }}</code> as an administrator to see details.</p>{% endcall %}{% endif %}
+{% if status.recovery_text %}{% call callout('danger', 'Update recovery needs attention') %}<p>{{ status.recovery_text }}</p>{% if status.recovery_detail %}<p>{{ status.recovery_detail }}</p>{% endif %}<p>Run <code>cvebeacon update recover</code> as an administrator.</p>{% endcall %}{% endif %}
+{% if status.finalization_text %}{% call callout('warning', 'Update finalization needs attention') %}<p>{{ status.finalization_text }}</p>{% if status.finalization_recover %}<p>Run <code>cvebeacon update recover</code> as an administrator.</p>{% endif %}{% endcall %}{% endif %}
 {% endcall %}
 {% if status.notes %}
 {% call card('Release notes', 'What the available version changes, as described by the release.') %}
