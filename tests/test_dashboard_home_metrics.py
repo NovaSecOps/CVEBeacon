@@ -1,15 +1,22 @@
 """Home KPI cards use honest, current inventory and delivery state."""
 
+from dataclasses import asdict, replace
 from datetime import timedelta
+import hashlib
+import json
+import os
 
 import pytest
 
 from cvebeacon import dashboard, dashboard_setup
 from cvebeacon.config import load_config
-from cvebeacon.dashboard_home import HomeContextCache
+from cvebeacon.dashboard_home import HomeContextCache, home_cache_key
 from cvebeacon.errors import StateError
+from cvebeacon.managed_inventory import client_key
 from cvebeacon.models import Applicability as A, Asset, Finding, QueryResult, Vulnerability, utc_now
+from cvebeacon.private_storage import private_directory
 from cvebeacon.state import StateStore
+from cvebeacon.web_assets import replace_bytes, save_allowlist
 
 
 @pytest.fixture(autouse=True)
@@ -17,11 +24,13 @@ def _no_host_scheduler(monkeypatch):
     monkeypatch.setattr(dashboard_setup, "schedule_scan_state", lambda config: "none")
 
 
-def make_home(tmp_path, *, inventory=True, watch_enabled=False):
+def make_home(tmp_path, *, inventory=True, watch_enabled=False, web_snapshots=False):
     path = tmp_path / "config.toml"
     text = "[state]\ndatabase = 'state.db'\n[output]\ndirectory = 'reports'\n"
     if inventory:
         text += "[inventory]\npath = 'inventory.csv'\n"
+        if web_snapshots:
+            text += "web_snapshots = true\n"
     if watch_enabled:
         text += "[watch]\nenabled = true\n"
     text += "[sources]\n" + "\n".join(
@@ -61,7 +70,46 @@ def home_kpis(page):
     return page[wrapper_start:wrapper_end]
 
 
-def test_home_replaces_seven_stat_tiles_with_five_linked_kpis(tmp_path):
+def home_secondary(page):
+    marker = 'id="home-secondary-counts"'
+    if marker not in page:
+        return ""
+    start = page.find(marker)
+    wrapper_start = page.rfind("<section", 0, start)
+    end = page.find("</section>", start) + len("</section>")
+    return page[wrapper_start:end]
+
+
+def _record_one_affected(config):
+    asset = Asset("a", "Acme", "Widget", "1")
+    StateStore(config.database_path).record_scan(
+        [QueryResult(asset, (finding(asset, "CVE-2026-9876", A.AFFECTED),), ())]
+    )
+
+
+def _write_web_snapshot(directory, *, partial=False):
+    private_directory(directory, owner_only=True)
+    path = directory / "saved.json"
+    rows = [dict(asset_id="web-asset", vendor="Acme", product="Widget", version="1")]
+    save_allowlist(path, rows)
+    timestamp = utc_now().isoformat()
+    manifest = {
+        "contract": "cvebeacon.inventory.v1",
+        "collector": "web-detect",
+        "collector_version": "0.1.0",
+        "source_id": "test-web",
+        "generated_at": timestamp,
+        "observed_at": timestamp,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "record_count": 1,
+        "status": "partial" if partial else "success",
+        "omissions": ["blocked"] if partial else [],
+    }
+    save_allowlist(path.with_name(path.name + ".manifest.json"), manifest)
+    return path
+
+
+def test_home_shows_five_linked_kpis_and_restores_four_secondary_numbers(tmp_path):
     _, _, client = make_home(tmp_path)
     page = client.get("/")
     assert page.status_code == 200
@@ -77,11 +125,55 @@ def test_home_replaces_seven_stat_tiles_with_five_linked_kpis(tmp_path):
         assert title in kpis
     assert 'href="/findings?applicability=affected"' in kpis
     assert 'href="/findings?applicability=needs_review"' in kpis
-    assert 'href="/findings?applicability=coverage_unknown"' in kpis
+    assert 'href="/assets"' in kpis
     assert 'href="/watch/events"' in kpis
     assert 'href="/#scan-activity"' in kpis
-    for removed in ("CISA KEV CVEs", "EU KEV CVEs", "Assets to check"):
-        assert removed not in kpis
+    secondary = home_secondary(page.text)
+    for restored in ("Assets", "Assets to check", "CISA KEV CVEs", "EU KEV CVEs"):
+        assert restored in secondary
+        assert "home-secondary-help" in secondary
+    assert "CISA KEV CVEs" not in kpis
+    assert "EU KEV CVEs" not in kpis
+    assert "Assets to check" not in kpis
+    assert '<strong class="home-secondary-value">1</strong><span class="home-secondary-label">Assets</span>' in secondary
+    assert secondary.count('class="home-secondary-value">No scan recorded') == 3
+
+
+@pytest.mark.parametrize("source", ["managed_client", "no_client", "web_snapshot"])
+def test_partial_inventory_sources_hide_all_three_inventory_card_counts(tmp_path, source):
+    config, _, client = make_home(
+        tmp_path, web_snapshots=source == "web_snapshot"
+    )
+    _record_one_affected(config)
+    if source == "managed_client":
+        private_directory(config.inventory_directory, owner_only=True)
+        bad_path = config.inventory_directory / f"{client_key('Broken client')}.json"
+        replace_bytes(bad_path, b"not-json")
+    elif source == "no_client":
+        private_directory(config.inventory_directory, owner_only=True)
+        replace_bytes(config.inventory_directory / "unassigned.json", b"not-json")
+    else:
+        snapshot_directory = config.database_path.parent / "web-inventory"
+        private_directory(snapshot_directory, owner_only=True)
+        save_allowlist(snapshot_directory / "broken.json", {"bad": "snapshot"})
+
+    page = client.get("/")
+    kpis = home_kpis(page.text)
+    for title in ("Affected findings", "Needs review", "Assets with unknown coverage"):
+        assert f'<span class="stat-value">Could not check</span><span class="stat-label">{title}</span>' in kpis
+    assert "An inventory source could not be read." in kpis
+    assert kpis.count('href="/inventory"') == 3
+    assert '<span class="stat-value">0</span>' not in kpis
+    assert '<span class="stat-value">1</span>' not in kpis
+
+
+def test_partial_web_manifest_hides_inventory_card_counts(tmp_path):
+    config, _, client = make_home(tmp_path, web_snapshots=True)
+    _record_one_affected(config)
+    _write_web_snapshot(config.database_path.parent / "web-inventory", partial=True)
+    kpis = home_kpis(client.get("/").text)
+    assert kpis.count('<span class="stat-value">Could not check</span>') == 3
+    assert "An inventory source could not be read." in kpis
 
 
 @pytest.mark.parametrize(
@@ -136,9 +228,13 @@ def test_home_inventory_read_error_shows_unknown_not_zero(tmp_path):
     config, _, client = make_home(tmp_path)
     config.inventory.path.write_text("not a valid inventory file\n", encoding="utf-8", newline="\n")
     kpis = home_kpis(client.get("/").text)
-    assert kpis.count('<span class="stat-value">Unknown</span>') >= 3
-    assert "Could not check." in kpis
+    for title in ("Affected findings", "Needs review", "Assets with unknown coverage"):
+        assert f'<span class="stat-value">Could not check</span><span class="stat-label">{title}</span>' in kpis
+    assert "An inventory source could not be read." in kpis
+    assert kpis.count('href="/inventory"') == 3
     assert '<span class="stat-value">0</span>' not in kpis
+    secondary = home_secondary(client.get("/").text)
+    assert secondary.count("Could not check") == 4
 
 
 def test_home_marks_stale_inventory_counts_with_age_and_warning(tmp_path):
@@ -153,6 +249,7 @@ def test_home_marks_stale_inventory_counts_with_age_and_warning(tmp_path):
     assert '<span class="stat-value">1</span><span class="stat-label">Affected findings</span>' in kpis
     assert "Stale scan data" in kpis
     assert old in kpis
+    assert home_secondary(client.get("/").text).count("Stale scan data") == 3
 
 
 def test_home_scan_read_error_is_unknown_and_does_not_render_zero(tmp_path, monkeypatch):
@@ -190,6 +287,7 @@ def test_home_delivery_counts_ignore_sent_and_count_gave_up_inside_failed(tmp_pa
     assert "Queued 1 · Sending 1 · Failed 1 · Unsure 1" in kpis
     assert "Gave up 1" not in kpis
     assert "Gave up is included in failed." in kpis
+    assert "Delivery state does not confirm that a person received an alert." in kpis
     assert "Accepted by the service" not in kpis
 
 
@@ -274,6 +372,79 @@ def test_home_context_cache_reuses_one_snapshot_for_thirty_seconds(tmp_path, mon
     assert client.get("/").status_code == 200
     assert client.get("/").status_code == 200
     assert calls == 1
+
+
+@pytest.mark.parametrize("source", ["managed", "web"])
+def test_home_cache_invalidates_when_inventory_source_is_added_replaced_or_removed(
+    tmp_path, monkeypatch, source
+):
+    config, _, client = make_home(tmp_path, web_snapshots=source == "web")
+    original = StateStore.dashboard_snapshot
+    calls = 0
+
+    def counted(store):
+        nonlocal calls
+        calls += 1
+        return original(store)
+
+    monkeypatch.setattr(StateStore, "dashboard_snapshot", counted)
+    assert client.get("/").status_code == 200
+    assert calls == 1
+    previous_key = home_cache_key(config)
+
+    if source == "managed":
+        directory = config.inventory_directory
+        private_directory(directory, owner_only=True)
+        path = directory / f"{client_key('Extra')}.json"
+        def save(asset_id, product):
+            content = json.dumps(
+                [asdict(Asset(asset_id, "Acme", product, "1", client="Extra"))]
+            ).encode("utf-8")
+            if path.exists():
+                path.write_bytes(content)
+            else:
+                replace_bytes(path, content)
+    else:
+        directory = config.database_path.parent / "web-inventory"
+        private_directory(directory, owner_only=True)
+        path = directory / "change.json"
+        def save(asset_id, product):
+            content = json.dumps({"asset_id": asset_id, "product": product}).encode("utf-8")
+            if path.exists():
+                path.write_bytes(content)
+            else:
+                save_allowlist(path, {"asset_id": asset_id, "product": product})
+
+    directory_stamp = directory.stat()
+
+    def keep_directory_stamp():
+        os.utime(directory, ns=(directory_stamp.st_atime_ns, directory_stamp.st_mtime_ns))
+
+    save("extra", "Widget")
+    keep_directory_stamp()
+    assert home_cache_key(config) != previous_key
+    assert client.get("/").status_code == 200
+    assert calls == 2
+    previous_key = home_cache_key(config)
+    save("replacement", "Different widget")
+    keep_directory_stamp()
+    assert home_cache_key(config) != previous_key
+    assert client.get("/").status_code == 200
+    assert calls == 3
+    previous_key = home_cache_key(config)
+    path.unlink()
+    keep_directory_stamp()
+    assert home_cache_key(config) != previous_key
+    assert client.get("/").status_code == 200
+    assert calls == 4
+
+
+def test_home_cache_key_includes_inventory_reader_settings(tmp_path):
+    config, _, _ = make_home(tmp_path, web_snapshots=True)
+    original_key = home_cache_key(config)
+    changed_inventory = replace(config.inventory, delimiter=";")
+    changed_config = replace(config, inventory=changed_inventory)
+    assert home_cache_key(changed_config) != original_key
 
 
 def test_home_cache_expires_and_failed_refresh_does_not_reuse_old_value():
