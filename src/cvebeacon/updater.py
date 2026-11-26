@@ -55,7 +55,9 @@ SAFE_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
 
 class UpdateError(CVEBeaconError):
-    pass
+    def __init__(self, message, *, reason_code=None):
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 class ConfigLock(RunLock):
@@ -74,6 +76,32 @@ def log_warning(message):
         LOG.warning(message)
     except Exception:
         pass  # Logging must never interrupt state recovery.
+
+
+REASON_STEPS = {
+    "preflight": "preflight-failed",
+    "check": "check-failed",
+    "verify": "verify-artifact",
+    "probe": "probe-unhealthy",
+    "quiesce": "quiesce-failed",
+    "lock": "lock-failed",
+    "freeze": "freeze-failed",
+    "backup": "backup-failed",
+    "install": "install-failed",
+    "migrate": "migrate-failed",
+    "switch": "switch-failed",
+    "start": "start-failed",
+    "doctor": "doctor-failed",
+    "recovery": "recovery-incomplete",
+}
+REASON_CODES = frozenset(REASON_STEPS.values()) | frozenset({
+    "preflight-crontab-unreadable",
+    "preflight-managed-crontab",
+    "check-network",
+    "verify-signature",
+    "backup-database-busy",
+    "update-failed",
+})
 
 
 def release_version(value):
@@ -264,7 +292,7 @@ class Releases:
         try:
             result = self.http.request_once("GET", url, body_limit=limit + 1, headers=headers, timeout=60)
         except (httpx.HTTPError, ValueError, OSError):
-            raise UpdateError("release request failed") from None
+            raise UpdateError("release request failed", reason_code="check-network") from None
         if len(result.body) > limit:
             raise UpdateError("release response exceeds the size limit")
         return result
@@ -337,7 +365,7 @@ class Releases:
 
     def verify(self, release, directory, signers):
         if shutil.which("ssh-keygen", path=SAFE_ENV["PATH"]) is None:
-            raise UpdateError("ssh-keygen is required to verify releases; update refused")
+            raise UpdateError("ssh-keygen is required to verify releases; update refused", reason_code="verify-signature")
         directory = Path(directory)
         for name, cap in (("SHA256SUMS", 65536), ("SHA256SUMS.sig", 16384)):
             self.download(release, name, directory / name, cap)
@@ -347,7 +375,7 @@ class Releases:
                                 input=checksums, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 timeout=30, env=SAFE_ENV, cwd="/")
         if result.returncode:
-            raise UpdateError("release signature verification failed")
+            raise UpdateError("release signature verification failed", reason_code="verify-signature")
         hashes = {}
         try:
             lines = checksums.decode("ascii", errors="strict").splitlines()
@@ -588,12 +616,16 @@ class Native:
 
     def managed_cron(self):
         if shutil.which("crontab", path=SAFE_ENV["PATH"]) is not None:
-            result = self.run(["crontab", "-l"], service=True, accepted=(0, 1), completed=True)
+            # `crontab -u` reads the service user's spool while keeping the
+            # updater's root credentials, including access to setgid spools.
+            result = self.run(["crontab", "-l", "-u", self.account.pw_name], accepted=(0, 1), completed=True)
             raw = result.stdout
             if result.returncode and b"no crontab" not in (raw + result.stderr).lower():
-                raise UpdateError("cannot verify the service account's managed crontab")
+                raise UpdateError("cannot verify the service account's managed crontab",
+                                  reason_code="preflight-crontab-unreadable")
             if b"# BEGIN CVEBEACON MANAGED" in raw:
-                raise UpdateError("remove the service account's managed cron schedule before adopting or applying updates")
+                raise UpdateError("remove the service account's managed cron schedule before adopting or applying updates",
+                                  reason_code="preflight-managed-crontab")
 
     def preflight(self, venv):
         self.service_access(venv)
@@ -656,8 +688,16 @@ for path in sys.argv[2:]:
 
     def state(self, python, action, backup, manifest_hash=None):
         # SQLite and config I/O runs with service privileges, even on rollback.
-        return self.run([python, "-I", "-m", "cvebeacon.update_state", action, self.policy.config, self.policy.data, backup,
-                         *([manifest_hash] if manifest_hash else [])], service=True, timeout=None)
+        result = self.run([python, "-I", "-m", "cvebeacon.update_state", action, self.policy.config, self.policy.data, backup,
+                           *([manifest_hash] if manifest_hash else [])], service=True, timeout=None,
+                          accepted=(0, 75), completed=True)
+        if result is not None and result.returncode == 75:
+            if action == "backup":
+                raise UpdateError("database remained busy during backup (details withheld)",
+                                  reason_code="backup-database-busy")
+            raise UpdateError("database remained busy during recovery (details withheld)",
+                              reason_code="recovery-incomplete")
+        return result.stdout if result is not None else None
 
     def backup_directory(self, path):
         path.mkdir(mode=0o700)
@@ -708,7 +748,8 @@ for path in sys.argv[2:]:
     def probe(self, expected_version=None):
         expected_version = expected_version or (self.policy.prefix / "current").resolve().name
         with httpx.Client(trust_env=False) as client, HttpClient(HttpConfig(retries=0), client=client) as http:
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + 120
+            delay = 0.5
             while True:
                 try:
                     pid = self.dashboard_pid()
@@ -719,9 +760,11 @@ for path in sys.argv[2:]:
                         return
                 except (OSError, ValueError, CVEBeaconError, httpx.HTTPError):
                     pass
-                if time.monotonic() >= deadline:
-                    raise UpdateError("dashboard loopback health probe failed")
-                time.sleep(0.5)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise UpdateError("dashboard loopback health probe failed", reason_code="probe-unhealthy")
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 16)
 
 
 def sync_directory(path):
@@ -784,9 +827,13 @@ class Updater:
         self.releases = releases
         self.events = []
         self.record = None
+        self.failure_step = None
+        self.failure_reason = None
 
-    def event(self, step, result="ok"):
+    def event(self, step, result="ok", *, reason=None):
         entry = {"time": stamp(), "step": step, "result": result, "version": getattr(self, "target", None)}
+        if reason in REASON_CODES:
+            entry["reason"] = reason
         self.events.append(entry)
         try:
             LOG.info("update %s: %s", step, result)
@@ -802,6 +849,19 @@ class Updater:
                 os.fsync(stream.fileno())
         except (OSError, CVEBeaconError):
             log_warning("update audit is unavailable")
+
+    @staticmethod
+    def _reason_code(step, error):
+        code = getattr(error, "reason_code", None)
+        if code in REASON_CODES:
+            return code
+        return REASON_STEPS.get(step, "update-failed")
+
+    def _record_failure(self, step, error):
+        reason = self._reason_code(step, error)
+        self.failure_reason = reason
+        self.event(step, "failed", reason=reason)
+        return reason
 
     def current(self):
         link = self.policy.prefix / "current"
@@ -838,6 +898,7 @@ class Updater:
             raise UpdateError("restore the original administrator policy before recovering this transaction")
         self.record = record
         self.target, self.previous_version = record["new"], record["old"]
+        self.failure_reason = record.get("failure_reason") or self.failure_reason
 
     @contextmanager
     def _locks(self, record):
@@ -893,7 +954,7 @@ class Updater:
             log_warning(warning)
         result = self.record["result"]
         selected = self.record["new"] if result == "updated" else self.record["old"]
-        self._result(selected, result, warning=warning)
+        self._result(selected, result, warning=warning, reason=self.failure_reason)
         self._retain_best_effort()
         return {"result": result, "version": selected, **({"warning": warning} if warning else {})}
 
@@ -912,28 +973,47 @@ class Updater:
                 return {"result": "no-request"}
         lock = RunLock(self.policy.prefix / "update.lock", command="update")
         if not lock.acquire():
+            self.target = target
+            self.failure_reason = "lock-failed"
             if not requested:
                 from .locking import RunInProgress
-                raise RunInProgress(lock.holder)
-            self.target = target
-            self.event("request_busy", "refused")
-            self._request_result(target, "busy")
+                error = RunInProgress(lock.holder)
+                self._record_failure("lock", error)
+                self._result(target, "refused", reason="lock-failed")
+                raise error
+            self.event("request_busy", "refused", reason="lock-failed")
+            self._request_result(target, "busy", reason="lock-failed")
             return {"result": "busy", "version": target}
         try:
-            pending = read_record(self.policy.prefix)
+            try:
+                pending = read_record(self.policy.prefix)
+            except BaseException as exc:
+                reason = self._record_failure("recovery", exc)
+                self._result(target, "refused", reason=reason)
+                raise
             if pending:
                 result = self._recover(pending)
                 if requested:
                     self._request_result(target, "recovered; request again")
                 return result
             self.record = None
+            self.failure_step = None
+            self.failure_reason = None
             try:
                 return self._apply(target)
-            except BaseException:
+            except BaseException as exc:
                 # Never let audit/status writes prevent restoration. A completed
                 # transaction may only need finalization, not another DB restore.
                 pending = read_record(self.policy.prefix)
                 if pending:
+                    if pending.get("phase") != "complete":
+                        reason = self._record_failure(self.failure_step or "recovery", exc)
+                        pending["failure_reason"] = reason
+                        try:
+                            self._checkpoint(pending["phase"], failure_reason=reason)
+                            pending = self.record
+                        except BaseException:
+                            log_warning("update failure reason could not be saved in the recovery record")
                     result = self._recover(pending)
                     if result["result"] == "updated":
                         return result
@@ -946,14 +1026,15 @@ class Updater:
                     warning = "update committed; temporary-file cleanup needs administrator review"
                     self._result(selected, result, warning=warning)
                     return {"result": result, "version": selected, "warning": warning}
-                self.event("refuse", "failed")
-                self._result(target, "refused")
+                reason = self._record_failure(self.failure_step or "recovery", exc)
+                self._result(target, "refused", reason=reason)
                 raise
         finally:
             lock.release()
 
     def _apply(self, target):
         p = self.policy
+        self.failure_step = "preflight"
         old = self.current()
         protected_tree(old / ".venv")
         self.native.preflight(old / ".venv")
@@ -964,6 +1045,7 @@ class Updater:
         settings = UpdateConfig(True, False, p.repository, p.allow_prereleases)
         with ExitStack() as stack:
             remote = self.releases or Releases(settings, stack.enter_context(HttpClient(HttpConfig(retries=0))))
+            self.failure_step = "check"
             release = remote.check(old.name, target)
             self.target = release.version if release else old.name
             self.checked = {"last_check": stamp(), "available": release.version if release else None, "notes": release.notes if release else ""}
@@ -978,19 +1060,26 @@ class Updater:
             if destination.exists() or destination.is_symlink():
                 raise UpdateError("release directory already exists; inspect or remove the failed install locally")
             artifacts = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=".verified-", dir=p.prefix)))
+            self.failure_step = "verify"
             remote.verify(release, artifacts, p.signers)
             self.event("verify")
+            self.failure_step = "quiesce"
             active = tuple(unit for unit in p.units if self.native.active(unit))
             if p.dashboard_unit not in active:
                 raise UpdateError("the configured dashboard must be running before applying an update")
+            self.failure_step = "probe"
             self.native.probe(old.name)
+            self.failure_step = "quiesce"
             self._begin(old.name, release.version, active)
             self.native.stop(p.units)
             self.event("quiesce")
+            self.failure_step = "lock"
             with self._locks(self.record):
                 self.event("lock")
+                self.failure_step = "freeze"
                 self.native.freeze(p.units)
                 self.event("freeze")
+                self.failure_step = "backup"
                 self._checkpoint("snapshot")
                 backup_root = release_directory(p.prefix / "backups", mode=0o711)
                 backup = backup_root / self.record["backup"]
@@ -999,6 +1088,7 @@ class Updater:
                 manifest_hash = hashlib.sha256(read_bounded(backup / "manifest.json", 8 * 1024 * 1024)).hexdigest()
                 self._checkpoint("installing", snapshot_ready=True, manifest_sha256=manifest_hash)
                 self.event("backup")
+                self.failure_step = "install"
                 release_directory(destination)
                 self.native.install(destination / ".venv", artifacts, [name for name in PACKAGES if name in packages], release.version, python=old / ".venv/bin/python")
                 protected_tree(destination / ".venv")
@@ -1006,44 +1096,74 @@ class Updater:
                 self.native.service_access(destination / ".venv")
                 sync_tree(destination)
                 self.event("install")
+                self.failure_step = "migrate"
                 self._checkpoint("migrating")
                 self.native.command(destination, "migrate")
                 self.event("migrate")
+                self.failure_step = "switch"
                 self._checkpoint("switching")
                 switch(p.prefix, destination)
                 self.event("switch")
+                self.failure_step = "start"
                 self._checkpoint("health")
                 self.native.start((p.dashboard_unit,))
                 self.event("start")
+                self.failure_step = "doctor"
                 self.native.command(destination, "doctor")
+                self.failure_step = "probe"
                 self.native.probe(release.version)
                 self.event("health")
                 self._finish("updated")
             return self._finalize()
 
     def recover(self):
-        with RunLock(self.policy.prefix / "update.lock", command="recover"):
-            pending = read_record(self.policy.prefix)
+        lock = RunLock(self.policy.prefix / "update.lock", command="recover")
+        if not lock.acquire():
+            from .locking import RunInProgress
+            error = RunInProgress(lock.holder)
+            reason = self._record_failure("lock", error)
+            self._result(None, "recovery-refused", reason=reason)
+            raise error
+        try:
+            try:
+                pending = read_record(self.policy.prefix)
+            except BaseException as exc:
+                reason = self._record_failure("recovery", exc)
+                self._result(None, "recovery-refused", reason=reason)
+                raise
             return self._recover(pending) if pending else {"result": "no-recovery-required"}
+        finally:
+            lock.release()
 
     def _recover(self, record):
-        self._validate_recovery(record)
+        try:
+            self._validate_recovery(record)
+        except BaseException as exc:
+            self.failure_reason = self._record_failure("recovery", exc)
+            self._result(record.get("new"), "rollback-failed", reason="recovery-incomplete")
+            raise UpdateError("update recovery remains incomplete; writers are blocked until recovery succeeds") from None
         if record["kind"] == "adopt":
             return self._complete_adopt()
         p = self.policy
         old = p.prefix / "releases" / record["old"]
-        protected(old, directory=True)
-        protected_tree(old / ".venv")
-        self.native.stop(p.units)
         try:
+            self.failure_step = "recovery"
+            protected(old, directory=True)
+            protected_tree(old / ".venv")
+            self.failure_step = "quiesce"
+            self.native.stop(p.units)
+            self.failure_step = "lock"
             with self._locks(record):
+                self.failure_step = "freeze"
                 self.native.freeze(p.units)
                 if record["phase"] == "complete":
+                    self.failure_step = "recovery"
                     selected = record["new"] if record["result"] == "updated" else record["old"]
                     if self.current().name != selected:
                         raise UpdateError("completed transaction does not match the selected release")
                     release = p.prefix / "releases" / selected
                 else:
+                    self.failure_step = "recovery"
                     try:
                         self._checkpoint("restoring")
                     except OSError:
@@ -1066,30 +1186,43 @@ class Updater:
                         raise UpdateError("restoration is incomplete")
                     self._checkpoint("rollback-health")
                     selected, release = record["old"], old
+                self.failure_step = "start"
                 self.native.start((p.dashboard_unit,))
+                self.failure_step = "doctor"
                 self.native.command(release, "doctor")
+                self.failure_step = "probe"
                 self.native.probe(selected)
+                self.failure_step = "recovery"
                 if self.current().name != selected:
                     raise UpdateError("restored release selection could not be verified")
                 self.event("rollback")
                 result = record.get("result", "rolled-back") if record["phase"] == "complete" else "rolled-back"
                 self._finish(result)
             return self._finalize()
-        except BaseException:
+        except BaseException as exc:
+            reason = self._record_failure(self.failure_step or "recovery", exc)
+            self.failure_reason = "recovery-incomplete"
+            if reason != "recovery-incomplete":
+                self.event("recovery", "failed", reason="recovery-incomplete")
+            try:
+                self._checkpoint(self.record.get("phase", "restoring"), failure_reason="recovery-incomplete")
+            except BaseException:
+                log_warning("recovery failure reason could not be saved in the transaction record")
+            self.event("rollback", "failed", reason="recovery-incomplete")
             try:
                 self.native.freeze(p.units)
             except BaseException:
                 pass
-            self.event("rollback", "failed")
             if record["phase"] == "complete":
                 selected = record["new"] if record["result"] == "updated" else record["old"]
-                self._result(selected, record["result"], warning="completed update recovery could not verify the selected release")
+                self._result(selected, record["result"], warning="completed update recovery could not verify the selected release",
+                             reason="recovery-incomplete")
                 raise UpdateError("completed update verification remains incomplete; inspect the active recovery record") from None
             else:
-                self._result(record["new"], "rollback-failed")
+                self._result(record["new"], "rollback-failed", reason="recovery-incomplete")
             raise UpdateError("update recovery remains incomplete; writers are blocked until recovery succeeds") from None
 
-    def _request_result(self, target, result):
+    def _request_result(self, target, result, *, reason=None):
         try:
             path = control_paths(self.policy.config)[1]
             try:
@@ -1098,15 +1231,21 @@ class Updater:
                 status = {}
             if not isinstance(status, dict):
                 status = {}
-            status["last_request"] = {"version": target, "result": result, "time": stamp()}
+            value = {"version": target, "result": result, "time": stamp()}
+            if reason in REASON_CODES:
+                value["reason"] = reason
+            status["last_request"] = value
             atomic_json(path, status)
         except OSError:
             log_warning("update request status is unavailable")
 
-    def _result(self, target, result, *, warning=None):
+    def _result(self, target, result, *, warning=None, reason=None):
         value = {"version": target, "result": result, "time": stamp()}
         if warning:
             value["warning"] = warning
+        reason = reason or self.failure_reason
+        if reason in REASON_CODES:
+            value["reason"] = reason
         try:
             atomic_json(self.policy.prefix / "update-result.json", value, mode=0o600)
         except OSError:
@@ -1225,8 +1364,9 @@ def _cli(args, config=None):
         except (CVEBeaconError, OSError):
             if not args.from_request:
                 raise
-            updater.event("request_refused", "failed")
-            updater._request_result(None, "refused; administrator review required")
+            reason = updater.failure_reason or "update-failed"
+            updater.event("request_refused", "failed", reason=reason)
+            updater._request_result(None, "refused", reason=reason)
             log_warning("update request refused; inspect the transaction record")
             return 0
 

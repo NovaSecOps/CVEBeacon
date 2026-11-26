@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -346,10 +347,47 @@ def test_same_port_on_another_loopback_address_cannot_pass_health(tmp_path, monk
             def request_once(self, *args, **kwargs):
                 return SimpleNamespace(status_code=200, body=json.dumps(payload).encode())
         monkeypatch.setattr(u, "HttpClient", lambda *args, **kwargs: HTTP())
-        ticks = iter([0, 31])
-        monkeypatch.setattr(u.time, "monotonic", lambda: next(ticks))
+        clock = {"now": 0.0}
+        monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(u.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
         with pytest.raises(u.UpdateError, match="health probe failed"):
             native.probe("99.0")
+        assert clock["now"] == 120
+
+
+def test_health_probe_retries_with_backoff_until_the_dashboard_is_ready(tmp_path, monkeypatch):
+    native = object.__new__(u.Native)
+    native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service")
+    native.dashboard_pid = lambda: 42
+    native.owns_listener = lambda pid: True
+    clock = {"now": 0.0, "sleeps": [], "attempts": 0}
+
+    class Transport:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def request_once(self, *args, **kwargs):
+            clock["attempts"] += 1
+            if clock["now"] >= 31:
+                body = {"status": "ok", "version": "0.1.1", "pid": 42}
+            else:
+                body = {"status": "starting"}
+            return SimpleNamespace(status_code=200, body=json.dumps(body).encode())
+
+    monkeypatch.setattr(u, "HttpClient", lambda *args, **kwargs: Transport())
+    monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
+    def sleep(seconds):
+        clock["sleeps"].append(seconds)
+        clock["now"] += seconds
+    monkeypatch.setattr(u.time, "sleep", sleep)
+
+    native.probe("0.1.1")
+
+    assert clock["now"] >= 31
+    assert clock["attempts"] <= 10
+    assert clock["sleeps"] == sorted(clock["sleeps"])
+    assert len(set(clock["sleeps"])) > 1
 
 
 @pytest.mark.parametrize("bind,probe,accepted", [

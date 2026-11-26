@@ -36,15 +36,36 @@ def feedback_updates(tmp_path, monkeypatch):
 def test_view_can_read_status_and_notes_are_escaped(updates):
     config, _, client = updates
     updater.atomic_json(config.watch.database.parent / updater.STATUS,
-                        {"available": "0.1.1", "notes": "<script>alert(1)</script>", "last_check": "2026-01-01"})
+                        {"available": "0.1.1", "notes": "<!-- publishing checklist -->\n<script>alert(1)</script>", "last_check": "2026-01-01"})
     login(client, "viewer")
     page = client.get("/updates/")
     assert page.status_code == 200
     assert "0.1.1" in page.text and "&lt;script&gt;" in page.text
     assert "<script>alert" not in page.text and "Update now" not in page.text
+    assert "publishing checklist" not in page.text
     assert submit(client, "/updates/request", version="0.1.1").status_code == 403
     assert submit(client, "/updates/check").status_code == 403
     assert not (config.watch.database.parent / updater.REQUEST).exists()
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("preflight-crontab-unreadable", "The crontab could not be read inside the update service."),
+        ("backup-database-busy", "A database stayed busy while the update backup was being created."),
+    ],
+)
+def test_update_failure_reason_is_plain_language_and_includes_cli_next_step(updates, reason, expected):
+    config, _, client = updates
+    updater.atomic_json(
+        config.watch.database.parent / updater.STATUS,
+        {"last_update": {"result": "refused", "version": "0.1.1", "time": updater.stamp(),
+                         "reason": reason}},
+    )
+    login(client, "viewer")
+    page = client.get("/updates/")
+    assert expected in page.text
+    assert "Run <code>cvebeacon update apply</code> as an administrator to see details" in page.text
 
 
 def test_admin_request_only_queues_version_and_audits(updates):

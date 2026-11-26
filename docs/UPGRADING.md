@@ -405,9 +405,10 @@ hours of the last successful check. Schedule that command as the service user
 if wanted. Checking and applying are never scheduled by default.
 
 The dashboard **Updates** page is visible with `view` permission. Only an
-administrator account can check or request an update. Release notes are escaped
-plain text. **Update now** writes only a small version/user/time request into
-the data directory and records the request in account audit. It never runs pip
+administrator account can check or request an update. Release notes are shown
+as escaped plain text with HTML comments removed. **Update now** writes only a
+small version/user/time request into the data directory and records the request
+in account audit. It never runs pip
 or writes code. Install `cvebeacon-update.path` and its one-shot service, and
 explicitly enable the path unit to process requests. The privileged process
 ignores the supplied identity and time, consumes the request, checks the version
@@ -419,6 +420,37 @@ name. A request arriving during a manual apply is consumed with an explicit
 `busy` audit/status result and can be submitted again. The request service exits
 cleanly for refusals and has no start-rate limit; contention cannot disable the
 path unit. PathExists is checked again after a triggered service exits.
+
+### When an update is refused
+
+The Updates page shows a plain-language reason. The updater records its fixed
+reason code in update status and `update-audit.jsonl`; raw subprocess output is
+withheld. An administrator can run `cvebeacon update apply` to see safe command
+details. If recovery is incomplete, run `cvebeacon update recover` before
+retrying an update.
+
+| Reason code | Meaning |
+| --- | --- |
+| `preflight-crontab-unreadable` | The crontab could not be read inside the update service. |
+| `preflight-managed-crontab` | A managed schedule must be removed before updating. |
+| `preflight-failed` | An access or storage preflight check failed. |
+| `check-network` | The release service could not be reached. |
+| `check-failed` | The release response could not be checked. |
+| `verify-signature` | The release signature could not be verified. |
+| `verify-artifact` | A release artifact failed a download, checksum, or metadata check. |
+| `quiesce-failed` | A configured service could not be stopped cleanly. |
+| `lock-failed` | A required update or storage lock could not be acquired. |
+| `freeze-failed` | The dashboard could not be stopped for the update. |
+| `backup-failed` | The pre-update backup could not be created. |
+| `backup-database-busy` | A database stayed busy during the bounded backup wait. |
+| `install-failed` | The verified release could not be installed. |
+| `migrate-failed` | The state migration did not complete. |
+| `switch-failed` | The new release could not be selected. |
+| `start-failed` | The dashboard could not be started after the update. |
+| `doctor-failed` | Local health checks did not pass after the update. |
+| `probe-unhealthy` | The dashboard did not pass its health probe after starting. |
+| `recovery-incomplete` | Automatic restoration or its health check did not finish. |
+| `update-failed` | The updater could not classify a failure more specifically. |
 
 ## Transaction and rollback
 

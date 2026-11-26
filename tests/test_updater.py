@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import time
 import zipfile
 
 import httpx
@@ -299,6 +300,111 @@ def test_apply_verifies_backs_up_migrates_switches_and_health_checks(transaction
     assert len((updater.policy.prefix / "update-audit.jsonl").read_text().splitlines()) == len(updater.events)
 
 
+def test_update_failures_record_fixed_reason_in_status_and_audit(transaction):
+    updater, native, config = transaction
+    native.preflight = lambda venv: (_ for _ in ()).throw(
+        u.UpdateError("crontab access details", reason_code="preflight-crontab-unreadable")
+    )
+
+    with pytest.raises(u.UpdateError):
+        updater.apply("0.1.1")
+
+    status = json.loads((config.config_path.parent / u.STATUS).read_text(encoding="utf-8"))
+    assert status["last_update"]["reason"] == "preflight-crontab-unreadable"
+    audit = [json.loads(row) for row in (updater.policy.prefix / "update-audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert audit[-1]["reason"] == "preflight-crontab-unreadable"
+    assert audit[-1]["step"] == "preflight" and audit[-1]["result"] == "failed"
+    assert not any(entry["step"] == "check" for entry in audit)
+
+
+def test_invalid_pending_recovery_record_has_a_fixed_failure_reason(transaction):
+    updater, _, config = transaction
+    journal = updater.policy.prefix / u.JOURNAL
+    with journal.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write("{")
+
+    with pytest.raises(u.UpdateError):
+        updater.apply("0.1.1")
+
+    status = json.loads((config.config_path.parent / u.STATUS).read_text(encoding="utf-8"))
+    assert status["last_update"]["reason"] == "recovery-incomplete"
+    audit = [json.loads(row) for row in (updater.policy.prefix / "update-audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert audit[-1]["step"] == "recovery" and audit[-1]["reason"] == "recovery-incomplete"
+
+
+@pytest.mark.parametrize(
+    ("phase", "failure", "reason"),
+    [
+        ("check", "check-network", "check-network"),
+        ("verify", "verify-signature", "verify-signature"),
+        ("backup", "backup-failed", "backup-failed"),
+        ("backup", "backup-database-busy", "backup-database-busy"),
+    ],
+)
+def test_update_failure_reasons_cover_check_signature_and_backup(transaction, phase, failure, reason):
+    updater, native, config = transaction
+    if phase == "check":
+        updater.releases.check = lambda *args: (_ for _ in ()).throw(
+            u.UpdateError("network detail", reason_code=failure)
+        )
+    elif phase == "verify":
+        updater.releases.verify = lambda *args: (_ for _ in ()).throw(
+            u.UpdateError("signature detail", reason_code=failure)
+        )
+    else:
+        original = native.state
+        def fail_backup(python, action, directory, manifest_hash=None):
+            if action == "backup":
+                raise u.UpdateError("database detail", reason_code=failure)
+            return original(python, action, directory, manifest_hash)
+        native.state = fail_backup
+
+    if phase == "backup":
+        with pytest.raises(u.UpdateError, match="previous release and state restored"):
+            updater.apply("0.1.1")
+    else:
+        with pytest.raises(u.UpdateError):
+            updater.apply("0.1.1")
+
+    status = json.loads((config.config_path.parent / u.STATUS).read_text(encoding="utf-8"))
+    assert status["last_update"]["reason"] == reason
+    audit = [json.loads(row) for row in (updater.policy.prefix / "update-audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(entry.get("reason") == reason for entry in audit)
+
+
+def test_update_locks_and_stops_dashboard_before_starting_snapshot(transaction):
+    updater, native, _ = transaction
+    acquired = []
+    timeline = []
+    acquire = native.acquire_lock
+    state = native.state
+    freeze = native.freeze
+
+    def tracked_acquire(lock):
+        result = acquire(lock)
+        if result:
+            acquired.append(lock)
+        return result
+
+    def tracked_freeze(units):
+        assert len(acquired) == 2  # config writer lock and the state run lock
+        timeline.append("freeze")
+        return freeze(units)
+
+    def tracked_state(python, action, directory, manifest_hash=None):
+        if action == "backup":
+            assert timeline == ["freeze"]
+            timeline.append("backup")
+        return state(python, action, directory, manifest_hash)
+
+    native.acquire_lock = tracked_acquire
+    native.freeze = tracked_freeze
+    native.state = tracked_state
+
+    assert updater.apply("0.1.1")["result"] == "updated"
+    assert timeline == ["freeze", "backup"]
+
+
 @pytest.mark.parametrize("failure", ["migrate", "doctor", "health"])
 def test_failure_restores_all_databases_config_and_old_link(transaction, failure):
     updater, native, config = transaction
@@ -312,7 +418,14 @@ def test_failure_restores_all_databases_config_and_old_link(transaction, failure
         assert value(path) == "old"
     assert not (config.config_path.parent / "new.sqlite3").exists()
     assert native.calls[-5:] == ["verify_restore", "start", "doctor", "probe", "start"]
-    assert json.loads((updater.policy.prefix / "update-result.json").read_text())["result"] == "rolled-back"
+    result = json.loads((updater.policy.prefix / "update-result.json").read_text(encoding="utf-8"))
+    assert result["result"] == "rolled-back"
+    expected = {"migrate": "migrate-failed", "doctor": "doctor-failed", "health": "probe-unhealthy"}[failure]
+    assert result["reason"] == expected
+    status = json.loads((updater.policy.data / u.STATUS).read_text(encoding="utf-8"))
+    assert status["last_update"]["reason"] == expected
+    audit = [json.loads(row) for row in (updater.policy.prefix / "update-audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(event.get("reason") == expected and event["result"] == "failed" for event in audit)
 
 
 def test_privileged_request_rechecks_signature_and_ignores_advisory_status(transaction, signed):
@@ -351,11 +464,13 @@ def test_update_waits_for_run_lock_without_killing_the_holder(transaction, monke
 
 
 def test_concurrent_update_is_refused_without_replacing_the_journal(transaction):
-    updater, _, _ = transaction
+    updater, _, config = transaction
     with RunLock(updater.policy.prefix / "update.lock"):
         with pytest.raises(RunInProgress):
             updater.apply("0.1.1")
     assert not (updater.policy.prefix / "update-journal.json").exists()
+    status = json.loads((config.config_path.parent / u.STATUS).read_text(encoding="utf-8"))
+    assert status["last_update"]["reason"] == "lock-failed"
 
 
 def test_switch_replaces_existing_link_atomically(tmp_path, monkeypatch):
@@ -398,6 +513,63 @@ def test_sqlite_online_backup_includes_committed_wal_and_private_accounts(tmp_pa
     row = next(r for r in json.loads((snapshot / "manifest.json").read_text())["databases"] if r["path"] == "watch.db")
     assert value(snapshot / row["backup"]) == "wal data"
     assert (snapshot / row["backup"]).stat().st_mode & 0o077 == 0
+
+
+def test_sqlite_online_backup_copies_while_a_reader_connection_is_open(tmp_path):
+    config = write_config(tmp_path, inventory=False)
+    with sqlite3.connect(config.watch.database) as db:
+        db.execute("CREATE TABLE sentinel(value)")
+        db.execute("INSERT INTO sentinel VALUES ('reader-safe')")
+    reader = sqlite3.connect(config.watch.database)
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM sentinel").fetchall()
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    try:
+        update_state.backup(config, tmp_path, snapshot)
+    finally:
+        reader.close()
+    row = next(r for r in json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))["databases"]
+               if r["path"] == "watch.db")
+    assert value(snapshot / row["backup"]) == "reader-safe"
+
+
+def test_sqlite_backup_stops_after_the_bounded_busy_wait(tmp_path):
+    source, destination = tmp_path / "live.db", tmp_path / "copy.db"
+    with sqlite3.connect(source) as db:
+        db.execute("CREATE TABLE sentinel(value)")
+    writer = sqlite3.connect(source)
+    writer.execute("BEGIN EXCLUSIVE")
+    writer.execute("INSERT INTO sentinel VALUES ('locked')")
+    started = time.monotonic()
+    try:
+        with pytest.raises(update_state.BackupDatabaseBusy):
+            update_state._copy_sqlite_bounded(source, destination, wait_seconds=0.15)
+        assert time.monotonic() - started < 3
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+def test_busy_backup_worker_exit_is_reported_as_a_fixed_reason(tmp_path):
+    native = object.__new__(u.Native)
+    native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service")
+    calls = []
+    native.run = lambda args, **kwargs: (calls.append((args, kwargs)) or subprocess.CompletedProcess(args, 75, b"", b""))
+
+    with pytest.raises(u.UpdateError) as error:
+        native.state(tmp_path / "python", "backup", tmp_path / "snapshot")
+
+    assert error.value.reason_code == "backup-database-busy"
+    assert calls[0][1]["accepted"] == (0, 75) and calls[0][1]["completed"] is True
+
+
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_BUSY_SNAPSHOT])
+def test_update_state_marks_only_sqlite_contention_with_the_fixed_busy_exit(code):
+    error = sqlite3.OperationalError("private database detail")
+    error.sqlite_errorcode = code
+    assert update_state.busy_exit_status(error) == 75
+    assert update_state.busy_exit_status(sqlite3.OperationalError("private database detail")) == 1
 
 
 def test_backup_refuses_external_database_or_symlink(tmp_path):

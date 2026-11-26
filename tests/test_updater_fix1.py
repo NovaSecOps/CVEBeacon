@@ -286,6 +286,8 @@ def test_rollback_health_must_be_checked_before_success(transaction):
         updater.apply("0.1.1")
     assert (updater.policy.prefix / "update-journal.json").exists()
     assert probes == ["0.1.0", "0.1.0"]
+    status = json.loads((updater.policy.data / u.STATUS).read_text(encoding="utf-8"))
+    assert status["last_update"]["reason"] == "recovery-incomplete"
 
 
 def test_interrupted_restore_can_be_repeated_from_the_same_snapshot(transaction, monkeypatch):
@@ -324,10 +326,12 @@ def test_health_refuses_stale_or_unrelated_listeners(tmp_path, monkeypatch, payl
         def request_once(self, *args, **kwargs):
             return SimpleNamespace(status_code=200, body=json.dumps(payload).encode())
     monkeypatch.setattr(u, "HttpClient", lambda *args, **kwargs: Transport())
-    ticks = iter([0, 31])
-    monkeypatch.setattr(u.time, "monotonic", lambda: next(ticks))
+    clock = {"now": 0.0}
+    monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(u.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
     with pytest.raises(u.UpdateError, match="health probe failed"):
         native.probe("0.1.1")
+    assert clock["now"] == 120
 
 
 def test_custom_dashboard_unit_is_not_treated_as_a_sync_service(tmp_path):
@@ -353,6 +357,7 @@ def test_unreadable_service_preflight_happens_before_quiescence_or_journal(trans
 
 def test_managed_service_cron_prevents_native_adoption_preflight(tmp_path, monkeypatch):
     native = object.__new__(u.Native)
+    native.account = SimpleNamespace(pw_name="service", pw_uid=1234, pw_gid=1234)
     calls = []
     monkeypatch.setattr(u.shutil, "which", lambda *args, **kwargs: "/usr/bin/crontab")
     def run(args, **kwargs):
@@ -361,7 +366,22 @@ def test_managed_service_cron_prevents_native_adoption_preflight(tmp_path, monke
     native.run = run
     with pytest.raises(u.UpdateError, match="remove.*cron"):
         native.managed_cron()
-    assert calls[0][0] == ["crontab", "-l"] and calls[0][1]["service"]
+    assert calls[0][0] == ["crontab", "-l", "-u", "service"]
+    assert calls[0][1].get("service", False) is False
+
+
+def test_service_crontab_absence_is_checked_as_root_for_the_named_account(tmp_path, monkeypatch):
+    native = object.__new__(u.Native)
+    native.account = SimpleNamespace(pw_name="service")
+    calls = []
+    monkeypatch.setattr(u.shutil, "which", lambda *args, **kwargs: "/usr/bin/crontab")
+    native.run = lambda args, **kwargs: (calls.append((args, kwargs)) or
+                                         SimpleNamespace(returncode=1, stdout=b"", stderr=b"no crontab for service"))
+
+    native.managed_cron()
+
+    assert calls[0][0] == ["crontab", "-l", "-u", "service"]
+    assert calls[0][1] == {"accepted": (0, 1), "completed": True}
 
 
 def test_non_dict_release_assets_are_already_rejected(signed):
@@ -467,10 +487,12 @@ def test_failed_timer_restart_retains_committed_state_and_retry_entry(transactio
 
 def test_unknown_crontab_read_failure_is_not_treated_as_no_schedule(tmp_path, monkeypatch):
     native = object.__new__(u.Native)
+    native.account = SimpleNamespace(pw_name="service")
     monkeypatch.setattr(u.shutil, "which", lambda *args, **kwargs: "/usr/bin/crontab")
     native.run = lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=b"", stderr=b"permission denied")
-    with pytest.raises(u.UpdateError, match="cannot verify"):
+    with pytest.raises(u.UpdateError, match="cannot verify") as error:
         native.managed_cron()
+    assert error.value.reason_code == "preflight-crontab-unreadable"
 
 
 def test_policy_permits_missing_runtime_config_only_for_recorded_recovery(transaction, monkeypatch):
