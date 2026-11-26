@@ -205,20 +205,108 @@ def write_snapshot(path: Path, records: list[dict], *, source_id: str, collector
     return manifest
 
 
+_LOCKED_OUTPUT = "output is locked; investigate an interrupted or concurrent writer"
+_UNLOCKED_OWNER = b"0000000000\n"
+
+
+def _initialize_output_lock(lock: Path) -> None:
+    # Publish an initialized inode atomically so interruption during creation
+    # cannot strand a new, empty lock that is indistinguishable from a legacy one.
+    if os.name == "nt":
+        from cvebeacon.private_storage import private_file
+        temporary = lock.parent / (".cvebeacon-lock-" + secrets.token_hex(16))
+        descriptor = private_file(temporary, create=True, exclusive=True)
+    else:
+        descriptor, name = tempfile.mkstemp(prefix=".cvebeacon-lock-", dir=lock.parent)
+        temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(_UNLOCKED_OWNER)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, lock)
+        except FileExistsError:
+            pass
+    finally:
+        temporary.unlink()
+
+
+def _process_gone(pid: int) -> bool:
+    if pid == os.getpid():
+        return False
+    if os.name == "nt":  # pragma: no cover - exercised on Windows
+        # os.kill(pid, 0) terminates a process on Windows. Open for waiting only.
+        from ctypes import WinDLL, get_last_error
+        from ctypes.wintypes import BOOL, DWORD, HANDLE
+
+        kernel = WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = (DWORD, BOOL, DWORD)
+        kernel.OpenProcess.restype = HANDLE
+        kernel.WaitForSingleObject.argtypes = (HANDLE, DWORD)
+        kernel.WaitForSingleObject.restype = DWORD
+        kernel.CloseHandle.argtypes = (HANDLE,)
+        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return get_last_error() == 87  # ERROR_INVALID_PARAMETER
+        try:
+            return kernel.WaitForSingleObject(handle, 0) == 0  # WAIT_OBJECT_0
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 @contextmanager
 def output_lock(path: Path):
-    """Serialise every file published for one output path."""
+    """Serialise publication and reclaim a recorded owner only after it exits."""
     path = Path(path)
     lock = path.with_name(path.name + ".lock")
     try:
-        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as exc:
-        raise ExtensionError("output is locked; investigate an interrupted or concurrent writer") from exc
-    try:
-        os.close(descriptor)
-        yield
-    finally:
-        os.unlink(lock)
+        _regular(lock)
+    except FileNotFoundError:
+        _initialize_output_lock(lock)
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(lock, flags | getattr(os, "O_BINARY", 0))
+    with os.fdopen(descriptor, "r+b", buffering=0) as handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                # Reserve a byte beyond the bounded owner record.
+                handle.seek(64)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ExtensionError(_LOCKED_OUTPUT) from exc
+        details, current = os.fstat(descriptor), lock.lstat()
+        if (not stat.S_ISREG(details.st_mode) or not stat.S_ISREG(current.st_mode)
+                or getattr(current, "st_file_attributes", 0) & 0x400
+                or (details.st_dev, details.st_ino) != (current.st_dev, current.st_ino)):
+            raise ExtensionError(_LOCKED_OUTPUT)
+        handle.seek(0)
+        owner = handle.read(64)
+        if owner != _UNLOCKED_OWNER:
+            if not re.fullmatch(rb"[0-9]{1,10}\n?", owner):
+                raise ExtensionError(_LOCKED_OUTPUT)
+            pid = int(owner)
+            if not 0 < pid <= 2**31 - 1 or not _process_gone(pid):
+                raise ExtensionError(_LOCKED_OUTPUT)
+        handle.seek(0)
+        handle.write(f"{os.getpid():010d}\n".encode("ascii"))
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            handle.write(_UNLOCKED_OWNER)
 
 
 def _write_snapshot_files(path: Path, data: bytes, metadata: bytes) -> None:
