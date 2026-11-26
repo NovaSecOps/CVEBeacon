@@ -24,7 +24,7 @@ from . import scheduling
 from .config import AppConfig, ConfigurationError, InventoryConfig, load_config
 from .clients import affected_clients, format_affected_clients
 from .engine import QueryEngine
-from .errors import CVEBeaconError, InventoryValidationError, SourceError
+from .errors import CVEBeaconError, InventoryValidationError, SchedulingError, SourceError
 from .http import HttpClient
 from .inventory import inspect_inventory, load_inventory
 from .identity import normalize_asset, identity_conflict
@@ -1427,7 +1427,12 @@ def run(args: argparse.Namespace) -> int:
             return _run_watch(args, config)
         if args.command == "run":
             if args.if_due:
-                if not scheduling.should_run_scheduled(config.database_path.parent):
+                try:
+                    due = scheduling.should_run_scheduled(config.database_path.parent)
+                except SchedulingError as exc:
+                    LOG.error("scheduled run skipped: %s", exc)
+                    return 2
+                if not due:
                     LOG.info("scheduled run not due")
                     return 0
                 LOG.info("scheduled run due")

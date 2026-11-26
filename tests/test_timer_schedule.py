@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 import shlex
 from zoneinfo import ZoneInfo
 
@@ -350,3 +351,42 @@ def test_run_if_due_records_start_before_starting_monitoring(tmp_path, monkeypat
     assert len(starts) == 1
     assert starts[0] is not None
     assert starts[0].tzinfo is not None
+
+
+@pytest.mark.parametrize("payload", [
+    pytest.param(b'{"version":' + b"1" * 5000 + b"}", id="integer"),
+    pytest.param(b"[" * 8000 + b"]" * 8000, id="nesting"),
+    pytest.param(
+        b'{"version":1,"every_hours":null,"times":["07:00"],'
+        b'"last_start":"0001-01-01T00:00:00+23:59"}', id="timestamp",
+    ),
+])
+def test_corrupt_schedule_is_a_handled_error(tmp_path, payload, monkeypatch):
+    path = tmp_path / "schedule.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    if payload.startswith(b"["):
+        # Some Python versions decode nested arrays without recursion. Run
+        # their stdlib Python scanner too, which has a recursive parse path.
+        monkeypatch.setattr(json.scanner, "make_scanner", json.scanner.py_make_scanner)
+        monkeypatch.setattr(json, "_default_decoder", json.JSONDecoder())
+    with pytest.raises(SchedulingError):
+        scheduling.load_timer_schedule(tmp_path)
+
+
+def test_time_validator_canonicalizes_decimal_minutes():
+    assert scheduling.parse_times("07:0٣") == ("07:03",)
+    with pytest.raises(SchedulingError, match="duplicate"):
+        scheduling.parse_times("07:03,07:0٣")
+
+
+def test_run_if_due_logs_corrupt_data_and_does_not_monitor(tmp_path, monkeypatch, caplog):
+    config = write_config(tmp_path, inventory=False)
+    path = config.database_path.parent / "schedule.json"
+    path.write_bytes(b'{"version":' + b"1" * 5000 + b"}")
+    path.chmod(0o600)
+    monkeypatch.setattr(cli, "_run_all", lambda *args, **kwargs: pytest.fail("corrupt schedule admitted a run"))
+
+    assert cli.main(["--config", str(config.config_path), "run", "--if-due"]) == 2
+    assert "scheduled run skipped: schedule data file is invalid" in caplog.text

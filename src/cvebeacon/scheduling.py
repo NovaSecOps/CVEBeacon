@@ -29,7 +29,7 @@ CRON_END = "# END CVEBEACON MANAGED"
 CRON_SEPARATOR = "# CVEBEACON SEPARATOR ADDED"
 SCHEDULE_COMMANDS = ("scan", "watch", "both")
 TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
-TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
+TIME_PATTERN = re.compile(r"(\d{2}):(\d{2})")
 MAX_TIMES = 12
 DEFAULT_TIMER_TIMES = ("07:00", "19:00")
 TIMER_SCHEDULE_FILENAME = "schedule.json"
@@ -118,11 +118,11 @@ def parse_times(value: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
     for item in raw:
         text = str(item).strip()
         match = TIME_PATTERN.fullmatch(text)
-        if match is None:
+        if match is None or int(match[1]) > 23 or int(match[2]) > 59:
             raise SchedulingError(
                 f"invalid schedule time {text!r}; use HH:MM from 00:00 to 23:59"
             )
-        canonical = f"{match.group(1)}:{match.group(2)}"
+        canonical = f"{int(match[1]):02d}:{int(match[2]):02d}"
         if canonical in seen:
             raise SchedulingError(f"duplicate schedule time {canonical}")
         seen.add(canonical)
@@ -150,7 +150,12 @@ def parse_interval(value: int | str) -> int:
             raise SchedulingError(
                 "schedule interval must be a whole number from 2 through 24 hours"
             )
-        value = int(value)
+        try:
+            value = int(value)
+        except ValueError as exc:
+            raise SchedulingError(
+                "schedule interval must be a whole number from 2 through 24 hours"
+            ) from exc
     if isinstance(value, bool) or not isinstance(value, int) or not 2 <= value <= 24:
         raise SchedulingError(
             "schedule interval must be a whole number from 2 through 24 hours"
@@ -179,13 +184,22 @@ def build_timer_schedule(
 ) -> TimerSchedule:
     """Build timer schedule data through the shared scheduler validators."""
     interval, fixed_times = _schedule_parts(every_hours, times)
-    if last_start is not None and (
-        not isinstance(last_start, datetime)
-        or last_start.tzinfo is None
-        or last_start.utcoffset() is None
-    ):
-        raise SchedulingError("scheduled run start must include a local time-zone offset")
+    if last_start is not None:
+        _history_instant(last_start)
     return TimerSchedule(interval, fixed_times, last_start)
+
+
+def _history_instant(value: datetime) -> datetime:
+    try:
+        if not isinstance(value, datetime) or value.utcoffset() is None:
+            raise SchedulingError("schedule history must include a local time-zone offset")
+        instant = value.astimezone(timezone.utc)
+        # Keep room for UTC/local conversion and day or interval arithmetic.
+        if not 2 <= value.year <= 9998 or not 2 <= instant.year <= 9998:
+            raise SchedulingError("schedule history is outside the supported time range")
+        return instant
+    except (OverflowError, ValueError) as exc:
+        raise SchedulingError("schedule history is outside the supported time range") from exc
 
 
 def _schedule_directory(data_directory: str | Path) -> tuple[Path, os.stat_result]:
@@ -272,7 +286,7 @@ def load_timer_schedule(data_directory: str | Path) -> TimerSchedule:
         raise SchedulingError("schedule data file is too large")
     try:
         payload = json.loads(encoded.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
         raise SchedulingError("schedule data file is invalid") from exc
     if (
         not isinstance(payload, dict)
