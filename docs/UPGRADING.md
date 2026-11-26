@@ -342,11 +342,36 @@ each snapshot is service-owned `0700`. Adoption also executes through
 is applied to existing snapshots.
 
 Use the reference units in `deploy/systemd/`: their executable path is
-`/opt/cvebeacon/current/.venv/bin/cvebeacon`. Choose `watch run` instead of `run`
-in the monitoring unit for watch-only deployments. Install the units locally,
-reload systemd and restart the dashboard once. No database migration or monitor
-interruption happens during adoption itself. The updater never installs units
-or enables schedules automatically.
+`/opt/cvebeacon/current/.venv/bin/cvebeacon`, and the monitoring service runs
+`run --if-due`. `run` also supports watch-only configurations: it runs watch
+when enabled and includes scans when an inventory is available. Install the
+units locally, reload systemd and restart the dashboard once. No database
+migration or monitor interruption happens during adoption itself. The updater
+never installs units or enables schedules automatically.
+
+### Enable dashboard control for an existing timer
+
+Existing installs with the original daily systemd timer can enable dashboard
+schedule editing with one root-only command. Use the executable and config path
+from the installed `cvebeacon.service` `ExecStart`:
+
+```console
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon \
+  --config /var/lib/cvebeacon/cvebeacon.toml schedule timer-control enable
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon schedule timer-control status
+```
+
+The command reads the current `ExecStart` and refuses an unexpected command. On
+first enable, a simple daily-time list or interval becomes the initial
+dashboard schedule; other calendar forms use the default `07:00` and `19:00`.
+It writes only the two `dashboard-schedule.conf` drop-ins, preserving the unit
+files. The timer then checks every 15 minutes, while `run --if-due` uses a
+private `schedule.json` beside the state data and starts at most one missed
+scheduled run. The dashboard changes only that private data file and does not
+gain access to systemd unit paths or privileged commands. Use the Schedule page
+to edit the saved times or interval after status reports dashboard control is
+enabled. To restore the existing unit behavior, run `schedule timer-control
+disable` as root; this removes only those two drop-ins.
 
 After copying the reviewed units to `/etc/systemd/system`, reload systemd and
 explicitly enable the dashboard unit to start at boot. Keep the reference

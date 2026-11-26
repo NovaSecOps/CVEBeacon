@@ -1,6 +1,6 @@
 # Native scheduling
 
-CVEBeacon supports a single narrowly owned native schedule: the exact Windows task name `CVEBeacon Monitor`, or one marked block in the current Linux user’s crontab.
+CVEBeacon supports a single narrowly owned native schedule: the exact Windows task name `CVEBeacon Monitor`, one marked block in the current Linux user’s crontab, or a root-owned systemd timer with dashboard schedule control.
 
 Install the default four-hour schedule:
 
@@ -93,6 +93,48 @@ first `full` history sync needs an interactive confirmation and stdin is not a
 terminal. Configure `baseline` or `backfill` for unattended first runs, or run
 `watch sync --yes` once before the first scheduled run.
 
+## Systemd timer schedule control
+
+The reference systemd timer checks every 15 minutes. Its service runs
+`cvebeacon --config CONFIG run --if-due`; the command uses the private
+`schedule.json` file beside the state database to decide whether monitoring is
+due. With no file, it uses the shipped local times `07:00` and `19:00`. An
+interval is measured from the start of the previous scheduled run; fixed times
+use the server's local clock. A delayed timer start catches up at most one
+missed run, and the shared run lock still prevents overlapping writers. A
+not-due check exits successfully without scanning.
+
+New reference units already use this timer. For an existing updater-managed
+installation, enable dashboard control once as root, using the selected
+executable and configuration path:
+
+```console
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon \
+  --config /var/lib/cvebeacon/cvebeacon.toml schedule timer-control enable
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon schedule timer-control status
+```
+
+The command reads the current service `ExecStart` and refuses a command that is
+not the expected CVEBeacon `run` command. It records a simple existing daily
+time list or interval as the initial dashboard schedule; an unsupported
+calendar expression starts with `07:00` and `19:00`. It writes two root-only
+drop-ins, leaves both unit files untouched, changes the timer to a 15-minute
+tick, and keeps `Persistent=true`. The dashboard edits only `schedule.json`
+inside the data directory; it does not run privileged commands or write system
+unit files. Use **Operations → Schedule** to select an interval from 2 to 24
+hours or fixed local times. Saving requires review and is recorded in the
+account audit trail.
+
+The root-only commands are idempotent:
+
+```console
+sudo cvebeacon schedule timer-control status
+sudo cvebeacon schedule timer-control disable
+```
+
+`disable` removes only the two `dashboard-schedule.conf` drop-ins and reloads
+and restarts the timer so the original unit schedule takes effect again.
+
 ## Single-flight lock
 
 `scan` locks the inventory state storage beside `[state] database`. `run` locks
@@ -170,26 +212,24 @@ Linux user cron requires an installed, running cron service. It uses the host's 
 ## Dashboard service unit
 
 The repository ships `deploy/systemd/cvebeacon-dashboard.service`, which runs the
-dashboard on `127.0.0.1` as the service user with `NoNewPrivileges=yes`. Under
-that setting `crontab` cannot use its setuid or setgid helper. For cron installs,
-the Schedule page cannot read or update the user's crontab under this hardened
-unit. When the root-owned updater policy file exists, the page reads only the
-reference units `cvebeacon.timer` and `cvebeacon.service` with `systemctl show`
-and displays the timer state, boot setting, next run, last run and result. If an
+dashboard on `127.0.0.1` as the service user with `NoNewPrivileges=yes`. For an
+updater-managed timer, the Schedule page reads the reference unit properties
+with `systemctl show`. Before timer control is enabled, it displays the current
+schedule and the one-time root command. Once enabled, it edits only the private
+schedule file in the data directory. This does not change the dashboard unit's
+privileges or give the dashboard a path to write systemd unit files. If an
 installation uses custom unit names, the reference-unit status is Unknown. The
-page does not try to read the crontab for updater-managed installs. Use systemd
-to change the timer; the dashboard refuses to install a competing cron schedule.
-Its separate cron removal action removes only a CVEBeacon-managed crontab block
-and leaves the systemd timer running.
+separate cron removal action removes only a CVEBeacon-managed crontab block and
+leaves the systemd timer running.
 
 Without an updater-managed timer, the Schedule page uses the native Windows task
 or managed Linux crontab status and retains its existing controls. For a
-systemd-managed schedule without the updater, use the reference
-`deploy/systemd/cvebeacon.timer` and `cvebeacon.service` units (or the examples
-in the deployment guide's [Schedule it](DEPLOY.md#schedule-it) section).
+systemd-managed schedule, use the reference `deploy/systemd/cvebeacon.timer` and
+`cvebeacon.service` units (or the examples in the deployment guide's
+[Schedule it](DEPLOY.md#schedule-it) section).
 
-To manage the schedule from the dashboard instead, the drop-in must restore both
-the privilege transition and write access to the distribution's cron spool:
+For cron installations only, the following optional drop-in restores the
+privilege transition and write access to the distribution's cron spool:
 
 ```ini
 [Service]
@@ -201,8 +241,10 @@ Use `ReadWritePaths=/var/spool/cron` on hosts whose spool is directly under that
 directory. `NoNewPrivileges=no` lets `crontab` switch to its privileged user or
 group, and the `ReadWritePaths` entry keeps that spool writable under
 `ProtectSystem=strict`.
+Both settings are required for the Schedule page to read or update the crontab.
 The dashboard process can then gain privileges through setuid and setgid helpers
 such as `crontab`, so accept that trade-off only where dashboard access is
-already equivalent to the service account. See the
+already equivalent to the service account. This cron-specific exception is not
+used for systemd timer schedule control. See the
 [deployment guide](DEPLOY.md#run-the-dashboard) for the complete drop-in and
 restart commands.

@@ -2,7 +2,7 @@
 Description=Run CVEBeacon monitoring on a schedule
 
 [Timer]
-OnCalendar=*-*-* 07,19:00:00
+OnCalendar=*:0/15
 Persistent=true
 Unit=cvebeacon.service
 
