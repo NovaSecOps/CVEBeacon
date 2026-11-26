@@ -392,6 +392,12 @@ sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply
 sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply --version VERSION
 ```
 
+**Upgrading from 0.2.0.** Start the upgrade as an administrator with
+`sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply`. Replace
+`/opt/cvebeacon` with your installation prefix if needed. In 0.2.0, the
+dashboard request cannot read the service account's crontab inside the update
+service. Dashboard-triggered upgrades work from 0.2.1 onward.
+
 A check makes one bounded, anonymous HTTPS request to the GitHub releases API;
 it sends no token, inventory, configuration, user, host or local paths. Checking
 lists at most 30 recent releases. The administrator can select an explicit
@@ -405,9 +411,10 @@ hours of the last successful check. Schedule that command as the service user
 if wanted. Checking and applying are never scheduled by default.
 
 The dashboard **Updates** page is visible with `view` permission. Only an
-administrator account can check or request an update. Release notes are escaped
-plain text. **Update now** writes only a small version/user/time request into
-the data directory and records the request in account audit. It never runs pip
+administrator account can check or request an update. Release notes are shown
+as escaped plain text with HTML comments removed. **Update now** writes only a
+small version/user/time request into the data directory and records the request
+in account audit. It never runs pip
 or writes code. Install `cvebeacon-update.path` and its one-shot service, and
 explicitly enable the path unit to process requests. The privileged process
 ignores the supplied identity and time, consumes the request, checks the version
@@ -419,6 +426,45 @@ name. A request arriving during a manual apply is consumed with an explicit
 `busy` audit/status result and can be submitted again. The request service exits
 cleanly for refusals and has no start-rate limit; contention cannot disable the
 path unit. PathExists is checked again after a triggered service exits.
+
+### When an update is refused
+
+The Updates page shows a plain-language reason. The updater records its fixed
+reason code in update status and `update-audit.jsonl`; raw subprocess output is
+withheld. An administrator can run `cvebeacon update apply` to see safe command
+details. If recovery is incomplete, run `cvebeacon update recover` before
+retrying an update.
+
+| Reason code | Meaning |
+| --- | --- |
+| `preflight-crontab-unreadable` | The crontab could not be read inside the update service. |
+| `preflight-managed-crontab` | A managed schedule must be removed before updating. |
+| `preflight-failed` | An access or storage preflight check failed. |
+| `check-network` | The release service could not be reached. |
+| `check-failed` | The release response could not be checked. |
+| `verify-signature` | The release signature could not be verified. |
+| `verify-artifact` | A release artifact failed a download, checksum, or metadata check. |
+| `quiesce-failed` | Timers could not be stopped or an active monitoring service did not finish. |
+| `lock-failed` | A required update or storage lock could not be acquired. |
+| `freeze-failed` | The dashboard could not be stopped for the update. |
+| `backup-failed` | The pre-update backup could not be created. |
+| `backup-database-busy` | A database stayed busy during the bounded backup wait. |
+| `install-failed` | The verified release could not be installed. |
+| `migrate-failed` | The state migration did not complete. |
+| `switch-failed` | The new release could not be selected. |
+| `start-failed` | The dashboard could not be started after the update. |
+| `doctor-failed` | Local health checks did not pass after the update. |
+| `probe-unhealthy` | The dashboard did not pass its health probe after starting. |
+| `recovery-incomplete` | Automatic restoration or its health check did not finish. |
+| `request-invalid` | The claimed dashboard request was malformed. |
+| `request-claim-failed` | The updater could not claim the dashboard request. |
+| `policy-invalid` | The administrator policy could not be loaded. |
+| `version-invalid` | The manual target was not a canonical release version. |
+| `adopt-failed` | Recovery could not finish a pending adoption. |
+| `finalize-timers-failed` | Timer restart failed after commit. Run `cvebeacon update recover`. |
+| `finalize-archive-failed` | Archival failed after commit. Run `cvebeacon update recover`. |
+| `finalize-cleanup-failed` | Temporary-file cleanup after commit needs administrator review. |
+| `update-failed` | The updater could not classify a failure more specifically. |
 
 ## Transaction and rollback
 
@@ -432,10 +478,18 @@ files alongside the corresponding account database. Snapshots made before
 managed inventory backup was added contain only the database and config
 copies. Symlinks and linked/non-regular data files are refused. All core
 state paths must stay inside that directory. The snapshot helper runs as the
-service account, not root; backups live under the protected code prefix.
+service account with the previous release's Python and snapshot helper. Backups
+live under the protected code prefix. The dashboard stop releases its SQLite
+locks before backup begins. If another process holds a SQLite lock, the current
+snapshot helper retries continuous contention for up to 30 seconds per
+operation. Copy progress resets that wait.
 The configuration writer lock stays held while discovering and waiting for run
-locks, so the dashboard cannot move storage paths during that wait. Dashboard
-children finish before the dashboard unit is stopped.
+locks, so the dashboard cannot move storage paths during that wait. The updater
+waits for dashboard jobs holding the relevant writer locks before stopping the
+dashboard unit. If a running monitoring service or a writer lock prevents
+recovery from quiescing, the dashboard keeps running with the transaction fence
+in place. Failed recovery stops a dashboard it tried to start while it still
+holds the writer locks.
 The updater's `doctor` uses `--local-state --allow-watch-only`: it checks the
 configuration, inventory when present, and local databases. Notification
 environment variables are loaded by the restarted service units and are not
@@ -444,8 +498,9 @@ passed through the privileged updater. This health check sends no test alerts.
 `dashboard_unit` explicitly names the persistent web unit and must be included
 in `units`; it can have a custom name. Its ExecStart must use `current`. Health
 requires that unit to be active, its MainPID to own the listening socket, and
-`/healthz` to report that PID and the expected running package version. A stale
-or unrelated listener cannot satisfy the probe. The endpoint caches the running
+`/healthz` to report that PID and the expected running package version. The
+updater retries within a 120-second budget and confirms the process start time
+and listener again after a successful response. The endpoint caches the running
 version at process startup rather than rereading a switched metadata path.
 Listener ownership must match the probe's exact address family and address;
 a wildcard bind is accepted only within that same address family.
@@ -529,15 +584,34 @@ apply. An unrecognized legacy journal lacks recovery coordinates and is refused:
 an administrator must verify code/state and retained snapshots before archiving
 that legacy record. Do not delete an active record to bypass recovery.
 
-`update-audit.jsonl` records events; `update-result.json` is a convenience mirror
-of the authoritative completed transaction. The dashboard status is advisory
-and uses the resolved **config directory**, as does the privileged request
-consumer, regardless of where database subdirectories reside. The reference
-path unit watches that config directory; adjust its path and the service's
-`--config` together for a custom installation.
-Check-only deployments with a read-only config mount fall back to the watch
-database directory for advisory status. Checks still return release information
-if neither advisory location can be written.
+`update-audit.jsonl` records events. `update-result.json` mirrors the
+authoritative completed transaction. The native updater creates
+`update-status/` inside the policy's data directory with service-account
+ownership and mode `0750`. Keep application data and configured paths outside
+that directory. Earlier status files remain readable for upgrade and rollback
+compatibility.
+
+The request path stays beside the runtime config. For a custom installation,
+point the path unit and the update service's absolute `--config` at the
+policy's data directory and config. If the policy is invalid or the updater
+cannot claim a request, the system journal records “waiting for administrator”
+and the updater stops `cvebeacon-update.path`. Inspect and repair the policy or
+request location, then rearm the watcher:
+
+```sh
+sudo systemctl reset-failed cvebeacon-update.service cvebeacon-update.path
+sudo systemctl start cvebeacon-update.path
+```
+
+The reference update service limits starts if the watcher cannot be stopped.
+Existing installations need to install the revised
+`cvebeacon-update.service` and run `sudo systemctl daemon-reload` to get that
+backstop. A request consumed while another update holds the lock leaves the
+watcher armed.
+
+Unprivileged checks with a read-only config mount can cache release information
+in `update-status/` beside the watch database. Root `update check` prints the
+result without writing a cache.
 
 Backups are private, retain the most recent seven snapshots by default, and
 include password hashes. The policy's `retention` overrides that count. A pending

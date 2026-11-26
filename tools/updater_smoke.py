@@ -103,7 +103,7 @@ class ScratchNative(u.Native):
         # enforcement is exercised separately by updater_permissions_smoke.py.
         self.run([venv / "bin/python", "-I", "-c", "import os,sys; assert all(os.access(p,os.R_OK|os.X_OK) for p in sys.argv[1:])", *directories], service=True)
 
-    def dashboard_pid(self):
+    def dashboard_pid(self, *, timeout):
         if self.external_pid is not None:
             os.kill(self.external_pid, 0)
             return self.external_pid

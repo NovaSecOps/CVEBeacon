@@ -98,6 +98,8 @@ environment directly.
   tag must equal `v` plus that exact version (`0.1.0` becomes `v0.1.0`).
 - Update the release notes template values that are not filled in by the
   workflow, and commit the version change, if any.
+- Keep review and publishing checklist items in the release job summary; the
+  release notes template is the public release body.
 - Treat changes to `requirements/release-build.txt` as reviewed changes. The
   python distribution build fails when a pinned version or hash does not match
   the index.
@@ -126,8 +128,8 @@ environment directly.
    before retrying or cleaning up; see [Recovery from a partial run](#recovery-from-a-partial-run).
    The release job also verifies that the tag still resolves to the commit the
    run built; a moved or recreated tag stops draft creation.
-5. Open the draft release and review the generated notes, the asset list, and
-   `SHA256SUMS`.
+5. Review the release job summary checklist. Open the draft release and review
+   the generated notes, the asset list, and `SHA256SUMS`.
 6. Download the assets and verify the checksums with
    `sha256sum -c SHA256SUMS`. Install the wheel in a clean environment and run
    `cvebeacon --help`. Extract the Windows archive on a Windows host and run

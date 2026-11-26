@@ -6,7 +6,7 @@ import os
 import math
 import stat
 import tomllib
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +36,37 @@ WATCH_SETTINGS = {
 }
 
 
+UPDATE_STATUS_DIR = "update-status"
+
+
 def _resolve(base: Path, value: str | Path) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = base / path
-    return path.resolve()
+    resolved = path.resolve()
+    reserved = base / UPDATE_STATUS_DIR
+    if (Path(os.path.abspath(path)).is_relative_to(reserved)
+            or resolved.is_relative_to(reserved.resolve())):
+        raise ConfigurationError("configured paths must not use update status storage")
+    return resolved
+
+
+def _validate_status_paths(config):
+    def paths(value):
+        if isinstance(value, Path):
+            yield value
+        elif is_dataclass(value):
+            for member in fields(value):
+                yield from paths(getattr(value, member.name))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from paths(item)
+
+    directories = {parent / UPDATE_STATUS_DIR
+                   for parent in (config.config_path.parent, config.watch.database.parent)}
+    reserved = directories | {path.resolve() for path in directories}
+    if any(path.is_relative_to(directory) for path in paths(config) for directory in reserved):
+        raise ConfigurationError("configured paths must not use update status storage")
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,7 +493,7 @@ def load_config(
         mapping_keys.add(key)
         mappings.append(ProductMapping(vendor, product, cpe))
 
-    return AppConfig(
+    config = AppConfig(
         config_path=config_path,
         inventory=inventory_config,
         managed_inventory=managed,
@@ -543,3 +569,5 @@ def load_config(
             reporting_identity=reporting_identity,
         ),
     )
+    _validate_status_paths(config)
+    return config

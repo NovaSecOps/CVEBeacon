@@ -169,7 +169,7 @@ def test_readonly_config_check_uses_writable_advisory_state(tmp_path, signed):
     try:
         assert u.check(config, http=signed[0].http)["available"] == "0.1.1"
         assert u.read_status(config)["available"] == "0.1.1"
-        assert (state / u.STATUS).is_file()
+        assert (state / u.UPDATE_STATUS_DIR / u.CHECK_STATUS).is_file()
     finally:
         config_dir.chmod(0o700)
 
@@ -182,7 +182,7 @@ def test_check_returns_data_even_if_all_status_publication_fails(tmp_path, signe
 
 def test_check_returns_data_when_status_is_a_directory(tmp_path, signed):
     config = replace(write_config(tmp_path, inventory=False), update=UpdateConfig(enabled=True))
-    (config.config_path.parent / u.STATUS).mkdir()
+    (u._advisory_directory(config.config_path.parent) / u.CHECK_STATUS).mkdir()
     assert u.check(config, http=signed[0].http)["available"] == "0.1.1"
 
 
@@ -323,7 +323,6 @@ def test_completed_recovery_health_failure_preserves_the_committed_result(transa
 def test_same_port_on_another_loopback_address_cannot_pass_health(tmp_path, monkeypatch):
     from contextlib import ExitStack
     import subprocess
-    from types import SimpleNamespace
     server = "import socket,sys; s=socket.socket(); s.bind((sys.argv[1],int(sys.argv[2]))); s.listen(); print(s.getsockname()[1],flush=True); sys.stdin.read()"
     with ExitStack() as stack:
         def child(address, port):
@@ -336,20 +335,44 @@ def test_same_port_on_another_loopback_address_cannot_pass_health(tmp_path, monk
         child("127.0.0.1", port)
         native = object.__new__(u.Native)
         native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service", probe=f"http://127.0.0.1:{port}/healthz")
-        native.dashboard_pid = lambda: dashboard.pid
+        native.dashboard_pid = lambda *, timeout: dashboard.pid
         payload = {"status": "ok", "version": "99.0", "pid": dashboard.pid}
-        class HTTP:
-            def __enter__(self):
-                return self
-            def __exit__(self, *args):
-                pass
-            def request_once(self, *args, **kwargs):
-                return SimpleNamespace(status_code=200, body=json.dumps(payload).encode())
-        monkeypatch.setattr(u, "HttpClient", lambda *args, **kwargs: HTTP())
-        ticks = iter([0, 31])
-        monkeypatch.setattr(u.time, "monotonic", lambda: next(ticks))
+        monkeypatch.setattr(u, "_health_response", lambda *args: payload)
+        clock = {"now": 0.0}
+        monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(u.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
         with pytest.raises(u.UpdateError, match="health probe failed"):
             native.probe("99.0")
+        assert clock["now"] == 120
+
+
+def test_health_probe_retries_with_backoff_until_the_dashboard_is_ready(tmp_path, monkeypatch):
+    native = object.__new__(u.Native)
+    native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service")
+    native.dashboard_pid = lambda *, timeout: 42
+    native.process_start = lambda pid: 1
+    native.listener_sockets = lambda pid: {"1"}
+    clock = {"now": 0.0, "sleeps": [], "attempts": 0}
+
+    def response(*args):
+        clock["attempts"] += 1
+        if clock["now"] >= 31:
+            return {"status": "ok", "version": "0.1.1", "pid": 42}
+        return {"status": "starting"}
+
+    monkeypatch.setattr(u, "_health_response", response)
+    monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
+    def sleep(seconds):
+        clock["sleeps"].append(seconds)
+        clock["now"] += seconds
+    monkeypatch.setattr(u.time, "sleep", sleep)
+
+    native.probe("0.1.1")
+
+    assert clock["now"] >= 31
+    assert clock["attempts"] <= 10
+    assert clock["sleeps"] == sorted(clock["sleeps"])
+    assert len(set(clock["sleeps"])) > 1
 
 
 @pytest.mark.parametrize("bind,probe,accepted", [

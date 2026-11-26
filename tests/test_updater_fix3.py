@@ -110,16 +110,20 @@ def test_writer_in_completion_rename_window_must_establish_durability(transactio
         assert "restore" not in native.calls
 
 
-def test_dashboard_displays_and_escapes_committed_update_warning(updates):
+@pytest.mark.parametrize("modified", [False, True])
+def test_dashboard_maps_only_the_exact_legacy_committed_update_warning(updates, modified):
     config, _, client = updates
-    warning = "update committed; run update recover to finish finalization <script>unsafe</script>"
+    warning = "update committed; run update recover to finish finalization"
+    if modified:
+        warning += " <script>unsafe</script>"
     u.atomic_json(u.control_paths(config.config_path)[1], {
         "last_update": {"result": "updated", "version": "0.1.1", "time": u.stamp(), "warning": warning}})
     login(client, "viewer")
     page = client.get("/updates/")
     assert page.status_code == 200 and "Last update: updated" in page.text
-    assert "run update recover to finish finalization" in page.text
-    assert "&lt;script&gt;unsafe&lt;/script&gt;" in page.text
+    assert ("The update was committed and finalization still needs to finish." in page.text) is not modified
+    assert ("Run <code>cvebeacon update recover</code>" in page.text) is not modified
+    assert "&lt;script&gt;unsafe&lt;/script&gt;" not in page.text
     assert "<script>unsafe</script>" not in page.text
 
 
