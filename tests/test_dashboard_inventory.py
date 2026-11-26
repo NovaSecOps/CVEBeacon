@@ -516,6 +516,9 @@ def test_client_page_explains_the_installed_schedule(deployment, monkeypatch, in
         output = "\n".join(lines).encode()
 
     def fake_scheduler(argv, **kwargs):
+        if argv[:2] == ["systemctl", "show"]:
+            assert argv[-1] == "cvebeacon.timer"
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
         assert argv == ["crontab", "-l"]
         return SimpleNamespace(returncode=0, stdout=output, stderr=b"")
 

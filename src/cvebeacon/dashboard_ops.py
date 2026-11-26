@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shlex
 import stat
 import subprocess
 import threading
 import time
 from pathlib import Path
-from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
+from flask import (
+    Blueprint, abort, current_app, g, redirect, render_template, request,
+    session, url_for,
+)
 
 from . import scheduling
 from .config import AppConfig
@@ -24,16 +28,13 @@ from .dashboard_jobs import (
     JobQueueFull,
     full_history_confirmation_required,
 )
-from .errors import CVEBeaconError, ConfigurationError
+from .errors import CVEBeaconError, ConfigurationError, SchedulingError
 from .locking import OperationLock, RunInProgress
 from .launching import command_prefix
 
 UPDATE_POLICY_PATH = Path("/etc/cvebeacon/update.toml")
 REFERENCE_UPDATE_UNITS = (
     "cvebeacon.timer", "cvebeacon.service",
-)
-TIMER_CRON_BLOCK_REASON = (
-    "This server uses a systemd timer for monitoring, so a cron schedule cannot be installed here."
 )
 TIMER_STATUS_LABELS = {
     "state": "Unknown",
@@ -146,8 +147,15 @@ def _schedule_snapshot(config: AppConfig) -> dict:
         managed = False
         timer_units = None
         timer_status = None
+        timer_control = None
         if platform == "linux":
             managed, timer_units = _update_timer_units()
+            timer_control = scheduling.systemd_timer_control_status(
+                *REFERENCE_UPDATE_UNITS, config.config_path, run=bounded_run
+            )
+            timer_control.pop("enable_command", None)
+            if timer_control["matches"]:
+                managed, timer_units = True, REFERENCE_UPDATE_UNITS
         if managed:
             timer_status = dict(TIMER_STATUS_LABELS)
             if timer_units is not None:
@@ -184,6 +192,7 @@ def _schedule_snapshot(config: AppConfig) -> dict:
             "scan_state": scan_state,
             "timer_managed": managed,
             "timer_status": timer_status,
+            "timer_control": timer_control,
         }
         app.extensions["operations_schedule_summary"] = (runner, platform, time.monotonic() + 30, result)
         return result
@@ -349,6 +358,7 @@ def _schedule_context(
     *,
     error: str | None = None,
     fallback_command: str | None = None,
+    schedule_confirmation: dict | None = None,
 ) -> dict:
     runner = _runner()
     snapshot = _schedule_snapshot(config)
@@ -359,18 +369,67 @@ def _schedule_context(
             status_text = scheduling.status(run=_bounded_schedule_runner(runner))
         except (CVEBeaconError, OSError, subprocess.SubprocessError) as exc:
             status_error = str(exc)
+    timer_control = snapshot.get("timer_control") or {}
+    timer_control_enabled = timer_control.get("enabled") is True
+    timer_enable_command = None
+    timer_schedule_mode = "times"
+    timer_schedule_every = 4
+    timer_schedule_times = ",".join(scheduling.DEFAULT_TIMER_TIMES)
+    timer_schedule_next_run = "Unknown"
+    timer_schedule_last_start = "Unknown"
+    if snapshot["timer_managed"] and timer_control_enabled:
+        try:
+            saved_schedule = scheduling.load_timer_schedule(config.database_path.parent)
+            timer_schedule_mode = saved_schedule.mode
+            timer_schedule_every = saved_schedule.every_hours or 4
+            timer_schedule_times = ",".join(saved_schedule.times)
+            now = scheduling.local_now()
+            next_run = scheduling.schedule_next_run(saved_schedule, now)
+            if snapshot["timer_status"]["state"] == "On":
+                timer_schedule_next_run = next_run.strftime("%Y-%m-%d %H:%M")
+            elif snapshot["timer_status"]["state"] == "Off":
+                timer_schedule_next_run = "Not scheduled"
+            timer_schedule_last_start = (
+                saved_schedule.last_start.astimezone(now.tzinfo).strftime("%Y-%m-%d %H:%M")
+                if saved_schedule.last_start else "Never"
+            )
+        except (CVEBeaconError, OSError, ValueError):
+            error = error or "The saved timer schedule could not be read."
+    elif snapshot["timer_managed"]:
+        try:
+            control_details = scheduling.systemd_timer_control_status(
+                *REFERENCE_UPDATE_UNITS,
+                config.config_path,
+                run=_bounded_schedule_runner(runner),
+                data_directory=(
+                    None if _policy_is_administrator_owned(UPDATE_POLICY_PATH)
+                    else config.database_path.parent
+                ),
+            )
+            timer_enable_command = control_details.get("enable_command")
+        except (CVEBeaconError, OSError, subprocess.SubprocessError):
+            timer_enable_command = None
     return {
         "error": error,
         "status_text": status_text,
         "status_error": status_error,
         "platform_name": scheduling.platform.system(),
         "fallback_command": fallback_command or _fallback_install_command(config),
-        "block_reason": (
-            TIMER_CRON_BLOCK_REASON if snapshot["timer_managed"]
-            else _install_block_reason()
-        ),
+        "block_reason": None if snapshot["timer_managed"] else _install_block_reason(),
         "timer_managed": snapshot["timer_managed"],
         "timer_status": snapshot["timer_status"],
+        "timer_control_enabled": timer_control_enabled,
+        "timer_calendar_words": timer_control.get(
+            "calendar_words", "The current timer schedule is unavailable"
+        ),
+        "timer_tick": timer_control.get("timer_tick", "Unknown"),
+        "timer_enable_command": timer_enable_command,
+        "timer_schedule_mode": timer_schedule_mode,
+        "timer_schedule_every": timer_schedule_every,
+        "timer_schedule_times": timer_schedule_times,
+        "timer_schedule_next_run": timer_schedule_next_run,
+        "timer_schedule_last_start": timer_schedule_last_start,
+        "schedule_confirmation": schedule_confirmation,
         "default_command": scheduling.default_command(
             inventory=config.effective_inventory is not None, watch=config.watch.enabled
         ),
@@ -386,13 +445,85 @@ def _render_schedule(
     error: str | None = None,
     status: int = 200,
     fallback_command: str | None = None,
+    schedule_confirmation: dict | None = None,
 ):
     return render_template(
         "schedule.html",
         **_schedule_context(
-            config, error=error, fallback_command=fallback_command
+            config, error=error, fallback_command=fallback_command,
+            schedule_confirmation=schedule_confirmation,
         ),
     ), status
+
+
+def _timer_schedule_confirmation(config: AppConfig):
+    """Review a schedule, then save it only after a separate confirmation post."""
+    token = _text(request.form, "confirm", limit=128)
+    pending = session.get("pending_timer_schedule")
+    if token:
+        session.pop("pending_timer_schedule", None)
+        if (
+            not isinstance(pending, dict)
+            or pending.get("token") != token
+            or pending.get("user") != _actor()
+        ):
+            abort(400)
+        try:
+            schedule = scheduling.build_timer_schedule(
+                pending.get("every_hours"),
+                times=pending.get("times"),
+            )
+            detail = json.dumps(
+                {
+                    "mode": schedule.mode,
+                    "every": schedule.every_hours,
+                    "times": ",".join(schedule.times) or None,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            _record("timer_schedule_update_requested", detail)
+            scheduling.change_timer_schedule(config.database_path.parent, schedule)
+            current_app.extensions.pop("operations_schedule_summary", None)
+            _record("timer_schedule_updated", detail)
+        except (CVEBeaconError, OSError) as exc:
+            return _render_schedule(config, error=str(exc), status=400)
+        return redirect(url_for("operations.schedule"), code=303)
+
+    mode = _text(request.form, "mode", required=True, limit=16)
+    try:
+        if mode == "interval":
+            schedule = scheduling.build_timer_schedule(
+                every_hours=_text(request.form, "every", required=True, limit=8)
+            )
+        elif mode == "times":
+            schedule = scheduling.build_timer_schedule(
+                times=_text(request.form, "times", required=True, limit=200)
+            )
+        else:
+            abort(400)
+    except SchedulingError as exc:
+        return _render_schedule(config, error=str(exc), status=400)
+    pending = {
+        "token": secrets.token_urlsafe(24),
+        "user": _actor(),
+        "every_hours": schedule.every_hours,
+        "times": list(schedule.times) if schedule.every_hours is None else None,
+    }
+    session["pending_timer_schedule"] = pending
+    description = (
+        f"Every {schedule.every_hours} hours"
+        if schedule.every_hours is not None
+        else "Every day at " + " and ".join(schedule.times)
+    )
+    return _render_schedule(
+        config,
+        schedule_confirmation={
+            "token": pending["token"],
+            "description": description,
+            "mode": schedule.mode,
+        },
+    )
 
 
 def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
@@ -552,18 +683,22 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
     @requires("manage_schedule")
     def schedule():
         require_accounts()
+        current_app.extensions.pop("operations_schedule_summary", None)
         return _render_schedule(config)
 
     @blueprint.post("/schedule/install")
     @requires("manage_schedule")
     def schedule_install():
         require_accounts()
-        if (
-            scheduling.platform.system().casefold() == "linux"
-            and _update_timer_units()[0]
-        ):
+        current_app.extensions.pop("operations_schedule_summary", None)
+        schedule_snapshot = _schedule_snapshot(config)
+        if scheduling.platform.system().casefold() == "linux" and schedule_snapshot["timer_managed"]:
+            if (schedule_snapshot.get("timer_control") or {}).get("enabled") is True:
+                return _timer_schedule_confirmation(config)
             return _render_schedule(
-                config, error=TIMER_CRON_BLOCK_REASON, status=409
+                config,
+                error="Enable dashboard schedule control with the one-time command shown on this page before saving a schedule.",
+                status=409,
             )
         blocked = _install_block_reason()
         if blocked:

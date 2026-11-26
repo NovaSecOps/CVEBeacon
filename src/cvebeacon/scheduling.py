@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, replace
+from datetime import datetime, time as datetime_time, timedelta, timezone
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import SchedulingError
 
@@ -26,8 +32,12 @@ CRON_END = "# END CVEBEACON MANAGED"
 CRON_SEPARATOR = "# CVEBEACON SEPARATOR ADDED"
 SCHEDULE_COMMANDS = ("scan", "watch", "both")
 TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
-TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
+TIME_PATTERN = re.compile(r"(\d{2}):(\d{2})")
 MAX_TIMES = 12
+DEFAULT_TIMER_TIMES = ("07:00", "19:00")
+TIMER_SCHEDULE_FILENAME = "schedule.json"
+TIMER_CONTROL_DROPIN = "dashboard-schedule.conf"
+TIMER_CONTROL_TICK = "*:0/15"
 
 WINDOWS_REGISTRATION_SCRIPT = """param(
     [Parameter(Mandatory = $true)][string]$TaskName,
@@ -111,16 +121,410 @@ def parse_times(value: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
     for item in raw:
         text = str(item).strip()
         match = TIME_PATTERN.fullmatch(text)
-        if match is None:
+        if match is None or int(match[1]) > 23 or int(match[2]) > 59:
             raise SchedulingError(
                 f"invalid schedule time {text!r}; use HH:MM from 00:00 to 23:59"
             )
-        canonical = f"{match.group(1)}:{match.group(2)}"
+        canonical = f"{int(match[1]):02d}:{int(match[2]):02d}"
         if canonical in seen:
             raise SchedulingError(f"duplicate schedule time {canonical}")
         seen.add(canonical)
         times.append(canonical)
     return tuple(sorted(times, key=lambda item: (int(item[:2]), int(item[3:]))))
+
+
+@dataclass(frozen=True, slots=True)
+class TimerSchedule:
+    """The dashboard-owned cadence and its admission history."""
+
+    every_hours: int | None = None
+    times: tuple[str, ...] = ()
+    last_start: datetime | None = None
+    eligible_since: datetime | None = None
+
+    @property
+    def mode(self) -> str:
+        return "interval" if self.every_hours is not None else "times"
+
+
+def parse_interval(value: int | str) -> int:
+    """Validate an interval using the same bounds as ``make_plan``."""
+    if isinstance(value, str):
+        if not re.fullmatch(r"\d+", value):
+            raise SchedulingError(
+                "schedule interval must be a whole number from 2 through 24 hours"
+            )
+        try:
+            value = int(value)
+        except ValueError as exc:
+            raise SchedulingError(
+                "schedule interval must be a whole number from 2 through 24 hours"
+            ) from exc
+    if isinstance(value, bool) or not isinstance(value, int) or not 2 <= value <= 24:
+        raise SchedulingError(
+            "schedule interval must be a whole number from 2 through 24 hours"
+        )
+    return value
+
+
+def _schedule_parts(
+    every_hours: int | None,
+    times: str | tuple[str, ...] | list[str] | None,
+) -> tuple[int | None, tuple[str, ...]]:
+    if times is not None and every_hours is not None:
+        raise SchedulingError("--times and --every are mutually exclusive")
+    if times is None and every_hours is None:
+        raise SchedulingError("choose an interval with --every or fixed times with --times")
+    if times is not None:
+        return None, parse_times(times)
+    return parse_interval(every_hours), ()
+
+
+def build_timer_schedule(
+    every_hours: int | None = None,
+    *,
+    times: str | tuple[str, ...] | list[str] | None = None,
+    last_start: datetime | None = None,
+) -> TimerSchedule:
+    """Build timer schedule data through the shared scheduler validators."""
+    interval, fixed_times = _schedule_parts(every_hours, times)
+    if last_start is not None:
+        _history_instant(last_start)
+    return TimerSchedule(interval, fixed_times, last_start)
+
+
+def _history_instant(value: datetime) -> datetime:
+    try:
+        if not isinstance(value, datetime) or value.utcoffset() is None:
+            raise SchedulingError("schedule history must include a local time-zone offset")
+        instant = value.astimezone(timezone.utc)
+        # Keep room for UTC/local conversion and day or interval arithmetic.
+        if not 2 <= value.year <= 9998 or not 2 <= instant.year <= 9998:
+            raise SchedulingError("schedule history is outside the supported time range")
+        return instant
+    except (OverflowError, ValueError) as exc:
+        raise SchedulingError("schedule history is outside the supported time range") from exc
+
+
+@contextmanager
+def _schedule_directory(data_directory):
+    path = Path(data_directory).absolute()
+    descriptor = None
+    try:
+        details = path.lstat()
+        if not stat.S_ISDIR(details.st_mode):
+            raise SchedulingError("schedule data directory must be a real directory")
+        if os.name == "posix":
+            descriptor = os.open(path, _DIRECTORY_FLAGS)
+            details = os.fstat(descriptor)
+        yield path, descriptor, details
+    except OSError as exc:
+        raise SchedulingError("schedule data directory or file is unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_LEAF_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+_SCHEDULE_LIMIT = 16384
+_HISTORY_SKEW = timedelta(minutes=5)
+
+
+def _leaf_metadata(directory_fd, name, owner):
+    details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1 or details.st_uid != owner:
+        raise SchedulingError("schedule or systemd file must be a regular, singly linked, owner-controlled file")
+    return details
+
+
+def _read_leaf(directory_fd, name, owner, limit, *, private=False):
+    try:
+        original = _leaf_metadata(directory_fd, name, owner)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(os.open(name, _LEAF_FLAGS, dir_fd=directory_fd), "rb") as stream:
+        details = os.fstat(stream.fileno())
+        if (
+            (details.st_dev, details.st_ino) != (original.st_dev, original.st_ino)
+            or not stat.S_ISREG(details.st_mode) or details.st_nlink != 1 or details.st_uid != owner
+            or (private and os.name == "posix" and stat.S_IMODE(details.st_mode) != 0o600)
+        ):
+            raise SchedulingError("schedule or systemd file has unsafe metadata")
+        contents = stream.read(limit + 1)
+    if len(contents) > limit:
+        raise SchedulingError("schedule or systemd file is too large")
+    return contents, stat.S_IMODE(details.st_mode)
+
+
+def _stage_file(directory_fd, contents, mode):
+    name = ".cvebeacon-schedule-" + uuid4().hex
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    with os.fdopen(os.open(name, flags, 0o600, dir_fd=directory_fd), "wb") as stream:
+        try:
+            stream.write(contents)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        except BaseException:
+            os.unlink(name, dir_fd=directory_fd)
+            raise
+    return name
+
+
+def _publish_file(directory_fd, name, temporary):
+    if temporary is None:
+        os.unlink(name, dir_fd=directory_fd)
+    else:
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    os.fsync(directory_fd)
+
+
+def _schedule_payload(schedule: TimerSchedule) -> bytes:
+    validated = build_timer_schedule(
+        schedule.every_hours, times=schedule.times or None, last_start=schedule.last_start,
+    )
+    if schedule.eligible_since is not None:
+        _history_instant(schedule.eligible_since)
+    payload = {
+        "version": 1,
+        "every_hours": validated.every_hours,
+        "times": list(validated.times),
+        "last_start": validated.last_start.isoformat() if validated.last_start is not None else None,
+        "eligible_since": schedule.eligible_since.isoformat() if schedule.eligible_since is not None else None,
+    }
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _read_timer_schedule(directory) -> tuple[TimerSchedule, bool]:
+    path, descriptor, details = directory
+    entry = _read_leaf(
+        descriptor, TIMER_SCHEDULE_FILENAME if descriptor is not None else path / TIMER_SCHEDULE_FILENAME,
+        details.st_uid, _SCHEDULE_LIMIT, private=True,
+    )
+    if entry is None:
+        return build_timer_schedule(times=DEFAULT_TIMER_TIMES), False
+    try:
+        payload = json.loads(entry[0].decode("utf-8"))
+        required = {"version", "every_hours", "times", "last_start"}
+        if (
+            not isinstance(payload, dict)
+            or set(payload) not in (required, required | {"eligible_since"})
+            or type(payload["version"]) is not int
+            or payload["version"] != 1
+        ):
+            raise ValueError
+        times = payload["times"]
+        interval = payload["every_hours"]
+        if (not isinstance(times, list) or any(not isinstance(item, str) for item in times)
+                or (interval is not None and times)):
+            raise ValueError
+        start = payload["last_start"]
+        baseline = payload.get("eligible_since")
+        schedule = build_timer_schedule(
+            interval, times=times if interval is None else None,
+            last_start=datetime.fromisoformat(start) if start is not None else None,
+        )
+        if baseline is not None:
+            baseline = datetime.fromisoformat(baseline)
+            _history_instant(baseline)
+        return replace(schedule, eligible_since=baseline), True
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise SchedulingError("schedule data file is invalid") from exc
+
+
+def load_timer_schedule(data_directory: str | Path) -> TimerSchedule:
+    """Read private schedule data, or return the shipped timer defaults."""
+    with _schedule_directory(data_directory) as directory:
+        schedule, _ = _read_timer_schedule(directory)
+    return schedule
+
+
+def _write_timer_schedule(directory, schedule):
+    path, descriptor, details = directory
+    contents = _schedule_payload(schedule)
+    if descriptor is not None:
+        if details.st_uid != os.geteuid():
+            raise SchedulingError("schedule data directory must be owned by the CVEBeacon account")
+        temporary = _stage_file(descriptor, contents, 0o600)
+        try:
+            _publish_file(descriptor, TIMER_SCHEDULE_FILENAME, temporary)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=descriptor)
+            except FileNotFoundError:
+                pass
+    else:
+        with tempfile.NamedTemporaryFile(prefix=".schedule.", dir=path, delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(contents)
+                stream.flush()
+                os.fsync(stream.fileno())
+                stream.close()
+                os.replace(temporary, path / TIMER_SCHEDULE_FILENAME)
+            finally:
+                stream.close()
+                temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def _schedule_lock(directory):
+    path, descriptor, _ = directory
+    if descriptor is not None:
+        import fcntl
+
+        # The directory inode remains stable when schedule.json is replaced.
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    else:
+        from .locking import RunLock
+
+        with RunLock(path / "schedule.lock"):
+            yield
+
+
+def save_timer_schedule(data_directory: str | Path, schedule: TimerSchedule) -> Path:
+    """Atomically write owner-only schedule data beside monitoring state."""
+    with _schedule_directory(data_directory) as directory, _schedule_lock(directory):
+        _read_timer_schedule(directory)
+        _write_timer_schedule(directory, schedule)
+    return directory[0] / TIMER_SCHEDULE_FILENAME
+
+
+def change_timer_schedule(data_directory: str | Path, schedule: TimerSchedule) -> None:
+    """Update the cadence without overwriting a concurrently admitted start."""
+    with _schedule_directory(data_directory) as directory, _schedule_lock(directory):
+        previous, _ = _read_timer_schedule(directory)
+        baseline = previous.eligible_since if previous.times == schedule.times else None
+        if schedule.every_hours is None and baseline is None:
+            baseline = _start_of_local_day(local_now())
+        _write_timer_schedule(directory, replace(
+            schedule, last_start=previous.last_start, eligible_since=baseline,
+        ))
+
+
+def _aware_now(now: datetime | None = None) -> datetime:
+    if now is None:
+        now = datetime.now(_system_local_timezone())
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise SchedulingError("schedule time must include a local time-zone offset")
+    return now
+
+
+def local_now() -> datetime:
+    """Return the current aware server-local time used by the timer schedule."""
+    return _aware_now()
+
+
+def _system_local_timezone():
+    if os.name == "posix":
+        try:
+            target = os.readlink("/etc/localtime")
+            marker = "/zoneinfo/"
+            if marker in target:
+                return ZoneInfo(target.split(marker, 1)[1])
+        except (OSError, ZoneInfoNotFoundError):
+            pass
+        try:
+            with open("/etc/localtime", "rb") as handle:
+                return ZoneInfo.from_file(handle)
+        except (OSError, ValueError):
+            pass
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _slot_instant(wall: datetime, zone) -> datetime:
+    """Choose the first occurrence of a wall time, or the first instant after a gap."""
+    guesses = sorted(
+        wall.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc) for fold in (0, 1)
+    )
+    for instant in guesses:
+        if instant.astimezone(zone).replace(tzinfo=None) == wall:
+            return instant
+
+    # The two UTC interpretations straddle the offset change in a gap.
+    lower, upper = guesses
+    second = timedelta(seconds=1)
+    while upper - lower > second:
+        midpoint = lower + ((upper - lower) // second // 2) * second
+        if midpoint.astimezone(zone).replace(tzinfo=None) < wall:
+            lower = midpoint
+        else:
+            upper = midpoint
+    return upper
+
+
+def _start_of_local_day(now):
+    return _slot_instant(datetime.combine(now.date(), datetime_time.min), now.tzinfo)
+
+
+def _schedule_window(schedule: TimerSchedule, now: datetime) -> datetime:
+    current = _history_instant(now)
+    start = _history_instant(schedule.last_start) if schedule.last_start is not None else None
+    baseline = _history_instant(schedule.eligible_since) if schedule.eligible_since is not None else None
+    if any(value is not None and value - current > _HISTORY_SKEW for value in (start, baseline)):
+        raise SchedulingError("schedule history is too far in the future")
+    if schedule.every_hours is not None:
+        return current if start is None else start + timedelta(hours=schedule.every_hours)
+    day = now.date()
+    if baseline is None and start is None:
+        baseline = _start_of_local_day(now)
+    candidates = (
+        _slot_instant(datetime.combine(day + timedelta(days=offset), datetime_time.fromisoformat(text)), now.tzinfo)
+        # A slightly future start may already fall after tomorrow's first slot.
+        for offset in range(-1, 3)
+        for text in schedule.times
+    )
+    available = [
+        slot for slot in candidates
+        if (start is None or slot > start) and (baseline is None or slot >= baseline)
+    ]
+    if not available:
+        raise SchedulingError("could not compute the next scheduled run")
+    return min(available)
+
+
+def schedule_due(schedule: TimerSchedule, now: datetime) -> bool:
+    """Return whether one scheduled window has elapsed since the last start."""
+    now = _aware_now(now)
+    return _schedule_window(schedule, now) <= _history_instant(now)
+
+
+def schedule_next_run(schedule: TimerSchedule, now: datetime | None = None) -> datetime:
+    """Estimate the first future quarter-hour check that can admit a run."""
+    now = _aware_now(now)
+    current = _history_instant(now)
+    earliest = _schedule_window(schedule, now)
+    # Walk the actual UTC timeline, including both occurrences of a repeated
+    # local quarter hour. An eligible fixed slot itself can occur only once.
+    instant = max(current + timedelta(microseconds=1), earliest)
+    if instant.microsecond:
+        instant = instant.replace(microsecond=0) + timedelta(seconds=1)
+    while True:
+        local = instant.astimezone(now.tzinfo)
+        if local.second == 0 and local.minute % 15 == 0:
+            return local
+        instant += timedelta(seconds=60 - local.second)
+
+
+def should_run_scheduled(data_directory: str | Path, now: datetime | None = None) -> bool:
+    """Read the saved schedule and persist the start before a due run begins."""
+    current = _aware_now(now)
+    with _schedule_directory(data_directory) as directory, _schedule_lock(directory):
+        schedule, exists = _read_timer_schedule(directory)
+        baseline = schedule.eligible_since
+        if schedule.every_hours is None and schedule.last_start is None and baseline is None:
+            baseline = _start_of_local_day(current)
+        due = schedule_due(schedule, current)
+        if due or not exists or baseline != schedule.eligible_since:
+            _write_timer_schedule(directory, replace(
+                schedule, eligible_since=baseline, last_start=current if due else schedule.last_start,
+            ))
+        return due
 
 
 def _windows_extended_name() -> str:
@@ -223,20 +627,9 @@ def make_plan(
     run_logged_out: bool = False,
     account: str | None = None,
 ) -> SchedulePlan:
-    if times is not None and every_hours is not None:
-        raise SchedulingError("--times and --every are mutually exclusive")
-    if times is None and every_hours is None:
-        raise SchedulingError("choose an interval with --every or fixed times with --times")
     if command not in SCHEDULE_COMMANDS:
         raise SchedulingError("command must be scan, watch, or both")
-    fixed_times: tuple[str, ...] = ()
-    interval: int | None = None
-    if times is not None:
-        fixed_times = parse_times(times)
-    else:
-        if isinstance(every_hours, bool) or not isinstance(every_hours, int) or not 2 <= every_hours <= 24:
-            raise SchedulingError("schedule interval must be a whole number from 2 through 24 hours")
-        interval = every_hours
+    interval, fixed_times = _schedule_parts(every_hours, times)
     actual = platform.system().casefold()
     detected = "windows" if actual == "windows" else "linux" if actual == "linux" else "unsupported"
     requested = detected if system == "auto" else system.casefold()
@@ -897,40 +1290,90 @@ def _argv_scan_action(parts: list[str], config_path: Path) -> str:
         tail = tuple(parts[option + 2:])
     except (ValueError, IndexError, OSError):
         return "unknown"
-    if tail in {("scan",), ("run",), ("run", "--yes")}:
+    if tail in {
+        ("scan",), ("run",), ("run", "--yes"),
+        ("run", "--if-due"), ("run", "--yes", "--if-due"),
+    }:
         return "scan"
     if tail in {("watch", "run"), ("watch", "run", "--yes")}:
         return "watch"
     return "unknown"
 
 
-def _systemd_properties(run, unit: str, properties: tuple[str, ...]) -> dict[str, str] | None:
-    """Read a fixed systemd property list without exposing command output."""
+_SYSTEMD_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+_TIMER_UNIT = "cvebeacon.timer"
+_SERVICE_UNIT = "cvebeacon.service"
+_TIMER_PROPERTIES = (
+    "LoadState", "Unit", "Triggers", "TimersCalendar", "TimersMonotonic",
+    "Persistent", "OnClockChange", "OnTimezoneChange",
+)
+_CALENDAR_ENTRY = re.compile(r"\{ OnCalendar=([^{}]+?) ; next_elapse=[^{}]* \}")
+_TICK_NORMALIZED = "*-*-* *:00/15:00"
+
+
+def _systemd_call(run, args, *, timeout=2):
     try:
         result = run(
-            ["systemctl", "show", "--property=" + ",".join(properties), "--", unit],
-            capture_output=True,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            timeout=2,
+            args, env=_SYSTEMD_ENV.copy(), cwd="/", capture_output=True,
+            check=False, stdin=subprocess.DEVNULL, encoding="utf-8", timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return None
     if getattr(result, "returncode", 1) != 0:
         return None
     output = _command_text(getattr(result, "stdout", ""))
-    if len(output) > 32768:
+    return output if len(output) <= 32768 else None
+
+
+def _systemd_properties(run, unit: str, properties: tuple[str, ...]) -> dict[str, str] | None:
+    """Read systemctl's display properties. Array entries can repeat the key."""
+    output = _systemd_call(run, ["systemctl", "show", "--property=" + ",".join(properties), "--", unit])
+    if output is None:
         return None
+    arrays = {"TimersCalendar", "TimersMonotonic"} & set(properties)
     values: dict[str, str] = {}
     for line in output.splitlines():
-        if len(line) > 8192 or "=" not in line:
+        key, separator, value = line.partition("=")
+        if len(line) > 8192 or not separator or key not in properties:
             return None
-        key, value = line.split("=", 1)
-        if key not in properties or key in values or any(ord(char) < 32 for char in key):
-            return None
-        values[key] = value
+        if key in values:
+            if key not in arrays:
+                return None
+            values[key] += " " + value
+        else:
+            values[key] = value
+    for key in arrays:
+        # systemctl emits no line for an empty array.
+        values.setdefault(key, "")
     return values if set(values) == set(properties) else None
+
+
+def _systemd_exec_start(run, unit):
+    """Read the typed system manager property without lossy argv display formatting."""
+    manager = "org.freedesktop.systemd1"
+    label = "".join(chr(byte) if chr(byte).isascii() and chr(byte).isalnum() else f"_{byte:02x}"
+                    for byte in unit.encode("utf-8"))
+    output = _systemd_call(run, [
+        "busctl", "--system", "--json=short", "get-property", manager,
+        f"/org/freedesktop/systemd1/unit/{label}", f"{manager}.Service", "ExecStartEx",
+    ])
+    if output is None:
+        return None
+    try:
+        payload = json.loads(output)
+        if payload["type"] != "a(sasasttttuii)" or len(payload["data"]) != 1:
+            return None
+        path, argv, flags, *status = payload["data"][0]
+        if (
+            not _systemd_token(path) or not isinstance(argv, list) or not 4 <= len(argv) <= 6
+            or not all(_systemd_token(token) for token in argv) or argv[0] != path
+            or flags not in ([], ["no-env-expand"])
+            or len(status) != 7 or any(type(field) is not int for field in status)
+        ):
+            return None
+        return argv, bool(flags)
+    except (KeyError, TypeError, ValueError, RecursionError):
+        return None
 
 
 def _timestamp(value: str):
@@ -956,22 +1399,706 @@ def _time_label(value, *, empty: str) -> str:
     return parsed.strftime("%Y-%m-%d %H:%M")
 
 
-def _systemd_exec_argv(value: str) -> list[str] | None:
-    """Extract one argv vector from systemd's fixed ExecStart display property."""
-    if len(value) > 16384 or value.count("argv[]=") != 1:
+def _systemd_token(value):
+    return (
+        isinstance(value, str) and 0 < len(value) <= 4096
+        and not any(
+            code < 32 or 0x7f <= code <= 0x9f or 0xd800 <= code <= 0xdfff
+            for code in map(ord, value)
+        )
+    )
+
+
+def _systemd_path(path):
+    if not _systemd_token(path):
         return None
-    encoded = value.partition("argv[]=")[2]
-    marker = " ; ignore_errors="
-    if marker not in encoded:
+    candidate = PurePosixPath(path)
+    if candidate.anchor != "/" or str(candidate) != path or ".." in candidate.parts:
         return None
-    encoded = encoded.partition(marker)[0].strip()
+    return candidate
+
+
+def _native_posix_path(path):
+    # Interpret systemd paths in the manager's POSIX namespace, including when
+    # local tests supply a native Windows temporary directory.
+    native = path if isinstance(path, PureWindowsPath) else Path(path).absolute()
+    return PurePosixPath("/", *native.parts[1:])
+
+
+def _timer_command(command, config_path=None):
+    if command is None:
+        return None
+    argv, no_expansion = command
+    executable = _systemd_path(argv[0])
+    config_arg = argv[2]
+    if not no_expansion:
+        if "${" in config_arg.replace("$$", ""):
+            return None
+        config_arg = config_arg.replace("$$", "$")
+    config = _systemd_path(config_arg)
+    if (
+        executable is None or executable.name != "cvebeacon" or argv[1] != "--config"
+        or config is None
+        or (config_path is not None and config != _native_posix_path(config_path))
+    ):
+        return None
+    return [argv[0], argv[1], config_arg, *argv[3:]]
+
+
+def _timer_run_command(command, config_path=None):
+    argv = _timer_command(command, config_path)
+    if not argv or argv[3] != "run":
+        return None
+    options = argv[4:]
+    if len(set(options)) != len(options) or set(options) - {"--yes", "--if-due"}:
+        return None
+    return argv
+
+
+def _trusted_executable(executable, root=Path("/")):
+    """Allow the updater's root-owned current link and preserve its lexical path."""
+    path = root.joinpath(*PurePosixPath(executable).parts[1:])
+    owner = 0 if root == Path("/") else os.geteuid()
+
+    def protected(directory):
+        for parent in (directory, *directory.parents):
+            details = parent.lstat()
+            if not stat.S_ISDIR(details.st_mode) or details.st_uid != owner or details.st_mode & 0o022:
+                return False
+            if parent == root:
+                return True
+        return False
+
     try:
-        parts = shlex.split(encoded, posix=True)
-    except ValueError:
+        # The installed entry point may traverse the versioned layout's
+        # administrator-controlled current link. No other symlink is needed.
+        for link in reversed(path.parents):
+            if link == root or root not in link.parents:
+                continue
+            if link.name == "current" and link.is_symlink():
+                if not protected(link.parent) or link.lstat().st_uid != owner:
+                    return False
+                target = link.readlink()
+                if not target.is_absolute():
+                    target = link.parent / target
+                if target.parent != link.parent / "releases" or not protected(target):
+                    return False
+                path = target / path.relative_to(link)
+                break
+        details = path.lstat()
+        return (
+            protected(path.parent) and stat.S_ISREG(details.st_mode) and details.st_uid == owner
+            and bool(details.st_mode & 0o111) and not details.st_mode & 0o022
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
+def _calendar_entries(value: str) -> tuple[str, ...] | None:
+    entries = []
+    cursor = 0
+    for match in _CALENDAR_ENTRY.finditer(value):
+        if value[cursor:match.start()].strip():
+            return None
+        entries.append(match[1])
+        cursor = match.end()
+    if value[cursor:].strip():
         return None
-    if not parts or len(parts) > 128 or any(len(part) > 4096 for part in parts):
+    return tuple(entries)
+
+
+def _calendar_schedule(specs: tuple[str, ...] | str) -> TimerSchedule | None:
+    if isinstance(specs, str):
+        specs = (specs,)
+    times = []
+    for spec in specs:
+        # The manager normalizes midnight-based hour stepping to 00/N.
+        step = re.fullmatch(r"\*-\*-\* 00/([0-9]{1,2}):00:00", spec)
+        if step:
+            hours = int(step[1])
+            if not 2 <= hours <= 24:
+                return None
+            if len(specs) == 1 and 24 % hours == 0:
+                return build_timer_schedule(every_hours=hours)
+            times.extend(f"{hour:02d}:00" for hour in range(0, 24, hours))
+            continue
+        daily = re.fullmatch(r"\*-\*-\* ([0-9,]+):([0-9,]+):00", spec)
+        if not daily:
+            return None
+        times.extend(f"{hour}:{minute}" for hour in daily[1].split(",") for minute in daily[2].split(","))
+    try:
+        return build_timer_schedule(times=list(dict.fromkeys(times)))
+    except SchedulingError:
         return None
-    return parts
+
+
+def _calendar_words(schedule: TimerSchedule | None) -> str:
+    if schedule is None:
+        return "A custom systemd timer schedule"
+    if schedule.every_hours is not None:
+        return f"Every {schedule.every_hours} hours"
+    return "Every day at " + " and ".join(schedule.times)
+
+
+def _timer_has_extra_triggers(timer):
+    return bool(
+        timer["TimersMonotonic"] or timer["OnClockChange"] != "no" or timer["OnTimezoneChange"] != "no"
+    )
+
+
+def _timer_control_state(timer, command, config_path=None, *, data_directory=None, root=Path("/")):
+    calendar = _calendar_entries(timer["TimersCalendar"])
+    argv = _timer_run_command(command, config_path)
+    matches = bool(
+        timer["LoadState"] == "loaded" and timer["Unit"] == _SERVICE_UNIT
+        and timer["Triggers"] == _SERVICE_UNIT and argv
+    )
+    schedule = _calendar_schedule(calendar) if calendar and not _timer_has_extra_triggers(timer) else None
+    enabled = bool(
+        matches and not _timer_has_extra_triggers(timer)
+        and calendar == (_TICK_NORMALIZED,) and timer["Persistent"] == "yes"
+        and "--if-due" in argv
+    )
+    enable_command = None
+    if (
+        matches and calendar is not None and not enabled
+        and timer["OnClockChange"] == timer["OnTimezoneChange"] == "no"
+        and _trusted_executable(argv[0], root)
+    ):
+        options = ["--data-dir", str(_native_posix_path(data_directory))] if data_directory is not None else []
+        enable_command = shlex.join([
+            "sudo", argv[0], "--config", argv[2], "schedule", "timer-control", "enable", *options,
+        ])
+    return {
+        "enabled": enabled,
+        "matches": matches,
+        "calendar_words": _calendar_words(schedule),
+        "timer_tick": "Every 15 minutes" if enabled else "15-minute tick when enabled",
+        "enable_command": enable_command,
+    }
+
+
+def systemd_timer_control_status(
+    timer_unit: str,
+    service_unit: str,
+    config_path: str | Path | None,
+    *,
+    run=subprocess.run,
+    data_directory: str | Path | None = None,
+) -> dict[str, object]:
+    """Detect dashboard control from the loaded reference timer and service."""
+    if (timer_unit, service_unit) == (_TIMER_UNIT, _SERVICE_UNIT):
+        timer = _systemd_properties(run, timer_unit, _TIMER_PROPERTIES)
+        if timer is not None:
+            return _timer_control_state(
+                timer, _systemd_exec_start(run, service_unit), config_path, data_directory=data_directory,
+            )
+    return {
+        "enabled": None, "matches": False,
+        "calendar_words": "The current timer schedule is unavailable",
+        "timer_tick": "Unknown", "enable_command": None,
+    }
+
+
+def _systemd_quote(value: str) -> str:
+    if not _systemd_token(value):
+        raise SchedulingError("systemd command contains an unsupported path")
+    # The generated command uses the ':' prefix to disable dollar expansion.
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
+_UPDATE_POLICY = Path("/etc/cvebeacon/update.toml")
+_SWITCH_RECOVERY_MARKER = b"# CVEBEACON-SCHEDULE-RECOVERY-1 "
+_SWITCH_RECOVERY_LIMIT = 4 * _SCHEDULE_LIMIT
+_DROPIN_DIRECTORIES = (_TIMER_UNIT + ".d", _SERVICE_UNIT + ".d")
+_MANAGER_STATE = ("LoadState", "NeedDaemonReload", "DropInPaths")
+
+
+def _open_admin_directory(stack, path, *, boundary=Path("/"), owner=0):
+    descriptor = os.open(boundary, _DIRECTORY_FLAGS)
+    stack.callback(os.close, descriptor)
+    _check_admin_directory(descriptor, owner)
+    for component in path.relative_to(boundary).parts:
+        if component == "..":
+            raise SchedulingError("administrator directory paths must be normalized")
+        descriptor = _open_admin_child(stack, descriptor, component, owner)
+    return descriptor
+
+
+def _check_admin_directory(descriptor, owner):
+    details = os.fstat(descriptor)
+    if details.st_uid != owner or details.st_mode & 0o022:
+        raise SchedulingError("systemd paths must use administrator-owned, non-writable directories")
+
+
+def _open_admin_child(stack, parent, name, owner, *, create=False):
+    try:
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+    except FileNotFoundError:
+        if not create:
+            raise
+        os.mkdir(name, 0o755, dir_fd=parent)
+        os.fsync(parent)
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+    stack.callback(os.close, descriptor)
+    _check_admin_directory(descriptor, owner)
+    return descriptor
+
+
+def _systemd_action(run, *arguments):
+    if _systemd_call(run, ["systemctl", *arguments], timeout=30) is None:
+        raise SchedulingError("systemd timer action failed; check systemd status")
+
+
+def _switch_manager_state(run):
+    timer = _systemd_properties(run, _TIMER_UNIT, (*_TIMER_PROPERTIES, *_MANAGER_STATE[1:], "ActiveState"))
+    service = _systemd_properties(run, _SERVICE_UNIT, _MANAGER_STATE)
+    if timer is None or service is None:
+        raise SchedulingError("could not read the CVEBeacon systemd timer and service")
+    if timer["LoadState"] != "loaded" or service["LoadState"] != "loaded":
+        raise SchedulingError("the CVEBeacon systemd timer and service must be loaded")
+    if timer["ActiveState"] not in {"active", "inactive", "failed"}:
+        raise SchedulingError("wait for the CVEBeacon timer state to settle and retry")
+    return timer, service
+
+
+def _manager_dropins(properties):
+    return tuple(
+        str(Path("/etc/systemd/system") / directory / TIMER_CONTROL_DROPIN) in unit["DropInPaths"].split()
+        for directory, unit in zip(_DROPIN_DIRECTORIES, properties, strict=True)
+    )
+
+
+def _verify_manager(run, *, dropins, active, argv=None):
+    timer, service = _switch_manager_state(run)
+    if (
+        _manager_dropins((timer, service)) != dropins
+        or (timer["ActiveState"] == "active") != active
+        or any(unit["NeedDaemonReload"] != "no" for unit in (timer, service))
+    ):
+        raise SchedulingError("the loaded timer, service or timer activity did not match the requested state")
+    if argv is not None:
+        command = _systemd_exec_start(run, _SERVICE_UNIT)
+        if command != (argv, True) or not _timer_control_state(timer, command)["enabled"]:
+            raise SchedulingError("systemd did not load the expected timer and monitoring command")
+
+
+def _apply_dropin_files(descriptors, entries, owner):
+    existing = [_read_leaf(fd, TIMER_CONTROL_DROPIN, owner, _SWITCH_RECOVERY_LIMIT) for fd in descriptors]
+    staged = []
+    try:
+        for descriptor, entry in zip(descriptors, entries, strict=True):
+            staged.append(_stage_file(descriptor, *entry) if entry is not None else None)
+        for descriptor, previous, temporary in zip(descriptors, existing, staged, strict=True):
+            if temporary is not None or previous is not None:
+                _publish_file(descriptor, TIMER_CONTROL_DROPIN, temporary)
+    finally:
+        for descriptor, temporary in zip(descriptors, staged):
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=descriptor)
+                except FileNotFoundError:
+                    pass
+
+
+def _switch_recovery_marker(files, active):
+    record = {
+        "version": 1,
+        "active": active,
+        "files": [
+            None if entry is None else (base64.b64encode(entry[0]).decode("ascii"), entry[1])
+            for entry in files
+        ],
+    }
+    return _SWITCH_RECOVERY_MARKER + json.dumps(
+        record, separators=(",", ":"), sort_keys=True
+    ).encode("ascii") + b"\n"
+
+
+def _read_switch_recovery(timer_directory, owner):
+    saved = _read_leaf(
+        timer_directory, TIMER_CONTROL_DROPIN, owner, _SWITCH_RECOVERY_LIMIT
+    )
+    if saved is None:
+        return None
+    lines = saved[0].splitlines(keepends=True)
+    marked = [line for line in lines if line.startswith(_SWITCH_RECOVERY_MARKER)]
+    if not marked:
+        return None
+    if len(marked) != 1 or lines[-1] != marked[0] or not marked[0].endswith(b"\n"):
+        raise SchedulingError("the timer switch recovery record is invalid")
+    try:
+        record = json.loads(marked[0][len(_SWITCH_RECOVERY_MARKER):-1])
+        if record["version"] != 1 or type(record["active"]) is not bool or len(record["files"]) != 2:
+            raise ValueError
+        files = []
+        for entry in record["files"]:
+            if entry is None:
+                files.append(None)
+                continue
+            encoded, mode = entry
+            content = base64.b64decode(encoded, validate=True)
+            if type(mode) is not int or not 0 <= mode <= 0o7777 or len(content) > _SCHEDULE_LIMIT:
+                raise ValueError
+            files.append((content, mode))
+        return files, record["active"]
+    except (KeyError, TypeError, ValueError, RecursionError) as exc:
+        raise SchedulingError("the timer switch recovery record is invalid") from exc
+
+
+def _with_switch_recovery(contents, marker):
+    current = contents or b""
+    if current and not current.endswith(b"\n"):
+        current += b"\n"
+    return current + marker
+
+
+def _publish_timer_dropin(directory, contents, mode=0o600):
+    temporary = _stage_file(directory, contents, mode)
+    try:
+        _publish_file(directory, TIMER_CONTROL_DROPIN, temporary)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+def _clear_switch_recovery(descriptor, timer_file):
+    if timer_file is None:
+        _publish_file(descriptor, TIMER_CONTROL_DROPIN, None)
+    else:
+        _publish_timer_dropin(descriptor, timer_file[0], timer_file[1])
+
+
+def _restore_timer_switch(run, descriptors, owner, recovery, marker):
+    files, active = recovery
+    _systemd_action(run, "stop", _TIMER_UNIT)
+    timer_file = files[0]
+    timer_content = timer_file[0] if timer_file is not None else b""
+    timer_with_marker = (_with_switch_recovery(timer_content, marker), 0o600)
+    _apply_dropin_files(descriptors, [timer_with_marker, files[1]], owner)
+    _systemd_action(run, "daemon-reload")
+    if active:
+        _systemd_action(run, "restart", _TIMER_UNIT)
+    _verify_manager(run, dropins=(True, files[1] is not None), active=active)
+    _clear_switch_recovery(descriptors[0], timer_file)
+    _systemd_action(run, "daemon-reload")
+    if active:
+        _systemd_action(run, "restart", _TIMER_UNIT)
+    _verify_manager(run, dropins=tuple(entry is not None for entry in files), active=active)
+
+
+def _open_existing_update_lock(stack, path, *, expected_owner=0):
+    """Lock a verified updater inode without creating or changing its contents."""
+    import errno
+
+    path = Path(path)
+    try:
+        original = path.lstat()
+    except FileNotFoundError as exc:
+        raise SchedulingError("the updater lock file is missing; refusing to change the timer") from exc
+    except OSError as exc:
+        raise SchedulingError("the updater lock file cannot be verified; refusing to change the timer") from exc
+    if (
+        not stat.S_ISREG(original.st_mode)
+        or original.st_nlink != 1
+        or original.st_uid != expected_owner
+        or original.st_mode & 0o022
+        or getattr(original, "st_file_attributes", 0) & 0x400
+    ):
+        raise SchedulingError("the updater lock file cannot be verified; refusing to change the timer")
+    descriptor = None
+    try:
+        descriptor = os.open(path, _LEAF_FLAGS)
+        current = os.fstat(descriptor)
+        if (
+            (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or current.st_uid != expected_owner
+            or current.st_mode & 0o022
+        ):
+            raise SchedulingError("the updater lock file changed during verification; refusing to change the timer")
+        import fcntl
+
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if isinstance(exc, BlockingIOError) or exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise SchedulingError("an updater is running; wait for it to finish before changing the timer") from exc
+            raise SchedulingError("the updater lock file could not be locked safely") from exc
+        stack.callback(os.close, descriptor)
+    except SchedulingError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        if isinstance(exc, FileNotFoundError):
+            raise SchedulingError("the updater lock file is missing; refusing to change the timer") from exc
+        raise SchedulingError("the updater lock file could not be verified or locked safely") from exc
+
+
+def _switch_update_lock(stack, policy_path, root, run):
+    """Take the same installation lock as the updater before touching systemd."""
+    import tomllib
+
+    from .update_transaction import installation_prefix, read_record
+    from .updater import protected, read_bounded
+
+    policy_present = policy_path is not None and os.path.lexists(policy_path)
+    prefixes = set()
+    if policy_present:
+        protected(policy_path)
+        raw_prefix = tomllib.loads(read_bounded(policy_path, _SCHEDULE_LIMIT).decode("utf-8")).get("prefix")
+        if _systemd_path(raw_prefix) is None:
+            raise SchedulingError("the administrator update policy has an invalid installation prefix")
+        prefixes.add(Path(raw_prefix))
+    elif root == Path("/"):
+        # Disable needs no policy or runtime config. Match the updater lock
+        # from the running installation and the loaded service installation.
+        candidates = {installation_prefix()}
+        command = _systemd_exec_start(run, _SERVICE_UNIT)
+        if command and _systemd_path(command[0][0]) and _trusted_executable(command[0][0]):
+            candidates.add(installation_prefix(Path(command[0][0]).parent.parent))
+        prefixes.update(
+            prefix for prefix in candidates if prefix is not None
+            and ((prefix / "current").is_symlink() or (prefix / "update.lock").exists())
+        )
+    for prefix in sorted(prefixes):
+        protected(prefix, directory=True)
+        _open_existing_update_lock(stack, prefix / "update.lock", expected_owner=0)
+        record = read_record(prefix)
+        if record is not None and record["phase"] != "complete":
+            raise SchedulingError("finish updater recovery before changing the timer")
+    return policy_present
+
+
+def _service_account(user):
+    import pwd
+
+    try:
+        account = pwd.getpwuid(int(user)) if user.isascii() and user.isdecimal() else pwd.getpwnam(user)
+    except (KeyError, ValueError, OverflowError) as exc:
+        raise SchedulingError("the loaded CVEBeacon service must use an existing unprivileged account") from exc
+    if account.pw_uid == 0:
+        raise SchedulingError("the loaded CVEBeacon service must run as an unprivileged account")
+    return account
+
+
+def _initialize_schedule_as_service(directory, config_path, initial):
+    from .config import load_config
+
+    expected = directory[0]
+    config = load_config(config_path)
+    if config.database_path.parent != expected or not os.path.samestat(expected.stat(), directory[2]):
+        raise SchedulingError("the configured state database must be directly in the administrator-approved data directory")
+    with _schedule_lock(directory):
+        saved, exists = _read_timer_schedule(directory)
+        if exists:
+            _schedule_window(saved, local_now())
+        else:
+            if initial.every_hours is None:
+                initial = replace(initial, eligible_since=_start_of_local_day(local_now()))
+            _write_timer_schedule(directory, initial)
+
+
+def _initialize_timer_data(data, config_path, account, initial):
+    """Keep the approved directory open and parse the runtime file after dropping privileges."""
+    import signal
+
+    with ExitStack() as stack:
+        parent = _open_admin_directory(stack, data.parent)
+        descriptor = os.open(data.name, _DIRECTORY_FLAGS, dir_fd=parent)
+        stack.callback(os.close, descriptor)
+        details = os.fstat(descriptor)
+        if details.st_uid != account.pw_uid or details.st_mode & 0o022 or details.st_mode & 0o700 != 0o700:
+            raise SchedulingError("the approved data directory must be writable only by the CVEBeacon account")
+        pid = os.fork()
+        if pid == 0:
+            exit_code = 1
+            try:
+                signal.signal(signal.SIGALRM, signal.SIG_DFL)
+                signal.alarm(10)
+                os.setgroups([])
+                os.setgid(account.pw_gid)
+                os.setuid(account.pw_uid)
+                _initialize_schedule_as_service((data, descriptor, details), config_path, initial)
+                exit_code = 0
+            finally:
+                os._exit(exit_code)
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            raise SchedulingError(
+                "could not initialize schedule as the service account; check the runtime config, "
+                "state database parent and schedule data"
+            )
+
+
+def _timer_data_authority(run, policy_path, policy_present, requested_data, config_path):
+    from .updater import Policy
+
+    service = _systemd_properties(run, _SERVICE_UNIT, ("User", "DynamicUser"))
+    if service is None or service["DynamicUser"] != "no":
+        raise SchedulingError("the CVEBeacon service requires a fixed unprivileged account")
+    account = _service_account(service["User"])
+    if policy_present:
+        try:
+            policy = Policy.read(policy_path)
+        except KeyError as exc:
+            raise SchedulingError("the administrator update policy requires an existing service account") from exc
+        if config_path != policy.config or account.pw_uid != _service_account(policy.user).pw_uid:
+            raise SchedulingError("the loaded service account and config must match the administrator update policy")
+        if requested_data is not None and Path(requested_data) != policy.data:
+            raise SchedulingError("--data-dir must match the administrator update policy")
+        requested_data = policy.data
+    if requested_data is None or _systemd_path(str(requested_data)) is None or str(requested_data) == "/":
+        raise SchedulingError("enable requires an administrator update policy or an explicit absolute --data-dir")
+    return Path(requested_data), account
+
+
+def _timer_switch_action(action, run, root, config_path, data_directory, policy_path):
+    import fcntl
+
+    base_path = root / "etc/systemd/system"
+    owner = 0 if root == Path("/") else os.geteuid()
+    with ExitStack() as stack:
+        base = _open_admin_directory(stack, base_path, boundary=root, owner=owner)
+        fcntl.flock(base, fcntl.LOCK_EX)
+        policy_present = _switch_update_lock(stack, policy_path if action == "enable" else None, root, run)
+        descriptors = []
+        for name in _DROPIN_DIRECTORIES:
+            try:
+                descriptor = _open_admin_child(stack, base, name, owner)
+            except FileNotFoundError:
+                descriptor = None
+            descriptors.append(descriptor)
+        recovery = (
+            _read_switch_recovery(descriptors[0], owner)
+            if descriptors[0] is not None else None
+        )
+        if recovery is not None:
+            if None in descriptors:
+                raise SchedulingError("timer switch recovery requires both verified drop-in directories")
+            marker = _switch_recovery_marker(*recovery)
+            _restore_timer_switch(run, descriptors, owner, recovery, marker)
+        before = [
+            _read_leaf(fd, TIMER_CONTROL_DROPIN, owner, _SCHEDULE_LIMIT) if fd is not None else None
+            for fd in descriptors
+        ]
+        properties = _switch_manager_state(run)
+        timer, service = properties
+        active = timer["ActiveState"] == "active"
+        desired = [None, None]
+        argv = None
+        if action == "disable":
+            if not any(before) and not any(_manager_dropins(properties)) and all(
+                unit["NeedDaemonReload"] == "no" for unit in properties
+            ):
+                return "dashboard schedule control drop-ins are already absent"
+        else:
+            command = _systemd_exec_start(run, _SERVICE_UNIT)
+            argv = _timer_run_command(command, config_path)
+            if not argv or not _trusted_executable(argv[0], root):
+                raise SchedulingError(
+                    "refusing to change the timer: ExecStart is not the expected CVEBeacon run command in a trusted installation"
+                )
+            calendar = _calendar_entries(timer["TimersCalendar"])
+            if (
+                timer["Unit"] != _SERVICE_UNIT or timer["Triggers"] != _SERVICE_UNIT or calendar is None
+                or timer["OnClockChange"] != "no" or timer["OnTimezoneChange"] != "no"
+            ):
+                raise SchedulingError("refusing to change a timer with unexpected targets or clock triggers")
+            if "--if-due" not in argv:
+                argv = [*argv, "--if-due"]
+            timer_content = f"[Timer]\nOnCalendar=\nOnCalendar={TIMER_CONTROL_TICK}\nPersistent=true\n"
+            service_line = ":" + " ".join(_systemd_quote(token) for token in argv)
+            service_content = f"[Service]\nExecStart=\nExecStart={service_line}\n"
+            desired = [(content.encode("utf-8"), 0o600) for content in (timer_content, service_content)]
+            configured = _timer_control_state(timer, command)["enabled"]
+            clean = all(unit["NeedDaemonReload"] == "no" for unit in properties)
+            if configured and clean and active and (before == desired or not any(before)):
+                if _manager_dropins(properties) == tuple(entry is not None for entry in before):
+                    return "dashboard schedule control is already enabled"
+            data, account = _timer_data_authority(run, policy_path, policy_present, data_directory, Path(argv[2]))
+            initial = _calendar_schedule(calendar) if not _timer_has_extra_triggers(timer) else None
+            _initialize_timer_data(data, Path(argv[2]), account, initial or build_timer_schedule(times=DEFAULT_TIMER_TIMES))
+
+        # Create both destinations before writing recovery metadata into the
+        # timer drop-in.
+        for index, (name, descriptor) in enumerate(zip(_DROPIN_DIRECTORIES, descriptors, strict=True)):
+            if descriptor is None:
+                descriptors[index] = _open_admin_child(stack, base, name, owner, create=True)
+        recovery = (before, active)
+        marker = _switch_recovery_marker(before, active)
+        try:
+            old_timer = before[0][0] if before[0] is not None else None
+            _publish_timer_dropin(
+                descriptors[0], _with_switch_recovery(old_timer, marker)
+            )
+            if active:
+                _systemd_action(run, "stop", _TIMER_UNIT)
+            timer_content = desired[0][0] if desired[0] is not None else None
+            timer_pending = (
+                _with_switch_recovery(timer_content, marker), 0o600
+            )
+            _apply_dropin_files(descriptors, [timer_pending, desired[1]], owner)
+            _systemd_action(run, "daemon-reload")
+            if active or action == "enable":
+                _systemd_action(run, "restart", _TIMER_UNIT)
+            _verify_manager(
+                run, dropins=(True, action == "enable"),
+                active=active or action == "enable", argv=argv,
+            )
+            _clear_switch_recovery(descriptors[0], desired[0])
+            _systemd_action(run, "daemon-reload")
+            if active or action == "enable":
+                _systemd_action(run, "restart", _TIMER_UNIT)
+            _verify_manager(
+                run, dropins=(action == "enable",) * 2,
+                active=active or action == "enable", argv=argv,
+            )
+        except BaseException:
+            try:
+                _restore_timer_switch(run, descriptors, owner, recovery, marker)
+            except (OSError, SchedulingError) as exc:
+                raise SchedulingError("timer switch rollback is pending; retry timer-control to recover") from exc
+            raise
+        return f"dashboard schedule control {action}d"
+
+
+def timer_control(
+    action: str,
+    *,
+    data_directory: str | Path | None = None,
+    config_path: str | Path | None = None,
+    run=subprocess.run,
+    root_directory: str | Path = "/",
+    geteuid=None,
+) -> str:
+    """Manage the two fixed systemd drop-ins from a root-only CLI command."""
+    if action not in {"enable", "disable", "status"}:
+        raise SchedulingError("timer-control action must be enable, disable, or status")
+    if platform.system().casefold() != "linux":
+        raise SchedulingError("systemd timer control is supported only on Linux")
+    resolve_uid = geteuid or getattr(os, "geteuid", lambda: -1)
+    if resolve_uid() != 0:
+        raise SchedulingError("schedule timer-control must run as root")
+    if action == "status":
+        detected = systemd_timer_control_status(_TIMER_UNIT, _SERVICE_UNIT, None, run=run)
+        if detected["enabled"]:
+            return "dashboard schedule control enabled (15-minute timer tick)"
+        if not detected["matches"]:
+            return "dashboard schedule control status unavailable"
+        return "dashboard schedule control not enabled; current timer: " + str(detected["calendar_words"])
+    root = Path(root_directory).absolute()
+    policy_path = root.joinpath(*_UPDATE_POLICY.parts[1:])
+    try:
+        return _timer_switch_action(action, run, root, config_path, data_directory, policy_path)
+    except (OSError, ValueError) as exc:
+        raise SchedulingError("the systemd timer switch could not access or verify its files") from exc
 
 
 def _service_result(result: str, status: str) -> str:
@@ -1036,7 +2163,7 @@ def systemd_timer_status(
     service = _systemd_properties(
         run,
         service_unit,
-        ("Result", "ExecMainStatus", "ExecMainExitTimestamp", "ExecStart"),
+        ("Result", "ExecMainStatus", "ExecMainExitTimestamp"),
     )
     if timer is None:
         timer_labels = {"state": "Unknown", "boot": "Unknown", "next_run": "Unknown"}
@@ -1065,15 +2192,28 @@ def systemd_timer_status(
 
     if service is None:
         return unknown
-    argv = _systemd_exec_argv(service["ExecStart"])
-    scan_state = _argv_scan_action(argv, config_path) if argv is not None else "unknown"
+    command = _systemd_exec_start(run, service_unit)
+    argv = _timer_command(command, config_path)
+    if not argv:
+        return unknown
+    tail = argv[3:]
+    if _timer_run_command(command, config_path) or tail == ["scan"]:
+        scan_state = "scan"
+    elif tail in (["watch", "run"], ["watch", "run", "--yes"]):
+        scan_state = "watch"
+    else:
+        scan_state = "unknown"
     if scan_state not in {"scan", "watch"}:
         return unknown
 
     service_last_run = _time_label(service["ExecMainExitTimestamp"], empty="Never")
     service_result = _service_result(service["Result"], service["ExecMainStatus"])
 
-    if service_last_run == "Never":
+    if "--if-due" in argv[4:]:
+        # systemd records service completion for idle checks too.
+        last_run = _time_label(last_trigger, empty="Never")
+        last_result = service_result if last_run not in {"Unknown", "Never"} else last_run
+    elif service_last_run == "Never":
         trigger_parsed = _timestamp(last_trigger)
         if trigger_parsed is None:
             last_run, last_result = "Never", "Never run"
