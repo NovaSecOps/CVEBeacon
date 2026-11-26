@@ -184,6 +184,40 @@ def test_no_client_impacts_omit_zero_counts(tmp_path):
     assert no_client_impacts == {}
 
 
+def test_unassigned_cve_filter_reuses_latest_scan_statuses(tmp_path, monkeypatch):
+    path = tmp_path / "state.db"
+    store = StateStore(path)
+    affected = Asset("u1", "Acme", "Widget", "1")
+    review = Asset("u2", "Acme", "Widget", "2")
+    unaffected = Asset("u3", "Acme", "Widget", "3")
+    named = Asset("a1", "Acme", "Widget", "4", client="Acme")
+    scan(
+        store,
+        [
+            QueryResult(affected, (finding(affected, "CVE-2026-0001", Applicability.AFFECTED),), ()),
+            QueryResult(review, (finding(review, "CVE-2026-0002", Applicability.NEEDS_REVIEW),), ()),
+            QueryResult(unaffected, (finding(unaffected, "CVE-2026-0003", Applicability.NOT_AFFECTED),), ()),
+            QueryResult(named, (finding(named, "CVE-2026-0004", Applicability.AFFECTED),), ()),
+        ],
+    )
+    later = Asset("u5", "Acme", "Widget", "5")
+    scan(
+        store,
+        [QueryResult(later, (finding(later, "CVE-2026-0005", Applicability.AFFECTED),), ())],
+        failed=True,
+    )
+
+    assert clients_module.unassigned_cve_filter(path) == (
+        ("CVE-2026-0001", "CVE-2026-0002"),
+        False,
+    )
+    monkeypatch.setattr(clients_module, "MAX_CLIENT_CVES", 1)
+    assert clients_module.unassigned_cve_filter(path) == (
+        ("CVE-2026-0001",),
+        True,
+    )
+
+
 def test_unaffected_cves_and_unassigned_assets_are_omitted(tmp_path):
     store = StateStore(tmp_path / "state.db")
     assigned = Asset("a1", "Acme", "Widget", "1", client="Acme")

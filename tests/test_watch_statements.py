@@ -22,7 +22,7 @@ import pytest
 from watch_support import NOW, write_config
 
 from cvebeacon import cli
-from cvebeacon.clients import ClientImpact
+from cvebeacon.clients import ClientImpact, UnassignedAssetImpacts
 from cvebeacon.errors import CVEBeaconError
 from cvebeacon.watch import statements
 from cvebeacon.watch.reporting import ReportService
@@ -287,6 +287,37 @@ def test_affected_clients_field_lists_clients_and_review_status(tmp_path):
         render_text("Clients: ${affected_clients}", fields)
         == "Clients: Acme, Globex (review)"
     )
+
+
+def test_unassigned_assets_field_is_empty_and_counts_assets(tmp_path):
+    store = full_store(tmp_path)
+    view = store.view("CVE-2026-0001", catalogs=SOURCES)
+    assert view is not None
+
+    none = build_fields(view, first_seen=view.first_seen, generated_at=NOW)
+    assert none["unassigned_assets"] == ""
+
+    some = build_fields(
+        view,
+        first_seen=view.first_seen,
+        generated_at=NOW,
+        unassigned_impacts=UnassignedAssetImpacts(2, 1),
+    )
+    assert some["unassigned_assets"] == "2 affected, 1 needs review"
+    assert render_text("Assets with no client: ${unassigned_assets}", some) == (
+        "Assets with no client: 2 affected, 1 needs review"
+    )
+    assert "asset-" not in some["unassigned_assets"]
+
+    mixed = build_fields(
+        view,
+        first_seen=view.first_seen,
+        generated_at=NOW,
+        client_impacts=(ClientImpact("Acme", 1, "affected"),),
+        unassigned_impacts=UnassignedAssetImpacts(1, 0),
+    )
+    assert mixed["affected_clients"] == "Acme"
+    assert mixed["unassigned_assets"] == "1 affected"
 
 
 def test_markdown_statement_escapes_hostile_client_names(tmp_path):

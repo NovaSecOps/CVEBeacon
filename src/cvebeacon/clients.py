@@ -182,27 +182,45 @@ def _impact_rows(
 
 
 def _unassigned_impact_rows(
-    db: sqlite3.Connection, run_id: str, names: Sequence[str]
+    db: sqlite3.Connection,
+    run_id: str,
+    names: Sequence[str] | None = None,
+    *,
+    cves_only: bool = False,
+    limit: int | None = None,
 ) -> list[sqlite3.Row]:
     """Count client-less assets with indexed, per-CVE grouping."""
-    marks = ",".join("?" for _ in names)
-    cursor = db.execute(
+    clauses = [
+        "sf.run_id = ?",
+        "sac.client_key = ''",
+        "sf.applicability IN ('affected','needs_review')",
+    ]
+    parameters: list[object] = [run_id]
+    if names:
+        clauses.append("sf.identifier IN (" + ",".join("?" for _ in names) + ")")
+        parameters.extend(names)
+    if cves_only:
+        clauses.append("sf.identifier LIKE 'CVE-%'")
+    sql = (
         "WITH per_asset AS ("
         " SELECT sf.identifier AS identifier, sf.asset_id AS asset_id,"
         " MIN(CASE sf.applicability WHEN 'affected' THEN 1 ELSE 2 END) AS rank"
         " FROM scan_findings sf JOIN scan_asset_clients sac"
         " ON sac.run_id = sf.run_id AND sac.asset_id = sf.asset_id"
-        " WHERE sf.run_id = ? AND sac.client_key = ''"
-        " AND sf.applicability IN ('affected','needs_review')"
-        " AND sf.identifier IN (" + marks + ")"
-        " GROUP BY sf.identifier, sf.asset_id"
+        " WHERE "
+        + " AND ".join(clauses)
+        + " GROUP BY sf.identifier, sf.asset_id"
         ") SELECT identifier,"
         " SUM(CASE rank WHEN 1 THEN 1 ELSE 0 END) AS affected,"
         " SUM(CASE rank WHEN 2 THEN 1 ELSE 0 END) AS needs_review"
-        " FROM per_asset GROUP BY identifier ORDER BY identifier",
-        (run_id, *names),
+        " FROM per_asset GROUP BY identifier ORDER BY identifier"
     )
-    return _fetch(cursor, len(names))
+    if limit is not None:
+        sql += " LIMIT ?"
+        parameters.append(limit + 1)
+    cursor = db.execute(sql, parameters)
+    row_limit = limit if limit is not None else len(names or ())
+    return _fetch(cursor, row_limit)
 
 
 def _affected_from_run(
@@ -298,6 +316,22 @@ def affected_clients_and_unassigned(
         )
 
     return _read(path, read, ({}, {}))
+
+
+def unassigned_cve_filter(path: str | Path) -> tuple[tuple[str, ...], bool]:
+    """Return bounded CVEs with no-client affected or needs-review findings."""
+
+    def read(db: sqlite3.Connection):
+        scan = _latest_successful_scan(db)
+        if scan is None:
+            return (), False
+        rows = _unassigned_impact_rows(
+            db, scan.run_id, cves_only=True, limit=MAX_CLIENT_CVES
+        )
+        identifiers = tuple(str(row["identifier"]) for row in rows[:MAX_CLIENT_CVES])
+        return identifiers, len(rows) > MAX_CLIENT_CVES
+
+    return _read(path, read, ((), False))
 
 
 def affected_clients_on_connection(

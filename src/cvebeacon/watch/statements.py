@@ -29,6 +29,7 @@ from xml.sax.saxutils import escape
 from ..clients import (
     ClientImpact,
     ClientImpacts,
+    UnassignedAssetImpacts,
     format_client_names,
     markdown_escape_client,
 )
@@ -98,6 +99,7 @@ FIELD_NAMES = (
     "cwes",
     "affected_products",
     "affected_clients",
+    "unassigned_assets",
     "references",
     "nvd_url",
     "cve_org_url",
@@ -176,10 +178,20 @@ def _reported_marks(mark: ReportedMark | None) -> tuple[str, str, str]:
     return "yes", mark.by, mark.at
 
 
+def _unassigned_asset_summary(impacts: UnassignedAssetImpacts) -> str:
+    values = []
+    if impacts.affected:
+        values.append(f"{impacts.affected} affected")
+    if impacts.needs_review:
+        values.append(f"{impacts.needs_review} needs review")
+    return ", ".join(values)
+
+
 def build_fields(
     view: WatchView, *, first_seen: str | None, generated_at: datetime,
     reported_mark: ReportedMark | None = None,
     client_impacts: ClientImpacts | Sequence[ClientImpact] = (),
+    unassigned_impacts: UnassignedAssetImpacts = UnassignedAssetImpacts(),
     client_escape: Callable[[str], str] | None = None,
 ) -> dict[str, str]:
     """Derive every statement field from one stored watch view."""
@@ -233,6 +245,7 @@ def build_fields(
             client_impacts, language="en", escape=client_escape
         )
         or MISSING,
+        "unassigned_assets": _unassigned_asset_summary(unassigned_impacts),
         "references": "\n".join(reference.url for reference in view.references)
         or MISSING,
         "nvd_url": NVD_URL.format(cve_id=cve_id),
@@ -1003,6 +1016,7 @@ def write_statement(
     force: bool = False,
     now: datetime | None = None,
     client_impacts: ClientImpacts | Sequence[ClientImpact] = (),
+    unassigned_impacts: UnassignedAssetImpacts = UnassignedAssetImpacts(),
 ) -> Path:
     """Render one stored CVE into ``out`` and return the written path."""
     template_path = Path(template).expanduser() if template else None
@@ -1024,6 +1038,7 @@ def write_statement(
         reported_mark=store.reported_marks((view.cve_id,)).get(view.cve_id),
         generated_at=now or datetime.now(timezone.utc),
         client_impacts=client_impacts,
+        unassigned_impacts=unassigned_impacts,
         client_escape=client_escape,
     )
     if template_path is None:
