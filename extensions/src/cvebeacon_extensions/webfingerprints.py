@@ -11,6 +11,7 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from html.parser import HTMLParser
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -25,9 +26,10 @@ from . import webrules
 
 MAX_TECHNOLOGY_FILES = 20_000
 MAX_DIRECTORY_ENTRIES = 50_000
-MAX_FILE_BYTES = 256 * 1024
+MAX_TECHNOLOGIES_PER_FILE = 2_048
+MAX_FILE_BYTES = 1024 * 1024
 MAX_METADATA_BYTES = 2 * 1024 * 1024
-MAX_TOTAL_FINGERPRINT_BYTES = 128 * 1024 * 1024
+MAX_TOTAL_FINGERPRINT_BYTES = 64 * 1024 * 1024
 MAX_PATTERNS_PER_TECHNOLOGY = 512
 MAX_TOTAL_PATTERNS = 100_000
 MAX_STRING_LENGTH = 4096
@@ -40,6 +42,8 @@ MAX_ROBOTS_LENGTH = 1024 * 1024
 MAX_PAGE_RESOURCES = 300
 MAX_RESOURCE_BYTES_PER_PAGE = 96 * 1024 * 1024
 MAX_DOM_NODES = 50_000
+MAX_DOM_TEXT_CACHE_BYTES = 4 * 1024 * 1024
+MAX_VERSION_CAPTURE_LENGTH = 64
 MAX_META_TAGS = 4096
 MAX_SCRIPT_URLS = 16_384
 MAX_EVIDENCE_PER_DETECTION = 64
@@ -53,8 +57,13 @@ SUPPORTED_KINDS = frozenset({
 UNSUPPORTED_KINDS = frozenset({"js", "xhr", "dns", "certIssuer", "probe"})
 _ALL_KINDS = SUPPORTED_KINDS | UNSUPPORTED_KINDS
 _KNOWN_FIELDS = _ALL_KINDS | frozenset({
-    "cats", "description", "website", "icon", "pricing", "saas", "cpe",
+    "cats", "description", "website", "icon", "pricing", "saas", "oss", "cpe",
     "implies", "excludes", "requires", "requiresCategory", "groups",
+})
+EVIDENCE_KIND_MAP = MappingProxyType({
+    "headers": "header", "cookies": "cookie", "meta": "meta",
+    "scriptSrc": "url", "scripts": "script", "css": "style", "html": "html",
+    "text": "text", "url": "url", "robots": "robots", "dom": "dom",
 })
 _VOID_TAGS = frozenset({
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
@@ -154,54 +163,25 @@ class _LiteralIndex:
     transitions: tuple[Mapping[str, int], ...]
     failures: tuple[int, ...]
     outputs: tuple[tuple[int, ...], ...]
-    anchor_regex: re.Pattern[str] | None
     literal_lengths: Mapping[int, int]
 
-    def find(self, text: str, deadline: float) -> tuple[dict[int, set[int]], bool]:
+    def find(self, text: str, deadline: float, clock=time.monotonic) -> tuple[dict[int, set[int]], bool]:
         candidates: dict[int, set[int]] = {}
         positions_are_exact = text.isascii()
         folded = _fold_for_index(text)
-        if self.anchor_regex is None:
-            state = 0
-            for position, char in enumerate(folded):
-                while state and char not in self.transitions[state]:
-                    state = self.failures[state]
-                state = self.transitions[state].get(char, 0)
-                if self.outputs[state]:
-                    for pattern_id in self.outputs[state]:
-                        found = candidates.setdefault(pattern_id, set())
-                        if positions_are_exact and len(found) < MAX_LITERAL_HITS_PER_PATTERN:
-                            found.add(position - self.literal_lengths[pattern_id] + 1)
-                if position and position % 65_536 == 0 and time.monotonic() >= deadline:
-                    return candidates, True
-            return candidates, time.monotonic() >= deadline
-
-        visits = 0
-        saturated_states: set[int] = set()
-        for anchor in self.anchor_regex.finditer(folded):
-            state = 0
-            position = anchor.start()
-            while position < len(folded):
-                char = folded[position]
-                next_state = self.transitions[state].get(char)
-                if next_state is None:
-                    break
-                state = next_state
-                if self.outputs[state] and state not in saturated_states:
-                    for pattern_id in self.outputs[state]:
-                        positions = candidates.setdefault(pattern_id, set())
-                        if positions_are_exact and len(positions) < MAX_LITERAL_HITS_PER_PATTERN:
-                            positions.add(position - self.literal_lengths[pattern_id] + 1)
-                    if self.outputs[state] and all(
-                        len(candidates.get(pattern_id, ())) >= MAX_LITERAL_HITS_PER_PATTERN
-                        for pattern_id in self.outputs[state]
-                    ):
-                        saturated_states.add(state)
-                position += 1
-            visits += 1
-            if visits % 1024 == 0 and time.monotonic() >= deadline:
+        state = 0
+        for position, char in enumerate(folded):
+            while state and char not in self.transitions[state]:
+                state = self.failures[state]
+            state = self.transitions[state].get(char, 0)
+            if self.outputs[state]:
+                for pattern_id in self.outputs[state]:
+                    found = candidates.setdefault(pattern_id, set())
+                    if positions_are_exact and len(found) < MAX_LITERAL_HITS_PER_PATTERN:
+                        found.add(position - self.literal_lengths[pattern_id] + 1)
+            if position and position % 65_536 == 0 and clock() >= deadline:
                 return candidates, True
-        return candidates, time.monotonic() >= deadline
+        return candidates, clock() >= deadline
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +236,7 @@ def _category_name(value: str) -> str:
 def _category_id(value: object) -> str:
     if type(value) is int:
         return str(value)
-    if isinstance(value, str) and len(value) <= 32:
+    if isinstance(value, str) and len(value) <= 32 and not _contains_invalid_unicode(value):
         return value
     raise ValueError("invalid category id")
 
@@ -270,24 +250,98 @@ def _object_pairs_no_duplicates(pairs):
     return result
 
 
-def _read_json_file(path: Path, limit: int) -> object:
-    with path.open("rb") as stream:
-        raw = stream.read(limit + 1)
+def _stat_stamp(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_size,
+        info.st_mtime_ns, info.st_ctime_ns, getattr(info, "st_file_attributes", 0),
+    )
+
+
+def _contains_invalid_unicode(value: object) -> bool:
+    if isinstance(value, str):
+        return any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+    if isinstance(value, dict):
+        return any(_contains_invalid_unicode(key) or _contains_invalid_unicode(item)
+                   for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_invalid_unicode(item) for item in value)
+    return False
+
+
+class _FingerprintFileChanged(OSError):
+    pass
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(info, "st_file_attributes", 0) & flag)
+
+
+def _safe_directory_info(info: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and not _is_reparse_point(info)
+        and not (info.st_mode & stat.S_IWOTH)
+    )
+
+
+def _safe_file_info(info: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and not _is_reparse_point(info)
+        and not (info.st_mode & stat.S_IWOTH)
+    )
+
+
+def _read_json_file(path: Path, limit: int, expected_stamp: tuple[int, ...] | None = None) -> object:
+    checked = path.lstat()
+    checked_stamp = _stat_stamp(checked)
+    if expected_stamp is not None and checked_stamp != expected_stamp:
+        raise _FingerprintFileChanged("fingerprint file changed during loading")
+    if not _safe_file_info(checked):
+        raise PermissionError("untrusted fingerprint file")
+    if checked.st_size > limit:
+        raise OverflowError("file too large")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(os.fspath(path), flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not _safe_file_info(opened)
+            or _stat_stamp(opened) != checked_stamp
+            or (expected_stamp is not None and _stat_stamp(opened) != expected_stamp)
+        ):
+            raise _FingerprintFileChanged("fingerprint file changed while opening")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            raw = stream.read(limit + 1)
+            after_read = os.fstat(stream.fileno())
+            if _stat_stamp(after_read) != checked_stamp:
+                raise _FingerprintFileChanged("fingerprint file changed while reading")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if len(raw) > limit:
         raise OverflowError("file too large")
     return json.loads(raw.decode("utf-8"), object_pairs_hook=_object_pairs_no_duplicates)
 
 
-def _category_map(root: Path, skipped: Counter[str]) -> dict[str, str]:
+def _category_map(root: Path, skipped: Counter[str], expected_stamp=None) -> dict[str, str]:
     path = root / "categories.json"
+    if expected_stamp is None:
+        skipped["categories file unavailable"] += 1
+        return {}
     try:
-        if path.is_symlink() or not path.is_file():
-            skipped["categories file unavailable"] += 1
-            return {}
-        if path.stat().st_size > MAX_METADATA_BYTES:
+        if len(expected_stamp) != 7:
+            raise OSError("invalid checked category file")
+        if expected_stamp[3] > MAX_METADATA_BYTES:
             skipped["categories file too large"] += 1
             return {}
-        payload = _read_json_file(path, MAX_METADATA_BYTES)
+        payload = _read_json_file(path, MAX_METADATA_BYTES, expected_stamp)
     except FileNotFoundError:
         skipped["categories file unavailable"] += 1
         return {}
@@ -312,7 +366,7 @@ def _category_map(root: Path, skipped: Counter[str]) -> dict[str, str]:
                 name = entry["name"]
             else:
                 raise ValueError("invalid category")
-            if not name or len(name) > MAX_STRING_LENGTH:
+            if not name or len(name) > MAX_STRING_LENGTH or _contains_invalid_unicode(name):
                 raise ValueError("invalid category name")
             result[key] = _category_name(name)
         except ValueError:
@@ -320,53 +374,104 @@ def _category_map(root: Path, skipped: Counter[str]) -> dict[str, str]:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _DirectorySnapshot:
+    root: Path
+    technologies_dir: Path
+    metadata_root: Path
+    files: tuple[tuple[str, tuple[int, ...]], ...]
+    metadata: tuple[tuple[str, tuple[int, ...] | None], ...]
+    root_stamp: tuple[int, ...]
+    technologies_stamp: tuple[int, ...]
+    overflow_files: int
+    truncated: bool
+    key: tuple
+
+
 def _snapshot_directory(directory: Path):
-    """Return the normalized layout and a bounded cache key."""
+    """Check only the published layout and return bounded file stamps."""
     try:
-        requested = directory.expanduser().resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    if not requested.is_dir():
-        return None
+        requested = Path(os.path.abspath(os.fspath(directory.expanduser())))
+        requested_info = requested.lstat()
+    except (OSError, RuntimeError, ValueError):
+        return None, "fingerprint directory unavailable"
+    if not _safe_directory_info(requested_info):
+        return None, "untrusted fingerprint layout"
+
     child = requested / "technologies"
-    if child.is_dir():
-        root, technologies = requested, child
-    else:
-        technologies, root = requested, requested.parent
     try:
-        entries = []
-        truncated = False
-        for position, entry in enumerate(technologies.iterdir()):
-            if position >= MAX_DIRECTORY_ENTRIES:
-                truncated = True
-                break
-            if entry.name.endswith(".json"):
-                try:
-                    info = entry.lstat()
-                    stamp = (info.st_mtime_ns, info.st_size, getattr(info, "st_ino", 0), stat.S_ISLNK(info.st_mode))
-                except OSError:
-                    stamp = (-1, -1, 0, False)
-                entries.append((entry.name, stamp))
-        entries.sort(key=lambda item: item[0])
+        child_info = child.lstat()
+    except FileNotFoundError:
+        if requested.name != "technologies":
+            return None, "fingerprint directory unavailable"
+        technologies = requested
+        metadata_root = requested.parent
+        try:
+            root_info = metadata_root.lstat()
+        except OSError:
+            return None, "fingerprint directory unavailable"
     except OSError:
-        return None
-    overflow_files = max(0, len(entries) - MAX_TECHNOLOGY_FILES)
-    entries = entries[:MAX_TECHNOLOGY_FILES]
-    if root == technologies:
-        metadata_root = root.parent
+        return None, "fingerprint directory unavailable"
     else:
-        metadata_root = root
+        if not _safe_directory_info(child_info):
+            return None, "untrusted fingerprint layout"
+        technologies = child
+        metadata_root = requested
+        root_info = requested_info
+
+    if not _safe_directory_info(root_info):
+        return None, "untrusted fingerprint layout"
+    try:
+        technologies_info = technologies.lstat()
+    except OSError:
+        return None, "fingerprint directory unavailable"
+    if not _safe_directory_info(technologies_info):
+        return None, "untrusted fingerprint layout"
+
+    files = []
+    truncated = False
+    try:
+        with os.scandir(technologies) as entries:
+            for position, entry in enumerate(entries):
+                if position >= MAX_DIRECTORY_ENTRIES:
+                    truncated = True
+                    break
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    info = Path(entry.path).lstat()
+                    stamp = _stat_stamp(info)
+                except OSError:
+                    stamp = ()
+                files.append((entry.name, stamp))
+    except OSError:
+        return None, "fingerprint directory unavailable"
+    files.sort(key=lambda item: item[0])
+    overflow_files = max(0, len(files) - MAX_TECHNOLOGY_FILES)
+    files = files[:MAX_TECHNOLOGY_FILES]
+
     metadata = []
     for filename in ("categories.json", "groups.json"):
-        path = metadata_root / filename
         try:
-            info = path.lstat()
-            stamp = (info.st_mtime_ns, info.st_size, getattr(info, "st_ino", 0), stat.S_ISLNK(info.st_mode))
+            info = (metadata_root / filename).lstat()
+            stamp = _stat_stamp(info)
+        except FileNotFoundError:
+            stamp = None
         except OSError:
-            stamp = (-1, -1, 0, False)
+            stamp = ()
         metadata.append((filename, stamp))
-    key = (str(root), str(technologies), tuple(entries), tuple(metadata), overflow_files, truncated)
-    return root, technologies, metadata_root, tuple(item[0] for item in entries), overflow_files, truncated, key
+    files_tuple = tuple(files)
+    metadata_tuple = tuple(metadata)
+    root_stamp = _stat_stamp(root_info)
+    technologies_stamp = _stat_stamp(technologies_info)
+    key = (
+        str(metadata_root), str(technologies), root_stamp, technologies_stamp,
+        files_tuple, metadata_tuple, overflow_files, truncated,
+    )
+    return _DirectorySnapshot(
+        metadata_root, technologies, metadata_root, files_tuple, metadata_tuple,
+        root_stamp, technologies_stamp, overflow_files, truncated, key,
+    ), ""
 
 
 def _parse_js_flags(source: str) -> tuple[str, int]:
@@ -416,50 +521,138 @@ def _unicode_escape(hex_value: str) -> str:
 
 
 def _unsafe_regex(source: str) -> bool:
-    """Reject common unbounded nested-backtracking forms before compilation."""
-    # Repeated groups containing alternatives or an inner unbounded repeat are
-    # conservatively skipped. Bounded repeats such as (?:\.\d+){0,3} remain
-    # usable because their outer work is finite.
-    stack: list[list[bool]] = []
-    escaped = False
-    in_class = False
-    for index, char in enumerate(source):
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char == "[":
-            in_class = True
-            continue
-        if char == "]" and in_class:
-            in_class = False
-            continue
-        if in_class:
-            continue
-        if char == "(":
-            stack.append([False, 0])
-            continue
-        if char == "|" and stack:
-            stack[-1][0] = True
-            continue
-        if char in "+*" and stack:
-            stack[-1][1] += 1
-        if char == ")" and stack:
-            has_alternative, inner_repeats = stack.pop()
-            if stack and inner_repeats:
-                stack[-1][1] += inner_repeats
-            tail = source[index + 1:index + 3]
-            if tail.startswith(("+", "*")) and (has_alternative or inner_repeats):
-                return True
-    return False
+    """Reject backtracking shapes that cannot be bounded by deadline checks."""
+    def parse(position: int, stop_at_group: bool = False):
+        has_alternative = False
+        has_unbounded = False
+        previous_unbounded = False
+        unsafe = False
+        while position < len(source):
+            char = source[position]
+            if stop_at_group and char == ")":
+                return has_alternative, has_unbounded, unsafe, position + 1
+            if char == "|":
+                has_alternative = True
+                previous_unbounded = False
+                position += 1
+                continue
+
+            atom_alternative = False
+            atom_unbounded = False
+            if char == "\\":
+                if position + 1 >= len(source):
+                    position += 1
+                    continue
+                escaped = source[position + 1]
+                if escaped.isdigit() and escaped != "0":
+                    unsafe = True
+                elif escaped == "k" and position + 2 < len(source) and source[position + 2] == "<":
+                    unsafe = True
+                position += 2
+            elif char == "[":
+                position += 1
+                escaped = False
+                while position < len(source):
+                    current = source[position]
+                    position += 1
+                    if escaped:
+                        escaped = False
+                    elif current == "\\":
+                        escaped = True
+                    elif current == "]":
+                        break
+            elif char == "(":
+                position += 1
+                if source.startswith("?P=", position):
+                    unsafe = True
+                    close = source.find(")", position + 3)
+                    position = len(source) if close < 0 else close + 1
+                    continue
+                if source.startswith("?:", position):
+                    position += 2
+                elif source.startswith(("?=", "?!"), position):
+                    position += 2
+                elif source.startswith(("?<=", "?<!"), position):
+                    position += 3
+                elif source.startswith("?P<", position):
+                    close = source.find(">", position + 3)
+                    if close < 0:
+                        return False, False, True, len(source)
+                    position = close + 1
+                elif source.startswith("?<", position):
+                    close = source.find(">", position + 2)
+                    if close < 0:
+                        return False, False, True, len(source)
+                    position = close + 1
+                elif source.startswith("?", position):
+                    colon = source.find(":", position + 1)
+                    if colon < 0:
+                        return False, False, True, len(source)
+                    position = colon + 1
+                atom_alternative, atom_unbounded, nested_unsafe, position = parse(position, True)
+                unsafe = unsafe or nested_unsafe
+            else:
+                position += 1
+
+            quantifier_unbounded = False
+            quantifier_max = 1
+            if position < len(source) and source[position] in "*+?":
+                quantifier = source[position]
+                quantifier_unbounded = quantifier in "*+"
+                quantifier_max = None if quantifier_unbounded else 1
+                position += 1
+            elif position < len(source) and source[position] == "{":
+                end = source.find("}", position + 1)
+                if end >= 0:
+                    spec = source[position + 1:end]
+                    match = re.fullmatch(r"(\d+)(?:,(\d*))?", spec)
+                    if match:
+                        if "," in spec and not match.group(2):
+                            quantifier_unbounded = True
+                            quantifier_max = None
+                        else:
+                            quantifier_max = int(match.group(2) or match.group(1))
+                            if quantifier_max > 256:
+                                unsafe = True
+                        position = end + 1
+            if position < len(source) and source[position] == "?":
+                position += 1
+
+            if quantifier_unbounded:
+                if previous_unbounded or atom_unbounded or atom_alternative:
+                    unsafe = True
+                has_unbounded = True
+                previous_unbounded = True
+            else:
+                if atom_unbounded and quantifier_max and quantifier_max > 1:
+                    unsafe = True
+                if atom_alternative and quantifier_max and quantifier_max > 1:
+                    unsafe = True
+                previous_unbounded = False
+        return has_alternative, has_unbounded, unsafe, position
+
+    _, _, unsafe, _ = parse(0)
+    return unsafe
+
+
+def _rewrite_safe_regex(source: str) -> str:
+    """Collapse redundant wildcards and nested repeats when matching is unchanged."""
+    def collapse(match):
+        atom, inner, outer = match.groups()
+        return atom + ("+" if inner == outer == "+" else "*")
+
+    value = re.sub(r"\(\?:([A-Za-z0-9])([+*])\)([+*])", collapse, source)
+    wildcard_literal = re.fullmatch(r"\.\*([A-Za-z0-9_:/-]{2,})\.\*", value)
+    if wildcard_literal:
+        return wildcard_literal.group(1)
+    return value
 
 
 def _compile_regex(source: str) -> tuple[re.Pattern[str], str]:
     if len(source) > MAX_REGEX_LENGTH:
         raise ValueError("regular expression too long")
     translated, flags = _parse_js_flags(source)
+    translated = _rewrite_safe_regex(translated)
     if _unsafe_regex(translated):
         raise ValueError("unsafe regular expression")
     return re.compile(translated, flags), translated
@@ -704,24 +897,20 @@ def _build_literal_index(patterns: tuple[_Pattern, ...], kind: str) -> tuple[_Li
                 failure = failures[failure]
             failures[next_state] = transitions[failure].get(char, 0)
             outputs[next_state].extend(outputs[failures[next_state]])
-    anchors = sorted({pattern.literal[:3] for pattern in patterns
-                      if pattern.kind == kind and pattern.literal and len(pattern.literal) >= 3
-                      and pattern.regex is not None})
-    anchor_regex = None
-    if anchors and len(anchors) <= 50_000:
-        anchor_regex = re.compile("(?=(?:" + "|".join(re.escape(anchor) for anchor in anchors) + "))")
     frozen = _LiteralIndex(
         tuple(MappingProxyType(dict(edges)) for edges in transitions),
         tuple(failures),
         tuple(tuple(sorted(set(items))) for items in outputs),
-        anchor_regex,
         MappingProxyType(literal_lengths),
     )
     return frozen, tuple(no_literal)
 
 
 def _string(value: object, *, allow_empty: bool = True) -> str:
-    if not isinstance(value, str) or len(value) > MAX_STRING_LENGTH or (not value and not allow_empty):
+    if (
+        not isinstance(value, str) or len(value) > MAX_STRING_LENGTH
+        or (not value and not allow_empty) or _contains_invalid_unicode(value)
+    ):
         raise ValueError("invalid bounded string")
     return value
 
@@ -831,9 +1020,17 @@ def _dom_pattern(index: int, selector_source: str, descriptor: object, skipped: 
     if "properties" in descriptor:
         skipped["DOM properties require a JavaScript runtime"] += 1
         return None
-    if "exists" in descriptor and descriptor["exists"] is not True:
-        skipped["unsupported DOM exists condition"] += 1
-        return None
+    if "exists" in descriptor:
+        exists = descriptor["exists"]
+        if isinstance(exists, str):
+            try:
+                _string(exists)
+            except ValueError:
+                skipped["malformed DOM pattern"] += 1
+                return None
+        elif exists is not True:
+            skipped["unsupported DOM exists condition"] += 1
+            return None
     attributes = []
     text = []
     try:
@@ -954,10 +1151,17 @@ def _patterns_for_technology(data: dict, base_index: int, skipped: Counter[str],
                 if pattern is not None:
                     output.append(pattern)
         elif kind == "dom":
-            if not isinstance(raw, dict) or len(raw) > MAX_PATTERNS_PER_TECHNOLOGY:
+            if isinstance(raw, list):
+                if len(raw) > MAX_PATTERNS_PER_TECHNOLOGY:
+                    skipped["malformed DOM collection"] += 1
+                    continue
+                entries = ((selector, {"exists": True}) for selector in raw)
+            elif isinstance(raw, dict) and len(raw) <= MAX_PATTERNS_PER_TECHNOLOGY:
+                entries = raw.items()
+            else:
                 skipped["malformed DOM collection"] += 1
                 continue
-            for selector_source, descriptor in raw.items():
+            for selector_source, descriptor in entries:
                 try:
                     selector_source = _string(selector_source, allow_empty=False)
                 except ValueError:
@@ -979,15 +1183,17 @@ def _patterns_for_technology(data: dict, base_index: int, skipped: Counter[str],
     return tuple(output)
 
 
-def _load_groups(root: Path, skipped: Counter[str]) -> dict[str, str]:
+def _load_groups(root: Path, skipped: Counter[str], expected_stamp=None) -> dict[str, str]:
+    if expected_stamp is None:
+        return {}
     path = root / "groups.json"
     try:
-        if not path.exists():
-            return {}
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_METADATA_BYTES:
+        if len(expected_stamp) != 7:
+            raise OSError("invalid checked groups file")
+        if expected_stamp[3] > MAX_METADATA_BYTES:
             skipped["malformed groups file"] += 1
             return {}
-        payload = _read_json_file(path, MAX_METADATA_BYTES)
+        payload = _read_json_file(path, MAX_METADATA_BYTES, expected_stamp)
         if not isinstance(payload, (dict, list)):
             skipped["malformed groups file"] += 1
             return {}
@@ -1005,7 +1211,7 @@ def _load_groups(root: Path, skipped: Counter[str]) -> dict[str, str]:
                 name = entry["name"]
             else:
                 raise ValueError("invalid group")
-            if not name or len(name) > MAX_STRING_LENGTH:
+            if not name or len(name) > MAX_STRING_LENGTH or _contains_invalid_unicode(name):
                 raise ValueError("invalid group name")
             result[key] = name
         except ValueError:
@@ -1013,27 +1219,53 @@ def _load_groups(root: Path, skipped: Counter[str]) -> dict[str, str]:
     return result
 
 
-def _load_uncached(root: Path, technologies_dir: Path, metadata_root: Path,
-                   names: tuple[str, ...], overflow_files: int, truncated: bool) -> Fingerprints:
+def _verify_directory(path: Path, expected_stamp: tuple[int, ...]) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return _safe_directory_info(info) and _stat_stamp(info) == expected_stamp
+
+
+def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
     skipped_technologies: Counter[str] = Counter()
     skipped_patterns: Counter[str] = Counter()
     unsupported_kinds: Counter[str] = Counter()
-    categories = _category_map(metadata_root, skipped_technologies)
-    groups = _load_groups(metadata_root, skipped_technologies)
-    if overflow_files:
-        skipped_technologies["technology file count limit"] += overflow_files
-    if truncated:
+    root = snapshot.root
+    technologies_dir = snapshot.technologies_dir
+    metadata_stamps = dict(snapshot.metadata)
+    if not _verify_directory(root, snapshot.root_stamp) or not _verify_directory(
+        technologies_dir, snapshot.technologies_stamp
+    ):
+        stats = FingerprintStats(skipped_technologies=(("untrusted fingerprint layout", 1),))
+        return Fingerprints(root, (), (), MappingProxyType({}), MappingProxyType({}), stats,
+                            MappingProxyType({}), MappingProxyType({}))
+    categories = _category_map(root, skipped_technologies, metadata_stamps.get("categories.json"))
+    groups = _load_groups(root, skipped_technologies, metadata_stamps.get("groups.json"))
+    if snapshot.overflow_files:
+        skipped_technologies["technology file count limit"] += snapshot.overflow_files
+    if snapshot.truncated:
         skipped_technologies["directory entry limit"] += 1
     technologies: list[_Technology] = []
     patterns: list[_Pattern] = []
     bytes_seen = 0
-    for filename in names:
+    for filename, expected_stamp in snapshot.files:
         path = technologies_dir / filename
         try:
-            if path.is_symlink() or not path.is_file():
+            if not _verify_directory(technologies_dir, snapshot.technologies_stamp):
+                skipped_technologies["untrusted fingerprint layout"] += 1
+                break
+            if not expected_stamp:
+                skipped_technologies["technology file unavailable"] += 1
+                continue
+            info = path.lstat()
+            if not _safe_file_info(info):
                 skipped_technologies["technology file is not a regular file"] += 1
                 continue
-            file_size = path.stat().st_size
+            if _stat_stamp(info) != expected_stamp:
+                skipped_technologies["technology file changed during loading"] += 1
+                continue
+            file_size = info.st_size
             if file_size > MAX_FILE_BYTES:
                 skipped_technologies["technology file too large"] += 1
                 continue
@@ -1041,69 +1273,89 @@ def _load_uncached(root: Path, technologies_dir: Path, metadata_root: Path,
                 skipped_technologies["total fingerprint byte limit"] += 1
                 continue
             bytes_seen += file_size
-            payload = _read_json_file(path, MAX_FILE_BYTES)
-            if not isinstance(payload, dict) or len(payload) != 1:
-                raise ValueError("technology file must contain one name")
-            name, data = next(iter(payload.items()))
-            if not isinstance(name, str) or not name or len(name) > 256 or not isinstance(data, dict):
-                raise ValueError("malformed technology shape")
-            if any(field not in _KNOWN_FIELDS for field in data):
-                raise ValueError("unknown technology field")
-            if "cats" not in data or not isinstance(data["cats"], list) or len(data["cats"]) > 64:
-                raise ValueError("malformed technology categories")
-            category_ids = tuple(_category_id(value) for value in data["cats"])
-            cpe = data.get("cpe", "")
-            if not isinstance(cpe, str) or len(cpe) > MAX_STRING_LENGTH:
-                raise ValueError("malformed technology CPE")
-            if cpe:
-                fields = split_cpe23(cpe)
-                if (
-                    len(fields) != 11 or fields[0] not in {"a", "o", "h"}
-                    or fields[1] in {"", "*", "-"} or fields[2] in {"", "*", "-"}
-                    or fields[3] != "*"
-                ):
-                    raise ValueError("malformed technology CPE")
-                webrules._validated_cpe(cpe)
-            for field in ("description", "website", "icon", "pricing"):
-                if field not in data:
-                    continue
-                value = data[field]
-                if isinstance(value, str):
-                    _string(value)
-                elif isinstance(value, list) and len(value) <= 64:
-                    for item in value:
-                        _string(item)
-                else:
-                    raise ValueError("malformed technology metadata")
-            if "saas" in data and type(data["saas"]) is not bool:
-                raise ValueError("malformed technology metadata")
-            if "groups" in data:
-                if not isinstance(data["groups"], list) or len(data["groups"]) > 64:
-                    raise ValueError("malformed technology groups")
-                for group in data["groups"]:
-                    _category_id(group)
-            potential_patterns = sum(
-                _pattern_size(data[kind]) for kind in SUPPORTED_KINDS if kind in data
-            )
-            if potential_patterns > MAX_TOTAL_PATTERNS - len(patterns):
-                skipped_technologies["total pattern limit"] += 1
+            payload = _read_json_file(path, MAX_FILE_BYTES, expected_stamp)
+            if not isinstance(payload, dict) or not payload or len(payload) > MAX_TECHNOLOGIES_PER_FILE:
+                skipped_technologies["malformed technology file"] += 1
                 continue
-            local_patterns = _patterns_for_technology(data, len(patterns), skipped_patterns, unsupported_kinds)
-            if len(patterns) + len(local_patterns) > MAX_TOTAL_PATTERNS:
-                skipped_technologies["total pattern limit"] += 1
-                continue
-            vendor, product = _cpe_identity(cpe, name)
-            category = next((categories[identifier] for identifier in category_ids if identifier in categories), "application")
-            relationships = _parse_relationships(data, skipped_patterns)
-            patterns.extend(local_patterns)
-            technologies.append(_Technology(name, cpe, vendor, product, category, category_ids,
-                                             tuple(pattern.index for pattern in local_patterns), *relationships))
+            for name, data in payload.items():
+                try:
+                    if _contains_invalid_unicode(name) or _contains_invalid_unicode(data):
+                        skipped_technologies["invalid Unicode scalar value"] += 1
+                        continue
+                    if not isinstance(name, str) or not name or len(name) > 256 or not isinstance(data, dict):
+                        raise ValueError("malformed technology shape")
+                    if any(field not in _KNOWN_FIELDS for field in data):
+                        raise ValueError("unknown technology field")
+                    if "cats" not in data or not isinstance(data["cats"], list) or len(data["cats"]) > 64:
+                        raise ValueError("malformed technology categories")
+                    category_ids = tuple(_category_id(value) for value in data["cats"])
+                    cpe = data.get("cpe", "")
+                    if not isinstance(cpe, str) or len(cpe) > MAX_STRING_LENGTH:
+                        raise ValueError("malformed technology CPE")
+                    if cpe:
+                        try:
+                            fields = split_cpe23(cpe)
+                            invalid_cpe = (
+                                len(fields) != 11 or fields[0] not in {"a", "o", "h"}
+                                or fields[1] in {"", "*", "-"} or fields[2] in {"", "*", "-"}
+                            )
+                            if not invalid_cpe:
+                                webrules._validated_cpe(cpe)
+                            else:
+                                cpe = ""
+                        except (TypeError, ValueError):
+                            # CPE is optional identity metadata; an unsupported
+                            # or non-product-specific value never blocks detection.
+                            cpe = ""
+                    for field in ("description", "website", "icon", "pricing"):
+                        if field not in data:
+                            continue
+                        value = data[field]
+                        if isinstance(value, str):
+                            _string(value)
+                        elif isinstance(value, list) and len(value) <= 64:
+                            for item in value:
+                                _string(item)
+                        else:
+                            raise ValueError("malformed technology metadata")
+                    if any(field in data and type(data[field]) is not bool for field in ("saas", "oss")):
+                        raise ValueError("malformed technology metadata")
+                    if "groups" in data:
+                        if not isinstance(data["groups"], list) or len(data["groups"]) > 64:
+                            raise ValueError("malformed technology groups")
+                        for group in data["groups"]:
+                            _category_id(group)
+                    potential_patterns = sum(
+                        _pattern_size(data[kind]) for kind in _ALL_KINDS if kind in data
+                    )
+                    if potential_patterns > MAX_PATTERNS_PER_TECHNOLOGY:
+                        skipped_technologies["technology pattern count limit"] += 1
+                        continue
+                    if potential_patterns > MAX_TOTAL_PATTERNS - len(patterns):
+                        skipped_technologies["total pattern limit"] += 1
+                        continue
+                    local_patterns = _patterns_for_technology(data, len(patterns), skipped_patterns, unsupported_kinds)
+                    if len(patterns) + len(local_patterns) > MAX_TOTAL_PATTERNS:
+                        skipped_technologies["total pattern limit"] += 1
+                        continue
+                    vendor, product = _cpe_identity(cpe, name)
+                    category = next((categories[identifier] for identifier in category_ids if identifier in categories), "application")
+                    relationships = _parse_relationships(data, skipped_patterns)
+                    patterns.extend(local_patterns)
+                    technologies.append(_Technology(name, cpe, vendor, product, category, category_ids,
+                                                     tuple(pattern.index for pattern in local_patterns), *relationships))
+                except (ValueError, TypeError, OverflowError, RecursionError):
+                    skipped_technologies["malformed technology"] += 1
         except OverflowError:
             skipped_technologies["technology file too large"] += 1
+        except _FingerprintFileChanged:
+            skipped_technologies["technology file changed during loading"] += 1
         except FileNotFoundError:
             skipped_technologies["technology file unavailable"] += 1
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError):
-            skipped_technologies["malformed technology"] += 1
+        except (UnicodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError):
+            skipped_technologies["malformed technology file"] += 1
+        except OSError:
+            skipped_technologies["technology file unavailable or untrusted"] += 1
     index_map = {}
     no_literal = {}
     pattern_tuple = tuple(patterns)
@@ -1131,18 +1383,17 @@ def load_fingerprints(directory: Path) -> Fingerprints:
     its ``technologies`` child. Malformed files and patterns are counted and
     skipped so an optional collection cannot abort a scan.
     """
-    snapshot = _snapshot_directory(Path(directory))
+    snapshot, reason = _snapshot_directory(Path(directory))
     if snapshot is None:
-        stats = FingerprintStats(skipped_technologies=(("fingerprint directory unavailable", 1),))
+        stats = FingerprintStats(skipped_technologies=((reason, 1),))
         return Fingerprints(Path(directory), (), (), MappingProxyType({}), MappingProxyType({}), stats,
                             MappingProxyType({}), MappingProxyType({}))
-    root, technologies_dir, metadata_root, names, overflow_files, truncated, key = snapshot
-    cached = _LOAD_CACHE.get(key)
+    cached = _LOAD_CACHE.get(snapshot.key)
     if cached is not None:
         return cached
-    loaded = _load_uncached(root, technologies_dir, metadata_root, names, overflow_files, truncated)
-    _LOAD_CACHE[key] = loaded
-    _LOAD_CACHE_ORDER.append(key)
+    loaded = _load_uncached(snapshot)
+    _LOAD_CACHE[snapshot.key] = loaded
+    _LOAD_CACHE_ORDER.append(snapshot.key)
     while len(_LOAD_CACHE_ORDER) > _LOAD_CACHE_LIMIT:
         oldest = _LOAD_CACHE_ORDER.popleft()
         _LOAD_CACHE.pop(oldest, None)
@@ -1178,6 +1429,7 @@ class _PageParser(HTMLParser):
         self.tag_index: dict[str, list[int]] = {}
         self.attribute_index: dict[str, list[int]] = {}
         self._node_text_cache: dict[int, str] = {}
+        self._node_text_cache_bytes = 0
         try:
             self.feed(self.html)
             self.close()
@@ -1264,7 +1516,10 @@ class _PageParser(HTMLParser):
                     break
             pending.extend(reversed(node.children))
         value = "".join(output)
-        self._node_text_cache[index] = value
+        byte_length = len(value.encode("utf-8", errors="replace"))
+        if self._node_text_cache_bytes + byte_length <= MAX_DOM_TEXT_CACHE_BYTES:
+            self._node_text_cache[index] = value
+            self._node_text_cache_bytes += byte_length
         return value
 
 
@@ -1430,6 +1685,8 @@ def _version_from(pattern: _Pattern | _DOMTest, value: str, matched: re.Match[st
             if not version_match:
                 return ""
             candidate = version_match.group(1) if version_match.lastindex else version_match.group(0)
+        if len(candidate) > MAX_VERSION_CAPTURE_LENGTH or _contains_invalid_unicode(candidate):
+            return ""
         return webrules.normalize_version(candidate)
     except (re.error, ValueError, IndexError):
         return ""
@@ -1439,15 +1696,15 @@ def _pattern_evidence(pattern: _Pattern, value: str, match: re.Match[str], sourc
     version = _version_from(pattern, value, match)
     start = match.start()
     excerpt = value[max(0, start - 40):start + EVIDENCE_EXCERPT_LENGTH]
-    return version, (pattern.kind, source[:512], excerpt[:EVIDENCE_EXCERPT_LENGTH])
+    return version, (EVIDENCE_KIND_MAP.get(pattern.kind, pattern.kind), source[:512], excerpt[:EVIDENCE_EXCERPT_LENGTH])
 
 
-def _dom_matches(pattern: _Pattern, parser: _PageParser, deadline: float):
+def _dom_matches(pattern: _Pattern, parser: _PageParser, deadline: float, clock):
     if pattern.selector is None:
         return (), False
     matches = []
     for count, node_index in enumerate(_selector_candidates(pattern.selector, parser)):
-        if count and count % 1024 == 0 and time.monotonic() >= deadline:
+        if count and count % 1024 == 0 and clock() >= deadline:
             return tuple(matches), True
         node = parser.nodes[node_index]
         if not _selector_matches(pattern.selector, node):
@@ -1539,27 +1796,29 @@ def _merge_direct_record(records: dict[str, _DetectionRecord], technology: _Tech
     if version:
         record.versions.add(version)
     record.evidence_types.add(evidence[0])
-    if len(record.evidence) < MAX_EVIDENCE_PER_DETECTION:
+    if evidence not in record.evidence and len(record.evidence) < MAX_EVIDENCE_PER_DETECTION:
         record.evidence.append(evidence)
 
 
 def _candidate_patterns(fingerprints: Fingerprints, kind: str, source: _Source,
-                        deadline: float) -> tuple[tuple[int, ...], bool, Mapping[int, set[int]]]:
+                        deadline: float, clock) -> tuple[tuple[int, ...], bool, Mapping[int, set[int]]]:
     index = fingerprints.literal_indexes.get(kind)
     no_literal = fingerprints.no_literal.get(kind, ())
     if index is None:
-        return no_literal, time.monotonic() >= deadline, MappingProxyType({})
+        return no_literal, clock() >= deadline, MappingProxyType({})
     if len(source.value) <= 16_384:
         folded = _fold_for_index(source.value)
         found = []
         no_literal_set = set(no_literal)
         for pattern in fingerprints.patterns:
+            if clock() >= deadline:
+                return tuple(found), True, MappingProxyType({})
             if pattern.kind == kind and pattern.index in no_literal_set:
                 found.append(pattern.index)
             elif pattern.kind == kind and pattern.literal and pattern.literal in folded:
                 found.append(pattern.index)
-        return tuple(found), time.monotonic() >= deadline, MappingProxyType({})
-    positions, expired = index.find(source.value, deadline)
+        return tuple(found), clock() >= deadline, MappingProxyType({})
+    positions, expired = index.find(source.value, deadline, clock)
     candidates = set(positions)
     candidates.update(no_literal)
     return tuple(candidates), expired, MappingProxyType(positions)
@@ -1570,126 +1829,147 @@ def _category_ids_available(records: Mapping[str, _DetectionRecord]) -> set[str]
 
 
 def _resolve_relationships(fingerprints: Fingerprints, direct: dict[str, _DetectionRecord],
-                           deadline: float):
-    records = dict(direct)
+                           deadline: float, clock):
     by_name = {technology.name.casefold(): technology for technology in fingerprints.technologies}
-    pending = [(record.technology, record.confidence, record.technology.name, 0)
-               for record in direct.values()]
-    best_implied: dict[str, int] = {}
-    expansions = 0
-    while pending and expansions < min(10_000, len(fingerprints.technologies) * 8 + 1):
-        if time.monotonic() >= deadline:
-            return records, True
-        source, source_confidence, origin, depth = pending.pop(0)
-        if depth >= 32:
-            continue
-        for relation in source.implies:
-            target_key = relation.target.casefold()
-            technology = by_name.get(target_key)
-            if technology is None or target_key in direct:
+    working_direct = dict(direct)
+    expansion_limit = min(10_000, len(fingerprints.technologies) * 8 + 1)
+    for _ in range(len(direct) + 1):
+        if clock() >= deadline:
+            return direct, True
+        records = dict(working_direct)
+        pending = [(record.technology, record.confidence, record.technology.name, 0)
+                   for record in working_direct.values()]
+        best_implied: dict[str, int] = {}
+        expansions = 0
+        while pending and expansions < expansion_limit:
+            if clock() >= deadline:
+                return direct, True
+            source, source_confidence, origin, depth = pending.pop(0)
+            if depth >= 32:
                 continue
-            confidence = min(source_confidence, relation.confidence)
-            record = records.get(target_key)
-            if record is None:
-                record = _DetectionRecord(technology, confidence, set(), {"implied"}, [], {origin}, False)
-                records[target_key] = record
-            else:
-                record.confidence = max(record.confidence, confidence)
-                record.implied_by.add(origin)
-            previous = best_implied.get(target_key, -1)
-            if confidence > previous:
-                best_implied[target_key] = confidence
-                pending.append((technology, confidence, technology.name, depth + 1))
-            else:
-                record.implied_by.add(origin)
-        expansions += 1
-
-    active_names = set(records)
-    excluded = set()
-    for key, record in records.items():
-        excluded.update(target for target in record.technology.excludes if target in active_names)
-    for key in excluded:
-        records.pop(key, None)
-    changed = True
-    while changed:
-        changed = False
-        active_names = set(records)
-        categories = _category_ids_available(records)
-        for key, record in tuple(records.items()):
-            if any(required not in active_names for required in record.technology.requires) or any(
-                required not in categories for required in record.technology.requires_categories
-            ):
-                records.pop(key, None)
-                changed = True
-    return records, False
-
-
-def detect_external(page: webrules.Page, fingerprints: Fingerprints, *, page_url: str = "") -> tuple[webrules.Detection, ...]:
-    """Evaluate passive fingerprint kinds on a fetched page, within 20 seconds."""
-    started = time.monotonic()
-    deadline = started + MAX_EVALUATION_SECONDS
-    sources, parser = _page_sources(page, page_url)
-    direct: dict[str, _DetectionRecord] = {}
-    by_index = {pattern.index: pattern for pattern in fingerprints.patterns}
-    technology_by_index = {}
-    for technology in fingerprints.technologies:
-        for pattern_id in technology.pattern_ids:
-            technology_by_index[pattern_id] = technology
-    patterns_evaluated = 0
-    stopped = False
-
-    for kind in ("headers", "cookies", "meta", "scriptSrc", "scripts", "css", "html", "text", "url", "robots"):
-        kind_sources = sources.get(kind, ())
-        for source in kind_sources:
-            candidate_ids, expired, literal_positions = _candidate_patterns(fingerprints, kind, source, deadline)
-            if expired:
-                stopped = True
-                break
-            for pattern_id in candidate_ids:
-                if time.monotonic() >= deadline:
-                    stopped = True
-                    break
-                pattern = by_index.get(pattern_id)
-                technology = technology_by_index.get(pattern_id)
-                if pattern is None or technology is None or pattern.regex is None:
+            for relation in source.implies:
+                if clock() >= deadline:
+                    return direct, True
+                target_key = relation.target.casefold()
+                technology = by_name.get(target_key)
+                if technology is None or target_key in direct:
                     continue
-                if kind in {"headers", "meta"}:
-                    if pattern.selector_regex is None or not pattern.selector_regex.fullmatch(source.selector):
-                        continue
-                patterns_evaluated += 1
-                positions = literal_positions.get(pattern_id, ())
-                if positions and pattern.prefix and pattern.literal.startswith(pattern.prefix):
-                    matches = tuple(
-                        match for position in sorted(positions)
-                        if (match := pattern.regex.match(source.value, position)) is not None
-                    )
+                confidence = min(source_confidence, relation.confidence)
+                record = records.get(target_key)
+                if record is None:
+                    record = _DetectionRecord(technology, confidence, set(), {"implied"}, [], {origin}, False)
+                    records[target_key] = record
                 else:
-                    match = pattern.regex.search(source.value)
-                    matches = (match,) if match else ()
-                if not matches:
-                    continue
-                for match in matches:
-                    version, evidence = _pattern_evidence(pattern, source.value, match, source.source)
-                    _merge_direct_record(direct, technology, pattern.confidence, version, evidence)
-            if stopped:
-                break
-        if stopped:
-            break
+                    record.confidence = max(record.confidence, confidence)
+                    record.implied_by.add(origin)
+                previous = best_implied.get(target_key, -1)
+                if confidence > previous:
+                    best_implied[target_key] = confidence
+                    pending.append((technology, confidence, technology.name, depth + 1))
+                else:
+                    record.implied_by.add(origin)
+            expansions += 1
 
-    if not stopped:
-        for technology in fingerprints.technologies:
+        active_names = set(records)
+        excluded = set()
+        for record in records.values():
+            if clock() >= deadline:
+                return direct, True
+            excluded.update(target for target in record.technology.excludes if target in active_names)
+        for key in excluded:
+            records.pop(key, None)
+        changed = True
+        while changed:
+            changed = False
+            active_names = set(records)
+            categories = _category_ids_available(records)
+            for key, record in tuple(records.items()):
+                if clock() >= deadline:
+                    return direct, True
+                if any(required not in active_names for required in record.technology.requires) or any(
+                    required not in categories for required in record.technology.requires_categories
+                ):
+                    records.pop(key, None)
+                    changed = True
+        surviving_direct = {key: record for key, record in working_direct.items() if key in records}
+        if surviving_direct.keys() == working_direct.keys():
+            return records, False
+        working_direct = surviving_direct
+    return working_direct, True
+
+
+class ExternalSession:
+    """Accumulate direct matches for one site under its caller's deadline."""
+
+    def __init__(self, fingerprints: Fingerprints, *, deadline: float, clock=time.monotonic):
+        self.fingerprints = fingerprints
+        self.deadline = deadline
+        self.clock = clock
+        self._direct: dict[str, _DetectionRecord] = {}
+        self._by_index = {pattern.index: pattern for pattern in fingerprints.patterns}
+        self._technology_by_index = {
+            pattern_id: technology
+            for technology in fingerprints.technologies
+            for pattern_id in technology.pattern_ids
+        }
+        self._patterns_evaluated = 0
+        self._stopped = False
+        self._result = None
+
+    def _expired(self) -> bool:
+        if self._stopped or self.clock() >= self.deadline:
+            self._stopped = True
+            return True
+        return False
+
+    def _match_sources(self, sources: Mapping[str, Iterable[_Source]]) -> None:
+        for kind in ("headers", "cookies", "meta", "scriptSrc", "scripts", "css", "html", "text", "url", "robots"):
+            for source in sources.get(kind, ()):
+                if self._expired():
+                    return
+                candidate_ids, expired, literal_positions = _candidate_patterns(
+                    self.fingerprints, kind, source, self.deadline, self.clock
+                )
+                if expired:
+                    self._stopped = True
+                    return
+                for pattern_id in candidate_ids:
+                    if self._expired():
+                        return
+                    pattern = self._by_index.get(pattern_id)
+                    technology = self._technology_by_index.get(pattern_id)
+                    if pattern is None or technology is None or pattern.regex is None:
+                        continue
+                    if kind in {"headers", "meta"}:
+                        if pattern.selector_regex is None or not pattern.selector_regex.fullmatch(source.selector):
+                            continue
+                    self._patterns_evaluated += 1
+                    positions = literal_positions.get(pattern_id, ())
+                    if positions and pattern.prefix and pattern.literal.startswith(pattern.prefix):
+                        matches = tuple(
+                            match for position in sorted(positions)
+                            if (match := pattern.regex.match(source.value, position)) is not None
+                        )
+                    else:
+                        match = pattern.regex.search(source.value)
+                        matches = (match,) if match else ()
+                    for match in matches:
+                        version, evidence = _pattern_evidence(pattern, source.value, match, source.source)
+                        _merge_direct_record(self._direct, technology, pattern.confidence, version, evidence)
+
+    def _match_dom(self, parser: _PageParser) -> None:
+        for technology in self.fingerprints.technologies:
             for pattern_id in technology.pattern_ids:
-                pattern = by_index[pattern_id]
+                if self._expired():
+                    return
+                pattern = self._by_index[pattern_id]
                 if pattern.kind != "dom":
                     continue
-                if time.monotonic() >= deadline:
-                    stopped = True
-                    break
-                patterns_evaluated += 1
-                dom_matches, expired = _dom_matches(pattern, parser, deadline)
+                self._patterns_evaluated += 1
+                dom_matches, expired = _dom_matches(pattern, parser, self.deadline, self.clock)
                 if expired:
-                    stopped = True
-                    break
+                    self._stopped = True
+                    return
                 if not dom_matches:
                     continue
                 confidence = 100
@@ -1706,26 +1986,87 @@ def detect_external(page: webrules.Page, fingerprints: Fingerprints, *, page_url
                             excerpt = value[max(0, start - 40):start + EVIDENCE_EXCERPT_LENGTH]
                             evidence.append(("dom", f"{source_name}:{selector}"[:512], excerpt[:EVIDENCE_EXCERPT_LENGTH]))
                 for version in versions or {""}:
-                    _merge_direct_record(direct, technology, confidence, version, ("dom", f"dom:{pattern.source}", pattern.source))
-                # Preserve bounded condition-specific evidence and the selector.
-                record = direct[technology.name.casefold()]
+                    _merge_direct_record(
+                        self._direct, technology, confidence, version,
+                        ("dom", f"dom:{pattern.source}"[:512], pattern.source[:EVIDENCE_EXCERPT_LENGTH]),
+                    )
+                record = self._direct[technology.name.casefold()]
                 for item in evidence:
-                    if len(record.evidence) < MAX_EVIDENCE_PER_DETECTION:
+                    if item not in record.evidence and len(record.evidence) < MAX_EVIDENCE_PER_DETECTION:
                         record.evidence.append(item)
-            if stopped:
-                break
 
-    resolved, relation_timed_out = _resolve_relationships(fingerprints, direct, deadline)
-    stopped = stopped or relation_timed_out
-    detections = tuple(
-        _make_detection(record)
-        for _, record in sorted(resolved.items(), key=lambda item: item[0])
+    def add_page(self, page: webrules.Page, page_url: str) -> None:
+        if self._result is not None or self._expired():
+            return
+        sources, parser = _page_sources(page, page_url)
+        self._match_sources(sources)
+        if not self._stopped:
+            self._match_dom(parser)
+
+    def add_resource(self, resource: webrules.Resource) -> None:
+        if self._result is not None or self._expired():
+            return
+        kind = getattr(resource, "kind", "")
+        url = _bounded_text(getattr(resource, "url", ""), 4096)
+        value = getattr(resource, "text", "")
+        if kind == "robots":
+            sources = {"robots": (_Source(_bounded_text(value, MAX_ROBOTS_LENGTH), url or "robots resource"),)}
+        elif kind == "script":
+            sources = {
+                "scriptSrc": (_Source(url, url),) if url else (),
+                "scripts": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH), url or "script resource"),),
+            }
+        elif kind in {"style", "css"}:
+            sources = {"css": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH), url or "style resource"),)}
+        else:
+            return
+        self._match_sources(sources)
+
+    @staticmethod
+    def _incomplete_requirements(records: Mapping[str, _DetectionRecord]) -> dict[str, _DetectionRecord]:
+        return {
+            key: record for key, record in records.items()
+            if not record.technology.requires and not record.technology.requires_categories
+        }
+
+    def finish(self) -> tuple[tuple[webrules.Detection, ...], dict]:
+        if self._result is not None:
+            detections, stats = self._result
+            return detections, dict(stats)
+        if self._expired():
+            resolved = self._incomplete_requirements(self._direct)
+        else:
+            resolved, relation_stopped = _resolve_relationships(
+                self.fingerprints, self._direct, self.deadline, self.clock
+            )
+            if relation_stopped:
+                self._stopped = True
+                resolved = self._incomplete_requirements(resolved)
+        detections = tuple(
+            _make_detection(record)
+            for _, record in sorted(resolved.items(), key=lambda item: item[0])
+        )
+        stats = {
+            "technologies_loaded": self.fingerprints.stats.technologies_loaded,
+            "skipped_patterns": self.fingerprints.stats.skipped_patterns,
+            "unsupported_kinds": self.fingerprints.stats.unsupported_kinds,
+            "stopped": self._stopped,
+            "patterns_evaluated": self._patterns_evaluated,
+        }
+        self._result = (detections, stats)
+        return detections, dict(stats)
+
+
+def detect_external(page: webrules.Page, fingerprints: Fingerprints, *, page_url: str = "") -> tuple[webrules.Detection, ...]:
+    """Evaluate one page through a one-shot external fingerprint session."""
+    clock = time.monotonic
+    session = ExternalSession(fingerprints, deadline=clock() + MAX_EVALUATION_SECONDS, clock=clock)
+    session.add_page(page, page_url)
+    detections, stats = session.finish()
+    return DetectionResults(
+        detections,
+        DetectionStats(
+            stats["technologies_loaded"], stats["skipped_patterns"], stats["unsupported_kinds"],
+            int(stats["stopped"]), stats["patterns_evaluated"],
+        ),
     )
-    stats = DetectionStats(
-        fingerprints.stats.technologies_loaded,
-        fingerprints.stats.skipped_patterns,
-        fingerprints.stats.unsupported_kinds,
-        1 if stopped else 0,
-        patterns_evaluated,
-    )
-    return DetectionResults(detections, stats)

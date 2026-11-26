@@ -1,6 +1,9 @@
 import json
+import os
+import stat
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -24,8 +27,21 @@ def make_collection(tmp_path, technologies=None, *, categories=None, groups=None
     })
     if groups is not None:
         write_json(root / "groups.json", groups)
+    bundle = {}
     for name, document in (technologies or {}).items():
-        write_json(tech_dir / f"{name}.json", {name: document})
+        technology = dict(document)
+        for field in ("cats", "groups", "requiresCategory"):
+            values = technology.get(field)
+            if isinstance(values, list):
+                technology[field] = [int(value) if isinstance(value, str) and value.isdigit() else value for value in values]
+        for kind in ("scriptSrc", "scripts", "css", "html", "text", "url", "robots", "xhr"):
+            if isinstance(technology.get(kind), str):
+                technology[kind] = [technology[kind]]
+        if isinstance(technology.get("cookies"), list):
+            technology["cookies"] = {value: "" for value in technology["cookies"]}
+        bundle[name] = technology
+    if bundle:
+        write_json(tech_dir / "SyntheticCollection.json", bundle)
     return root, tech_dir
 
 
@@ -60,7 +76,7 @@ def test_loading_skips_malformed_and_oversize_inputs_with_counts(tmp_path):
         "Good": {"cats": ["2"], "html": "good-marker"},
     })
     (tech_dir / "Broken.json").write_text("{not json", encoding="utf-8", newline="\n")
-    write_json(tech_dir / "WrongShape.json", {"one": {"cats": []}, "two": {"cats": []}})
+    write_json(tech_dir / "WrongShape.json", {"WrongShape": {"cats": "not-a-list"}})
     (tech_dir / "Huge.json").write_text("x" * (wf.MAX_FILE_BYTES + 1), encoding="utf-8", newline="\n")
     write_json(root / "groups.json", 42)
     page = page_from({}, "<p>good-marker</p>")
@@ -70,7 +86,8 @@ def test_loading_skips_malformed_and_oversize_inputs_with_counts(tmp_path):
     skipped = dict(fingerprints.stats.skipped_technologies)
 
     assert fingerprints.stats.technologies_loaded == 1
-    assert skipped["malformed technology"] >= 2
+    assert skipped["malformed technology"] >= 1
+    assert skipped["malformed technology file"] >= 1
     assert skipped["technology file too large"] == 1
     assert skipped["malformed groups file"] == 1
     assert {item.name for item in detections} == {"Good"}
@@ -83,12 +100,16 @@ def test_loading_cache_tracks_file_stamps_and_skips_pattern_and_string_limits(tm
         "TooLong": {"cats": ["2"], "html": "x" * (wf.MAX_STRING_LENGTH + 1)},
     })
     first = wf.load_fingerprints(root)
-    change_file = tech_dir / "ChangeMe.json"
-    write_json(change_file, {"ChangeMe": {"cats": ["2"], "html": "second-marker-with-different-size"}})
+    change_file = tech_dir / "SyntheticCollection.json"
+    write_json(change_file, {
+        "ChangeMe": {"cats": [2], "html": ["second-marker-with-different-size"]},
+        "TooManyPatterns": {"cats": [2], "html": ["x"] * (wf.MAX_PATTERNS_PER_TECHNOLOGY + 1)},
+        "TooLong": {"cats": [2], "html": ["x" * (wf.MAX_STRING_LENGTH + 1)]},
+    })
     second = wf.load_fingerprints(root)
 
     assert second is not first
-    assert dict(second.stats.skipped_technologies)["malformed technology"] == 1
+    assert dict(second.stats.skipped_technologies)["technology pattern count limit"] == 1
     assert "malformed pattern collection" in dict(second.stats.skipped_patterns)
     page = page_from({}, "first-marker second-marker-with-different-size")
     assert {item.name for item in wf.detect_external(page, second)} == {"ChangeMe"}
@@ -99,7 +120,7 @@ def test_supported_pattern_kinds_and_tags_match_bounded_page_data(tmp_path):
         "HeaderDemo": {"cats": ["2"], "headers": {
             "x-demo": r"HeaderDemo/([0-9.]+)\;version:\1\;confidence:75",
         }},
-        "CookieDemo": {"cats": ["2"], "cookies": [r"session_demo\;confidence:40"]},
+        "CookieDemo": {"cats": ["2"], "cookies": {r"session_demo\;confidence:40": ""}},
         "MetaDemo": {"cats": ["2"], "meta": {
             "application-name": r"MetaDemo ([0-9.]+)\;version:\1",
         }},
@@ -137,7 +158,13 @@ def test_supported_pattern_kinds_and_tags_match_bounded_page_data(tmp_path):
         assert found[name].versions == (version,)
     assert found["HeaderDemo"].confidence == "medium"
     assert found["CookieDemo"].confidence == "low"
-    assert found["ScriptUrlDemo"].evidence_types == ("scriptSrc",)
+    expected_kinds = {
+        "HeaderDemo": "header", "CookieDemo": "cookie", "MetaDemo": "meta",
+        "ScriptUrlDemo": "url", "ScriptTextDemo": "script", "CssDemo": "style",
+        "HtmlDemo": "html", "TextDemo": "text", "UrlDemo": "url", "RobotsDemo": "robots",
+    }
+    for name, kind in expected_kinds.items():
+        assert found[name].evidence_types == (kind,)
     assert dict(fingerprints.stats.skipped_patterns) == {}
 
 
@@ -181,8 +208,13 @@ def test_relationships_implies_excludes_requires_and_requires_category(tmp_path)
         "NeedsPresent": {"cats": ["1"], "html": "needs-present-marker", "requires": ["PresentDemo"]},
         "PresentDemo": {"cats": ["1"], "html": "present-marker"},
         "NeedsLanguage": {"cats": ["1"], "html": "needs-language-marker", "requiresCategory": ["3"]},
+        "InvalidFramework": {
+            "cats": ["4"], "html": "invalid-framework-marker",
+            "implies": ["InvalidChild"], "requires": ["MissingDemo"],
+        },
+        "InvalidChild": {"cats": ["3"]},
     }
-    page = page_from({}, "framework-marker excluded-marker needs-missing-marker needs-present-marker present-marker needs-language-marker")
+    page = page_from({}, "framework-marker excluded-marker needs-missing-marker needs-present-marker present-marker needs-language-marker invalid-framework-marker")
     detections, _ = detect(tmp_path, technologies, page)
     found = names(detections)
 
@@ -223,7 +255,14 @@ def test_dom_selector_subset_and_unsupported_forms(tmp_path):
 
 
 def test_unsupported_kinds_are_counted_and_never_matched(tmp_path):
-    technology = {"cats": ["2"], **{kind: "synthetic-marker" for kind in wf.UNSUPPORTED_KINDS}}
+    technology = {
+        "cats": [2],
+        "js": {"window": "synthetic-marker"},
+        "xhr": ["synthetic-marker"],
+        "dns": {"synthetic.invalid": ["synthetic-marker"]},
+        "certIssuer": "synthetic-marker",
+        "probe": {"selector": "synthetic-marker"},
+    }
     root, _ = make_collection(tmp_path, {"Unsupported": technology})
     fingerprints = wf.load_fingerprints(root)
     page = page_from({}, "synthetic-marker", resources=(Resource("/synthetic", "script", "synthetic-marker"),))
@@ -350,18 +389,20 @@ def test_performance_3000_synthetic_technologies_against_16mb(tmp_path):
     write_json(tmp_path / "src" / "categories.json", {"1": {"name": "JavaScript libraries"}})
     count = 3000
     markers = []
-    for index in range(count):
-        marker = f"module_{index:04d}"
-        markers.append(marker)
-        write_json(tech_dir / f"Synthetic{index:04d}.json", {
-            f"Synthetic{index:04d}": {
-                "cats": ["1"],
-                "scriptSrc": rf"/assets/chunk-{index:04d}\.js(?:\?|$)",
-                "scripts": rf"window\.{marker}(?:=|\s)",
-                "css": rf"\.theme-{index:04d}\s*\{{",
-                "html": rf"data-module=[\"']{index:04d}[\"']",
-            },
-        })
+    batch_size = 1500
+    for batch_start in range(0, count, batch_size):
+        bundle = {}
+        for index in range(batch_start, min(count, batch_start + batch_size)):
+            marker = f"module_{index:04d}"
+            markers.append(marker)
+            bundle[f"Synthetic{index:04d}"] = {
+                "cats": [1],
+                "scriptSrc": [rf"/assets/chunk-{index:04d}\.js(?:\?|$)"],
+                "scripts": [rf"window\.{marker}(?:=|\s)"],
+                "css": [rf"\.theme-{index:04d}\s*\{{"],
+                "html": [rf"data-module=[\"']{index:04d}[\"']"],
+            }
+        write_json(tech_dir / f"SyntheticBatch{batch_start:04d}.json", bundle)
     per_chunk = [markers[position:position + count // 4] for position in range(0, count, count // 4)]
     resources = []
     chunk_size = wf.MAX_RESOURCE_LENGTH
@@ -382,3 +423,203 @@ def test_performance_3000_synthetic_technologies_against_16mb(tmp_path):
     assert elapsed < 30.0
     # Keep timing visible in test output for the task report when run with -s.
     print(f"synthetic fingerprint benchmark: load plus detect, {count} technologies, 16 MiB text, {elapsed:.3f}s")
+
+
+def test_real_published_schema_accepts_many_technologies_and_informational_fields(tmp_path):
+    root, tech_dir = make_collection(tmp_path)
+    write_json(tech_dir / "Bundle.json", {
+        "BundleAlpha": {
+            "cats": [2], "description": "Synthetic description", "oss": True,
+            "website": "https://synthetic.invalid/", "html": ["alpha-marker"],
+        },
+        "BundleBeta": {
+            "cats": [2], "icon": "synthetic.svg", "pricing": ["free"], "saas": False,
+            "dom": ["main#feature"], "html": ["beta-marker"],
+        },
+    })
+
+    fingerprints = wf.load_fingerprints(root)
+    detections = wf.detect_external(page_from({}, '<main id="feature">alpha-marker beta-marker</main>'), fingerprints)
+
+    assert fingerprints.stats.technologies_loaded == 2
+    assert {item.name for item in detections} == {"BundleAlpha", "BundleBeta"}
+
+
+def test_invalid_unicode_technology_is_quarantined_without_losing_valid_entries(tmp_path):
+    root, tech_dir = make_collection(tmp_path)
+    write_json(tech_dir / "Invalid.json", {"Invalid\ud800": {"cats": [2], "html": "invalid-marker"}})
+    write_json(tech_dir / "Valid.json", {"Valid": {"cats": [2], "html": "valid-marker"}})
+
+    fingerprints = wf.load_fingerprints(root)
+    detections = wf.detect_external(page_from({}, "invalid-marker valid-marker"), fingerprints)
+
+    assert fingerprints.stats.technologies_loaded == 1
+    assert dict(fingerprints.stats.skipped_technologies)["invalid Unicode scalar value"] == 1
+    assert {item.name for item in detections} == {"Valid"}
+
+
+def test_version_capture_longer_than_64_characters_is_not_emitted(tmp_path):
+    value = "v" * 65
+    technologies = {"LongVersion": {"cats": [2], "html": r"version=([a-z]+)\;version:\1"}}
+    detections, _ = detect(tmp_path, technologies, page_from({}, f"version={value}"))
+
+    assert detections[0].versions == ()
+
+
+def test_regex_backreferences_and_adjacent_unbounded_repeats_are_skipped(tmp_path):
+    technologies = {
+        "Risky": {
+            "cats": [2],
+            "html": [r"(a+)\1b", "a*a*synthetic-marker", r"(a+)+b", r"(?:a|aa)+b"],
+        },
+        "SafeNested": {"cats": [2], "html": r"(?:a+)+b"},
+    }
+    detections, fingerprints = detect(tmp_path, technologies, page_from({}, "aaaab"))
+
+    assert dict(fingerprints.stats.skipped_patterns)["invalid or unsafe regular expression"] == 4
+    assert {item.name for item in detections} == {"SafeNested"}
+    _, rewritten = wf._compile_regex(r".*synthetic-marker.*")
+    assert rewritten == "synthetic-marker"
+
+
+def test_adversarial_10_mib_page_stays_bounded(tmp_path):
+    technologies = {"Risky": {"cats": [2], "html": r"(a+)\1b"}}
+    root, _ = make_collection(tmp_path, technologies)
+    fingerprints = wf.load_fingerprints(root)
+    page = page_from({}, "a" * (10 * 1024 * 1024) + "!")
+
+    started = time.perf_counter()
+    detections = wf.detect_external(page, fingerprints)
+    elapsed = time.perf_counter() - started
+
+    assert tuple(detections) == ()
+    assert dict(fingerprints.stats.skipped_patterns)["invalid or unsafe regular expression"] == 1
+    assert elapsed < 10.0
+
+
+def test_dom_text_cache_obeys_total_utf8_byte_budget(monkeypatch):
+    monkeypatch.setattr(wf, "MAX_DOM_TEXT_CACHE_BYTES", 96, raising=False)
+    parser = wf._PageParser("<main>" + ("é" * 40) + "<span>" + ("x" * 40) + "</span></main>")
+
+    parent = parser.node_text(0)
+    child = parser.node_text(1)
+
+    assert parent.startswith("é") and child == "x" * 40
+    cache_bytes = sum(len(value.encode("utf-8")) for value in parser._node_text_cache.values())
+    assert cache_bytes == parser._node_text_cache_bytes
+    assert cache_bytes <= 96
+
+
+def test_external_session_resolves_relations_across_page_and_resource(tmp_path):
+    technologies = {
+        "SessionFramework": {"cats": [2], "html": "framework-marker", "requires": ["SessionRuntime"]},
+        "SessionRuntime": {"cats": [2], "scripts": "runtime-marker"},
+    }
+    root, _ = make_collection(tmp_path, technologies)
+    fingerprints = wf.load_fingerprints(root)
+    session = wf.ExternalSession(fingerprints, deadline=20.0, clock=lambda: 0.0)
+
+    session.add_page(page_from({}, "framework-marker"), "https://synthetic.invalid/")
+    session.add_resource(Resource("/runtime.js", "script", "runtime-marker"))
+    detections, stats = session.finish()
+
+    assert {item.name for item in detections} == {"SessionFramework", "SessionRuntime"}
+    assert stats["stopped"] is False
+
+
+def test_external_session_uses_callers_absolute_deadline_and_keeps_matches(tmp_path):
+    technologies = {
+        "BeforeDeadline": {"cats": [2], "html": "before-marker", "requires": ["AfterDeadline"]},
+        "AfterDeadline": {"cats": [2], "scripts": "after-marker"},
+    }
+    root, _ = make_collection(tmp_path, technologies)
+    fingerprints = wf.load_fingerprints(root)
+    now = [0.0]
+    session = wf.ExternalSession(fingerprints, deadline=5.0, clock=lambda: now[0])
+
+    session.add_page(page_from({}, "before-marker"), "https://synthetic.invalid/")
+    now[0] = 6.0
+    session.add_resource(Resource("/late.js", "script", "after-marker"))
+    detections, stats = session.finish()
+
+    assert tuple(detections) == ()
+    assert stats["stopped"] is True
+
+
+def test_loader_rejects_world_writable_supported_directory(tmp_path):
+    root, _ = make_collection(tmp_path, {"Demo": {"cats": [2], "html": "demo-marker"}})
+    root.chmod(0o777)
+    if not root.stat().st_mode & stat.S_IWOTH:
+        pytest.skip("platform does not expose POSIX world-write mode bits")
+
+    fingerprints = wf.load_fingerprints(root)
+
+    assert fingerprints.stats.technologies_loaded == 0
+    assert dict(fingerprints.stats.skipped_technologies)["untrusted fingerprint layout"] >= 1
+
+
+def test_loader_rejects_symlinked_technology_files(tmp_path):
+    root, tech_dir = make_collection(tmp_path)
+    target = tmp_path / "outside.json"
+    write_json(target, {"Outside": {"cats": [2], "html": "outside-marker"}})
+    try:
+        (tech_dir / "Linked.json").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+
+    fingerprints = wf.load_fingerprints(root)
+
+    assert fingerprints.stats.technologies_loaded == 0
+    assert dict(fingerprints.stats.skipped_technologies)["technology file is not a regular file"] == 1
+
+
+def test_loader_rejects_world_writable_technology_files(tmp_path):
+    root, tech_dir = make_collection(tmp_path, {"Demo": {"cats": [2], "html": "demo-marker"}})
+    technology_file = tech_dir / "SyntheticCollection.json"
+    technology_file.chmod(0o666)
+    if not technology_file.stat().st_mode & stat.S_IWOTH:
+        pytest.skip("platform does not expose POSIX world-write mode bits")
+
+    fingerprints = wf.load_fingerprints(root)
+
+    assert fingerprints.stats.technologies_loaded == 0
+
+
+def test_loader_detects_file_replacement_between_lstat_and_open(tmp_path, monkeypatch):
+    root, tech_dir = make_collection(tmp_path, {"Original": {"cats": [2], "html": "original-marker"}})
+    filename = tech_dir / "SyntheticCollection.json"
+    original_open = os.open
+    swapped = False
+
+    def replace_then_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path).name == filename.name:
+            filename.rename(tech_dir / "Original.hold")
+            write_json(filename, {"Replacement": {"cats": [2], "html": ["replacement-marker"]}})
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(wf.os, "open", replace_then_open)
+
+    fingerprints = wf.load_fingerprints(root)
+
+    assert swapped
+    assert fingerprints.stats.technologies_loaded == 0
+    assert dict(fingerprints.stats.skipped_technologies)["technology file changed during loading"] == 1
+
+
+def test_cpe_less_detection_keeps_display_name_and_slug_identity(tmp_path):
+    detections, _ = detect(
+        tmp_path,
+        {
+            "Readable Product Name": {
+                "cats": [2], "html": "identity-marker",
+                "cpe": "cpe:2.3:a:Example_Vendor:*:*:*:*:*:*:*:*:*",
+            },
+        },
+        page_from({}, "identity-marker"),
+    )
+
+    detection = detections[0]
+    assert detection.name == "Readable Product Name"
+    assert (detection.vendor, detection.product, detection.cpe) == ("readable_product_name", "readable_product_name", "")
