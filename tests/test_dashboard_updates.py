@@ -208,6 +208,7 @@ def test_release_notes_comment_scan(updates, monkeypatch, notes, visible):
     (("last_request", "busy", "lock-failed"), ("last_update", "updated", None), None),
     (("last_update", "refused", "probe-unhealthy"), ("last_request", "busy", "lock-failed"), "acquire the required locks"),
     (("last_request", "busy", "lock-failed"), ("last_attempt", "refused", "version-invalid"), "canonical release version"),
+    (("last_request", "refused", "recovery-incomplete"), ("last_update", "rolled-back", "migrate-failed"), "state migration did not complete"),
 ])
 def test_latest_attempt_controls_primary_callout(updates, monkeypatch, older, latest, expected):
     def attempt(row, time):
@@ -220,6 +221,7 @@ def test_latest_attempt_controls_primary_callout(updates, monkeypatch, older, la
     monkeypatch.setattr(dashboard_update, "read_status", lambda config: state)
     login(client, "viewer")
     page = client.get("/updates/").text
+    assert dashboard_update.UPDATE_REASON_TEXT[older[2]] not in page
     if expected is None:
         assert "The last update needs attention" not in page
     else:

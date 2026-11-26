@@ -14,9 +14,9 @@
 <p>Available version: {{ status.available or 'No newer version found yet' }}</p>
 <p>Last check: {{ watch_stamp(status.last_check) or 'Never' }}</p>
 {% if status.last_request or status.last_update or status.last_attempt %}<details class="disclosure"><summary>Technical details</summary>
-{% if status.last_request %}<p class="muted">Last request: {{ status.last_request.reason_text or status.last_request.result }} ({{ status.last_request.version or 'unspecified version' }}) at {{ watch_stamp(status.last_request.time) }}</p>{% endif %}
+{% if status.last_request %}<p class="muted">Last request: {{ status.last_request.result }} ({{ status.last_request.version or 'unspecified version' }}) at {{ watch_stamp(status.last_request.time) }}</p>{% endif %}
 {% if status.last_update %}<p class="muted">Last update: {{ status.last_update.result }} ({{ status.last_update.version or 'unspecified version' }}) at {{ watch_stamp(status.last_update.time) }}</p>{% endif %}
-{% if status.last_attempt %}<p class="muted">Last manual refusal: {{ status.last_attempt.reason_text or status.last_attempt.result }} ({{ status.last_attempt.version or 'unspecified version' }}) at {{ watch_stamp(status.last_attempt.time) }}</p>{% endif %}
+{% if status.last_attempt %}<p class="muted">Last manual refusal: {{ status.last_attempt.result }} ({{ status.last_attempt.version or 'unspecified version' }}) at {{ watch_stamp(status.last_attempt.time) }}</p>{% endif %}
 </details>{% endif %}
 {% if status.failure %}{% call callout('danger', 'The last update needs attention') %}<p>{{ status.failure }}</p><p>Run <code>cvebeacon update {{ status.failure_action }}</code> as an administrator to see details.</p>{% endcall %}{% endif %}
 {% if status.recovery_text %}{% call callout('danger', 'Update recovery needs attention') %}<p>{{ status.recovery_text }}</p>{% if status.recovery_detail %}<p>{{ status.recovery_detail }}</p>{% endif %}<p>Run <code>cvebeacon update recover</code> as an administrator.</p>{% endcall %}{% endif %}
