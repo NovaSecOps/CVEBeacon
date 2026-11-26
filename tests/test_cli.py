@@ -89,3 +89,37 @@ def test_invalid_queries_fail_before_network(local_config, args):
 def test_validate_explains_identity(local_config, capsys):
     assert cli.main(["--config", str(local_config), "inventory", "validate", "--identities"]) == 0
     assert "a: product" in capsys.readouterr().out
+
+
+def test_timer_control_disable_works_without_runtime_config(monkeypatch, capsys):
+    from cvebeacon import scheduling
+
+    monkeypatch.setattr(cli, "load_config", lambda *args, **kwargs: pytest.fail("root must not load runtime config"))
+    called = []
+
+    def control(action, **kwargs):
+        called.append((action, kwargs))
+        return "dashboard schedule control disabled"
+
+    monkeypatch.setattr(scheduling, "timer_control", control)
+    assert cli.main(["--config", "missing.toml", "schedule", "timer-control", "disable"]) == 0
+    assert called == [("disable", {})]
+    assert "dashboard schedule control disabled" in capsys.readouterr().out
+
+
+def test_timer_control_enable_passes_explicit_data_dir_without_loading_config(tmp_path, monkeypatch):
+    from cvebeacon import scheduling
+
+    monkeypatch.setattr(cli, "load_config", lambda *args, **kwargs: pytest.fail("root must not load runtime config"))
+    config_path = tmp_path / "config.toml"
+    called = []
+
+    def control(action, **kwargs):
+        called.append((action, kwargs))
+        return "dashboard schedule control enabled"
+
+    monkeypatch.setattr(scheduling, "timer_control", control)
+    assert cli.main([
+        "--config", str(config_path), "schedule", "timer-control", "enable", "--data-dir", str(tmp_path),
+    ]) == 0
+    assert called == [("enable", {"config_path": str(config_path), "data_directory": str(tmp_path)})]

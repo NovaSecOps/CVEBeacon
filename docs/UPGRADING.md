@@ -342,11 +342,12 @@ each snapshot is service-owned `0700`. Adoption also executes through
 is applied to existing snapshots.
 
 Use the reference units in `deploy/systemd/`: their executable path is
-`/opt/cvebeacon/current/.venv/bin/cvebeacon`. Choose `watch run` instead of `run`
-in the monitoring unit for watch-only deployments. Install the units locally,
-reload systemd and restart the dashboard once. No database migration or monitor
-interruption happens during adoption itself. The updater never installs units
-or enables schedules automatically.
+`/opt/cvebeacon/current/.venv/bin/cvebeacon`, and the monitoring service runs
+`run --if-due`. `run` also supports watch-only configurations: it runs watch
+when enabled and includes scans when an inventory is available. Install the
+units locally, reload systemd and restart the dashboard once. No database
+migration or monitor interruption happens during adoption itself. The updater
+never installs units or enables schedules automatically.
 
 After copying the reviewed units to `/etc/systemd/system`, reload systemd and
 explicitly enable the dashboard unit to start at boot. Keep the reference
@@ -357,6 +358,31 @@ temporarily prevent the updater's recovery restart.
 Manual Core invocations enforce the same fence. Enable
 `cvebeacon-update.path` only when requests should be processed, and the
 monitoring timer only when its schedule is wanted.
+
+### Enable dashboard control for an existing timer
+
+Existing installs can keep their base timer and service units and add dashboard
+schedule editing through two drop-ins. Use the loaded service's executable and
+configuration path. On an installation with the administrator update policy:
+
+```console
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon \
+  --config /var/lib/cvebeacon/cvebeacon.toml schedule timer-control enable
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon schedule timer-control status
+```
+
+For a standalone install, add `--data-dir /var/lib/cvebeacon` after `enable`
+and specify the directory that directly contains the configured state
+database. Updater-managed installations use the policy's data directory and
+service account. The switch reads the loaded command and validates the runtime
+configuration as the service account.
+
+Conversion preserves supported daily minute times and midnight-based hour
+steps as described in [scheduling](SCHEDULING.md#systemd-timer-schedule-control).
+Other calendars start with `07:00` and `19:00`. The drop-ins switch the timer to
+a 15-minute check, and the dashboard uses the private `schedule.json` to decide
+when monitoring is due. Run `schedule timer-control disable` as root to remove
+the drop-ins and restore the installed base unit configuration.
 
 ## Enable checking and applying
 
@@ -619,4 +645,5 @@ transaction's snapshot is never pruned. Retained venvs are not deleted
 automatically. A new apply refuses an existing staging release directory;
 recover and inspect it before removing only that failed staging directory.
 For a deliberate later rollback, stop writers and restore the matching snapshot
-and code together; never select older code against newer schemas.
+and code together. For a release predating `run --if-due`, also restore
+compatible timer and service settings before restarting the monitoring timer.
