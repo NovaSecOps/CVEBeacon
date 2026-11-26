@@ -167,12 +167,6 @@ def test_untouched_structured_control_preserves_presence_order_and_values(
         ("watch", '[watch]\nenabled = true\nsources = ["euvd", "nvd", "nvd"]\n\n', "sources", ["euvd", "nvd", "nvd"]),
         (
             "inventory",
-            '[inventory.columns]\nasset_id = "asset"\nfuture_field = "future heading"\n\n',
-            "columns",
-            {"asset_id": "asset", "future_field": "future heading"},
-        ),
-        (
-            "inventory",
             '[inventory.columns]\nasset_id = 7\n\n',
             "columns",
             {"asset_id": 7},
@@ -213,6 +207,40 @@ def test_unrepresentable_shapes_and_unknown_source_names_select_text_mode():
     assert "not a mapping table" in columns["reason"]
     assert sources["mode"] == "text"
     assert "unsupported catalog name" in sources["reason"]
+    unknown = groups_for("inventory", {"inventory": {"columns": {"asset_id": "a", "future": "b"}}})
+    unknown_columns = next(control for group in unknown for control in group["controls"]
+                           if control["key"] == "columns")["structured"]
+    assert unknown_columns["mode"] == "text"
+
+
+@pytest.mark.parametrize(
+    "section,extra",
+    [
+        ("watch", '[watch]\nenabled = true\nsources = ["nvd", "INLINE-SYNTHETIC-CATALOG"]\n\n'),
+        ("watch", '[watch]\nenabled = true\nsources = []\n\n'),
+        ("inventory", '[inventory.columns]\nasset_id = "asset"\nhidden = "INLINE-SYNTHETIC-SECRET"\n\n'),
+        ("inventory", 'columns = ["INLINE-SYNTHETIC-SECRET"]\n'),
+    ],
+)
+def test_stored_values_the_loader_rejects_open_as_an_error_without_echo(accounts, section, extra):
+    # The structured views are built only from documents that pass the
+    # existing gate, so an invalid stored value is fixed in the file first.
+    if extra.startswith("columns"):
+        path = accounts[0].config_path
+        path.write_text(_BASE.replace('path = "inventory.csv"\n',
+                                      'path = "inventory.csv"\n' + extra),
+                        encoding="utf-8", newline="\n")
+    else:
+        path = _write_config(accounts, extra)
+    _, _, _, client = accounts
+    login(client, "admin")
+    before = path.read_bytes()
+    response = client.get("/config/" + section)
+
+    assert response.status_code == 400
+    assert "inline-synthetic" not in response.text.casefold()
+    assert 'name="g0_' not in response.text
+    assert path.read_bytes() == before
 
 
 def test_editing_one_column_changes_only_that_mapping_and_preview_is_separate(accounts):

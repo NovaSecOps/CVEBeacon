@@ -452,9 +452,11 @@ def check_document(document):
     if columns is not None:
         if not isinstance(columns, dict):
             raise ConfigurationError("inventory.columns must be a table")
-        # The loader accepts extra column keys and stringifies non-string
-        # headings. The structured editor cannot represent either faithfully,
-        # so those tables stay visible in the TOML fallback.
+        allowed_columns = set(CANONICAL_FIELDS) | set(OPTIONAL_FIELDS)
+        if set(columns) - allowed_columns:
+            raise ConfigurationError("Unrecognized inventory column keys; review the file before editing")
+        # The loader stringifies non-string headings. The row editor cannot
+        # represent them faithfully, so those tables use the TOML fallback.
     rules = get_table(document, "watch").get("rules", [])
     mappings = document.get("product_mappings", [])
     for rows, schema in ((rules, RULE_FIELDS), (mappings, MAPPING_FIELDS)):
