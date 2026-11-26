@@ -32,7 +32,33 @@ def form_data(document, section, **changes):
             "row_count": str(len(groups))}
     for group in groups:
         for control in group["controls"]:
-            data[control["id"]] = control["value"]
+            structured = control.get("structured")
+            if not structured or structured.get("kind") not in {
+                    "providers", "address_rows", "bot_recipient_rows",
+                    "conversation_references"}:
+                data[control["id"]] = control["value"]
+                continue
+            prefix = control["form_prefix"]
+            data[prefix + "_mode"] = structured["mode"]
+            if structured["mode"] == "text":
+                data[control["id"]] = control["value"]
+            elif structured["mode"] == "checkboxes":
+                for choice in structured["selected"]:
+                    data[f"{prefix}_{choice}"] = choice
+            else:
+                rows = structured["rows"]
+                data[prefix + "_count"] = str(len(rows))
+                if structured["kind"] == "conversation_references":
+                    for index, row in enumerate(rows):
+                        data[f"{prefix}_r{index}c"] = row["conversation_id"]
+                        data[f"{prefix}_r{index}u"] = row["service_url"]
+                        data[f"{prefix}_r{index}p"] = "yes" if row["service_present"] else "no"
+                    data[prefix + "_add_c"] = structured["add_conversation_id"]
+                    data[prefix + "_add_u"] = structured["add_service_url"]
+                else:
+                    for index, row in enumerate(rows):
+                        data[f"{prefix}_r{index}"] = row
+                    data[prefix + "_add_value"] = structured["add_value"]
     data.update(changes)
     return data
 

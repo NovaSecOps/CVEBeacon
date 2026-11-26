@@ -74,7 +74,30 @@ def preview(client, section="http", **changes):
     assert page.status_code == 200, page.text
     if section != "rules":
         data = form(page.text)
-        data.update(changes)
+        for field, value in changes.items():
+            match = re.fullmatch(r"g(\d+)_(to|cc|bcc|recipients)", field)
+            if match and field not in data:
+                index, key = match.groups()
+                prefix = f"g{index}_" + {"to": "t", "cc": "c", "bcc": "b", "recipients": "r"}[key]
+                mode = data.get(prefix + "_mode")
+                if mode == "rows":
+                    if isinstance(value, str) and value.lstrip().startswith("["):
+                        try:
+                            values = tomllib.loads("value = " + value)["value"]
+                        except tomllib.TOMLDecodeError:
+                            values = [value]
+                    else:
+                        values = [part.strip() for part in value.split(",")] if value else []
+                    if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+                        values = [value]
+                    data[prefix + "_count"] = str(len(values))
+                    for name in tuple(data):
+                        if re.fullmatch(re.escape(prefix) + r"_r\d+", name):
+                            data.pop(name)
+                    for row, item in enumerate(values):
+                        data[f"{prefix}_r{row}"] = item
+                    continue
+            data[field] = value
         return client.post(path, data=data)
 
     data = page_form(page.text)

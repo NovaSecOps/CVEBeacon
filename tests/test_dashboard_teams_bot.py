@@ -48,7 +48,7 @@ recipients = ["{USER}"]
     login(client)
     page = client.get("/config/channels?new_type=teams_bot")
     assert page.status_code == 200 and "teams_bot" in page.text
-    assert re.search(r'<textarea name="g0_recipients"[^>]*\breadonly\b', page.text)
+    assert re.search(r'<input type="text" name="g0_r_r0"[^>]*\breadonly\b', page.text)
     assert 'name="g0_client_secret_file" value="teams-secret" readonly' in page.text
     assert SECRET not in page.text
     before = config.config_path.read_bytes()

@@ -84,6 +84,55 @@
 <p class="help" id="control-{{ field.id }}-reason">{{ field.structured.reason }}</p>
 <p class="help" id="control-{{ field.id }}-help">{{ field.help }}</p>
 {% endif %}
+{% elif field.structured.kind in ['address_rows', 'bot_recipient_rows', 'conversation_references'] %}
+{% set form_prefix = field.form_prefix %}
+{% if field.structured.mode == 'rows' %}
+<input type="hidden" name="{{ form_prefix }}_mode" value="rows">
+<input type="hidden" name="{{ form_prefix }}_count" value="{{ field.structured.rows|length }}">
+{% if field.structured.kind == 'address_rows' %}
+<p class="help" id="control-{{ field.id }}-help">{% if field.identity == 'notifications.email.recipients' %}This list accepts legacy recipient names or addresses, including email addresses, in the order shown. {% else %}This list accepts email addresses. {% endif %}Each row stays in its original position unless you edit, add or remove it.</p>
+{% elif field.structured.kind == 'bot_recipient_rows' %}
+<p class="help" id="control-{{ field.id }}-help">Enter Teams object IDs or user principal names. No email-only formatting is applied; the channel loader validates each value.</p>
+{% else %}
+<p class="help" id="control-{{ field.id }}-help">Enter a conversation ID and, if needed, a service URL. The service URL may be omitted; the loader validates each row and allows up to 100 references.</p>
+{% endif %}
+<div class="structured-list-rows">
+{% for row in field.structured.rows %}
+<div class="structured-list-row">
+{% if field.structured.kind == 'conversation_references' %}
+<div class="field"><label for="control-{{ field.id }}-row-{{ loop.index0 }}-conversation">Conversation ID</label><input type="text" name="{{ form_prefix }}_r{{ loop.index0 }}c" id="control-{{ field.id }}-row-{{ loop.index0 }}-conversation" value="{{ row.conversation_id }}" {% if field.readonly or read_only %}readonly{% endif %}{% if invalid %} aria-invalid="true" aria-describedby="control-{{ field.id }}-help control-{{ field.id }}-error"{% endif %}></div>
+<div class="field"><label for="control-{{ field.id }}-row-{{ loop.index0 }}-service">Optional service URL</label><input type="text" name="{{ form_prefix }}_r{{ loop.index0 }}u" id="control-{{ field.id }}-row-{{ loop.index0 }}-service" value="{{ row.service_url }}" {% if field.readonly or read_only %}readonly{% endif %}{% if invalid %} aria-invalid="true" aria-describedby="control-{{ field.id }}-help control-{{ field.id }}-error"{% endif %}><input type="hidden" name="{{ form_prefix }}_r{{ loop.index0 }}p" value="{{ 'yes' if row.service_present else 'no' }}"></div>
+{% else %}
+<div class="field"><label for="control-{{ field.id }}-row-{{ loop.index0 }}">{% if field.structured.kind == 'bot_recipient_rows' %}Object ID or user principal name{% elif field.identity == 'notifications.email.recipients' %}Legacy recipient name or address{% else %}Email address{% endif %}</label><input type="text" name="{{ form_prefix }}_r{{ loop.index0 }}" id="control-{{ field.id }}-row-{{ loop.index0 }}" value="{{ row }}" {% if field.readonly or read_only %}readonly{% endif %}{% if invalid %} aria-invalid="true" aria-describedby="control-{{ field.id }}-help control-{{ field.id }}-error"{% endif %}></div>
+{% endif %}
+<div class="field structured-list-action"><span class="field-label">Action</span><button type="submit" class="btn btn-secondary" name="{{ form_prefix }}_remove" value="{{ loop.index0 }}" {% if read_only or field.readonly %}disabled{% endif %}>Remove</button></div>
+</div>
+{% endfor %}
+{% if field.structured.rows|length < field.structured.limit %}
+<div class="structured-list-row structured-list-add">
+{% if field.structured.kind == 'conversation_references' %}
+<div class="field"><label for="control-{{ field.id }}-add-conversation">Add conversation ID</label><input type="text" name="{{ form_prefix }}_add_c" id="control-{{ field.id }}-add-conversation" value="{{ field.structured.add_conversation_id }}" {% if field.readonly or read_only %}readonly{% endif %}></div>
+<div class="field"><label for="control-{{ field.id }}-add-service">Optional service URL</label><input type="text" name="{{ form_prefix }}_add_u" id="control-{{ field.id }}-add-service" value="{{ field.structured.add_service_url }}" {% if field.readonly or read_only %}readonly{% endif %}></div>
+{% else %}
+<div class="field"><label for="control-{{ field.id }}-add-value">Add {% if field.structured.kind == 'bot_recipient_rows' %}recipient{% elif field.identity == 'notifications.email.recipients' %}legacy recipient{% else %}email address{% endif %}</label><input type="text" name="{{ form_prefix }}_add_value" id="control-{{ field.id }}-add-value" value="{{ field.structured.add_value }}" {% if field.readonly or read_only %}readonly{% endif %}></div>
+{% endif %}
+<div class="field structured-list-action"><span class="field-label">Action</span><button type="submit" class="btn btn-secondary" name="{{ form_prefix }}_add" value="yes" {% if read_only or field.readonly %}disabled{% endif %}>Add</button></div>
+</div>
+{% else %}<p class="help">The row editor has reached its limit of {{ field.structured.limit }}.</p>{% endif %}
+</div>
+{% else %}
+{% if field.structured.kind == 'address_rows' %}
+<label for="control-{{ field.id }}-text">{{ field_label }} (single-line fallback)</label>
+<input type="hidden" name="{{ form_prefix }}_mode" value="text">
+<input type="text" name="{{ field.id }}" id="control-{{ field.id }}-text" value="{{ field.value }}" {% if field.readonly or read_only %}readonly{% endif %}{% if invalid %} aria-invalid="true" aria-describedby="control-{{ field.id }}-help control-{{ field.id }}-reason control-{{ field.id }}-error"{% endif %}>
+{% else %}
+<label for="control-{{ field.id }}-text">{{ field_label }} (TOML fallback)</label>
+<input type="hidden" name="{{ form_prefix }}_mode" value="text">
+<textarea name="{{ field.id }}" id="control-{{ field.id }}-text" rows="3" cols="60" {% if invalid %}aria-invalid="true" aria-describedby="control-{{ field.id }}-help control-{{ field.id }}-reason control-{{ field.id }}-error"{% endif %} {% if field.readonly or read_only %}readonly{% endif %}>{{ field.value }}</textarea>
+{% endif %}
+<p class="help" id="control-{{ field.id }}-reason">{{ field.structured.reason }}</p>
+<p class="help" id="control-{{ field.id }}-help">{{ field.help }}</p>
+{% endif %}
 {% endif %}
 {% if invalid %}<p class="field-error" id="control-{{ field.id }}-error">{{ error }}</p>{% endif %}
 </fieldset>
@@ -126,7 +175,7 @@
 {% call card(group_title) %}
 {% if group.readonly_reason %}<p class="help">{{ group.readonly_reason }}</p>{% endif %}
 {% if section in ['rules','channels','product-mappings'] %}<div class="field field-check"><input id="remove-{{ index }}" type="checkbox" name="remove{{ index }}" value="yes" {% if group.removed %}checked{% endif %} {% if read_only %}disabled{% endif %}><label for="remove-{{ index }}">Remove this row</label></div>{% endif %}
-{% for field in group.controls %}{% if section == 'rules' and field.key in ['condition', 'channels', 'events'] %}{% include '_rule_builder.html' %}{% elif field.structured is defined %}{{ structured_control(field, index) }}{% else %}{{ config_control(field, index) }}{% endif %}{% endfor %}
+{% for field in group.controls %}{% if section == 'rules' and field.key in ['condition', 'channels', 'events', 'cvss_providers'] %}{% include '_rule_builder.html' %}{% elif field.structured is defined %}{{ structured_control(field, index) }}{% else %}{{ config_control(field, index) }}{% endif %}{% endfor %}
 {% endcall %}
 {% endfor %}{% if not read_only %}<div class="form-actions">{{ button("Validate and preview") }}</div>{% endif %}</form>
 {% endif %}

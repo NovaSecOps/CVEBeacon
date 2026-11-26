@@ -72,8 +72,14 @@ def _plain_label(markup, control):
         markup,
         re.S,
     )
+    if match is None and control.get("structured"):
+        match = re.search(
+            rf'<fieldset id="control-{re.escape(control["id"])}".*?<legend>(.*?)</legend>',
+            markup,
+            re.S,
+        )
     if match is None and control["identity"] in {
-        "watch.sources", "inventory.columns",
+        "watch.sources", "inventory.columns", "watch.rules.cvss_providers",
     }:
         match = re.search(r"<legend>(.*?)</legend>", markup, re.S)
     assert match, control["identity"]

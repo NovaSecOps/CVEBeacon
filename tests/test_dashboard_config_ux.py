@@ -67,7 +67,7 @@ def test_checkbox_limits_required_and_help(accounts):
     assert 'placeholder="10.0"' in page
 
 
-def test_addresses_normalized_and_channel_save_keeps_sessions(accounts):
+def test_address_rows_keep_order_and_channel_save_keeps_sessions(accounts):
     config, _, app, client = accounts
     login(client, "admin")
     other = app.test_client()
@@ -76,7 +76,7 @@ def test_addresses_normalized_and_channel_save_keeps_sessions(accounts):
                        g0_from="alerts@example.com", g0_to=" one@example.com, two@example.com, one@example.com ")
     assert response.status_code == 200, response.text
     assert confirm(client, response, "channels").status_code == 303
-    assert tomllib.loads(config.config_path.read_text())["watch"]["channels"]["email"]["to"] == ["one@example.com", "two@example.com"]
+    assert tomllib.loads(config.config_path.read_text())["watch"]["channels"]["email"]["to"] == ["one@example.com", "two@example.com", "one@example.com"]
     response = preview(client, "channels", g0_format="html")
     assert confirm(client, response, "channels").status_code == 303
     assert other.get("/").status_code == 200 and client.get("/").status_code == 200
@@ -96,7 +96,10 @@ def test_field_errors_retain_form(accounts, section, changes, expected):
     data = form(response.text)
     for key, value in changes.items():
         if key != "g0_name":
-            assert data[key] == value
+            if key == "g0_to":
+                assert data["g0_t_r0"] == "broken"
+            else:
+                assert data[key] == value
 
 
 def test_condition_helper_from_schema(accounts):

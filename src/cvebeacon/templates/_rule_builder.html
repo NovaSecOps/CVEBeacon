@@ -200,4 +200,24 @@
   {% endcall %}
 {% endif %}
 
+{% elif field.key == 'cvss_providers' %}
+{% set invalid = field_error_control is defined and field_error_control == field.id %}
+<div class="field structured-config-field">
+<fieldset id="control-{{ field.id }}"{% if invalid %} aria-invalid="true"{% endif %} aria-describedby="control-{{ field.id }}-help{% if field.structured.mode == 'text' %} control-{{ field.id }}-reason{% endif %}{% if invalid %} control-{{ field.id }}-error{% endif %}">
+<legend>Score providers <small class="muted">cvss_providers</small></legend>
+{% if field.structured.mode == 'checkboxes' %}
+<input type="hidden" name="{{ field.form_prefix }}_mode" value="checkboxes">
+{% for provider in field.structured.choices %}<div class="field field-check"><input type="checkbox" id="control-{{ field.id }}-{{ provider }}" name="{{ field.form_prefix }}_{{ provider }}" value="{{ provider }}" {% if provider in field.structured.selected %}checked{% endif %} {% if field.readonly or read_only %}disabled{% endif %}{% if invalid %} aria-invalid="true" aria-describedby="control-{{ field.id }}-help control-{{ field.id }}-error"{% endif %}><label for="control-{{ field.id }}-{{ provider }}">{{ provider }}</label></div>{% endfor %}
+<p class="help" id="control-{{ field.id }}-help">Choose the score providers this rule accepts. An unchanged selection keeps its stored order.</p>
+{% else %}
+<input type="hidden" name="{{ field.form_prefix }}_mode" value="text">
+<label for="control-{{ field.id }}-text">Score provider list (TOML)</label>
+<textarea name="{{ field.id }}" id="control-{{ field.id }}-text" rows="3" cols="60" {% if invalid %}aria-invalid="true" aria-describedby="control-{{ field.id }}-help control-{{ field.id }}-reason control-{{ field.id }}-error"{% endif %} {% if read_only or field.readonly %}readonly{% endif %}>{{ field.value }}</textarea>
+<p class="help" id="control-{{ field.id }}-reason">{{ field.structured.reason }}</p>
+<p class="help" id="control-{{ field.id }}-help">{{ field.help }}</p>
+{% endif %}
+{% if invalid %}<p class="field-error" id="control-{{ field.id }}-error">{{ error }}</p>{% endif %}
+</fieldset>
+</div>
+
 {% endif %}

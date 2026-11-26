@@ -556,22 +556,36 @@ Blank fields omit a setting and use the configuration loader's default. String
 fields accept plain text. Enumerated settings use selectors, boolean settings use
 checkboxes, and numeric settings show the validator's bounds. Required fields
 are marked; requirements on a blank final row apply only when that row is added.
-Defaults appear as placeholders and beneath the controls. Email `to`, `cc`,
-`bcc` and legacy `recipients` accept comma-separated addresses or TOML arrays;
-watch-channel lists are trimmed, deduplicated and validated per address. Existing
-items containing commas, including quoted display names, and lists whose joined
-text starts with `[` render as TOML arrays so an unchanged form preserves their
-meaning. Legacy `recipients` keeps the
-loader's nonempty-string rules, ordering and duplicates, including distribution
-names without `@`; it has no separate editor limit on recipient count. Other arrays,
-column mappings and nested rule conditions accept TOML values. For example,
-use `["soc-email"]` for channels and
-`{ any = [{ cvss_min = 9.0 }, { epss_min = 0.5 }] }` for a condition.
+Defaults appear as placeholders and beneath the controls. Watch rules show
+`cvss_providers` as checkboxes; an untouched selection keeps its original order,
+including an absent key, while an edited selection uses the provider metadata
+order. Repeated or differently written provider names use a TOML text field and
+are kept as they are until edited. A stored value the loader rejects, such as an
+empty or unknown provider list or an unknown conversation reference field, opens
+as an error page; fix it in the file first.
+
+Email `to`, `cc` and `bcc` fields, legacy notification `recipients`, and Teams
+bot `recipients` use repeatable rows. The legacy notification list accepts
+recipient names or addresses and retains its ordering and duplicates, including
+names without `@`. Channel `to`, `cc` and `bcc` fields accept email addresses.
+Teams bot recipients accept object IDs or user principal names; the channel
+loader validates them. An unchanged row list preserves its original spelling,
+surrounding spaces, order, duplicates and absent-versus-empty state. Add and
+remove actions keep other unsaved fields on the page; they do not save the file.
+Legacy notification recipients support up to 1000 rows; other recipient lists
+support up to 101 rows.
+
+Teams bot `conversation_references` use rows for the conversation ID and optional
+service URL. An unchanged row preserves an omitted `service_url`. The editor
+shows up to 101 rows so the loader remains responsible for rejecting more than
+its existing limit of 100 references. Other arrays, column mappings and nested rule
+conditions accept TOML values. For example, use `["soc-email"]` for channels
+and `{ any = [{ cvss_min = 9.0 }, { epss_min = 0.5 }] }` for a condition.
 The final blank row adds a rule, mapping or channel. Choose the new channel type
 before making other changes; choosing it reloads the form. Removal checkboxes
-remove existing rows. Every submitted document is validated by `load_config`,
-including channel references and source requirements. Invalid submissions name
-the field and expected format, keep ordinary form
+remove existing rule, mapping or channel rows. Every submitted document is
+validated by `load_config`, including channel references and source
+requirements. Invalid submissions name the field and expected format, keep ordinary form
 values for correction, and leave the file intact. Secret contents are never
 redisplayed. Changed credential references, unvalidated row labels, rejected
 enum values and unsafe or malformed structured values retain their validated
@@ -650,9 +664,9 @@ on the first configuration request, not by dashboard startup. A configuration
 request holds the editor's process lock for its full duration, deliberately
 serialising configuration work with other dashboard traffic in the supported
 single-process deployment.
-Requests are bounded by the dashboard's
-8192-byte form limit, and a section form accepts at most 101 rows per save;
-split larger edits into smaller saves where possible. Pending previews hold
+Requests are bounded by the dashboard's 8192-byte form limit. Most section row
+controls accept up to 101 rows; split larger edits into smaller saves where
+possible. Pending previews hold
 full documents, so a session's pending count is also a memory bound.
 
 Saving removes hand-written **comments and formatting**. Before replacement,

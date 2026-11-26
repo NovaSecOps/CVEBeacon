@@ -44,6 +44,9 @@ from .watch.users import UserStore
 MAX_CONFIG = 256 * 1024
 RULES_ROW_LIMIT = 101
 INVENTORY_COLUMN_ROW_LIMIT = len(CANONICAL_FIELDS) + len(OPTIONAL_FIELDS)
+LIST_ROW_LIMIT = 101
+LEGACY_RECIPIENT_ROW_LIMIT = 1000
+CONVERSATION_REFERENCE_ROW_LIMIT = 101
 KEEP_BACKUPS = 10
 PREVIEW_SECONDS = 600
 MAX_PENDING_PER_SESSION = 32
@@ -55,6 +58,7 @@ _RELOADING = ContextVar("config_reload", default=None)
 _CONFIG_LOCKS = {}
 _CONFIG_LOCKS_GUARD = threading.Lock()
 _EDITORS = {}
+_STRUCTURED_ABSENT = object()
 
 
 def _config_thread_lock(path):
@@ -569,12 +573,43 @@ def _channel_loader_field_key(error, document):
 
 
 def _config_loader_field_key(error, document):
-    """Map loader-owned source and column errors to their structured controls."""
+    """Map loader-owned errors to structured controls without exposing values."""
     message = str(error)
     if message.startswith(("watch.sources ", "unknown watch source:")):
         return "watch.sources"
     if message.startswith(("inventory.columns ", "Inventory column mappings")):
         return "inventory.columns"
+    if message.startswith("notifications.email.recipients "):
+        return "notifications.email.recipients"
+    rules = get_table(document, "watch").get("rules", [])
+    if isinstance(rules, list):
+        for index, row in enumerate(rules):
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                continue
+            prefix = f"watch rule {row['name']!r} cvss_providers"
+            if message.startswith(prefix):
+                return f"watch.rules[{index}].cvss_providers"
+    channels = get_table(document, "watch.channels")
+    if isinstance(channels, dict):
+        for index, (name, row) in enumerate(channels.items()):
+            if not isinstance(name, str) or not isinstance(row, dict):
+                continue
+            marker = f"watch channel {name!r} "
+            if not message.startswith(marker):
+                continue
+            detail = message[len(marker):]
+            kind = str(row.get("type", "")).strip().casefold()
+            keys = {"to", "cc", "bcc"} if kind in {"smtp", "graph"} else set()
+            if kind == "teams_bot":
+                keys = {"recipients", "conversation_references", "conversation_id"}
+                if detail.startswith(("conversation reference ", "conversation service_url ")):
+                    return f"watch.channels[{index}].conversation_references"
+                if detail.startswith("must have at most 100 destinations"):
+                    return f"watch.channels[{index}].conversation_references"
+            for key in keys:
+                if detail.startswith((key + " ", key + "[")):
+                    identity = "conversation_references" if key == "conversation_id" else key
+                    return f"watch.channels[{index}].{identity}"
     return _channel_loader_field_key(error, document)
 
 
@@ -583,6 +618,19 @@ def _field_error_control_id(section, identity):
         return "g0_sources"
     if section == "inventory" and identity == "inventory.columns":
         return "g0_columns"
+    if section == "notifications" and identity == "notifications.email.recipients":
+        return "g1_recipients"
+    if section == "rules":
+        match = re.fullmatch(r"watch\.rules\[(\d+)\]\.cvss_providers", identity or "")
+        if match:
+            return f"g{match.group(1)}_cvss_providers"
+    if section == "channels":
+        match = re.fullmatch(
+            r"watch\.channels\[(\d+)\]\.(?:to|cc|bcc|recipients|conversation_references)",
+            identity or "",
+        )
+        if match:
+            return f"g{match.group(1)}_{identity.rsplit('.', 1)[-1]}"
     return None
 
 
@@ -591,6 +639,17 @@ def _field_error_message(identity, fallback):
         return "Watch catalog settings are invalid. Include NVD and choose supported catalog names."
     if identity == "inventory.columns":
         return "Inventory column mappings are invalid. Include the required asset_id mapping and use a valid table."
+    if identity == "notifications.email.recipients":
+        return "Legacy notification recipients are invalid. Review the recipient rows."
+    if identity == "watch.rules" or re.fullmatch(r"watch\.rules\[\d+\]\.cvss_providers", identity or ""):
+        return "CVSS provider settings are invalid. Choose supported providers."
+    if identity and identity.startswith("watch.channels["):
+        if identity.endswith(".recipients"):
+            return "Teams bot recipients are invalid. Use an object ID or user principal name."
+        if identity.endswith(".conversation_references"):
+            return "Teams bot conversation references are invalid. Check the conversation ID and optional service URL."
+        if identity.endswith((".to", ".cc", ".bcc")):
+            return "Email recipient settings are invalid. Review the address rows."
     return fallback
 
 
@@ -2338,6 +2397,135 @@ def _inventory_columns_view(raw):
             "limit": INVENTORY_COLUMN_ROW_LIMIT}
 
 
+def _list_text_view(kind, raw, present, reason):
+    return {"kind": kind, "mode": "text", "present": present,
+            "reason": reason, "raw": deepcopy(raw) if present else None}
+
+
+def _cvss_providers_view(raw, choices):
+    present = raw is not _SESSION_ABSENT
+    item = raw if present else list(choices)
+    kind = "providers"
+    if not isinstance(item, list) or not all(isinstance(provider, str) for provider in item):
+        return _list_text_view(
+            kind, raw, present,
+            "This value is not a list of provider names; edit it as TOML text.",
+        )
+    if not item:
+        return _list_text_view(
+            kind, raw, present,
+            "This list is empty; edit it as TOML text.",
+        )
+    if any(provider not in choices for provider in item):
+        return _list_text_view(
+            kind, raw, present,
+            "This list contains an unsupported provider name; edit it as TOML text.",
+        )
+    if len(set(item)) != len(item):
+        return _list_text_view(
+            kind, raw, present,
+            "This list contains repeated providers; edit it as TOML text.",
+        )
+    return {"kind": kind, "mode": "checkboxes", "present": present,
+            "reason": None, "selected": tuple(item),
+            "raw": deepcopy(item) if present else None,
+            "choices": tuple(choices)}
+
+
+def _string_rows_view(raw, *, kind, limit, absent_reason, type_reason, bound_reason):
+    present = raw is not _SESSION_ABSENT
+    item = raw if present else []
+    if not isinstance(item, list):
+        return _list_text_view(kind, raw, present, type_reason)
+    if len(item) > limit:
+        return _list_text_view(kind, raw, present, bound_reason)
+    if not all(isinstance(entry, str) for entry in item):
+        return _list_text_view(
+            kind, raw, present,
+            "This list contains a non-text value; edit it as text.",
+        )
+    if kind == "address_rows" and any("," in entry for entry in item):
+        return _list_text_view(
+            kind, raw, present,
+            "An address contains a comma that the row editor cannot split safely; edit it as text.",
+        )
+    if any("\n" in entry or "\r" in entry for entry in item):
+        return _list_text_view(
+            kind, raw, present,
+            "This value contains a line break the row editor cannot carry; edit it as text.",
+        )
+    return {"kind": kind, "mode": "rows", "present": present,
+            "reason": None, "rows": list(item), "raw": deepcopy(item) if present else None,
+            "add_value": "", "limit": limit}
+
+
+def _conversation_references_view(raw):
+    present = raw is not _SESSION_ABSENT
+    item = raw if present else []
+    kind = "conversation_references"
+    if not isinstance(item, list):
+        return _list_text_view(
+            kind, raw, present,
+            "This value is not a list of conversation tables; edit it as TOML text.",
+        )
+    if len(item) > CONVERSATION_REFERENCE_ROW_LIMIT:
+        return _list_text_view(
+            kind, raw, present,
+            "This value has more rows than the editor can carry; edit it as TOML text.",
+        )
+    rows = []
+    for reference in item:
+        if not isinstance(reference, dict):
+            return _list_text_view(
+                kind, raw, present,
+                "This value contains a non-table row; edit it as TOML text.",
+            )
+        if set(reference) - {"conversation_id", "service_url"}:
+            return _list_text_view(
+                kind, raw, present,
+                "A conversation row has fields the editor cannot carry; edit it as TOML text.",
+            )
+        if "conversation_id" not in reference:
+            return _list_text_view(
+                kind, raw, present,
+                "A conversation row is missing its conversation ID; edit it as TOML text.",
+            )
+        if (not isinstance(reference.get("conversation_id"), str)
+                or "service_url" in reference and not isinstance(reference["service_url"], str)):
+            return _list_text_view(
+                kind, raw, present,
+                "A conversation row contains a non-text value; edit it as TOML text.",
+            )
+        conversation_id = reference["conversation_id"]
+        service_url = reference.get("service_url", "")
+        if any("\n" in entry or "\r" in entry for entry in (conversation_id, service_url)):
+            return _list_text_view(
+                kind, raw, present,
+                "A conversation row contains a line break the editor cannot carry; edit it as TOML text.",
+            )
+        rows.append({"conversation_id": conversation_id,
+                     "service_url": service_url,
+                     "service_present": "service_url" in reference})
+    return {"kind": kind, "mode": "rows", "present": present,
+            "reason": None, "rows": rows, "raw": deepcopy(item) if present else None,
+            "add_conversation_id": "", "add_service_url": "",
+            "limit": CONVERSATION_REFERENCE_ROW_LIMIT}
+
+
+def _control_text(item, spec):
+    if item is None:
+        return ""
+    if spec.kind == "addresses":
+        if not isinstance(item, list) or not all(isinstance(address, str) for address in item):
+            return value(item)
+        joined = ", ".join(item)
+        if (any("," in address or "\n" in address or "\r" in address for address in item)
+                or joined.lstrip().startswith("[")):
+            return value(item)
+        return joined
+    return str(item) if spec.kind in {"string", "enum"} else value(item)
+
+
 def groups_for(section, document, *, new_type="smtp", row_types=None, count=None,
                can_manage=False, can_admin=False):
     groups = []
@@ -2387,10 +2575,7 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
                     "watch.rules" if section == "rules" else
                     "product_mappings" if section == "product-mappings" else label)
             spec = FIELD_METADATA[f"{path}.{key}"]
-            text = ("" if item is None or direct_url else
-                    (value(item) if any("," in address for address in item) or ", ".join(item).lstrip().startswith("[") else ", ".join(item))
-                    if spec.kind == "addresses" and isinstance(item, list) else
-                    str(item) if spec.kind in {"string", "enum"} else value(item))
+            text = "" if direct_url else _control_text(item, spec)
             hint = _display(spec.default)
             if section == "channels" and path == "watch.channels.smtp" and key == "port":
                 security = data.get("security", "starttls")
@@ -2433,6 +2618,50 @@ def groups_for(section, document, *, new_type="smtp", row_types=None, count=None
             elif section == "inventory" and key == "columns":
                 control["structured"] = _inventory_columns_view(
                     data[key] if key in data else _SESSION_ABSENT)
+            elif section == "rules" and key == "cvss_providers":
+                control["structured"] = _cvss_providers_view(
+                    data[key] if key in data else _SESSION_ABSENT,
+                    spec.item_choices,
+                )
+            elif section == "notifications" and path == "notifications.email" and key == "recipients":
+                control["structured"] = _string_rows_view(
+                    data[key] if key in data else _SESSION_ABSENT,
+                    kind="address_rows", limit=LEGACY_RECIPIENT_ROW_LIMIT,
+                    absent_reason="This value is not a list of recipient names; edit it as text.",
+                    type_reason="This value is not a list of recipient names; edit it as text.",
+                    bound_reason="This list has more rows than the editor can carry; edit it as text.",
+                )
+            elif section == "channels":
+                channel_type = str(data.get("type", "")).strip().casefold()
+                raw = data[key] if key in data else _SESSION_ABSENT
+                if channel_type in {"smtp", "graph"} and key in {"to", "cc", "bcc"}:
+                    control["structured"] = _string_rows_view(
+                        raw, kind="address_rows", limit=LIST_ROW_LIMIT,
+                        absent_reason="This value is not a list of email addresses; edit it as text.",
+                        type_reason="This value is not a list of email addresses; edit it as text.",
+                        bound_reason="This list has more rows than the editor can carry; edit it as text.",
+                    )
+                elif channel_type == "teams_bot" and key == "recipients":
+                    control["structured"] = _string_rows_view(
+                        raw, kind="bot_recipient_rows", limit=LIST_ROW_LIMIT,
+                        absent_reason="This value is not a list of recipients; edit it as TOML text.",
+                        type_reason="This value is not a list of recipients; edit it as TOML text.",
+                        bound_reason="This list has more rows than the editor can carry; edit it as TOML text.",
+                    )
+                elif channel_type == "teams_bot" and key == "conversation_references":
+                    control["structured"] = _conversation_references_view(raw)
+            if control.get("structured", {}).get("kind") in {
+                    "providers", "address_rows", "bot_recipient_rows",
+                    "conversation_references"}:
+                suffix = {
+                    "cvss_providers": "p",
+                    "recipients": "r",
+                    "to": "t",
+                    "cc": "c",
+                    "bcc": "b",
+                    "conversation_references": "q",
+                }[key]
+                control["form_prefix"] = f"g{index}_{suffix}"
             controls.append(control)
         output.append({"label": label, "controls": controls, "data": data, "prefix": prefix,
                        "readonly_reason": (
@@ -2464,6 +2693,187 @@ def _copy_form(form):
 def _structured_control(groups, key):
     return next(control for group in groups for control in group["controls"]
                 if control["key"] == key and "structured" in control)
+
+
+def _list_control_post(form, control):
+    """Validate the exact row/checkbox contract and return its draft values."""
+    view = control["structured"]
+    control_id = control["id"]
+    prefix = control.get("form_prefix", control_id)
+    mode_name = prefix + "_mode"
+    mode = _posted_one(form, mode_name)
+    if mode != view["mode"]:
+        abort(400)
+    if mode == "text":
+        expected = {mode_name, control_id}
+        text = _posted_one(form, control_id)
+        if any(name.startswith(prefix + "_") and name not in expected for name in form):
+            abort(400)
+        unchanged = text == control["value"]
+        structured_value = (
+            deepcopy(view["raw"]) if view["present"] else _STRUCTURED_ABSENT
+        ) if unchanged else None
+        return {"draft": None, "value": structured_value, "action": None}
+
+    if control_id in form:
+        abort(400)
+    if mode == "checkboxes":
+        expected = {mode_name}
+        selected = []
+        for choice in view["choices"]:
+            name = f"{prefix}_{choice}"
+            expected.add(name)
+            values = form.getlist(name)
+            if len(values) > 1 or values and values[0] != choice:
+                abort(400)
+            if values:
+                selected.append(choice)
+        if any(name.startswith(prefix + "_") and name not in expected for name in form):
+            abort(400)
+        unchanged = set(selected) == set(view["selected"])
+        structured_value = (
+            deepcopy(view["raw"]) if view["present"] else _STRUCTURED_ABSENT
+        ) if unchanged else [choice for choice in view["choices"] if choice in selected]
+        return {"draft": {**view, "selected": tuple(selected)},
+                "value": structured_value, "action": None}
+
+    if mode != "rows":
+        abort(400)
+    count_text = _posted_one(form, prefix + "_count")
+    if re.fullmatch(r"(?:0|[1-9][0-9]{0,3})", count_text) is None:
+        abort(400)
+    count = int(count_text)
+    if count > view["limit"]:
+        abort(400)
+    is_reference = view["kind"] == "conversation_references"
+    add_names = (
+        (prefix + "_add_c", prefix + "_add_u")
+        if is_reference else (prefix + "_add_value",)
+    )
+    expected = {mode_name, prefix + "_count", *add_names}
+    # The optional add inputs are absent once the row bound is reached.
+    if count >= view["limit"]:
+        expected.difference_update(add_names)
+    rows = []
+    for index in range(count):
+        if is_reference:
+            conversation_name = f"{prefix}_r{index}c"
+            service_name = f"{prefix}_r{index}u"
+            present_name = f"{prefix}_r{index}p"
+            expected.update((conversation_name, service_name, present_name))
+            conversation_id = _posted_one(form, conversation_name)
+            service_url = _posted_one(form, service_name)
+            service_present = _posted_one(form, present_name)
+            if service_present not in {"yes", "no"}:
+                abort(400)
+            present = service_present == "yes" or bool(service_url)
+            rows.append({"conversation_id": conversation_id,
+                         "service_url": service_url,
+                         "service_present": present})
+        else:
+            name = f"{prefix}_r{index}"
+            expected.add(name)
+            rows.append(_posted_one(form, name))
+    can_add = count < view["limit"]
+    add_values = {}
+    if can_add:
+        for name in add_names:
+            add_values[name] = _posted_one(form, name)
+    else:
+        if any(name in form for name in add_names):
+            abort(400)
+    add_button, remove_button = prefix + "_add", prefix + "_remove"
+    add_posted, remove_posted = form.getlist(add_button), form.getlist(remove_button)
+    if (len(add_posted) > 1 or len(remove_posted) > 1
+            or add_posted and remove_posted):
+        abort(400)
+    action = None
+    if add_posted:
+        if add_posted[0] != "yes" or not can_add:
+            abort(400)
+        expected.add(add_button)
+        action = {"control_id": control_id, "operation": "add",
+                  "values": tuple(add_values[name] for name in add_names)}
+    elif remove_posted:
+        if re.fullmatch(r"(?:0|[1-9][0-9]{0,2})", remove_posted[0]) is None:
+            abort(400)
+        index = int(remove_posted[0])
+        if index >= count:
+            abort(400)
+        expected.add(remove_button)
+        action = {"control_id": control_id, "operation": "remove", "index": index}
+    if any(name.startswith(prefix + "_") and name not in expected for name in form):
+        abort(400)
+    for name in expected:
+        values = form.getlist(name)
+        if name in {add_button, remove_button}:
+            continue
+        if len(values) != 1:
+            abort(400)
+    add_text = tuple(add_values[name] for name in add_names) if can_add else tuple("" for _ in add_names)
+    draft = {**view, "rows": rows}
+    if is_reference:
+        draft.update(add_conversation_id=add_text[0], add_service_url=add_text[1])
+    else:
+        draft["add_value"] = add_text[0]
+    unchanged = rows == view["rows"]
+    if unchanged:
+        structured_value = deepcopy(view["raw"]) if view["present"] else _STRUCTURED_ABSENT
+    elif is_reference:
+        structured_value = [
+            {"conversation_id": row["conversation_id"], **(
+                {"service_url": row["service_url"]} if row["service_present"] else {}
+            )}
+            for row in rows
+        ]
+    else:
+        structured_value = list(rows)
+    return {"draft": draft, "value": structured_value, "action": action}
+
+
+def _prepare_list_controls(groups, form):
+    copied = _copy_form(form)
+    drafts, values, actions = {}, {}, []
+    for group in groups:
+        for control in group["controls"]:
+            if control.get("structured", {}).get("kind") not in {
+                    "providers", "address_rows", "bot_recipient_rows",
+                    "conversation_references"}:
+                continue
+            result = _list_control_post(form, control)
+            if result["draft"] is not None:
+                drafts[control["id"]] = result["draft"]
+            if result["value"] is not None:
+                values[control["id"]] = result["value"]
+            if result["action"] is not None:
+                actions.append(result["action"])
+            prefix = control.get("form_prefix", control["id"])
+            for name in list(copied.keys()):
+                if name.startswith(prefix + "_"):
+                    copied.pop(name, None)
+    if len(actions) > 1:
+        abort(400)
+    return copied, drafts, values, actions[0] if actions else None
+
+
+def _apply_list_action(drafts, action):
+    draft = drafts.get(action["control_id"])
+    if draft is None or draft.get("mode") != "rows":
+        abort(400)
+    rows = list(draft["rows"])
+    if action["operation"] == "remove":
+        rows.pop(action["index"])
+    elif draft["kind"] == "conversation_references":
+        conversation_id, service_url = action["values"]
+        rows.append({"conversation_id": conversation_id,
+                     "service_url": service_url,
+                     "service_present": bool(service_url)})
+        draft["add_conversation_id"] = ""
+        draft["add_service_url"] = ""
+    else:
+        rows.append(action["values"][0])
+        draft["add_value"] = ""
+    draft["rows"] = rows
 
 
 def _parse_column_rows(form, view):
@@ -2686,9 +3096,28 @@ def _retain_action_controls(groups, form, section):
                 )
 
 
+def _table_exists(document, path):
+    current = document
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    return isinstance(current, dict)
+
+
+def _ordered_patch(original, updated):
+    """Keep existing table key order while appending newly added keys."""
+    if not isinstance(original, dict) or not isinstance(updated, dict):
+        return updated
+    ordered = {key: updated[key] for key in original if key in updated}
+    ordered.update((key, item) for key, item in updated.items() if key not in ordered)
+    return ordered
+
+
 def parse_form(editor, section, document, current_config, permissions, *, can_admin=False, count=None,
-               form=None, append_channels=False):
+               form=None, append_channels=False, structured_values=None):
     form = request.form if form is None else form
+    structured_values = structured_values or {}
     if append_channels and section != "channels":
         abort(400)
     can_manage = "manage_secrets" in permissions
@@ -2714,6 +3143,11 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
             for control in group["controls"]:
                 key, name = control["key"], control["id"]
                 expected.add(name)
+                if name in structured_values:
+                    parsed_value = structured_values[name]
+                    if not remove and parsed_value is not _STRUCTURED_ABSENT:
+                        row[key] = deepcopy(parsed_value)
+                    continue
                 text = form.get(name, "")
                 if not remove and (text != "" if control["kind"] == "string" else text.strip() != ""):
                     if control["kind"] in {"string", "enum"}:
@@ -2865,10 +3299,17 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
         candidate = deepcopy(document)
         if section in SCHEMAS:
             for (path, _), row in zip(SCHEMAS[section], rows):
-                set_table(candidate, path, row if row is not None else {})
+                if row is None:
+                    row = {}
+                if not _table_exists(document, path) and not row:
+                    continue
+                original = get_table(document, path)
+                set_table(candidate, path, _ordered_patch(original, row))
         elif section == "rules":
             candidate.setdefault("watch", {})["rules"] = [
-                row for row in rows if row is not None and row.get("name")
+                _ordered_patch(group["data"], row)
+                for group, row in zip(groups, rows)
+                if row is not None and row.get("name")
             ]
         elif section == "product-mappings":
             candidate["product_mappings"] = [
@@ -2889,7 +3330,7 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                 channels[name] = row
             else:
                 channels = {}
-                for row in rows:
+                for group, row in zip(groups, rows):
                     if row is None:
                         continue
                     row = dict(row)
@@ -2897,7 +3338,9 @@ def parse_form(editor, section, document, current_config, permissions, *, can_ad
                     if name:
                         if name in channels:
                             raise ConfigurationError("watch.channels.name must be unique; duplicate channel name")
-                        channels[name] = row
+                        original = {key: value for key, value in group["data"].items()
+                                    if key != "name"}
+                        channels[name] = _ordered_patch(original, row)
                 candidate.setdefault("watch", {})["channels"] = channels
         referenced = {value for value in secret_references(candidate).values() if isinstance(value, str)}
         for path in list(staged):
@@ -3114,6 +3557,7 @@ def register_config(app, config, *, host):
         match = None
         retained_form = None
         structured_draft = None
+        structured_values = {}
         field_error_control = None
         status = 400
         try:
@@ -3164,13 +3608,17 @@ def register_config(app, config, *, host):
                 if rule_action:
                     from .dashboard_rule_builder import match_preview, retain_rule_action_form
 
-                    retained_form, error = retain_rule_action_form(
-                        request.form, document, current_config, count)
-                    if match_request(request.form):
-                        match = match_preview(request.form, document, current_config)
                     groups = groups_for(section, document, count=count,
                                         can_manage="manage_secrets" in g.permissions,
                                         can_admin=g.user.is_admin)
+                    prepared, structured_draft, structured_values, list_action = _prepare_list_controls(
+                        groups, request.form)
+                    if list_action is not None:
+                        abort(400)
+                    retained_form, error = retain_rule_action_form(
+                        prepared, document, current_config, count)
+                    if match_request(request.form):
+                        match = match_preview(request.form, document, current_config)
                     status = 200
                 else:
                     row_types = [request.form.get(f"g{index}_type") for index in range(count)] if section == "channels" else None
@@ -3180,26 +3628,46 @@ def register_config(app, config, *, host):
                     if section in {"watch", "inventory"}:
                         prepared, structured_draft = _prepare_structured_config_form(
                             section, document, request.form, count=count)
-                    if section == "rules":
-                        # The visual builder rewrites its posted fields into the
-                        # same values the text form sends, before the checks run.
-                        from .dashboard_rule_builder import prepare_rules_form
-                        prepared = prepare_rules_form(request.form, document, current_config, count)
-                    candidate, staged, replacements = parse_form(editor, section, document, current_config,
-                                                                 g.permissions, can_admin=g.user.is_admin,
-                                                                 count=count, form=prepared)
-                    preview, lockout = editor.preview(
-                        section, candidate, version, staged, replacements,
-                        current_document=document, current_config=current_config,
-                        origin=("full", None),
-                    )
-                    staged = []
-                    if editor.pending_review(preview, section, ("full", None)) is None:
-                        abort(400)
-                    diff = "\n".join(difflib.unified_diff(
-                        dumps(redacted(project_document(document, section))).splitlines(),
-                        dumps(redacted(project_document(candidate, section))).splitlines(),
-                        fromfile="current", tofile="proposed", lineterm=""))
+                    prepared, list_draft, structured_values, list_action = _prepare_list_controls(
+                        groups, prepared)
+                    if structured_draft is None:
+                        structured_draft = {}
+                    structured_draft.update(list_draft)
+                    if list_action is not None:
+                        if section == "rules":
+                            from .dashboard_rule_builder import prepare_rules_form
+                            try:
+                                prepare_rules_form(prepared, document, current_config, count)
+                            except HTTPException:
+                                # The builder stores its safe draft before reporting
+                                # criterion errors; keep that draft through this row action.
+                                pass
+                        _apply_list_action(structured_draft, list_action)
+                        retained_form = request.form
+                        status = 200
+                    else:
+                        if section == "rules":
+                            # The visual builder rewrites its posted fields into the
+                            # same values the text form sends, before the checks run.
+                            from .dashboard_rule_builder import prepare_rules_form
+                            prepared = prepare_rules_form(prepared, document, current_config, count)
+                        candidate, staged, replacements = parse_form(
+                            editor, section, document, current_config, g.permissions,
+                            can_admin=g.user.is_admin, count=count, form=prepared,
+                            structured_values=structured_values,
+                        )
+                        preview, lockout = editor.preview(
+                            section, candidate, version, staged, replacements,
+                            current_document=document, current_config=current_config,
+                            origin=("full", None),
+                        )
+                        staged = []
+                        if editor.pending_review(preview, section, ("full", None)) is None:
+                            abort(400)
+                        diff = "\n".join(difflib.unified_diff(
+                            dumps(redacted(project_document(document, section))).splitlines(),
+                            dumps(redacted(project_document(candidate, section))).splitlines(),
+                            fromfile="current", tofile="proposed", lineterm=""))
             if retained_form is None:
                 new_type = request.args.get("new_type", "smtp")
                 groups = groups_for(section, document, new_type=new_type,
