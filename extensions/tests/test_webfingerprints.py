@@ -3,11 +3,12 @@ import os
 import stat
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from cvebeacon_extensions import webfingerprints as wf, webrules
+from cvebeacon_extensions import web, webfingerprints as wf, webrules
 from cvebeacon_extensions.webrules import Resource, page_from
 
 
@@ -53,6 +54,96 @@ def detect(tmp_path, technologies, page, *, page_url="https://synthetic.invalid/
 
 def names(detections):
     return {item.name: item for item in detections}
+
+
+def observe_identities(tmp_path, technologies, headers, html):
+    root, _ = make_collection(tmp_path, technologies)
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    asset = web.WebAsset(web.Endpoint("https", "example.invalid", 443, "/"),
+                         "Test", now, None, True, 0, False)
+
+    class Fetcher:
+        @staticmethod
+        def _clock():
+            return 0.0
+
+        @staticmethod
+        def fetch(*args, **kwargs):
+            page_headers = {"content-type": ("text/html",), **headers}
+            return web._FetchSuccess(web._Response(200, page_headers, html.encode()), (), now)
+
+    return web._observe(asset, web.Allowlist("Acme", None, (asset,)), Fetcher(),
+                        run_deadline=10.0, external=wf.load_fingerprints(root))
+
+
+def test_cpe_aliases_merge_built_in_and_external_evidence(tmp_path):
+    result = observe_identities(tmp_path, {
+        "Example Nginx fingerprint": {
+            "cats": ["1"], "html": "example-nginx-marker",
+            "cpe": "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*",
+        },
+        "Nginx": {
+            "cats": ["1"], "html": "example-unrelated-marker",
+            "cpe": "cpe:2.3:a:other_vendor:nginx:*:*:*:*:*:*:*:*",
+        },
+    }, {"server": ("nginx/1.26.2",)}, "example-nginx-marker example-unrelated-marker")
+    assert [item["name"] for item in result.products] == ["Nginx", "Nginx"]
+    nginx = next(item for item in result.products if item["vendor"] == "nginx")
+    assert nginx["evidence_types"] == ["header", "html"]
+    assert nginx["category"] == "web-server"
+    assert {row["cpe"] for row in result.rows} == {
+        "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*",
+        "cpe:2.3:a:other_vendor:nginx:*:*:*:*:*:*:*:*",
+    }
+
+
+@pytest.mark.parametrize("vendors", [("nginx", "f5"), ("f5", "nginx")])
+def test_cpe_aliases_choose_the_same_canonical_vendor_in_either_order(vendors):
+    detections = [
+        webrules.Detection(vendor, "nginx", "web-server", f"cpe:2.3:a:{vendor}:nginx:*:*:*:*:*:*:*:*",
+                           "high", ("1.26.2",), ("header",), name="Nginx")
+        for vendor in vendors
+    ]
+    merged = {}
+    web._merge_detections(merged, detections)
+    merged_detection, = merged.values()
+    assert merged_detection.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"
+
+
+def test_weak_display_names_merge_only_on_exact_casefolded_name(tmp_path):
+    result = observe_identities(tmp_path, {
+        "gOoGlE fOnT aPi": {"cats": ["1"], "html": "test-font-marker"},
+        "Google Font  API": {"cats": ["1"], "html": "test-font-marker"},
+    }, {}, '<link href="https://fonts.googleapis.com/css2?family=Demo">test-font-marker')
+    assert [(item["name"], item["evidence_types"]) for item in result.products] == [
+        ("Google Font API", ["html", "url"]),
+        ("Google Font  API", ["html"]),
+    ]
+
+
+def test_external_fingerprints_keep_distinct_cpes_with_the_same_display_name(tmp_path):
+    result = observe_identities(tmp_path, {
+        "Example Widget": {"cats": ["1"], "html": "test-first-marker",
+                           "cpe": "cpe:2.3:a:first_vendor:widget:*:*:*:*:*:*:*:*"},
+        "EXAMPLE WIDGET": {"cats": ["1"], "html": "test-second-marker",
+                           "cpe": "cpe:2.3:a:second_vendor:widget:*:*:*:*:*:*:*:*"},
+    }, {}, "test-first-marker test-second-marker")
+    assert {item["vendor"] for item in result.products} == {"first_vendor", "second_vendor"}
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_direct_and_implied_php_merge_across_engines(tmp_path, direct):
+    headers = {"set-cookie": ("laravel_session=synthetic; Path=/",)}
+    if direct:
+        headers["x-powered-by"] = ("PHP/8.3.1",)
+    result = observe_identities(tmp_path, {
+        "Example Framework": {"cats": ["4"], "html": "example-framework-marker", "implies": "PHP"},
+        "PHP": {"cats": ["3"], "cpe": "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"},
+    }, headers, "example-framework-marker")
+    php, = [item for item in result.products if item["name"] == "PHP"]
+    assert php["implied_by"] == ["Example Framework", "Laravel"]
+    assert php["evidence_types"] == (["header", "implied"] if direct else ["implied"])
+    assert [row["version"] for row in result.rows if row["product"] == "php"] == (["8.3.1"] if direct else [])
 
 
 def test_loading_accepts_published_root_and_technologies_directory(tmp_path):

@@ -1779,15 +1779,20 @@ def _make_detection(record: _DetectionRecord):
         "ecosystem": "",
         "package": "",
         "implied_by": tuple(sorted(record.implied_by)),
+        "name_only": not technology.cpe,
     }
     if "evidence" in detection_fields:
         kwargs["evidence"] = evidence_values
     return webrules.Detection(**{key: value for key, value in kwargs.items() if key in detection_fields})
 
 
-def _merge_direct_record(records: dict[str, _DetectionRecord], technology: _Technology,
+def _technology_key(technology: _Technology) -> tuple[str, str]:
+    return technology.name.casefold(), technology.cpe
+
+
+def _merge_direct_record(records: dict[tuple[str, str], _DetectionRecord], technology: _Technology,
                          confidence: int, version: str, evidence):
-    key = technology.name.casefold()
+    key = _technology_key(technology)
     record = records.get(key)
     if record is None:
         record = _DetectionRecord(technology, confidence, set(), set(), [], set(), True)
@@ -1824,13 +1829,18 @@ def _candidate_patterns(fingerprints: Fingerprints, kind: str, source: _Source,
     return tuple(candidates), expired, MappingProxyType(positions)
 
 
-def _category_ids_available(records: Mapping[str, _DetectionRecord]) -> set[str]:
+def _category_ids_available(records: Mapping[tuple[str, str], _DetectionRecord]) -> set[str]:
     return {identifier for record in records.values() for identifier in record.technology.category_ids}
 
 
-def _resolve_relationships(fingerprints: Fingerprints, direct: dict[str, _DetectionRecord],
+def _resolve_relationships(fingerprints: Fingerprints, direct: dict[tuple[str, str], _DetectionRecord],
                            deadline: float, clock):
-    by_name = {technology.name.casefold(): technology for technology in fingerprints.technologies}
+    by_name: dict[str, _Technology | None] = {}
+    for technology in fingerprints.technologies:
+        key = _technology_key(technology)
+        previous = by_name.setdefault(key[0], technology)
+        if previous is not None and _technology_key(previous) != key:
+            by_name[key[0]] = None  # A name alone cannot select between distinct CPEs.
     working_direct = dict(direct)
     expansion_limit = min(10_000, len(fingerprints.technologies) * 8 + 1)
     for _ in range(len(direct) + 1):
@@ -1839,7 +1849,7 @@ def _resolve_relationships(fingerprints: Fingerprints, direct: dict[str, _Detect
         records = dict(working_direct)
         pending = [(record.technology, record.confidence, record.technology.name, 0)
                    for record in working_direct.values()]
-        best_implied: dict[str, int] = {}
+        best_implied: dict[tuple[str, str], int] = {}
         expansions = 0
         while pending and expansions < expansion_limit:
             if clock() >= deadline:
@@ -1850,9 +1860,11 @@ def _resolve_relationships(fingerprints: Fingerprints, direct: dict[str, _Detect
             for relation in source.implies:
                 if clock() >= deadline:
                     return direct, True
-                target_key = relation.target.casefold()
-                technology = by_name.get(target_key)
-                if technology is None or target_key in direct:
+                technology = by_name.get(relation.target.casefold())
+                if technology is None:
+                    continue
+                target_key = _technology_key(technology)
+                if target_key in direct:
                     continue
                 confidence = min(source_confidence, relation.confidence)
                 record = records.get(target_key)
@@ -1870,18 +1882,16 @@ def _resolve_relationships(fingerprints: Fingerprints, direct: dict[str, _Detect
                     record.implied_by.add(origin)
             expansions += 1
 
-        active_names = set(records)
-        excluded = set()
+        excluded_names = set()
         for record in records.values():
             if clock() >= deadline:
                 return direct, True
-            excluded.update(target for target in record.technology.excludes if target in active_names)
-        for key in excluded:
-            records.pop(key, None)
+            excluded_names.update(record.technology.excludes)
+        records = {key: record for key, record in records.items() if key[0] not in excluded_names}
         changed = True
         while changed:
             changed = False
-            active_names = set(records)
+            active_names = {name for name, _ in records}
             categories = _category_ids_available(records)
             for key, record in tuple(records.items()):
                 if clock() >= deadline:
@@ -1905,7 +1915,7 @@ class ExternalSession:
         self.fingerprints = fingerprints
         self.deadline = deadline
         self.clock = clock
-        self._direct: dict[str, _DetectionRecord] = {}
+        self._direct: dict[tuple[str, str], _DetectionRecord] = {}
         self._by_index = {pattern.index: pattern for pattern in fingerprints.patterns}
         self._technology_by_index = {
             pattern_id: technology
@@ -1990,7 +2000,7 @@ class ExternalSession:
                         self._direct, technology, confidence, version,
                         ("dom", f"dom:{pattern.source}"[:512], pattern.source[:EVIDENCE_EXCERPT_LENGTH]),
                     )
-                record = self._direct[technology.name.casefold()]
+                record = self._direct[_technology_key(technology)]
                 for item in evidence:
                     if item not in record.evidence and len(record.evidence) < MAX_EVIDENCE_PER_DETECTION:
                         record.evidence.append(item)
@@ -2023,7 +2033,9 @@ class ExternalSession:
         self._match_sources(sources)
 
     @staticmethod
-    def _incomplete_requirements(records: Mapping[str, _DetectionRecord]) -> dict[str, _DetectionRecord]:
+    def _incomplete_requirements(
+        records: Mapping[tuple[str, str], _DetectionRecord],
+    ) -> dict[tuple[str, str], _DetectionRecord]:
         return {
             key: record for key, record in records.items()
             if not record.technology.requires and not record.technology.requires_categories

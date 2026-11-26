@@ -66,6 +66,7 @@ RULE_CASES = (
     ("jquery-ui-script", "script", '/*! jQuery UI - v1.14.1 - 2024-09-26 */', '/*! jQuery UI extensions */', "jQuery UI", "jquery-ui", "1.14.1"),
     ("jquery-migrate-script", "script", 'JQMIGRATE: Migrate is installed, version 3.4.1', 'JQMIGRATE: Migrate compatible build 2026', "jQuery Migrate", "jquery-migrate", "3.4.1"),
     ("lodash-script", "script", 'lodash 4.17.21', 'loadsheaf 4.17.21', "Lodash", "lodash", "4.17.21"),
+    ("lodash-minified", "script", 'build="4.18.1",threshold=200,message="Unsupported core-js use."', 'build="4.18.1",threshold=201,message="Unsupported core-js use."', "Lodash", "lodash", "4.18.1"),
     ("underscore-script", "script", 'Underscore.js 1.13.7\n// https://underscorejs.org', 'Underscore-compatible build 1.13.7', "Underscore.js", "underscore", "1.13.7"),
     ("moment-script", "script", '//! moment.js version : 2.30.1', '//! moment.js compatibility layer', "Moment.js", "moment", "2.30.1"),
     ("axios-script", "script", '/*! Axios v1.7.9 | (c) OpenJS Foundation */', '/*! Axios-compatible build v1.7.9 */', "Axios", "axios", "1.7.9"),
@@ -78,8 +79,12 @@ RULE_CASES = (
     ("requirejs-script", "script", '/*! RequireJS 2.3.7 */', '/*! RequireJS-compatible build 2.3.7 */', "RequireJS", "requirejs", "2.3.7"),
     ("handlebars-script", "script", 'Handlebars.VERSION = "4.7.8";', 'Handlebars.build = "4.7.8";', "Handlebars", "handlebars", "4.7.8"),
     ("rxjs-script", "script", 'rxjs@7.8.1', 'rxjs-compatible-build@7.8.1', "RxJS", "rxjs", "7.8.1"),
+    # rxjs@7.8.1, Apache-2.0. Concatenate the short constructor excerpt after a banner.
+    ("rxjs-runtime", "script", '/*! Bootstrap v5.3.9 */\nthis.name="ObjectUnsubscribedError";this.message="object unsubscribed"', 'this.name="ObjectUnsubscribedError";this.message="another error"', "RxJS", "rxjs", ""),
     ("core-js", "script", "__core-js_shared__.versions.push({ version: '3.40.0', mode: 'global', copyright: 'Core-js' });", "const build = '3.40.0';", "core-js", "core-js", "3.40.0"),
     ("zonejs-script", "script", '/*! zone.js v0.15.0 */', '/*! zone.js compatible build 0.15.0 */', "zone.js", "zone.js", "0.15.0"),
+    # zone.js@0.16.3, MIT. Use two short markers from the minified runtime.
+    ("zonejs-runtime", "script", '/*! Bootstrap v5.3.9 */\n"__zone_symbol__";throw Error("Already loaded patch: "+r)', 'throw Error("Already loaded patch: "+r)', "zone.js", "zone.js", ""),
     ("webpack-runtime", "script", 'self.webpackChunk_app = self.webpackChunk_app || [];', 'self.webpackChunked_app = [];', "webpack", "webpack", ""),
     ("tslib", "url", "https://static.example.invalid/tslib/tslib.es6.js", "https://static.example.invalid/my-tslib.js", "tslib", "tslib", ""),
     ("typescript", "url", "https://static.example.invalid/typescript@5.7.2/browser.js", "https://static.example.invalid/typescript-helper.js", "TypeScript", "typescript", "5.7.2"),
@@ -91,6 +96,8 @@ RULE_CASES = (
     ("tailwind-style", "style", '/*! tailwindcss v3.4.17 | MIT License */', '/*! tailwind-compatible utilities v3.4.17 */', "Tailwind CSS", "tailwindcss", "3.4.17"),
     ("bulma-style", "style", '/*! Bulma v1.0.2 | https://bulma.io */', '/*! Bulma-compatible styles v1.0.2 */', "Bulma", "bulma", "1.0.2"),
     ("foundation-style", "style", '/*! Foundation for Sites 6.8.1 */', '/*! Foundation-like styles 6.8.1 */', "Foundation", "foundation-sites", "6.8.1"),
+    # foundation-sites@6.9.0, MIT. Short media-query registration excerpt.
+    ("foundation-media-queries", "style", '/*! Bootstrap v5.3.9 */\n.foundation-mq{font-family:"small=0em&medium=40em&large=64', '.foundation-mq{font-family:sans-serif}', "Foundation", "foundation-sites", ""),
     ("animate-style", "style", '/*! animate.css - Version 4.1.1 */', '/*! animate-compatible styles 4.1.1 */', "Animate.css", "animate.css", "4.1.1"),
     ("font-awesome-url", "style-url", "https://cdn.example.invalid/font-awesome/6.7.2/css/all.min.css", "https://cdn.example.invalid/font-like/6.7.2/css/all.css", "Font Awesome", "@fortawesome/fontawesome-free", ""),
     ("tailwind-url", "style-url", "https://cdn.example.invalid/tailwindcss/3.4.17/tailwind.min.css", "https://cdn.example.invalid/tailwind-like/3.4.17/app.css", "Tailwind CSS", "tailwindcss", ""),
@@ -139,6 +146,8 @@ def test_rule_has_narrow_positive_negative_and_identity(key, kind, positive, neg
         assert (found.ecosystem, found.package) == ("npm", package), key
     if version:
         assert found.versions == (version,), key
+    if key in {"rxjs-runtime", "zonejs-runtime", "foundation-media-queries"}:
+        assert found.versions == ()
 
 
 def test_all_new_rules_have_positive_and_negative_cases():
@@ -250,6 +259,31 @@ def test_direct_react_evidence_merges_with_nextjs_implication():
     react = next(item for item in detect(page) if item.name == "React")
     assert react.ecosystem == "npm" and react.package == "react"
     assert "html" in react.evidence_types and react.implied_by == ("Next.js",)
+
+
+def test_lodash_bundle_version_comes_from_its_own_build():
+    # lodash@4.18.1, MIT. Short excerpts from the banner and version declaration.
+    lodash = '/* Lodash lodash.com/license */\nvar X,nn="4.18.1",tn=200,rn="Unsupported core-js use. Try '
+    bundle = 'const otherVersion="1.2.3";\n' + '/* padding */\n' * 400 + lodash
+    found = next(item for item in detect(_page("script", bundle)) if item.package == "lodash")
+    assert found.versions == ("4.18.1",)
+
+
+def test_backbone_bundle_version_comes_from_its_own_build():
+    # backbone@1.6.1, MIT. Short VERSION declaration excerpt.
+    backbone = 'var i=t.Backbone;var a=Array.prototype.slice;h.VERSION="1.6.1"'
+    found = next(item for item in detect(_page("script", 'other.VERSION="2.0.0";\n' + backbone))
+                 if item.package == "backbone")
+    assert found.versions == ("1.6.1",)
+
+
+def test_underscore_bundle_version_comes_from_its_own_banner():
+    # MIT notices from lodash@4.18.1 and underscore@1.13.8, with shortened spacing.
+    lodash_notice = "/* Lodash lodash.com/license | Underscore.js 1.8.3 underscorejs.org/LICENSE */"
+    underscore = "// Underscore.js 1.13.8\n// https://underscorejs.org"
+    bundle = lodash_notice + "\n" + "/* padding */\n" * 20 + underscore
+    found = next(item for item in detect(_page("script", bundle)) if item.package == "underscore")
+    assert found.versions == ("1.13.8",)
 
 
 def test_npm_rows_from_web_row_builder_normalize():

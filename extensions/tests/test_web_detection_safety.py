@@ -162,15 +162,15 @@ def test_every_builtin_rule_has_a_display_name_and_identity_keys_are_stable():
     invalid_package = Detection("npm", "../react", "js-library", "", "high", (),
                                 ecosystem="npm", package="@../react")
     assert webrules.identity_key(package) == ("npm", "react")
-    assert webrules.identity_key(apache) == ("cpe", "apache", "http_server")
-    assert webrules.identity_key(equivalent) == ("alias", "apache-http-server")
+    assert webrules.identity_key(apache) == ("product", "apache", "http_server")
+    assert webrules.identity_key(equivalent) == webrules.identity_key(apache)
     assert webrules.identity_key(invalid_package) == ("product", "npm", "../react")
     assert webrules.EVIDENCE_KINDS == frozenset({
         "header", "cookie", "meta", "url", "html", "script", "style", "manifest",
         "robots", "icon", "implied", "dom", "text",
     })
-    assert webrules.REVIEWED_ALIASES[("php_language", "php")] == "php"
-    assert webrules.REVIEWED_ALIASES[("wordpress", "wordpress_cms")] == "wordpress"
+    assert webrules.REVIEWED_ALIASES[("php_language", "php")] == ("php", "php")
+    assert webrules.REVIEWED_ALIASES[("wordpress", "wordpress_cms")] == ("wordpress", "wordpress")
 
 
 def test_deadline_returns_matches_completed_before_expiry():
@@ -253,6 +253,24 @@ def test_artifact_digest_lookup_uses_exact_resource_text(monkeypatch):
     found = detect(_resource(sample))
     assert any(item.package == "example" and item.versions == ("1.2.3",) for item in found)
     assert webrules.BUILT_ARTIFACT_HASHES != {}
+
+
+def test_artifact_digest_lookup_verifies_embedded_bytes(monkeypatch):
+    sample = b'var marker="fixture only";'
+    marker = b'fixture only'
+    digest = hashlib.sha256(sample).hexdigest()
+    monkeypatch.setattr(webrules, "BUILT_ARTIFACT_HASHES", {
+        digest: ("example", "published-build", "Example", "js-library", "npm", "example",
+                 "1.2.3", "script"),
+    })
+    monkeypatch.setattr(webrules, "_EMBEDDED_ARTIFACTS", {
+        digest: (marker, sample.index(marker), len(sample)),
+    }, raising=False)
+    bundle = b'/* prefix fixture only */\n' + sample + b'\n/* suffix */'
+    found = detect(_resource(bundle.decode()))
+    assert [(item.package, item.versions) for item in found] == [("example", ("1.2.3",))]
+    modified = bundle.replace(b'var marker', b'let marker')
+    assert not detect(_resource(modified.decode()))
 
 
 def test_detection_rejects_non_scalar_input_text():

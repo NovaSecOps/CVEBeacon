@@ -2121,7 +2121,7 @@ def _vendor_product_key(detection) -> tuple[str, ...]:
 def _detection_summary(detection) -> _DetectionSummary:
     return _DetectionSummary(
         _review_text(detection.vendor), _review_text(detection.product),
-        _review_text(detection.category), _review_text(detection.cpe),
+        _review_text(detection.category), webrules.canonical_cpe(_review_text(detection.cpe)),
         _review_text(detection.confidence), _review_values(detection.versions),
         _review_values(detection.evidence_types), _review_text(getattr(detection, "name", "")),
         _review_text(getattr(detection, "ecosystem", "")),
@@ -2130,10 +2130,39 @@ def _detection_summary(detection) -> _DetectionSummary:
     )
 
 
+def _implied_only(detection: _DetectionSummary) -> bool:
+    return bool(detection.implied_by) and set(detection.evidence_types) <= {"implied"}
+
+
+def _combine_detections(current: _DetectionSummary, incoming: _DetectionSummary) -> _DetectionSummary:
+    evidence = list(current.evidence)
+    evidence_seen = {(item.kind, item.source, item.excerpt) for item in evidence}
+    for item in incoming.evidence:
+        identity = (item.kind, item.source, item.excerpt)
+        if identity not in evidence_seen and len(evidence) < 20:
+            evidence.append(item)
+            evidence_seen.add(identity)
+    confidence_rank = {"low": 0, "medium": 1, "high": 2}
+    confidence = max((incoming.confidence, current.confidence),
+                     key=lambda value: confidence_rank.get(value, 0))
+    versions = tuple(sorted(set(current.versions) | set(incoming.versions)))
+    evidence_types = tuple(sorted(set(current.evidence_types) | set(incoming.evidence_types)))
+    implied_by = tuple(sorted(set(current.implied_by) | set(incoming.implied_by)))
+    if max(len(versions), len(evidence_types), len(implied_by)) > 64:
+        raise ValueError("too many merged detection values")
+    category = incoming.category if _implied_only(current) and not _implied_only(incoming) else current.category
+    cpe = min(filter(None, (current.cpe, incoming.cpe)), default="")
+    return _DetectionSummary(
+        current.vendor, current.product, category, cpe,
+        confidence, versions, evidence_types, current.name or incoming.name,
+        current.ecosystem or incoming.ecosystem, current.package or incoming.package,
+        implied_by, tuple(evidence),
+    )
+
+
 def _merge_detections(target: dict[tuple[str, ...], _DetectionSummary], detections, *,
                       deadline: float = float("inf"), clock=time.monotonic,
                       keep_completed: bool = False, on_invalid=lambda: None) -> None:
-    confidence_rank = {"low": 0, "medium": 1, "high": 2}
     identity_key = getattr(webrules, "identity_key", _vendor_product_key)
     for detection in detections:
         if clock() >= deadline and not keep_completed:
@@ -2141,34 +2170,26 @@ def _merge_detections(target: dict[tuple[str, ...], _DetectionSummary], detectio
         try:
             incoming = _detection_summary(detection)
             key = identity_key(detection)
+            current = target.get(key)
+            target[key] = incoming if current is None else _combine_detections(current, incoming)
         except (AttributeError, TypeError, ValueError):
             on_invalid()
-            continue
-        current = target.get(key)
-        if current is None:
-            target[key] = incoming
-            continue
-        evidence = list(current.evidence)
-        evidence_seen = {(item.kind, item.source, item.excerpt) for item in evidence}
-        for item in incoming.evidence:
-            identity = (item.kind, item.source, item.excerpt)
-            if identity not in evidence_seen and len(evidence) < 20:
-                evidence.append(item)
-                evidence_seen.add(identity)
-        confidence = max((incoming.confidence, current.confidence),
-                         key=lambda value: confidence_rank.get(value, 0))
-        versions = tuple(sorted(set(current.versions) | set(incoming.versions)))
-        evidence_types = tuple(sorted(set(current.evidence_types) | set(incoming.evidence_types)))
-        implied_by = tuple(sorted(set(current.implied_by) | set(incoming.implied_by)))
-        if max(len(versions), len(evidence_types), len(implied_by)) > 64:
+
+
+def _merge_weak_names(detections: Mapping[tuple[str, ...], _DetectionSummary], on_invalid):
+    # Wait until all identity evidence is in. A later CPE should not turn an
+    # earlier display-name match into a bridge between distinct identities.
+    merged: dict[tuple[str, ...], _DetectionSummary] = {}
+    by_name: dict[str, tuple[str, ...]] = {}
+    for key, detection in detections.items():
+        if key[0] != "npm" and not detection.cpe and detection.name:
+            key = by_name.setdefault(detection.name.casefold(), key)
+        current = merged.get(key)
+        try:
+            merged[key] = detection if current is None else _combine_detections(current, detection)
+        except ValueError:
             on_invalid()
-            continue
-        target[key] = _DetectionSummary(
-            current.vendor, current.product, incoming.category, current.cpe or incoming.cpe,
-            confidence, versions, evidence_types, current.name or incoming.name,
-            current.ecosystem or incoming.ecosystem, current.package or incoming.package,
-            implied_by, tuple(evidence),
-        )
+    return merged
 
 
 def _public_evidence(detection: _DetectionSummary,
@@ -2427,7 +2448,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         omissions.add("no-technologies")
     products = []
     used_ids = set()
-    for key, detection in merged.items():
+    for key, detection in _merge_weak_names(merged, lambda: _quarantine(reviews, omissions, base)).items():
         display = f"{detection.vendor}/{detection.product}"
         if len(display) > MAX_TEXT:
             _quarantine(reviews, omissions, base)
@@ -2438,7 +2459,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         used_ids.add(row_id)
         detail = dict(base, asset_id=row_id)
         preferred = _preferred_version(detection.versions)
-        implied = detection.implied_by and set(detection.evidence_types) <= {"implied"}
+        implied = _implied_only(detection)
         if not implied and preferred is not None and (preferred or detection.cpe):
             try:
                 purl = package_url(detection.ecosystem, detection.package, preferred)

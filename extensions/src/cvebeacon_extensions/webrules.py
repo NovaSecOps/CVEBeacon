@@ -93,6 +93,9 @@ class Detection:
     # listed for people to read and never becomes an inventory row.
     implied_by: tuple[str, ...] = ()
     evidence: tuple[Evidence, ...] = ()
+    # External fingerprints without a CPE use the name to generate vendor and
+    # product slugs for display. The slugs are not independent identity evidence.
+    name_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +403,21 @@ RULES = tuple(
 ) + tuple(rule for rule in RULES if rule.key not in _EXISTING_IDENTITIES)
 
 
+_BACKBONE_VERSION = (
+    r"(?:\bBackbone\.VERSION|\bvar\s+[\w$]+\s*=\s*[\w$]+\.Backbone\s*;\s*"
+    r"var\s+[\w$]+\s*=\s*Array\.prototype\.slice\s*;\s*[\w$]+\.VERSION)"
+    r"\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)"
+)
+_UNDERSCORE_VERSION = (
+    r"Underscore\.js\s+v?(\d+(?:\.\d+){0,3})(?!\d|\.\d)"
+    r"[\s\S]{0,120}?https://underscorejs\.org"
+)
+_LODASH_MIN_VERSION = (
+    r"=\s*[\"'](\d+(?:\.\d+){0,3})[\"']\s*,\s*[\w$]+\s*=\s*200\s*,"
+    r"\s*[\w$]+\s*=\s*[\"']Unsupported core-js use\."
+)
+
+
 EXPANDED_RULES: tuple[Rule, ...] = (
     # Product banners and attributes published by front-end libraries.
     _rule("expanded-angular-core", "angular", "angular", "js-library", "script",
@@ -437,8 +455,7 @@ EXPANDED_RULES: tuple[Rule, ...] = (
     _rule("expanded-ember-markup", "emberjs", "ember", "js-library", "html",
           r"\bember-view\b", name="Ember", ecosystem="npm", package="ember-source", confidence="medium"),
     _rule("expanded-backbone-script", "backbonejs", "backbone", "js-library", "script",
-          r"(?:Backbone\.VERSION|\bBackbone\b[\s\S]{0,8192}?\b[A-Za-z_$][A-Za-z0-9_$]*\.VERSION)\s*=\s*[\"']\d",
-          version=r"\.VERSION\s*=\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          _BACKBONE_VERSION, version=_BACKBONE_VERSION,
           name="Backbone.js", ecosystem="npm", package="backbone", confidence="high", hint="backbone"),
     _rule("expanded-alpine-markup", "alpinejs", "alpinejs", "js-library", "html",
           r"(?:^|\s)x-(?:data|init|show|bind|on|model|for|if|ref|text|html|transition)\s*=",
@@ -468,11 +485,13 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           name="jQuery Migrate", ecosystem="npm", package="jquery-migrate", confidence="high", hint="jqmigrate:"),
     _rule("expanded-lodash-script", "lodash", "lodash", "js-library", "script",
           r"(?:\blodash\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)|Lodash\s+lodash\.com/license)",
-          version=r"(?:\blodash\s+|^[\s\S]{0,4096}?[A-Za-z_$][A-Za-z0-9_$]*=[\"'])(\d+(?:\.\d+){0,3})(?!\d|\.\d)[\"']?",
+          version=r"\blodash\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           name="Lodash", ecosystem="npm", package="lodash", confidence="high", hint="lodash"),
+    _rule("expanded-lodash-minified", "lodash", "lodash", "js-library", "script",
+          _LODASH_MIN_VERSION, version=_LODASH_MIN_VERSION,
+          name="Lodash", ecosystem="npm", package="lodash", confidence="high", hint="unsupported core-js use"),
     _rule("expanded-underscore-script", "underscorejs", "underscore", "js-library", "script",
-          r"Underscore\.js\s+(?:v)?\d+(?:\.\d+){0,3}(?!\d|\.\d)[\s\S]{0,120}?https://underscorejs\.org",
-          version=r"Underscore\.js\s+(?:v)?(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
+          _UNDERSCORE_VERSION, version=_UNDERSCORE_VERSION,
           name="Underscore.js", ecosystem="npm", package="underscore", confidence="high", hint="underscore"),
     _rule("expanded-moment-script", "momentjs", "moment", "js-library", "script",
           r"moment\.js\s+version\s*:\s*(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
@@ -518,6 +537,9 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           r"\brxjs@(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           version=r"\brxjs@(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           name="RxJS", ecosystem="npm", package="rxjs", confidence="high", hint="rxjs@"),
+    _rule("expanded-rxjs-runtime", "reactivex", "rxjs", "js-library", "script",
+          r"""["']ObjectUnsubscribedError["']\s*[,;]\s*this\.message\s*=\s*["']object unsubscribed["']""",
+          name="RxJS", ecosystem="npm", package="rxjs", confidence="high", hint="objectunsubscribederror"),
     _rule("expanded-core-js", "core-js", "core-js", "js-library", "script",
           r"__core-js_shared__[\s\S]{0,160}?\.push\(\{\s*version\s*:\s*[\"']\d+(?:\.\d+){0,3}[^}]{0,256}?copyright\s*:\s*[\"']",
           version=r"__core-js_shared__[\s\S]{0,160}?\.push\(\{\s*version\s*:\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)[^}]{0,256}?copyright\s*:\s*[\"']",
@@ -526,6 +548,9 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           r"zone\.js\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           version=r"zone\.js\s+v(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           name="zone.js", ecosystem="npm", package="zone.js", confidence="high", hint="zone.js"),
+    _rule("expanded-zonejs-runtime", "zone.js", "zone.js", "js-library", "script",
+          r"""["']Already loaded patch: ["']\s*\+""",
+          name="zone.js", ecosystem="npm", package="zone.js", confidence="high", hint="__zone_symbol__"),
     _rule("expanded-webpack-runtime", "webpack", "webpack", "js-library", "script",
           r"(?:webpackJsonp|webpackChunk(?!ed)[A-Za-z0-9_$]*\s*=|__webpack_require__)",
           name="webpack", ecosystem="npm", package="webpack", confidence="high", hint="webpack"),
@@ -571,6 +596,9 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           r"Foundation for Sites\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           version=r"Foundation for Sites\s+(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           name="Foundation", ecosystem="npm", package="foundation-sites", confidence="high", hint="foundation for sites"),
+    _rule("expanded-foundation-media-queries", "zurb", "foundation-sites", "js-library", "style",
+          r"""\.foundation-mq\s*\{\s*font-family\s*:\s*["']?small=[^&{}"'\s]{1,32}&medium=""",
+          name="Foundation", ecosystem="npm", package="foundation-sites", confidence="high", hint=".foundation-mq"),
     _rule("expanded-animate-style", "animatecss", "animate.css", "js-library", "style",
           r"(?:animate\.css\s+-\s+Version\s+|animate\.css\s+-\s+https://animate\.style/[\s\S]{0,120}?Version\s+-\s+)(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           version=r"(?:animate\.css\s+-\s+Version\s+|animate\.css\s+-\s+https://animate\.style/[\s\S]{0,120}?Version\s+-\s+)(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
@@ -753,6 +781,18 @@ BUILT_ARTIFACT_HASHES = {
         ("zurb", "foundation-sites", "Foundation", "js-library", "npm", "foundation-sites",
          "6.9.0", "style"),
 }
+
+# Byte offsets and lengths of the same published artifacts. These anchors
+# locate candidates in concatenated bundles. Only a digest match gives a version.
+_EMBEDDED_ARTIFACTS = {
+    "4ee0b2fe4733702f3ff1bc453ef5547effdc08e62551904946d2058bdd811ada":
+        (b"Already loaded patch: ", 1659, 36166),  # zone.js 0.16.3, MIT
+    "6508e15edacb9eb2c00b8d3fb8fe3022bef1ca1cdb705519524093d4659b3c23":
+        (b"ObjectUnsubscribedError", 52581, 88037),  # RxJS 7.8.1, Apache-2.0
+    "c500decbe33468e54180f1b6238850d810e85dcdfbea7f87f56bcb17051a51e4":
+        (b".foundation-mq{font-family:", 2346, 131304),  # Foundation 6.9.0, MIT
+}
+_MAX_ARTIFACT_ANCHORS = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -1017,36 +1057,64 @@ def _npm_name(value: str) -> bool:
 
 
 REVIEWED_ALIASES = {
-    # Web and application servers.
-    ("apache", "http_server"): "apache-http-server",
-    ("apache_http_server", "apache_http_server"): "apache-http-server",
-    ("apache-http-server", "apache-http-server"): "apache-http-server",
-    ("microsoft", "iis"): "microsoft-iis",
-    ("microsoft_iis", "internet_information_services"): "microsoft-iis",
-    ("nginxinc", "nginx"): "nginx",
-    ("apache_tomcat", "apache_tomcat"): "apache-tomcat",
-    ("apache", "tomcat"): "apache-tomcat",
-    ("eclipse_jetty", "jetty"): "jetty",
-    ("oracle", "weblogic"): "weblogic-server",
-    ("ibm", "websphere"): "websphere-application-server",
-    # Languages and frameworks.
-    ("php_language", "php"): "php",
-    ("microsoft", "asp_net"): "asp-net",
-    ("microsoft_asp_net", "asp_net"): "asp-net",
-    ("ruby_on_rails", "rails"): "rails",
-    ("expressjs", "express"): "express",
-    # Content management systems and applications.
-    ("wordpress", "wordpress_cms"): "wordpress",
-    ("drupal", "drupal_cms"): "drupal",
-    ("joomla", "joomla_cms"): "joomla",
-    ("adobe", "magento_commerce"): "magento",
-    ("prestashop", "prestashop_ecommerce"): "prestashop",
-    ("typo3_cms", "typo3"): "typo3",
-    ("adobe", "experience_manager"): "adobe-experience-manager",
-    ("microsoft", "sharepoint"): "sharepoint-server",
-    ("umbraco_cms", "umbraco"): "umbraco",
-    ("sitecore", "sitecore"): "sitecore-experience-platform",
+    # Each value is the preferred vendor/product, including for emitted CPEs.
+    # Prefer established built-in CPEs, then reviewed published CPEs where the
+    # built-in has none (for example f5/nginx). Name-only matches add no CPE.
+    ("apache_http_server", "apache_http_server"): ("apache", "http_server"),
+    ("apache-http-server", "apache-http-server"): ("apache", "http_server"),
+    ("microsoft", "iis"): ("microsoft", "internet_information_services"),
+    ("microsoft_iis", "internet_information_services"): ("microsoft", "internet_information_services"),
+    ("nginx", "nginx"): ("f5", "nginx"),
+    ("nginxinc", "nginx"): ("f5", "nginx"),
+    ("apache_tomcat", "apache_tomcat"): ("apache", "tomcat"),
+    ("eclipse_jetty", "jetty"): ("eclipse", "jetty"),
+    ("oracle", "weblogic"): ("oracle", "weblogic_server"),
+    ("ibm", "websphere"): ("ibm", "websphere_application_server"),
+    ("websphere", "websphere"): ("ibm", "websphere_application_server"),
+    ("php_language", "php"): ("php", "php"),
+    ("microsoft", "asp_net"): ("microsoft", "asp.net"),
+    ("microsoft_asp_net", "asp_net"): ("microsoft", "asp.net"),
+    ("ruby_on_rails", "rails"): ("rubyonrails", "rails"),
+    ("symfony", "symfony"): ("sensiolabs", "symfony"),
+    ("wordpress", "wordpress_cms"): ("wordpress", "wordpress"),
+    ("drupal", "drupal_cms"): ("drupal", "drupal"),
+    ("joomla", "joomla"): ("joomla", "joomla!"),
+    ("joomla", "joomla_cms"): ("joomla", "joomla!"),
+    ("adobe", "magento"): ("magento", "magento"),
+    ("adobe", "magento_commerce"): ("magento", "magento"),
+    ("prestashop", "prestashop_ecommerce"): ("prestashop", "prestashop"),
+    ("typo3_cms", "typo3"): ("typo3", "typo3"),
+    ("microsoft", "sharepoint"): ("microsoft", "sharepoint_server"),
+    ("umbraco_cms", "umbraco"): ("umbraco", "umbraco"),
+    ("sitecore", "sitecore"): ("sitecore", "sitecore_experience_platform"),
+    ("sitecore_experience_platform", "sitecore_experience_platform"): ("sitecore", "sitecore_experience_platform"),
+    ("elasticsearch", "kibana"): ("elastic", "kibana"),
+    ("paypal", "paypal-sdk"): ("paypal", "paypal"),
+    ("recaptcha", "recaptcha"): ("google", "recaptcha"),
+    ("microsoft_clarity", "microsoft_clarity"): ("microsoft", "clarity"),
 }
+_CANONICAL_ALIAS_KEYS = frozenset(REVIEWED_ALIASES.values())
+
+
+def _cpe_fields(cpe: str, *, keep_escapes: bool = False) -> tuple[str, ...]:
+    fields = split_cpe23(cpe, keep_escapes=keep_escapes)
+    if len(fields) == 11 and all(field not in {"", "*", "-"} for field in fields[1:3]):
+        return fields
+    return ()
+
+
+def canonical_cpe(cpe: str) -> str:
+    """Use the reviewed vendor/product spelling and keep other CPE fields."""
+    fields = _cpe_fields(cpe)
+    if not fields:
+        return cpe
+    pair = (fields[1].casefold(), fields[2].casefold())
+    canonical = REVIEWED_ALIASES.get(pair, pair)
+    if canonical not in _CANONICAL_ALIAS_KEYS:
+        return cpe
+    escaped = tuple(re.sub(r"([^a-z0-9._-])", r"\\\1", item) for item in canonical)
+    raw = _cpe_fields(cpe, keep_escapes=True)
+    return "cpe:2.3:" + ":".join((raw[0], *escaped, *raw[3:]))
 
 
 def identity_key(detection: Detection) -> tuple[str, ...]:
@@ -1054,17 +1122,14 @@ def identity_key(detection: Detection) -> tuple[str, ...]:
     if (detection.ecosystem == "npm" and isinstance(detection.package, str)
             and _npm_name(detection.package)):
         return "npm", detection.package
-    if detection.cpe:
-        try:
-            fields = split_cpe23(detection.cpe)
-        except (TypeError, ValueError):
-            fields = ()
-        if len(fields) == 11 and fields[1] not in {"", "*", "-"} and fields[2] not in {"", "*", "-"}:
-            return "cpe", fields[1].casefold(), fields[2].casefold()
-    alias = REVIEWED_ALIASES.get((detection.vendor.casefold(), detection.product.casefold()))
-    if alias:
-        return "alias", alias
-    return "product", detection.vendor.casefold(), detection.product.casefold()
+    fields = _cpe_fields(detection.cpe)
+    if fields:
+        pair = (fields[1].casefold(), fields[2].casefold())
+    else:
+        pair = (detection.vendor.casefold(), detection.product.casefold())
+        if getattr(detection, "name_only", False) and detection.name and pair not in REVIEWED_ALIASES:
+            return "name", detection.name.casefold()
+    return "product", *REVIEWED_ALIASES.get(pair, pair)
 
 
 def _url_parts(value: str):
@@ -1240,6 +1305,36 @@ def _deadline_passed(deadline, clock) -> bool:
     return deadline is not None and clock() >= deadline
 
 
+def _artifact_matches(resource: Resource, deadline, clock):
+    encoded = resource.text.encode("utf-8")
+    whole_digest = hashlib.sha256(encoded).hexdigest()
+    for digest, entry in BUILT_ARTIFACT_HASHES.items():
+        if _deadline_passed(deadline, clock):
+            break
+        if entry[7] != resource.kind:
+            continue
+        if digest == whole_digest:
+            yield entry, resource.text[:160]
+            continue
+        if digest not in _EMBEDDED_ARTIFACTS:
+            continue
+        marker, offset, length = _EMBEDDED_ARTIFACTS[digest]
+        if len(encoded) <= length:
+            continue
+        position = offset
+        for _ in range(_MAX_ARTIFACT_ANCHORS):
+            if _deadline_passed(deadline, clock):
+                break
+            position = encoded.find(marker, position, len(encoded) - length + offset + len(marker))
+            if position == -1:
+                break
+            start = position - offset
+            if hashlib.sha256(encoded[start:start + length]).hexdigest() == digest:
+                yield entry, marker.decode("ascii")
+                break
+            position += 1
+
+
 def _valid_detection(detection: Detection) -> bool:
     values = (detection.vendor, detection.product, detection.category, detection.cpe,
               detection.confidence, detection.name, detection.ecosystem, detection.package,
@@ -1333,16 +1428,13 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
         for resource in page.resources:
             if _deadline_passed(deadline, clock):
                 break
-            encoded = resource.text.encode("utf-8")
-            exact = BUILT_ARTIFACT_HASHES.get(hashlib.sha256(encoded).hexdigest())
-            if exact is None or exact[7] != resource.kind:
-                continue
-            vendor, product, name, category, ecosystem, package, version, _kind = exact
-            _record(grouped, vendor=vendor, product=product, name=name, category=category,
-                    confidence="high", evidence=resource.kind, versions=(version,),
-                    ecosystem=ecosystem, package=package,
-                    evidence_items=(Evidence(resource.kind, resource.url, resource.text[:160]),),
-                    rule_key=f"artifact-sha256:{package}:{version}")
+            for exact, excerpt in _artifact_matches(resource, deadline, clock):
+                vendor, product, name, category, ecosystem, package, version, _kind = exact
+                _record(grouped, vendor=vendor, product=product, name=name, category=category,
+                        confidence="high", evidence=resource.kind, versions=(version,),
+                        ecosystem=ecosystem, package=package,
+                        evidence_items=(Evidence(resource.kind, resource.url, excerpt),),
+                        rule_key=f"artifact-sha256:{package}:{version}")
 
     if not _deadline_passed(deadline, clock):
         from . import retirejs
