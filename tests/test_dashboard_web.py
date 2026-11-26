@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -220,7 +221,10 @@ def test_detection_companion_argument_list(web, monkeypatch):
     assert save(client).status_code == 303
     asset_path, output = paths(config, "Acme")
     calls = []
-    monkeypatch.setattr(web_assets.subprocess, "call", lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
+    child = MagicMock()
+    child.__enter__.return_value.wait.return_value = 0
+    monkeypatch.setattr(web_assets.subprocess, "Popen",
+                        lambda argv, **kwargs: calls.append((argv, kwargs)) or child)
     assert web_assets.run_detection(config, "Acme") == 0
     assert calls[0][0] == [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
                            "--client", "Acme", "--assets", str(asset_path), "--output", str(output),
@@ -592,15 +596,16 @@ def test_single_removal_warns_until_next_detection(web, monkeypatch):
     assert save(client, action="remove", index="0").status_code == 303
     warning = "Results include assets removed since the last run"
     assert warning in client.get("/web-assets?client=Acme").text
-    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 0)
+    child = MagicMock()
+    wait = child.__enter__.return_value.wait
+    wait.side_effect = [0, 2, 0]
+    monkeypatch.setattr(web_assets.subprocess, "Popen", lambda *a, **k: child)
     assert web_assets.run_detection(config, "Acme", plan=True) == 0
     assert warning in client.get("/web-assets?client=Acme").text
     before = output.read_bytes()
-    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 2)
     assert web_assets.run_detection(config, "Acme") == 2
     assert output.read_bytes() == before
     assert warning in client.get("/web-assets?client=Acme").text
-    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 0)
     assert web_assets.run_detection(config, "Acme") == 0
     assert warning not in client.get("/web-assets?client=Acme").text
 

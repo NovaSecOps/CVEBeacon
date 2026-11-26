@@ -20,6 +20,8 @@ from .snapshot import sync_directory
 from .web_inventory import decode_json, read_bytes
 
 COMPANION_NOTICE = "Web detection requires the optional Extensions package. Install it to enable these actions."
+RUN_TIMEOUT = 60 * 60.0
+RUN_TIMEOUT_REASON = "detection stopped at the run time limit"
 
 
 def companion_available():
@@ -152,9 +154,19 @@ def run_detection(config, client, *, plan=False):
         raise ConfigurationError("Save an attested web asset before running detection")
     # The parent CLI holds the shared scan lock throughout the child process.
     fingerprints = fingerprint_directory(config)
-    code = subprocess.call(companion_command(document["client"], assets, output, plan=plan,
-                                             fingerprints=fingerprints if fingerprints.is_dir() else None),
-                           stdin=subprocess.DEVNULL, env=child_environment(config))
+    command = companion_command(document["client"], assets, output, plan=plan,
+                                fingerprints=fingerprints if fingerprints.is_dir() else None)
+    with subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config)) as child:
+        try:
+            code = child.wait(timeout=RUN_TIMEOUT + 5 * 60)
+        except subprocess.TimeoutExpired as exc:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            raise ConfigurationError(RUN_TIMEOUT_REASON) from exc
     if not plan and code == 0:
         output.with_name(output.name + ".removed").unlink(missing_ok=True)
     return code
