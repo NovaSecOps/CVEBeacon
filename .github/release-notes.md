@@ -1,16 +1,3 @@
-<!--
-Release notes template. The release workflow fills in the version, date and
-container image digest, then creates a draft release. Review the draft, the
-asset list and the checksums before publishing it.
-
-## Publishing checklist
-- [ ] Confirm the version and notes in this draft.
-- [ ] Confirm `SHA256SUMS` covers every uploaded artifact except itself and
-      `SHA256SUMS.sig`.
-- [ ] Confirm the GHCR manifest digest matches `{{IMAGE_DIGEST}}`.
-- [ ] Publish only after `docs/RELEASE_CHECKLIST.md` passes.
--->
-
 # CVEBeacon {{VERSION}}
 
 Released {{DATE}}.
@@ -82,6 +69,12 @@ version tag. The version tag above is immutable; publish a new patch version
 instead of replacing it.
 
 ## Upgrade notes
+
+- **Upgrading from 0.2.0.** Start the upgrade as an administrator with
+  `sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply`. Replace
+  `/opt/cvebeacon` with your installation prefix if needed. In 0.2.0, the
+  dashboard request cannot read the service account's crontab inside the update
+  service. Dashboard-triggered upgrades work from 0.2.1 onward.
 
 - **Installs made from source before `0.1.0`.** Installs made before the first
   published release (`0.1.0`) carry only the fail-closed placeholder signing pin, so

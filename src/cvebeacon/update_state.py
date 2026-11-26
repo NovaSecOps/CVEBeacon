@@ -9,9 +9,11 @@ import secrets
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
+import time
 
-from .config import load_config
+from .config import UPDATE_STATUS_DIR, load_config
 from .errors import CVEBeaconError
 from .inventory_journal import recover, remove_file
 from .managed_inventory import is_managed_file
@@ -23,8 +25,10 @@ from .snapshot import (
     digest,
     logical_digest,
     sync_directory,
+    sync_file,
 )
 from .state import StateStore
+from .updater import ADVISORY_MARKER, ADVISORY_MARKER_BYTES, read_bounded
 from .watch.store import WatchStore
 from .watch.users import UserStore
 from .web_assets import replace_bytes
@@ -32,6 +36,87 @@ from .web_inventory import read_bytes
 
 
 MAX_MANAGED_FILES = 20_000
+BACKUP_BUSY_WAIT_SECONDS = 30.0
+
+
+class BackupDatabaseBusy(SnapshotError):
+    """A database remained locked for the bounded update-backup wait."""
+
+
+BACKUP_RETRY_SECONDS = 0.05
+BACKUP_BATCH_PAGES = 128
+
+
+def _sqlite_busy(code):
+    return isinstance(code, int) and (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+
+
+class _BusyWait:
+    def __init__(self, wait_seconds):
+        self.wait_seconds = wait_seconds
+        self.since = None
+
+    def retry(self):
+        now = time.monotonic()
+        if self.since is None:
+            self.since = now
+        if now - self.since >= self.wait_seconds:
+            raise BackupDatabaseBusy("database remained busy during backup")
+
+    def run(self, operation):
+        while True:
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                if not _sqlite_busy(getattr(exc, "sqlite_errorcode", None)):
+                    raise
+                self.retry()
+                time.sleep(BACKUP_RETRY_SECONDS)
+
+    def progress(self, code, remaining, total):
+        if _sqlite_busy(code):
+            self.retry()
+        elif code in {sqlite3.SQLITE_OK, sqlite3.SQLITE_DONE}:
+            self.since = None
+
+
+def _backup_copy_worker(source, destination, *, wait_seconds):
+    """Bound continuous SQLite contention at the point of retry."""
+    source, destination = Path(source), Path(destination)
+    src = _BusyWait(wait_seconds).run(
+        lambda: sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=BACKUP_RETRY_SECONDS)
+    )
+    with closing(src):
+        dst = _BusyWait(wait_seconds).run(
+            lambda: sqlite3.connect(destination, timeout=BACKUP_RETRY_SECONDS)
+        )
+        with closing(dst):
+            wait = _BusyWait(wait_seconds)
+            # A surfaced BUSY/LOCKED ends this backup handle. Retrying against
+            # the private destination is safe and shares the callback's clock.
+            wait.run(lambda: src.backup(dst, pages=BACKUP_BATCH_PAGES,
+                                        progress=wait.progress, sleep=BACKUP_RETRY_SECONDS))
+            integrity = _BusyWait(wait_seconds).run(lambda: dst.execute("PRAGMA integrity_check").fetchone())
+            if integrity[0] != "ok":
+                raise SnapshotError("SQLite snapshot integrity check failed")
+    destination.chmod(0o600)
+    sync_file(destination)
+
+
+def _copy_sqlite_bounded(source, destination, *, wait_seconds=BACKUP_BUSY_WAIT_SECONDS):
+    """Use a separate process so SQLite file closes cannot release caller locks."""
+    process = subprocess.run(
+        [sys.executable, "-I", "-m", "cvebeacon.update_state", "--backup-copy",
+         str(source), str(destination), str(wait_seconds)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+        cwd=Path.cwd(),
+    )
+    if process.returncode == 75:
+        raise BackupDatabaseBusy("database remained busy during backup")
+    if process.returncode:
+        raise SnapshotError("SQLite snapshot operation failed")
 
 
 def databases(config, data, *, validate_known=True):
@@ -42,6 +127,15 @@ def databases(config, data, *, validate_known=True):
             raise SnapshotError("all state databases must be inside the configured data directory")
     count = 0
     for parent, directories, files in os.walk(data, followlinks=False):
+        if Path(parent) == data and UPDATE_STATUS_DIR in directories:
+            advisory = data / UPDATE_STATUS_DIR
+            if not advisory.is_symlink():
+                try:
+                    initialized = read_bounded(advisory / ADVISORY_MARKER, 64) == ADVISORY_MARKER_BYTES
+                except (OSError, CVEBeaconError):
+                    initialized = False
+                if initialized:
+                    directories.remove(UPDATE_STATUS_DIR)
         for name in directories + files:
             count += 1
             if count > 20000:
@@ -190,7 +284,7 @@ def backup(config, data, destination):
             entry["mode"] = stat.S_IMODE(path.stat().st_mode)
             target = destination / entry["backup"]
             os.close(private_file(target, create=True, exclusive=True))
-            _copy_sqlite(path, target)
+            _copy_sqlite_bounded(path, target)
             entry.update(sha256=digest(target), logical_sha256=logical_digest(target))
         manifest["databases"].append(entry)
     config_backup = destination / "config.toml"
@@ -306,6 +400,9 @@ def migrate(config):
 
 
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == "--backup-copy":
+        _backup_copy_worker(sys.argv[2], sys.argv[3], wait_seconds=float(sys.argv[4]))
+        return
     action, config_path, data, directory, *expected = sys.argv[1:]
     data, source = Path(data).resolve(strict=True), Path(directory)
     if expected and digest(source / "manifest.json") != expected[0]:
@@ -330,5 +427,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except BackupDatabaseBusy:
+        raise SystemExit(75) from None
     except (CVEBeaconError, OSError, ValueError, KeyError, sqlite3.Error):
         raise SystemExit("state snapshot operation failed") from None

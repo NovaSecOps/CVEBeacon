@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -220,7 +221,10 @@ def test_detection_companion_argument_list(web, monkeypatch):
     assert save(client).status_code == 303
     asset_path, output = paths(config, "Acme")
     calls = []
-    monkeypatch.setattr(web_assets.subprocess, "call", lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
+    child = MagicMock()
+    child.wait.return_value = 0
+    monkeypatch.setattr(web_assets.subprocess, "Popen",
+                        lambda argv, **kwargs: calls.append((argv, kwargs)) or child)
     assert web_assets.run_detection(config, "Acme") == 0
     assert calls[0][0] == [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
                            "--client", "Acme", "--assets", str(asset_path), "--output", str(output),
@@ -592,15 +596,16 @@ def test_single_removal_warns_until_next_detection(web, monkeypatch):
     assert save(client, action="remove", index="0").status_code == 303
     warning = "Results include assets removed since the last run"
     assert warning in client.get("/web-assets?client=Acme").text
-    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 0)
+    child = MagicMock()
+    wait = child.wait
+    wait.side_effect = [0, 2, 0]
+    monkeypatch.setattr(web_assets.subprocess, "Popen", lambda *a, **k: child)
     assert web_assets.run_detection(config, "Acme", plan=True) == 0
     assert warning in client.get("/web-assets?client=Acme").text
     before = output.read_bytes()
-    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 2)
     assert web_assets.run_detection(config, "Acme") == 2
     assert output.read_bytes() == before
     assert warning in client.get("/web-assets?client=Acme").text
-    monkeypatch.setattr(web_assets.subprocess, "call", lambda *a, **k: 0)
     assert web_assets.run_detection(config, "Acme") == 0
     assert warning not in client.get("/web-assets?client=Acme").text
 
@@ -623,6 +628,125 @@ def test_corrupt_review_fields_are_rejected_before_rendering(web, section, field
     assert page.status_code == 200
     assert "review the local files" in page.text
     assert "SECRET_BODY" not in page.text
+
+
+@pytest.mark.parametrize("section,field,value", [
+    ("products", "name", {"body": "not text"}),
+    ("products", "ecosystem", 7),
+    ("products", "package", None),
+    ("products", "implied_by", "Angular"),
+    ("products", "implied_by", ["Angular", 7]),
+    ("products", "name", ""),
+    ("products", "name", "x" * 257),
+    ("products", "package", "react"),
+    ("products", "ecosystem", "npm"),
+    ("products", "package", "../react"),
+    ("products", "package", "@../react"),
+    ("products", "evidence", "not a list"),
+    ("products", "evidence", [{"kind": 7, "source": "page", "excerpt": "x"}]),
+    ("products", "evidence", [{"kind": "unknown", "source": "page", "excerpt": "x"}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x" * 161}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "sha256": "bad"}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "sha256": "a" * 64}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "bytes": 512}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "bytes": True}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "bytes": -1}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x"}] * 21),
+    ("run", "resources_fetched", -1),
+    ("run", "resources_skipped", True),
+    ("run", "resources_skipped_by_reason", {"blocked": 1}),
+])
+def test_new_review_fields_are_validated_before_rendering(web, section, field, value):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    detail = {"client": "Acme", "products": [], "reviews": []}
+    detail[section] = {field: value} if section == "run" else [{field: value}]
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert "review the local files" in page.text
+
+
+def test_skip_reason_counts_must_sum_to_total(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    detail = {
+        "client": "Acme", "products": [], "reviews": [],
+        "run": {"resources_skipped": 2, "resources_skipped_by_reason": {"blocked": 1}},
+    }
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert "review the local files" in page.text
+
+
+def test_detected_product_table_groups_sorts_and_uses_plain_evidence_labels(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    detail = {
+        "client": "Acme",
+        "products": [
+            {"hostname": "b.example", "vendor": "npm", "product": "package", "name": "Package",
+             "category": "js-library", "confidence": "high", "versions": ["1.2.3"],
+             "evidence_types": ["style"]},
+            {"hostname": "a.example", "vendor": "angular", "product": "angular", "name": "React",
+             "category": "framework", "confidence": "high", "versions": [],
+             "evidence_types": ["header", "cookie", "html", "url", "script"],
+             "ecosystem": "npm", "package": "react", "implied_by": ["Next.js"],
+             "evidence": [{"kind": "script", "source": "https://assets.example.invalid/react.js",
+                           "excerpt": "/*! @license React v18.2.0 */", "sha256": "a" * 64,
+                           "bytes": 512}]},
+            {"hostname": "a.example", "vendor": "angular", "product": "angular", "name": "Angular",
+             "category": "framework", "confidence": "low", "versions": [],
+             "evidence_types": ["implied"], "implied_by": ["TypeScript"]},
+            {"hostname": "a.example", "vendor": "lodash", "product": "lodash",
+             "category": "js-library", "confidence": "medium", "versions": ["4.17.21"],
+             "evidence_types": ["url"]},
+        ],
+        "reviews": [{"reason": "version-unknown"}],
+        "run": {"status": "success", "resources_fetched": 4, "resources_skipped": 2},
+    }
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    table = page.text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
+    assert table.index("a.example") < table.index("b.example")
+    assert table.index("Angular") < table.index("React") < table.index("lodash")
+    assert "Version not disclosed" in table and "4.17.21" in table
+    for label in ("response header", "cookie", "page markup", "linked file", "script file",
+                  "stylesheet", "Inferred from TypeScript", "Inferred from Next.js"):
+        assert label in table
+    for label in ("<summary>Evidence</summary>", "https://assets.example.invalid/react.js",
+                  "/*! @license React v18.2.0 */", "SHA-256", "512 bytes"):
+        assert label in table
+    assert "Read 4 script and style files from the sites (2 skipped)." in page.text
+    assert "Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory." in page.text
+
+
+def test_product_and_evidence_markup_sentinel_is_rendered_as_text(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    sentinel = "<script>alert(1)</script>"
+    detail = {
+        "client": "Acme",
+        "products": [{
+            "hostname": "example.invalid", "vendor": "npm", "product": "react",
+            "name": sentinel, "category": "js-library", "confidence": "high",
+            "versions": ["18.3.1"], "evidence_types": ["script"],
+            "ecosystem": "npm", "package": "react",
+            "evidence": [{"kind": "script", "source": sentinel, "excerpt": sentinel}],
+        }],
+        "reviews": [],
+    }
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    response = client.get("/web-assets?client=Acme")
+    assert response.status_code == 200
+    assert sentinel not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
 
 
 
@@ -932,3 +1056,33 @@ def test_redirect_prefill_action_needs_manage_web_assets(web):
     assert "This site redirects to https://www.example.invalid:443" in page.text
     assert "Add this redirect target as an authorised site" not in page.text
     assert "If the client authorises it, add it as a site." not in page.text
+
+
+@pytest.mark.parametrize("field,value", [
+    ("review_truncated", "yes"), ("fingerprint_error", []), ("fingerprint_stopped", -1),
+    ("fingerprint_technologies", True), ("analysis_stopped", "1"),
+])
+def test_review_run_flags_are_validated_by_type(field, value):
+    from cvebeacon.dashboard_web import _review_metadata
+
+    with pytest.raises(ValueError):
+        _review_metadata({"client": "Acme", "run": {field: value}}, "Acme")
+
+
+@pytest.mark.parametrize("persisted_entry_count", [1, 1001])
+def test_dashboard_distinguishes_collection_truncation_from_display_limit(setup, persisted_entry_count):
+    config, _, client = setup
+    assets, output = paths(config, "Acme")
+    save_allowlist(assets, {"client": "Acme", "assets": []})
+    detail = {"client": "Acme", "reviews": [{}] * persisted_entry_count, "run": {
+        "status": "partial", "review_truncated": True, "fingerprint_error": True,
+        "fingerprint_stopped": 2, "analysis_stopped": 1,
+    }}
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert "The saved review reached its size limit" in page.text
+    assert "Fingerprint analysis stopped early for 2 sites" in page.text
+    assert "Fingerprint analysis encountered an error" in page.text
+    assert "Web analysis reached its time limit on 1 site" in page.text
+    assert ("Showing the first 1,000 saved entries per table" in page.text) == (persisted_entry_count > 1000)

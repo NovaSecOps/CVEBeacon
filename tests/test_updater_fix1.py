@@ -45,7 +45,7 @@ def test_real_config_variants_share_request_and_status_locations(tmp_path, signe
     u.request_update(config, "0.1.1", proof, users)
     assert u.read_request(tmp_path / u.REQUEST) == "0.1.1"
     u.check(config, http=signed[0].http)
-    assert json.loads((tmp_path / u.STATUS).read_text())["available"] == "0.1.1"
+    assert json.loads((tmp_path / u.UPDATE_STATUS_DIR / u.CHECK_STATUS).read_text(encoding="utf-8"))["value"]["available"] == "0.1.1"
     assert u.read_status(config)["available"] == "0.1.1"
 
 
@@ -99,7 +99,7 @@ def test_post_replace_fsync_error_restores_the_actual_link(transaction, monkeypa
 
 def test_advisory_status_failure_does_not_reverse_or_fail_a_healthy_update(transaction):
     updater, native, config = transaction
-    (config.config_path.parent / u.STATUS).mkdir()
+    (u._advisory_directory(config.config_path.parent) / u.STATUS).mkdir()
     assert updater.apply("0.1.1")["result"] == "updated"
     assert updater.current().name == "0.1.1"
 
@@ -286,6 +286,10 @@ def test_rollback_health_must_be_checked_before_success(transaction):
         updater.apply("0.1.1")
     assert (updater.policy.prefix / "update-journal.json").exists()
     assert probes == ["0.1.0", "0.1.0"]
+    status = json.loads((updater.policy.data / u.UPDATE_STATUS_DIR / u.STATUS).read_text(encoding="utf-8"))["value"]
+    assert status["last_update"]["result"] == "rollback-failed"
+    assert status["last_update"]["reason"] == "migrate-failed"
+    assert status["last_update"]["recovery_reason"] == "probe-unhealthy"
 
 
 def test_interrupted_restore_can_be_repeated_from_the_same_snapshot(transaction, monkeypatch):
@@ -314,20 +318,16 @@ def test_interrupted_restore_can_be_repeated_from_the_same_snapshot(transaction,
 def test_health_refuses_stale_or_unrelated_listeners(tmp_path, monkeypatch, payload, listener):
     native = object.__new__(u.Native)
     native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service")
-    native.dashboard_pid = lambda: 42
-    native.owns_listener = lambda pid: listener
-    class Transport:
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def request_once(self, *args, **kwargs):
-            return SimpleNamespace(status_code=200, body=json.dumps(payload).encode())
-    monkeypatch.setattr(u, "HttpClient", lambda *args, **kwargs: Transport())
-    ticks = iter([0, 31])
-    monkeypatch.setattr(u.time, "monotonic", lambda: next(ticks))
+    native.dashboard_pid = lambda *, timeout: 42
+    native.process_start = lambda pid: 1
+    native.listener_sockets = lambda pid: {"1"} if listener else set()
+    monkeypatch.setattr(u, "_health_response", lambda *args: payload)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(u.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
     with pytest.raises(u.UpdateError, match="health probe failed"):
         native.probe("0.1.1")
+    assert clock["now"] == 120
 
 
 def test_custom_dashboard_unit_is_not_treated_as_a_sync_service(tmp_path):
@@ -351,17 +351,39 @@ def test_unreadable_service_preflight_happens_before_quiescence_or_journal(trans
     assert not native.calls and not (updater.policy.prefix / "update-journal.json").exists()
 
 
-def test_managed_service_cron_prevents_native_adoption_preflight(tmp_path, monkeypatch):
-    native = object.__new__(u.Native)
-    calls = []
+@pytest.fixture
+def cron_native(tmp_path, monkeypatch):
+    import pwd
+
+    account = SimpleNamespace(pw_name="service", pw_uid=1234, pw_gid=1234)
+    monkeypatch.setattr(pwd, "getpwnam", lambda login: account)
     monkeypatch.setattr(u.shutil, "which", lambda *args, **kwargs: "/usr/bin/crontab")
+    return u.Native(u.Policy(tmp_path, tmp_path / "config", tmp_path, "service"))
+
+
+def test_managed_service_cron_prevents_native_adoption_preflight(cron_native):
+    native = cron_native
+    calls = []
     def run(args, **kwargs):
         calls.append((args, kwargs))
         return SimpleNamespace(returncode=0, stdout=b"# BEGIN CVEBEACON MANAGED\nold-path job\n# END CVEBEACON MANAGED", stderr=b"")
     native.run = run
     with pytest.raises(u.UpdateError, match="remove.*cron"):
         native.managed_cron()
-    assert calls[0][0] == ["crontab", "-l"] and calls[0][1]["service"]
+    assert calls[0][0] == ["crontab", "-l", "-u", "service"]
+    assert calls[0][1].get("service", False) is False
+
+
+def test_service_crontab_absence_is_checked_as_root_for_the_named_account(cron_native):
+    native = cron_native
+    calls = []
+    native.run = lambda args, **kwargs: (calls.append((args, kwargs)) or
+                                         SimpleNamespace(returncode=1, stdout=b"", stderr=b"no crontab for service"))
+
+    native.managed_cron()
+
+    assert calls[0][0] == ["crontab", "-l", "-u", "service"]
+    assert calls[0][1] == {"accepted": (0, 1), "completed": True, "env": {**u.SAFE_ENV, "LC_ALL": "C"}}
 
 
 def test_non_dict_release_assets_are_already_rejected(signed):
@@ -410,17 +432,24 @@ def test_pending_recovery_can_restore_a_deleted_config(transaction):
     assert config.config_path.exists() and value(config.watch.database) == "old"
 
 
-def test_from_request_policy_failure_consumes_the_request_without_a_service_failure(tmp_path, monkeypatch):
-    request = tmp_path / u.REQUEST
-    config = tmp_path / "cvebeacon.toml"
-    config.write_text("# runtime config")
+def test_from_request_policy_failure_leaves_the_request_and_stops_the_watcher(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    request = data / u.REQUEST
+    config = data / "cvebeacon.toml"
+    config.write_text("# runtime config", encoding="utf-8", newline="\n")
     u.atomic_json(request, {"version": "0.1.1", "user": "admin", "time": u.stamp()})
+    original = request.stat().st_ino, request.read_bytes()
     args = SimpleNamespace(update_command="apply", from_request=True, config=str(config), policy=str(tmp_path / "policy"))
     monkeypatch.setattr(u, "unsupported_reason", lambda: None)
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr(u.Policy, "read", lambda *args: (_ for _ in ()).throw(u.UpdateError("disabled")))
+    def systemctl(argv, **kwargs):
+        assert argv == ["systemctl", "stop", "cvebeacon-update.path"]
+
+    monkeypatch.setattr(u.subprocess, "run", systemctl)
     assert u.cli(args) == 0
-    assert not request.exists()
+    assert (request.stat().st_ino, request.read_bytes()) == original
 
 
 def test_malformed_request_directory_is_quarantined_without_recursive_deletion(transaction):
@@ -465,12 +494,12 @@ def test_failed_timer_restart_retains_committed_state_and_retry_entry(transactio
     assert not pending.exists() and "restore" not in native.calls
 
 
-def test_unknown_crontab_read_failure_is_not_treated_as_no_schedule(tmp_path, monkeypatch):
-    native = object.__new__(u.Native)
-    monkeypatch.setattr(u.shutil, "which", lambda *args, **kwargs: "/usr/bin/crontab")
+def test_unknown_crontab_read_failure_is_not_treated_as_no_schedule(cron_native):
+    native = cron_native
     native.run = lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=b"", stderr=b"permission denied")
-    with pytest.raises(u.UpdateError, match="cannot verify"):
+    with pytest.raises(u.UpdateError, match="cannot verify") as error:
         native.managed_cron()
+    assert error.value.reason_code == "preflight-crontab-unreadable"
 
 
 def test_policy_permits_missing_runtime_config_only_for_recorded_recovery(transaction, monkeypatch):

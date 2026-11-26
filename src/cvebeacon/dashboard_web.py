@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import math
+import re
 import stat
 from urllib.parse import urlsplit
 
@@ -23,6 +24,12 @@ from .web_assets import (COMPANION_NOTICE, client_label, directories,
 from .web_inventory import decode_json, read_bytes, read_web_snapshot
 
 _RUN_STATUSES = {"success", "partial", "failed", "no-usable-versions"}
+_EVIDENCE_KINDS = frozenset({
+    "header", "cookie", "meta", "url", "html", "script", "style", "manifest",
+    "robots", "icon", "implied", "dom", "text",
+})
+_NPM_NAME_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
+_NPM_SCOPE_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
 _FETCH_FAILURE_REASONS = {
     "unreachable", "tls-error", "blocked", "redirect-blocked", "timeout", "too-large",
     "unsupported-encoding",
@@ -87,14 +94,52 @@ def _review_metadata(detail, client):
     def text(value):
         return (isinstance(value, str) and len(value) <= 8192
                 and not any(0xD800 <= ord(char) <= 0xDFFF for char in value))
+    def valid_npm_package(value):
+        if not isinstance(value, str) or len(value) > 214:
+            return False
+        if value.startswith("@"):
+            parts = value[1:].split("/", 1)
+            return (len(parts) == 2 and bool(parts[0]) and bool(parts[1])
+                    and _NPM_SCOPE_PART.fullmatch(parts[0]) is not None
+                    and _NPM_NAME_PART.fullmatch(parts[1]) is not None)
+        return _NPM_NAME_PART.fullmatch(value) is not None
     for item in products + reviews:
-        for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence", "reason", "detail"):
+        for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence",
+                      "reason", "detail", "name", "ecosystem", "package"):
             if field in item and not text(item[field]):
                 raise ValueError("invalid review text")
-        for field in ("versions", "evidence_types"):
+        if "name" in item and (not item["name"].strip() or len(item["name"]) > 256):
+            raise ValueError("invalid review name")
+        if ("ecosystem" in item) != ("package" in item):
+            raise ValueError("incomplete review package identity")
+        if "package" in item and (item.get("ecosystem") != "npm"
+                or not valid_npm_package(item["package"])):
+            raise ValueError("invalid review package identity")
+        for field in ("versions", "evidence_types", "implied_by"):
             if field in item and (not isinstance(item[field], list)
                                   or any(not text(value) for value in item[field])):
                 raise ValueError("invalid review list")
+        if "evidence_types" in item and any(kind not in _EVIDENCE_KINDS
+                                             for kind in item["evidence_types"]):
+            raise ValueError("invalid review evidence kind")
+        if "evidence" in item:
+            evidence = item["evidence"]
+            if not isinstance(evidence, list) or len(evidence) > 20:
+                raise ValueError("invalid review evidence")
+            for entry in evidence:
+                if (not isinstance(entry, dict)
+                        or any(field not in entry or not text(entry[field])
+                               for field in ("kind", "source", "excerpt"))
+                        or len(entry["excerpt"]) > 160
+                        or entry["kind"] not in _EVIDENCE_KINDS):
+                    raise ValueError("invalid review evidence text")
+                if ("sha256" in entry) != ("bytes" in entry):
+                    raise ValueError("incomplete review file metadata")
+                if ("sha256" in entry and (not isinstance(entry["sha256"], str)
+                        or re.fullmatch(r"[0-9a-fA-F]{64}", entry["sha256"]) is None)):
+                    raise ValueError("invalid review evidence hash")
+                if "bytes" in entry and (type(entry["bytes"]) is not int or entry["bytes"] < 0):
+                    raise ValueError("invalid review evidence size")
         for field in ("status", "retry_after", "redirects_followed"):
             if field in item and (type(item[field]) is not int or item[field] < 0):
                 raise ValueError("invalid review number")
@@ -111,7 +156,9 @@ def _review_metadata(detail, client):
                 raise ValueError("invalid run text")
         if "status" in run and run["status"] not in _RUN_STATUSES:
             raise ValueError("invalid run status")
-        for field in ("asset_count", "fetched_count", "products_recognized", "products_with_version"):
+        for field in ("asset_count", "fetched_count", "products_recognized", "products_with_version",
+                      "resources_fetched", "resources_skipped", "fingerprint_technologies",
+                      "fingerprint_stopped", "analysis_stopped"):
             if field in run and (type(run[field]) is not int or run[field] < 0):
                 raise ValueError("invalid run count")
         if (run.get("asset_count", 0) < run.get("fetched_count", 0)
@@ -119,10 +166,20 @@ def _review_metadata(detail, client):
             raise ValueError("invalid run counts")
         if "saved_snapshot_generated_at" in run and not text(run["saved_snapshot_generated_at"]):
             raise ValueError("invalid saved snapshot timestamp")
-        if "snapshot_updated" in run and type(run["snapshot_updated"]) is not bool:
-            raise ValueError("invalid snapshot update state")
+        for field in ("snapshot_updated", "review_truncated", "fingerprint_error"):
+            if field in run and type(run[field]) is not bool:
+                raise ValueError("invalid run flag")
         if "request_count" in run and (type(run["request_count"]) is not int or run["request_count"] < 0):
             raise ValueError("invalid run request count")
+        if "resources_skipped_by_reason" in run:
+            skipped = run["resources_skipped_by_reason"]
+            if (not isinstance(skipped, dict) or len(skipped) > 100
+                    or "resources_skipped" not in run
+                    or any(not text(reason) or not reason or len(reason) > 128
+                           or type(count) is not int or count < 0
+                           for reason, count in skipped.items())
+                    or sum(skipped.values()) != run["resources_skipped"]):
+                raise ValueError("invalid resource skip counts")
         if "duration_seconds" in run and (type(run["duration_seconds"]) not in (int, float)
                 or (type(run["duration_seconds"]) is float and not math.isfinite(run["duration_seconds"]))
                 or run["duration_seconds"] < 0):
@@ -266,6 +323,26 @@ def create_web_blueprint(config):
                                       or (client.startswith("-") and job.argv[-2:] == ("--", client)))), None)
         except (CVEBeaconError, ValueError, OSError, TypeError, KeyError):
             error = error or "Web asset storage could not be read; review the local files"
+        evidence_words = {
+            "header": "response header", "cookie": "cookie", "meta": "page markup",
+            "html": "page markup", "url": "linked file", "script": "script file",
+            "style": "stylesheet", "manifest": "manifest file", "robots": "robots.txt",
+        }
+        for item in products:
+            item["display_name"] = item.get("name") or (
+                f"{item.get('vendor', '')}/{item.get('product', '')}"
+            )
+            item["display_version"] = ", ".join(item.get("versions", [])) or "Version not disclosed"
+            labels = [evidence_words[kind] for kind in item.get("evidence_types", [])
+                      if kind in evidence_words]
+            labels.extend(f"Inferred from {source}" for source in item.get("implied_by", []))
+            if not labels and "implied" in item.get("evidence_types", []):
+                labels.append("Inferred")
+            item["evidence_labels"] = list(dict.fromkeys(labels))
+        products.sort(key=lambda item: (
+            item.get("hostname", "").casefold(), item.get("category", "").casefold(),
+            item["display_name"].casefold(),
+        ))
         return render_template("web_assets.html", clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,

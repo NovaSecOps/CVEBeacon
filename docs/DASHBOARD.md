@@ -119,6 +119,14 @@ host is audited. Client CA bundle paths are
 administrator-only; changing one renews and audits all entries under the same
 attestation.
 
+The Detected products table groups results by site and sorts each site by
+category and display name. It shows the version when one was observed, or
+**Version not disclosed**, plus plain evidence labels such as response header,
+page markup, linked file, script file and stylesheet. An **Evidence** disclosure
+shows the source and a short matched excerpt as text; file evidence may also show
+its SHA-256 and byte count. Inferred products name the technology they follow
+and remain out of inventory rows when they have no direct evidence.
+
 The optional Extensions package must be installed in the dashboard's Python
 environment. Without it the page explains the requirement and disables the
 companion actions. **Show planned requests** validates the saved document and
@@ -145,6 +153,9 @@ fetched sites but found no usable inventory versions succeeds and keeps the
 previous snapshot. A run where every site failed to fetch remains failed; its
 message gives the failed-site count and reason codes without naming a host.
 When versions are hidden, the page explains where to review those products.
+When resource counts are present, it also says how many script and style files
+were read from the sites and how many were skipped. Products without a version
+are listed for review and are not added to the inventory.
 Entries to review translate reason codes into plain wording and retain the raw
 code in muted text. Redirect details explain why the hop was blocked. For an
 unlisted host and port, the page offers to pre-fill the add-site form; saving

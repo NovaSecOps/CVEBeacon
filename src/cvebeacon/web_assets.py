@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import stat
 import subprocess
 import sys
 
@@ -20,6 +21,9 @@ from .snapshot import sync_directory
 from .web_inventory import decode_json, read_bytes
 
 COMPANION_NOTICE = "Web detection requires the optional Extensions package. Install it to enable these actions."
+RUN_TIMEOUT = 60 * 60.0
+RUN_TIMEOUT_REASON = "detection stopped at the run time limit"
+CHILD_STOP_GRACE = 10
 
 
 def companion_available():
@@ -92,13 +96,19 @@ def temporary_bytes(directory, data):
         raise
 
 
-def companion_command(client, assets, output, *, plan=False):
+def fingerprint_directory(config):
+    """Optional operator-supplied Wappalyzer-format fingerprints, beside the state data."""
+    return config.database_path.parent / "web-fingerprints"
+
+
+def companion_command(client, assets, output, *, plan=False, fingerprints=None):
     require_companion()
     label = client_label(client)
     client_arguments = ["--client=" + label] if label.startswith("-") else ["--client", label]
     return [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
             *client_arguments, "--assets", str(assets), "--output", str(output),
-            "--source-id", "web-" + client_key(client), "--allow-partial", *(["--plan"] if plan else [])]
+            "--source-id", "web-" + client_key(client), "--allow-partial", *(["--plan"] if plan else []),
+            *(["--fingerprints", str(fingerprints)] if fingerprints is not None else [])]
 
 
 def validate_allowlist(config, path, document):
@@ -145,8 +155,30 @@ def run_detection(config, client, *, plan=False):
     if not document["assets"]:
         raise ConfigurationError("Save an attested web asset before running detection")
     # The parent CLI holds the shared scan lock throughout the child process.
-    code = subprocess.call(companion_command(document["client"], assets, output, plan=plan),
-                           stdin=subprocess.DEVNULL, env=child_environment(config))
+    fingerprints = fingerprint_directory(config)
+    try:
+        details = fingerprints.lstat()
+    except FileNotFoundError:
+        fingerprints = None
+    else:
+        if not stat.S_ISDIR(details.st_mode) or getattr(details, "st_file_attributes", 0) & 0x400:
+            fingerprints = None
+    command = companion_command(document["client"], assets, output, plan=plan, fingerprints=fingerprints)
+    # Popen's context manager waits without a timeout on exit.
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config))
+    try:
+        code = child.wait(timeout=RUN_TIMEOUT + 5 * 60)
+    except subprocess.TimeoutExpired as exc:
+        child.terminate()
+        try:
+            child.wait(timeout=CHILD_STOP_GRACE)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            try:
+                child.wait(timeout=CHILD_STOP_GRACE)
+            except subprocess.TimeoutExpired:
+                pass
+        raise ConfigurationError(RUN_TIMEOUT_REASON) from exc
     if not plan and code == 0:
         output.with_name(output.name + ".removed").unlink(missing_ok=True)
     return code

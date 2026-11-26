@@ -143,7 +143,7 @@ def test_lock_and_symlink_no_overwrite(tmp_path):
     path = snapshot(tmp_path)
     before = path.read_bytes()
     lock = Path(str(path) + ".lock")
-    lock.touch()
+    lock.write_bytes(b"")
     with pytest.raises(ExtensionError, match="locked"):
         write_snapshot(path, [row(version="2")], source_id="a", collector="test")
     assert path.read_bytes() == before
@@ -339,3 +339,47 @@ def test_cli_shows_path_free_publication_timeout_guidance(tmp_path, monkeypatch,
     message = capsys.readouterr().err
     assert 'Atomic publication' in message and 'close open readers and retry' in message
     assert 'SECRET_PATH' not in message and str(tmp_path) not in message
+
+
+def test_output_lock_reclaims_only_a_confirmed_dead_process(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    path = tmp_path / "snapshot.json"
+    lock = Path(str(path) + ".lock")
+    with subprocess.Popen([sys.executable, "-c",
+                           "import sys; sys.stdin.read()",],
+                          stdin=subprocess.PIPE) as child:
+        lock.write_text(f"{child.pid}\n", encoding="utf-8", newline="\n")
+        with pytest.raises(ExtensionError, match="locked"):
+            with contract.output_lock(path):
+                pytest.fail("a live process still owns the lock")
+        child.kill()
+        child.wait(timeout=10)
+    with contract.output_lock(path):
+        assert int(lock.read_text(encoding="utf-8")) == os.getpid()
+        with pytest.raises(ExtensionError, match="locked"):
+            with contract.output_lock(path):
+                pytest.fail("another writer acquired the output lock")
+    with contract.output_lock(path):
+        assert int(lock.read_text(encoding="utf-8")) == os.getpid()
+
+
+def test_output_lock_recovers_after_a_writer_exits_inside_publication(tmp_path):
+    import subprocess
+    import sys
+
+    path = tmp_path / "snapshot.json"
+    script = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "from cvebeacon_extensions.contract import output_lock\n"
+        "with output_lock(Path(sys.argv[1])):\n"
+        "    os._exit(17)\n"
+    )
+    child = subprocess.run([sys.executable, "-c", script, str(path)], timeout=10)
+    assert child.returncode == 17
+    assert int(Path(str(path) + ".lock").read_text(encoding="utf-8")) > 0
+    manifest = write_snapshot(path, [row()], source_id="a", collector="test")
+    assert read_snapshot(path).manifest == manifest

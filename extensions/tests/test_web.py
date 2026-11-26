@@ -97,7 +97,11 @@ class Transport:
         self.responses = list(responses)
         self.calls = []
 
-    def fetch(self, endpoint, address, *, ca_bundle, deadline, user_agent):
+    def fetch(self, endpoint, address, *, ca_bundle, deadline, user_agent, **kwargs):
+        if endpoint.path == "/favicon.ico":
+            return response(headers={"content-type": "image/x-icon"}, body=b"icon")
+        if endpoint.path == "/robots.txt":
+            return response(headers={"content-type": "text/plain"}, body=b"User-agent: *\n")
         self.calls.append((endpoint, address, ca_bundle, user_agent))
         item = self.responses.pop(0)
         if isinstance(item, Exception):
@@ -305,8 +309,9 @@ def matching(detections, rule):
 
 
 def test_every_rule_has_a_match_and_nonmatch_fixture():
-    assert set(FIXTURES) == {rule.key for rule in RULES}
-    for rule in RULES:
+    legacy_rules = tuple(rule for rule in RULES if not rule.key.startswith("expanded-"))
+    assert set(FIXTURES) == {rule.key for rule in legacy_rules}
+    for rule in legacy_rules:
         fixture, expected = FIXTURES[rule.key]
         found = matching(detect(fixture_page(fixture)), rule)
         assert found, rule.key
@@ -314,10 +319,14 @@ def test_every_rule_has_a_match_and_nonmatch_fixture():
         assert not matching(detect(fixture_page(nonmatch(rule))), rule), rule.key
 
 
-def test_detection_is_direct_evidence_only():
+def test_detection_keeps_direct_evidence_and_adds_required_inference():
     page = fixture_page({"meta": "WordPress 6.4.2"})
-    found = {item.product for item in detect(page)}
-    assert found == {"wordpress"}
+    found = {item.product: item for item in detect(page)}
+    assert set(found) == {"wordpress", "php"}
+    assert found["wordpress"].versions == ("6.4.2",)
+    assert found["php"].versions == ()
+    assert found["php"].evidence_types == ("implied",)
+    assert found["php"].implied_by == ("WordPress",)
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -1106,15 +1115,22 @@ def test_auth_and_not_found_responses_are_not_retried(tmp_path, status, reason):
 
 
 def test_connection_errors_retry_twice_with_backoff(tmp_path):
+    clock = [0.0]
     sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
     manifest, output, resolver, transport = run(
         tmp_path, [asset()],
         [_ConnectionFailure("connection reset"), _ConnectionFailure("connection reset"),
          response(headers={"server": "nginx/1.25.3"})],
-        sleep=sleeps.append)
+        sleep=sleep, clock=lambda: clock[0])
     assert manifest["status"] == "success"
     assert len(transport.calls) == 3
-    assert len(sleeps) == 2
+    assert 0.375 <= sleeps[0] <= 0.625 and 0.75 <= sleeps[1] <= 1.25
+    assert sleeps[-1] == 0.1  # robots follows the icon after the host pacing interval
 
 
 def test_retry_backoff_is_clamped_to_the_asset_deadline(tmp_path):
@@ -1652,7 +1668,8 @@ def test_review_persists_request_counts_durations_and_only_evidence_types(tmp_pa
     assert detail["run"]["products_recognized"] == 1
     assert detail["run"]["products_with_version"] == 1
     assert detail["run"]["snapshot_updated"] is True
-    assert detail["run"]["request_count"] == len(transport.calls) == 2
+    assert detail["run"]["request_count"] == 4
+    assert len(transport.calls) == 2  # fallback resources are answered by the fake transport
     assert detail["run"]["duration_seconds"] >= 0
     assert detail["run"]["started_at"] == detail["run"]["ended_at"] == NOW.isoformat()
     product = detail["products"][0]

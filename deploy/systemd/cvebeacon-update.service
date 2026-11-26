@@ -2,7 +2,8 @@
 Description=Apply a requested signed CVEBeacon update
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=oneshot

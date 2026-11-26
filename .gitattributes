@@ -1,2 +1,4 @@
 # Golden snapshots are compared byte for byte; keep their line endings.
 extensions/tests/fixtures/web/*.json -text
+# Bundled signature data is verified by checksum; keep its bytes on every platform.
+extensions/src/cvebeacon_extensions/data/retirejs/* -text

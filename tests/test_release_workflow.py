@@ -80,6 +80,16 @@ def test_release_verifies_the_tag_target_before_creating_the_draft(jobs):
     assert "git/ref/tags" in run
 
 
+def test_release_review_checklist_is_in_job_summary_not_release_body(jobs):
+    notes_step = step_with(jobs["release"]["steps"], name="Write release notes")
+    notes_template = (ROOT / ".github" / "release-notes.md").read_text(encoding="utf-8")
+    assert "GITHUB_STEP_SUMMARY" in notes_step["run"]
+    assert "Confirm the version and notes" in notes_step["run"]
+    assert "<!--" not in notes_template
+    assert "[ ] Confirm" not in notes_template
+    assert "{{VERSION}}" in notes_template and "{{DATE}}" in notes_template and "{{IMAGE_DIGEST}}" in notes_template
+
+
 def test_python_distribution_build_uses_the_hashed_toolchain(jobs):
     step = step_with(jobs["python-dist"]["steps"], name="Build core sdist and wheel")
     run = step["run"]
@@ -147,3 +157,13 @@ def test_all_publication_jobs_wait_for_a_pin_validation_gate_without_container_k
     assert "release-signing" in jobs["container-publish"]["needs"]
     assert "release-signing" in jobs["release"]["needs"]
     assert "RELEASE_SIGNING_KEY" not in str(jobs["container-publish"])
+
+
+def test_020_upgrade_notes_require_the_administrator_command():
+    guide = (ROOT / "docs" / "UPGRADING.md").read_text(encoding="utf-8")
+    template = (ROOT / ".github" / "release-notes.md").read_text(encoding="utf-8")
+    for notes in (guide, template):
+        boundary = " ".join(notes.split("**Upgrading from 0.2.0.**", 1)[1].split("\n\n", 1)[0].split())
+        assert "sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply" in boundary
+        assert "crontab" in boundary and "update service" in boundary
+        assert "Dashboard-triggered upgrades work from 0.2.1 onward" in boundary
