@@ -114,8 +114,9 @@ page observation.
   linked URL text independently. An HTTPS page or file cannot lead to an HTTP
   resource request, including through redirects.
 - At most 300 files are fetched per site, each up to 10 MiB decoded and 20 MiB
-  on the wire, with a shared 96 MiB decoded budget across the files for
-  starting paths on the same origin. Decoded bytes count as they are
+  on the wire, with a shared 96 MiB decoded budget. Starting paths on the same
+  origin share these caps, and paths redirected to the same final origin
+  share them there too. Decoded bytes count as they are
   produced, including during failed reads and retries. Resource collection
   and each page's analysis have 180-second deadlines. The run is limited to
   60 minutes, with a five-second margin to publish completed results.

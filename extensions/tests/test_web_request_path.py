@@ -172,6 +172,30 @@ def test_expired_page_preserves_other_sites_in_a_partial_snapshot(tmp_path):
     assert read_snapshot(output, allow_partial=True, now=NOW).records[0]["product"] == "http_server"
 
 
+@pytest.mark.parametrize("budget,limit", [("RESOURCE_MAX_FILES", 1), ("RESOURCE_SITE_LIMIT", 5)])
+def test_pages_redirected_to_the_same_origin_keep_shared_resource_caps(tmp_path, monkeypatch,
+                                                                    budget, limit):
+    monkeypatch.setattr(web, budget, limit)
+    class Routes(Transport):
+        def fetch(self, endpoint, *args, **kwargs):
+            self.calls.append((endpoint, *args, kwargs))
+            routes = {
+                "/one": response(302, "", location="https://target.invalid/landing-one"),
+                "/two": response(302, "", location="https://target.invalid/landing-two"),
+                "/landing-one": response(body=b'<script src="/one.js"></script>'),
+                "/landing-two": response(body=b'<script src="/two.js"></script>'),
+                "/direct": response(body=b'<script src="/direct.js"></script>'),
+                "/one.js": response(content_type="text/javascript", body=b"12345"),
+            }
+            return web._Response(*routes.get(endpoint.path, response(404, "", b"")))
+
+    detail, transport, _, _ = run(tmp_path, [
+        asset(path="/one"), asset("second.invalid", "/two"), asset("target.invalid", "/direct"),
+    ], "", transport=Routes([]))
+    assert _paths(transport) == ["/one", "/landing-one", "/one.js", "/two", "/landing-two", "/direct"]
+    assert detail["run"]["resources_fetched"] == 1
+
+
 def test_shared_file_cannot_replay_page_or_response_header_evidence(tmp_path):
     html = '<script src="/shared.js"></script>'
     detail, transport, output, _ = run(tmp_path, [asset(path="/one"), asset(path="/two")], html,

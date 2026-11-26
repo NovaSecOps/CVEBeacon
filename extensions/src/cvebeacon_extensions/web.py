@@ -1043,19 +1043,56 @@ class _Pacer:
 
 
 @dataclass
-class _ResourceSiteState:
+class _ResourceBudget:
     deadline: float = float("inf")
     requested_files: int = 0
     decoded_bytes: int = 0
+
+
+@dataclass
+class _OriginResourceBudget(_ResourceBudget):
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class _OriginResourceBudgets:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._budgets: dict[tuple[str, str, int], _OriginResourceBudget] = {}
+
+    def get(self, endpoint: Endpoint, deadline: float) -> _OriginResourceBudget:
+        with self._lock:
+            budget = self._budgets.get(endpoint.origin)
+            if budget is None:
+                budget = _OriginResourceBudget(deadline)
+                self._budgets[endpoint.origin] = budget
+            return budget
+
+
+@dataclass
+class _ResourceSiteState(_ResourceBudget):
+    final_budget: _OriginResourceBudget | None = None
     seen_urls: set[str] = field(default_factory=set)
     files: dict[str, _CachedResource] = field(default_factory=dict)
 
     @property
+    def remaining_files(self) -> int:
+        final = self.final_budget.requested_files if self.final_budget is not None else 0
+        return RESOURCE_MAX_FILES - max(self.requested_files, final)
+
+    @property
     def remaining_bytes(self) -> int:
-        return max(0, RESOURCE_SITE_LIMIT - self.decoded_bytes)
+        final = self.final_budget.decoded_bytes if self.final_budget is not None else 0
+        return max(0, RESOURCE_SITE_LIMIT - max(self.decoded_bytes, final))
 
     def debit(self, size: int) -> None:
         self.decoded_bytes += size
+        if self.final_budget is not None:
+            self.final_budget.decoded_bytes += size
+
+    def request_file(self) -> None:
+        self.requested_files += 1
+        if self.final_budget is not None:
+            self.final_budget.requested_files += 1
 
 
 class Fetcher:
@@ -1786,7 +1823,7 @@ def _resource_candidate(reference: _ResourceReference, base_url: str, page_asset
         if cached is not None:
             on_cached(cached)
         return resource_url
-    if state.requested_files + len(queue) >= RESOURCE_MAX_FILES:
+    if len(state.seen_urls) >= RESOURCE_MAX_FILES or len(queue) >= state.remaining_files:
         skipped["file-limit"] += 1
         return
     policy = allowlist.authorization(endpoint, page_asset)
@@ -1913,6 +1950,8 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
 
     resources_fetched = 0
     fetch_deadline = min(state.deadline, deadline)
+    if state.final_budget is not None:
+        fetch_deadline = min(fetch_deadline, state.final_budget.deadline)
     while queue:
         if clock() >= fetch_deadline:
             skipped["run-deadline" if fetch_deadline == run_deadline else "site-time-budget"] += len(queue)
@@ -1921,7 +1960,7 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             skipped["site-limit"] += len(queue)
             break
         candidate = queue.popleft()
-        state.requested_files += 1
+        state.request_file()
         request_headers = {
             "Accept": "text/css,*/*;q=0.1" if candidate.kind == "style" else "*/*",
         }
@@ -2268,6 +2307,7 @@ class _ExternalObservation:
 def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
              run_deadline: float, external=None, state: _ResourceSiteState | None = None,
              remember_resource: bool = False,
+             final_budgets: _OriginResourceBudgets | None = None,
              on_page: Callable[[Callable[[], _AssetResult]], None] | None = None) -> _AssetResult:
     base = _observation_ids(allowlist.client, asset.endpoint)
     clock = fetcher._clock
@@ -2333,15 +2373,28 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
     fingerprints = _ExternalObservation(external, clock=clock, deadline=deadline)
     if page is not None:
         merge(fingerprints.add_page(page, page_endpoint.url), completed=True)
+    final_budget = (final_budgets.get(page_endpoint, deadline)
+                    if final_budgets is not None else _OriginResourceBudget(deadline))
+    budget_wait = max(0.0, min(final_budget.deadline, deadline) - clock())
+    acquired = final_budget.lock.acquire(timeout=budget_wait)
     try:
-        resources_fetched, resources_skipped, file_metadata = _fetch_resources(
-            html, page_endpoint, asset, allowlist, fetcher, state, run_deadline=run_deadline,
-            deadline=deadline, remember_resource=remember_resource, on_detections=merge,
-            fingerprints=fingerprints)
+        if acquired:
+            state.final_budget = final_budget
+            resources_fetched, resources_skipped, file_metadata = _fetch_resources(
+                html, page_endpoint, asset, allowlist, fetcher, state, run_deadline=run_deadline,
+                deadline=deadline, remember_resource=remember_resource, on_detections=merge,
+                fingerprints=fingerprints)
+        else:
+            reason = "run-deadline" if clock() >= run_deadline else "site-time-budget"
+            resources_fetched, resources_skipped, file_metadata = 0, Counter({reason: 1}), {}
     except Exception:
         # Resource collection is optional evidence. A parser or auxiliary file
         # failure must leave the page observation usable and path-free.
         resources_fetched, resources_skipped, file_metadata = 0, Counter({"unreachable": 1}), {}
+    finally:
+        if acquired:
+            state.final_budget = None
+            final_budget.lock.release()
     merge(fingerprints.finish(), completed=True)
     return _observation_result(
         asset, allowlist.client, success.observed_at, merged, reviews, omissions,
@@ -2442,6 +2495,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
 
 def _observe_origin(assets: list[WebAsset], allowlist: Allowlist, fetcher: Fetcher, *,
                     run_deadline: float, external,
+                    final_budgets: _OriginResourceBudgets,
                     record: Callable[[Endpoint, _AssetResult | Callable[[], _AssetResult]], None]) -> None:
     # Grouping starting paths gives the shared budget and cache the lifetime of this worker.
     state = _ResourceSiteState()
@@ -2453,7 +2507,8 @@ def _observe_origin(assets: list[WebAsset], allowlist: Allowlist, fetcher: Fetch
             record(endpoint, result)
 
         result = _observe(asset, allowlist, fetcher, run_deadline=run_deadline, external=external,
-                          state=state, remember_resource=index + 1 < len(assets), on_page=on_page)
+                          state=state, remember_resource=index + 1 < len(assets),
+                          final_budgets=final_budgets, on_page=on_page)
         record(asset.endpoint, result)
 
 
@@ -2588,11 +2643,12 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     for asset in allowlist.assets:
         origins.setdefault(asset.endpoint.origin, []).append(asset)
     workers = max(1, min(max_workers, MAX_WORKERS, len(origins)))
+    final_budgets = _OriginResourceBudgets()
     pool = ThreadPoolExecutor(max_workers=workers)
     unfinished = set()
     try:
         futures = [pool.submit(_observe_origin, assets, allowlist, fetcher, run_deadline=run_deadline,
-                               external=external, record=record)
+                               external=external, final_budgets=final_budgets, record=record)
                    for assets in origins.values()]
         # Let in-flight observers return partial matches briefly after the
         # work cutoff, reserving the rest of the margin for publication.
