@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 import hashlib
 import json
+import os
 import threading
 import weakref
 
@@ -746,6 +747,7 @@ def test_stricter_referrer_policy_is_applied_on_every_discovery_hop(tmp_path, po
     assert referers == {"/first.js": initial, "/last.js": None, "/nested.js": None}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="external fingerprint collections are POSIX-only")
 def test_external_loader_leaves_unrelated_tree_entries_to_the_bounded_reader(tmp_path, monkeypatch):
     from test_webfingerprints import make_collection
 
@@ -786,6 +788,7 @@ def test_publication_joins_full_sources_before_redacting_and_shortening(tmp_path
 
 
 
+@pytest.mark.skipif(os.name == "nt", reason="external fingerprint collections are POSIX-only")
 def test_real_external_session_joins_long_sources_with_the_same_display_url(tmp_path, monkeypatch):
     from test_webfingerprints import make_collection
 

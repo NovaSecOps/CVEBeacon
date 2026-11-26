@@ -121,7 +121,7 @@ def test_scoped_cpe_rows_keep_their_ids_whatever_the_order(tmp_path, monkeypatch
 
 
 def test_windows_reports_external_collections_as_unsupported(tmp_path, monkeypatch):
-    monkeypatch.setattr(webfingerprints.os, "name", "nt")
+    monkeypatch.setattr(webfingerprints, "_collections_supported", lambda: False)
     loaded = webfingerprints.load_fingerprints(tmp_path)
     assert loaded.technology_count == 0 and loaded.incomplete
     monkeypatch.setattr(webfingerprints, "load_fingerprints", lambda directory: loaded)

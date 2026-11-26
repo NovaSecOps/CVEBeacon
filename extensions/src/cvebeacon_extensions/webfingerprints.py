@@ -1438,6 +1438,11 @@ _LOAD_CACHE_ORDER: deque[tuple] = deque()
 _LOAD_CACHE_LIMIT = 8
 
 
+def _collections_supported() -> bool:
+    """External collections are read on POSIX systems only for now."""
+    return os.name != "nt"
+
+
 def load_fingerprints(directory: Path) -> Fingerprints:
     """Load and cache a bounded operator-supplied fingerprint directory.
 
@@ -1449,7 +1454,7 @@ def load_fingerprints(directory: Path) -> Fingerprints:
     load reports that the platform is not supported and the scan is partial.
     The operator must restrict write access to the collection and its directories.
     """
-    if os.name == "nt":
+    if not _collections_supported():
         # The trust checks rely on POSIX directory handles and no-follow opens.
         stats = FingerprintStats(skipped_technologies=(
             ("fingerprint collections are not supported on this platform", 1),))
