@@ -321,14 +321,7 @@ def test_health_refuses_stale_or_unrelated_listeners(tmp_path, monkeypatch, payl
     native.dashboard_pid = lambda *, timeout: 42
     native.process_start = lambda pid: 1
     native.listener_sockets = lambda pid: {"1"} if listener else set()
-    class Transport:
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def request_once(self, *args, **kwargs):
-            return SimpleNamespace(status_code=200, body=json.dumps(payload).encode())
-    monkeypatch.setattr(u, "HttpClient", lambda *args, **kwargs: Transport())
+    monkeypatch.setattr(u, "_health_response", lambda *args: payload)
     clock = {"now": 0.0}
     monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(u.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))

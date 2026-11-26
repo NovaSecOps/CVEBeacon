@@ -259,8 +259,7 @@ def test_health_probe_shares_deadline_and_rechecks_process_and_listener(tmp_path
         def __exit__(self, *args):
             pass
 
-    class Transport(Client):
-        def request_once(self, *args, timeout, **kwargs):
+        def stream(self, *args, timeout, **kwargs):
             requests.append(timeout)
             assert 0 < timeout <= min(2, 120 - clock[0])
             if failure == "late":
@@ -269,16 +268,18 @@ def test_health_probe_shares_deadline_and_rechecks_process_and_listener(tmp_path
                 start_id[0] += 1
             elif failure == "relisten":
                 listener[0] = str(int(listener[0]) + 1)
-            return SimpleNamespace(status_code=200, body=b'{"status":"ok","version":"0.1.1","pid":42}')
+
+            from contextlib import nullcontext
+            return nullcontext(SimpleNamespace(
+                status_code=200, headers={}, iter_raw=lambda: [b'{"status":"ok","version":"0.1.1","pid":42}']))
 
     monkeypatch.setattr(u.httpx, "Client", Client)
-    monkeypatch.setattr(u, "HttpClient", Transport)
     monkeypatch.setattr(u.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(u.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     with pytest.raises(u.UpdateError, match="health probe failed"):
         native.probe("0.1.1")
     assert clock[0] == (121 if failure == "late" else 120)
-    assert len([client for client in clients if type(client) is Client]) == len(requests)
+    assert len(clients) == len(requests)
     assert all(0 < timeout <= 120 - now for now, timeout in timeouts)
 
 

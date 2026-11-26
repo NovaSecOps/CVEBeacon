@@ -20,6 +20,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -642,10 +643,13 @@ class Releases:
         for name, cap in (("SHA256SUMS", 65536), ("SHA256SUMS.sig", 16384)):
             self.download(release, name, directory / name, cap)
         checksums = (directory / "SHA256SUMS").read_bytes()
-        result = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", "cvebeacon-release",
-                                 "-n", "cvebeacon-release", "-s", str(directory / "SHA256SUMS.sig")],
-                                input=checksums, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                timeout=30, env=SAFE_ENV, cwd="/")
+        try:
+            result = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", "cvebeacon-release",
+                                     "-n", "cvebeacon-release", "-s", str(directory / "SHA256SUMS.sig")],
+                                    input=checksums, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    timeout=30, env=SAFE_ENV, cwd="/")
+        except (OSError, subprocess.SubprocessError):
+            raise UpdateError("release signature verification failed", reason_code="verify-signature") from None
         if result.returncode:
             raise UpdateError("release signature verification failed", reason_code="verify-signature")
         hashes = {}
@@ -878,6 +882,37 @@ def switch(prefix, target):
         name.unlink(missing_ok=True)
 
 
+@contextmanager
+def _health_deadline(seconds):
+    def expired(signum, frame):
+        raise UpdateError("dashboard health probe deadline elapsed")
+
+    # The native updater runs on the main thread of a one-shot Linux process.
+    previous = signal.signal(signal.SIGALRM, expired)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _health_response(url, timeout):
+    # Read through the protocol's end of message. A partial delivery response
+    # or an abbreviated body cannot prove that the dashboard is healthy.
+    with httpx.Client(trust_env=False) as client, client.stream(
+        "GET", url, timeout=timeout, headers={"Accept-Encoding": "identity"}
+    ) as response:
+        if response.status_code != 200 or response.headers.get("content-encoding", "identity") != "identity":
+            raise UpdateError("invalid dashboard health response")
+        body = bytearray()
+        for chunk in response.iter_raw():
+            if len(chunk) > 1024 - len(body):
+                raise UpdateError("dashboard health response exceeds the size limit")
+            body.extend(chunk)
+    return _json(bytes(body))
+
+
 class Native:
     """Small OS boundary; tests replace this with local fakes."""
     def __init__(self, policy):
@@ -1096,16 +1131,13 @@ for path in sys.argv[2:]:
         delay = 0.5
         while time.monotonic() < deadline:
             try:
-                pid = self.dashboard_pid(timeout=timeout())
-                started = self.process_start(pid)
-                listeners = self.listener_sockets(pid)
-                if listeners:
-                    # A new client prevents an attempt from reusing a socket
-                    # connected to a previously observed process.
-                    with httpx.Client(trust_env=False) as client, HttpClient(HttpConfig(retries=0), client=client) as http:
-                        result = http.request_once("GET", self.policy.probe, body_limit=1024, timeout=timeout())
-                    if (result.status_code == 200
-                            and _json(result.body) == {"status": "ok", "version": expected_version, "pid": pid}
+                with _health_deadline(timeout()):
+                    pid = self.dashboard_pid(timeout=timeout())
+                    started = self.process_start(pid)
+                    listeners = self.listener_sockets(pid)
+                    if (listeners
+                            and _health_response(self.policy.probe, timeout())
+                            == {"status": "ok", "version": expected_version, "pid": pid}
                             and self.dashboard_pid(timeout=timeout()) == pid
                             and listeners & self.listener_sockets(pid)
                             and self.process_start(pid) == started

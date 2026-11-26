@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -324,7 +323,6 @@ def test_completed_recovery_health_failure_preserves_the_committed_result(transa
 def test_same_port_on_another_loopback_address_cannot_pass_health(tmp_path, monkeypatch):
     from contextlib import ExitStack
     import subprocess
-    from types import SimpleNamespace
     server = "import socket,sys; s=socket.socket(); s.bind((sys.argv[1],int(sys.argv[2]))); s.listen(); print(s.getsockname()[1],flush=True); sys.stdin.read()"
     with ExitStack() as stack:
         def child(address, port):
@@ -339,14 +337,7 @@ def test_same_port_on_another_loopback_address_cannot_pass_health(tmp_path, monk
         native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service", probe=f"http://127.0.0.1:{port}/healthz")
         native.dashboard_pid = lambda *, timeout: dashboard.pid
         payload = {"status": "ok", "version": "99.0", "pid": dashboard.pid}
-        class HTTP:
-            def __enter__(self):
-                return self
-            def __exit__(self, *args):
-                pass
-            def request_once(self, *args, **kwargs):
-                return SimpleNamespace(status_code=200, body=json.dumps(payload).encode())
-        monkeypatch.setattr(u, "HttpClient", lambda *args, **kwargs: HTTP())
+        monkeypatch.setattr(u, "_health_response", lambda *args: payload)
         clock = {"now": 0.0}
         monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
         monkeypatch.setattr(u.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
@@ -363,20 +354,13 @@ def test_health_probe_retries_with_backoff_until_the_dashboard_is_ready(tmp_path
     native.listener_sockets = lambda pid: {"1"}
     clock = {"now": 0.0, "sleeps": [], "attempts": 0}
 
-    class Transport:
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def request_once(self, *args, **kwargs):
-            clock["attempts"] += 1
-            if clock["now"] >= 31:
-                body = {"status": "ok", "version": "0.1.1", "pid": 42}
-            else:
-                body = {"status": "starting"}
-            return SimpleNamespace(status_code=200, body=json.dumps(body).encode())
+    def response(*args):
+        clock["attempts"] += 1
+        if clock["now"] >= 31:
+            return {"status": "ok", "version": "0.1.1", "pid": 42}
+        return {"status": "starting"}
 
-    monkeypatch.setattr(u, "HttpClient", lambda *args, **kwargs: Transport())
+    monkeypatch.setattr(u, "_health_response", response)
     monkeypatch.setattr(u.time, "monotonic", lambda: clock["now"])
     def sleep(seconds):
         clock["sleeps"].append(seconds)

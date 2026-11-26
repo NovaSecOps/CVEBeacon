@@ -158,6 +158,29 @@ def test_advisory_decoder_failure_cannot_obscure_authoritative_completion(transa
 
 
 @linux
+@pytest.mark.parametrize("outcome", ["timeout", "missing", "invalid"])
+def test_verifier_invocation_errors_use_the_signature_reason(transaction, monkeypatch, outcome):
+    updater, _, config = transaction
+    run = subprocess.run
+
+    def verify(args, *a, **kwargs):
+        if args[:3] != ["ssh-keygen", "-Y", "verify"]:
+            return run(args, *a, **kwargs)
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired("synthetic private verifier text", 1)
+        if outcome == "missing":
+            raise FileNotFoundError("synthetic private verifier text")
+        return subprocess.CompletedProcess(args, 1)
+
+    monkeypatch.setattr(subprocess, "run", verify)
+    with pytest.raises(u.UpdateError) as error:
+        updater.apply("0.1.1")
+    assert "synthetic private" not in str(error.value)
+    assert _audit(updater)[-1]["reason"] == "verify-signature"
+    assert u.read_status(config)["last_update"]["reason"] == "verify-signature"
+
+
+@linux
 @pytest.mark.parametrize("persistent", [True, False])
 def test_request_activation_suspends_only_for_a_persistent_refusal(transaction, monkeypatch, caplog, persistent):
     updater, _, config = transaction
@@ -199,6 +222,35 @@ def test_request_activation_suspends_only_for_a_persistent_refusal(transaction, 
         assert caplog.text.count("waiting for administrator") == 1
     else:
         assert u.read_status(config)["last_request"]["result"] == "busy"
+
+
+@linux
+@pytest.mark.parametrize("response", ["interrupted", "oversized"])
+def test_probe_requires_a_complete_bounded_response(tmp_path, monkeypatch, response):
+    import httpx
+
+    native = object.__new__(u.Native)
+    native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service")
+    native.dashboard_pid = lambda **kwargs: 42
+    native.process_start = lambda pid: 1
+    native.listener_sockets = lambda pid: {"1"}
+    clock = [0.0]
+
+    class Stream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'{"status":"ok","version":"0.1.1","pid":42}'
+            if response == "interrupted":
+                raise httpx.ReadTimeout("incomplete response")
+            yield b" " * 1024
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=Stream()))
+    client = httpx.Client
+    monkeypatch.setattr(u.httpx, "Client", lambda **kwargs: client(transport=transport, **kwargs))
+    monkeypatch.setattr(u.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(u.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(u.UpdateError, match="health probe failed"):
+        native.probe("0.1.1")
+    assert clock[0] == 120
 
 
 @linux
@@ -343,6 +395,42 @@ def test_requested_update_uses_only_the_bound_service_identity(transaction, monk
     else:
         assert calls == []
         assert request.exists()
+
+
+@linux
+def test_probe_deadline_interrupts_waiting_for_response_headers(tmp_path, monkeypatch):
+    import httpx
+
+    native = object.__new__(u.Native)
+    native.policy = u.Policy(tmp_path, tmp_path / "config", tmp_path, "service")
+    native.dashboard_pid = lambda **kwargs: 42
+    native.process_start = lambda pid: 1
+    native.listener_sockets = lambda pid: {"1"}
+    monotonic, sleep = u.time.monotonic, u.time.sleep
+    start = monotonic()
+    calls = []
+
+    def clock():
+        if not calls:
+            calls.append("deadline")
+            return 0
+        return 119.85 + monotonic() - start
+
+    def headers(request):
+        calls.append("waiting")
+        sleep(0.5)
+        calls.append("received")
+        return httpx.Response(200, json={"status": "ok", "version": "0.1.1", "pid": 42})
+
+    transport = httpx.MockTransport(headers)
+    client = httpx.Client
+    monkeypatch.setattr(u.httpx, "Client", lambda **kwargs: client(transport=transport, **kwargs))
+    monkeypatch.setattr(u.time, "monotonic", clock)
+
+    with pytest.raises(u.UpdateError, match="health probe failed"):
+        native.probe("0.1.1")
+    assert calls == ["deadline", "waiting"]
+    assert u.signal.getitimer(u.signal.ITIMER_REAL)[0] == 0
 
 
 @pytest.mark.parametrize("legacy_size", [0, 24000])
