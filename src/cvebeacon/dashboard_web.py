@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import math
+import re
 import stat
 from urllib.parse import urlsplit
 
@@ -88,13 +89,29 @@ def _review_metadata(detail, client):
         return (isinstance(value, str) and len(value) <= 8192
                 and not any(0xD800 <= ord(char) <= 0xDFFF for char in value))
     for item in products + reviews:
-        for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence", "reason", "detail"):
+        for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence",
+                      "reason", "detail", "name", "ecosystem", "package"):
             if field in item and not text(item[field]):
                 raise ValueError("invalid review text")
-        for field in ("versions", "evidence_types"):
+        for field in ("versions", "evidence_types", "implied_by"):
             if field in item and (not isinstance(item[field], list)
                                   or any(not text(value) for value in item[field])):
                 raise ValueError("invalid review list")
+        if "evidence" in item:
+            evidence = item["evidence"]
+            if not isinstance(evidence, list) or len(evidence) > 20:
+                raise ValueError("invalid review evidence")
+            for entry in evidence:
+                if (not isinstance(entry, dict)
+                        or any(field not in entry or not text(entry[field])
+                               for field in ("kind", "source", "excerpt"))
+                        or len(entry["excerpt"]) > 160):
+                    raise ValueError("invalid review evidence text")
+                if ("sha256" in entry and (not isinstance(entry["sha256"], str)
+                        or re.fullmatch(r"[0-9a-fA-F]{64}", entry["sha256"]) is None)):
+                    raise ValueError("invalid review evidence hash")
+                if "bytes" in entry and (type(entry["bytes"]) is not int or entry["bytes"] < 0):
+                    raise ValueError("invalid review evidence size")
         for field in ("status", "retry_after", "redirects_followed"):
             if field in item and (type(item[field]) is not int or item[field] < 0):
                 raise ValueError("invalid review number")
@@ -111,7 +128,8 @@ def _review_metadata(detail, client):
                 raise ValueError("invalid run text")
         if "status" in run and run["status"] not in _RUN_STATUSES:
             raise ValueError("invalid run status")
-        for field in ("asset_count", "fetched_count", "products_recognized", "products_with_version"):
+        for field in ("asset_count", "fetched_count", "products_recognized", "products_with_version",
+                      "resources_fetched", "resources_skipped"):
             if field in run and (type(run[field]) is not int or run[field] < 0):
                 raise ValueError("invalid run count")
         if (run.get("asset_count", 0) < run.get("fetched_count", 0)
@@ -266,6 +284,26 @@ def create_web_blueprint(config):
                                       or (client.startswith("-") and job.argv[-2:] == ("--", client)))), None)
         except (CVEBeaconError, ValueError, OSError, TypeError, KeyError):
             error = error or "Web asset storage could not be read; review the local files"
+        evidence_words = {
+            "header": "response header", "cookie": "cookie", "meta": "page markup",
+            "html": "page markup", "url": "linked file", "script": "script file",
+            "style": "stylesheet", "manifest": "manifest file", "robots": "robots.txt",
+        }
+        for item in products:
+            item["display_name"] = item.get("name") or (
+                f"{item.get('vendor', '')}/{item.get('product', '')}"
+            )
+            item["display_version"] = ", ".join(item.get("versions", [])) or "Version not disclosed"
+            labels = [evidence_words[kind] for kind in item.get("evidence_types", [])
+                      if kind in evidence_words]
+            labels.extend(f"Inferred from {source}" for source in item.get("implied_by", []))
+            if not labels and "implied" in item.get("evidence_types", []):
+                labels.append("Inferred")
+            item["evidence_labels"] = list(dict.fromkeys(labels))
+        products.sort(key=lambda item: (
+            item.get("hostname", "").casefold(), item.get("category", "").casefold(),
+            item["display_name"].casefold(),
+        ))
         return render_template("web_assets.html", clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
