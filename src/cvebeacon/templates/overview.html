@@ -1,5 +1,6 @@
 {% extends 'base.html' %}{% from 'macros.html' import status, health_table, inventory_notice %}
 {% from 'ui.html' import page_header, card, stat, stat_grid, callout, empty_state, definition_list, table_wrap, badge, setup_checklist %}
+{% from 'home_charts.html' import horizontal_count_bars %}
 {% block title %}Home · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Home', 'A summary of what CVEBeacon is watching, when it last checked, and what needs your attention.', url_for('findings') if inventory_configured else none, 'Review findings' if inventory_configured else none) }}
@@ -14,6 +15,9 @@
 <h2 class="visually-hidden">Additional inventory counts</h2>
 {% for item in home.secondary %}<div class="home-secondary-item"><strong class="home-secondary-value">{{ item.value }}</strong><span class="home-secondary-label">{{ item.title }}</span><span class="home-secondary-help">{{ item.help }}</span></div>{% endfor %}
 </section>
+{% call card('Affected findings by severity', 'CVSS severity for findings marked affected in the current inventory.', id='home-severity-chart-card') %}
+{{ horizontal_count_bars(home.severity_chart) }}
+{% endcall %}
 {% set delivery_state_labels = {'pending': 'Queued', 'sending': 'Sending', 'sent': 'Accepted by the service', 'accepted': 'Accepted by the service', 'failed': 'Failed', 'given_up': 'Gave up', 'ambiguous': 'Unsure'} %}
 {% set change_labels = {'new': 'New finding', 'changed': 'Finding changed'} %}
 {% set run_status_labels = {'completed': 'Finished', 'succeeded': 'Succeeded', 'running': 'Running', 'failed': 'Failed'} %}

@@ -427,6 +427,22 @@ a.stat:hover { border-color: var(--accent); }
 .home-secondary-value { font-size: 1.35rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .home-secondary-label { font-size: .9rem; font-weight: 650; }
 .home-secondary-help { color: var(--text-muted); font-size: .78rem; overflow-wrap: anywhere; }
+.home-chart-svg { display: block; width: 100%; max-width: 100%; height: auto; }
+.home-chart-grid { stroke: var(--border); stroke-width: 1; }
+.home-chart-axis { stroke: var(--text-muted); stroke-width: 1.25; }
+.home-chart-axis-title, .home-chart-axis-label { fill: var(--text); font-size: 14px; font-weight: 600; }
+.home-chart-tick { fill: var(--text-muted); font-size: 13px; }
+.home-chart-category { fill: var(--text); font-size: 15px; }
+.home-chart-bar-value { fill: var(--text); font-size: 15px; font-weight: 650; }
+.home-chart-bar-critical { fill: var(--critical-text); }
+.home-chart-bar-high { fill: var(--high-text); }
+.home-chart-bar-medium { fill: var(--medium-text); }
+.home-chart-bar-low { fill: var(--low-text); }
+.home-chart-bar-none { fill: var(--text-muted); }
+.home-chart-bar-unknown { fill: var(--accent); }
+.home-chart-state, .home-chart-empty { margin: 8px 0; color: var(--text-muted); }
+.home-chart-note { margin: 8px 0 0; color: var(--text-muted); font-size: .88rem; }
+.home-chart-data { margin-top: 12px; }
 
 /* Badges: text label always present; colour is reinforcement only. */
 .badge {

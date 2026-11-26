@@ -1,0 +1,49 @@
+{% from 'ui.html' import table_wrap %}
+
+{# Shared accessible SVG and data-table frame for Home charts. SVG content is the caller block. #}
+{% macro chart_frame(chart) %}
+{% if chart.state == 'available' %}
+<svg class="home-chart-svg" id="{{ chart.id }}" role="img" aria-labelledby="{{ chart.id }}-title {{ chart.id }}-desc" viewBox="{{ chart.view_box }}" xmlns="http://www.w3.org/2000/svg">
+<title id="{{ chart.id }}-title">{{ chart.title }}</title>
+<desc id="{{ chart.id }}-desc">{{ chart.description }}</desc>
+{{ caller() }}
+</svg>
+{% else %}<p class="home-chart-state" role="status">{{ chart.state_message }}</p>{% endif %}
+{% if chart.empty_message %}<p class="home-chart-empty" role="status">{{ chart.empty_message }}</p>{% endif %}
+{% if chart.note %}<p class="home-chart-note">{{ chart.note }}</p>{% endif %}
+{% if chart.state == 'available' %}
+<details class="disclosure home-chart-data">
+<summary>View data table</summary>
+{% call table_wrap(chart.table_label) %}
+<table>
+<caption>{{ chart.title }} values</caption>
+<thead><tr>{% for header in chart.headers %}<th scope="col">{{ header }}</th>{% endfor %}</tr></thead>
+<tbody>{% for row in chart.rows %}<tr>{% for cell in row.cells %}{% if loop.first %}<th scope="row">{{ cell }}</th>{% else %}<td class="num">{{ cell }}</td>{% endif %}{% endfor %}</tr>{% endfor %}</tbody>
+</table>
+{% endcall %}
+</details>
+{% endif %}
+{% endmacro %}
+
+{# Horizontal count bars use the shared accessible SVG/table frame above. #}
+{% macro horizontal_count_bars(chart) %}
+{% call chart_frame(chart) %}
+<text class="home-chart-axis-title" x="12" y="29">{{ chart.category_label }}</text>
+<text class="home-chart-axis-title" x="124" y="29">Count</text>
+{% for tick in (0, chart.max_value) %}
+{% set tick_x = 124 + (tick * 200 / chart.max_value) %}
+<line class="home-chart-grid" x1="{{ tick_x }}" y1="38" x2="{{ tick_x }}" y2="238" />
+<text class="home-chart-tick" x="{{ tick_x }}" y="253" text-anchor="middle">{{ tick }}</text>
+{% endfor %}
+{% for row in chart.rows %}
+{% set row_y = 48 + (loop.index0 * 31) %}
+{% set bar_width = row.value * 200 / chart.max_value %}
+{% set value_x = 124 + bar_width + 8 %}
+<text class="home-chart-category" x="10" y="{{ row_y + 15 }}">{{ row.label }}</text>
+<rect class="home-chart-bar {{ row.css_class }}" x="124" y="{{ row_y }}" width="{{ bar_width }}" height="18" rx="3" />
+<text class="home-chart-bar-value" x="{{ value_x }}" y="{{ row_y + 14 }}">{{ row.value }}</text>
+{% endfor %}
+<line class="home-chart-axis" x1="124" y1="238" x2="324" y2="238" />
+<text class="home-chart-axis-label" x="224" y="292" text-anchor="middle">{{ chart.value_label }}</text>
+{% endcall %}
+{% endmacro %}
