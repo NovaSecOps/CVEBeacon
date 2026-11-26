@@ -107,7 +107,7 @@ def test_fixed_channel_error_identity_survives_redaction(accounts):
     login(client, "admin")
     response = preview(client, "channels", g0_to="broken")
     assert response.status_code == 400
-    assert "watch.channels.smtp.to (row 1)" in html.unescape(response.text)
+    assert 'href="#control-g0_to"' in response.text
 
 
 @pytest.mark.parametrize("count", ["²", "9" * 5000])

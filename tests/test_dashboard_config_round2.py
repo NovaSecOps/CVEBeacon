@@ -483,7 +483,7 @@ def test_credential_channel_textareas_render_read_only(accounts):
     login(client)
     page = client.get("/config/channels")
     assert page.status_code == 200
-    assert re.search(r'name="g0_to"[^>]*readonly', page.text)
+    assert re.search(r'name="g0_t_r0"[^>]*readonly', page.text)
 
 
 def test_explicit_empty_strings_do_not_block_unrelated_channel_edits(accounts):
@@ -1063,8 +1063,11 @@ topic = "alerts"
     assert page.status_code == 200, page.text
     response = preview(client, "channels", g0_max_items="7")
     assert response.status_code == 200, response.text
-    assert "data_env" in response.text and "data_file" in response.text and "data_url" in response.text
+    assert '+&#34;max_items&#34; = 7' in response.text
     assert confirm(client, response, "channels").status_code == 303
+    assert set(tomllib.loads(config.config_path.read_text(encoding="utf-8"))["watch"]["channels"]) == {
+        "data_env", "data_file", "data_url",
+    }
 
 
 def test_credential_channel_rename_needs_manage_but_delete_does_not(accounts):

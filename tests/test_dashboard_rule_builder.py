@@ -1274,19 +1274,26 @@ def test_rule_actions_keep_pending_edits_in_all_rows(tmp_path, button):
         "g1_name": "renamed",
         "g1_condition": '{ keyword = ["edited"] }',
         "g1_events": '["rejected"]',
-        "g2_cvss_providers": '["cna"]',
         "b2_keyword_value": "pending",
         "remove2": "yes",
         button: "0",
     }
     for key, value in changes.items():
         fields[key] = value
+    for provider in ("nvd", "cna", "euvd"):
+        name = f"g2_p_{provider}"
+        if provider == "cna":
+            fields[name] = provider
+        else:
+            fields.pop(name, None)
     response = client.post("/config/rules", data=fields)
     assert response.status_code == 200
     retained = page_form(response.text)
-    for key in ("g1_name", "g1_condition", "g1_events", "g2_cvss_providers",
+    for key in ("g1_name", "g1_condition", "g1_events",
                 "b2_keyword_value", "remove2"):
         assert retained[key] == fields[key]
+    assert retained.get("g2_p_cna") == "cna"
+    assert "g2_p_nvd" not in retained and "g2_p_euvd" not in retained
     if button == "match_rule":
         assert "uses this rule’s stored score providers" in response.text
         for key in ("b0_kev_value", "b0_events", "b0_channels"):
