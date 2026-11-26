@@ -1608,7 +1608,8 @@ def _systemd_quote(value: str) -> str:
 
 
 _UPDATE_POLICY = Path("/etc/cvebeacon/update.toml")
-_SWITCH_JOURNAL = ".cvebeacon-dashboard-schedule.json"
+_SWITCH_RECOVERY_MARKER = b"# CVEBEACON-SCHEDULE-RECOVERY-1 "
+_SWITCH_RECOVERY_LIMIT = 4 * _SCHEDULE_LIMIT
 _DROPIN_DIRECTORIES = (_TIMER_UNIT + ".d", _SERVICE_UNIT + ".d")
 _MANAGER_STATE = ("LoadState", "NeedDaemonReload", "DropInPaths")
 
@@ -1683,7 +1684,7 @@ def _verify_manager(run, *, dropins, active, argv=None):
 
 
 def _apply_dropin_files(descriptors, entries, owner):
-    existing = [_read_leaf(fd, TIMER_CONTROL_DROPIN, owner, _SCHEDULE_LIMIT) for fd in descriptors]
+    existing = [_read_leaf(fd, TIMER_CONTROL_DROPIN, owner, _SWITCH_RECOVERY_LIMIT) for fd in descriptors]
     staged = []
     try:
         for descriptor, entry in zip(descriptors, entries, strict=True):
@@ -1700,12 +1701,34 @@ def _apply_dropin_files(descriptors, entries, owner):
                     pass
 
 
-def _read_switch_journal(base, owner):
-    saved = _read_leaf(base, _SWITCH_JOURNAL, owner, 3 * _SCHEDULE_LIMIT, private=True)
+def _switch_recovery_marker(files, active):
+    record = {
+        "version": 1,
+        "active": active,
+        "files": [
+            None if entry is None else (base64.b64encode(entry[0]).decode("ascii"), entry[1])
+            for entry in files
+        ],
+    }
+    return _SWITCH_RECOVERY_MARKER + json.dumps(
+        record, separators=(",", ":"), sort_keys=True
+    ).encode("ascii") + b"\n"
+
+
+def _read_switch_recovery(timer_directory, owner):
+    saved = _read_leaf(
+        timer_directory, TIMER_CONTROL_DROPIN, owner, _SWITCH_RECOVERY_LIMIT
+    )
     if saved is None:
         return None
+    lines = saved[0].splitlines(keepends=True)
+    marked = [line for line in lines if line.startswith(_SWITCH_RECOVERY_MARKER)]
+    if not marked:
+        return None
+    if len(marked) != 1 or lines[-1] != marked[0] or not marked[0].endswith(b"\n"):
+        raise SchedulingError("the timer switch recovery record is invalid")
     try:
-        record = json.loads(saved[0])
+        record = json.loads(marked[0][len(_SWITCH_RECOVERY_MARKER):-1])
         if record["version"] != 1 or type(record["active"]) is not bool or len(record["files"]) != 2:
             raise ValueError
         files = []
@@ -1723,37 +1746,105 @@ def _read_switch_journal(base, owner):
         raise SchedulingError("the timer switch recovery record is invalid") from exc
 
 
-def _write_switch_journal(base, files, active):
-    record = {
-        "version": 1, "active": active,
-        "files": [None if entry is None else (base64.b64encode(entry[0]).decode("ascii"), entry[1]) for entry in files],
-    }
-    temporary = _stage_file(base, json.dumps(record).encode("ascii"), 0o600)
+def _with_switch_recovery(contents, marker):
+    current = contents or b""
+    if current and not current.endswith(b"\n"):
+        current += b"\n"
+    return current + marker
+
+
+def _publish_timer_dropin(directory, contents, mode=0o600):
+    temporary = _stage_file(directory, contents, mode)
     try:
-        _publish_file(base, _SWITCH_JOURNAL, temporary)
+        _publish_file(directory, TIMER_CONTROL_DROPIN, temporary)
     finally:
         try:
-            os.unlink(temporary, dir_fd=base)
+            os.unlink(temporary, dir_fd=directory)
         except FileNotFoundError:
             pass
 
 
-def _restore_timer_switch(run, base, descriptors, owner, recovery):
+def _clear_switch_recovery(descriptor, timer_file):
+    if timer_file is None:
+        _publish_file(descriptor, TIMER_CONTROL_DROPIN, None)
+    else:
+        _publish_timer_dropin(descriptor, timer_file[0], timer_file[1])
+
+
+def _restore_timer_switch(run, descriptors, owner, recovery, marker):
     files, active = recovery
     _systemd_action(run, "stop", _TIMER_UNIT)
-    _apply_dropin_files(descriptors, files, owner)
+    timer_file = files[0]
+    timer_content = timer_file[0] if timer_file is not None else b""
+    timer_with_marker = (_with_switch_recovery(timer_content, marker), 0o600)
+    _apply_dropin_files(descriptors, [timer_with_marker, files[1]], owner)
+    _systemd_action(run, "daemon-reload")
+    if active:
+        _systemd_action(run, "restart", _TIMER_UNIT)
+    _verify_manager(run, dropins=(True, files[1] is not None), active=active)
+    _clear_switch_recovery(descriptors[0], timer_file)
     _systemd_action(run, "daemon-reload")
     if active:
         _systemd_action(run, "restart", _TIMER_UNIT)
     _verify_manager(run, dropins=tuple(entry is not None for entry in files), active=active)
-    _publish_file(base, _SWITCH_JOURNAL, None)
+
+
+def _open_existing_update_lock(stack, path, *, expected_owner=0):
+    """Lock a verified updater inode without creating or changing its contents."""
+    import errno
+
+    path = Path(path)
+    try:
+        original = path.lstat()
+    except FileNotFoundError as exc:
+        raise SchedulingError("the updater lock file is missing; refusing to change the timer") from exc
+    except OSError as exc:
+        raise SchedulingError("the updater lock file cannot be verified; refusing to change the timer") from exc
+    if (
+        not stat.S_ISREG(original.st_mode)
+        or original.st_nlink != 1
+        or original.st_uid != expected_owner
+        or original.st_mode & 0o022
+        or getattr(original, "st_file_attributes", 0) & 0x400
+    ):
+        raise SchedulingError("the updater lock file cannot be verified; refusing to change the timer")
+    descriptor = None
+    try:
+        descriptor = os.open(path, _LEAF_FLAGS)
+        current = os.fstat(descriptor)
+        if (
+            (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or current.st_uid != expected_owner
+            or current.st_mode & 0o022
+        ):
+            raise SchedulingError("the updater lock file changed during verification; refusing to change the timer")
+        import fcntl
+
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if isinstance(exc, BlockingIOError) or exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise SchedulingError("an updater is running; wait for it to finish before changing the timer") from exc
+            raise SchedulingError("the updater lock file could not be locked safely") from exc
+        stack.callback(os.close, descriptor)
+    except SchedulingError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        if isinstance(exc, FileNotFoundError):
+            raise SchedulingError("the updater lock file is missing; refusing to change the timer") from exc
+        raise SchedulingError("the updater lock file could not be verified or locked safely") from exc
 
 
 def _switch_update_lock(stack, policy_path, root, run):
     """Take the same installation lock as the updater before touching systemd."""
     import tomllib
 
-    from .locking import RunLock
     from .update_transaction import installation_prefix, read_record
     from .updater import protected, read_bounded
 
@@ -1778,7 +1869,7 @@ def _switch_update_lock(stack, policy_path, root, run):
         )
     for prefix in sorted(prefixes):
         protected(prefix, directory=True)
-        stack.enter_context(RunLock(prefix / "update.lock", command="update"))
+        _open_existing_update_lock(stack, prefix / "update.lock", expected_owner=0)
         record = read_record(prefix)
         if record is not None and record["phase"] != "complete":
             raise SchedulingError("finish updater recovery before changing the timer")
@@ -1877,7 +1968,6 @@ def _timer_switch_action(action, run, root, config_path, data_directory, policy_
         base = _open_admin_directory(stack, base_path, boundary=root, owner=owner)
         fcntl.flock(base, fcntl.LOCK_EX)
         policy_present = _switch_update_lock(stack, policy_path if action == "enable" else None, root, run)
-        recovery = _read_switch_journal(base, owner)
         descriptors = []
         for name in _DROPIN_DIRECTORIES:
             try:
@@ -1885,10 +1975,15 @@ def _timer_switch_action(action, run, root, config_path, data_directory, policy_
             except FileNotFoundError:
                 descriptor = None
             descriptors.append(descriptor)
+        recovery = (
+            _read_switch_recovery(descriptors[0], owner)
+            if descriptors[0] is not None else None
+        )
         if recovery is not None:
             if None in descriptors:
                 raise SchedulingError("timer switch recovery requires both verified drop-in directories")
-            _restore_timer_switch(run, base, descriptors, owner, recovery)
+            marker = _switch_recovery_marker(*recovery)
+            _restore_timer_switch(run, descriptors, owner, recovery, marker)
         before = [
             _read_leaf(fd, TIMER_CONTROL_DROPIN, owner, _SCHEDULE_LIMIT) if fd is not None else None
             for fd in descriptors
@@ -1931,16 +2026,33 @@ def _timer_switch_action(action, run, root, config_path, data_directory, policy_
             initial = _calendar_schedule(calendar) if not _timer_has_extra_triggers(timer) else None
             _initialize_timer_data(data, Path(argv[2]), account, initial or build_timer_schedule(times=DEFAULT_TIMER_TIMES))
 
-        # Open both destinations before journalling, including absent dirs
-        # needed to replay the original pair after an interruption.
+        # Create both destinations before writing recovery metadata into the
+        # timer drop-in.
         for index, (name, descriptor) in enumerate(zip(_DROPIN_DIRECTORIES, descriptors, strict=True)):
             if descriptor is None:
                 descriptors[index] = _open_admin_child(stack, base, name, owner, create=True)
-        _write_switch_journal(base, before, active)
+        recovery = (before, active)
+        marker = _switch_recovery_marker(before, active)
         try:
+            old_timer = before[0][0] if before[0] is not None else None
+            _publish_timer_dropin(
+                descriptors[0], _with_switch_recovery(old_timer, marker)
+            )
             if active:
                 _systemd_action(run, "stop", _TIMER_UNIT)
-            _apply_dropin_files(descriptors, desired, owner)
+            timer_content = desired[0][0] if desired[0] is not None else None
+            timer_pending = (
+                _with_switch_recovery(timer_content, marker), 0o600
+            )
+            _apply_dropin_files(descriptors, [timer_pending, desired[1]], owner)
+            _systemd_action(run, "daemon-reload")
+            if active or action == "enable":
+                _systemd_action(run, "restart", _TIMER_UNIT)
+            _verify_manager(
+                run, dropins=(True, action == "enable"),
+                active=active or action == "enable", argv=argv,
+            )
+            _clear_switch_recovery(descriptors[0], desired[0])
             _systemd_action(run, "daemon-reload")
             if active or action == "enable":
                 _systemd_action(run, "restart", _TIMER_UNIT)
@@ -1950,11 +2062,10 @@ def _timer_switch_action(action, run, root, config_path, data_directory, policy_
             )
         except BaseException:
             try:
-                _restore_timer_switch(run, base, descriptors, owner, (before, active))
+                _restore_timer_switch(run, descriptors, owner, recovery, marker)
             except (OSError, SchedulingError) as exc:
                 raise SchedulingError("timer switch rollback is pending; retry timer-control to recover") from exc
             raise
-        _publish_file(base, _SWITCH_JOURNAL, None)
         return f"dashboard schedule control {action}d"
 
 

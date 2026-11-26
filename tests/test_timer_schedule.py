@@ -176,6 +176,38 @@ def test_timer_control_enable_preserves_command_and_writes_private_dropins(fake_
 
 
 @posix_only
+def test_timer_control_publishes_only_fixed_dropin_files(fake_switch, monkeypatch):
+    root, config, runner = fake_switch
+    published = []
+    publish = scheduling._publish_file
+
+    def record_publish(directory_fd, name, temporary):
+        systemd_root = root / "etc/systemd/system"
+        details = os.fstat(directory_fd)
+        directories = (systemd_root, *(
+            path for path in systemd_root.rglob("*") if path.is_dir()
+        ))
+        if any(
+            (details.st_dev, details.st_ino) == (path.stat().st_dev, path.stat().st_ino)
+            for path in directories
+        ):
+            published.append(name)
+        return publish(directory_fd, name, temporary)
+
+    monkeypatch.setattr(scheduling, "_publish_file", record_publish)
+    _switch("enable", root, config, runner)
+
+    assert published
+    assert set(published) == {DROPIN}
+    files = {
+        path.relative_to(root / "etc/systemd/system")
+        for path in (root / "etc/systemd/system").rglob("*")
+        if path.is_file()
+    }
+    assert files == {Path(TIMER + ".d") / DROPIN, Path(SERVICE + ".d") / DROPIN}
+
+
+@posix_only
 def test_timer_control_parses_initial_interval_and_is_idempotent(fake_switch):
     root, config, runner = fake_switch
     runner.calendar = ("*-*-* 00/6:00:00",)
@@ -556,22 +588,106 @@ def test_enable_rolls_back_restart_failure_and_retry_restarts(fake_switch):
 
 
 @posix_only
-def test_retry_recovers_after_reload_and_rollback_fail(fake_switch):
+@pytest.mark.parametrize("action", ("enable", "disable"))
+def test_retry_recovers_after_reload_and_rollback_fail(fake_switch, action):
     root, config, runner = fake_switch
-    _existing_dropins(root)
-    runner.loaded_dropins = (True, True)
+    if action == "disable":
+        _existing_dropins(root)
+        runner.loaded_dropins = (True, True)
     runner.fail_action = "daemon-reload"
     runner.fail_once = False
     with pytest.raises(SchedulingError, match="rollback is pending"):
-        _switch("disable", root, config, runner)
-    journal = root / "etc/systemd/system/.cvebeacon-dashboard-schedule.json"
-    assert journal.stat().st_mode & 0o777 == 0o600
+        _switch(action, root, config, runner)
+    timer = _dropins(root)[0]
+    assert b"# CVEBEACON-SCHEDULE-RECOVERY-1 " in timer.read_bytes()
+    systemd_files = {
+        path.relative_to(root / "etc/systemd/system")
+        for path in (root / "etc/systemd/system").rglob("*")
+        if path.is_file()
+    }
+    assert systemd_files <= {
+        Path(TIMER + ".d") / DROPIN,
+        Path(SERVICE + ".d") / DROPIN,
+    }
 
     runner.fail_action = None
-    assert _switch("disable", root, config, runner) == "dashboard schedule control disabled"
-    assert not journal.exists()
-    assert runner.loaded_dropins == (False, False)
+    assert _switch(action, root, config, runner) == f"dashboard schedule control {action}d"
+    assert runner.loaded_dropins == ((True, True) if action == "enable" else (False, False))
+    if action == "enable":
+        assert b"# CVEBEACON-SCHEDULE-RECOVERY-1 " not in timer.read_bytes()
+        assert _dropins(root)[1].exists()
+    else:
+        assert not timer.exists()
+        assert not _dropins(root)[1].exists()
+    final_files = {
+        path.relative_to(root / "etc/systemd/system")
+        for path in (root / "etc/systemd/system").rglob("*")
+        if path.is_file()
+    }
+    expected_files = (
+        {Path(TIMER + ".d") / DROPIN, Path(SERVICE + ".d") / DROPIN}
+        if action == "enable" else set()
+    )
+    assert final_files == expected_files
     assert runner.fields["ActiveState"] == "active"
+
+
+@posix_only
+def test_updater_exclusion_locks_existing_inode_without_writing(tmp_path):
+    import fcntl
+
+    lock_path = tmp_path / "update.lock"
+    lock_path.write_bytes(b"existing updater metadata\n")
+    lock_path.chmod(0o600)
+    original_stat = lock_path.stat()
+    original_bytes = lock_path.read_bytes()
+
+    with scheduling.ExitStack() as stack:
+        scheduling._open_existing_update_lock(
+            stack, lock_path, expected_owner=os.geteuid()
+        )
+        locked_stat = lock_path.stat()
+        assert (locked_stat.st_dev, locked_stat.st_ino) == (
+            original_stat.st_dev,
+            original_stat.st_ino,
+        )
+        assert lock_path.read_bytes() == original_bytes
+        contender = os.open(lock_path, os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(contender)
+
+    assert lock_path.read_bytes() == original_bytes
+    final_stat = lock_path.stat()
+    assert (final_stat.st_dev, final_stat.st_ino) == (
+        original_stat.st_dev,
+        original_stat.st_ino,
+    )
+
+
+@posix_only
+def test_updater_exclusion_fails_closed_when_lock_is_missing(tmp_path):
+    with scheduling.ExitStack() as stack:
+        with pytest.raises(SchedulingError, match="updater lock file is missing"):
+            scheduling._open_existing_update_lock(
+                stack, tmp_path / "missing-update.lock", expected_owner=os.geteuid()
+            )
+
+
+@posix_only
+def test_updater_exclusion_fails_closed_for_a_linked_lock(tmp_path):
+    target = tmp_path / "target.lock"
+    target.write_bytes(b"unchanged\n")
+    lock_path = tmp_path / "update.lock"
+    lock_path.symlink_to(target)
+
+    with scheduling.ExitStack() as stack:
+        with pytest.raises(SchedulingError, match="updater lock file cannot be verified"):
+            scheduling._open_existing_update_lock(
+                stack, lock_path, expected_owner=os.geteuid()
+            )
 
 
 @posix_only
