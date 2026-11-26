@@ -72,9 +72,33 @@ def _text(values, name: str, *, required=False, limit=256) -> str:
 
 
 def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
-    asset = Asset(**item)
-    current = assets.get(asset.asset_id)
-    return current is not None and current.target_key == asset.target_key
+    current = assets.get(item["asset_id"])
+    return current is not None and current.target_key == _inventory_target_key(item)
+
+
+def _inventory_target_key(item: dict) -> tuple[str, ...]:
+    """Match stored asset data without rebuilding an Asset for every finding."""
+    identity_path = (
+        "purl" if item.get("purl") else "cpe" if item.get("cpe")
+        else "ecosystem" if item.get("ecosystem") else "commit" if item.get("commit")
+        else "product"
+    )
+    if identity_path != "product":
+        return (
+            identity_path,
+            item.get("purl", ""),
+            item.get("cpe", ""),
+            item.get("ecosystem", ""),
+            item.get("product", ""),
+            item.get("version", ""),
+            item.get("repository", ""),
+            item.get("commit", ""),
+        )
+    return (
+        item.get("vendor", "").casefold().strip(),
+        item.get("product", "").casefold().strip(),
+        item.get("version", "").strip(),
+    )
 
 
 
@@ -227,7 +251,13 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
 
     @app.context_processor
     def inventory_state():
-        return {"inventory_configured": config.effective_inventory is not None}
+        try:
+            configured = config.effective_inventory is not None
+        except Exception as exc:
+            # Pages that read the inventory report the failure themselves.
+            LOG.error("inventory state could not be checked (%s)", type(exc).__name__)
+            configured = config.inventory is not None or config.managed_inventory
+        return {"inventory_configured": configured}
 
     @app.get("/healthz")
     @requires("public")
@@ -314,16 +344,17 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
             LOG.error("dashboard request failed (%s)", type(exc).__name__)
         return render_template("error.html", code=code), code
 
-    def snapshot():
+    def snapshot(*, home: bool = False, inventory_config=None, inventory_resolved: bool = False):
         data = store.dashboard_snapshot()
         now = datetime.now(timezone.utc)
-        inventory = config.effective_inventory
+        inventory = inventory_config if inventory_resolved else config.effective_inventory
         data["inventory_warnings"] = []
+        web_inventory_errors = []
         if inventory is not None:
             try:
                 assets = {asset.asset_id: asset for asset in load_inventory(
                     inventory, snapshot_directory=config.database_path.parent / "web-inventory",
-                    managed_warnings=data["inventory_warnings"],
+                    managed_warnings=data["inventory_warnings"], web_errors=web_inventory_errors,
                 )}
                 data["inventory_error"] = False
             except CVEBeaconError:
@@ -332,29 +363,83 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
         else:
             assets = {}
             data["inventory_error"] = False
-        data["inventory"] = assets
+        data["inventory_incomplete"] = bool(
+            data["inventory_error"] or data["inventory_warnings"] or web_inventory_errors
+        )
+        if not home:
+            data["inventory"] = assets
         data["categories"] = Counter(asset.category or "Uncategorized" for asset in assets.values())
         latest, attempt = data["latest"], data["attempt"]
         data["stale"] = latest is None or _old(latest["completed_at"], now)
         data["failed"] = bool(latest and latest["status"] != "completed") or bool(attempt and attempt["status"] != "completed")
         data["unfinished"] = bool(attempt and attempt["status"] == "running")
-        observed_assets = {item["asset"]["asset_id"]: item for item in data["assets"]}
-        data["coverage"] = [{"asset": asdict(asset), "coverage":
-            observed_assets[asset.asset_id].get("coverage") if asset.asset_id in observed_assets and _inventory_match(observed_assets[asset.asset_id]["asset"], assets) else "coverage_unknown",
-            "reason": observed_assets[asset.asset_id].get("coverage_reason") if asset.asset_id in observed_assets and _inventory_match(observed_assets[asset.asset_id]["asset"], assets) else "No scan observation for this inventory identity/version"}
-            for asset in assets.values()]
+        inventory_identity_keys = {asset_id: asset.target_key for asset_id, asset in assets.items()}
+
+        def matches_inventory(item):
+            asset_id = item["asset_id"]
+            return (
+                asset_id in inventory_identity_keys
+                and _inventory_target_key(item) == inventory_identity_keys[asset_id]
+            )
+
+        observed_assets = {}
+        for item in data["assets"]:
+            asset = item["asset"]
+            if matches_inventory(asset):
+                observed_assets[asset["asset_id"]] = item
+
+        coverage = []
+        unknown_coverage = 0
+        coverage_review = 0
+        for asset_id, asset in assets.items():
+            observation = observed_assets.get(asset_id)
+            current_coverage = observation.get("coverage") if observation else None
+            if current_coverage == "coverage_unknown" or observation is None:
+                unknown_coverage += 1
+            if current_coverage == "needs_review":
+                coverage_review += 1
+            if not home:
+                coverage.append({
+                    "asset": asdict(asset),
+                    "coverage": current_coverage if observation else "coverage_unknown",
+                    "reason": (
+                        observation.get("coverage_reason")
+                        if observation else "No scan observation for this inventory identity/version"
+                    ),
+                })
+        if not home:
+            data["coverage"] = coverage
+
+        affected = needs_review = 0
+        cisa_kev = set()
+        eu_kev = set()
         for row in data["findings"]:
-            row["current_inventory"] = _inventory_match(row["finding"]["asset"], assets)
-            row["stale"] = _old(row["last_seen"], now) or not latest or row["last_seen"] != latest["completed_at"]
+            current_inventory = matches_inventory(row["finding"]["asset"])
+            if not home:
+                row["current_inventory"] = current_inventory
+                row["stale"] = _old(row["last_seen"], now) or not latest or row["last_seen"] != latest["completed_at"]
+            if current_inventory:
+                finding = row["finding"]
+                if finding["applicability"] == "affected":
+                    affected += 1
+                elif finding["applicability"] == "needs_review":
+                    needs_review += 1
+                vulnerability = finding["vulnerability"]
+                if vulnerability.get("cve_id"):
+                    if vulnerability.get("cisa_kev") is True:
+                        cisa_kev.add(vulnerability["cve_id"])
+                    if vulnerability.get("eu_kev") is True:
+                        eu_kev.add(vulnerability["cve_id"])
         for row in data["health"]:
             row["freshness"] = "stale" if _old(row["checked_at"], now) else "cached observation"
-        current = [row["finding"] for row in data["findings"] if row["current_inventory"]]
-        counts = Counter(row["applicability"] for row in current)
-        data["counts"] = {"Assets": len(assets), "Affected findings": counts["affected"], "Needs review": counts["needs_review"],
-            "Coverage unknown assets": sum(row["coverage"] == "coverage_unknown" for row in data["coverage"]),
-            "Assets needing coverage review": sum(row["coverage"] == "needs_review" for row in data["coverage"]),
-            "CISA KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"]["cisa_kev"] is True}),
-            "EU KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"]["eu_kev"] is True})}
+        data["counts"] = {"Assets": len(assets), "Affected findings": affected, "Needs review": needs_review,
+            "Coverage unknown assets": unknown_coverage,
+            "Assets needing coverage review": coverage_review,
+            "CISA KEV CVEs": len(cisa_kev),
+            "EU KEV CVEs": len(eu_kev)}
+        if home:
+            data["assets"] = []
+            data["findings"] = []
         return data
 
     def inventory_required(title: str, *, status: int = 200):
@@ -364,8 +449,76 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @requires("view")
     def overview():
         from .dashboard_setup import Viewer, gather
-        return render_template("overview.html", data=snapshot(),
-                               setup=gather(config, viewer=Viewer.from_flask(app)))
+        from .dashboard_home import (
+            build_home_context,
+            cached_home_context,
+            home_cache_key,
+            unavailable_home_context,
+        )
+
+        inventory_config = None
+        inventory_configured = config.inventory is not None or config.managed_inventory
+        links = {
+            "findings": url_for("findings", applicability="affected"),
+            "review": url_for("findings", applicability="needs_review"),
+            "coverage": url_for("assets"),
+            "inventory": url_for("client_inventory.index"),
+            "alerts": url_for("watch.events"),
+            "scan": url_for("overview") + "#scan-activity",
+        }
+
+        def build():
+            data = snapshot(home=True, inventory_config=inventory_config, inventory_resolved=True)
+            home = build_home_context(
+                config,
+                data,
+                app.extensions["dashboard_watch"]["store"],
+                inventory_configured=inventory_configured,
+                links=links,
+            )
+            return data, home
+
+        try:
+            # Resolve inside the guard so an unreadable inventory directory
+            # shows Could not check instead of an error page or a cached count.
+            inventory_config = config.effective_inventory
+            inventory_configured = inventory_config is not None
+            data, home = cached_home_context(app, lambda: home_cache_key(config), build)
+        except Exception as exc:
+            LOG.error("home metrics could not be checked (%s)", type(exc).__name__)
+            data = {
+                "home_scan_error": True,
+                "inventory_warnings": [],
+                "inventory_error": False,
+                "inventory_incomplete": False,
+                "latest": None,
+                "successful": None,
+                "attempt": None,
+                "stale": True,
+                "failed": False,
+                "unfinished": False,
+                "inventory": {},
+                "categories": {},
+                "findings": [],
+                "assets": [],
+                "health": [],
+                "coverage": [],
+                "counts": {},
+                "events": [],
+                "deliveries": [],
+                "delivery_counts": [],
+            }
+            home = unavailable_home_context(
+                inventory_configured=inventory_configured,
+                watch_enabled=config.watch.enabled,
+                links=links,
+            )
+        return render_template(
+            "overview.html",
+            data=data,
+            home=home,
+            setup=gather(config, viewer=Viewer.from_flask(app)),
+        )
 
     @app.get("/findings")
     @requires("view")

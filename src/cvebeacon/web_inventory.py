@@ -144,6 +144,14 @@ def append_snapshots(assets, directory: Path, *, errors: list[Exception] | None 
     private_directory(directory, owner_only=True)
     seen = {asset.asset_id.casefold() for asset in assets}
     merged = list(assets)
+    if errors is not None:
+        # Path.glob hides a directory that cannot be listed; report it instead.
+        try:
+            with os.scandir(directory):
+                pass
+        except OSError as exc:
+            errors.append(exc)
+            return merged
     for path in sorted(directory.glob("*.json")):
         if path.name.endswith((".manifest.json", ".review.json")):
             continue

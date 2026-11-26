@@ -62,9 +62,46 @@ shows whether it is waiting, sending, accepted, failed or cancelled, and links
 to the job log. An accepted message still needs to be checked at its
 destination.
 
+## Home
+
+After **Getting started**, Home shows five KPI cards: **Affected findings**,
+**Needs review**, **Assets with unknown coverage**, **Alerts waiting or
+uncertain**, and **Latest scan**. The inventory counts reuse the latest scan
+snapshot. **Affected findings** and **Needs review** count findings whose asset
+identity and version still match the current inventory. **Assets with unknown
+coverage** counts inventory assets whose latest scan does not establish
+coverage, including assets with no matching scan observation. Each card links
+to its detail page or the scan activity section below.
+
+A compact row below the cards also shows **Assets**, **Assets to check**,
+**CISA KEV CVEs**, and **EU KEV CVEs**. Assets to check is the separate count of
+inventory assets marked for coverage review; it is not part of Assets with
+unknown coverage. Scan-dependent values show **No scan recorded** when there is
+no scan, and show the stored value with a stale-data warning after 24 hours.
+
+When no inventory is configured, the first three cards explain that inventory
+is needed. When no scan is recorded, they say so instead of showing zero. A
+partly read or unreadable inventory source shows **Could not check** for all
+three inventory cards and links to the Inventory page. Counts from a scan older
+than 24 hours remain visible with the scan time, age, and **Stale scan data**
+warning. A zero for affected findings means no affected finding was recorded
+for the current inventory; it does not establish complete coverage.
+
+The alerts card counts Watch delivery rows that are queued, sending, failed or
+unsure. It excludes accepted rows and includes “gave up” rows within the failed
+count. This is global Watch activity and is not inventory-specific. Delivery
+state does not confirm that a person received an alert. If Watch is off or has
+no delivery history, the card states that instead of implying that alerts were
+sent.
+
+The **Latest scan** card shows the latest stored run time and result. It shows
+the most recent attempt separately when that attempt differs from the latest
+stored run. Scan activity, recent changes, inventory-scan notification
+delivery and source observations remain below the cards.
+
 ## Views and investigation
 
-- **Overview:** last successful full scan, most recent attempted scan, current inventory count, latest known affected/review findings, coverage gaps, KEV counts, recent material changes, notification acceptance/failure, and source observations.
+- **Overview:** five Home KPI cards, a secondary row for Assets, Assets to check and CISA/EU KEV CVEs, inventory categories, scan activity, recent material changes, inventory-scan notification delivery and source observations. Watch delivery counts are shown as global activity, separate from inventory findings.
 - **Findings:** filter by asset, vendor, product, version, CVE, applicability, severity or minimum CVSS, and CISA/EU KEV. Expand evidence to see the assessment reason, provenance, conflicts, CVSS and EPSS. Unknown KEV membership is distinct from a healthy negative result.
 - **Assets:** search the current inventory, including dashboard uploads, and inspect an asset's stored findings. A changed version or removed asset leaves its older observations explicitly labelled as historical.
 - **History:** browse material events, filter exact asset/CVE identifiers, and open the evidence saved with an event. Older-event links provide access beyond the first page.

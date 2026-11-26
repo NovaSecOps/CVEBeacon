@@ -88,7 +88,7 @@ def test_empty_database_is_unknown_and_server_is_safe(setup):
     response = client.get("/")
     assert response.status_code == 200
     assert "No scan results recorded" in response.text
-    assert "Assets with no recent scan result" in response.text
+    assert "Assets with unknown coverage" in response.text
     assert not client.application.debug
     assert response.headers["Cache-Control"] == "no-store"
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
