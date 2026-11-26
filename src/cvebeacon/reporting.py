@@ -100,7 +100,7 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
             result.asset.category, result.asset.system_id, result.asset.ecosystem,
         ]])
     findings = workbook.create_sheet("Findings")
-    findings.append(["Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability", "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile", "EPSS Date", "CISA KEV", "EU KEV", "Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts"])
+    findings.append(["Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability", "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile", "EPSS Date", "CISA KEV", "EU KEV", "Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts", "Client"])
     for result in values:
         for item in result.findings:
             vuln = item.vulnerability
@@ -112,6 +112,7 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
                 vuln.cisa_kev, vuln.eu_kev, vuln.rejected, vuln.published, vuln.modified,
                 vuln.summary, ", ".join(sorted({x.source for x in item.evidence})),
                 "; ".join(item.conflicts),
+                item.asset.client or "No client",
             ]])
     uncertainty = workbook.create_sheet("Uncertainty")
     uncertainty.append(["Asset ID", "Advisory", "State", "Reason", "Source Health"])
