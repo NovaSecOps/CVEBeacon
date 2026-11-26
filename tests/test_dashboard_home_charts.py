@@ -322,4 +322,3 @@ def test_severity_chart_svg_ids_accessibility_table_and_no_inline_markup(tmp_pat
     assert "default-src 'none'; style-src 'self'; script-src 'self'" in client.get("/").headers[
         "Content-Security-Policy"
     ]
-
