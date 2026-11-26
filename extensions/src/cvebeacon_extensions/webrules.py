@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import re
 from typing import Iterable, Mapping
+from urllib.parse import quote
 
 from cvebeacon.identity import normalize_asset
 from cvebeacon.models import Asset
@@ -40,7 +41,7 @@ class Rule:
     vendor: str
     product: str
     category: str
-    kind: str  # header | cookie | meta | url | html
+    kind: str  # header | cookie | meta | url | html | script | style
     pattern: str
     subject: str = ""  # header name for kind == "header"
     version_pattern: str = ""
@@ -57,6 +58,33 @@ class Detection:
     confidence: str
     versions: tuple[str, ...]
     evidence_types: tuple[str, ...] = ()
+    # Human-facing product name, for example "Google Font API". Empty means
+    # vendor/product is shown.
+    name: str = ""
+    # Package identity for package-manager libraries (for example "npm" and
+    # "core-js"); when set with a version, the inventory row uses a PURL.
+    ecosystem: str = ""
+    package: str = ""
+    # Keys of the detections that imply this one. An implied-only detection is
+    # listed for people to read and never becomes an inventory row.
+    implied_by: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Resource:
+    """A same-site script or stylesheet that the page referenced and the fetcher read."""
+    url: str
+    kind: str  # script | style
+    text: str
+
+
+def package_url(ecosystem: str, package: str, version: str) -> str:
+    """Return a PURL for a supported package ecosystem, or an empty string."""
+    if ecosystem != "npm" or not package or not version:
+        return ""
+    namespace, _, name = package.rpartition("/")
+    path = (quote(namespace, safe="") + "/" if namespace else "") + quote(name, safe="")
+    return f"pkg:npm/{path}@{quote(version, safe='')}"
 
 
 _VERSION_BODY = r"\d+(?:\.\d+){0,3}"
@@ -331,13 +359,15 @@ class Page:
     generators: tuple[str, ...]
     urls: tuple[str, ...]
     html: str
+    resources: tuple[Resource, ...] = ()
 
 
 def _header_value(headers: Mapping[str, tuple[str, ...]], name: str) -> tuple[str, ...]:
     return headers.get(name.casefold(), ())
 
 
-def page_from(headers: Mapping[str, Iterable[str]], html: str) -> Page:
+def page_from(headers: Mapping[str, Iterable[str]], html: str,
+              resources: Iterable[Resource] = ()) -> Page:
     normalized = {str(name).casefold(): tuple(str(value) for value in values)
                   for name, values in headers.items()}
     cookies = []
@@ -362,7 +392,7 @@ def page_from(headers: Mapping[str, Iterable[str]], html: str) -> Page:
             urls.append(attribute.group(1))
             if len(urls) >= MAX_URLS:
                 break
-    return Page(normalized, tuple(cookies), tuple(generators), tuple(urls), html)
+    return Page(normalized, tuple(cookies), tuple(generators), tuple(urls), html, tuple(resources))
 
 
 def _values(rule: Rule, page: Page) -> tuple[str, ...]:
@@ -374,6 +404,8 @@ def _values(rule: Rule, page: Page) -> tuple[str, ...]:
         return page.generators
     if rule.kind == "url":
         return page.urls
+    if rule.kind in {"script", "style"}:
+        return tuple(resource.text for resource in page.resources if resource.kind == rule.kind)
     return (page.html,)
 
 

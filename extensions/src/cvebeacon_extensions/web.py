@@ -38,7 +38,7 @@ from . import __version__
 from .contract import (ExtensionError, MAX_BYTES, _atomic, _regular, decode_json, json_bytes,
                        label, output_lock, read_bytes, read_snapshot, timestamp, utc_now,
                        write_snapshot)
-from .webrules import detect, page_from
+from .webrules import detect, package_url, page_from
 
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
@@ -1220,11 +1220,19 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
     page = page_from(success.response.headers, _decode_html(success.response.body,
                                                            success.response.headers))
     detections = detect(page)
-    products = [dict(asset_id=_asset_id(allowlist.client, asset.endpoint, item.vendor, item.product),
-                     hostname=asset.endpoint.hostname, vendor=item.vendor, product=item.product,
-                     versions=list(item.versions), category=item.category,
-                     evidence_types=list(item.evidence_types), confidence=item.confidence)
-                for item in detections]
+    products = []
+    for item in detections:
+        product = dict(asset_id=_asset_id(allowlist.client, asset.endpoint, item.vendor, item.product),
+                       hostname=asset.endpoint.hostname, vendor=item.vendor, product=item.product,
+                       versions=list(item.versions), category=item.category,
+                       evidence_types=list(item.evidence_types), confidence=item.confidence)
+        if item.name:
+            product["name"] = item.name
+        if item.ecosystem and item.package:
+            product["ecosystem"], product["package"] = item.ecosystem, item.package
+        if item.implied_by:
+            product["implied_by"] = list(item.implied_by)
+        products.append(product)
     rows: list[dict] = []
     reviews: list[dict] = []
     omissions: set[str] = set()
@@ -1232,6 +1240,9 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
         reviews.append(dict(base, reason="no-technologies", detail="fetch succeeded; no direct evidence matched"))
         omissions.add("no-technologies")
     for detection in detections:
+        if detection.implied_by and set(detection.evidence_types) <= {"implied"}:
+            # Inferred from another product: listed for people, never a row or a review item.
+            continue
         display = f"{detection.vendor}/{detection.product}"
         row_id = _asset_id(allowlist.client, asset.endpoint, detection.vendor,
                            detection.product)
@@ -1253,16 +1264,18 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
                                 confidence=detection.confidence))
             omissions.add("version-unknown")
             continue
+        purl = package_url(detection.ecosystem, detection.package, version)
         rows.append({
             "asset_id": row_id,
             "vendor": detection.vendor,
-            "product": detection.product,
+            # A package identity names the package itself and never carries a CPE too.
+            "product": detection.package if purl else detection.product,
             "version": version,
             "category": detection.category,
             "system_id": system_id,
-            "ecosystem": "",
-            "purl": "",
-            "cpe": detection.cpe,
+            "ecosystem": detection.ecosystem if purl else "",
+            "purl": purl,
+            "cpe": "" if purl else detection.cpe,
             "repository": "",
             "commit": "",
             "client": allowlist.client,
