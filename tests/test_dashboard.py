@@ -190,6 +190,8 @@ def test_assets_explains_coverage_and_asset_detail_marks_active_nav(setup):
     _, store, client = setup
     store.record_scan([result()])
     assets = client.get("/assets").text
+    assert "<td>No client</td>" in assets
+    assert "Unassigned" not in assets
     assert "Coverage means whether the last scan could check an item." in assets
     assert "Unknown coverage is not the same as no vulnerabilities." in assets
     asset = client.get("/asset?asset_id=a").text

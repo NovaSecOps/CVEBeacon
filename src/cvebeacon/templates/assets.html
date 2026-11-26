@@ -19,7 +19,7 @@
 <thead><tr><th>Asset</th><th>Client</th><th>Vendor</th><th>Product</th><th>Version</th><th>Last scan coverage</th></tr></thead>
 <tbody>{% for row in rows %}<tr>
 <td><a href="{{ url_for('asset', asset_id=row.asset.asset_id) }}">{{ row.asset.asset_id }}</a><br><span class="muted">{{ row.asset.category or 'No category' }} · {{ row.asset.system_id or 'No system' }}</span></td>
-<td>{{ row.asset.client or 'Unassigned' }}</td>
+<td>{{ row.asset.client or 'No client' }}</td>
 <td>{{ row.asset.vendor }}</td>
 <td>{{ row.asset.product }}<br><span class="muted">{{ row.asset.ecosystem or 'No ecosystem' }}</span></td>
 <td>{{ row.asset.version }}</td>

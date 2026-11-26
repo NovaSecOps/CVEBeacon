@@ -56,7 +56,7 @@
 <table>
 <thead><tr><th scope="col">Asset</th><th scope="col">Client</th><th scope="col">Advisory</th><th scope="col">{{ term('Applicability', 'whether the flaw applies to this asset') }}</th></tr></thead>
 <tbody>
-{% for item in scan_findings %}<tr><td>{{ item.asset_id }}</td><td>{{ item.client or 'Unassigned' }}</td><td>{{ item.advisory_id }}</td><td>{{ applicability_badge(item.applicability) }}</td></tr>{% else %}<tr><td colspan="4">No scan findings are stored for this CVE.</td></tr>{% endfor %}
+{% for item in scan_findings %}<tr><td>{{ item.asset_id }}</td><td>{{ item.client or 'No client' }}</td><td>{{ item.advisory_id }}</td><td>{{ applicability_badge(item.applicability) }}</td></tr>{% else %}<tr><td colspan="4">No scan findings are stored for this CVE.</td></tr>{% endfor %}
 </tbody>
 </table>
 {% endcall %}

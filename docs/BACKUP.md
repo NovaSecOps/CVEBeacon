@@ -35,11 +35,12 @@ discovered automatically; back it up with the automation guide's procedure.
 Directories that are themselves backup stores are never discovered as owned
 databases, even after `backup.directory` changes.
 
-For a manual backup of dashboard-managed client inventories, stop writers and
-copy the private `inventories/` directory alongside this backup. Keep its
-owner-only permissions. A command-line restore of the account database should
-use the matching inventory directory copy. The administrator updater takes its
-own snapshots that include both stores.
+The no-client inventory and client-assigned inventories share the private
+`inventories/` directory. For a manual backup of dashboard-managed inventories,
+stop writers and copy that directory alongside this backup. Keep its owner-only
+permissions. A command-line restore of the account database should use the
+matching inventory directory copy. The administrator updater takes its own
+snapshots that include both stores.
 
 Each SQLite file is copied with SQLite's online backup API, integrity-checked,
 and hashed. A normal file copy is not sufficient while a database is using WAL.

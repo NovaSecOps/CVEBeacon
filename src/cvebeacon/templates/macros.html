@@ -1,7 +1,7 @@
 {% from 'ui.html' import callout, table_wrap, applicability_badge, badge, term, explain %}
 {% macro inventory_notice() %}
 {% call callout('info') %}
-<p>No software list is set up yet. Add a client and upload their software list on the <a href="{{ url_for('watch.clients') }}">Clients page</a>. Alerts about public flaws still work without it.</p>
+<p>No inventory is set up yet. Add a list on the <a href="/inventory">Inventory page</a>. Client is optional. Alerts about public flaws still work without an inventory.</p>
 {% call explain('Configuration file option') %}
 <p>An inventory can also be added to the configuration file:</p>
 <pre>[inventory]

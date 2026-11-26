@@ -6,7 +6,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
-import sqlite3
 
 import pytest
 from flask import g
@@ -18,14 +17,13 @@ from cvebeacon.dashboard_setup import (
     STALE_BACKUP_DAYS,
     STALE_SYNC_DAYS,
     WATCH_UNREADABLE,
-    ClientInfo,
+    InventoryInfo,
     Setup,
     Viewer,
     build_setup,
     gather,
 )
 from cvebeacon.errors import StateError
-from cvebeacon.state import StateStore
 from cvebeacon.watch.channels import ChannelConfig
 from cvebeacon.watch.rules import Condition, Rule
 from cvebeacon.watch.store import WatchStore
@@ -42,7 +40,8 @@ FULL_PERMISSIONS = frozenset({
 })
 BASE_ENDPOINTS = frozenset({
     "backups.index",
-    "client_inventory.add",
+    "client_inventory.index",
+    "client_inventory.inventory_add",
     "config_editor.channels",
     "config_editor.inventory",
     "config_editor.rules",
@@ -114,7 +113,7 @@ def steps_for(config, **values):
         "jobs": (),
         "schedule_state": "none",
         "backup_info": {"count": 0, "last": None, "last_id": None},
-        "client_info": ClientInfo(managed=False, scanned=0),
+        "inventory_info": InventoryInfo(exists=False),
         "now": NOW,
         "viewer": make_viewer(),
     }
@@ -427,42 +426,49 @@ def test_rule_step_reports_done_and_counts_rules():
     assert item.detail == "2 rules send alerts to an enabled channel."
 
 
-def test_client_step_reports_no_client_list():
-    item = step(steps_for(unit_config()), "client")
+def test_inventory_step_reports_no_inventory():
+    item = step(steps_for(unit_config()), "inventory")
     assert item.state == "todo"
-    assert item.title == "Add a client and their software list"
-    assert item.detail == (
-        "No client has a software list yet. Until one does, CVEBeacon cannot say "
-        "which clients are affected."
-    )
-    assert item.action_label == "Add a client"
-    assert item.action_url == "/client_inventory.add"
+    assert item.title == "Add inventory"
+    assert item.detail == "No inventory has been added yet, so there is nothing to scan."
+    assert item.action_label == "Add inventory"
+    assert item.action_url == "/client_inventory.inventory_add"
     assert item.hint is None
 
 
-def test_client_step_reports_disabled_managed_lists():
-    item = step(steps_for(unit_config(managed=False)), "client")
-    assert item.state == "na"
-    assert item.detail == "Client software lists added in the dashboard are turned off."
-    assert item.action_label == "Open inventory settings"
+def test_inventory_step_stays_to_do_when_managed_uploads_are_disabled():
+    item = step(steps_for(unit_config(managed=False)), "inventory")
+    assert item.state == "todo"
+    assert item.title == "Add inventory"
+    assert item.action_label == "Open Inventory settings"
     assert item.action_url == "/config_editor.inventory"
     assert item.hint is None
 
 
-@pytest.mark.parametrize("client_info", [ClientInfo(managed=True, scanned=0),
-                                         ClientInfo(managed=False, scanned=3)])
-def test_client_step_reports_done(client_info):
-    item = step(steps_for(unit_config(), client_info=client_info), "client")
+def test_inventory_step_viewer_without_edit_permission_gets_a_hint_when_uploads_are_disabled():
+    viewer = make_viewer({"view"}, is_admin=False)
+    item = step(steps_for(unit_config(managed=False), viewer=viewer), "inventory")
+    assert item.state == "todo"
+    assert item.action_url is None
+    assert item.action_label is None
+    assert item.hint == (
+        "Ask someone who can turn on managed inventories or configure a shared file."
+    )
+
+
+def test_inventory_step_reports_done_as_soon_as_an_inventory_is_available():
+    item = step(steps_for(unit_config(), inventory_info=InventoryInfo(exists=True)), "inventory")
     assert item.state == "done"
-    assert item.detail == "At least one client has a software list."
+    assert item.title == "Add inventory"
+    assert item.detail == "An inventory is available."
 
 
-def test_client_step_reports_unreadable_information():
-    item = step(steps_for(unit_config(), client_info=None), "client")
+def test_inventory_step_reports_unreadable_information():
+    item = step(steps_for(unit_config(), inventory_info=None), "inventory")
     assert item.state == "unknown"
-    assert item.detail == "Client information could not be read. Open Clients for details."
-    assert item.action_label == "Open Clients"
-    assert item.action_url == "/watch.clients"
+    assert item.detail == "Inventory information could not be read. Open Inventory for details."
+    assert item.action_label == "Open Inventory"
+    assert item.action_url == "/client_inventory.index"
 
 
 @pytest.mark.parametrize("state,expected,detail,label,url", [
@@ -517,13 +523,13 @@ def test_backup_step_states(info, state, detail):
 def test_backup_step_is_omitted_without_the_backups_page():
     endpoints = BASE_ENDPOINTS - {"backups.index"}
     steps = steps_for(unit_config(), viewer=make_viewer(endpoints=endpoints))
-    assert [item.id for item in steps] == ["sources", "channel", "rule", "client", "schedule"]
+    assert [item.id for item in steps] == ["sources", "channel", "rule", "inventory", "schedule"]
     assert Setup.from_steps(steps).total == 5
 
 
 def test_steps_are_in_the_documented_order():
     assert [item.id for item in steps_for(unit_config())] == [
-        "sources", "channel", "rule", "client", "schedule", "backup",
+        "sources", "channel", "rule", "inventory", "schedule", "backup",
     ]
 
 
@@ -564,9 +570,9 @@ def test_view_only_actions_are_limited_to_read_pages():
     assert item.action_url is None
     assert item.hint == "Ask someone who may edit alert rules."
 
-    item = step(steps_for(unit_config(), viewer=make_viewer({"view"}, is_admin=False)), "client")
+    item = step(steps_for(unit_config(), viewer=make_viewer({"view"}, is_admin=False)), "inventory")
     assert item.action_url is None
-    assert item.hint == "Ask someone who may manage client lists."
+    assert item.hint == "Ask someone who may manage inventories."
 
     item = step(steps_for(unit_config(), viewer=make_viewer({"view"}, is_admin=False)),
                 "schedule")
@@ -610,7 +616,7 @@ def test_setup_summary_collapses_when_nothing_needs_attention():
         jobs=(make_job(),),
         schedule_state="scan",
         backup_info={"count": 1, "last": "2026-11-23T09:30:00+00:00", "last_id": "b"},
-        client_info=ClientInfo(managed=True, scanned=0),
+        inventory_info=InventoryInfo(exists=True),
     )
     summary = Setup.from_steps(steps)
     assert summary.done == 6
@@ -735,12 +741,15 @@ def test_fresh_watch_install_renders_every_step_to_do(tmp_path):
         "Turn on watching and get the first data",
         "Set up and test a way to receive alerts",
         "Choose what should trigger an alert",
-        "Add a client and their software list",
+        "Add inventory",
         "Run CVEBeacon automatically",
         "Make a backup",
     ):
         assert title in page.text
-    assert "setup-unknown" not in page.text
+    checklist = checklist_text(page.text)
+    assert "setup-unknown" not in checklist
+    assert '<li class="setup-step setup-todo" id="setup-inventory">' in checklist
+    assert "Add a client" not in page.text
     # Reading the checklist must not create a missing watch database.
     assert not config.watch.database.exists()
 
@@ -757,13 +766,14 @@ def test_home_get_does_not_create_scan_database_sidecars(tmp_path):
             assert not sidecar.exists(), sidecar
 
 
-def test_fresh_scan_install_renders_every_step_to_do(tmp_path):
+def test_fresh_scan_install_marks_an_existing_inventory_done(tmp_path):
     (tmp_path / "missing-inventory.csv").write_text(
         "asset_id,vendor,product,version\na,Acme,Widget,1\n", encoding="utf-8")
     _, app = make_app(tmp_path, inventory=True, enabled=False)
     page = app.test_client().get("/")
     assert page.status_code == 200
-    assert "0 of 6 steps done" in page.text
+    assert "1 of 6 steps done" in page.text
+    assert "An inventory is available." in page.text
     assert "Turn on watching and get the first data" in page.text
     assert "Watch mode is off" in page.text
 
@@ -859,18 +869,78 @@ def test_home_reports_unreadable_backups(tmp_path, monkeypatch):
     assert "backup secret detail" not in page.text
 
 
-def test_home_reports_unreadable_client_information(tmp_path, monkeypatch):
+def test_home_reports_unreadable_inventory_information(tmp_path, monkeypatch):
     config, app, client = make_home(tmp_path)
-    StateStore(config.database_path).record_scan([])
 
-    def explode(path, *, limit=1):
-        raise sqlite3.Error("client secret detail")
+    def explode(_directory):
+        raise OSError("inventory secret detail")
 
-    monkeypatch.setattr(dashboard_setup, "client_page", explode)
+    monkeypatch.setattr(dashboard_setup, "has_managed_inventory", explode)
     page = client.get("/")
     assert page.status_code == 200
-    assert "Client information could not be read." in page.text
-    assert "client secret detail" not in page.text
+    assert "Inventory information could not be read." in page.text
+    assert "inventory secret detail" not in page.text
+
+
+def test_configured_file_inventory_is_available_without_a_scan(tmp_path):
+    config, _ = make_app(tmp_path, inventory=True)
+    config.inventory.path.write_text(
+        "asset_id,vendor,product,version\na,Acme,Widget,1\n",
+        encoding="utf-8", newline="\n",
+    )
+    info = dashboard_setup._inventory_info(config)
+    assert info.exists is True
+    item = step(steps_for(config, inventory_info=info), "inventory")
+    assert item.state == "done"
+    assert item.detail == "An inventory is available."
+
+
+def test_client_managed_inventory_is_available_without_a_scan(tmp_path):
+    config, app = make_app(tmp_path, inventory=False)
+    directory = config.inventory_directory
+    directory.mkdir()
+    from cvebeacon.managed_inventory import client_key
+    key = client_key("Acme")
+    (directory / f"{key}.json").write_text(
+        '[{"asset_id":"router-1","vendor":"Acme","product":"Router","version":"1","client":"Acme"}]',
+        encoding="utf-8", newline="\n",
+    )
+    (directory / f"{key}.client").write_text(
+        '{"name":"Acme","notes":"","contact":""}\n',
+        encoding="utf-8", newline="\n",
+    )
+
+    info = dashboard_setup._inventory_info(config)
+    assert info.exists is True
+    item = step(steps_for(config, inventory_info=info), "inventory")
+    assert item.state == "done"
+    assert item.detail == "An inventory is available."
+    checklist = checklist_text(app.test_client().get("/").text)
+    assert '<li class="setup-step setup-done" id="setup-inventory">' in checklist
+    assert "Add a client" not in checklist
+
+
+def test_no_client_managed_inventory_is_available_without_a_scan(tmp_path):
+    config, _ = make_app(tmp_path, inventory=False)
+    directory = config.inventory_directory
+    directory.mkdir()
+    (directory / "unassigned.json").write_text(
+        '[{"asset_id":"router-1","vendor":"Acme","product":"Router","version":"1"}]',
+        encoding="utf-8", newline="\n",
+    )
+    info = dashboard_setup._inventory_info(config)
+    assert info.exists is True
+    item = step(steps_for(config, inventory_info=info), "inventory")
+    assert item.state == "done"
+    assert item.detail == "An inventory is available."
+
+
+def test_home_inventory_action_links_to_inventory_add(tmp_path):
+    _, app = make_app(tmp_path, inventory=False, admin=True)
+    client = app.test_client()
+    login(client)
+    checklist = checklist_text(client.get("/").text)
+    assert 'href="/inventory/add">Add inventory</a>' in checklist
 
 
 def test_rendered_checklist_avoids_banned_words(tmp_path):
@@ -878,8 +948,9 @@ def test_rendered_checklist_avoids_banned_words(tmp_path):
                            rules=(make_rule(),), admin=True)
     client = app.test_client()
     login(client)
-    checklist = checklist_text(client.get("/").text)
-    assert BANNED.search(checklist) is None
+    page = client.get("/").text
+    assert BANNED.search(page) is None
+    assert "Add a client" not in page
 
 
 def test_can_helper_requires_accounts_and_permission(tmp_path):

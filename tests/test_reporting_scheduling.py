@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import subprocess
 
@@ -9,7 +10,7 @@ from openpyxl import load_workbook
 
 from cvebeacon.errors import SchedulingError
 from cvebeacon.models import Applicability, Asset, Evidence, Finding, HealthStatus, QueryResult, SourceHealth, Vulnerability, utc_now
-from cvebeacon.reporting import write_xlsx
+from cvebeacon.reporting import write_json, write_xlsx
 from cvebeacon.scheduling import CRON_BEGIN, CRON_END, SchedulePlan, _windows_args, _without_managed_block, describe, install, make_plan, remove, status
 
 
@@ -21,6 +22,24 @@ def test_xlsx_has_practical_sheets(tmp_path):
     workbook = load_workbook(path)
     assert workbook.sheetnames == ["Summary", "Findings", "Uncertainty", "Evidence", "Source Health", "Identities", "Advisory Details"]
     assert workbook["Findings"]["E2"].value == "CVE-2026-1234"
+
+
+def test_findings_report_shows_no_client_without_changing_json(tmp_path):
+    unassigned = Asset("asset-1", "Acme", "Widget", "1")
+    assigned = Asset("asset-2", "Acme", "Widget", "1", client="Example client")
+    finding = Finding(unassigned, Vulnerability("CVE-2026-1234"), Applicability.AFFECTED, "high", "range")
+    assigned_finding = Finding(assigned, Vulnerability("CVE-2026-1234"), Applicability.AFFECTED, "high", "range")
+    results = [QueryResult(unassigned, (finding,), ()), QueryResult(assigned, (assigned_finding,), ())]
+
+    workbook = load_workbook(write_xlsx(results, tmp_path / "report.xlsx"))
+    findings = workbook["Findings"]
+    client_column = next(cell.column for cell in findings[1] if cell.value == "Client")
+    assert findings.cell(2, client_column).value == "No client"
+    assert findings.cell(3, client_column).value == "Example client"
+
+    write_json(results, tmp_path / "report.json")
+    payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert payload[0]["asset"]["client"] == ""
 
 
 def test_xlsx_neutralizes_formula_like_inventory_values(tmp_path):

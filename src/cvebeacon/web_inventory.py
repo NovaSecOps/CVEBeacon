@@ -137,7 +137,7 @@ def read_contract(data: bytes):
     return assets
 
 
-def append_snapshots(assets, directory: Path):
+def append_snapshots(assets, directory: Path, *, errors: list[Exception] | None = None):
     from .errors import StateError
     if not directory.exists() and not directory.is_symlink():
         return assets
@@ -149,7 +149,9 @@ def append_snapshots(assets, directory: Path):
             continue
         try:
             rows, manifest = read_web_snapshot(path)
-        except (OSError, ValueError, InventoryValidationError, StateError):
+        except (OSError, ValueError, InventoryValidationError, StateError) as exc:
+            if errors is not None:
+                errors.append(exc)
             LOG.warning("Skipping invalid web snapshot %s; check its snapshot and manifest", path.name)
             continue
         for asset in rows:

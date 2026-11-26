@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from io import BytesIO
 import sqlite3
 import pytest
 
+from cvebeacon import dashboard
 import cvebeacon.clients as clients_module
 
 from test_dashboard_watch import csrf, login, seeded
@@ -77,6 +79,15 @@ def test_clients_page_without_a_scan_explains_the_missing_state(tmp_path):
     assert "No successful inventory scan is available" in response.text
 
 
+def test_clients_empty_state_points_to_inventory_and_keeps_client_optional(tmp_path):
+    config, _, _, _, _ = seeded(tmp_path)
+    client = dashboard.create_app(replace(config, inventory=None)).test_client()
+    login(client, "reader")
+    response = client.get("/watch/clients")
+    assert response.status_code == 200
+    assert "To add assets, open Inventory → Add inventory. Client is optional." in response.text
+
+
 def test_cve_detail_shows_affected_clients(tmp_path):
     _, _, _, _, client = with_scan(tmp_path)
     login(client, "reader")
@@ -86,6 +97,20 @@ def test_cve_detail_shows_affected_clients(tmp_path):
     assert "Affected clients" in text
     assert "Acme" in text and "Globex" in text
     assert "review" in text
+
+
+def test_cve_findings_label_empty_client_as_no_client(tmp_path):
+    config, _, _, _, client = seeded(tmp_path)
+    asset = Asset("asset-no-client", "Acme", "Widget", "1")
+    finding = Finding(
+        asset, Vulnerability("CVE-2026-0001"), Applicability.AFFECTED, "high", "test"
+    )
+    StateStore(config.database_path).record_scan([QueryResult(asset, (finding,), ())])
+    login(client, "reader")
+    response = client.get("/watch/cve/CVE-2026-0001")
+    assert response.status_code == 200
+    assert "<td>No client</td>" in response.text
+    assert "Unassigned" not in response.text
 
 
 def test_cve_detail_without_a_scan_explains_the_missing_state(tmp_path):
