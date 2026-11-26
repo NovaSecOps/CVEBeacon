@@ -8,8 +8,10 @@ passive patterns against data already present on a :class:`webrules.Page`.
 from __future__ import annotations
 
 from collections import Counter, deque
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -35,6 +37,7 @@ MAX_TOTAL_PATTERNS = 100_000
 MAX_STRING_LENGTH = 4096
 MAX_REGEX_LENGTH = 2048
 MAX_EVALUATION_SECONDS = 20.0
+RELATION_FINALIZATION_RESERVE_SECONDS = 0.05
 MAX_HTML_LENGTH = 4 * 1024 * 1024
 MAX_TEXT_LENGTH = 1024 * 1024
 MAX_RESOURCE_LENGTH = 4 * 1024 * 1024
@@ -43,6 +46,8 @@ MAX_PAGE_RESOURCES = 300
 MAX_RESOURCE_BYTES_PER_PAGE = 96 * 1024 * 1024
 MAX_DOM_NODES = 50_000
 MAX_DOM_TEXT_CACHE_BYTES = 4 * 1024 * 1024
+MAX_DOM_TEXT_WORK = 16 * 1024 * 1024
+HTML_PARSE_CHUNK = 16 * 1024
 MAX_VERSION_CAPTURE_LENGTH = 64
 MAX_META_TAGS = 4096
 MAX_SCRIPT_URLS = 16_384
@@ -70,6 +75,11 @@ _VOID_TAGS = frozenset({
     "meta", "param", "source", "track", "wbr",
 })
 _JS_FLAGS = {"i": re.IGNORECASE, "m": re.MULTILINE, "s": re.DOTALL}
+_COOKIE_HEADERS = frozenset({"set-cookie", "cookie"})
+_SENSITIVE_HEADERS = _COOKIE_HEADERS | {"authorization", "proxy-authorization"}
+_WINDOWS = os.name == "nt"
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+_OPEN_FLAGS |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +209,11 @@ class Fingerprints:
     def technology_count(self) -> int:
         return len(self.technologies)
 
+    @property
+    def load_error(self) -> bool:
+        return any(reason in {"fingerprint directory unavailable", "untrusted fingerprint layout"}
+                   for reason, _ in self.stats.skipped_technologies)
+
 
 def _freeze_counts(counter: Counter[str]) -> tuple[tuple[str, int], ...]:
     return tuple(sorted((key, value) for key, value in counter.items() if value))
@@ -282,7 +297,7 @@ def _safe_directory_info(info: os.stat_result) -> bool:
         stat.S_ISDIR(info.st_mode)
         and not stat.S_ISLNK(info.st_mode)
         and not _is_reparse_point(info)
-        and not (info.st_mode & stat.S_IWOTH)
+        and (_WINDOWS or not (info.st_mode & stat.S_IWOTH))
     )
 
 
@@ -291,29 +306,103 @@ def _safe_file_info(info: os.stat_result) -> bool:
         stat.S_ISREG(info.st_mode)
         and not stat.S_ISLNK(info.st_mode)
         and not _is_reparse_point(info)
-        and not (info.st_mode & stat.S_IWOTH)
+        and (_WINDOWS or not (info.st_mode & stat.S_IWOTH))
     )
 
 
-def _read_json_file(path: Path, limit: int, expected_stamp: tuple[int, ...] | None = None) -> object:
-    checked = path.lstat()
+def _open_windows(path: Path, *, directory: bool) -> int:
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel.CreateFileW
+    create_file.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    # Pin each directory in the chain against rename or removal by omitting
+    # FILE_SHARE_DELETE. OPEN_REPARSE_POINT opens a link itself for inspection.
+    access = 0x81 if directory else 0x80000000  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, or GENERIC_READ
+    sharing = 0x3  # FILE_SHARE_READ | FILE_SHARE_WRITE
+    flags = 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+    if directory:
+        flags |= 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
+    handle = create_file(str(path), access, sharing, None, 3, flags, None)  # OPEN_EXISTING
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        get_info = kernel.GetFileInformationByHandleEx
+        get_info.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+        get_info.restype = wintypes.BOOL
+        attributes_and_tag = (wintypes.DWORD * 2)()
+        if not get_info(handle, 9, ctypes.byref(attributes_and_tag), ctypes.sizeof(attributes_and_tag)):
+            raise ctypes.WinError(ctypes.get_last_error())  # FileAttributeTagInfo
+        if attributes_and_tag[0] & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise PermissionError("untrusted fingerprint layout")
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        close_handle(handle)
+        raise
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectoryHandle:
+    path: Path
+    descriptor: int
+
+    def stat(self, name: str) -> os.stat_result:
+        if _WINDOWS:
+            return (self.path / name).lstat()
+        return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+
+    def open(self, name: str, *, directory: bool = False) -> int:
+        if _WINDOWS:
+            return _open_windows(self.path / name, directory=directory)
+        flags = _OPEN_FLAGS | (getattr(os, "O_DIRECTORY", 0) if directory else 0)
+        return os.open(name, flags, dir_fd=self.descriptor)
+
+    def entries(self):
+        return os.scandir(self.path if _WINDOWS else self.descriptor)
+
+
+def _open_directory(stack: ExitStack, parent: _DirectoryHandle | None, name: str) -> _DirectoryHandle:
+    path = parent.path / name if parent is not None else Path(name)
+    checked = parent.stat(name) if parent is not None else path.lstat()
+    if not stat.S_ISDIR(checked.st_mode) or _is_reparse_point(checked):
+        raise PermissionError("untrusted fingerprint layout")
+    if parent is not None:
+        descriptor = parent.open(name, directory=True)
+    elif _WINDOWS:
+        descriptor = _open_windows(path, directory=True)
+    else:
+        descriptor = os.open(path, _OPEN_FLAGS | getattr(os, "O_DIRECTORY", 0))
+    stack.callback(os.close, descriptor)
+    opened = os.fstat(descriptor)
+    if (not stat.S_ISDIR(opened.st_mode) or _is_reparse_point(opened)
+            or (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino)):
+        raise PermissionError("untrusted fingerprint layout")
+    return _DirectoryHandle(path, descriptor)
+
+
+def _read_json_file(directory: _DirectoryHandle, name: str, limit: int, expected_stamp: tuple[int, ...]) -> object:
+    checked = directory.stat(name)
     checked_stamp = _stat_stamp(checked)
-    if expected_stamp is not None and checked_stamp != expected_stamp:
+    if checked_stamp != expected_stamp:
         raise _FingerprintFileChanged("fingerprint file changed during loading")
     if not _safe_file_info(checked):
         raise PermissionError("untrusted fingerprint file")
     if checked.st_size > limit:
         raise OverflowError("file too large")
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(os.fspath(path), flags)
+    descriptor = directory.open(name)
     try:
         opened = os.fstat(descriptor)
         if (
             not _safe_file_info(opened)
             or _stat_stamp(opened) != checked_stamp
-            or (expected_stamp is not None and _stat_stamp(opened) != expected_stamp)
         ):
             raise _FingerprintFileChanged("fingerprint file changed while opening")
         with os.fdopen(descriptor, "rb") as stream:
@@ -330,8 +419,7 @@ def _read_json_file(path: Path, limit: int, expected_stamp: tuple[int, ...] | No
     return json.loads(raw.decode("utf-8"), object_pairs_hook=_object_pairs_no_duplicates)
 
 
-def _category_map(root: Path, skipped: Counter[str], expected_stamp=None) -> dict[str, str]:
-    path = root / "categories.json"
+def _category_map(root: _DirectoryHandle, skipped: Counter[str], expected_stamp=None) -> dict[str, str]:
     if expected_stamp is None:
         skipped["categories file unavailable"] += 1
         return {}
@@ -341,7 +429,7 @@ def _category_map(root: Path, skipped: Counter[str], expected_stamp=None) -> dic
         if expected_stamp[3] > MAX_METADATA_BYTES:
             skipped["categories file too large"] += 1
             return {}
-        payload = _read_json_file(path, MAX_METADATA_BYTES, expected_stamp)
+        payload = _read_json_file(root, "categories.json", MAX_METADATA_BYTES, expected_stamp)
     except FileNotFoundError:
         skipped["categories file unavailable"] += 1
         return {}
@@ -376,102 +464,72 @@ def _category_map(root: Path, skipped: Counter[str], expected_stamp=None) -> dic
 
 @dataclass(frozen=True, slots=True)
 class _DirectorySnapshot:
-    root: Path
-    technologies_dir: Path
-    metadata_root: Path
+    root: _DirectoryHandle
+    technologies_dir: _DirectoryHandle
     files: tuple[tuple[str, tuple[int, ...]], ...]
     metadata: tuple[tuple[str, tuple[int, ...] | None], ...]
-    root_stamp: tuple[int, ...]
-    technologies_stamp: tuple[int, ...]
     overflow_files: int
     truncated: bool
     key: tuple
 
 
-def _snapshot_directory(directory: Path):
-    """Check only the published layout and return bounded file stamps."""
-    try:
-        requested = Path(os.path.abspath(os.fspath(directory.expanduser())))
-        requested_info = requested.lstat()
-    except (OSError, RuntimeError, ValueError):
-        return None, "fingerprint directory unavailable"
-    if not _safe_directory_info(requested_info):
-        return None, "untrusted fingerprint layout"
+def _snapshot_directory(directory: Path, stack: ExitStack) -> _DirectorySnapshot:
+    """Open and inspect only the supported layout through verified handles."""
+    requested = Path(os.path.abspath(os.fspath(directory.expanduser())))
+    requested_handle = None
+    parent = None
+    for component in requested.parts:
+        parent = requested_handle
+        requested_handle = _open_directory(stack, parent, component)
+    if requested_handle is None:
+        raise FileNotFoundError("fingerprint directory unavailable")
 
-    child = requested / "technologies"
+    root = requested_handle
     try:
-        child_info = child.lstat()
+        technologies = _open_directory(stack, root, "technologies")
     except FileNotFoundError:
-        if requested.name != "technologies":
-            return None, "fingerprint directory unavailable"
-        technologies = requested
-        metadata_root = requested.parent
-        try:
-            root_info = metadata_root.lstat()
-        except OSError:
-            return None, "fingerprint directory unavailable"
-    except OSError:
-        return None, "fingerprint directory unavailable"
-    else:
-        if not _safe_directory_info(child_info):
-            return None, "untrusted fingerprint layout"
-        technologies = child
-        metadata_root = requested
-        root_info = requested_info
-
-    if not _safe_directory_info(root_info):
-        return None, "untrusted fingerprint layout"
-    try:
-        technologies_info = technologies.lstat()
-    except OSError:
-        return None, "fingerprint directory unavailable"
-    if not _safe_directory_info(technologies_info):
-        return None, "untrusted fingerprint layout"
+        if requested.name != "technologies" or parent is None:
+            raise
+        technologies = requested_handle
+        root = parent
+    root_info = os.fstat(root.descriptor)
+    technologies_info = os.fstat(technologies.descriptor)
+    if not _safe_directory_info(root_info) or not _safe_directory_info(technologies_info):
+        raise PermissionError("untrusted fingerprint layout")
 
     files = []
     truncated = False
-    try:
-        with os.scandir(technologies) as entries:
-            for position, entry in enumerate(entries):
-                if position >= MAX_DIRECTORY_ENTRIES:
-                    truncated = True
-                    break
-                if not entry.name.endswith(".json"):
-                    continue
-                try:
-                    info = Path(entry.path).lstat()
-                    stamp = _stat_stamp(info)
-                except OSError:
-                    stamp = ()
-                files.append((entry.name, stamp))
-    except OSError:
-        return None, "fingerprint directory unavailable"
+    with technologies.entries() as entries:
+        for position, entry in enumerate(entries):
+            if position >= MAX_DIRECTORY_ENTRIES:
+                truncated = True
+                break
+            if not entry.name.endswith(".json"):
+                continue
+            try:
+                stamp = _stat_stamp(technologies.stat(entry.name))
+            except OSError:
+                stamp = ()
+            files.append((entry.name, stamp))
     files.sort(key=lambda item: item[0])
     overflow_files = max(0, len(files) - MAX_TECHNOLOGY_FILES)
-    files = files[:MAX_TECHNOLOGY_FILES]
+    files_tuple = tuple(files[:MAX_TECHNOLOGY_FILES])
 
     metadata = []
     for filename in ("categories.json", "groups.json"):
         try:
-            info = (metadata_root / filename).lstat()
-            stamp = _stat_stamp(info)
+            stamp = _stat_stamp(root.stat(filename))
         except FileNotFoundError:
             stamp = None
         except OSError:
             stamp = ()
         metadata.append((filename, stamp))
-    files_tuple = tuple(files)
     metadata_tuple = tuple(metadata)
-    root_stamp = _stat_stamp(root_info)
-    technologies_stamp = _stat_stamp(technologies_info)
     key = (
-        str(metadata_root), str(technologies), root_stamp, technologies_stamp,
+        str(root.path), str(technologies.path), _stat_stamp(root_info), _stat_stamp(technologies_info),
         files_tuple, metadata_tuple, overflow_files, truncated,
     )
-    return _DirectorySnapshot(
-        metadata_root, technologies, metadata_root, files_tuple, metadata_tuple,
-        root_stamp, technologies_stamp, overflow_files, truncated, key,
-    ), ""
+    return _DirectorySnapshot(root, technologies, files_tuple, metadata_tuple, overflow_files, truncated, key)
 
 
 def _parse_js_flags(source: str) -> tuple[str, int]:
@@ -915,6 +973,13 @@ def _string(value: object, *, allow_empty: bool = True) -> str:
     return value
 
 
+def _valid_technology_name(value: object) -> bool:
+    validate_name = getattr(webrules, "valid_technology_name", None)
+    if validate_name is not None:
+        return validate_name(value)
+    return isinstance(value, str) and bool(value.strip()) and webrules._is_scalar_text(value, 256)
+
+
 def _pattern_values(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         return (_string(value),)
@@ -1079,7 +1144,7 @@ def _parse_relationships(data: dict, skipped: Counter[str]):
     for raw in _relation_values(data.get("implies", [])):
         try:
             target, _, confidence = _split_pattern_tags(_string(raw, allow_empty=False))
-            if not target.strip() or len(target) > 256:
+            if not _valid_technology_name(target):
                 raise ValueError("invalid implied technology")
             implies.append(_Relationship(target.strip(), confidence))
         except ValueError:
@@ -1088,7 +1153,7 @@ def _parse_relationships(data: dict, skipped: Counter[str]):
         for raw in _relation_values(data.get(field, [])):
             try:
                 target, _, _ = _split_pattern_tags(_string(raw, allow_empty=False))
-                if not target.strip() or len(target) > 256:
+                if not _valid_technology_name(target):
                     raise ValueError("invalid relationship")
                 destination.append(target.strip().casefold())
             except ValueError:
@@ -1183,17 +1248,16 @@ def _patterns_for_technology(data: dict, base_index: int, skipped: Counter[str],
     return tuple(output)
 
 
-def _load_groups(root: Path, skipped: Counter[str], expected_stamp=None) -> dict[str, str]:
+def _load_groups(root: _DirectoryHandle, skipped: Counter[str], expected_stamp=None) -> dict[str, str]:
     if expected_stamp is None:
         return {}
-    path = root / "groups.json"
     try:
         if len(expected_stamp) != 7:
             raise OSError("invalid checked groups file")
         if expected_stamp[3] > MAX_METADATA_BYTES:
             skipped["malformed groups file"] += 1
             return {}
-        payload = _read_json_file(path, MAX_METADATA_BYTES, expected_stamp)
+        payload = _read_json_file(root, "groups.json", MAX_METADATA_BYTES, expected_stamp)
         if not isinstance(payload, (dict, list)):
             skipped["malformed groups file"] += 1
             return {}
@@ -1219,14 +1283,6 @@ def _load_groups(root: Path, skipped: Counter[str], expected_stamp=None) -> dict
     return result
 
 
-def _verify_directory(path: Path, expected_stamp: tuple[int, ...]) -> bool:
-    try:
-        info = path.lstat()
-    except OSError:
-        return False
-    return _safe_directory_info(info) and _stat_stamp(info) == expected_stamp
-
-
 def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
     skipped_technologies: Counter[str] = Counter()
     skipped_patterns: Counter[str] = Counter()
@@ -1234,12 +1290,6 @@ def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
     root = snapshot.root
     technologies_dir = snapshot.technologies_dir
     metadata_stamps = dict(snapshot.metadata)
-    if not _verify_directory(root, snapshot.root_stamp) or not _verify_directory(
-        technologies_dir, snapshot.technologies_stamp
-    ):
-        stats = FingerprintStats(skipped_technologies=(("untrusted fingerprint layout", 1),))
-        return Fingerprints(root, (), (), MappingProxyType({}), MappingProxyType({}), stats,
-                            MappingProxyType({}), MappingProxyType({}))
     categories = _category_map(root, skipped_technologies, metadata_stamps.get("categories.json"))
     groups = _load_groups(root, skipped_technologies, metadata_stamps.get("groups.json"))
     if snapshot.overflow_files:
@@ -1250,15 +1300,11 @@ def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
     patterns: list[_Pattern] = []
     bytes_seen = 0
     for filename, expected_stamp in snapshot.files:
-        path = technologies_dir / filename
         try:
-            if not _verify_directory(technologies_dir, snapshot.technologies_stamp):
-                skipped_technologies["untrusted fingerprint layout"] += 1
-                break
             if not expected_stamp:
                 skipped_technologies["technology file unavailable"] += 1
                 continue
-            info = path.lstat()
+            info = technologies_dir.stat(filename)
             if not _safe_file_info(info):
                 skipped_technologies["technology file is not a regular file"] += 1
                 continue
@@ -1273,7 +1319,7 @@ def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
                 skipped_technologies["total fingerprint byte limit"] += 1
                 continue
             bytes_seen += file_size
-            payload = _read_json_file(path, MAX_FILE_BYTES, expected_stamp)
+            payload = _read_json_file(technologies_dir, filename, MAX_FILE_BYTES, expected_stamp)
             if not isinstance(payload, dict) or not payload or len(payload) > MAX_TECHNOLOGIES_PER_FILE:
                 skipped_technologies["malformed technology file"] += 1
                 continue
@@ -1282,7 +1328,7 @@ def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
                     if _contains_invalid_unicode(name) or _contains_invalid_unicode(data):
                         skipped_technologies["invalid Unicode scalar value"] += 1
                         continue
-                    if not isinstance(name, str) or not name or len(name) > 256 or not isinstance(data, dict):
+                    if not _valid_technology_name(name) or not isinstance(data, dict):
                         raise ValueError("malformed technology shape")
                     if any(field not in _KNOWN_FIELDS for field in data):
                         raise ValueError("unknown technology field")
@@ -1366,7 +1412,7 @@ def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
         no_literal[kind] = no_literal_patterns
     stats = FingerprintStats(len(technologies), _freeze_counts(skipped_technologies),
                              _freeze_counts(skipped_patterns), _freeze_counts(unsupported_kinds))
-    return Fingerprints(root, tuple(technologies), pattern_tuple, MappingProxyType(dict(categories)),
+    return Fingerprints(root.path, tuple(technologies), pattern_tuple, MappingProxyType(dict(categories)),
                         MappingProxyType(dict(groups)), stats, MappingProxyType(index_map),
                         MappingProxyType(no_literal))
 
@@ -1382,16 +1428,24 @@ def load_fingerprints(directory: Path) -> Fingerprints:
     ``directory`` may point at the published ``src`` directory or directly at
     its ``technologies`` child. Malformed files and patterns are counted and
     skipped so an optional collection cannot abort a scan.
+
+    Windows handles reject reparse points and pin the directory chain during
+    loading. The reader does not evaluate effective Windows ACLs. The operator
+    must restrict write access to the collection and its directories.
     """
-    snapshot, reason = _snapshot_directory(Path(directory))
-    if snapshot is None:
-        stats = FingerprintStats(skipped_technologies=((reason, 1),))
-        return Fingerprints(Path(directory), (), (), MappingProxyType({}), MappingProxyType({}), stats,
-                            MappingProxyType({}), MappingProxyType({}))
-    cached = _LOAD_CACHE.get(snapshot.key)
-    if cached is not None:
-        return cached
-    loaded = _load_uncached(snapshot)
+    with ExitStack() as stack:
+        try:
+            snapshot = _snapshot_directory(Path(directory), stack)
+        except (OSError, RuntimeError, ValueError) as error:
+            reason = ("untrusted fingerprint layout" if isinstance(error, PermissionError)
+                      else "fingerprint directory unavailable")
+            stats = FingerprintStats(skipped_technologies=((reason, 1),))
+            return Fingerprints(Path(directory), (), (), MappingProxyType({}), MappingProxyType({}), stats,
+                                MappingProxyType({}), MappingProxyType({}))
+        cached = _LOAD_CACHE.get(snapshot.key)
+        if cached is not None:
+            return cached
+        loaded = _load_uncached(snapshot)
     _LOAD_CACHE[snapshot.key] = loaded
     _LOAD_CACHE_ORDER.append(snapshot.key)
     while len(_LOAD_CACHE_ORDER) > _LOAD_CACHE_LIMIT:
@@ -1409,15 +1463,21 @@ class _Node:
     text: list[str]
 
 
+class _AnalysisStopped(Exception):
+    pass
+
+
 class _PageParser(HTMLParser):
-    def __init__(self, html: str):
+    def __init__(self, html: str, *, deadline: float = float("inf"), clock=time.monotonic):
         super().__init__(convert_charrefs=True)
+        self.deadline = deadline
+        self.clock = clock
         self.nodes: list[_Node] = []
         self.stack: list[int] = []
-        self.meta: list[tuple[str, str, str]] = []
-        self.script_urls: list[tuple[str, str]] = []
-        self.inline_scripts: list[tuple[str, str]] = []
-        self.inline_styles: list[tuple[str, str]] = []
+        self.meta: list[tuple[str, str]] = []
+        self.script_urls: list[str] = []
+        self.inline_scripts: list[str] = []
+        self.inline_styles: list[str] = []
         self.visible_text: list[str] = []
         self.visible_text_length = 0
         self.capture_tag = ""
@@ -1430,23 +1490,34 @@ class _PageParser(HTMLParser):
         self.attribute_index: dict[str, list[int]] = {}
         self._node_text_cache: dict[int, str] = {}
         self._node_text_cache_bytes = 0
+        self._node_text_work_remaining = MAX_DOM_TEXT_WORK
         try:
-            self.feed(self.html)
+            for offset in range(0, len(self.html), HTML_PARSE_CHUNK):
+                self.check_deadline()
+                self.feed(self.html[offset:offset + HTML_PARSE_CHUNK])
+            self.check_deadline()
             self.close()
+        except _AnalysisStopped:
+            raise
         except Exception:
             # HTMLParser is intentionally lenient; malformed pages simply
             # contribute the bounded prefix that was parsed successfully.
             pass
 
+    def check_deadline(self) -> None:
+        if self.clock() >= self.deadline:
+            raise _AnalysisStopped
+
     def handle_starttag(self, tag: str, attrs):
+        self.check_deadline()
         tag = tag.casefold()
         values = {str(name).casefold(): "" if value is None else str(value) for name, value in attrs}
         if tag == "meta" and len(self.meta) < MAX_META_TAGS:
             name = values.get("name") or values.get("property") or values.get("http-equiv")
             if name and "content" in values:
-                self.meta.append((name, values["content"], f"meta:{name}"))
+                self.meta.append((name, values["content"]))
         if tag == "script" and len(self.script_urls) < MAX_SCRIPT_URLS and values.get("src"):
-            self.script_urls.append((values["src"], values["src"]))
+            self.script_urls.append(values["src"])
         if tag in {"script", "style"}:
             self.capture_tag = tag
             self.capture_text = []
@@ -1470,22 +1541,26 @@ class _PageParser(HTMLParser):
             self.stack.append(index)
 
     def handle_endtag(self, tag: str):
+        self.check_deadline()
         tag = tag.casefold()
         if self.capture_tag == tag:
             content = "".join(self.capture_text)
             if tag == "script":
-                self.inline_scripts.append((content, "inline script"))
+                self.inline_scripts.append(content)
             elif tag == "style":
-                self.inline_styles.append((content, "inline style"))
+                self.inline_styles.append(content)
             self.capture_tag = ""
             self.capture_text = []
             self.capture_length = 0
         for position in range(len(self.stack) - 1, -1, -1):
+            if position % 256 == 0:
+                self.check_deadline()
             if self.nodes[self.stack[position]].tag == tag:
                 del self.stack[position:]
                 break
 
     def handle_data(self, data: str):
+        self.check_deadline()
         if self.capture_tag and self.capture_length < MAX_RESOURCE_LENGTH:
             remaining = MAX_RESOURCE_LENGTH - self.capture_length
             chunk = data[:remaining]
@@ -1498,20 +1573,32 @@ class _PageParser(HTMLParser):
             self.visible_text.append(chunk)
             self.visible_text_length += len(chunk)
 
+    def _charge_text_work(self, amount: int) -> None:
+        # Count traversed nodes and text characters, including repeated cache hits.
+        if amount > self._node_text_work_remaining:
+            raise _AnalysisStopped
+        self._node_text_work_remaining -= amount
+
     def node_text(self, index: int) -> str:
+        self.check_deadline()
         cached = self._node_text_cache.get(index)
         if cached is not None:
+            self._charge_text_work(len(cached) + 1)
             return cached
         output = []
         pending = [index]
         total = 0
         while pending and total < MAX_TEXT_LENGTH:
+            self.check_deadline()
+            self._charge_text_work(1)
             current = pending.pop()
             node = self.nodes[current]
             for part in node.text:
-                chunk = part[:MAX_TEXT_LENGTH - total]
-                output.append(chunk)
-                total += len(chunk)
+                self.check_deadline()
+                size = min(len(part), MAX_TEXT_LENGTH - total)
+                self._charge_text_work(size)
+                output.append(part[:size])
+                total += size
                 if total >= MAX_TEXT_LENGTH:
                     break
             pending.extend(reversed(node.children))
@@ -1530,31 +1617,39 @@ class _Source:
     selector: str = ""
 
 
+def _resource_source(resource: webrules.Resource) -> str:
+    url = getattr(resource, "url", "")
+    return url if isinstance(url, str) and url else "page"
+
+
 def _bounded_text(value: object, limit: int) -> str:
     return value[:limit] if isinstance(value, str) else ""
 
 
-def _page_sources(page: webrules.Page, page_url: str):
+def _page_sources(page: webrules.Page, page_url: str, *, deadline: float, clock):
     html = _bounded_text(getattr(page, "html", ""), MAX_HTML_LENGTH)
-    parser = _PageParser(html)
+    parser = _PageParser(html, deadline=deadline, clock=clock)
     sources: dict[str, list[_Source]] = {kind: [] for kind in SUPPORTED_KINDS}
     for name, values in getattr(page, "headers", {}).items():
         if not isinstance(name, str):
             continue
-        for value in tuple(values)[:64]:
-            sources["headers"].append(_Source(_bounded_text(value, 16_384), f"header:{name}", name.casefold()))
-    for name, content, source in parser.meta:
-        sources["meta"].append(_Source(_bounded_text(content, 16_384), source, name))
-    cookie_names = tuple(getattr(page, "cookie_names", ()))[:4096]
-    for cookie in cookie_names:
+        name = name.casefold()
+        if name in _COOKIE_HEADERS:
+            continue
+        for value in islice(values, 64):
+            sources["headers"].append(_Source(_bounded_text(value, 16_384), f"header:{name}", name))
+    for name, content in parser.meta:
+        sources["meta"].append(_Source(_bounded_text(content, 16_384), "page", name))
+    for cookie in islice(getattr(page, "cookie_names", ()), 4096):
         if isinstance(cookie, str):
-            sources["cookies"].append(_Source(cookie[:256], f"cookie:{cookie[:128]}"))
-    for url, source in parser.script_urls:
-        sources["scriptSrc"].append(_Source(url[:4096], source[:512]))
-    resources = tuple(getattr(page, "resources", ()))[:MAX_PAGE_RESOURCES]
+            sources["cookies"].append(_Source(cookie[:256], f"cookie:{cookie}"))
+    for url in parser.script_urls:
+        sources["scriptSrc"].append(_Source(url[:4096], "page"))
     resource_budget = MAX_RESOURCE_BYTES_PER_PAGE
-    for resource in resources:
+    for resource in islice(getattr(page, "resources", ()), MAX_PAGE_RESOURCES):
+        parser.check_deadline()
         kind = getattr(resource, "kind", "")
+        source = _resource_source(resource)
         url = _bounded_text(getattr(resource, "url", ""), 4096)
         resource_text = getattr(resource, "text", "")
         per_resource_limit = MAX_ROBOTS_LENGTH if kind == "robots" else MAX_RESOURCE_LENGTH
@@ -1563,21 +1658,21 @@ def _page_sources(page: webrules.Page, page_url: str):
         resource_budget -= len(bounded_resource)
         if kind == "script":
             if url:
-                sources["scriptSrc"].append(_Source(url, url))
-            sources["scripts"].append(_Source(bounded_resource, url or "script resource"))
+                sources["scriptSrc"].append(_Source(url, source))
+            sources["scripts"].append(_Source(bounded_resource, source))
         elif kind in {"style", "css"}:
-            sources["css"].append(_Source(bounded_resource, url or "style resource"))
+            sources["css"].append(_Source(bounded_resource, source))
         elif kind == "robots":
-            sources["robots"].append(_Source(bounded_resource, url or "robots resource"))
-    sources["scripts"].extend(_Source(value, source) for value, source in parser.inline_scripts)
-    sources["css"].extend(_Source(value, source) for value, source in parser.inline_styles)
-    sources["html"].append(_Source(parser.html, "page HTML"))
-    sources["text"].append(_Source("".join(parser.visible_text)[:MAX_TEXT_LENGTH], "page text"))
-    sources["url"].append(_Source(_bounded_text(page_url, 4096), "page URL"))
+            sources["robots"].append(_Source(bounded_resource, source))
+    sources["scripts"].extend(_Source(value, "page") for value in parser.inline_scripts)
+    sources["css"].extend(_Source(value, "page") for value in parser.inline_styles)
+    sources["html"].append(_Source(parser.html, "page"))
+    sources["text"].append(_Source("".join(parser.visible_text), "page"))
+    sources["url"].append(_Source(_bounded_text(page_url, 4096), "page"))
     return sources, parser
 
 
-def _selector_candidates(selector: _Selector, parser: _PageParser) -> tuple[int, ...]:
+def _selector_candidates(selector: _Selector, parser: _PageParser) -> Iterable[int]:
     candidates = None
     if selector.identifier:
         candidates = parser.id_index.get(selector.identifier, [])
@@ -1594,8 +1689,8 @@ def _selector_candidates(selector: _Selector, parser: _PageParser) -> tuple[int,
         if candidates is None or len(values) < len(candidates):
             candidates = values
     if candidates is None:
-        return tuple(range(len(parser.nodes)))
-    return tuple(candidates)
+        return range(len(parser.nodes))
+    return candidates
 
 
 def _selector_matches(selector: _Selector, node: _Node) -> bool:
@@ -1603,9 +1698,10 @@ def _selector_matches(selector: _Selector, node: _Node) -> bool:
         return False
     if selector.identifier and node.attributes.get("id") != selector.identifier:
         return False
-    classes = set(node.attributes.get("class", "").split())
-    if any(class_name not in classes for class_name in selector.classes):
-        return False
+    if selector.classes:
+        classes = set(node.attributes.get("class", "").split())
+        if any(class_name not in classes for class_name in selector.classes):
+            return False
     for attribute in selector.attributes:
         if attribute.name not in node.attributes:
             return False
@@ -1623,49 +1719,58 @@ def _selector_matches(selector: _Selector, node: _Node) -> bool:
     return True
 
 
+_VERSION_REFERENCE = re.compile(r"\\(?:(\d+)|k<([A-Za-z_$][\w$]*)>)")
+
+
+def _group_span(match: re.Match[str], key: str | int) -> tuple[int, int]:
+    try:
+        return match.span(key)
+    except (IndexError, OverflowError):
+        return -1, -1
+
+
+def _bounded_capture(match: re.Match[str], key: str | int) -> str:
+    start, end = _group_span(match, key)
+    if end - start > MAX_VERSION_CAPTURE_LENGTH:
+        raise ValueError("version capture too long")
+    return match.string[start:end] if start >= 0 else ""
+
+
+def _reference_key(reference: re.Match[str]) -> str | int:
+    return int(reference[1]) if reference[1] is not None else reference[2]
+
+
 def _expand_version_reference(template: str, match: re.Match[str]) -> tuple[str, bool]:
     conditional = re.fullmatch(r"\\(\d+|[A-Za-z_$][\w$]*)\?([^:]*):(.*)", template, re.DOTALL)
     literal_value = False
     if conditional:
-        group_key = conditional.group(1)
-        try:
-            group_value = match.group(int(group_key)) if group_key.isdigit() else match.group(group_key)
-        except (IndexError, KeyError):
-            group_value = None
-        template = conditional.group(2) if group_value else conditional.group(3)
-        literal_value = bool(webrules.normalize_version(template)) or not bool(
-            re.search(r"[\\.^$*+?{}\[\]()|]", template)
-        )
-    pure_numeric = re.fullmatch(r"\\(\d+)", template)
-    if pure_numeric:
-        try:
-            return match.group(int(pure_numeric.group(1))) or "", True
-        except IndexError:
-            return "", True
-    pure_named = re.fullmatch(r"\\k<([A-Za-z_$][\w$]*)>", template)
-    if pure_named:
-        try:
-            return match.group(pure_named.group(1)) or "", True
-        except (IndexError, KeyError):
-            return "", True
+        group_key = conditional[1]
+        start, end = _group_span(match, int(group_key) if group_key.isdigit() else group_key)
+        template = conditional[2] if end > start else conditional[3]
+        literal_value = (
+            len(template) <= MAX_VERSION_CAPTURE_LENGTH and bool(webrules.normalize_version(template))
+        ) or not re.search(r"[\\.^$*+?{}\[\]()|]", template)
+    pure_reference = _VERSION_REFERENCE.fullmatch(template)
+    if pure_reference:
+        return _bounded_capture(match, _reference_key(pure_reference)), True
 
-    def numeric_reference(reference):
-        try:
-            value = match.group(int(reference.group(1))) or ""
-        except IndexError:
-            value = ""
-        return re.escape(value)
-
-    def named_reference(reference):
-        try:
-            value = match.group(reference.group(1)) or ""
-        except (IndexError, KeyError):
-            value = ""
-        return re.escape(value)
-
-    template = re.sub(r"\\(\d+)", numeric_reference, template)
-    template = re.sub(r"\\k<([A-Za-z_$][\w$]*)>", named_reference, template)
-    return template, literal_value
+    chunks = []
+    previous = 0
+    remaining = MAX_REGEX_LENGTH
+    for reference in _VERSION_REFERENCE.finditer(template):
+        literal_size = reference.start() - previous
+        if literal_size > remaining:
+            raise ValueError("version expression too long")
+        escaped = re.escape(_bounded_capture(match, _reference_key(reference)))
+        remaining -= literal_size + len(escaped)
+        if remaining < 0:
+            raise ValueError("version expression too long")
+        chunks.extend((template[previous:reference.start()], escaped))
+        previous = reference.end()
+    if len(template) - previous > remaining:
+        raise ValueError("version expression too long")
+    chunks.append(template[previous:])
+    return "".join(chunks), literal_value
 
 
 def _version_from(pattern: _Pattern | _DOMTest, value: str, matched: re.Match[str]) -> str:
@@ -1684,7 +1789,7 @@ def _version_from(pattern: _Pattern | _DOMTest, value: str, matched: re.Match[st
             version_match = version_regex.search(value)
             if not version_match:
                 return ""
-            candidate = version_match.group(1) if version_match.lastindex else version_match.group(0)
+            candidate = _bounded_capture(version_match, 1 if version_match.lastindex else 0)
         if len(candidate) > MAX_VERSION_CAPTURE_LENGTH or _contains_invalid_unicode(candidate):
             return ""
         return webrules.normalize_version(candidate)
@@ -1692,45 +1797,79 @@ def _version_from(pattern: _Pattern | _DOMTest, value: str, matched: re.Match[st
         return ""
 
 
-def _pattern_evidence(pattern: _Pattern, value: str, match: re.Match[str], source: str):
-    version = _version_from(pattern, value, match)
-    start = match.start()
-    excerpt = value[max(0, start - 40):start + EVIDENCE_EXCERPT_LENGTH]
-    return version, (EVIDENCE_KIND_MAP.get(pattern.kind, pattern.kind), source[:512], excerpt[:EVIDENCE_EXCERPT_LENGTH])
+def _excerpt(value: str, start: int) -> str:
+    begin = max(0, start - 40)
+    return value[begin:begin + EVIDENCE_EXCERPT_LENGTH]
 
 
-def _dom_matches(pattern: _Pattern, parser: _PageParser, deadline: float, clock):
-    if pattern.selector is None:
-        return (), False
-    matches = []
-    for count, node_index in enumerate(_selector_candidates(pattern.selector, parser)):
-        if count and count % 1024 == 0 and clock() >= deadline:
-            return tuple(matches), True
-        node = parser.nodes[node_index]
-        if not _selector_matches(pattern.selector, node):
-            continue
-        matched_tests: list[tuple[_DOMTest, str, re.Match[str], str]] = []
-        accepted = True
-        for name, alternatives in pattern.dom_attributes:
-            value = node.attributes.get(name)
-            if value is None:
-                accepted = False
-                break
-            found = next(((test, test.regex.search(value)) for test in alternatives if test.regex.search(value)), None)
-            if found is None:
-                accepted = False
-                break
-            matched_tests.append((found[0], value, found[1], f"dom attribute:{name}"))
-        if not accepted:
-            continue
-        if pattern.dom_text:
-            value = parser.node_text(node_index)
-            found = next(((test, test.regex.search(value)) for test in pattern.dom_text if test.regex.search(value)), None)
-            if found is None:
+def _pattern_evidence(pattern: _Pattern, source: _Source, match: re.Match[str]):
+    kind = EVIDENCE_KIND_MAP.get(pattern.kind, pattern.kind)
+    if pattern.kind == "headers" and source.selector in _SENSITIVE_HEADERS:
+        return "", (kind, source.source, source.source)
+    version = _version_from(pattern, source.value, match)
+    return version, (kind, source.source, _excerpt(source.value, match.start()))
+
+
+@dataclass(slots=True)
+class _DOMMatches:
+    accepted: bool = False
+    confidence: int = 100
+    versions: set[str] = field(default_factory=set)
+    excerpts: list[str] = field(default_factory=list)
+
+
+def _dom_condition(alternatives: tuple[_DOMTest, ...], value: str, parser: _PageParser):
+    for test in alternatives:
+        parser.check_deadline()
+        match = test.regex.search(value)
+        if match is not None:
+            parser.check_deadline()
+            return test.confidence, _version_from(test, value, match), _excerpt(value, match.start())
+    return None
+
+
+def _dom_node_matches(pattern: _Pattern, selector: _Selector, parser: _PageParser, node_index: int):
+    node = parser.nodes[node_index]
+    if not _selector_matches(selector, node):
+        return None
+    conditions = []
+    for name, alternatives in pattern.dom_attributes:
+        value = node.attributes.get(name)
+        if value is None:
+            return None
+        condition = _dom_condition(alternatives, value, parser)
+        if condition is None:
+            return None
+        conditions.append(condition)
+    if pattern.dom_text:
+        condition = _dom_condition(pattern.dom_text, parser.node_text(node_index), parser)
+        if condition is None:
+            return None
+        conditions.append(condition)
+    return conditions
+
+
+def _dom_matches(pattern: _Pattern, parser: _PageParser) -> tuple[_DOMMatches, bool]:
+    matched = _DOMMatches()
+    selector = pattern.selector
+    if selector is None:
+        return matched, False
+    try:
+        for node_index in _selector_candidates(selector, parser):
+            parser.check_deadline()
+            conditions = _dom_node_matches(pattern, selector, parser, node_index)
+            if conditions is None:
                 continue
-            matched_tests.append((found[0], value, found[1], "dom text"))
-        matches.append((matched_tests, pattern.source))
-    return tuple(matches), False
+            matched.accepted = True
+            for confidence, version, excerpt in conditions:
+                matched.confidence = min(matched.confidence, confidence)
+                if version and len(matched.versions) < MAX_EVIDENCE_PER_DETECTION:
+                    matched.versions.add(version)
+                if len(matched.excerpts) < MAX_EVIDENCE_PER_DETECTION and excerpt not in matched.excerpts:
+                    matched.excerpts.append(excerpt)
+    except _AnalysisStopped:
+        return matched, True
+    return matched, False
 
 
 @dataclass(slots=True)
@@ -1834,9 +1973,11 @@ def _category_ids_available(records: Mapping[tuple[str, str], _DetectionRecord])
 
 
 def _resolve_relationships(fingerprints: Fingerprints, direct: dict[tuple[str, str], _DetectionRecord],
-                           deadline: float, clock):
+                           known_exclusions: set[str], deadline: float, clock):
     by_name: dict[str, _Technology | None] = {}
     for technology in fingerprints.technologies:
+        if clock() >= deadline:
+            return direct, True
         key = _technology_key(technology)
         previous = by_name.setdefault(key[0], technology)
         if previous is not None and _technology_key(previous) != key:
@@ -1847,14 +1988,14 @@ def _resolve_relationships(fingerprints: Fingerprints, direct: dict[tuple[str, s
         if clock() >= deadline:
             return direct, True
         records = dict(working_direct)
-        pending = [(record.technology, record.confidence, record.technology.name, 0)
-                   for record in working_direct.values()]
+        pending = deque((record.technology, record.confidence, record.technology.name, 0)
+                        for record in working_direct.values())
         best_implied: dict[tuple[str, str], int] = {}
         expansions = 0
         while pending and expansions < expansion_limit:
             if clock() >= deadline:
                 return direct, True
-            source, source_confidence, origin, depth = pending.pop(0)
+            source, source_confidence, origin, depth = pending.popleft()
             if depth >= 32:
                 continue
             for relation in source.implies:
@@ -1871,6 +2012,7 @@ def _resolve_relationships(fingerprints: Fingerprints, direct: dict[tuple[str, s
                 if record is None:
                     record = _DetectionRecord(technology, confidence, set(), {"implied"}, [], {origin}, False)
                     records[target_key] = record
+                    known_exclusions.update(technology.excludes)
                 else:
                     record.confidence = max(record.confidence, confidence)
                     record.implied_by.add(origin)
@@ -1881,6 +2023,8 @@ def _resolve_relationships(fingerprints: Fingerprints, direct: dict[tuple[str, s
                 else:
                     record.implied_by.add(origin)
             expansions += 1
+        if pending:
+            return direct, True
 
         excluded_names = set()
         for record in records.values():
@@ -1916,6 +2060,7 @@ class ExternalSession:
         self.deadline = deadline
         self.clock = clock
         self._direct: dict[tuple[str, str], _DetectionRecord] = {}
+        self._known_exclusions: set[str] = set()
         self._by_index = {pattern.index: pattern for pattern in fingerprints.patterns}
         self._technology_by_index = {
             pattern_id: technology
@@ -1931,6 +2076,11 @@ class ExternalSession:
             self._stopped = True
             return True
         return False
+
+    def _record_direct(self, technology: _Technology, confidence: int, version: str, evidence) -> None:
+        if _technology_key(technology) not in self._direct:
+            self._known_exclusions.update(technology.excludes)
+        _merge_direct_record(self._direct, technology, confidence, version, evidence)
 
     def _match_sources(self, sources: Mapping[str, Iterable[_Source]]) -> None:
         for kind in ("headers", "cookies", "meta", "scriptSrc", "scripts", "css", "html", "text", "url", "robots"):
@@ -1956,16 +2106,19 @@ class ExternalSession:
                     self._patterns_evaluated += 1
                     positions = literal_positions.get(pattern_id, ())
                     if positions and pattern.prefix and pattern.literal.startswith(pattern.prefix):
-                        matches = tuple(
+                        matches = (
                             match for position in sorted(positions)
-                            if (match := pattern.regex.match(source.value, position)) is not None
+                            if not self._expired()
+                            and (match := pattern.regex.match(source.value, position)) is not None
                         )
                     else:
                         match = pattern.regex.search(source.value)
                         matches = (match,) if match else ()
                     for match in matches:
-                        version, evidence = _pattern_evidence(pattern, source.value, match, source.source)
-                        _merge_direct_record(self._direct, technology, pattern.confidence, version, evidence)
+                        if self._expired():
+                            return
+                        version, evidence = _pattern_evidence(pattern, source, match)
+                        self._record_direct(technology, pattern.confidence, version, evidence)
 
     def _match_dom(self, parser: _PageParser) -> None:
         for technology in self.fingerprints.technologies:
@@ -1976,39 +2129,33 @@ class ExternalSession:
                 if pattern.kind != "dom":
                     continue
                 self._patterns_evaluated += 1
-                dom_matches, expired = _dom_matches(pattern, parser, self.deadline, self.clock)
+                matched, expired = _dom_matches(pattern, parser)
+                if matched.accepted:
+                    base_evidence = ("dom", "page", pattern.source[:EVIDENCE_EXCERPT_LENGTH])
+                    self._record_direct(technology, matched.confidence, "", base_evidence)
+                    record = self._direct[_technology_key(technology)]
+                    for version in sorted(matched.versions):
+                        if len(record.versions) >= MAX_EVIDENCE_PER_DETECTION:
+                            break
+                        record.versions.add(version)
+                    for excerpt in matched.excerpts:
+                        item = ("dom", "page", excerpt)
+                        if len(record.evidence) >= MAX_EVIDENCE_PER_DETECTION:
+                            break
+                        if item not in record.evidence:
+                            record.evidence.append(item)
                 if expired:
                     self._stopped = True
                     return
-                if not dom_matches:
-                    continue
-                confidence = 100
-                versions = set()
-                evidence = []
-                for tests, selector in dom_matches:
-                    for test, value, match, source_name in tests:
-                        confidence = min(confidence, test.confidence)
-                        version = _version_from(test, value, match)
-                        if version:
-                            versions.add(version)
-                        if len(evidence) < MAX_EVIDENCE_PER_DETECTION:
-                            start = match.start()
-                            excerpt = value[max(0, start - 40):start + EVIDENCE_EXCERPT_LENGTH]
-                            evidence.append(("dom", f"{source_name}:{selector}"[:512], excerpt[:EVIDENCE_EXCERPT_LENGTH]))
-                for version in versions or {""}:
-                    _merge_direct_record(
-                        self._direct, technology, confidence, version,
-                        ("dom", f"dom:{pattern.source}"[:512], pattern.source[:EVIDENCE_EXCERPT_LENGTH]),
-                    )
-                record = self._direct[_technology_key(technology)]
-                for item in evidence:
-                    if item not in record.evidence and len(record.evidence) < MAX_EVIDENCE_PER_DETECTION:
-                        record.evidence.append(item)
 
     def add_page(self, page: webrules.Page, page_url: str) -> None:
         if self._result is not None or self._expired():
             return
-        sources, parser = _page_sources(page, page_url)
+        try:
+            sources, parser = _page_sources(page, page_url, deadline=self.deadline, clock=self.clock)
+        except _AnalysisStopped:
+            self._stopped = True
+            return
         self._match_sources(sources)
         if not self._stopped:
             self._match_dom(parser)
@@ -2017,28 +2164,27 @@ class ExternalSession:
         if self._result is not None or self._expired():
             return
         kind = getattr(resource, "kind", "")
+        source = _resource_source(resource)
         url = _bounded_text(getattr(resource, "url", ""), 4096)
         value = getattr(resource, "text", "")
         if kind == "robots":
-            sources = {"robots": (_Source(_bounded_text(value, MAX_ROBOTS_LENGTH), url or "robots resource"),)}
+            sources = {"robots": (_Source(_bounded_text(value, MAX_ROBOTS_LENGTH), source),)}
         elif kind == "script":
             sources = {
-                "scriptSrc": (_Source(url, url),) if url else (),
-                "scripts": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH), url or "script resource"),),
+                "scriptSrc": (_Source(url, source),) if url else (),
+                "scripts": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH), source),),
             }
         elif kind in {"style", "css"}:
-            sources = {"css": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH), url or "style resource"),)}
+            sources = {"css": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH), source),)}
         else:
             return
         self._match_sources(sources)
 
-    @staticmethod
-    def _incomplete_requirements(
-        records: Mapping[tuple[str, str], _DetectionRecord],
-    ) -> dict[tuple[str, str], _DetectionRecord]:
+    def _partial_records(self) -> dict[tuple[str, str], _DetectionRecord]:
         return {
-            key: record for key, record in records.items()
-            if not record.technology.requires and not record.technology.requires_categories
+            key: record for key, record in self._direct.items()
+            if key[0] not in self._known_exclusions
+            and not record.technology.requires and not record.technology.requires_categories
         }
 
     def finish(self) -> tuple[tuple[webrules.Detection, ...], dict]:
@@ -2046,14 +2192,15 @@ class ExternalSession:
             detections, stats = self._result
             return detections, dict(stats)
         if self._expired():
-            resolved = self._incomplete_requirements(self._direct)
+            resolved = self._partial_records()
         else:
             resolved, relation_stopped = _resolve_relationships(
-                self.fingerprints, self._direct, self.deadline, self.clock
+                self.fingerprints, self._direct, self._known_exclusions,
+                self.deadline - RELATION_FINALIZATION_RESERVE_SECONDS, self.clock,
             )
             if relation_stopped:
                 self._stopped = True
-                resolved = self._incomplete_requirements(resolved)
+                resolved = self._partial_records()
         detections = tuple(
             _make_detection(record)
             for _, record in sorted(resolved.items(), key=lambda item: item[0])

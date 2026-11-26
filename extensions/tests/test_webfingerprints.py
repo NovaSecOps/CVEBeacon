@@ -440,7 +440,7 @@ def test_optional_evidence_is_filled_when_the_web_rules_type_is_available(tmp_pa
 
     assert detections[0].evidence
     assert detections[0].evidence[0].kind == "html"
-    assert detections[0].evidence[0].source == "page HTML"
+    assert detections[0].evidence[0].source == "page"
 
 
 def test_owner_angular_style_synthetic_page_detects_expected_technologies(tmp_path):
@@ -637,6 +637,7 @@ def test_external_session_uses_callers_absolute_deadline_and_keeps_matches(tmp_p
     assert stats["stopped"] is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows POSIX mode bits do not represent ACLs")
 def test_loader_rejects_world_writable_supported_directory(tmp_path):
     root, _ = make_collection(tmp_path, {"Demo": {"cats": [2], "html": "demo-marker"}})
     root.chmod(0o777)
@@ -664,6 +665,7 @@ def test_loader_rejects_symlinked_technology_files(tmp_path):
     assert dict(fingerprints.stats.skipped_technologies)["technology file is not a regular file"] == 1
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows POSIX mode bits do not represent ACLs")
 def test_loader_rejects_world_writable_technology_files(tmp_path):
     root, tech_dir = make_collection(tmp_path, {"Demo": {"cats": [2], "html": "demo-marker"}})
     technology_file = tech_dir / "SyntheticCollection.json"
@@ -714,3 +716,248 @@ def test_cpe_less_detection_keeps_display_name_and_slug_identity(tmp_path):
     detection = detections[0]
     assert detection.name == "Readable Product Name"
     assert (detection.vendor, detection.product, detection.cpe) == ("readable_product_name", "readable_product_name", "")
+
+
+def test_reader_serializes_cookie_names_and_fixed_sensitive_header_labels(tmp_path):
+    technologies = {
+        "CookieName": {"cats": [2], "cookies": {"session_demo": ""}},
+        "CookieHeader": {"cats": [2], "headers": {"(?:set-cookie|cookie)": "session_demo"}},
+        "Authorization": {"cats": [2], "headers": {
+            "authorization": r"synthetic-auth-marker/(\d+)\;version:\1",
+        }},
+        "ProxyAuthorization": {"cats": [2], "headers": {
+            "proxy-authorization": "synthetic-proxy-marker",
+        }},
+    }
+    # A caller can also construct Page directly, without page_from.
+    page = webrules.Page({
+        "Set-Cookie": ("session_demo=synthetic-set-cookie-sentinel",),
+        "Cookie": ("session_demo=synthetic-cookie-sentinel",),
+        "Authorization": ("synthetic-auth-marker/98765",),
+        "Proxy-Authorization": ("synthetic-proxy-marker",),
+    }, ("session_demo",), (), (), "")
+    detections, _ = detect(tmp_path, technologies, page)
+    payload = json.dumps([
+        {"name": item.name, "versions": item.versions,
+         "evidence": [{"source": e.source, "excerpt": e.excerpt} for e in item.evidence]}
+        for item in detections
+    ]).encode("utf-8")
+
+    assert b"synthetic-" not in payload and b"98765" not in payload
+    found = names(detections)
+    assert set(found) == {"CookieName", "Authorization", "ProxyAuthorization"}
+    assert found["CookieName"].evidence[0].source == "cookie:session_demo"
+    assert found["CookieName"].evidence[0].excerpt == "session_demo"
+    for product, label in (("Authorization", "authorization"), ("ProxyAuthorization", "proxy-authorization")):
+        evidence, = found[product].evidence
+        assert (evidence.source, evidence.excerpt) == (f"header:{label}", f"header:{label}")
+
+
+def test_dom_text_matches_release_subtree_strings_as_they_scan(tmp_path, monkeypatch):
+    root, _ = make_collection(tmp_path, {"Dom": {"cats": [2], "dom": {"div": {"text": "marker"}}}})
+    live = peak = 0
+    original_node_text = wf._PageParser.node_text
+
+    class TrackedText(str):
+        def __new__(cls, value):
+            nonlocal live, peak
+            live += 1
+            peak = max(peak, live)
+            return super().__new__(cls, value)
+
+        def __del__(self):
+            nonlocal live
+            live -= 1
+
+    def track_text(self, index):
+        return TrackedText(original_node_text(self, index))
+
+    monkeypatch.setattr(wf._PageParser, "node_text", track_text)
+    page = page_from({}, "<div>" * 30 + "marker" + "</div>" * 30)
+    detections = wf.detect_external(page, wf.load_fingerprints(root))
+
+    assert set(names(detections)) == {"Dom"}
+    assert peak <= 1
+
+
+def test_dom_text_work_limit_preserves_completed_matches(tmp_path, monkeypatch):
+    monkeypatch.setattr(wf, "MAX_DOM_TEXT_WORK", 40, raising=False)
+    page = page_from({}, "<div>first-marker</div><div>" + "x" * 56 + "late-marker</div>")
+    detections, _ = detect(tmp_path, {"Dom": {"cats": [2], "dom": {"div": {"text": "-marker"}}}}, page)
+
+    assert detections.stats.stopped_at_time_limit == 1
+    assert {e.excerpt for e in detections[0].evidence} == {"div", "first-marker"}
+
+
+def test_dom_construction_stops_at_callers_deadline(tmp_path, monkeypatch):
+    root, _ = make_collection(tmp_path, {"Dom": {"cats": [2], "dom": {"div": {"exists": True}}}})
+    now = [0.0]
+    visited = 0
+    original_starttag = wf._PageParser.handle_starttag
+
+    def advance_clock(self, tag, attrs):
+        nonlocal visited
+        original_starttag(self, tag, attrs)
+        visited += 1
+        now[0] = 2.0
+
+    monkeypatch.setattr(wf._PageParser, "handle_starttag", advance_clock)
+    session = wf.ExternalSession(wf.load_fingerprints(root), deadline=1.0, clock=lambda: now[0])
+    session.add_page(page_from({}, "<div></div>" * 100), "https://synthetic.invalid/")
+    detections, stats = session.finish()
+
+    assert visited == 1
+    assert detections == () and stats["stopped"] is True
+
+
+def test_dom_subtree_traversal_checks_deadline_internally(tmp_path, monkeypatch):
+    root, _ = make_collection(tmp_path, {"Dom": {"cats": [2], "dom": {"main": {"text": "text-marker"}}}})
+    now = [0.0]
+    visited = 0
+    original_node_text = wf._PageParser.node_text
+
+    class TraversalNodes(list):
+        def __getitem__(self, index):
+            nonlocal visited
+            visited += 1
+            now[0] = 2.0
+            return super().__getitem__(index)
+
+    def instrument_traversal(self, index):
+        self.nodes = TraversalNodes(self.nodes)
+        return original_node_text(self, index)
+
+    monkeypatch.setattr(wf._PageParser, "node_text", instrument_traversal)
+    session = wf.ExternalSession(wf.load_fingerprints(root), deadline=1.0, clock=lambda: now[0])
+    session.add_page(page_from({}, "<main>" + "<div>text-marker</div>" * 100 + "</main>"),
+                     "https://synthetic.invalid/")
+    detections, stats = session.finish()
+
+    assert visited == 1
+    assert detections == () and stats["stopped"] is True
+
+
+@pytest.mark.parametrize(("template", "capture_size"), [(r"\1", 65), (r"\1" * 40, 60)],
+                         ids=["capture", "expanded-expression"])
+def test_version_templates_bound_captures_and_expansion_before_compiling(tmp_path, monkeypatch, template, capture_size):
+    technologies = {"Demo": {"cats": [2], "html": r"value=([a-z]+)\;version:(" + template + ")"}}
+    root, _ = make_collection(tmp_path, technologies)
+    fingerprints = wf.load_fingerprints(root)
+    original_escape = wf.re.escape
+    original_flags = wf._parse_js_flags
+    escaped = []
+    compiled = []
+
+    def record_escape(value):
+        escaped.append(len(value))
+        return original_escape(value)
+
+    def record_flags(source):
+        compiled.append(len(source))
+        return original_flags(source)
+
+    monkeypatch.setattr(wf.re, "escape", record_escape)
+    monkeypatch.setattr(wf, "_parse_js_flags", record_flags)
+    page = page_from({}, "value=" + "v" * capture_size)
+    (detection,) = wf.detect_external(page, fingerprints)
+
+    assert all(length <= wf.MAX_VERSION_CAPTURE_LENGTH for length in escaped)
+    assert all(length <= wf.MAX_REGEX_LENGTH for length in compiled)
+    assert detection.versions == ()
+
+
+@pytest.mark.parametrize("expiry", ["before-finish", "during-resolution"])
+def test_expired_session_applies_known_exclusions_and_withholds_requires(tmp_path, expiry):
+    root, _ = make_collection(tmp_path, {
+        "Alpha": {"cats": [2], "html": "alpha-marker", "excludes": ["Beta"]},
+        "Beta": {"cats": [2], "html": "beta-marker"},
+        "Dependent": {"cats": [2], "html": "dep-marker", "requires": ["Alpha"]},
+    })
+    session = wf.ExternalSession(wf.load_fingerprints(root), deadline=1.0, clock=lambda: 0.0)
+    session.add_page(page_from({}, "alpha-marker beta-marker dep-marker"), "https://synthetic.invalid/")
+    now = iter([2.0] if expiry == "before-finish" else [0.0, 2.0])
+    session.clock = lambda: next(now, 2.0)
+    detections, stats = session.finish()
+
+    assert set(names(detections)) == {"Alpha"}
+    assert stats["stopped"] is True
+    assert session.finish() == (detections, stats)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory-relative open")
+def test_loader_opens_files_relative_to_verified_directory_nonblocking(tmp_path, monkeypatch):
+    root, tech_dir = make_collection(tmp_path, {"Demo": {"cats": [2], "html": "demo-marker"}})
+    original_open = os.open
+    checked = set()
+
+    def check_open(path, flags, *args, **kwargs):
+        filename = Path(path).name
+        if filename in {"SyntheticCollection.json", "categories.json"}:
+            assert flags & os.O_NOFOLLOW and flags & os.O_NONBLOCK
+            assert Path(path) == Path(filename)
+            directory = os.fstat(kwargs["dir_fd"])
+            expected = (tech_dir if filename == "SyntheticCollection.json" else root).stat()
+            assert (directory.st_dev, directory.st_ino) == (expected.st_dev, expected.st_ino)
+            checked.add(filename)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(wf.os, "open", check_open)
+    assert wf.load_fingerprints(root).technology_count == 1
+    assert checked == {"SyntheticCollection.json", "categories.json"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory symlinks")
+def test_loader_rejects_symlinked_collection_ancestor(tmp_path):
+    actual = tmp_path / "actual"
+    root, _ = make_collection(actual, {"Demo": {"cats": [2], "html": "demo-marker"}})
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+
+    result = wf.load_fingerprints(alias / root.name)
+
+    assert result.technology_count == 0
+    assert dict(result.stats.skipped_technologies) == {"untrusted fingerprint layout": 1}
+    assert result.load_error
+
+
+def test_windows_layout_checks_reparse_attributes_instead_of_posix_modes(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(wf, "_WINDOWS", True, raising=False)
+    directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_file_attributes=0)
+    regular = SimpleNamespace(st_mode=stat.S_IFREG | 0o666, st_file_attributes=0)
+
+    assert wf._safe_directory_info(directory)
+    assert wf._safe_file_info(regular)
+    directory.st_file_attributes = regular.st_file_attributes = 0x400
+    assert not wf._safe_directory_info(directory)
+    assert not wf._safe_file_info(regular)
+
+
+def test_loader_quarantines_blank_and_invalid_length_names_individually(tmp_path):
+    technologies = {
+        " \t\u2003": {"cats": [2], "html": "blank-marker"},
+        "x" * 257: {"cats": [2], "html": "long-marker"},
+        "y" * 256: {"cats": [2], "html": "valid-marker"},
+    }
+    detections, fingerprints = detect(tmp_path, technologies, page_from({}, "blank-marker long-marker valid-marker"))
+
+    assert set(names(detections)) == {"y" * 256}
+    assert dict(fingerprints.stats.skipped_technologies)["malformed technology"] == 2
+
+
+def test_real_session_joins_file_metadata_for_sources_with_the_same_display_prefix(tmp_path):
+    root, _ = make_collection(tmp_path, {"Demo": {"cats": [2], "scripts": "script-marker"}})
+    session = wf.ExternalSession(wf.load_fingerprints(root), deadline=1.0, clock=lambda: 0.0)
+    prefix = "https://synthetic.invalid/" + "a" * 4500
+    urls = (prefix + "1.js", prefix + "2.js")
+    for url in urls:
+        session.add_resource(Resource(url, "script", "script-marker"))
+    (detection,), stats = session.finish()
+    metadata = {urls[0]: ("a" * 64, 11), urls[1]: ("b" * 64, 22)}
+
+    assert tuple(e.source for e in detection.evidence) == urls
+    assert stats["stopped"] is False
+    displayed = web._public_evidence(detection, metadata)
+    assert len(displayed) == 2 and displayed[0]["source"] == displayed[1]["source"]
+    assert [(item["sha256"], item["bytes"]) for item in displayed] == list(metadata.values())
