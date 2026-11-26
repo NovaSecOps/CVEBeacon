@@ -34,7 +34,7 @@ import ssl
 import threading
 import time
 from typing import Callable, Iterable, Mapping
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit, urlunsplit
 import zlib
 
 from cvebeacon.errors import InventoryValidationError
@@ -103,6 +103,11 @@ _ANALYSIS_STOP_REASONS = {"site-time-budget", "run-deadline"}
 _SENSITIVE_HEADERS = frozenset({"set-cookie", "cookie", "authorization", "proxy-authorization"})
 _URL_IN_EXCERPT = re.compile(r"""(?:https?://|(?<![:/])//)[^\s<>"'`]+""", re.IGNORECASE)
 _URL_SUFFIX_IN_EXCERPT = re.compile(r"""[?#][^\s<>"'`]*""")
+# Query pairs, and an excerpt that starts inside a query string ("name=value" with no
+# quote, unlike an HTML attribute), may carry private values from a page's URLs.
+_QUERY_PAIRS_IN_EXCERPT = re.compile(r"""[?&][\w.%~+-]{1,256}=[^\s<>"'`&#]*""")
+_LEADING_QUERY_IN_EXCERPT = re.compile(r"""^[\w.%~+-]{1,256}=(?!["'])[^\s<>"'`]*""")
+_URL_BEARING_KINDS = frozenset({"url", "html", "dom", "text", "meta"})
 
 
 class _FetchFailure(Exception):
@@ -1349,7 +1354,8 @@ class Fetcher:
         if not _valid_reference(location):
             raise _RedirectFailure("redirect target is not a valid URL")
         try:
-            target = urlsplit(urljoin(current.url, location))
+            target = urlsplit(location if urlsplit(location).scheme
+                              else _resolve_reference(current.url, location))
             target_port = target.port
             target_host = target.hostname
         except ValueError as exc:
@@ -1908,6 +1914,57 @@ def _url_origin(value: str) -> tuple[str, str, int]:
     return scheme, hostname, _port(parts.port, scheme)
 
 
+
+def _remove_dot_segments(path: str) -> str:
+    """RFC 3986 section 5.2.4; keeps empty segments, as browsers do."""
+    output: list[str] = []
+    while path:
+        if path.startswith("../"):
+            path = path[3:]
+        elif path.startswith("./"):
+            path = path[2:]
+        elif path.startswith("/./"):
+            path = "/" + path[3:]
+        elif path == "/.":
+            path = "/"
+        elif path.startswith("/../"):
+            path = "/" + path[4:]
+            if output:
+                output.pop()
+        elif path == "/..":
+            path = "/"
+            if output:
+                output.pop()
+        elif path in {".", ".."}:
+            path = ""
+        else:
+            end = path.find("/", 1 if path.startswith("/") else 0)
+            end = len(path) if end == -1 else end
+            output.append(path[:end])
+            path = path[end:]
+    return "".join(output)
+
+
+def _resolve_reference(base: str, reference: str) -> str:
+    """Resolve a relative reference against an absolute base (RFC 3986 section 5.2.2)."""
+    b = urlsplit(base)
+    r = urlsplit(reference)
+    before_fragment = reference.split("#", 1)[0]
+    has_query = "?" in before_fragment
+    if reference.startswith("//"):
+        return urlunsplit((b.scheme, r.netloc, _remove_dot_segments(r.path), r.query, r.fragment))
+    if not r.path:
+        path, query = b.path, (r.query if has_query else b.query)
+    else:
+        if r.path.startswith("/"):
+            merged = r.path
+        elif b.netloc and not b.path:
+            merged = "/" + r.path
+        else:
+            merged = b.path[:b.path.rfind("/") + 1] + r.path
+        path, query = _remove_dot_segments(merged), r.query
+    return urlunsplit((b.scheme, b.netloc, path, query, r.fragment))
+
 def _resource_candidate(reference: _ResourceReference, base_url: str | None, page_asset: WebAsset,
                         allowlist: Allowlist, state: _ResourceSiteState, queue,
                         skipped: Counter, lookup: Callable[[_ResourceCandidate], _CachedResource | None],
@@ -1924,7 +1981,7 @@ def _resource_candidate(reference: _ResourceReference, base_url: str | None, pag
             skipped["invalid-url"] += 1
             return
         # A same-scheme URL like "https:relative.js" is ambiguous across parsers.
-        absolute = urljoin(base_url, value) if relative else value
+        absolute = _resolve_reference(base_url, value) if relative else value
         parts = urlsplit(absolute)
         scheme = parts.scheme.casefold()
         if scheme not in {"http", "https"}:
@@ -2042,7 +2099,7 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
                 parts = urlsplit(value)
                 if value.startswith("//") and not parts.netloc:
                     raise ValueError("network-path base has no authority")
-                proposed = value if parts.scheme else urljoin(page_url, value)
+                proposed = value if parts.scheme else _resolve_reference(page_url, value)
                 _url_origin(proposed)
                 base_url = urlsplit(proposed)._replace(fragment="").geturl()
             except (ExtensionError, ValueError, UnicodeError):
@@ -2389,6 +2446,11 @@ def _display_evidence(evidence: _EvidenceRecord) -> tuple[str, str]:
     excerpt = _URL_IN_EXCERPT.sub(lambda match: _display_url(match[0]), excerpt)
     if evidence.kind == "url" or excerpt.lstrip().startswith(("/", "./", "../")):
         excerpt = _URL_SUFFIX_IN_EXCERPT.sub("", excerpt)
+    if evidence.kind in _URL_BEARING_KINDS:
+        excerpt = _QUERY_PAIRS_IN_EXCERPT.sub("", excerpt)
+        excerpt = _LEADING_QUERY_IN_EXCERPT.sub("", excerpt).strip()
+        if not excerpt:
+            excerpt = "link on the page" if evidence.kind == "url" else "page markup"
     return source[:512], excerpt[:160]
 
 
@@ -2682,7 +2744,12 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         if len(display) > MAX_TEXT:
             _quarantine(reviews, omissions, base)
             continue
-        row_id = _asset_id(client, asset.endpoint, detection.vendor, detection.product)
+        # A scoped identity (an OS, hardware or qualified CPE) always takes its own ID, so
+        # its row keeps the same ID across scans whatever else is found beside it. The
+        # legacy vendor/product ID stays with the plain application identity.
+        scoped = isinstance(key, tuple) and len(key) > 3 and key[0] == "product"
+        row_id = (_asset_id(client, asset.endpoint, "\0".join(key), "") if scoped
+                  else _asset_id(client, asset.endpoint, detection.vendor, detection.product))
         if row_id in used_ids:
             row_id = _asset_id(client, asset.endpoint, "\0".join(key), "")
         used_ids.add(row_id)
@@ -2847,7 +2914,8 @@ def _load_external_fingerprints(directory: Path | None):
         loaded = load_fingerprints(directory)
         if not loaded.technology_count:
             raise ExtensionError("fingerprint layout contains no usable technologies")
-        return loaded, loaded.technology_count, False
+        # Use what loaded, but a file that could not be read or trusted makes the result partial.
+        return loaded, loaded.technology_count, bool(getattr(loaded, "incomplete", False))
     except Exception:
         LOG.warning("Web fingerprint files could not be loaded; continuing without them")
         return None, 0, True

@@ -214,6 +214,11 @@ class Fingerprints:
         return any(reason in {"fingerprint directory unavailable", "untrusted fingerprint layout"}
                    for reason, _ in self.stats.skipped_technologies)
 
+    @property
+    def incomplete(self) -> bool:
+        """True when a supported file could not be read or trusted, so coverage is partial."""
+        return any(reason in INCOMPLETE_LOAD_REASONS for reason, _ in self.stats.skipped_technologies)
+
 
 def _freeze_counts(counter: Counter[str]) -> tuple[tuple[str, int], ...]:
     return tuple(sorted((key, value) for key, value in counter.items() if value))
@@ -1420,6 +1425,13 @@ def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
                         MappingProxyType(no_literal))
 
 
+# Reasons that mean a supported file was not read as published. A malformed file
+# is a property of the collection itself and does not make every scan partial.
+INCOMPLETE_LOAD_REASONS = frozenset({
+    "fingerprint directory unavailable", "untrusted fingerprint layout",
+    "technology file changed during loading", "technology file unavailable",
+    "technology file unavailable or untrusted", "categories file unavailable",
+})
 _LOAD_CACHE: dict[tuple, Fingerprints] = {}
 _LOAD_CACHE_ORDER: deque[tuple] = deque()
 _LOAD_CACHE_LIMIT = 8
@@ -1449,6 +1461,9 @@ def load_fingerprints(directory: Path) -> Fingerprints:
         if cached is not None:
             return cached
         loaded = _load_uncached(snapshot)
+    if loaded.incomplete:
+        # A transient read or trust failure must not be remembered as the complete collection.
+        return loaded
     _LOAD_CACHE[snapshot.key] = loaded
     _LOAD_CACHE_ORDER.append(snapshot.key)
     while len(_LOAD_CACHE_ORDER) > _LOAD_CACHE_LIMIT:
