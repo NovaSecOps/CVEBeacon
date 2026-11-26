@@ -95,6 +95,7 @@ def test_cpe_aliases_merge_built_in_and_external_evidence(tmp_path):
     nginx = next(item for item in result.products if item["vendor"] == "nginx")
     assert nginx["evidence_types"] == ["header", "html"]
     assert nginx["category"] == "web-server"
+    assert set(nginx["categories"]) >= {"cms", "reverse-proxy", "web-server"}
     assert {row["cpe"] for row in result.rows} == {
         "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*",
         "cpe:2.3:a:other_vendor:nginx:*:*:*:*:*:*:*:*",
@@ -382,6 +383,21 @@ def test_cpe_identity_and_unknown_category_fallback(tmp_path):
     assert (found.vendor, found.product) == ("example_vendor", "exampleproduct")
     assert found.category == "application"
     assert found.cpe == technologies["Human Name"]["cpe"]
+
+
+def test_external_fingerprints_keep_every_category(tmp_path):
+    root, _ = make_collection(
+        tmp_path,
+        {"Multi Category": {"cats": ["1", "2"], "html": "multi-category-marker"}},
+        categories={"1": {"name": "Web server"}, "2": {"name": "Reverse proxy"}},
+    )
+    fingerprints = wf.load_fingerprints(root)
+    page = page_from({}, "multi-category-marker")
+
+    found, = wf.detect_external(page, fingerprints)
+
+    assert found.category == "web-server"
+    assert set(found.categories) == {"web-server", "reverse-proxy"}
 
 
 def test_literal_prefilter_preserves_matches_and_text_bounds_apply(tmp_path):

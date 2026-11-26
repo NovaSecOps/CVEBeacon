@@ -1,3 +1,3 @@
 """Optional automation; Core and Extensions do not import this package."""
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"

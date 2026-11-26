@@ -23,6 +23,21 @@ def _display(kind, source, excerpt):
     return web._display_evidence(web._EvidenceRecord(kind, source, excerpt))
 
 
+def test_detection_category_merges_keep_primary_and_union_all_engines():
+    detections = (
+        webrules.Detection("nginx", "nginx", "web-server", "", "high", (),
+                           categories=("reverse-proxy",)),
+        webrules.Detection("nginx", "nginx", "cms", "", "medium", (),
+                           categories=("web-server",)),
+    )
+    merged = {}
+    web._merge_detections(merged, detections)
+
+    item, = merged.values()
+    assert item.category == "web-server"
+    assert item.categories == ("cms", "reverse-proxy", "web-server")
+
+
 @pytest.mark.parametrize("kind,source,excerpt", [
     ("url", "page", "key=SYNTHETIC-PRIVATE&callback=initMap"),
     ("url", "page", "maps.googleapis.com/maps/api/js?key=SYNTHETIC-PRIVATE"),

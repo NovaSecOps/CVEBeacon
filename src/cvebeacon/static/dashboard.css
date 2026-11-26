@@ -471,6 +471,39 @@ tr:last-child > td { border-bottom: 0; }
 /* Bare tables outside a wrapper still read as a table. */
 main > table { background: var(--surface); border: 1px solid var(--border); }
 
+/* Web detection results keep their tags together and constrain evidence panels. */
+.web-products-table { min-width: 50rem; table-layout: fixed; }
+.web-products-table td { min-width: 0; }
+.web-products-table thead th:nth-child(1) { width: 36%; }
+.web-products-table thead th:nth-child(2) { width: 18%; }
+.web-products-table thead th:nth-child(3) { width: 18%; }
+.web-products-table thead th:nth-child(4) { width: 28%; }
+.web-products-table .web-site-group {
+  text-transform: none; letter-spacing: normal; color: var(--text); font-size: .9rem;
+}
+.web-product-cell { width: 36%; overflow-wrap: anywhere; }
+.web-version-cell { width: 18%; }
+.web-confidence-cell { width: 18%; }
+.web-evidence-cell { width: 28%; }
+.web-product-tags { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
+.web-product-tags .badge, .web-version-badge { white-space: normal; overflow-wrap: anywhere; }
+.web-evidence { margin: 0; }
+.web-evidence > summary {
+  display: list-item; width: fit-content; max-width: 100%;
+  padding: 2px var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-muted); font-size: .82rem; font-weight: 600; line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.web-evidence[open] > summary { color: var(--link); border-color: var(--border-strong); }
+.web-evidence-panel {
+  min-width: 0; max-width: 100%; margin-top: var(--space-2); padding: var(--space-2);
+  overflow-wrap: anywhere; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.web-evidence-panel ul { margin: 0; padding-left: var(--space-4); }
+.web-evidence-panel li > p { margin-bottom: var(--space-1); }
+.web-evidence-panel pre { max-width: 100%; padding: var(--space-2); }
+
 /* Definition list: label and value pairs */
 dl { display: grid; grid-template-columns: minmax(160px, 240px) 1fr; gap: var(--space-3) var(--space-5); margin: 0 0 var(--space-4); }
 dt { font-weight: 650; color: var(--text); }
