@@ -27,9 +27,11 @@ collapsed.
 
 The steps cover getting watch data, setting up and testing an alert channel,
 choosing an alert rule, adding an inventory, installing a schedule, and making
-a backup. The inventory step is Done when an inventory exists and a completed
-scan includes its assets. A client is optional; a no-client-only inventory can
-complete the step. With no inventory, the step stays To do and links to
+a backup. The inventory step is Done when a configured file, a dashboard-managed
+inventory with or without a client, or a valid enabled web snapshot is available.
+Its detail reads “An inventory is available.” Scan status stays in the Scan
+activity card. A client is optional; a no-client-only inventory can complete
+the step. With no inventory, the step stays To do and links to
 **Inventory → Add inventory**. If the check cannot read its state, the step
 says it could not be checked. A **Done** badge means only that the condition
 for that step is recorded. It does not mean CVEBeacon found every flaw. For

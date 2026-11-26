@@ -10,6 +10,7 @@ import pytest
 
 from cvebeacon import cli, dashboard
 from cvebeacon.config import load_config
+from cvebeacon.dashboard_setup import _inventory_info
 from cvebeacon.dashboard_config import groups_for, dumps
 from cvebeacon.errors import ConfigurationError, InventoryValidationError
 from cvebeacon.inventory import load_inventory
@@ -121,6 +122,31 @@ def test_web_only_inventory_scan_and_dashboard(tmp_path, capsys):
     response = client.get("/assets")
     assert response.status_code == 200 and "Acme" in response.text and "nginx" in response.text
     assert cli.main(["--config", str(config.config_path), "inventory", "inspect"]) == 2
+
+
+def test_home_inventory_check_accepts_a_valid_enabled_web_snapshot(tmp_path):
+    config = config_file(tmp_path, enabled=True, path=False)
+    snapshot(config.database_path.parent / "web-inventory")
+    page = dashboard.create_app(config).test_client().get("/")
+    assert page.status_code == 200
+    assert '<li class="setup-step setup-done" id="setup-inventory">' in page.text
+
+
+def test_unreadable_enabled_web_snapshot_makes_home_inventory_unknown(tmp_path, monkeypatch):
+    config = config_file(tmp_path, enabled=True, path=False)
+    directory = config.database_path.parent / "web-inventory"
+    private_directory(directory, owner_only=True)
+    (directory / "blocked.json").write_text("[]\n", encoding="utf-8", newline="\n")
+
+    def unreadable(_path):
+        raise PermissionError("snapshot secret detail")
+
+    monkeypatch.setattr("cvebeacon.web_inventory.read_web_snapshot", unreadable)
+    page = dashboard.create_app(config).test_client().get("/")
+    assert page.status_code == 200
+    assert "Inventory information could not be read." in page.text
+    assert '<li class="setup-step setup-unknown" id="setup-inventory">' in page.text
+    assert "snapshot secret detail" not in page.text
 
 
 def test_empty_web_only_inventory_is_not_clean(tmp_path):

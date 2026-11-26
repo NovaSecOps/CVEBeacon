@@ -8,7 +8,6 @@ reported as a good state.
 
 from __future__ import annotations
 
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,7 +17,6 @@ from typing import Callable, Mapping
 from flask import current_app, g, url_for
 
 from . import backup
-from .clients import client_page
 from .config import AppConfig
 from .dashboard_jobs import MAX_HISTORY
 from .dashboard_ops import schedule_scan_state
@@ -29,7 +27,7 @@ from .watch.reported import format_timestamp
 STALE_SYNC_DAYS = 3
 STALE_BACKUP_DAYS = 7
 STEP_STATES = frozenset({"done", "todo", "attention", "unknown", "na"})
-READ_FAILURES = (CVEBeaconError, OSError, sqlite3.Error)
+READ_FAILURES = (CVEBeaconError, OSError)
 
 SOURCES_TITLE = "Turn on watching and get the first data"
 CHANNEL_TITLE = "Set up and test a way to receive alerts"
@@ -56,10 +54,9 @@ class Step:
 
 @dataclass(frozen=True, slots=True)
 class InventoryInfo:
-    """Whether an inventory exists and how many assets a completed scan read."""
+    """Whether an inventory source is available."""
 
     exists: bool
-    scanned: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,27 +347,34 @@ def _rule_step(config: AppConfig, viewer: Viewer) -> Step:
     )
 
 
-def _inventory_step(inventory_info: InventoryInfo | None, viewer: Viewer) -> Step:
+def _inventory_step(
+    inventory_info: InventoryInfo | None,
+    viewer: Viewer,
+    *,
+    managed_inventory_enabled: bool,
+) -> Step:
     if inventory_info is None:
         return _step(
             "inventory", INVENTORY_TITLE, "unknown", INVENTORY_UNREADABLE,
             _link(viewer, "view", "client_inventory.index", "Open Inventory", None),
         )
-    if inventory_info.exists and inventory_info.scanned > 0:
+    if inventory_info.exists:
         return _step(
             "inventory", INVENTORY_TITLE, "done",
-            "An inventory is available and has been scanned.",
+            "An inventory is available.",
         )
-    detail = (
-        "Inventory is available, but no completed scan includes its assets yet."
-        if inventory_info.exists else
-        "No inventory has been added yet, so there is nothing to scan."
-    )
-    return _step(
-        "inventory", INVENTORY_TITLE, "todo", detail,
-        _link(viewer, "manage_inventory", "client_inventory.inventory_add", "Add inventory",
-              "Ask someone who may manage inventories."),
-    )
+    detail = "No inventory has been added yet, so there is nothing to scan."
+    if not managed_inventory_enabled:
+        action = _link(
+            viewer, "edit_inventory", "config_editor.inventory", "Open Inventory settings",
+            "Ask someone who can turn on managed inventories or configure a shared file.",
+        )
+    else:
+        action = _link(
+            viewer, "manage_inventory", "client_inventory.inventory_add", "Add inventory",
+            "Ask someone who may manage inventories.",
+        )
+    return _step("inventory", INVENTORY_TITLE, "todo", detail, action)
 
 
 def _schedule_step(state: str, viewer: Viewer) -> Step:
@@ -448,7 +452,10 @@ def build_setup(
         _sources_step(config, meta, now, viewer),
         _channel_step(config, jobs, viewer),
         _rule_step(config, viewer),
-        _inventory_step(inventory_info, viewer),
+        _inventory_step(
+            inventory_info, viewer,
+            managed_inventory_enabled=config.managed_inventory,
+        ),
         _schedule_step(schedule_state, viewer),
     ]
     backup_step = _backup_step(backup_info, now, viewer)
@@ -500,38 +507,6 @@ def _backup_info(config: AppConfig, viewer: Viewer):
         return None
 
 
-def _completed_scan_exists(path: Path) -> bool:
-    """Whether a completed scan is on record, without opening a WAL connection.
-
-    A read-only WAL connection leaves ``-wal``/``-shm`` files beside the scan
-    database. When no writer is active the main file is read immutably, which
-    creates nothing; anything unclear falls through to the normal read so the
-    existing error handling still applies.
-    """
-    for suffix in ("-wal", "-journal"):
-        if Path(str(path) + suffix).exists():
-            return True
-    try:
-        uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
-        with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as db:
-            row = db.execute(
-                "SELECT 1 FROM runs WHERE status='completed' LIMIT 1"
-            ).fetchone()
-            return row is not None
-    except (sqlite3.Error, OSError, ValueError):
-        return True
-
-
-def _scan_asset_count(path: Path, run_id: str) -> int:
-    sidecar = any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-journal"))
-    uri = path.resolve().as_uri() + ("?mode=ro" if sidecar else "?mode=ro&immutable=1")
-    with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as db:
-        row = db.execute("SELECT asset_count FROM runs WHERE run_id=?", (run_id,)).fetchone()
-    if row is None:
-        raise sqlite3.DatabaseError("completed inventory scan could not be read")
-    return max(0, int(row[0]))
-
-
 def _inventory_info(config: AppConfig):
     try:
         source = config.inventory
@@ -540,17 +515,14 @@ def _inventory_info(config: AppConfig):
             exists = True
         if source and source.web_snapshots:
             from .web_inventory import append_snapshots
-            snapshots = append_snapshots([], config.database_path.parent / "web-inventory")
+            errors = []
+            snapshots = append_snapshots(
+                [], config.database_path.parent / "web-inventory", errors=errors
+            )
+            if errors:
+                return None
             exists = exists or bool(snapshots)
-
-        path = Path(config.database_path)
-        scanned = 0
-        if path.is_file() and _completed_scan_exists(path):
-            scan, _, _ = client_page(path, limit=1)
-            if scan is None:
-                raise sqlite3.DatabaseError("completed inventory scan could not be read")
-            scanned = _scan_asset_count(path, scan.run_id)
-        return InventoryInfo(exists=exists, scanned=scanned)
+        return InventoryInfo(exists=exists)
     except READ_FAILURES:
         return None
 

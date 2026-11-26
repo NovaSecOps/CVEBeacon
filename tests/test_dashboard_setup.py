@@ -6,7 +6,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
-import sqlite3
 
 import pytest
 from flask import g
@@ -25,7 +24,6 @@ from cvebeacon.dashboard_setup import (
     gather,
 )
 from cvebeacon.errors import StateError
-from cvebeacon.state import StateStore
 from cvebeacon.watch.channels import ChannelConfig
 from cvebeacon.watch.rules import Condition, Rule
 from cvebeacon.watch.store import WatchStore
@@ -115,7 +113,7 @@ def steps_for(config, **values):
         "jobs": (),
         "schedule_state": "none",
         "backup_info": {"count": 0, "last": None, "last_id": None},
-        "inventory_info": InventoryInfo(exists=False, scanned=0),
+        "inventory_info": InventoryInfo(exists=False),
         "now": NOW,
         "viewer": make_viewer(),
     }
@@ -442,22 +440,27 @@ def test_inventory_step_stays_to_do_when_managed_uploads_are_disabled():
     item = step(steps_for(unit_config(managed=False)), "inventory")
     assert item.state == "todo"
     assert item.title == "Add inventory"
-    assert item.action_label == "Add inventory"
-    assert item.action_url == "/client_inventory.inventory_add"
+    assert item.action_label == "Open Inventory settings"
+    assert item.action_url == "/config_editor.inventory"
     assert item.hint is None
 
 
-def test_inventory_step_needs_a_scan_before_it_is_done():
-    item = step(steps_for(unit_config(), inventory_info=InventoryInfo(exists=True, scanned=0)), "inventory")
+def test_inventory_step_viewer_without_edit_permission_gets_a_hint_when_uploads_are_disabled():
+    viewer = make_viewer({"view"}, is_admin=False)
+    item = step(steps_for(unit_config(managed=False), viewer=viewer), "inventory")
     assert item.state == "todo"
-    assert item.action_url == "/client_inventory.inventory_add"
+    assert item.action_url is None
+    assert item.action_label is None
+    assert item.hint == (
+        "Ask someone who can turn on managed inventories or configure a shared file."
+    )
 
 
-def test_inventory_step_reports_done_for_a_scanned_inventory():
-    item = step(steps_for(unit_config(), inventory_info=InventoryInfo(exists=True, scanned=1)), "inventory")
+def test_inventory_step_reports_done_as_soon_as_an_inventory_is_available():
+    item = step(steps_for(unit_config(), inventory_info=InventoryInfo(exists=True)), "inventory")
     assert item.state == "done"
     assert item.title == "Add inventory"
-    assert item.detail == "An inventory is available and has been scanned."
+    assert item.detail == "An inventory is available."
 
 
 def test_inventory_step_reports_unreadable_information():
@@ -613,7 +616,7 @@ def test_setup_summary_collapses_when_nothing_needs_attention():
         jobs=(make_job(),),
         schedule_state="scan",
         backup_info={"count": 1, "last": "2026-11-23T09:30:00+00:00", "last_id": "b"},
-        inventory_info=InventoryInfo(exists=True, scanned=1),
+        inventory_info=InventoryInfo(exists=True),
     )
     summary = Setup.from_steps(steps)
     assert summary.done == 6
@@ -746,7 +749,7 @@ def test_fresh_watch_install_renders_every_step_to_do(tmp_path):
     checklist = checklist_text(page.text)
     assert "setup-unknown" not in checklist
     assert '<li class="setup-step setup-todo" id="setup-inventory">' in checklist
-    assert "Add a client" not in checklist
+    assert "Add a client" not in page.text
     # Reading the checklist must not create a missing watch database.
     assert not config.watch.database.exists()
 
@@ -763,13 +766,14 @@ def test_home_get_does_not_create_scan_database_sidecars(tmp_path):
             assert not sidecar.exists(), sidecar
 
 
-def test_fresh_scan_install_renders_every_step_to_do(tmp_path):
+def test_fresh_scan_install_marks_an_existing_inventory_done(tmp_path):
     (tmp_path / "missing-inventory.csv").write_text(
         "asset_id,vendor,product,version\na,Acme,Widget,1\n", encoding="utf-8")
     _, app = make_app(tmp_path, inventory=True, enabled=False)
     page = app.test_client().get("/")
     assert page.status_code == 200
-    assert "0 of 6 steps done" in page.text
+    assert "1 of 6 steps done" in page.text
+    assert "An inventory is available." in page.text
     assert "Turn on watching and get the first data" in page.text
     assert "Watch mode is off" in page.text
 
@@ -867,37 +871,68 @@ def test_home_reports_unreadable_backups(tmp_path, monkeypatch):
 
 def test_home_reports_unreadable_inventory_information(tmp_path, monkeypatch):
     config, app, client = make_home(tmp_path)
-    StateStore(config.database_path).record_scan([])
 
-    def explode(path, *, limit=1):
-        raise sqlite3.Error("client secret detail")
+    def explode(_directory):
+        raise OSError("inventory secret detail")
 
-    monkeypatch.setattr(dashboard_setup, "client_page", explode)
+    monkeypatch.setattr(dashboard_setup, "has_managed_inventory", explode)
     page = client.get("/")
     assert page.status_code == 200
     assert "Inventory information could not be read." in page.text
-    assert "client secret detail" not in page.text
+    assert "inventory secret detail" not in page.text
 
 
-def test_no_client_managed_inventory_counts_as_scanned(tmp_path):
+def test_configured_file_inventory_is_available_without_a_scan(tmp_path):
+    config, _ = make_app(tmp_path, inventory=True)
+    config.inventory.path.write_text(
+        "asset_id,vendor,product,version\na,Acme,Widget,1\n",
+        encoding="utf-8", newline="\n",
+    )
+    info = dashboard_setup._inventory_info(config)
+    assert info.exists is True
+    item = step(steps_for(config, inventory_info=info), "inventory")
+    assert item.state == "done"
+    assert item.detail == "An inventory is available."
+
+
+def test_client_managed_inventory_is_available_without_a_scan(tmp_path):
     config, app = make_app(tmp_path, inventory=False)
+    directory = config.inventory_directory
+    directory.mkdir()
+    from cvebeacon.managed_inventory import client_key
+    key = client_key("Acme")
+    (directory / f"{key}.json").write_text(
+        '[{"asset_id":"router-1","vendor":"Acme","product":"Router","version":"1","client":"Acme"}]',
+        encoding="utf-8", newline="\n",
+    )
+    (directory / f"{key}.client").write_text(
+        '{"name":"Acme","notes":"","contact":""}\n',
+        encoding="utf-8", newline="\n",
+    )
+
+    info = dashboard_setup._inventory_info(config)
+    assert info.exists is True
+    item = step(steps_for(config, inventory_info=info), "inventory")
+    assert item.state == "done"
+    assert item.detail == "An inventory is available."
+    checklist = checklist_text(app.test_client().get("/").text)
+    assert '<li class="setup-step setup-done" id="setup-inventory">' in checklist
+    assert "Add a client" not in checklist
+
+
+def test_no_client_managed_inventory_is_available_without_a_scan(tmp_path):
+    config, _ = make_app(tmp_path, inventory=False)
     directory = config.inventory_directory
     directory.mkdir()
     (directory / "unassigned.json").write_text(
         '[{"asset_id":"router-1","vendor":"Acme","product":"Router","version":"1"}]',
         encoding="utf-8", newline="\n",
     )
-    from cvebeacon.models import Asset, QueryResult
-    StateStore(config.database_path).record_scan([
-        QueryResult(Asset("router-1", "Acme", "Router", "1"), (), ()),
-    ])
-
     info = dashboard_setup._inventory_info(config)
     assert info.exists is True
-    assert info.scanned == 1
-    checklist = checklist_text(app.test_client().get("/").text)
-    assert '<li class="setup-step setup-done" id="setup-inventory">' in checklist
-    assert "Add a client" not in checklist
+    item = step(steps_for(config, inventory_info=info), "inventory")
+    assert item.state == "done"
+    assert item.detail == "An inventory is available."
 
 
 def test_home_inventory_action_links_to_inventory_add(tmp_path):
@@ -913,8 +948,9 @@ def test_rendered_checklist_avoids_banned_words(tmp_path):
                            rules=(make_rule(),), admin=True)
     client = app.test_client()
     login(client)
-    checklist = checklist_text(client.get("/").text)
-    assert BANNED.search(checklist) is None
+    page = client.get("/").text
+    assert BANNED.search(page) is None
+    assert "Add a client" not in page
 
 
 def test_can_helper_requires_accounts_and_permission(tmp_path):

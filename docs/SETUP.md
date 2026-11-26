@@ -15,7 +15,10 @@ When setting up through the dashboard, follow the **Getting started** list on
 Home: start watch data, test an alert channel, choose a rule, add an inventory,
 install a schedule, and make a backup. Start in **Inventory → Add inventory**;
 the Client field defaults to **No client**, and a client profile is optional.
-The inventory step is Done after a completed scan includes its assets. **Done**
+The inventory step is Done when a configured file, a dashboard-managed
+inventory with or without a client, or a valid enabled web snapshot is
+available. Its detail reads “An inventory is available.” Scan status stays in
+the Scan activity area. **Done**
 does not guarantee complete vulnerability coverage or that a person received a
 test alert. See the [dashboard guide](DASHBOARD.md).
 
