@@ -40,6 +40,11 @@ MAX_ANALYSIS_TEXT = 4 * 1_048_576
 MAX_PAGE_RESOURCES = 512
 MAX_TOTAL_RESOURCE_TEXT = 32 * 1_048_576
 MAX_DETECTION_TEXT = 8192
+MAX_DETECTION_NAME = 256
+MAX_VERSION_CAPTURE_LENGTH = 64
+MAX_EVIDENCE_EXCERPT_LENGTH = 160
+
+SENSITIVE_HEADERS = frozenset({"set-cookie", "cookie", "authorization", "proxy-authorization"})
 
 EVIDENCE_KINDS = frozenset({
     "header", "cookie", "meta", "url", "html", "script", "style", "manifest",
@@ -138,7 +143,7 @@ def _versioned(pattern: str) -> str:
 
 def normalize_version(value: object) -> str:
     """Return a conservative exact version, or an empty string."""
-    if not isinstance(value, str) or len(value) > 64:
+    if not isinstance(value, str) or len(value) > MAX_VERSION_CAPTURE_LENGTH:
         return ""
     text = value.strip()
     if not text:
@@ -153,6 +158,16 @@ def normalize_version(value: object) -> str:
         text = text[prefix.end():]
     match = _VERSION.fullmatch(text)
     return match.group(0) if match else ""
+
+
+def _captured_version(match: re.Match[str], group: int | str) -> str:
+    try:
+        start, end = match.span(group)
+    except IndexError:
+        return ""
+    if start < 0 or end - start > MAX_VERSION_CAPTURE_LENGTH:
+        return ""
+    return normalize_version(match.string[start:end])
 
 
 def _validated_cpe(value: str) -> str:
@@ -749,6 +764,13 @@ for _product_rule in RULES:
         )
 _PACKAGE_PRODUCTS.setdefault("react-dom", ("facebook", "react-dom", "React DOM", "js-library"))
 
+# npm identities backed by the bundled Retire.js signatures as well as the
+# built-in rules. Extending this set permits URL-only npm detections.
+REVIEWED_PACKAGES = frozenset(_PACKAGE_PRODUCTS) | {
+    "alasql", "dompurify", "dwr", "easyxdm", "froala-editor", "highlight.js", "jplayer",
+    "mootools", "mustache", "pdfjs-dist", "protobufjs", "quill", "three", "tinymce", "yui",
+}
+
 _CDNJS_PACKAGES = {
     "angular": "angular", "angular.js": "angular",
     "react": "react", "vue": "vue", "ember.js": "ember-source",
@@ -836,7 +858,8 @@ def _scalar_text(value: object, limit: int) -> str:
     return text
 
 
-def _is_scalar_text(value: object, limit: int) -> bool:
+def is_scalar_text(value: object, limit: int = MAX_DETECTION_TEXT) -> bool:
+    """Check a character limit and reject lone Unicode surrogates."""
     if not isinstance(value, str) or len(value) > limit:
         return False
     if value.isascii():
@@ -846,6 +869,40 @@ def _is_scalar_text(value: object, limit: int) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+def valid_detection_name(value: object) -> bool:
+    """Check the dashboard's required name contract when a name is supplied."""
+    return isinstance(value, str) and is_scalar_text(value, MAX_DETECTION_NAME) and bool(value.strip())
+
+
+_COOKIE_TOKEN = r"[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,256}"
+_COOKIE_NAME = re.compile(_COOKIE_TOKEN)
+_COOKIE_PAIR = re.compile(rf"[ \t]*({_COOKIE_TOKEN})[ \t]*=")
+_MAX_COOKIE_NAMES = 4096
+
+
+def _cookie_names(value: str, *, multiple: bool):
+    stop = min(len(value), MAX_ANALYSIS_TEXT)
+    if not multiple:
+        pair = _COOKIE_PAIR.match(value, endpos=stop)
+        if pair:
+            yield pair[1]
+        return
+    start = 0
+    while start < stop:
+        separator = value.find(";", start, stop)
+        end = stop if separator < 0 else separator
+        pair = _COOKIE_PAIR.match(value, start, end)
+        if pair:
+            yield pair[1]
+            quotes = value.count('"', pair.end(), end)
+            if quotes and (quotes != 2 or value.find("\\", pair.end(), end) >= 0):
+                # A malformed quoted value may continue past the separator.
+                return
+        elif value.find('"', start, end) >= 0:
+            return
+        start = end + 1
 
 
 def _tag_end(html: str, start: int) -> int:
@@ -928,15 +985,26 @@ def page_from(headers: Mapping[str, Iterable[str]], html: str,
               resources: Iterable[Resource] = ()) -> Page:
     bounded_html = _scalar_text(html, MAX_ANALYSIS_TEXT)
     normalized = {}
+    cookies: dict[str, None] = {}
     if isinstance(headers, Mapping):
         for index, (raw_name, raw_values) in enumerate(headers.items()):
             if index >= 256:
                 break
-            name = _scalar_text(str(raw_name).casefold(), 256)
+            name = _scalar_text(str(raw_name).strip().casefold(), 256)
             if not name:
                 continue
             values = (raw_values,) if isinstance(raw_values, str) else raw_values
             try:
+                if name in {"set-cookie", "cookie"}:
+                    for value in islice(values, 64):
+                        if len(cookies) >= _MAX_COOKIE_NAMES:
+                            break
+                        if isinstance(value, str):
+                            for cookie_name in _cookie_names(value, multiple=name == "cookie"):
+                                cookies.setdefault(cookie_name, None)
+                                if len(cookies) >= _MAX_COOKIE_NAMES:
+                                    break
+                    continue
                 safe_values = tuple(
                     value for value in (_scalar_text(str(item), MAX_ANALYSIS_TEXT)
                                         for item in islice(values, 64)) if value
@@ -945,11 +1013,6 @@ def page_from(headers: Mapping[str, Iterable[str]], html: str,
                 continue
             if safe_values:
                 normalized[name] = safe_values
-    cookies = []
-    for value in normalized.get("set-cookie", ()):
-        name = value.split(";", 1)[0].split("=", 1)[0].strip()
-        if name and len(name) <= 256:
-            cookies.append(name)
     generators = []
     urls = []
     for tag, attributes in _html_tags(bounded_html):
@@ -973,8 +1036,8 @@ def page_from(headers: Mapping[str, Iterable[str]], html: str,
             if not isinstance(resource, Resource) or resource.kind not in {
                     "script", "style", "manifest", "robots", "icon"}:
                 continue
-            url = _scalar_text(resource.url, MAX_DETECTION_TEXT)
-            if not url:
+            url = resource.url
+            if not isinstance(url, str) or not url or not is_scalar_text(url, len(url)):
                 continue
             text_limit = min(MAX_ANALYSIS_TEXT, remaining)
             text = _scalar_text(resource.text, text_limit) if text_limit else ""
@@ -995,8 +1058,8 @@ def _bounded_page(page: Page) -> Page | None:
         return page
     bounded = page_from(page.headers, page.html, page.resources)
     cookies = tuple(dict.fromkeys(
-        value for value in (_scalar_text(item, 256) for item in islice(page.cookie_names, 4096))
-        if value
+        value for value in islice(page.cookie_names, _MAX_COOKIE_NAMES)
+        if isinstance(value, str) and _COOKIE_NAME.fullmatch(value)
     ))
     generators = tuple(dict.fromkeys(
         value for value in (_scalar_text(item, MAX_DETECTION_TEXT)
@@ -1008,7 +1071,7 @@ def _bounded_page(page: Page) -> Page | None:
     ))
     bounded_page = Page(
         bounded.headers,
-        tuple(dict.fromkeys((*bounded.cookie_names, *cookies)))[:4096],
+        tuple(dict.fromkeys((*bounded.cookie_names, *cookies)))[:_MAX_COOKIE_NAMES],
         tuple(dict.fromkeys((*bounded.generators, *generators)))[:MAX_GENERATORS],
         tuple(dict.fromkeys((*bounded.urls, *urls)))[:MAX_URLS],
         bounded.html,
@@ -1098,15 +1161,24 @@ _CANONICAL_ALIAS_KEYS = frozenset(REVIEWED_ALIASES.values())
 
 def _cpe_fields(cpe: str, *, keep_escapes: bool = False) -> tuple[str, ...]:
     fields = split_cpe23(cpe, keep_escapes=keep_escapes)
-    if len(fields) == 11 and all(field not in {"", "*", "-"} for field in fields[1:3]):
+    if (len(fields) == 11 and fields[0] in {"a", "o", "h"}
+            and all(fields) and all(field not in {"*", "-"} for field in fields[1:3])):
         return fields
     return ()
+
+
+def _cpe_scope(fields: tuple[str, ...]) -> tuple[str, ...]:
+    # The unqualified application identity also matches a reviewed detection
+    # with no CPE. Keep the scope of OS, hardware and qualified CPEs explicit.
+    if not fields or (fields[0] == "a" and all(field == "*" for field in fields[4:])):
+        return ()
+    return fields[0], *(field.casefold() for field in fields[4:])
 
 
 def canonical_cpe(cpe: str) -> str:
     """Use the reviewed vendor/product spelling and keep other CPE fields."""
     fields = _cpe_fields(cpe)
-    if not fields:
+    if not fields or fields[0] != "a":
         return cpe
     pair = (fields[1].casefold(), fields[2].casefold())
     canonical = REVIEWED_ALIASES.get(pair, pair)
@@ -1125,10 +1197,12 @@ def identity_key(detection: Detection) -> tuple[str, ...]:
     fields = _cpe_fields(detection.cpe)
     if fields:
         pair = (fields[1].casefold(), fields[2].casefold())
-    else:
-        pair = (detection.vendor.casefold(), detection.product.casefold())
-        if getattr(detection, "name_only", False) and detection.name and pair not in REVIEWED_ALIASES:
-            return "name", detection.name.casefold()
+        if fields[0] == "a":
+            pair = REVIEWED_ALIASES.get(pair, pair)
+        return "product", *pair, *_cpe_scope(_cpe_fields(detection.cpe, keep_escapes=True))
+    pair = (detection.vendor.casefold(), detection.product.casefold())
+    if getattr(detection, "name_only", False) and detection.name and pair not in REVIEWED_ALIASES:
+        return "name", detection.name.casefold()
     return "product", *REVIEWED_ALIASES.get(pair, pair)
 
 
@@ -1182,8 +1256,7 @@ def _npm_path(segments: list[str], start: int = 0) -> tuple[str, str] | None:
         package_name = first + "/" + package
     if not _npm_name(package_name):
         return None
-    normalized = normalize_version(version)
-    return (package_name, normalized) if normalized else None
+    return package_name, normalize_version(version)
 
 
 def _cdn_detection(url: str):
@@ -1193,8 +1266,10 @@ def _cdn_detection(url: str):
     host, segments = parsed
     package_version = None
     if host == "cdn.jsdelivr.net" and len(segments) >= 3 and segments[0] == "npm":
+        cdn = "jsdelivr"
         package_version = _npm_path(segments, 1)
     elif host == "unpkg.com":
+        cdn = "unpkg"
         package_version = _npm_path(segments)
     elif (host == "cdnjs.cloudflare.com" and len(segments) >= 4
           and segments[:2] == ["ajax", "libs"]):
@@ -1204,7 +1279,7 @@ def _cdn_detection(url: str):
                 or ".." in library):
             return None
         package = _CDNJS_PACKAGES.get(library.casefold(), "")
-        if package:
+        if package in REVIEWED_PACKAGES:
             if not version:
                 return None
             details = _PACKAGE_PRODUCTS.get(package)
@@ -1217,6 +1292,10 @@ def _cdn_detection(url: str):
     if not package_version:
         return None
     package, version = package_version
+    if package not in REVIEWED_PACKAGES:
+        return cdn, "", f"Unidentified {cdn} library", "js-library", "", "", ""
+    if not version:
+        return None
     details = _PACKAGE_PRODUCTS.get(package)
     if details:
         vendor, product, name, category = details
@@ -1227,7 +1306,7 @@ def _cdn_detection(url: str):
 def _record(grouped: dict, *, vendor: str, product: str, category: str, confidence: str,
             evidence: str, versions=(), cpe="", name="", ecosystem="", package="",
             implied_by=(), evidence_items=(), rule_key=""):
-    key = (vendor.casefold(), product.casefold())
+    key = (vendor.casefold(), product.casefold(), *_cpe_scope(_cpe_fields(cpe, keep_escapes=True)))
     entry = grouped.setdefault(key, {
         "vendor": vendor, "product": product, "category": category,
         "cpe": "" if ecosystem == "npm" and package else cpe,
@@ -1281,11 +1360,12 @@ def _apply_implications(grouped: dict) -> None:
 
 def _rule_sources(rule: Rule, page: Page, folded_resources: Mapping[int, str] | None = None):
     if rule.kind == "header":
-        for value in _header_value(page.headers, rule.subject)[:64]:
+        subject = rule.subject.casefold()
+        for value in _header_value(page.headers, subject)[:64]:
             if value:
-                yield f"header:{rule.subject}", value, None
+                yield f"header:{subject}", value, None
     elif rule.kind == "cookie":
-        for value in page.cookie_names[:4096]:
+        for value in page.cookie_names[:_MAX_COOKIE_NAMES]:
             yield f"cookie:{value}", value, None
     elif rule.kind == "meta":
         for value in page.generators[:MAX_GENERATORS]:
@@ -1337,17 +1417,19 @@ def _artifact_matches(resource: Resource, deadline, clock):
 
 def _valid_detection(detection: Detection) -> bool:
     values = (detection.vendor, detection.product, detection.category, detection.cpe,
-              detection.confidence, detection.name, detection.ecosystem, detection.package,
+              detection.confidence, detection.ecosystem, detection.package,
               *detection.versions, *detection.evidence_types, *detection.implied_by)
-    if any(not _is_scalar_text(value, MAX_DETECTION_TEXT) for value in values):
+    if any(not is_scalar_text(value) for value in values):
         return False
-    if any(len(version) > 64 for version in detection.versions):
+    if detection.name != "" and not valid_detection_name(detection.name):
+        return False
+    if any(len(version) > MAX_VERSION_CAPTURE_LENGTH for version in detection.versions):
         return False
     if any(kind not in EVIDENCE_KINDS for kind in detection.evidence_types):
         return False
-    if any(not all(_is_scalar_text(value, MAX_DETECTION_TEXT)
-                   for value in (item.kind, item.source, item.excerpt))
-           or item.kind not in EVIDENCE_KINDS or len(item.excerpt) > 160
+    if any(not isinstance(item.kind, str) or item.kind not in EVIDENCE_KINDS
+           or not isinstance(item.source, str) or not is_scalar_text(item.source, len(item.source))
+           or not is_scalar_text(item.excerpt, MAX_EVIDENCE_EXCERPT_LENGTH)
            for item in detection.evidence):
         return False
     return True
@@ -1360,7 +1442,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
     page = _bounded_page(page)
     if page is None:
         return ()
-    grouped: dict[tuple[str, str], dict] = {}
+    grouped: dict[tuple[str, ...], dict] = {}
     folded_resources = {
         id(resource): resource.text.casefold()
         for resource in page.resources
@@ -1370,6 +1452,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
         if _deadline_passed(deadline, clock):
             break
         rule = compiled.rule
+        sensitive_header = rule.kind == "header" and rule.subject.casefold() in SENSITIVE_HEADERS
         versions: set[str] = set()
         matched = False
         evidence_items = []
@@ -1380,22 +1463,24 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
             if rule.hint and folded is not None and rule.hint not in folded:
                 continue
             found = compiled.evidence.search(value)
-            if not found or not found.group(0):
+            if not found:
+                continue
+            start, end = found.span()
+            if start == end:
                 continue
             matched = True
-            if compiled.version is not None:
+            if compiled.version is not None and not sensitive_header:
                 version_match = compiled.version.search(value)
                 if version_match:
-                    try:
-                        captured = version_match.group(rule.version_group)
-                    except IndexError:
-                        captured = ""
-                    version = normalize_version(captured)
+                    version = _captured_version(version_match, rule.version_group)
                     if version:
                         versions.add(version)
             if source not in seen_sources:
                 seen_sources.add(source)
-                evidence_items.append(Evidence(rule.kind, source, found.group(0)[:160]))
+                excerpt = source if sensitive_header else value[start:min(
+                    end, start + MAX_EVIDENCE_EXCERPT_LENGTH,
+                )]
+                evidence_items.append(Evidence(rule.kind, source, excerpt))
         if not matched:
             continue
         _record(grouped, vendor=rule.vendor, product=rule.product, category=rule.category,
@@ -1412,7 +1497,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
             if not match:
                 continue
             vendor, product, name, category, ecosystem, package, version = match
-            unique = (vendor.casefold(), product.casefold(), package, version)
+            unique = (vendor, package, version) if package else (vendor, url)
             if unique in seen_cdn:
                 continue
             if len(seen_cdn) >= MAX_CDN_DETECTIONS:
@@ -1421,8 +1506,8 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
             _record(grouped, vendor=vendor, product=product, name=name, category=category,
                     confidence="high", evidence="url", versions=(version,) if version else (),
                     ecosystem=ecosystem, package=package,
-                    evidence_items=(Evidence("url", "page", url[:160]),),
-                    rule_key=f"cdn:{vendor}:{product}:{package}")
+                    evidence_items=(Evidence("url", "page", url[:MAX_EVIDENCE_EXCERPT_LENGTH]),),
+                    rule_key=f"cdn:{len(seen_cdn)}")
 
     if not _deadline_passed(deadline, clock):
         for resource in page.resources:
@@ -1447,7 +1532,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
                           package=retired.package, implied_by=retired.implied_by)
             for index, item in enumerate(retired.evidence):
                 _record(grouped, vendor=retired.vendor, product=retired.product,
-                        category=retired.category, confidence=retired.confidence,
+                        category=retired.category, confidence=retired.confidence, cpe=retired.cpe,
                         evidence="", evidence_items=(item,),
                         rule_key=f"retirejs:{index}:{item.kind}")
             grouped[key]["evidence_types"].update(retired.evidence_types)

@@ -162,11 +162,11 @@ def test_all_new_rules_have_positive_and_negative_cases():
 
 @pytest.mark.parametrize("url,package,version", [
     ("https://cdn.jsdelivr.net/npm/core-js@3.40.0/es/index.js", "core-js", "3.40.0"),
-    ("https://unpkg.com/@scope/widget@2.4.1/dist/widget.js", "@scope/widget", "2.4.1"),
+    ("https://unpkg.com/@fortawesome/fontawesome-free@6.7.2/css/all.css", "@fortawesome/fontawesome-free", "6.7.2"),
     ("https://cdn.jsdelivr.net/npm/@angular/core@17.3.8/fesm2022/core.mjs", "@angular/core", "17.3.8"),
     ("https://unpkg.com/@popperjs/core@2.11.8/dist/umd/popper.min.js", "@popperjs/core", "2.11.8"),
 ])
-def test_jsdelivr_and_unpkg_keep_npm_names_and_versions(url, package, version):
+def test_jsdelivr_and_unpkg_keep_reviewed_npm_names_and_versions(url, package, version):
     detections = detect(page_from({}, f'<script src="{url}"></script>'))
     found = next(item for item in detections if item.ecosystem == "npm" and item.package == package)
     assert found.versions == (version,)

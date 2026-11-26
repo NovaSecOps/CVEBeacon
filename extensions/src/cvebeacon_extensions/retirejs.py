@@ -14,9 +14,13 @@ from .webrules import (
     Detection,
     Evidence,
     Page,
+    MAX_DETECTION_TEXT,
+    MAX_EVIDENCE_EXCERPT_LENGTH,
     MAX_PAGE_RESOURCES,
     MAX_URLS,
+    REVIEWED_PACKAGES,
     _bounded_page,
+    _captured_version,
     _deadline_passed,
     _PACKAGE_PRODUCTS,
     normalize_version,
@@ -336,27 +340,27 @@ _FILECONTENT_HINT_PATTERN = re.compile(
 ) if _HINTS else None
 def _matches(signature: _Signature, text: str):
     match = signature.expression.search(text) if signature.expression else None
-    if not match or not match.group(0):
+    if not match:
+        return None
+    start, end = match.span()
+    if start == end:
         return None
     version = ""
     if signature.versioned:
-        try:
-            version = normalize_version(match.group("retire_version"))
-        except (IndexError, KeyError):
-            version = ""
+        version = _captured_version(match, "retire_version")
         if signature.package == "react-dom" and version:
             stable = re.fullmatch(r"(\d+(?:\.\d+){0,3})-next-[0-9A-Za-z._-]+", version,
                                   re.IGNORECASE)
             if stable:
                 version = stable.group(1)
-    return match, version
+    return text[start:min(end, start + MAX_EVIDENCE_EXCERPT_LENGTH)], version
 
 
 def _page_urls(page: Page):
     for url in page.urls[:MAX_URLS]:
         yield url, "page"
     for resource in page.resources[:MAX_PAGE_RESOURCES]:
-        if resource.url:
+        if resource.url and len(resource.url) <= MAX_DETECTION_TEXT:
             yield resource.url, resource.url
 
 
@@ -379,11 +383,15 @@ def _filecontent_candidates(text: str) -> set[_Signature]:
 
 def _append(findings: dict, signature: _Signature, kind: str, source: str,
             excerpt: str, version: str = ""):
-    identity = (signature.vendor.casefold(), signature.product.casefold())
+    vendor, product = signature.vendor, signature.product
+    ecosystem, package = signature.ecosystem, signature.package
+    if kind == "url" and (ecosystem != "npm" or package not in REVIEWED_PACKAGES):
+        vendor, product = "retirejs", signature.component
+        ecosystem, package, version = "", "", ""
+    identity = (vendor.casefold(), product.casefold())
     item = findings.setdefault(identity, {
-        "vendor": signature.vendor, "product": signature.product,
-        "name": signature.name, "ecosystem": signature.ecosystem,
-        "package": signature.package, "category": signature.category,
+        "vendor": vendor, "product": product, "name": signature.name,
+        "ecosystem": ecosystem, "package": package, "category": signature.category,
         "versions": set(), "evidence_types": set(), "confidence": "medium",
         "evidence": [], "evidence_keys": set(),
     })
@@ -393,7 +401,7 @@ def _append(findings: dict, signature: _Signature, kind: str, source: str,
     key = (signature.key, source)
     if key not in item["evidence_keys"] and len(item["evidence"]) < 20:
         item["evidence_keys"].add(key)
-        item["evidence"].append(Evidence(kind, source, excerpt[:160]))
+        item["evidence"].append(Evidence(kind, source, excerpt))
 
 
 def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detection, ...]:
@@ -415,8 +423,8 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
                     break
                 result = _matches(signature, value)
                 if result:
-                    match, version = result
-                    _append(findings, signature, "url", source, match.group(0), version)
+                    excerpt, version = result
+                    _append(findings, signature, "url", source, excerpt, version)
 
     for resource in page.resources:
         if _deadline_passed(deadline, clock):
@@ -429,9 +437,8 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
                 break
             result = _matches(signature, resource.text)
             if result:
-                match, version = result
-                _append(findings, signature, "script", resource.url,
-                        match.group(0), version)
+                excerpt, version = result
+                _append(findings, signature, "script", resource.url, excerpt, version)
         digest = hashlib.sha1(resource.text.encode("utf-8")).hexdigest()
         for signature in signatures_by_type.get("hashes", ()):
             if _deadline_passed(deadline, clock):
