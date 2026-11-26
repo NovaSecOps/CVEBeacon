@@ -466,8 +466,12 @@ copies. Symlinks and linked/non-regular data files are refused. All core
 state paths must stay inside that directory. The snapshot helper runs as the
 service account, not root; backups live under the protected code prefix.
 The configuration writer lock stays held while discovering and waiting for run
-locks, so the dashboard cannot move storage paths during that wait. Dashboard
-children finish before the dashboard unit is stopped.
+locks, so the dashboard cannot move storage paths during that wait. The updater
+waits for dashboard jobs holding the relevant writer locks before stopping the
+dashboard unit. If a running monitoring service or a writer lock prevents
+recovery from quiescing, the dashboard keeps running with the transaction fence
+in place. Failed recovery stops a dashboard it tried to start while it still
+holds the writer locks.
 The updater's `doctor` uses `--local-state --allow-watch-only`: it checks the
 configuration, inventory when present, and local databases. Notification
 environment variables are loaded by the restarted service units and are not

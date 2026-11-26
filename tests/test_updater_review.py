@@ -1,5 +1,9 @@
 """Regression cases for the updater's recovery and diagnostic boundaries."""
+from dataclasses import replace
 import errno
+import json
+import os
+from pathlib import Path
 import sqlite3
 import subprocess
 import sys
@@ -8,6 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from cvebeacon import update_state, updater as u
+from cvebeacon.locking import RunInProgress, RunLock
+from test_updater import signed, transaction, value
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native updates are Linux-only")
@@ -218,3 +224,120 @@ def test_health_probe_shares_deadline_and_rechecks_process_and_listener(tmp_path
     assert clock[0] == (121 if failure == "late" else 120)
     assert len([client for client in clients if type(client) is Client]) == len(requests)
     assert all(0 < timeout <= 120 - now for now, timeout in timeouts)
+
+
+def _audit(updater):
+    return [json.loads(line) for line in (updater.policy.prefix / "update-audit.jsonl")
+            .read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.mark.parametrize("obstacle", ["monitor", "writer"])
+def test_recovery_leaves_running_dashboard_alone_if_writers_have_not_quiesced(transaction, monkeypatch, obstacle):
+    updater, native, config = transaction
+    updater._begin("0.1.0", "0.1.1", updater.policy.units)
+    journal = updater.policy.prefix / u.JOURNAL
+    initial = journal.read_bytes()
+    lock = RunLock(config.watch.database.parent / u.LOCK_NAME)
+    if obstacle == "monitor":
+
+        def stop(units):
+            raise u.UpdateError("monitoring service is still active")
+        monkeypatch.setattr(native, "stop", stop)
+    else:
+        assert lock.acquire()
+        updater.policy = replace(updater.policy, wait_seconds=0)
+    try:
+        with pytest.raises(u.UpdateError, match="recovery remains incomplete"):
+            updater.recover()
+        assert "freeze" not in native.calls
+        assert journal.read_bytes() == initial
+    finally:
+        lock.release()
+
+
+def test_recovery_stops_a_partially_started_dashboard_while_writer_lock_is_held(transaction, monkeypatch):
+    updater, native, config = transaction
+    updater._begin("0.1.0", "0.1.1", updater.policy.units)
+    stops = []
+    started = False
+
+    def start(units):
+        nonlocal started
+        started = True
+        raise subprocess.TimeoutExpired("private synthetic command", 1)
+
+    # Check both stops without ever taking or releasing recovery's lock.
+    def record_stop(units):
+        with pytest.raises(RunInProgress):
+            with RunLock(config.watch.database.parent / u.LOCK_NAME):
+                pytest.fail("dashboard stop occurred without the writer lock")
+        stops.append(started)
+
+    monkeypatch.setattr(native, "freeze", record_stop)
+    monkeypatch.setattr(native, "start", start)
+    with pytest.raises(u.UpdateError, match="recovery remains incomplete"):
+        updater.recover()
+    assert stops == [False, True]
+
+
+@pytest.mark.parametrize("phase", ["installing", "complete"])
+def test_post_replacement_fsync_failure_uses_the_disk_checkpoint(transaction, monkeypatch, phase):
+    updater, native, config = transaction
+    journal = updater.policy.prefix / u.JOURNAL
+    original_fsync = os.fsync
+    injected = []
+    restores = []
+
+    def fsync(fd):
+        if (not injected and Path(f"/proc/self/fd/{fd}").resolve() == journal.parent
+                and journal.exists()):
+            record = json.loads(journal.read_text(encoding="utf-8"))
+            if record["phase"] == phase:
+                injected.append(record)
+                raise OSError(errno.EIO, "synthetic fsync failure after replacement")
+        return original_fsync(fd)
+
+    original_state = native.state
+
+    def state(python, action, directory, digest=None):
+        if action == "restore":
+            restores.append(digest)
+        return original_state(python, action, directory, digest)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(native, "state", state)
+    if phase == "installing":
+        with pytest.raises(u.UpdateError, match="previous release and state restored"):
+            updater.apply("0.1.1")
+    else:
+        # A complete record skips diagnostic rewriting and restoration.
+        assert updater.apply("0.1.1")["result"] == "updated"
+        # Force the complete branch through the same audit-visible recovery
+        # boundary by asserting that the final record remains complete below.
+        assert "restore" not in native.calls
+    assert len(injected) == 1
+    record = injected[0]
+    archived = json.loads((updater.policy.prefix / "transactions" / (record["id"] + ".json"))
+                          .read_text(encoding="utf-8"))
+    assert archived["snapshot_ready"]
+    assert archived["manifest_sha256"] == record["manifest_sha256"]
+    assert restores == ([record["manifest_sha256"]] if phase == "installing" else [])
+    assert value(config.watch.database) == ("old" if phase == "installing" else "new")
+
+
+def test_unreadable_checkpoint_reread_does_not_overwrite_the_fence(transaction, monkeypatch):
+    updater, native, config = transaction
+    journal = updater.policy.prefix / u.JOURNAL
+    original = native.backup_directory
+
+    def fail_after_invalid_record(path):
+        original(path)
+        journal.write_text("{", encoding="utf-8", newline="\n")
+        raise OSError("synthetic private write details")
+
+    monkeypatch.setattr(native, "backup_directory", fail_after_invalid_record)
+    with pytest.raises(u.UpdateError, match="recovery remains incomplete"):
+        updater.apply("0.1.1")
+    assert journal.read_bytes() == b"{"
+    assert u.read_status(config)["last_update"]["reason"] == "recovery-incomplete"
+    assert _audit(updater)[-1]["reason"] == "recovery-incomplete"

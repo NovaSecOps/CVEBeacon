@@ -934,8 +934,8 @@ class Updater:
         protected(target, directory=True)
         return target
 
-    def _checkpoint(self, phase, **fields):
-        record = {**self.record, **fields, "phase": phase}
+    def _checkpoint(self, phase, *, record=None, **fields):
+        record = {**(self.record if record is None else record), **fields, "phase": phase}
         atomic_json(self.policy.prefix / JOURNAL, record, mode=0o644)
         self.record = record
 
@@ -1064,14 +1064,18 @@ class Updater:
             except BaseException as exc:
                 # Never let audit/status writes prevent restoration. A completed
                 # transaction may only need finalization, not another DB restore.
-                pending = read_record(self.policy.prefix)
+                try:
+                    pending = read_record(self.policy.prefix)
+                except OPERATION_ERRORS as error:
+                    reason = self._record_failure("recovery", error)
+                    self._result(target, "rollback-failed" if self.record else "refused", reason=reason)
+                    raise UpdateError("update recovery remains incomplete; inspect the active recovery record") from None
                 if pending:
                     if pending.get("phase") != "complete":
                         reason = self._record_failure(self.failure_step or "recovery", exc)
-                        pending["failure_reason"] = reason
+                        pending = {**pending, "failure_reason": reason}
                         try:
-                            self._checkpoint(pending["phase"], failure_reason=reason)
-                            pending = self.record
+                            self._checkpoint(pending["phase"], record=pending)
                         except BaseException:
                             log_warning("update failure reason could not be saved in the recovery record")
                     result = self._recover(pending)
@@ -1195,6 +1199,22 @@ class Updater:
         finally:
             lock.release()
 
+    @contextmanager
+    def _recovery_dashboard(self):
+        unit = (self.policy.dashboard_unit,)
+        try:
+            self.failure_step = "start"
+            self.native.start(unit)
+            yield
+        except BaseException:
+            # Start can partially succeed before it raises. The caller still
+            # holds the resource locks while we stop this attempt's dashboard.
+            try:
+                self.native.freeze(unit)
+            except OPERATION_ERRORS:
+                self.event("freeze", "failed", reason="freeze-failed")
+            raise
+
     def _recover(self, record):
         try:
             self._validate_recovery(record)
@@ -1246,33 +1266,24 @@ class Updater:
                         raise UpdateError("restoration is incomplete")
                     self._checkpoint("rollback-health")
                     selected, release = record["old"], old
-                self.failure_step = "start"
-                self.native.start((p.dashboard_unit,))
-                self.failure_step = "doctor"
-                self.native.command(release, "doctor")
-                self.failure_step = "probe"
-                self.native.probe(selected)
-                self.failure_step = "recovery"
-                if self.current().name != selected:
-                    raise UpdateError("restored release selection could not be verified")
-                self.event("rollback")
-                result = record.get("result", "rolled-back") if record["phase"] == "complete" else "rolled-back"
-                self._finish(result)
+                with self._recovery_dashboard():
+                    self.failure_step = "doctor"
+                    self.native.command(release, "doctor")
+                    self.failure_step = "probe"
+                    self.native.probe(selected)
+                    self.failure_step = "recovery"
+                    if self.current().name != selected:
+                        raise UpdateError("restored release selection could not be verified")
+                    self.event("rollback")
+                    result = record.get("result", "rolled-back") if record["phase"] == "complete" else "rolled-back"
+                    self._finish(result)
             return self._finalize()
         except BaseException as exc:
             reason = self._record_failure(self.failure_step or "recovery", exc)
             self.failure_reason = "recovery-incomplete"
             if reason != "recovery-incomplete":
                 self.event("recovery", "failed", reason="recovery-incomplete")
-            try:
-                self._checkpoint(self.record.get("phase", "restoring"), failure_reason="recovery-incomplete")
-            except BaseException:
-                log_warning("recovery failure reason could not be saved in the transaction record")
             self.event("rollback", "failed", reason="recovery-incomplete")
-            try:
-                self.native.freeze(p.units)
-            except BaseException:
-                pass
             if record["phase"] == "complete":
                 selected = record["new"] if record["result"] == "updated" else record["old"]
                 self._result(selected, record["result"], warning="completed update recovery could not verify the selected release",
