@@ -231,6 +231,8 @@ def test_untouched_list_controls_are_noop_saves(accounts, extra, section, path, 
     raw_before = config_path.read_bytes()
     page = client.get("/config/" + section)
     assert page.status_code == 200, page.text
+    if section == "rules":
+        assert 'name="g0_p_mode" value="checkboxes"' in page.text
     preview = _post_rendered(client, section, page.text)
 
     assert preview.status_code == 200, _response_detail(preview)
