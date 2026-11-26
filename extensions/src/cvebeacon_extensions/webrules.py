@@ -1,9 +1,8 @@
-"""Reviewed direct-evidence rules for passive web technology detection.
+"""Direct-evidence rules for passive web technology detection.
 
-The patterns below were written from public product documentation and the
-response conventions those products document (Server and X-Powered-By values,
-cookie names, generator metadata, and published asset URLs). No fingerprint
-data was copied from another detector project.
+Rules maintained here are written from public product documentation and
+published banners. Retire.js signatures are bundled separately under
+Apache-2.0 with attribution in the Extensions NOTICE.
 """
 
 from __future__ import annotations
@@ -55,6 +54,13 @@ class Rule:
 
 
 @dataclass(frozen=True, slots=True)
+class Evidence:
+    kind: str
+    source: str
+    excerpt: str
+
+
+@dataclass(frozen=True, slots=True)
 class Detection:
     vendor: str
     product: str
@@ -73,13 +79,14 @@ class Detection:
     # Keys of the detections that imply this one. An implied-only detection is
     # listed for people to read and never becomes an inventory row.
     implied_by: tuple[str, ...] = ()
+    evidence: tuple[Evidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class Resource:
-    """A same-site script or stylesheet that the page referenced and the fetcher read."""
+    """A page-referenced resource the fetcher read or hashed."""
     url: str
-    kind: str  # script | style
+    kind: str  # script | style | manifest | robots | icon
     text: str
 
 
@@ -155,7 +162,7 @@ def _rule(key, vendor, product, category, kind, pattern, *, subject="", version=
           confidence="medium", name="", ecosystem="", package="", hint=""):
     if category not in CATEGORIES:
         raise ValueError(f"unknown rule category: {category}")
-    if kind not in {"header", "cookie", "meta", "url", "html", "script", "style"}:
+    if kind not in {"header", "cookie", "meta", "url", "html", "script", "style", "manifest", "robots"}:
         raise ValueError(f"unknown evidence kind: {kind}")
     if kind == "header" and not subject:
         raise ValueError(f"header rule {key} has no header name")
@@ -612,6 +619,18 @@ EXPANDED_RULES: tuple[Rule, ...] = (
     _rule("expanded-inertia-markup", "inertiajs", "inertia.js", "js-library", "html",
           r"data-page\s*=\s*[\"'][^\"']{0,200}(?:&quot;|\")component(?:&quot;|\")",
           name="Inertia.js", ecosystem="npm", package="@inertiajs/core", confidence="high"),
+    _rule("expanded-wordpress-robots", "wordpress", "wordpress", "cms", "robots",
+          r"Disallow:\s*/wp-admin/|Allow:\s*/wp-admin/admin-ajax\.php",
+          name="WordPress", confidence="medium"),
+    _rule("expanded-drupal-robots", "drupal", "drupal", "cms", "robots",
+          r"Disallow:\s*/(?:core|modules|profiles|sites)/",
+          name="Drupal", confidence="medium"),
+    _rule("expanded-joomla-robots", "joomla", "joomla", "cms", "robots",
+          r"Disallow:\s*/administrator/",
+          name="Joomla", confidence="medium"),
+    _rule("expanded-angular-manifest", "angular", "angular", "js-library", "manifest",
+          r"ngsw-worker\.js", name="Angular", ecosystem="npm", package="@angular/core",
+          confidence="medium"),
 )
 RULES = RULES + EXPANDED_RULES
 
@@ -743,6 +762,8 @@ def _values(rule: Rule, page: Page, cache: Mapping[str, tuple[str, ...]] | None 
         resources = (resource.text for resource in page.resources if resource.kind == rule.kind)
         joined = "\n".join(resources)
         return (joined,) if joined else ()
+    if rule.kind in {"manifest", "robots"}:
+        return tuple(resource.text for resource in page.resources if resource.kind == rule.kind)
     return (page.html,)
 
 
@@ -833,19 +854,24 @@ def _cdn_detection(url: str):
 
 def _record(grouped: dict, *, vendor: str, product: str, category: str, confidence: str,
             evidence: str, versions=(), cpe="", name="", ecosystem="", package="",
-            implied_by=()):
+            implied_by=(), evidence_items=(), rule_key=""):
     key = (vendor.casefold(), product.casefold())
     entry = grouped.setdefault(key, {
         "vendor": vendor, "product": product, "category": category,
         "cpe": "" if ecosystem == "npm" and package else cpe,
         "confidence": confidence, "versions": set(), "evidence_types": set(),
         "name": name, "ecosystem": ecosystem, "package": package,
-        "implied_by": set(),
+        "implied_by": set(), "evidence": [], "evidence_keys": set(),
     })
     entry["versions"].update(versions)
     if evidence:
         entry["evidence_types"].add(evidence)
     entry["implied_by"].update(implied_by)
+    for item in evidence_items:
+        evidence_key = (rule_key, item.source)
+        if (evidence_key not in entry["evidence_keys"] and len(entry["evidence"]) < 20):
+            entry["evidence_keys"].add(evidence_key)
+            entry["evidence"].append(item)
     if name and not entry["name"]:
         entry["name"] = name
     if ecosystem == "npm" and package:
@@ -875,45 +901,63 @@ def _apply_implications(grouped: dict) -> None:
             was_present = target_key in grouped
             _record(grouped, vendor=vendor, product=product, name=name, category=category,
                     confidence="low", evidence="" if was_present else "implied",
-                    ecosystem=ecosystem, package=package,
+                    ecosystem=ecosystem, package=package, rule_key="implied:" + source_name,
                     implied_by=(source_name,))
             if not was_present:
                 pending.append(target_key)
 
 
+def _rule_sources(rule: Rule, page: Page):
+    if rule.kind == "header":
+        for value in _header_value(page.headers, rule.subject):
+            yield f"header:{rule.subject}", value, None
+    elif rule.kind == "cookie":
+        for value in page.cookie_names:
+            yield f"cookie:{value}", value, None
+    elif rule.kind == "meta":
+        for value in page.generators:
+            yield "page", value, None
+    elif rule.kind == "url":
+        for value in page.urls:
+            yield "page", value, None
+    elif rule.kind == "html":
+        yield "page", page.html, None
+    elif rule.kind in {"script", "style", "manifest", "robots"}:
+        for resource in page.resources:
+            if resource.kind == rule.kind and resource.text:
+                yield resource.url, resource.text, resource.text.casefold()
+
+
 def detect(page: Page) -> tuple[Detection, ...]:
     grouped: dict[tuple[str, str], dict] = {}
-    cache = {}
-    if page.urls:
-        cache["url"] = ("\n".join(page.urls),)
-    for kind in ("script", "style"):
-        text = "\n".join(resource.text for resource in page.resources if resource.kind == kind)
-        if text:
-            cache[kind] = (text,)
-            cache[kind + "_folded"] = (text.casefold(),)
     for compiled in _rule_index():
         rule = compiled.rule
-        if rule.hint and rule.kind in {"script", "style"}:
-            folded = cache.get(rule.kind + "_folded", ())
-            if not folded or rule.hint not in folded[0]:
-                continue
         versions: set[str] = set()
         matched = False
-        for value in _values(rule, page, cache):
-            if compiled.evidence.search(value):
-                matched = True
-                if compiled.version is not None:
-                    found = compiled.version.search(value)
-                    if found:
-                        version = normalize_version(found.group(1))
-                        if version:
-                            versions.add(version)
+        evidence_items = []
+        seen_sources = set()
+        for source, value, folded in _rule_sources(rule, page):
+            if rule.hint and folded is not None and rule.hint not in folded:
+                continue
+            found = compiled.evidence.search(value)
+            if not found or not found.group(0):
+                continue
+            matched = True
+            if compiled.version is not None:
+                version_match = compiled.version.search(value)
+                if version_match:
+                    version = normalize_version(version_match.group(1))
+                    if version:
+                        versions.add(version)
+            if source not in seen_sources:
+                seen_sources.add(source)
+                evidence_items.append(Evidence(rule.kind, source, found.group(0)[:160]))
         if not matched:
             continue
         _record(grouped, vendor=rule.vendor, product=rule.product, category=rule.category,
                 cpe=rule.cpe, confidence=rule.confidence, evidence=rule.kind,
                 versions=versions, name=rule.name, ecosystem=rule.ecosystem,
-                package=rule.package)
+                package=rule.package, evidence_items=evidence_items, rule_key=rule.key)
 
     seen_cdn = set()
     for url in page.urls:
@@ -929,13 +973,31 @@ def detect(page: Page) -> tuple[Detection, ...]:
         seen_cdn.add(unique)
         _record(grouped, vendor=vendor, product=product, name=name, category=category,
                 confidence="high", evidence="url", versions=(version,),
-                ecosystem=ecosystem, package=package)
+                ecosystem=ecosystem, package=package,
+                evidence_items=(Evidence("url", "page", url[:160]),),
+                rule_key=f"cdn:{vendor}:{product}:{package}")
+
+    from . import retirejs
+
+    for retired in retirejs.detect(page):
+        key = _record(grouped, vendor=retired.vendor, product=retired.product,
+                      category=retired.category, confidence=retired.confidence,
+                      evidence="", versions=retired.versions, cpe=retired.cpe,
+                      name=retired.name, ecosystem=retired.ecosystem,
+                      package=retired.package, implied_by=retired.implied_by)
+        for index, item in enumerate(retired.evidence):
+            _record(grouped, vendor=retired.vendor, product=retired.product,
+                    category=retired.category, confidence=retired.confidence,
+                    evidence="", evidence_items=(item,),
+                    rule_key=f"retirejs:{index}:{item.kind}")
+        grouped[key]["evidence_types"].update(retired.evidence_types)
 
     _apply_implications(grouped)
     return tuple(
         Detection(entry["vendor"], entry["product"], entry["category"], entry["cpe"],
                   entry["confidence"], tuple(sorted(entry["versions"])),
                   tuple(sorted(entry["evidence_types"])), entry["name"],
-                  entry["ecosystem"], entry["package"], tuple(sorted(entry["implied_by"])))
+                  entry["ecosystem"], entry["package"], tuple(sorted(entry["implied_by"])),
+                  tuple(entry["evidence"]))
         for _, entry in sorted(grouped.items())
     )

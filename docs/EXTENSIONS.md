@@ -34,6 +34,42 @@ warnings, and asset ID collisions fail validation. The companion review file
 also records timestamps, total duration, request attempts and product evidence
 types, without storing response bodies or cookie values.
 
+### What web detection recognises
+
+The rules use direct evidence from response headers, cookie names, generator
+metadata, page markup, linked URLs, and the text or hashes of resources supplied
+to the detector, including framework-specific manifest fields and CMS robots
+entries. They recognise web servers and languages; server frameworks
+and CMS products; JavaScript libraries and CSS frameworks; build tooling; and
+third-party services such as analytics, maps, payments, chat and bot checks.
+Third-party service and CDN URLs are read as text only. The detector does not
+fetch those URLs or execute JavaScript. Retire.js signatures are bundled under
+Apache-2.0 with attribution and a pinned source record; their vulnerability
+entries are ignored.
+
+Some technologies imply a likely runtime or framework. Examples include
+Laravel and supported PHP CMS products implying PHP, Angular implying
+TypeScript, Next.js and Gatsby implying React, Nuxt implying Vue and Node.js,
+Express implying Node.js, and Livewire implying Laravel. These results are
+labelled as inferred and have no version. Inferred-only results are for review;
+they are not inventory rows or review entries that could be mistaken for a
+direct version observation.
+
+When a library has an npm identity, a disclosed version is recorded with that
+exact package name so it can use an npm package URL. Examples include
+`@angular/core`, `@fortawesome/fontawesome-free`, `@popperjs/core`, `core-js`,
+`zone.js`, `react`, `vue`, `jquery`, `bootstrap`, `lodash`, `moment`, `axios`,
+`chart.js`, `d3`, `rxjs` and `tslib`. Products without a disclosed version are
+listed for review and are not added to the inventory.
+
+Public CDN paths are parsed without fetching files. jsDelivr and unpkg paths
+such as `cdn.jsdelivr.net/npm/<package>@<version>/` and
+`unpkg.com/<package>@<version>/` supply the npm package name and version. For
+cdnjs paths such as `cdnjs.cloudflare.com/ajax/libs/<library>/<version>/`, a
+package identity is added only for a recognised library; other entries keep
+their library name and version without an npm identity. CDN detections are
+bounded per page.
+
 ### What it sends
 
 - One `GET` to the configured path, plus at most ten redirects that are

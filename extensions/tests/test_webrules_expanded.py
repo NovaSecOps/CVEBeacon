@@ -32,7 +32,7 @@ def _page(kind, text):
         return page_from({}, f'<link rel="stylesheet" href="{text}">')
     if kind == "meta":
         return page_from({}, f'<meta name="generator" content="{text}">')
-    if kind in {"script", "style"}:
+    if kind in {"script", "style", "manifest", "robots"}:
         extension = "js" if kind == "script" else "css"
         return page_from({}, "", resources=(Resource(f"https://example.invalid/{extension}.{extension}", kind, text),))
     return page_from({}, text)
@@ -102,6 +102,10 @@ RULE_CASES = (
     ("rails-header", "header", "X-Runtime: 0.123", "X-Runtime-Name: rails", "Ruby on Rails", "", ""),
     ("livewire-markup", "html", '<div wire:id="abc123">', '<div data-wire-id="abc123">', "Livewire", "", ""),
     ("inertia-markup", "html", '<div id="app" data-page="{&quot;component&quot;:&quot;Home&quot;}">', '<div data-page-name="Home">', "Inertia.js", "@inertiajs/core", ""),
+    ("wordpress-robots", "robots", "User-agent: *\nDisallow: /wp-admin/\nAllow: /wp-admin/admin-ajax.php", "User-agent: *\nDisallow: /admin/", "WordPress", "", ""),
+    ("drupal-robots", "robots", "Disallow: /core/\nDisallow: /modules/\nDisallow: /profiles/", "Disallow: /core-files/", "Drupal", "", ""),
+    ("joomla-robots", "robots", "Disallow: /administrator/", "Disallow: /admin/", "Joomla", "", ""),
+    ("angular-manifest", "manifest", '{"serviceworker":{"src":"/ngsw-worker.js"}}', '{"serviceworker":{"src":"/worker.js"}}', "Angular", "@angular/core", ""),
     ("google-maps", "url", "https://maps.googleapis.com/maps/api/js?key=TEST", "https://maps.example.invalid/api/js", "Google Maps", "", ""),
     ("google-fonts", "style-url", "https://fonts.googleapis.com/css?family=Inter", "https://fonts.example.invalid/css?family=Inter", "Google Font API", "", ""),
     ("google-analytics", "url", "https://www.google-analytics.com/analytics.js", "https://analytics.example.invalid/analytics.js", "Google Analytics", "", ""),
@@ -227,6 +231,15 @@ def test_implications_merge_with_direct_evidence_and_keep_versions():
     assert php.implied_by == ("Laravel",)
     typescript = next(item for item in detect(page) if item.name == "TypeScript")
     assert typescript.evidence_types == ("implied",) and typescript.implied_by == ("Angular",)
+
+
+def test_direct_detections_record_matched_excerpt_and_source():
+    page = page_from({}, '<app-root ng-version="17.3.8"></app-root>')
+    angular = next(item for item in detect(page) if item.name == "Angular")
+    evidence = next(item for item in angular.evidence if item.kind == "html")
+    assert evidence.source == "page"
+    assert evidence.excerpt == 'ng-version="17.3.8'
+    assert len(evidence.excerpt) <= 160
 
 
 def test_direct_react_evidence_merges_with_nextjs_implication():
