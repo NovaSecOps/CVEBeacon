@@ -11,10 +11,15 @@
 {% call card('Monitoring timer', 'The updater-managed systemd timer that runs CVEBeacon monitoring.') %}
 <p>{{ badge(timer_status.state, 'success' if timer_status.state == 'On' else 'neutral' if timer_status.state == 'Off' else 'warning') }}</p>
 <p>Starts at boot: {{ timer_status.boot }}</p>
-<p>Next run: {{ timer_status.next_run }}</p>
+{% if timer_control_enabled %}
+<p>Next scheduled run: {{ timer_schedule_next_run }}</p>
+<p>Timer tick: {{ timer_tick }}</p>
+{% else %}
+<p>Current timer schedule: {{ timer_calendar_words }}.</p>
+<p>Next timer tick: {{ timer_status.next_run }}</p>
+{% endif %}
 <p>Last run: {{ timer_status.last_run }}</p>
 <p>Last result: {{ timer_status.last_result }}</p>
-<p class="muted">This schedule is managed on the server. Change it with systemd, not from this page.</p>
 {% endcall %}
 {% else %}
 {% call card('Current status', 'What this server currently has installed for CVEBeacon.') %}
@@ -35,10 +40,47 @@
 {% endcall %}
 {% endif %}
 
-{% if timer_managed %}
-{% if not error %}
-{% call callout('info', 'Use systemd to change this schedule') %}<p>{{ block_reason }}</p>{% endcall %}
+{% if timer_managed and timer_control_enabled %}
+{% if schedule_confirmation %}
+{% call card('Confirm schedule change', 'Review the schedule before saving it.') %}
+<p>The monitoring command will run {{ schedule_confirmation.description }}.</p>
+<form method="post" action="{{ url_for('operations.schedule_install') }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="confirm" value="{{ schedule_confirmation.token }}">
+<div class="form-actions">{{ button('Confirm schedule') }}</div>
+</form>
+{% endcall %}
+{% else %}
+{% call card('Change schedule', 'Choose an interval or fixed local times for the monitoring timer.') %}
+<form method="post" class="stack" action="{{ url_for('operations.schedule_install') }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="field"><label for="schedule-mode">How often</label>
+<select id="schedule-mode" name="mode" aria-describedby="schedule-mode-help">
+<option value="interval" {% if timer_schedule_mode == 'interval' %}selected{% endif %}>Every N hours</option>
+<option value="times" {% if timer_schedule_mode == 'times' %}selected{% endif %}>At fixed times</option>
+</select>
+<p class="help" id="schedule-mode-help">Choose an interval from 2 to 24 hours, or fixed times each day using the server's local clock.</p></div>
+<div class="field"><label for="schedule-every">Hours between runs</label>
+<input id="schedule-every" name="every" type="number" min="2" max="24" value="{{ timer_schedule_every }}">
+</div>
+<div class="field"><label for="schedule-times">Times of day</label>
+<input id="schedule-times" name="times" value="{{ timer_schedule_times }}" placeholder="07:00,19:00" maxlength="200">
+<p class="help">Comma-separated 24-hour times, for example 07:00,19:00. Fixed times use the server's local clock.</p></div>
+<div class="form-actions">{{ button('Review schedule') }}</div>
+</form>
+{% endcall %}
 {% endif %}
+{% elif timer_managed %}
+{% call callout('info', 'Enable dashboard schedule control') %}
+<p>Current timer schedule: {{ timer_calendar_words }}.</p>
+{% if timer_enable_command %}
+<p>Run this one-time command as root to enable schedule editing here:</p>
+<pre>{{ timer_enable_command }}</pre>
+{% else %}
+<p>The monitoring service command needs administrator review before dashboard control can be enabled.</p>
+{% endif %}
+<p class="muted">The command adds two root-owned systemd drop-ins. They preserve the current monitoring executable and configuration, save this schedule, and change the timer to a 15-minute check that starts monitoring only when its saved schedule is due.</p>
+{% endcall %}
 {% elif block_reason %}
 {% call callout('warning', 'The dashboard cannot install a schedule here') %}<p>{{ block_reason }}</p><p>Use the command-line fallback below from the intended account instead.</p>{% endcall %}
 {% call card('Install or update') %}<p>The dashboard will not install a schedule in this setup.</p>{% endcall %}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import html
 import os
 import re
 import stat
@@ -168,7 +169,8 @@ def _systemd_runner(config_path, *, command=("run",), timer_state="active",
                     unit_file_state="enabled", result="success", exit_status=0,
                     next_run="Thu 2026-11-26 07:00:00 WET",
                     last_trigger="Wed 2026-11-25 07:00:00 WET",
-                    last_exit="Wed 2026-11-25 07:04:00 WET"):
+                    last_exit="Wed 2026-11-25 07:04:00 WET",
+                    calendar="*-*-* 07,19:00:00", persistent="yes"):
     timer, service = _systemd_output(
         config_path, command, timer_state=timer_state,
         unit_file_state=unit_file_state, result=result,
@@ -179,7 +181,16 @@ def _systemd_runner(config_path, *, command=("run",), timer_state="active",
 
     def run(args, **kwargs):
         calls.append((list(args), kwargs))
-        return _Result(stdout=timer if args[-1] == "cvebeacon.timer" else service)
+        if args[:2] == ["crontab", "-l"]:
+            return _Result(stdout="")
+        if args[:2] != ["systemctl", "show"]:
+            return _Result(returncode=1)
+        timer_values = dict(line.split("=", 1) for line in timer.splitlines())
+        timer_values.update({"OnCalendar": calendar, "Persistent": persistent})
+        service_values = dict(line.split("=", 1) for line in service.splitlines())
+        properties = args[2].partition("=")[2].split(",")
+        values = timer_values if args[-1] == "cvebeacon.timer" else service_values
+        return _Result(stdout="".join(f"{name}={values[name]}\n" for name in properties))
 
     return run, calls
 
@@ -201,7 +212,8 @@ def _policy_file(tmp_path, *, units=("cvebeacon.timer", "cvebeacon.service",
     return path
 
 
-def test_systemd_timer_probe_maps_active_enabled_status_and_scan(tmp_path):
+def test_systemd_timer_probe_maps_active_enabled_status_and_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     runner, calls = _systemd_runner(config.config_path, command=("run",))
 
@@ -232,7 +244,8 @@ def test_systemd_timer_probe_maps_active_enabled_status_and_scan(tmp_path):
     assert not any("/opt/cvebeacon" in str(call) for call in result.values())
 
 
-def test_systemd_timer_probe_maps_inactive_disabled_and_watch(tmp_path):
+def test_systemd_timer_probe_maps_inactive_disabled_and_watch(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     runner, _ = _systemd_runner(
         config.config_path, command=("watch", "run"), timer_state="inactive",
@@ -249,7 +262,8 @@ def test_systemd_timer_probe_maps_inactive_disabled_and_watch(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["missing", "malformed", "another_config"])
-def test_systemd_timer_probe_shows_unknown_for_unmatched_service(mode, tmp_path):
+def test_systemd_timer_probe_shows_unknown_for_unmatched_service(mode, tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     timer, service = _systemd_output(
         tmp_path / "another.toml" if mode == "another_config" else config.config_path,
@@ -276,7 +290,8 @@ def test_systemd_timer_probe_shows_unknown_for_unmatched_service(mode, tmp_path)
     }
 
 
-def test_systemd_timer_probe_maps_failed_result_and_never_run(tmp_path):
+def test_systemd_timer_probe_maps_failed_result_and_never_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     failed, _ = _systemd_runner(
         config.config_path, result="exit-code", exit_status=2,
@@ -298,7 +313,8 @@ def test_systemd_timer_probe_maps_failed_result_and_never_run(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["timeout", "garbage"])
-def test_systemd_timer_probe_fails_closed(mode, tmp_path):
+def test_systemd_timer_probe_fails_closed(mode, tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
 
     def run(args, **kwargs):
@@ -376,6 +392,7 @@ def test_policy_presence_ignores_contents_and_blocks_cron_for_custom_units(
     }
     assert [call[0][-1] for call in calls] == [
         "cvebeacon.timer", "cvebeacon.service",
+        "cvebeacon.timer", "cvebeacon.service",
     ]
 
     client = app.test_client()
@@ -389,18 +406,18 @@ def test_policy_presence_ignores_contents_and_blocks_cron_for_custom_units(
         command="watch",
     )
     assert denied.status_code == 409
-    assert dashboard_ops.TIMER_CRON_BLOCK_REASON in denied.text
+    assert "Enable dashboard schedule control" in denied.text
     assert not any(call[0][0] == "crontab" for call in calls)
 
 
-def test_schedule_page_shows_systemd_timer_and_refuses_cron_install(tmp_path, monkeypatch):
+def test_schedule_page_shows_systemd_timer_and_enable_instructions(tmp_path, monkeypatch):
     # Timer detection is Linux-only; read the fakes as Linux on every runner.
     monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
     config = make_config(tmp_path)
     _allow_test_account_storage(monkeypatch)
     new_accounts(config)
     app = dashboard.create_app(config)
-    runner, calls = _systemd_runner(config.config_path, command=("watch", "run"))
+    runner, calls = _systemd_runner(config.config_path, command=("run",))
     app.extensions["dashboard_schedule_runner"] = runner
     policy = _policy_file(tmp_path)
     monkeypatch.setattr(dashboard_ops, "UPDATE_POLICY_PATH", policy)
@@ -417,10 +434,13 @@ def test_schedule_page_shows_systemd_timer_and_refuses_cron_install(tmp_path, mo
     assert "2026-11-26 07:00" in page.text
     assert "2026-11-25 07:04" in page.text
     assert "Succeeded" in page.text
-    assert "This schedule is managed on the server. Change it with systemd, not from this page." in page.text
+    assert "Current timer schedule: Every day at 07:00 and 19:00." in page.text
+    assert "sudo /opt/cvebeacon/current/.venv/bin/cvebeacon" in page.text
+    assert "schedule timer-control enable" in page.text
+    assert "15-minute check" in page.text
     assert "Install schedule" not in page.text
     assert "permission denied" not in page.text.casefold()
-    assert "/opt/cvebeacon/current" not in page.text
+    assert "sudo /opt/cvebeacon/current/.venv/bin/cvebeacon" in page.text
     assert "ExecStart=" not in page.text
     assert not any(call[0][0] == "crontab" for call in calls)
 
@@ -429,8 +449,102 @@ def test_schedule_page_shows_systemd_timer_and_refuses_cron_install(tmp_path, mo
         command="watch",
     )
     assert denied.status_code == 409
-    assert dashboard_ops.TIMER_CRON_BLOCK_REASON in denied.text
+    assert "Enable dashboard schedule control" in denied.text
     assert not any(call[0][0] == "crontab" for call in calls)
+
+
+def test_dashboard_timer_schedule_editor_requires_permission_csrf_and_confirmation(
+    ops, monkeypatch,
+):
+    config, users, app, client = ops
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    app.extensions["dashboard_schedule_runner"] = _systemd_runner(
+        config.config_path, command=("run", "--if-due"), calendar="*:0/15"
+    )[0]
+    timer_status = {
+        "state": "On", "boot": "Yes", "next_run": "2026-11-26 07:15",
+        "last_run": "Never", "last_result": "Never run", "scan_state": "scan",
+    }
+    monkeypatch.setattr(
+        dashboard_ops,
+        "_schedule_snapshot",
+        lambda _config: {
+            "summary": "Scheduled automatically",
+            "scan_state": "scan",
+            "timer_managed": True,
+            "timer_status": timer_status,
+            "timer_control": {
+                "enabled": True,
+                "calendar_words": "Every 15 minutes",
+                "timer_tick": "Every 15 minutes",
+            },
+        },
+    )
+
+    login(client, "runner")
+    assert client.get("/operations/schedule").status_code == 403
+    login(client, "scheduler")
+    page = client.get("/operations/schedule")
+    assert page.status_code == 200
+    assert "Change schedule" in page.text
+    assert "Next scheduled run:" in page.text
+    assert "Timer tick: Every 15 minutes" in page.text
+    assert "This schedule is managed on the server" not in page.text
+
+    denied = client.post(
+        "/operations/schedule/install", data={"mode": "interval", "every": "5"}
+    )
+    assert denied.status_code == 400
+    assert not (config.database_path.parent / "schedule.json").exists()
+
+    review = submit(
+        client, "/operations/schedule/install", mode="interval", every="5"
+    )
+    assert review.status_code == 200
+    assert "Confirm schedule change" in review.text
+    assert "Every 5 hours" in review.text
+    assert not (config.database_path.parent / "schedule.json").exists()
+    token = re.search(r'name="confirm" value="([^"]+)"', review.text)[1]
+
+    missing_csrf = client.post(
+        "/operations/schedule/install", data={"confirm": token}
+    )
+    assert missing_csrf.status_code == 400
+    saved = client.post(
+        "/operations/schedule/install",
+        data={"csrf": csrf(client), "confirm": token},
+    )
+    assert saved.status_code == 303
+    schedule = scheduling.load_timer_schedule(config.database_path.parent)
+    assert schedule.every_hours == 5
+    actions = [entry.action for entry in users.audit_entries()]
+    assert "timer_schedule_update_requested:{\"mode\":\"interval\",\"every\":5,\"times\":null}" in actions
+    assert "timer_schedule_updated:{\"mode\":\"interval\",\"every\":5,\"times\":null}" in actions
+
+
+def test_dashboard_timer_schedule_validation_uses_shared_messages(ops, monkeypatch):
+    config, _, app, client = ops
+    monkeypatch.setattr(scheduling.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        dashboard_ops,
+        "_schedule_snapshot",
+        lambda _config: {
+            "summary": "Scheduled automatically",
+            "scan_state": "scan",
+            "timer_managed": True,
+            "timer_status": dict(dashboard_ops.TIMER_STATUS_LABELS),
+            "timer_control": {"enabled": True, "calendar_words": "", "timer_tick": "Every 15 minutes"},
+        },
+    )
+    login(client, "scheduler")
+
+    response = submit(
+        client, "/operations/schedule/install", mode="times", times="25:00"
+    )
+
+    assert response.status_code == 400
+    assert "invalid schedule time '25:00'; use HH:MM from 00:00 to 23:59" in html.unescape(response.text)
+    assert not (config.database_path.parent / "schedule.json").exists()
 
 
 def test_home_and_operations_use_the_same_active_timer_state(tmp_path, monkeypatch):
@@ -454,7 +568,7 @@ def test_home_and_operations_use_the_same_active_timer_state(tmp_path, monkeypat
 
     assert "Scheduled automatically" in operations.text
     assert "A schedule is installed for this configuration" in home.text
-    assert len(calls) == 2
+    assert len(calls) == 4
     cached = app.extensions["operations_schedule_summary"][3]
     assert cached["summary"] == "Scheduled automatically"
     assert "/opt/cvebeacon" not in repr(cached)
