@@ -28,6 +28,11 @@ _EVIDENCE_KINDS = frozenset({
     "header", "cookie", "meta", "url", "html", "script", "style", "manifest",
     "robots", "icon", "implied", "dom", "text",
 })
+# Mirror the optional detector's category vocabulary without importing Extensions into Core.
+_WEB_PRODUCT_CATEGORIES = frozenset({
+    "web-server", "application-server", "language", "framework", "cms", "js-library",
+    "edge", "ops-tool", "hosted-platform", "application", "reverse-proxy",
+})
 _NPM_NAME_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
 _NPM_SCOPE_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
 _FETCH_FAILURE_REASONS = {
@@ -119,6 +124,12 @@ def _review_metadata(detail, client):
             if field in item and (not isinstance(item[field], list)
                                   or any(not text(value) for value in item[field])):
                 raise ValueError("invalid review list")
+        if "categories" in item:
+            categories = item["categories"]
+            if (not isinstance(categories, list) or len(categories) > 64
+                    or any(not text(value) or value not in _WEB_PRODUCT_CATEGORIES
+                           for value in categories)):
+                raise ValueError("invalid review categories")
         if "evidence_types" in item and any(kind not in _EVIDENCE_KINDS
                                              for kind in item["evidence_types"]):
             raise ValueError("invalid review evidence kind")
@@ -263,7 +274,7 @@ def create_web_blueprint(config):
 
     def render(client="", *, error=None, status=200, prefill_url=""):
         clients, document, version = [], None, "new"
-        products, reviews, run, snapshot = [], [], None, None
+        products, reviews, run, snapshot, snapshot_rows = [], [], None, None, []
         last_job, truncated, removed = None, False, False
         inventory_clients = _inventory_clients(config)
         prefill_entry = _prefill_entry(prefill_url) if prefill_url else {}
@@ -290,7 +301,7 @@ def create_web_blueprint(config):
                 removed = output.with_name(output.name + ".removed").exists()
                 if output.exists() or output.is_symlink():
                     try:
-                        _, snapshot = read_web_snapshot(output)
+                        snapshot_rows, snapshot = read_web_snapshot(output)
                     except (CVEBeaconError, ValueError, OSError):
                         error = error or "The saved snapshot is invalid; it will be skipped by scans"
                 review_path = output.with_name(output.name + ".review.json")
@@ -324,15 +335,33 @@ def create_web_blueprint(config):
         except (CVEBeaconError, ValueError, OSError, TypeError, KeyError):
             error = error or "Web asset storage could not be read; review the local files"
         evidence_words = {
-            "header": "response header", "cookie": "cookie", "meta": "page markup",
-            "html": "page markup", "url": "linked file", "script": "script file",
-            "style": "stylesheet", "manifest": "manifest file", "robots": "robots.txt",
+            "header": "header", "cookie": "cookie", "meta": "meta",
+            "html": "markup", "url": "link", "script": "script",
+            "style": "stylesheet", "manifest": "manifest", "robots": "robots.txt",
+        }
+        confidence_classes = {"high": "high", "medium": "medium", "low": "low"}
+        snapshot_inventory_ids = {
+            getattr(record, "asset_id", "") for record in snapshot_rows
+            if getattr(record, "version", "") or getattr(record, "cpe", "")
         }
         for item in products:
             item["display_name"] = item.get("name") or (
                 f"{item.get('vendor', '')}/{item.get('product', '')}"
             )
-            item["display_version"] = ", ".join(item.get("versions", [])) or "Version not disclosed"
+            versions = [version for version in item.get("versions", []) if version.strip()]
+            item["has_version"] = bool(versions)
+            item["display_version"] = ", ".join(versions) or "Version not disclosed"
+            confidence = item.get("confidence", "").casefold()
+            item["confidence_label"] = (
+                confidence.title() if confidence in confidence_classes else "Unknown"
+            )
+            item["confidence_class"] = confidence_classes.get(confidence, "neutral")
+            item["category_labels"] = item.get(
+                "categories", [item.get("category") or "Category not recorded"]
+            )
+            item["in_inventory"] = (
+                item["has_version"] or item.get("asset_id") in snapshot_inventory_ids
+            )
             labels = [evidence_words[kind] for kind in item.get("evidence_types", [])
                       if kind in evidence_words]
             labels.extend(f"Inferred from {source}" for source in item.get("implied_by", []))
