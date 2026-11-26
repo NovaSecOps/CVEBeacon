@@ -631,15 +631,25 @@ def test_corrupt_review_fields_are_rejected_before_rendering(web, section, field
     ("products", "package", None),
     ("products", "implied_by", "Angular"),
     ("products", "implied_by", ["Angular", 7]),
+    ("products", "name", ""),
+    ("products", "name", "x" * 257),
+    ("products", "package", "react"),
+    ("products", "ecosystem", "npm"),
+    ("products", "package", "../react"),
+    ("products", "package", "@../react"),
     ("products", "evidence", "not a list"),
     ("products", "evidence", [{"kind": 7, "source": "page", "excerpt": "x"}]),
+    ("products", "evidence", [{"kind": "unknown", "source": "page", "excerpt": "x"}]),
     ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x" * 161}]),
     ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "sha256": "bad"}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "sha256": "a" * 64}]),
+    ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "bytes": 512}]),
     ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "bytes": True}]),
     ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x", "bytes": -1}]),
     ("products", "evidence", [{"kind": "script", "source": "page", "excerpt": "x"}] * 21),
     ("run", "resources_fetched", -1),
     ("run", "resources_skipped", True),
+    ("run", "resources_skipped_by_reason", {"blocked": 1}),
 ])
 def test_new_review_fields_are_validated_before_rendering(web, section, field, value):
     config, _, _, client = web
@@ -647,6 +657,20 @@ def test_new_review_fields_are_validated_before_rendering(web, section, field, v
     _, output = paths(config, "Acme")
     detail = {"client": "Acme", "products": [], "reviews": []}
     detail[section] = {field: value} if section == "run" else [{field: value}]
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200
+    assert "review the local files" in page.text
+
+
+def test_skip_reason_counts_must_sum_to_total(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    detail = {
+        "client": "Acme", "products": [], "reviews": [],
+        "run": {"resources_skipped": 2, "resources_skipped_by_reason": {"blocked": 1}},
+    }
     web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
     page = client.get("/web-assets?client=Acme")
     assert page.status_code == 200
@@ -695,6 +719,29 @@ def test_detected_product_table_groups_sorts_and_uses_plain_evidence_labels(web)
         assert label in table
     assert "Read 4 script and style files from the sites (2 skipped)." in page.text
     assert "Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory." in page.text
+
+
+def test_product_and_evidence_markup_sentinel_is_rendered_as_text(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    sentinel = "<script>alert(1)</script>"
+    detail = {
+        "client": "Acme",
+        "products": [{
+            "hostname": "example.invalid", "vendor": "npm", "product": "react",
+            "name": sentinel, "category": "js-library", "confidence": "high",
+            "versions": ["18.3.1"], "evidence_types": ["script"],
+            "ecosystem": "npm", "package": "react",
+            "evidence": [{"kind": "script", "source": sentinel, "excerpt": sentinel}],
+        }],
+        "reviews": [],
+    }
+    web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
+    response = client.get("/web-assets?client=Acme")
+    assert response.status_code == 200
+    assert sentinel not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
 
 
 
