@@ -1095,7 +1095,6 @@ def test_client_filter_and_opt_in_identities(tmp_path):
     assert software_names == {"Gadget"}
     assert "Globex" not in json.dumps(filtered)
     assert "Widget" not in json.dumps(filtered)
-
     included = _export(
         tmp_path,
         "--client",
@@ -1123,6 +1122,42 @@ def test_client_filter_and_opt_in_identities(tmp_path):
     assert relationships[0]["x_cvebeacon_clients"] == ["Globex"]
     assert relationships[0]["x_cvebeacon_client_refs"] == identity_ids
     assert "Acme" not in json.dumps(included)
+
+
+def test_default_stix_includes_no_client_findings_and_client_filter_is_named_only(
+    tmp_path,
+):
+    named = Asset("named-asset", "Example", "Widget", "1.0", client="Acme")
+    unassigned = Asset("no-client-asset", "Example", "Gadget", "2.0")
+    findings = [
+        _finding(named, cve_id="CVE-2026-0101", state=Applicability.AFFECTED),
+        _finding(unassigned, cve_id="CVE-2026-0102", state=Applicability.NEEDS_REVIEW),
+    ]
+    times = {
+        (item.asset.asset_id, item.vulnerability.primary_id): (
+            "2026-11-01T00:00:00+00:00",
+            "2026-11-02T00:00:00+00:00",
+        )
+        for item in findings
+    }
+    _record(StateStore(tmp_path / "state.db"), findings, times)
+
+    default = _export(tmp_path, output="default.json")
+    default_ids = {
+        item["name"]
+        for item in default["objects"]
+        if item["type"] == "vulnerability"
+    }
+    assert default_ids == {"CVE-2026-0101", "CVE-2026-0102"}
+    assert "identity" not in {item["type"] for item in default["objects"]}
+
+    named_only = _export(tmp_path, "--client", "Acme", output="named.json")
+    named_ids = {
+        item["name"]
+        for item in named_only["objects"]
+        if item["type"] == "vulnerability"
+    }
+    assert named_ids == {"CVE-2026-0101"}
 
 
 def test_client_identities_include_only_exported_clients(tmp_path):
