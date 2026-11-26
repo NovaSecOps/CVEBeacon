@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from . import scheduling
 from .config import AppConfig, ConfigurationError, InventoryConfig, load_config
 from .clients import affected_clients, format_affected_clients
 from .engine import QueryEngine
@@ -56,6 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     scan.add_argument("--report", choices=("xlsx", "json"), help="write an on-demand report")
     run_all = commands.add_parser("run", help="run scan and watch run in one ordered command")
     run_all.add_argument("--yes", action="store_true", help="skip the full-history confirmation")
+    run_all.add_argument("--if-due", action="store_true", help="run only when the saved schedule is due")
     query = commands.add_parser("query", help="query a product or package without changing monitoring or delivery state")
     for field in ("vendor", "product", "version", "ecosystem", "purl", "cpe", "repository", "commit"):
         query.add_argument("--" + field, default="")
@@ -129,6 +131,8 @@ def _parser() -> argparse.ArgumentParser:
     add = schedule_sub.add_parser("install"); add.add_argument("--every", "--hours", dest="every"); add.add_argument("--times", help="comma-separated local times such as 07:00,19:00"); add.add_argument("--command", dest="schedule_target", choices=("scan", "watch", "both"), help="what the schedule runs"); add.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); add.add_argument("--run-logged-out", action="store_true", help="Windows: run whether the account is logged on (stored password)"); add.add_argument("--account", help="Windows: account for the stored-password task; requires --run-logged-out"); add.add_argument("--password-stdin", action="store_true", help="read the Windows account password from one stdin line"); add.add_argument("--dry-run", action="store_true"); add.add_argument("--yes", action="store_true")
     schedule_status = schedule_sub.add_parser("status"); schedule_status.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto")
     delete = schedule_sub.add_parser("remove"); delete.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); delete.add_argument("--yes", action="store_true")
+    timer_control = schedule_sub.add_parser("timer-control", help="enable or inspect dashboard control of a systemd timer")
+    timer_control.add_argument("action", choices=("enable", "disable", "status"))
     watch = commands.add_parser("watch", help="keep a local database of recently changed CVEs")
     watch_sub = watch.add_subparsers(dest="watch_command", required=True)
     watch_refresh = watch_sub.add_parser("refresh", help="fetch or refresh exactly one CVE and evaluate its rules")
@@ -1365,6 +1369,17 @@ def run(args: argparse.Namespace) -> int:
         if not args.yes and input("Remove the CVEBeacon schedule? [y/N] ").strip().casefold() not in {"y", "yes"}: print("cancelled"); return 1
         print("removed" if remove(system=args.platform) else "not installed")
         return 0
+    if args.command == "schedule" and args.schedule_command == "timer-control":
+        if args.action == "status":
+            print(scheduling.timer_control("status"))
+            return 0
+        config = load_config(args.config)
+        print(scheduling.timer_control(
+            args.action,
+            data_directory=config.database_path.parent,
+            config_path=config.config_path,
+        ))
+        return 0
     stix_export = (
         args.command == "export"
         and getattr(args, "export_command", None) == "stix"
@@ -1411,6 +1426,11 @@ def run(args: argparse.Namespace) -> int:
         if args.command == "watch":
             return _run_watch(args, config)
         if args.command == "run":
+            if args.if_due:
+                if not scheduling.should_run_scheduled(config.database_path.parent):
+                    LOG.info("scheduled run not due")
+                    return 0
+                LOG.info("scheduled run due")
             return _run_all(config, yes=args.yes)
         if args.command == "migrate" or (args.command == "doctor" and config.effective_inventory is None and args.allow_watch_only):
             from .update_state import migrate

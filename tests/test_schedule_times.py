@@ -76,7 +76,8 @@ def test_interval_both_uses_one_cron_line(tmp_path):
     assert lines[0].endswith(" run")
 
 
-def test_linux_install_keeps_unrelated_entries_and_one_owned_block(tmp_path):
+def test_linux_install_keeps_unrelated_entries_and_one_owned_block(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
     writes = []
 
     class Result:
@@ -101,7 +102,8 @@ def test_linux_install_keeps_unrelated_entries_and_one_owned_block(tmp_path):
     assert " watch run" not in value
 
 
-def test_cron_read_failure_never_writes_with_times(tmp_path):
+def test_cron_read_failure_never_writes_with_times(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
     calls = []
 
     def fake_run(args, **kwargs):
@@ -1570,7 +1572,8 @@ def test_without_managed_block_preserves_unrelated_bytes():
     assert _without_managed_block(mixed) == "0 5 * * * /bin/foo   \n15 2 * * * backup\r"
 
 
-def test_install_keeps_an_entry_without_a_final_newline(tmp_path):
+def test_install_keeps_an_entry_without_a_final_newline(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
     writes = []
 
     class Result:
@@ -1589,6 +1592,7 @@ def test_install_keeps_an_entry_without_a_final_newline(tmp_path):
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX cron")
 def test_real_crontab_round_trip_preserves_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvebeacon.scheduling.platform.system", lambda: "Linux")
     store = tmp_path / "crontab"
     original = b"MAILTO=me  \r\n0 1 * * * a\rb  \n# caf\xe9  \r\nlast"
     store.write_bytes(original)
