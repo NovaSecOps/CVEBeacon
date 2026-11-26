@@ -382,10 +382,19 @@ jobs:
               "{{DATE}}": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
               "{{IMAGE_DIGEST}}": digest,
           }
-          notes = pathlib.Path(".github/release-notes.md").read_text()
+          notes = pathlib.Path(".github/release-notes.md").read_text(encoding="utf-8")
           for placeholder, value in replacements.items():
               notes = notes.replace(placeholder, value)
-          pathlib.Path("release-notes.md").write_text(notes)
+          pathlib.Path("release-notes.md").write_text(notes, encoding="utf-8")
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(
+              "## Draft release review\n\n"
+              "- [ ] Confirm the version and notes in this draft.\n"
+              "- [ ] Confirm `SHA256SUMS` covers every uploaded artifact except itself and `SHA256SUMS.sig`.\n"
+              f"- [ ] Confirm the GHCR manifest digest matches `{digest}`.\n"
+              "- [ ] Publish only after `docs/RELEASE_CHECKLIST.md` passes.\n",
+              encoding="utf-8",
+          )
           print(notes)
           PY
       - name: Verify the tag still points at the built commit

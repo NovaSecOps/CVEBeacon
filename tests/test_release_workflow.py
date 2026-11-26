@@ -80,6 +80,16 @@ def test_release_verifies_the_tag_target_before_creating_the_draft(jobs):
     assert "git/ref/tags" in run
 
 
+def test_release_review_checklist_is_in_job_summary_not_release_body(jobs):
+    notes_step = step_with(jobs["release"]["steps"], name="Write release notes")
+    notes_template = (ROOT / ".github" / "release-notes.md").read_text(encoding="utf-8")
+    assert "GITHUB_STEP_SUMMARY" in notes_step["run"]
+    assert "Confirm the version and notes" in notes_step["run"]
+    assert "<!--" not in notes_template
+    assert "[ ] Confirm" not in notes_template
+    assert "{{VERSION}}" in notes_template and "{{DATE}}" in notes_template and "{{IMAGE_DIGEST}}" in notes_template
+
+
 def test_python_distribution_build_uses_the_hashed_toolchain(jobs):
     step = step_with(jobs["python-dist"]["steps"], name="Build core sdist and wheel")
     run = step["run"]
