@@ -14,12 +14,14 @@
 {% if timer_control_enabled %}
 <p>Next scheduled run: {{ timer_schedule_next_run }}</p>
 <p>Timer tick: {{ timer_tick }}</p>
+<p>Last scheduled monitoring start: {{ timer_schedule_last_start }}</p>
+<p>Last timer check: {{ timer_status.last_run }}</p>
 {% else %}
 <p>Current timer schedule: {{ timer_calendar_words }}.</p>
 <p>Next timer tick: {{ timer_status.next_run }}</p>
-{% endif %}
 <p>Last run: {{ timer_status.last_run }}</p>
 <p>Last result: {{ timer_status.last_result }}</p>
+{% endif %}
 {% endcall %}
 {% else %}
 {% call card('Current status', 'What this server currently has installed for CVEBeacon.') %}

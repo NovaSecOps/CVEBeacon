@@ -376,6 +376,7 @@ def _schedule_context(
     timer_schedule_every = 4
     timer_schedule_times = ",".join(scheduling.DEFAULT_TIMER_TIMES)
     timer_schedule_next_run = "Unknown"
+    timer_schedule_last_start = "Unknown"
     if snapshot["timer_managed"] and timer_control_enabled:
         try:
             saved_schedule = scheduling.load_timer_schedule(config.database_path.parent)
@@ -388,6 +389,10 @@ def _schedule_context(
                 timer_schedule_next_run = next_run.strftime("%Y-%m-%d %H:%M")
             elif snapshot["timer_status"]["state"] == "Off":
                 timer_schedule_next_run = "Not scheduled"
+            timer_schedule_last_start = (
+                saved_schedule.last_start.astimezone(now.tzinfo).strftime("%Y-%m-%d %H:%M")
+                if saved_schedule.last_start else "Never"
+            )
         except (CVEBeaconError, OSError, ValueError):
             error = error or "The saved timer schedule could not be read."
     elif snapshot["timer_managed"]:
@@ -423,6 +428,7 @@ def _schedule_context(
         "timer_schedule_every": timer_schedule_every,
         "timer_schedule_times": timer_schedule_times,
         "timer_schedule_next_run": timer_schedule_next_run,
+        "timer_schedule_last_start": timer_schedule_last_start,
         "schedule_confirmation": schedule_confirmation,
         "default_command": scheduling.default_command(
             inventory=config.effective_inventory is not None, watch=config.watch.enabled

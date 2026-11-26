@@ -2098,7 +2098,11 @@ def systemd_timer_status(
     service_last_run = _time_label(service["ExecMainExitTimestamp"], empty="Never")
     service_result = _service_result(service["Result"], service["ExecMainStatus"])
 
-    if service_last_run == "Never":
+    if "--if-due" in argv[4:]:
+        # systemd records service completion for idle checks too.
+        last_run = _time_label(last_trigger, empty="Never")
+        last_result = service_result if last_run not in {"Unknown", "Never"} else last_run
+    elif service_last_run == "Never":
         trigger_parsed = _timestamp(last_trigger)
         if trigger_parsed is None:
             last_run, last_result = "Never", "Never run"

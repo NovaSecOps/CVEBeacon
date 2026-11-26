@@ -416,6 +416,9 @@ def test_standalone_timer_editor_requires_permission_csrf_and_confirmation(
     assert "Change schedule" in page.text
     assert "Next scheduled run:" in page.text
     assert "Timer tick: Every 15 minutes" in page.text
+    assert "Last scheduled monitoring start: Never" in page.text
+    assert "Last timer check: 2026-11-25 07:00" in page.text
+    assert "Last result: Succeeded" not in page.text
     assert not any(call[0][0] == "crontab" for call in calls)
     assert "This schedule is managed on the server" not in page.text
 
