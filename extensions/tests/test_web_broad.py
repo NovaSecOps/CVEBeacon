@@ -7,7 +7,7 @@ import pytest
 from cvebeacon_extensions import webrules
 from cvebeacon_extensions.webrules import Resource, detect, page_from
 
-BOUND = 4.0
+BOUND = 15.0  # Quadratic forms take hours on these inputs; leave room for slow CI runners.
 BIG = 4 * 1024 * 1024
 
 

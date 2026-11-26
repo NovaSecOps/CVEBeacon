@@ -1610,18 +1610,38 @@ _NG_LITERAL = re.compile(
 )
 
 
+_ANGULAR_VARIABLE_LIMIT = 8
+
+
+def _angular_assignment(text: str, variable: str, *, deadline, clock):
+    """The first ``variable=new X("version")`` not preceded by an identifier character."""
+    # A literal-first pattern lets the regex engine skip quickly to each candidate.
+    lookup = re.compile(re.escape(variable) + r"\s*=\s*new\s+[\w$]{1,40}\s*\(\s*[\"']"
+                        + _NG_VERSION_BODY + r"[\"']\s*\)")
+    for count, candidate in enumerate(lookup.finditer(text)):
+        if count % 1024 == 0 and _deadline_passed(deadline, clock):
+            return None
+        start = candidate.start()
+        if start == 0 or not (text[start - 1].isalnum() or text[start - 1] in "_$."):
+            return candidate
+    return None
+
+
 def _angular_unbannered_versions(text: str, *, deadline, clock) -> list[tuple[str, str]]:
     """Versions from ng-version records in builds that strip the licence banner."""
     found = []
+    assignments: dict[str, re.Match | None] = {}
     for pattern in (_NG_LINKED, _NG_INLINE, _NG_LITERAL):
         for index, match in enumerate(pattern.finditer(text)):
             if index >= _ANGULAR_MARKER_LIMIT or _deadline_passed(deadline, clock):
                 break
             if pattern is _NG_LINKED:
-                variable = re.escape(match.group(1))
-                assignment = re.search(
-                    r"(?<![\w$.])" + variable + r"\s*=\s*new\s+[\w$]{1,40}\s*\(\s*[\"']"
-                    + _NG_VERSION_BODY + r"[\"']\s*\)", text)
+                variable = match.group(1)
+                if variable not in assignments:
+                    if len(assignments) >= _ANGULAR_VARIABLE_LIMIT:
+                        continue
+                    assignments[variable] = _angular_assignment(text, variable, deadline=deadline, clock=clock)
+                assignment = assignments[variable]
                 if not assignment:
                     continue
                 version, excerpt = assignment.group(1), (

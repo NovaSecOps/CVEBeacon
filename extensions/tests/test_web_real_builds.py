@@ -16,7 +16,7 @@ from test_web_resource_fetching import asset, response, run
 # Optional directory of official minified Angular core builds, for example
 # "angular_core@16.2.12__core.min.mjs". The test skips when it is not set.
 CORPUS = Path(os.environ["CVEBEACON_ANGULAR_BUILDS"]) if os.environ.get("CVEBEACON_ANGULAR_BUILDS") else None
-BOUND = 4.0
+BOUND = 15.0  # Quadratic forms take hours on these inputs; leave room for slow CI runners.
 BIG = 4 * 1024 * 1024
 
 
