@@ -66,7 +66,7 @@ RULE_CASES = (
     ("jquery-ui-script", "script", '/*! jQuery UI - v1.14.1 - 2024-09-26 */', '/*! jQuery UI extensions */', "jQuery UI", "jquery-ui", "1.14.1"),
     ("jquery-migrate-script", "script", 'JQMIGRATE: Migrate is installed, version 3.4.1', 'JQMIGRATE: Migrate compatible build 2026', "jQuery Migrate", "jquery-migrate", "3.4.1"),
     ("lodash-script", "script", 'lodash 4.17.21', 'loadsheaf 4.17.21', "Lodash", "lodash", "4.17.21"),
-    ("underscore-script", "script", 'Underscore.js 1.13.7', 'Underscore-compatible build 1.13.7', "Underscore.js", "underscore", "1.13.7"),
+    ("underscore-script", "script", 'Underscore.js 1.13.7\n// https://underscorejs.org', 'Underscore-compatible build 1.13.7', "Underscore.js", "underscore", "1.13.7"),
     ("moment-script", "script", '//! moment.js version : 2.30.1', '//! moment.js compatibility layer', "Moment.js", "moment", "2.30.1"),
     ("axios-script", "script", '/*! Axios v1.7.9 | (c) OpenJS Foundation */', '/*! Axios-compatible build v1.7.9 */', "Axios", "axios", "1.7.9"),
     ("chartjs-script", "script", '/*! Chart.js v4.4.7 */', '/*! Chart-compatible build v4.4.7 */', "Chart.js", "chart.js", "4.4.7"),
@@ -78,7 +78,7 @@ RULE_CASES = (
     ("requirejs-script", "script", '/*! RequireJS 2.3.7 */', '/*! RequireJS-compatible build 2.3.7 */', "RequireJS", "requirejs", "2.3.7"),
     ("handlebars-script", "script", 'Handlebars.VERSION = "4.7.8";', 'Handlebars.build = "4.7.8";', "Handlebars", "handlebars", "4.7.8"),
     ("rxjs-script", "script", 'rxjs@7.8.1', 'rxjs-compatible-build@7.8.1', "RxJS", "rxjs", "7.8.1"),
-    ("core-js", "script", "__core-js_shared__.versions.push({ version: '3.40.0', mode: 'global' });", "const build = '3.40.0';", "core-js", "core-js", "3.40.0"),
+    ("core-js", "script", "__core-js_shared__.versions.push({ version: '3.40.0', mode: 'global', copyright: 'Core-js' });", "const build = '3.40.0';", "core-js", "core-js", "3.40.0"),
     ("zonejs-script", "script", '/*! zone.js v0.15.0 */', '/*! zone.js compatible build 0.15.0 */', "zone.js", "zone.js", "0.15.0"),
     ("webpack-runtime", "script", 'self.webpackChunk_app = self.webpackChunk_app || [];', 'self.webpackChunked_app = [];', "webpack", "webpack", ""),
     ("tslib", "url", "https://static.example.invalid/tslib/tslib.es6.js", "https://static.example.invalid/my-tslib.js", "tslib", "tslib", ""),
@@ -171,9 +171,12 @@ def test_cdnjs_maps_known_packages_and_leaves_unknown_libraries_unidentified():
     )
     detections = detect(page_from({}, html))
     jquery = next(item for item in detections if item.name == "jQuery")
-    unknown = next(item for item in detections if item.name == "unknown-widget")
+    review = next(item for item in detections if item.name == "Unidentified cdnjs library")
     assert (jquery.ecosystem, jquery.package, jquery.versions) == ("npm", "jquery", ("3.7.1",))
-    assert (unknown.ecosystem, unknown.package, unknown.versions) == ("", "", ("2.4.1",))
+    assert (review.vendor, review.product, review.ecosystem, review.package, review.versions) == (
+        "cdnjs", "", "", "", (),
+    )
+    assert review.evidence[0].source == "page"
 
 
 def test_cdn_detection_count_is_bounded():
@@ -283,7 +286,7 @@ def test_angular_example_with_resources_and_laravel_cookie():
     )
     resources = (
         Resource("https://example.invalid/runtime.js", "script", "self.webpackChunk_app = [];"),
-        Resource("https://example.invalid/polyfills.js", "script", "/*! zone.js v0.15.0 */ __core-js_shared__.versions.push({ version: '3.40.0' });"),
+        Resource("https://example.invalid/polyfills.js", "script", "/*! zone.js v0.15.0 */ __core-js_shared__.versions.push({ version: '3.40.0', copyright: 'Core-js' });"),
         Resource("https://example.invalid/main.js", "script", 'const core="@angular/core@17.3.8";'),
         Resource("https://example.invalid/styles.css", "style", "/*! Bootstrap v5.3.3 */"),
     )

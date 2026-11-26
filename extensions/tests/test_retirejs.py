@@ -98,9 +98,12 @@ def test_unsupported_func_and_filecontentreplace_extractors_are_not_executed():
 def test_regex_compilation_skips_invalid_and_nested_unbounded_patterns():
     assert retirejs._compile_pattern("demo", "filecontent", 0, "(?<bad>", {}) is None
     assert retirejs._compile_pattern("demo", "filecontent", 1, r"(a+)+$", {}) is None
+    assert retirejs._compile_pattern("demo", "filecontent", 2,
+                                    r"Demo §§version§§.*", {}) is None
     compiled = retirejs._compile_pattern("demo", "filecontent", 2,
                                          r"Demo version §§version§§", {})
     assert compiled is not None and compiled.versioned
+    assert retirejs.SKIPPED_UNBOUNDED_VERSION_GAPS > 0
 
 
 def test_webrules_merges_retirejs_evidence_and_limits_excerpt_and_count():
