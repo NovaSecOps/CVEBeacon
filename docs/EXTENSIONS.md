@@ -98,8 +98,12 @@ DOM selectors include tags, IDs, classes, attribute presence and the `=`, `*=`,
 conditions. The `js`, `xhr`, `dns`, `certIssuer` and `probe` kinds are not
 evaluated. Those patterns need a browser, additional lookups or requests, or
 dynamic page state; DOM `properties` conditions also need JavaScript execution.
-Fingerprints are only matched against data already collected for the authorised
-page observation.
+Technology files may contain multiple named entries. The reader only uses the
+supported technologies and metadata files, with bounds on file sizes, pattern
+counts and evaluated text. Direct matches across a site observation are
+combined before `implies`, `excludes` and requirement relationships are
+resolved. Fingerprints are only matched against data already collected for the
+authorised page observation.
 
 ### What it sends
 
