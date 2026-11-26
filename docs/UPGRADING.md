@@ -584,19 +584,34 @@ apply. An unrecognized legacy journal lacks recovery coordinates and is refused:
 an administrator must verify code/state and retained snapshots before archiving
 that legacy record. Do not delete an active record to bypass recovery.
 
-`update-audit.jsonl` records events; `update-result.json` is a convenience mirror
-of the authoritative completed transaction. The dashboard status is advisory
-and uses the resolved **config directory**, as does the privileged request
-consumer, regardless of where database subdirectories reside. Request results,
-manual refusals and release checks have separate advisory files so they cannot
-overwrite the locked transaction result. An invalid policy uses the system
-journal and publishes a dashboard refusal only when the independently configured
-data directory passes validation. The reference
-path unit watches that config directory; adjust its path and the service's
-`--config` together for a custom installation.
-Check-only deployments with a read-only config mount fall back to the watch
-database directory for advisory status. Checks still return release information
-if neither advisory location can be written.
+`update-audit.jsonl` records events. `update-result.json` mirrors the
+authoritative completed transaction. The native updater creates
+`update-status/` inside the policy's data directory with service-account
+ownership and mode `0750`. Keep application data and configured paths outside
+that directory. Earlier status files remain readable for upgrade and rollback
+compatibility.
+
+The request path stays beside the runtime config. For a custom installation,
+point the path unit and the update service's absolute `--config` at the
+policy's data directory and config. If the policy is invalid or the updater
+cannot claim a request, the system journal records “waiting for administrator”
+and the updater stops `cvebeacon-update.path`. Inspect and repair the policy or
+request location, then rearm the watcher:
+
+```sh
+sudo systemctl reset-failed cvebeacon-update.service cvebeacon-update.path
+sudo systemctl start cvebeacon-update.path
+```
+
+The reference update service limits starts if the watcher cannot be stopped.
+Existing installations need to install the revised
+`cvebeacon-update.service` and run `sudo systemctl daemon-reload` to get that
+backstop. A request consumed while another update holds the lock leaves the
+watcher armed.
+
+Unprivileged checks with a read-only config mount can cache release information
+in `update-status/` beside the watch database. Root `update check` prints the
+result without writing a cache.
 
 Backups are private, retain the most recent seven snapshots by default, and
 include password hashes. The policy's `retention` overrides that count. A pending
