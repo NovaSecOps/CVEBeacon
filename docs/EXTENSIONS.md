@@ -58,17 +58,26 @@ direct version observation.
 When a library has an npm identity, a disclosed version is recorded with that
 exact package name so it can use an npm package URL. Examples include
 `@angular/core`, `@fortawesome/fontawesome-free`, `@popperjs/core`, `core-js`,
-`zone.js`, `react`, `vue`, `jquery`, `bootstrap`, `lodash`, `moment`, `axios`,
-`chart.js`, `d3`, `rxjs` and `tslib`. Products without a disclosed version are
-listed for review and are not added to the inventory.
+`zone.js`, `react`, `react-dom`, `vue`, `jquery`, `bootstrap`, `lodash`,
+`moment`, `axios`, `chart.js`, `d3`, `rxjs` and `tslib`. Products without a
+disclosed version are listed for review and are not added to the inventory.
+
+Rules are checked against version-pinned published builds. When a selected
+minified artifact has no literal version string, the detector recognises only
+that exact build by its SHA-256 digest. The maintainer script
+`tools/web_detection_corpus.py` checks a caller-supplied package manifest; its
+offline mode reads local files, while its download mode retrieves the named
+files from the npm registry. It is an opt-in maintenance check and is not part
+of CI.
 
 Public CDN paths are parsed without fetching files. jsDelivr and unpkg paths
 such as `cdn.jsdelivr.net/npm/<package>@<version>/` and
 `unpkg.com/<package>@<version>/` supply the npm package name and version. For
 cdnjs paths such as `cdnjs.cloudflare.com/ajax/libs/<library>/<version>/`, a
-package identity is added only for a recognised library; other entries keep
-their library name and version without an npm identity. CDN detections are
-bounded per page.
+package identity is added only for a recognised library. Unknown but valid
+cdnjs names remain generic private review evidence with no product, package or
+version identity. Decoded separators, controls, URL-like values and invalid
+library names are rejected. CDN detections are bounded per page.
 
 ### Optional Wappalyzer-format fingerprints
 

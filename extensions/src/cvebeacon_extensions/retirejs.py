@@ -7,12 +7,17 @@ import hashlib
 import json
 from importlib.resources import files
 import re
+import time
 from urllib.parse import unquote, urlsplit
 
 from .webrules import (
     Detection,
     Evidence,
     Page,
+    MAX_PAGE_RESOURCES,
+    MAX_URLS,
+    _bounded_page,
+    _deadline_passed,
     _PACKAGE_PRODUCTS,
     normalize_version,
 )
@@ -24,6 +29,30 @@ _VERSION_CAPTURE = (
 )
 _BACKREFERENCE = re.compile(r"\\[1-9]")
 _COMPONENT_NPM_ALIASES = {"ember": "ember-source"}
+_REVIEWED_PATTERN_REWRITES = {
+    # react-dom's upstream suffix is an open-ended prerelease marker. Bound it
+    # while retaining the version string used by the React DOM release build.
+    ("react-dom", "filecontent", 0):
+        r'version:"(§§version§§)[a-z0-9\-]{0,128}"[\s,]{0,8}rendererPackageName:"react-dom"',
+}
+_REVIEWED_FILECONTENT_HINTS = {
+    "jquery-migrate:filecontent:1": "migrateversion",
+    "jquery.prettyPhoto:filecontent:1": "prettyphoto",
+    "knockout:filecontent:0": "knockout javascript library",
+    "YUI:filecontent:1": "yui/license",
+    "prototypejs:filecontent:1": "prototype",
+    "ember:filecontent:2": "ember.version",
+    "mustache.js:filecontent:2": "mustache.version",
+    "mustache.js:filecontent:3": "exports.name",
+    "handlebars:filecontent:1": "handlebars",
+    "handlebars:filecontent:2": "this.handlebars",
+    "handlebars:filecontent:3": "exports.handlebarsenvironment",
+    "moment.js:filecontent:1": "moment.js",
+    "vue:filecontent:4": "/npm/vue@",
+    "lodash:filecontent:4": "@license",
+    "pdf.js:filecontent:0": "pdfjsversion",
+    "d3:filecontent:0": "d3js.org",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +119,36 @@ def _safe_pattern(pattern: str) -> bool:
             if nested and stack:
                 stack[-1] = True
     return not escaped and not in_class
+
+
+def _has_unbounded_version_gap(pattern: str) -> bool:
+    """Return true when a version placeholder is followed by an open-ended repeat."""
+    if "§§version§§" not in pattern:
+        return False
+    suffix = pattern.split("§§version§§", 1)[1]
+    in_class = False
+    escaped = False
+    index = 0
+    while index < len(suffix):
+        character = suffix[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+        elif character == "[":
+            in_class = True
+        elif character == "]" and in_class:
+            in_class = False
+        elif not in_class and character in "*+":
+            return True
+        elif not in_class and character == "{":
+            end = suffix.find("}", index + 1)
+            if end >= 0 and re.fullmatch(r"\d+,\s*", suffix[index + 1:end]):
+                return True
+        index += 1
+    return False
 
 
 def _literal_hint(pattern: str) -> str:
@@ -187,7 +246,11 @@ def _component_name(value: str) -> str:
 
 def _compile_pattern(component: str, extractor: str, index: int, pattern: object,
                      metadata: dict) -> _Signature | None:
-    if not isinstance(pattern, str) or not _safe_pattern(pattern):
+    if not isinstance(pattern, str):
+        return None
+    pattern = _REVIEWED_PATTERN_REWRITES.get((component, extractor, index), pattern)
+    if (not _safe_pattern(pattern)
+            or _has_unbounded_version_gap(pattern)):
         return None
     versioned = "§§version§§" in pattern
     if pattern.count("§§version§§") > 1:
@@ -198,7 +261,9 @@ def _compile_pattern(component: str, extractor: str, index: int, pattern: object
     except (re.error, OverflowError):
         return None
     vendor, product, name, ecosystem, package = _package_for(component, metadata)
-    hint = _literal_hint(expression_text) if extractor == "filecontent" else ""
+    hint = (_literal_hint(expression_text) or
+            _REVIEWED_FILECONTENT_HINTS.get(f"{component}:{extractor}:{index}", "")) \
+        if extractor == "filecontent" else ""
     return _Signature(
         f"{component}:{extractor}:{index}", component, vendor, product, name,
         ecosystem, package, "js-library", extractor, expression, versioned,
@@ -211,6 +276,7 @@ def _load_signatures():
         "data/retirejs/jsrepository-master.json").read_text(encoding="utf-8")
     data = json.loads(payload)
     signatures: list[_Signature] = []
+    skipped_unbounded_version_gaps = 0
     for component, metadata in data.items():
         if not isinstance(metadata, dict):
             continue
@@ -224,6 +290,13 @@ def _load_signatures():
             if not isinstance(patterns, (list, tuple)):
                 continue
             for index, pattern in enumerate(patterns):
+                if isinstance(pattern, str):
+                    pattern = _REVIEWED_PATTERN_REWRITES.get(
+                        (component, extractor, index), pattern,
+                    )
+                if isinstance(pattern, str) and _has_unbounded_version_gap(pattern):
+                    skipped_unbounded_version_gaps += 1
+                    continue
                 compiled = _compile_pattern(component, extractor, index, pattern, metadata)
                 if compiled:
                     signatures.append(compiled)
@@ -238,10 +311,10 @@ def _load_signatures():
                         ecosystem, package, "js-library", "hashes", None, False,
                         digest.lower(), normalize_version(version),
                     ))
-    return tuple(signatures)
+    return tuple(signatures), skipped_unbounded_version_gaps
 
 
-SIGNATURES = _load_signatures()
+SIGNATURES, SKIPPED_UNBOUNDED_VERSION_GAPS = _load_signatures()
 _FILECONTENT_BY_HINT: dict[str, tuple[_Signature, ...]] = {}
 _FILECONTENT_FALLBACK: tuple[_Signature, ...] = ()
 _HINTS: tuple[str, ...] = ()
@@ -257,6 +330,10 @@ for _signature in SIGNATURES:
 _FILECONTENT_BY_HINT = {key: tuple(value) for key, value in _hint_groups.items()}
 _FILECONTENT_FALLBACK = tuple(_fallback)
 _HINTS = tuple(sorted(_FILECONTENT_BY_HINT, key=lambda value: (-len(value), value)))
+_FILECONTENT_HINT_PREFIXES = tuple(sorted({hint[:2] for hint in _HINTS}))
+_FILECONTENT_HINT_PATTERN = re.compile(
+    "(?=(" + "|".join(re.escape(value) for value in _HINTS) + "))"
+) if _HINTS else None
 def _matches(signature: _Signature, text: str):
     match = signature.expression.search(text) if signature.expression else None
     if not match or not match.group(0):
@@ -267,13 +344,18 @@ def _matches(signature: _Signature, text: str):
             version = normalize_version(match.group("retire_version"))
         except (IndexError, KeyError):
             version = ""
+        if signature.package == "react-dom" and version:
+            stable = re.fullmatch(r"(\d+(?:\.\d+){0,3})-next-[0-9A-Za-z._-]+", version,
+                                  re.IGNORECASE)
+            if stable:
+                version = stable.group(1)
     return match, version
 
 
 def _page_urls(page: Page):
-    for url in page.urls:
+    for url in page.urls[:MAX_URLS]:
         yield url, "page"
-    for resource in page.resources:
+    for resource in page.resources[:MAX_PAGE_RESOURCES]:
         if resource.url:
             yield resource.url, resource.url
 
@@ -288,9 +370,10 @@ def _filename(value: str) -> str:
 def _filecontent_candidates(text: str) -> set[_Signature]:
     candidates = set(_FILECONTENT_FALLBACK)
     folded = text.casefold()
-    for hint in _HINTS:
-        if hint in folded:
-            candidates.update(_FILECONTENT_BY_HINT[hint])
+    if (_FILECONTENT_HINT_PATTERN is not None and any(
+            folded.find(prefix) >= 0 for prefix in _FILECONTENT_HINT_PREFIXES)):
+        for match in _FILECONTENT_HINT_PATTERN.finditer(folded):
+            candidates.update(_FILECONTENT_BY_HINT.get(match.group(1), ()))
     return candidates
 
 
@@ -313,8 +396,13 @@ def _append(findings: dict, signature: _Signature, kind: str, source: str,
         item["evidence"].append(Evidence(kind, source, excerpt[:160]))
 
 
-def detect(page: Page) -> tuple[Detection, ...]:
+def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detection, ...]:
     """Evaluate URI, filename, file-content, and SHA-1 extractors offline."""
+    if _deadline_passed(deadline, clock):
+        return ()
+    page = _bounded_page(page)
+    if page is None:
+        return ()
     findings: dict[tuple[str, str], dict] = {}
     signatures_by_type: dict[str, list[_Signature]] = {}
     for signature in SIGNATURES:
@@ -323,16 +411,22 @@ def detect(page: Page) -> tuple[Detection, ...]:
     for url, source in _page_urls(page):
         for extractor, value in (("uri", url), ("filename", _filename(url))):
             for signature in signatures_by_type.get(extractor, ()):
+                if _deadline_passed(deadline, clock):
+                    break
                 result = _matches(signature, value)
                 if result:
                     match, version = result
                     _append(findings, signature, "url", source, match.group(0), version)
 
     for resource in page.resources:
+        if _deadline_passed(deadline, clock):
+            break
         if resource.kind != "script" or not resource.text:
             continue
         candidates = _filecontent_candidates(resource.text)
         for signature in candidates:
+            if _deadline_passed(deadline, clock):
+                break
             result = _matches(signature, resource.text)
             if result:
                 match, version = result
@@ -340,6 +434,8 @@ def detect(page: Page) -> tuple[Detection, ...]:
                         match.group(0), version)
         digest = hashlib.sha1(resource.text.encode("utf-8")).hexdigest()
         for signature in signatures_by_type.get("hashes", ()):
+            if _deadline_passed(deadline, clock):
+                break
             if digest == signature.digest:
                 _append(findings, signature, "script", resource.url, digest,
                         signature.hash_version)
