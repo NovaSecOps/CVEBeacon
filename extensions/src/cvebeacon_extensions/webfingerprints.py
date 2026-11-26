@@ -974,10 +974,13 @@ def _string(value: object, *, allow_empty: bool = True) -> str:
 
 
 def _valid_technology_name(value: object) -> bool:
-    validate_name = getattr(webrules, "valid_technology_name", None)
+    # The rules module owns the shared name contract that the dashboard enforces.
+    validate_name = (getattr(webrules, "valid_detection_name", None)
+                     or getattr(webrules, "valid_technology_name", None))
     if validate_name is not None:
         return validate_name(value)
-    return isinstance(value, str) and bool(value.strip()) and webrules._is_scalar_text(value, 256)
+    scalar = getattr(webrules, "is_scalar_text", None) or getattr(webrules, "_is_scalar_text")
+    return isinstance(value, str) and bool(value.strip()) and scalar(value, 256)
 
 
 def _pattern_values(value: object) -> tuple[str, ...]:
