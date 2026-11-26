@@ -70,6 +70,28 @@ package identity is added only for a recognised library; other entries keep
 their library name and version without an npm identity. CDN detections are
 bounded per page.
 
+### Optional Wappalyzer-format fingerprints
+
+CVEBeacon can read operator-supplied fingerprint files in the published
+Wappalyzer JSON layout. CVEBeacon includes no Wappalyzer fingerprint data and
+does not download fingerprint files at run time. An operator may obtain a copy
+of a published collection, for example by cloning its community repository,
+and point the reader at its `src` directory or its `src/technologies`
+directory. The maintained community collection is licensed under GPL-3.0; that
+licence applies to the fingerprint data. Check the licence for any collection
+you choose to use and follow its terms.
+
+The reader supports passive matching for response headers, cookie names, all
+HTML meta tags, script source URLs, script text, CSS, HTML, visible page text,
+the page URL, robots resources and a bounded static DOM selector subset. Static
+DOM selectors include tags, IDs, classes, attribute presence and the `=`, `*=`,
+`^=` and `$=` attribute operators, with `exists`, `attributes` and `text`
+conditions. The `js`, `xhr`, `dns`, `certIssuer` and `probe` kinds are not
+evaluated. Those patterns need a browser, additional lookups or requests, or
+dynamic page state; DOM `properties` conditions also need JavaScript execution.
+Fingerprints are only matched against data already collected for the authorised
+page observation.
+
 ### What it sends
 
 - One `GET` to the configured page path, plus at most ten redirects that are
