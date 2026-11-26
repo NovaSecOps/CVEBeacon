@@ -49,7 +49,7 @@
 {% elif total %}
 {{ empty_state('No clients on this page', 'Go to the previous page to see more clients.') }}
 {% else %}
-{{ empty_state('No clients in the latest scan', 'Add the client name to an inventory and run a scan to see findings here.') }}
+{{ empty_state('No clients in the latest scan', 'To add assets, open Inventory → Add inventory. Client is optional.') }}
 {% endif %}
 {% if has_previous or has_next %}
 {{ pagination(page, url_for('watch.clients', page=page - 1) if has_previous else none,
@@ -57,8 +57,7 @@
 {% endif %}
 {% elif not inventory_configured %}
 {{ empty_state('No scan results yet' if managed_clients else 'No clients yet',
-               'Client allocation requires an inventory scan. Add a client and upload their software list to get started.' if can_add else
-               'Client allocation requires an inventory scan. Findings appear after an inventory is available and scanned.') }}
+               'To add assets, open Inventory → Add inventory. Client is optional.') }}
 {% else %}
 {{ empty_state('No scan results yet', 'No successful inventory scan is available. Run a scan to see affected clients.') }}
 {% endif %}

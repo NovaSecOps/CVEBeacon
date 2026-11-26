@@ -207,10 +207,11 @@ def test_home_uses_plain_names_for_changes_and_delivery(signed_in):
 def test_home_inventory_notice_is_plain_language(watch_only):
     _, _, client = watch_only
     text = client.get("/").text
-    assert "No software list is set up yet." in text
-    assert "Add a client and upload their software list on the" in text
-    assert "Alerts about public flaws still work without it." in text
-    assert 'href="/watch/clients"' in text
+    copy = re.sub(r"<[^>]+>", "", text)
+    assert "No inventory is set up yet." in text
+    assert "Add a list on the Inventory page. Client is optional." in copy
+    assert "Alerts about public flaws still work without an inventory." in text
+    assert 'href="/inventory">Inventory page</a>' in text
     # The technical alternative is still available, but closed by default.
     assert "[inventory]" in text
     assert "[inventory]" not in visible(text)
