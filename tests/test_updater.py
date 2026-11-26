@@ -469,8 +469,9 @@ def test_concurrent_update_is_refused_without_replacing_the_journal(transaction)
         with pytest.raises(RunInProgress):
             updater.apply("0.1.1")
     assert not (updater.policy.prefix / "update-journal.json").exists()
-    status = json.loads((config.config_path.parent / u.STATUS).read_text(encoding="utf-8"))
-    assert status["last_update"]["reason"] == "lock-failed"
+    status = u.read_status(config)
+    assert status["last_attempt"]["reason"] == "lock-failed"
+    assert "last_update" not in status
 
 
 def test_switch_replaces_existing_link_atomically(tmp_path, monkeypatch):

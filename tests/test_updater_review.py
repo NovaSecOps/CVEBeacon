@@ -19,6 +19,62 @@ from test_updater import signed, transaction, value
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native updates are Linux-only")
 
 
+def _audit(updater):
+    return [json.loads(line) for line in (updater.policy.prefix / "update-audit.jsonl")
+            .read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.mark.parametrize("obstacle", ["monitor", "writer"])
+def test_recovery_leaves_running_dashboard_alone_if_writers_have_not_quiesced(transaction, monkeypatch, obstacle):
+    updater, native, config = transaction
+    updater._begin("0.1.0", "0.1.1", updater.policy.units)
+    journal = updater.policy.prefix / u.JOURNAL
+    initial = journal.read_bytes()
+    lock = RunLock(config.watch.database.parent / u.LOCK_NAME)
+    if obstacle == "monitor":
+
+        def stop(units):
+            raise u.UpdateError("monitoring service is still active")
+        monkeypatch.setattr(native, "stop", stop)
+    else:
+        assert lock.acquire()
+        updater.policy = replace(updater.policy, wait_seconds=0)
+    try:
+        with pytest.raises(u.UpdateError, match="recovery remains incomplete"):
+            updater.recover()
+        assert "freeze" not in native.calls
+        assert journal.read_bytes() == initial
+        assert u.read_status(config)["last_update"]["recovery_reason"] == (
+            "quiesce-failed" if obstacle == "monitor" else "lock-failed")
+    finally:
+        lock.release()
+
+
+def test_recovery_stops_a_partially_started_dashboard_while_writer_lock_is_held(transaction, monkeypatch):
+    updater, native, config = transaction
+    updater._begin("0.1.0", "0.1.1", updater.policy.units)
+    stops = []
+    started = False
+
+    def start(units):
+        nonlocal started
+        started = True
+        raise subprocess.TimeoutExpired("private synthetic command", 1)
+
+    # Check both stops without ever taking or releasing recovery's lock.
+    def record_stop(units):
+        with pytest.raises(RunInProgress):
+            with RunLock(config.watch.database.parent / u.LOCK_NAME):
+                pytest.fail("dashboard stop occurred without the writer lock")
+        stops.append(started)
+
+    monkeypatch.setattr(native, "freeze", record_stop)
+    monkeypatch.setattr(native, "start", start)
+    with pytest.raises(u.UpdateError, match="recovery remains incomplete"):
+        updater.recover()
+    assert stops == [False, True]
+
+
 @pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
                                  sqlite3.SQLITE_BUSY_SNAPSHOT, sqlite3.SQLITE_LOCKED_SHAREDCACHE])
 @pytest.mark.parametrize("direct", [False, True])
@@ -226,58 +282,159 @@ def test_health_probe_shares_deadline_and_rechecks_process_and_listener(tmp_path
     assert all(0 < timeout <= 120 - now for now, timeout in timeouts)
 
 
-def _audit(updater):
-    return [json.loads(line) for line in (updater.policy.prefix / "update-audit.jsonl")
-            .read_text(encoding="utf-8").splitlines()]
-
-
-@pytest.mark.parametrize("obstacle", ["monitor", "writer"])
-def test_recovery_leaves_running_dashboard_alone_if_writers_have_not_quiesced(transaction, monkeypatch, obstacle):
+@pytest.mark.parametrize("failure", ["malformed", "unclaimable", "timeout"])
+def test_request_service_classifies_failures_and_keeps_details_private(transaction, monkeypatch, failure):
     updater, native, config = transaction
-    updater._begin("0.1.0", "0.1.1", updater.policy.units)
-    journal = updater.policy.prefix / u.JOURNAL
-    initial = journal.read_bytes()
-    lock = RunLock(config.watch.database.parent / u.LOCK_NAME)
-    if obstacle == "monitor":
-
-        def stop(units):
-            raise u.UpdateError("monitoring service is still active")
-        monkeypatch.setattr(native, "stop", stop)
+    request = updater.policy.data / u.REQUEST
+    private = "synthetic private request text"
+    if failure == "malformed":
+        request.write_text(private, encoding="utf-8", newline="\n")
     else:
-        assert lock.acquire()
-        updater.policy = replace(updater.policy, wait_seconds=0)
+        u.atomic_json(request, {"version": "0.1.1", "user": "admin", "time": u.stamp()})
+    if failure == "unclaimable":
+        original_rename = os.rename
+
+        def rename(source, destination, **kwargs):
+            if source == request:
+                raise PermissionError(private)
+            return original_rename(source, destination, **kwargs)
+
+        monkeypatch.setattr(os, "rename", rename)
+    if failure == "timeout":
+        def preflight(venv):
+            raise subprocess.TimeoutExpired(private, 1)
+        monkeypatch.setattr(native, "preflight", preflight)
+    args = SimpleNamespace(update_command="apply", from_request=True, version=None,
+                           config=str(config.config_path), policy="unused")
+    monkeypatch.setattr(u, "unsupported_reason", lambda: None)
+    monkeypatch.setattr(u.Policy, "read", lambda path: updater.policy)
+    monkeypatch.setattr(u, "Updater", lambda policy: updater)
+    assert u.cli(args) == 0
+    expected = {"malformed": "request-invalid", "unclaimable": "request-claim-failed", "timeout": "preflight-failed"}[failure]
+    status = u.read_status(config)
+    assert status["last_request"]["reason"] == expected
+    assert _audit(updater)[-1]["reason"] == expected
+    assert private not in json.dumps(status) + json.dumps(_audit(updater))
+
+
+@pytest.mark.parametrize("operation", ["apply", "recover"])
+def test_update_lock_open_errors_are_classified_as_advisory_attempts(transaction, monkeypatch, operation):
+    updater, _, config = transaction
+
+    def cannot_open(lock):
+        raise PermissionError("synthetic private lock path")
+
+    monkeypatch.setattr(u.RunLock, "acquire", cannot_open)
+    with pytest.raises(PermissionError):
+        getattr(updater, operation)()
+    assert u.read_status(config)["last_attempt"]["reason"] == "lock-failed"
+    assert _audit(updater)[-1]["reason"] == "lock-failed"
+    assert not (updater.policy.prefix / "update-result.json").exists()
+
+
+@pytest.mark.parametrize("operation", ["apply", "recover"])
+def test_contender_cannot_replace_the_newly_written_transaction_result(transaction, monkeypatch, operation):
+    updater, native, config = transaction
+    contender = type(updater)(updater.policy, native, updater.releases)
+    original = contender.event
+    lock = RunLock(updater.policy.prefix / "update.lock")
+    assert lock.acquire()
+
+    def finish_original(*args, **kwargs):
+        lock.release()
+        assert updater.apply("0.1.1")["result"] == "updated"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(contender, "event", finish_original)
     try:
-        with pytest.raises(u.UpdateError, match="recovery remains incomplete"):
-            updater.recover()
-        assert "freeze" not in native.calls
-        assert journal.read_bytes() == initial
+        with pytest.raises(RunInProgress):
+            getattr(contender, operation)()
     finally:
         lock.release()
+    mirror = json.loads((updater.policy.prefix / "update-result.json").read_text(encoding="utf-8"))
+    status = u.read_status(config)
+    assert mirror["result"] == status["last_update"]["result"] == "updated"
+    assert status["last_attempt"]["reason"] == "lock-failed"
 
 
-def test_recovery_stops_a_partially_started_dashboard_while_writer_lock_is_held(transaction, monkeypatch):
+@pytest.mark.parametrize("obstacle", ["lock", "preflight"])
+def test_invalid_manual_version_never_enters_status_or_audit(transaction, monkeypatch, obstacle):
     updater, native, config = transaction
-    updater._begin("0.1.0", "0.1.1", updater.policy.units)
-    stops = []
-    started = False
+    private = "synthetic private version text"
+    lock = RunLock(updater.policy.prefix / "update.lock")
 
-    def start(units):
-        nonlocal started
-        started = True
-        raise subprocess.TimeoutExpired("private synthetic command", 1)
+    def preflight(venv):
+        raise u.UpdateError("synthetic private exception details")
 
-    # Check both stops without ever taking or releasing recovery's lock.
-    def record_stop(units):
-        with pytest.raises(RunInProgress):
-            with RunLock(config.watch.database.parent / u.LOCK_NAME):
-                pytest.fail("dashboard stop occurred without the writer lock")
-        stops.append(started)
+    monkeypatch.setattr(native, "preflight", preflight)
+    if obstacle == "lock":
+        assert lock.acquire()
+    try:
+        with pytest.raises(u.UpdateError, match="release version"):
+            updater.apply(private)
+    finally:
+        lock.release()
+    updater.target = private
+    updater.event("check")
+    status, audit = u.read_status(config), _audit(updater)
+    assert status["last_attempt"]["reason"] == "version-invalid"
+    assert status["last_attempt"]["version"] is audit[-1]["version"] is None
+    assert private not in json.dumps(status) + json.dumps(audit)
+    assert "synthetic private exception details" not in json.dumps(status) + json.dumps(audit)
 
-    monkeypatch.setattr(native, "freeze", record_stop)
-    monkeypatch.setattr(native, "start", start)
+
+@pytest.mark.parametrize("failure", ["timer", "archive"])
+def test_finalization_failure_keeps_completed_outcome_and_records_phase(transaction, monkeypatch, failure):
+    updater, _, config = transaction
+    attr = "_resume_timers" if failure == "timer" else "_archive"
+
+    def fail(*args):
+        raise OSError("synthetic private finalization details")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(updater, attr, fail)
+        assert updater.apply("0.1.1")["result"] == "updated"
+    expected = "finalize-timers-failed" if failure == "timer" else "finalize-archive-failed"
+    entry = u.read_status(config)["last_update"]
+    assert entry["result"] == "updated" and entry["finalization_reason"] == expected
+    assert _audit(updater)[-1]["reason"] == expected
+    assert updater.recover()["result"] == "updated"
+    assert "finalization_reason" not in u.read_status(config)["last_update"]
+
+
+def test_pending_adoption_failure_is_classified(transaction, monkeypatch):
+    updater, native, config = transaction
+    updater._begin("0.1.0", "0.1.0", (), kind="adopt")
+    (updater.policy.prefix / ".venv").mkdir()
+
+    def preflight(venv):
+        raise subprocess.TimeoutExpired("synthetic private adoption command", 1)
+
+    monkeypatch.setattr(native, "preflight", preflight)
     with pytest.raises(u.UpdateError, match="recovery remains incomplete"):
         updater.recover()
-    assert stops == [False, True]
+    assert u.read_status(config)["last_update"]["recovery_reason"] == "adopt-failed"
+    assert any(event.get("reason") == "adopt-failed" for event in _audit(updater))
+    assert (updater.policy.prefix / u.JOURNAL).exists()
+
+
+def test_verified_recovery_clears_incomplete_without_losing_original_update_reason(transaction, monkeypatch):
+    updater, native, config = transaction
+    native.failure = "migrate"
+
+    def cannot_start(units):
+        raise u.UpdateError("synthetic partial start")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native, "start", cannot_start)
+        with pytest.raises(u.UpdateError, match="recovery remains incomplete"):
+            updater.apply("0.1.1")
+    failed = u.read_status(config)["last_update"]
+    assert failed["reason"] == "migrate-failed" and failed["recovery_reason"] == "start-failed"
+    assert type(updater)(updater.policy, native, updater.releases).recover()["result"] == "rolled-back"
+    recovered = u.read_status(config)["last_update"]
+    assert recovered["reason"] == "migrate-failed" and "recovery_reason" not in recovered
+    assert value(config.watch.database) == "old"
 
 
 @pytest.mark.parametrize("phase", ["installing", "complete"])
@@ -343,6 +500,40 @@ def test_unreadable_checkpoint_reread_does_not_overwrite_the_fence(transaction, 
     assert _audit(updater)[-1]["reason"] == "recovery-incomplete"
 
 
+@pytest.mark.parametrize("safe", [False, True])
+@pytest.mark.parametrize("reason", ["policy-invalid", "recovery-incomplete"])
+def test_invalid_policy_reports_only_to_an_independently_validated_destination(transaction, monkeypatch, caplog, safe, reason):
+    updater, _, config = transaction
+    request = updater.policy.data / u.REQUEST
+    u.atomic_json(request, {"version": "0.1.1", "user": "admin", "time": u.stamp()})
+    (updater.policy.data).chmod(0o700)
+    args = SimpleNamespace(update_command="apply", from_request=True,
+                           config=str(config.config_path), policy="unused")
+    monkeypatch.setattr(u, "unsupported_reason", lambda: None)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+    def policy(path):
+        raise u.UpdateError("synthetic private policy error", reason_code=reason)
+
+    def protected(path, *, directory=False):
+        assert Path(path) == updater.policy.data.parent and directory
+        if not safe:
+            raise u.UpdateError("synthetic untrusted directory")
+        return Path(path)
+
+    monkeypatch.setattr(u.Policy, "read", policy)
+    monkeypatch.setattr(u, "protected", protected)
+    assert u.cli(args) == 0
+    assert reason in caplog.text and "synthetic private policy error" not in caplog.text
+    status = u.read_status(config)
+    if safe:
+        assert status["last_request"]["reason"] == reason
+        assert not request.exists()
+    else:
+        assert "last_request" not in status
+        assert request.exists()
+
+
 def test_apply_runs_backup_with_the_020_interpreter_and_state_module(transaction, monkeypatch):
     updater, native, config = transaction
     prefix = updater.policy.prefix
@@ -373,3 +564,28 @@ def test_apply_runs_backup_with_the_020_interpreter_and_state_module(transaction
     monkeypatch.setattr(native, "state", executor.state)
     assert updater.apply("0.2.1")["result"] == "updated"
     assert len(observed) == 1 and (observed[0] / "manifest.json").is_file()
+
+
+def test_long_multilingual_notes_cannot_hide_diagnostic_status(transaction, monkeypatch):
+    updater, _, config = transaction
+    release = u.Release("0.1.1", "🚀漢" * 32768, ())
+    monkeypatch.setattr(updater.releases, "check", lambda *args: release)
+
+    def fail(*args):
+        raise u.UpdateError("synthetic private verification details", reason_code="verify-signature")
+
+    monkeypatch.setattr(updater.releases, "verify", fail)
+    with pytest.raises(u.UpdateError):
+        updater.apply("0.1.1")
+    status = u.read_status(config)
+    assert status["last_update"]["reason"] == "verify-signature"
+    assert status["notes"] and release.notes.startswith(status["notes"])
+    assert (config.config_path.parent / u.STATUS).stat().st_size <= 131072
+
+
+def test_every_consumed_request_gets_a_terminal_result(transaction):
+    updater, _, config = transaction
+    u.atomic_json(updater.policy.data / u.REQUEST, {"version": "0.1.1", "user": "admin", "time": u.stamp()})
+    assert updater.apply(from_request=True)["result"] == "updated"
+    entry = u.read_status(config)["last_request"]
+    assert entry["version"] == "0.1.1" and entry["result"] == "updated" and "reason" not in entry

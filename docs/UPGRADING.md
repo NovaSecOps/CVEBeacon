@@ -444,7 +444,7 @@ retrying an update.
 | `check-failed` | The release response could not be checked. |
 | `verify-signature` | The release signature could not be verified. |
 | `verify-artifact` | A release artifact failed a download, checksum, or metadata check. |
-| `quiesce-failed` | A configured service could not be stopped cleanly. |
+| `quiesce-failed` | Timers could not be stopped or an active monitoring service did not finish. |
 | `lock-failed` | A required update or storage lock could not be acquired. |
 | `freeze-failed` | The dashboard could not be stopped for the update. |
 | `backup-failed` | The pre-update backup could not be created. |
@@ -456,6 +456,14 @@ retrying an update.
 | `doctor-failed` | Local health checks did not pass after the update. |
 | `probe-unhealthy` | The dashboard did not pass its health probe after starting. |
 | `recovery-incomplete` | Automatic restoration or its health check did not finish. |
+| `request-invalid` | The claimed dashboard request was malformed. |
+| `request-claim-failed` | The updater could not claim the dashboard request. |
+| `policy-invalid` | The administrator policy could not be loaded. |
+| `version-invalid` | The manual target was not a canonical release version. |
+| `adopt-failed` | Recovery could not finish a pending adoption. |
+| `finalize-timers-failed` | Timer restart failed after commit. Run `cvebeacon update recover`. |
+| `finalize-archive-failed` | Archival failed after commit. Run `cvebeacon update recover`. |
+| `finalize-cleanup-failed` | Temporary-file cleanup after commit needs administrator review. |
 | `update-failed` | The updater could not classify a failure more specifically. |
 
 ## Transaction and rollback
@@ -470,7 +478,11 @@ files alongside the corresponding account database. Snapshots made before
 managed inventory backup was added contain only the database and config
 copies. Symlinks and linked/non-regular data files are refused. All core
 state paths must stay inside that directory. The snapshot helper runs as the
-service account, not root; backups live under the protected code prefix.
+service account with the previous release's Python and snapshot helper. Backups
+live under the protected code prefix. The dashboard stop releases its SQLite
+locks before backup begins. If another process holds a SQLite lock, the current
+snapshot helper retries continuous contention for up to 30 seconds per
+operation. Copy progress resets that wait.
 The configuration writer lock stays held while discovering and waiting for run
 locks, so the dashboard cannot move storage paths during that wait. The updater
 waits for dashboard jobs holding the relevant writer locks before stopping the
@@ -486,8 +498,9 @@ passed through the privileged updater. This health check sends no test alerts.
 `dashboard_unit` explicitly names the persistent web unit and must be included
 in `units`; it can have a custom name. Its ExecStart must use `current`. Health
 requires that unit to be active, its MainPID to own the listening socket, and
-`/healthz` to report that PID and the expected running package version. A stale
-or unrelated listener cannot satisfy the probe. The endpoint caches the running
+`/healthz` to report that PID and the expected running package version. The
+updater retries within a 120-second budget and confirms the process start time
+and listener again after a successful response. The endpoint caches the running
 version at process startup rather than rereading a switched metadata path.
 Listener ownership must match the probe's exact address family and address;
 a wildcard bind is accepted only within that same address family.
@@ -574,7 +587,11 @@ that legacy record. Do not delete an active record to bypass recovery.
 `update-audit.jsonl` records events; `update-result.json` is a convenience mirror
 of the authoritative completed transaction. The dashboard status is advisory
 and uses the resolved **config directory**, as does the privileged request
-consumer, regardless of where database subdirectories reside. The reference
+consumer, regardless of where database subdirectories reside. Request results,
+manual refusals and release checks have separate advisory files so they cannot
+overwrite the locked transaction result. An invalid policy uses the system
+journal and publishes a dashboard refusal only when the independently configured
+data directory passes validation. The reference
 path unit watches that config directory; adjust its path and the service's
 `--config` together for a custom installation.
 Check-only deployments with a read-only config mount fall back to the watch

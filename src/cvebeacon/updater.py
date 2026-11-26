@@ -38,7 +38,7 @@ from packaging.version import InvalidVersion, Version
 from .config import HttpConfig, UpdateConfig, load_config
 from .errors import CVEBeaconError
 from .http import HttpClient
-from .locking import LOCK_NAME, RunLock
+from .locking import LOCK_NAME, RunInProgress, RunLock
 from .private_storage import private_directory, private_file
 from .release_repository import valid_repository
 from .update_transaction import JOURNAL, read_record
@@ -46,6 +46,11 @@ from .update_transaction import JOURNAL, read_record
 LOG = logging.getLogger(__name__)
 REQUEST = "update-request.json"
 STATUS = "update-status.json"
+CHECK_STATUS = "update-check-status.json"
+REQUEST_STATUS = "update-request-status.json"
+ATTEMPT_STATUS = "update-attempt-status.json"
+MAX_STATUS = 131072
+MAX_NOTES = 65536
 MAX_REQUEST = 1024
 MAX_ASSETS = 256
 MAX_ARTIFACT = 256 * 1024 * 1024
@@ -94,6 +99,10 @@ REASON_STEPS = {
     "start": "start-failed",
     "doctor": "doctor-failed",
     "recovery": "recovery-incomplete",
+    "adopt": "adopt-failed",
+    "finalize-timers": "finalize-timers-failed",
+    "finalize-archive": "finalize-archive-failed",
+    "finalize-cleanup": "finalize-cleanup-failed",
 }
 REASON_CODES = frozenset(REASON_STEPS.values()) | frozenset({
     "preflight-crontab-unreadable",
@@ -101,6 +110,10 @@ REASON_CODES = frozenset(REASON_STEPS.values()) | frozenset({
     "check-network",
     "verify-signature",
     "backup-database-busy",
+    "request-invalid",
+    "request-claim-failed",
+    "policy-invalid",
+    "version-invalid",
     "update-failed",
 })
 
@@ -115,6 +128,26 @@ def release_version(value):
     if str(result) != value:
         raise UpdateError("use the canonical PEP 440 release version")
     return result
+
+
+def diagnostic_version(value):
+    try:
+        release_version(value)
+    except UpdateError:
+        return None
+    return value
+
+
+def diagnostic_reason(value):
+    return value if isinstance(value, str) and value in REASON_CODES else None
+
+
+def diagnostic_result(target, result, *, reason=None):
+    entry = {"version": diagnostic_version(target), "result": result,
+             "time": datetime.now(timezone.utc).isoformat(timespec="microseconds")}
+    if code := diagnostic_reason(reason):
+        entry["reason"] = code
+    return entry
 
 
 def _json(raw):
@@ -216,23 +249,90 @@ def control_paths(config_path):
     return directory / REQUEST, directory / STATUS
 
 
-def read_status(config):
+def _read_status_file(path):
+    try:
+        value = _json(read_bounded(path, MAX_STATUS))
+        return value if isinstance(value, dict) else {}
+    except (OSError, CVEBeaconError):
+        return {}
+
+
+def _latest_status(paths):
     candidates = []
-    for path in status_paths(config):
-        try:
-            value = _json(read_bounded(path, 131072))
-            if isinstance(value, dict):
+    for path in paths:
+        value = _read_status_file(path)
+        if value:
+            try:
                 candidates.append((path.stat().st_mtime_ns, value))
-        except (OSError, CVEBeaconError):
-            pass
+            except OSError:
+                pass
     return max(candidates, key=lambda item: item[0])[1] if candidates else {}
 
 
-def status_paths(config):
-    # Native control files stay beside the resolved config. Check-only layouts
-    # can mount that directory read-only and keep advisory state with watch data.
-    return tuple(dict.fromkeys((control_paths(config.config_path)[1],
-                               Path(config.watch.database).resolve().parent / STATUS)))
+def status_time(entry, key="time"):
+    try:
+        value = datetime.fromisoformat(entry[key])
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def read_status(config):
+    state = _latest_status(status_paths(config))
+    checked = _latest_status(status_paths(config, CHECK_STATUS))
+    last_update = state.get("last_update")
+    last_check = status_time(state, "last_check")
+    if isinstance(last_update, dict) and last_update.get("result") == "updated":
+        last_check = max(last_check, status_time(last_update))
+    if status_time(checked, "last_check") > last_check:
+        state.update(_check_fields(checked))
+    directory = control_paths(config.config_path)[1].parent
+    for filename, key in ((REQUEST_STATUS, "last_request"), (ATTEMPT_STATUS, "last_attempt")):
+        if entry := _read_status_file(directory / filename):
+            state[key] = entry
+    return state
+
+
+def status_paths(config, filename=STATUS):
+    # Check-only layouts can mount the config directory read-only.
+    directory = control_paths(config.config_path)[1].parent
+    return tuple(dict.fromkeys((directory / filename, Path(config.watch.database).resolve().parent / filename)))
+
+
+def _check_fields(state):
+    fields = {key: diagnostic_version(state[key]) for key in ("current", "available") if key in state}
+    notes, checked = state.get("notes"), state.get("last_check")
+    if isinstance(notes, str):
+        fields["notes"] = notes[:MAX_NOTES]
+    if isinstance(checked, str) and len(checked) <= 40:
+        fields["last_check"] = checked
+    return fields
+
+
+def _publish_status(path, state):
+    notes = state.get("notes")
+    if isinstance(notes, str):
+        # Use the same serialization as atomic_json. ASCII escapes can expand
+        # a character to twelve bytes, including two escapes for non-BMP text.
+        if len(json.dumps(state, ensure_ascii=True)) > MAX_STATUS:
+            low, high = 0, min(len(notes), MAX_NOTES)
+            while low < high:
+                middle = (low + high + 1) // 2
+                state["notes"] = notes[:middle]
+                if len(json.dumps(state, ensure_ascii=True)) <= MAX_STATUS:
+                    low = middle
+                else:
+                    high = middle - 1
+            state["notes"] = notes[:low]
+    atomic_json(path, state)
+
+
+def _publish_advisory(config_path, filename, entry):
+    try:
+        path = control_paths(config_path)[1].with_name(filename)
+        atomic_json(path, entry)
+    except (OSError, CVEBeaconError):
+        log_warning("update attempt status is unavailable")
 
 
 def unsupported_reason():
@@ -334,7 +434,7 @@ class Releases:
             if len(set(names)) != len(names) or not {"SHA256SUMS", "SHA256SUMS.sig"} <= set(names):
                 raise UpdateError("release is unsigned or has duplicate artifacts")
             notes = row.get("body") or ""
-            if not isinstance(notes, str) or len(notes) > 65536:
+            if not isinstance(notes, str) or len(notes) > MAX_NOTES:
                 raise UpdateError("release notes exceed the size limit")
             candidates.append(Release(str(parsed), notes, names))
         if not candidates:
@@ -425,16 +525,17 @@ def check(config, *, daily=False, http=None):
     with ExitStack() as stack:
         transport = http or stack.enter_context(HttpClient(HttpConfig(retries=0)))
         release = Releases(config.update, transport).check(installed_version("cvebeacon"))
-    state.update(current=installed_version("cvebeacon"), available=release.version if release else None,
-                 notes=release.notes if release else "", last_check=stamp())
-    for path in status_paths(config):
+    checked = {"current": installed_version("cvebeacon"), "available": release.version if release else None,
+               "notes": release.notes if release else "",
+               "last_check": datetime.now(timezone.utc).isoformat(timespec="microseconds")}
+    for path in status_paths(config, CHECK_STATUS):
         try:
             private_directory(path.parent)
-            atomic_json(path, state)
+            _publish_status(path, checked)
             break
         except (OSError, CVEBeaconError):
             pass  # Advisory publication cannot fail a successful release check.
-    return state
+    return {**state, **checked}
 
 
 def protected(path, *, directory=False):
@@ -871,11 +972,16 @@ def consume_request(config_path):
         os.rename(request, claimed)
     except FileNotFoundError:
         return None
+    except OSError:
+        raise UpdateError("cannot claim the update request", reason_code="request-claim-failed") from None
     try:
-        return read_request(claimed)
+        try:
+            return read_request(claimed)
+        except (OSError, CVEBeaconError):
+            raise UpdateError("invalid update request", reason_code="request-invalid") from None
     finally:
         try:
-            claimed.unlink()
+            claimed.unlink(missing_ok=True)
         except IsADirectoryError:
             pass  # Quarantine malformed directories; never recursively delete input.
 
@@ -891,9 +997,10 @@ class Updater:
         self.failure_reason = None
 
     def event(self, step, result="ok", *, reason=None):
-        entry = {"time": stamp(), "step": step, "result": result, "version": getattr(self, "target", None)}
-        if reason in REASON_CODES:
-            entry["reason"] = reason
+        entry = {"time": stamp(), "step": step, "result": result,
+                 "version": diagnostic_version(getattr(self, "target", None))}
+        if code := diagnostic_reason(reason):
+            entry["reason"] = code
         self.events.append(entry)
         try:
             LOG.info("update %s: %s", step, result)
@@ -912,10 +1019,7 @@ class Updater:
 
     @staticmethod
     def _reason_code(step, error):
-        code = getattr(error, "reason_code", None)
-        if code in REASON_CODES:
-            return code
-        return REASON_STEPS.get(step, "update-failed")
+        return diagnostic_reason(getattr(error, "reason_code", None)) or REASON_STEPS.get(step, "update-failed")
 
     def _record_failure(self, step, error):
         reason = self._reason_code(step, error)
@@ -958,7 +1062,8 @@ class Updater:
             raise UpdateError("restore the original administrator policy before recovering this transaction")
         self.record = record
         self.target, self.previous_version = record["new"], record["old"]
-        self.failure_reason = record.get("failure_reason") or self.failure_reason
+        reason = diagnostic_reason(record.get("failure_reason"))
+        self.failure_reason = reason if reason != "recovery-incomplete" else None
 
     @contextmanager
     def _locks(self, record):
@@ -1002,99 +1107,145 @@ class Updater:
             raise
 
     def _finish(self, result):
-        self._checkpoint("complete", result=result)
+        record = dict(self.record)
+        if record.get("failure_reason") == "recovery-incomplete":
+            record.pop("failure_reason")  # Clear the legacy recovery-only marker.
+        self._checkpoint("complete", record=record, result=result)
+
+    def _completed_result(self, record, *, warning=None, recovery_reason=None, finalization_reason=None):
+        result = record["result"]
+        selected = record["new"] if result == "updated" else record["old"]
+        self._result(selected, result, warning=warning, recovery_reason=recovery_reason,
+                     finalization_reason=finalization_reason)
+        return {"result": result, "version": selected, **({"warning": warning} if warning else {})}
 
     def _finalize(self):
-        warning = None
+        step = "finalize-timers"
         try:
             self._resume_timers(self.record)
+            step = "finalize-archive"
             self._archive()
-        except (OSError, CVEBeaconError, subprocess.SubprocessError):
+        except OPERATION_ERRORS:
+            reason = REASON_STEPS[step]
+            self.event(step, "failed", reason=reason)
             warning = "update committed; run update recover to finish finalization"
             log_warning(warning)
-        result = self.record["result"]
-        selected = self.record["new"] if result == "updated" else self.record["old"]
-        self._result(selected, result, warning=warning, reason=self.failure_reason)
+            outcome = self._completed_result(self.record, warning=warning, finalization_reason=reason)
+        else:
+            outcome = self._completed_result(self.record)
         self._retain_best_effort()
-        return {"result": result, "version": selected, **({"warning": warning} if warning else {})}
+        return outcome
 
     def _resume_timers(self, record):
         timers = tuple(unit for unit in record["active"] if unit.endswith(".timer"))
         if timers:
             self.native.start(timers)
 
+    def _update_lock(self, command, *, requested=False):
+        lock = RunLock(self.policy.prefix / "update.lock", command=command)
+        try:
+            if lock.acquire():
+                return lock
+            raise RunInProgress(lock.holder)
+        except OPERATION_ERRORS as exc:
+            busy = requested and isinstance(exc, RunInProgress)
+            result = "busy" if busy else "refused" if command == "update" else "recovery-refused"
+            entry = diagnostic_result(self.target, result, reason="lock-failed")
+            self.failure_reason = "lock-failed"
+            self.event("request_busy" if busy else "lock", "refused" if busy else "failed", reason="lock-failed")
+            _publish_advisory(self.policy.config, REQUEST_STATUS if requested else ATTEMPT_STATUS, entry)
+            raise
+
+    def _read_pending(self, *, result):
+        try:
+            return read_record(self.policy.prefix)
+        except OPERATION_ERRORS:
+            reason = "recovery-incomplete"
+            self.event("recovery", "failed", reason=reason)
+            if self.record and self.record.get("phase") == "complete":
+                self._completed_result(self.record, recovery_reason=reason)
+            else:
+                self._result(self.target, result, reason=reason)
+            self.failure_reason = reason
+            raise UpdateError("update recovery remains incomplete; inspect the active recovery record") from None
+
     def apply(self, target=None, *, from_request=False, _requested=False):
         requested = from_request or _requested
+        self.target = None
+        self.record = self.failure_step = self.failure_reason = None
+        self.checked = {}
         if from_request:
-            if target:
-                raise UpdateError("--version and --from-request are mutually exclusive")
-            target = consume_request(self.policy.config)
+            try:
+                if target is not None:
+                    raise UpdateError("--version and --from-request are mutually exclusive", reason_code="request-invalid")
+                target = consume_request(self.policy.config)
+            except OPERATION_ERRORS as exc:
+                reason = self._reason_code("request", exc)
+                if reason == "update-failed":
+                    reason = "request-claim-failed"
+                self.failure_reason = reason
+                self.event("request_refused", "failed", reason=reason)
+                self._request_result(None, "refused", reason=reason)
+                raise
             if target is None:
                 return {"result": "no-request"}
-        lock = RunLock(self.policy.prefix / "update.lock", command="update")
-        if not lock.acquire():
-            self.target = target
-            self.failure_reason = "lock-failed"
-            if not requested:
-                from .locking import RunInProgress
-                error = RunInProgress(lock.holder)
-                self._record_failure("lock", error)
-                self._result(target, "refused", reason="lock-failed")
-                raise error
-            self.event("request_busy", "refused", reason="lock-failed")
-            self._request_result(target, "busy", reason="lock-failed")
-            return {"result": "busy", "version": target}
+        if target is not None and diagnostic_version(target) is None:
+            self.failure_reason = "version-invalid"
+            self.event("version", "failed", reason=self.failure_reason)
+            filename = REQUEST_STATUS if requested else ATTEMPT_STATUS
+            _publish_advisory(self.policy.config, filename,
+                              diagnostic_result(None, "refused", reason=self.failure_reason))
+            raise UpdateError("invalid or noncanonical release version", reason_code=self.failure_reason)
+        self.target = target
         try:
-            try:
-                pending = read_record(self.policy.prefix)
-            except BaseException as exc:
-                reason = self._record_failure("recovery", exc)
-                self._result(target, "refused", reason=reason)
-                raise
-            if pending:
-                result = self._recover(pending)
-                if requested:
-                    self._request_result(target, "recovered; request again")
-                return result
-            self.record = None
-            self.failure_step = None
-            self.failure_reason = None
-            try:
-                return self._apply(target)
-            except BaseException as exc:
-                # Never let audit/status writes prevent restoration. A completed
-                # transaction may only need finalization, not another DB restore.
-                try:
-                    pending = read_record(self.policy.prefix)
-                except OPERATION_ERRORS as error:
-                    reason = self._record_failure("recovery", error)
-                    self._result(target, "rollback-failed" if self.record else "refused", reason=reason)
-                    raise UpdateError("update recovery remains incomplete; inspect the active recovery record") from None
-                if pending:
-                    if pending.get("phase") != "complete":
-                        reason = self._record_failure(self.failure_step or "recovery", exc)
-                        pending = {**pending, "failure_reason": reason}
-                        try:
-                            self._checkpoint(pending["phase"], record=pending)
-                        except BaseException:
-                            log_warning("update failure reason could not be saved in the recovery record")
-                    result = self._recover(pending)
-                    if result["result"] == "updated":
-                        return result
-                    raise UpdateError("update failed; previous release and state restored") from None
-                if self.record and self.record["phase"] == "complete":
-                    # Even a late temporary-directory cleanup failure must not
-                    # rewrite the durable outcome after archival.
-                    result = self.record["result"]
-                    selected = self.record["new"] if result == "updated" else self.record["old"]
-                    warning = "update committed; temporary-file cleanup needs administrator review"
-                    self._result(selected, result, warning=warning)
-                    return {"result": result, "version": selected, "warning": warning}
-                reason = self._record_failure(self.failure_step or "recovery", exc)
-                self._result(target, "refused", reason=reason)
-                raise
+            lock = self._update_lock("update", requested=requested)
+        except RunInProgress:
+            if requested:
+                return {"result": "busy", "version": target}
+            raise
+        try:
+            pending = self._read_pending(result="refused")
+            result = self._recover(pending) if pending else self._apply_or_restore(target)
+        except OPERATION_ERRORS:
+            if requested:
+                reason = self.failure_reason or "update-failed"
+                self.event("request_refused", "failed", reason=reason)
+                self._request_result(target, "refused", reason=reason)
+            raise
+        else:
+            if requested:
+                self._request_result(target, "recovered; request again" if pending else result["result"])
+            return result
         finally:
             lock.release()
+
+    def _apply_or_restore(self, target):
+        try:
+            return self._apply(target)
+        except BaseException as exc:
+            # An atomic replacement can succeed before its directory fsync
+            # raises. Recover from the observed record, including commit.
+            pending = self._read_pending(result="rollback-failed" if self.record else "refused")
+            if pending:
+                if pending["phase"] != "complete":
+                    reason = self._record_failure(self.failure_step or "recovery", exc)
+                    pending = {**pending, "failure_reason": reason}
+                    try:
+                        self._checkpoint(pending["phase"], record=pending)
+                    except OSError:
+                        log_warning("update failure reason could not be saved in the recovery record")
+                result = self._recover(pending)
+                if result["result"] == "updated":
+                    return result
+                raise UpdateError("update failed; previous release and state restored") from None
+            if self.record and self.record["phase"] == "complete":
+                reason = REASON_STEPS["finalize-cleanup"]
+                self.event("finalize-cleanup", "failed", reason=reason)
+                warning = "update committed; temporary-file cleanup needs administrator review"
+                return self._completed_result(self.record, warning=warning, finalization_reason=reason)
+            reason = self._record_failure(self.failure_step or "recovery", exc)
+            self._result(target, "refused", reason=reason)
+            raise
 
     def _apply(self, target):
         p = self.policy
@@ -1112,7 +1263,8 @@ class Updater:
             self.failure_step = "check"
             release = remote.check(old.name, target)
             self.target = release.version if release else old.name
-            self.checked = {"last_check": stamp(), "available": release.version if release else None, "notes": release.notes if release else ""}
+            self.checked = {"last_check": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                            "available": release.version if release else None, "notes": release.notes if release else ""}
             self.event("check")
             if release is None:
                 self._result(old.name, "up-to-date")
@@ -1181,20 +1333,12 @@ class Updater:
             return self._finalize()
 
     def recover(self):
-        lock = RunLock(self.policy.prefix / "update.lock", command="recover")
-        if not lock.acquire():
-            from .locking import RunInProgress
-            error = RunInProgress(lock.holder)
-            reason = self._record_failure("lock", error)
-            self._result(None, "recovery-refused", reason=reason)
-            raise error
+        self.target = None
+        self.record = self.failure_step = self.failure_reason = None
+        self.checked = {}
+        lock = self._update_lock("recover")
         try:
-            try:
-                pending = read_record(self.policy.prefix)
-            except BaseException as exc:
-                reason = self._record_failure("recovery", exc)
-                self._result(None, "recovery-refused", reason=reason)
-                raise
+            pending = self._read_pending(result="recovery-refused")
             return self._recover(pending) if pending else {"result": "no-recovery-required"}
         finally:
             lock.release()
@@ -1216,17 +1360,14 @@ class Updater:
             raise
 
     def _recover(self, record):
+        self.failure_step = "recovery"
         try:
             self._validate_recovery(record)
-        except BaseException as exc:
-            self.failure_reason = self._record_failure("recovery", exc)
-            self._result(record.get("new"), "rollback-failed", reason="recovery-incomplete")
-            raise UpdateError("update recovery remains incomplete; writers are blocked until recovery succeeds") from None
-        if record["kind"] == "adopt":
-            return self._complete_adopt()
-        p = self.policy
-        old = p.prefix / "releases" / record["old"]
-        try:
+            if record["kind"] == "adopt":
+                self.failure_step = "adopt"
+                return self._complete_adopt()
+            p = self.policy
+            old = p.prefix / "releases" / record["old"]
             self.failure_step = "recovery"
             protected(old, directory=True)
             protected_tree(old / ".venv")
@@ -1275,67 +1416,53 @@ class Updater:
                     if self.current().name != selected:
                         raise UpdateError("restored release selection could not be verified")
                     self.event("rollback")
-                    result = record.get("result", "rolled-back") if record["phase"] == "complete" else "rolled-back"
-                    self._finish(result)
+                    self._finish(record["result"] if record["phase"] == "complete" else "rolled-back")
             return self._finalize()
         except BaseException as exc:
-            reason = self._record_failure(self.failure_step or "recovery", exc)
-            self.failure_reason = "recovery-incomplete"
-            if reason != "recovery-incomplete":
-                self.event("recovery", "failed", reason="recovery-incomplete")
+            reason = self._reason_code(self.failure_step, exc)
+            self.event(self.failure_step, "failed", reason=reason)
             self.event("rollback", "failed", reason="recovery-incomplete")
+            try:
+                observed = read_record(self.policy.prefix)
+            except OPERATION_ERRORS:
+                observed = None
+            if observed and observed["id"] == record["id"] and observed["phase"] == "complete":
+                record = observed  # Completion may have replaced the journal before fsync failed.
             if record["phase"] == "complete":
-                selected = record["new"] if record["result"] == "updated" else record["old"]
-                self._result(selected, record["result"], warning="completed update recovery could not verify the selected release",
-                             reason="recovery-incomplete")
+                warning = "completed update recovery could not verify the selected release"
+                self._completed_result(record, warning=warning, recovery_reason=reason)
+                self.failure_reason = "recovery-incomplete"
                 raise UpdateError("completed update verification remains incomplete; inspect the active recovery record") from None
-            else:
-                self._result(record["new"], "rollback-failed", reason="recovery-incomplete")
+            self._result(record["new"], "rollback-failed", reason=self.failure_reason or "recovery-incomplete",
+                         recovery_reason=reason)
+            self.failure_reason = "recovery-incomplete"
             raise UpdateError("update recovery remains incomplete; writers are blocked until recovery succeeds") from None
 
     def _request_result(self, target, result, *, reason=None):
-        try:
-            path = control_paths(self.policy.config)[1]
-            try:
-                status = _json(read_bounded(path, 131072))
-            except (OSError, CVEBeaconError):
-                status = {}
-            if not isinstance(status, dict):
-                status = {}
-            value = {"version": target, "result": result, "time": stamp()}
-            if reason in REASON_CODES:
-                value["reason"] = reason
-            status["last_request"] = value
-            atomic_json(path, status)
-        except OSError:
-            log_warning("update request status is unavailable")
+        _publish_advisory(self.policy.config, REQUEST_STATUS, diagnostic_result(target, result, reason=reason))
 
-    def _result(self, target, result, *, warning=None, reason=None):
-        value = {"version": target, "result": result, "time": stamp()}
+    def _result(self, target, result, *, warning=None, reason=None, recovery_reason=None, finalization_reason=None):
+        value = diagnostic_result(target, result, reason=reason or self.failure_reason)
         if warning:
             value["warning"] = warning
-        reason = reason or self.failure_reason
-        if reason in REASON_CODES:
-            value["reason"] = reason
+        if code := diagnostic_reason(recovery_reason):
+            value["recovery_reason"] = code
+        if code := diagnostic_reason(finalization_reason):
+            value["finalization_reason"] = code
         try:
             atomic_json(self.policy.prefix / "update-result.json", value, mode=0o600)
         except OSError:
             log_warning("update result mirror is unavailable; retain the transaction record")
         try:
             path = control_paths(self.policy.config)[1]
-            try:
-                status = _json(read_bounded(path, 131072))
-            except (OSError, CVEBeaconError):
-                status = {}
-            if not isinstance(status, dict):
-                status = {}
+            status = _check_fields(_read_status_file(path))
             status.update(getattr(self, "checked", {}))
             status["last_update"] = value
-            status["current"] = target if result == "updated" else getattr(self, "previous_version", None)
+            status["current"] = diagnostic_version(target if result == "updated" else getattr(self, "previous_version", None))
             if result == "updated":
                 status["available"] = None
-            atomic_json(path, status)
-        except OSError:
+            _publish_status(path, status)
+        except (OSError, CVEBeaconError):
             log_warning("advisory update status is unavailable")
 
     def _retain_best_effort(self):
@@ -1410,20 +1537,34 @@ def _cli(args, config=None):
     reason = unsupported_reason()
     if reason:
         raise UpdateError(reason)
+    requested = action == "apply" and args.from_request
     try:
         policy = Policy.read(args.policy)
-    except (CVEBeaconError, OSError, ValueError, TypeError, KeyError):
-        if action != "apply" or not args.from_request:
-            raise
+    except OPERATION_ERRORS as exc:
         if os.geteuid() != 0:
-            raise UpdateError("request processing requires an administrator") from None
-        config_path = Path(args.config) if Path(args.config).is_absolute() else Path("/var/lib/cvebeacon/cvebeacon.toml")
+            raise
+        reason = "recovery-incomplete" if getattr(exc, "reason_code", None) == "recovery-incomplete" else "policy-invalid"
+        # The invalid policy cannot select either a privileged audit path or
+        # an advisory destination. Validate the separately configured data path.
+        config_path = Path(args.config)
+        if not config_path.is_absolute():
+            config_path = Path("/var/lib/cvebeacon/cvebeacon.toml")
+        log_warning("update refused: " + reason)
         try:
-            consume_request(config_path)
-        except (CVEBeaconError, OSError):
+            service_data(config_path)
+        except OPERATION_ERRORS:
             pass
-        log_warning("update request refused: administrator policy needs review")
-        return 0
+        else:
+            if requested:
+                try:
+                    consume_request(config_path)
+                except OPERATION_ERRORS:
+                    pass
+            _publish_advisory(config_path, REQUEST_STATUS if requested else ATTEMPT_STATUS,
+                              diagnostic_result(None, "refused", reason=reason))
+        if requested:
+            return 0
+        raise UpdateError("administrator update policy or journal requires review", reason_code=reason) from None
     updater = Updater(policy)
     if action == "adopt":
         result = updater.adopt()
@@ -1431,14 +1572,10 @@ def _cli(args, config=None):
         result = updater.recover()
     else:
         try:
-            result = updater.apply(args.version, from_request=args.from_request)
-        except (CVEBeaconError, OSError):
-            if not args.from_request:
+            result = updater.apply(args.version, from_request=requested)
+        except OPERATION_ERRORS:
+            if not requested:
                 raise
-            reason = updater.failure_reason or "update-failed"
-            updater.event("request_refused", "failed", reason=reason)
-            updater._request_result(None, "refused", reason=reason)
-            log_warning("update request refused; inspect the transaction record")
             return 0
 
     print(json.dumps(result, indent=2))

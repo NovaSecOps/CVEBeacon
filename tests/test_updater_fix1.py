@@ -45,7 +45,7 @@ def test_real_config_variants_share_request_and_status_locations(tmp_path, signe
     u.request_update(config, "0.1.1", proof, users)
     assert u.read_request(tmp_path / u.REQUEST) == "0.1.1"
     u.check(config, http=signed[0].http)
-    assert json.loads((tmp_path / u.STATUS).read_text())["available"] == "0.1.1"
+    assert json.loads((tmp_path / u.CHECK_STATUS).read_text())["available"] == "0.1.1"
     assert u.read_status(config)["available"] == "0.1.1"
 
 
@@ -287,7 +287,9 @@ def test_rollback_health_must_be_checked_before_success(transaction):
     assert (updater.policy.prefix / "update-journal.json").exists()
     assert probes == ["0.1.0", "0.1.0"]
     status = json.loads((updater.policy.data / u.STATUS).read_text(encoding="utf-8"))
-    assert status["last_update"]["reason"] == "recovery-incomplete"
+    assert status["last_update"]["result"] == "rollback-failed"
+    assert status["last_update"]["reason"] == "migrate-failed"
+    assert status["last_update"]["recovery_reason"] == "probe-unhealthy"
 
 
 def test_interrupted_restore_can_be_repeated_from_the_same_snapshot(transaction, monkeypatch):
@@ -438,14 +440,18 @@ def test_pending_recovery_can_restore_a_deleted_config(transaction):
 
 
 def test_from_request_policy_failure_consumes_the_request_without_a_service_failure(tmp_path, monkeypatch):
-    request = tmp_path / u.REQUEST
-    config = tmp_path / "cvebeacon.toml"
-    config.write_text("# runtime config")
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    request = data / u.REQUEST
+    config = data / "cvebeacon.toml"
+    config.write_text("# runtime config", encoding="utf-8", newline="\n")
     u.atomic_json(request, {"version": "0.1.1", "user": "admin", "time": u.stamp()})
     args = SimpleNamespace(update_command="apply", from_request=True, config=str(config), policy=str(tmp_path / "policy"))
     monkeypatch.setattr(u, "unsupported_reason", lambda: None)
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr(u.Policy, "read", lambda *args: (_ for _ in ()).throw(u.UpdateError("disabled")))
+    # Exercise policy refusal with an independently trusted parent in the fixture.
+    monkeypatch.setattr(u, "protected", lambda path, **kwargs: path)
     assert u.cli(args) == 0
     assert not request.exists()
 
