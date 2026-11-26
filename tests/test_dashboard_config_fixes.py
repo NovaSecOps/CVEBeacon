@@ -58,8 +58,11 @@ def form(page, action="preview"):
     data = {}
     for tag in re.findall(r"<input\b[^>]*>", source):
         attributes = dict(re.findall(r'([\w-]+)="([^"]*)"', tag))
-        if attributes.get("type") != "checkbox":
-            data[attributes["name"]] = html.unescape(attributes.get("value", ""))
+        if attributes.get("type") == "checkbox":
+            if "checked" in tag and attributes.get("name"):
+                data[attributes["name"]] = html.unescape(attributes.get("value", ""))
+            continue
+        data[attributes["name"]] = html.unescape(attributes.get("value", ""))
     for name, contents in re.findall(r'<textarea name="([^"]+)"[^>]*>(.*?)</textarea>', source, re.S):
         data[name] = html.unescape(contents)
     for name, contents in re.findall(r'<select name="([^"]+)"[^>]*>(.*?)</select>', source, re.S):

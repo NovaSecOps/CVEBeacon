@@ -587,6 +587,20 @@ Field labels use plain words such as **Watch for new flaws**, **Data sources**
 and **Inventory file**; the corresponding setting key appears beside the
 label in muted text.
 
+Watch settings show `watch.sources` as catalog checkboxes. NVD is required.
+This controls the watch catalogs only; `[sources].*_enabled` remains the
+separate set of scan-source toggles. An untouched selection keeps its original
+order, while a changed selection is written in the loader's canonical order.
+A list with a repeated catalog name uses a TOML text field and is kept as it
+is until edited.
+
+Inventory column mappings use repeatable rows with a canonical field selector
+and a free-text source heading. Every canonical and optional field is offered;
+`asset_id` is required. A mapping with a non-text heading uses a TOML text
+field so its values are kept as they are until edited. The loader still
+validates the resulting document. A stored value the loader rejects, such as
+an unknown catalog name, opens as an error page; fix it in the file first.
+
 Alert rules open in the builder when their condition fits its fixed criteria.
 It can combine included criteria with **Any one** or **All**, then apply
 exclusions that always prevent an alert. It covers known-exploited lists,
