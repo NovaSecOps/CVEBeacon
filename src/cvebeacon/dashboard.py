@@ -71,6 +71,21 @@ def _text(values, name: str, *, required=False, limit=256) -> str:
     return value
 
 
+def _cvss_severity(score: float | None) -> str:
+    """Return the shared dashboard severity key for a CVSS score."""
+    if score is None:
+        return "unknown"
+    if score >= 9:
+        return "critical"
+    if score >= 7:
+        return "high"
+    if score >= 4:
+        return "medium"
+    if score > 0:
+        return "low"
+    return "none"
+
+
 def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
     current = assets.get(item["asset_id"])
     return current is not None and current.target_key == _inventory_target_key(item)
@@ -411,6 +426,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
             data["coverage"] = coverage
 
         affected = needs_review = 0
+        affected_severity = Counter()
         cisa_kev = set()
         eu_kev = set()
         for row in data["findings"]:
@@ -422,6 +438,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
                 finding = row["finding"]
                 if finding["applicability"] == "affected":
                     affected += 1
+                    affected_severity[_cvss_severity(finding["vulnerability"].get("cvss_score"))] += 1
                 elif finding["applicability"] == "needs_review":
                     needs_review += 1
                 vulnerability = finding["vulnerability"]
@@ -437,6 +454,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
             "Assets needing coverage review": coverage_review,
             "CISA KEV CVEs": len(cisa_kev),
             "EU KEV CVEs": len(eu_kev)}
+        data["affected_severity"] = dict(affected_severity)
         if home:
             data["assets"] = []
             data["findings"] = []
@@ -553,7 +571,7 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
             if filters["applicability"] and finding["applicability"] != filters["applicability"]:
                 continue
             score = vuln["cvss_score"]
-            severity = "unknown" if score is None else "critical" if score >= 9 else "high" if score >= 7 else "medium" if score >= 4 else "low" if score > 0 else "none"
+            severity = _cvss_severity(score)
             if minimum is not None and (score is None or score < minimum):
                 continue
             if filters["severity"] and severity != filters["severity"]:

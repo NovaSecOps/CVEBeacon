@@ -46,6 +46,15 @@ _SECONDARY_CARDS = (
     ("EU KEV CVEs", "EU KEV CVEs", "Unique EU KEV CVEs matched to current inventory findings."),
 )
 
+_SEVERITY_BANDS = (
+    ("critical", "Critical", "home-chart-bar-critical"),
+    ("high", "High", "home-chart-bar-high"),
+    ("medium", "Medium", "home-chart-bar-medium"),
+    ("low", "Low", "home-chart-bar-low"),
+    ("none", "None", "home-chart-bar-none"),
+    ("unknown", "Unknown score", "home-chart-bar-unknown"),
+)
+
 
 class HomeContextCache:
     """Cache one derived Home context; failed refreshes never expose old data."""
@@ -261,6 +270,48 @@ def _secondary_metrics(data: dict, inventory_state: str, *, freshness: str) -> l
     return result
 
 
+def _severity_chart(data: dict, inventory_state: str, *, freshness: str) -> dict:
+    chart = {
+        "id": "home-severity-chart",
+        "title": "Affected findings by severity",
+        "description": (
+            "Horizontal bars show CVSS severity bands for findings marked affected in the current inventory. "
+            "Critical is 9 and above, High is 7 and above, Medium is 4 and above, Low is above 0, "
+            "None is 0, and Unknown score means no score. Values are counts of findings."
+        ),
+        "state": inventory_state,
+        "state_message": {
+            "not_configured": "Add inventory to see these numbers.",
+            "could_not_check": "Could not check.",
+            "no_scan_recorded": "No scan recorded.",
+        }.get(inventory_state, "Could not check."),
+        "category_label": "Severity band",
+        "value_label": "Affected findings (count)",
+        "view_box": "0 0 420 310",
+        "headers": ["Severity band", "Affected findings (count)"],
+        "table_label": "Affected findings by severity values",
+        "rows": [],
+        "empty_message": None,
+        "note": "This shows current findings, not history." + freshness,
+    }
+    if inventory_state != "available":
+        return chart
+
+    counts = data.get("affected_severity") or {}
+    for key, label, css_class in _SEVERITY_BANDS:
+        value = counts.get(key, 0)
+        chart["rows"].append({
+            "label": label,
+            "value": value,
+            "css_class": css_class,
+            "cells": [label, value],
+        })
+    if not any(row["value"] for row in chart["rows"]):
+        chart["empty_message"] = "No affected findings recorded for this inventory."
+    chart["max_value"] = max((row["value"] for row in chart["rows"]), default=0) or 1
+    return chart
+
+
 def build_home_context(
     config,
     data: dict,
@@ -290,6 +341,15 @@ def build_home_context(
     if inventory_state == "available" and any(
         not isinstance(counts.get(key), int) or counts[key] < 0
         for key in ("Affected findings", "Needs review", "Coverage unknown assets")
+    ):
+        inventory_state = "could_not_check"
+    severity_counts = data.get("affected_severity")
+    if inventory_state == "available" and (
+        not isinstance(severity_counts, dict)
+        or any(type(severity_counts.get(key, 0)) is not int or severity_counts.get(key, 0) < 0
+               for key, _label, _class_name in _SEVERITY_BANDS)
+        or sum(severity_counts.get(key, 0) for key, _label, _class_name in _SEVERITY_BANDS)
+        != counts["Affected findings"]
     ):
         inventory_state = "could_not_check"
 
@@ -413,6 +473,7 @@ def build_home_context(
     return {
         "cards": cards,
         "secondary": _secondary_metrics(data, inventory_state, freshness=freshness),
+        "severity_chart": _severity_chart(data, inventory_state, freshness=freshness),
         "inventory_state": inventory_state,
         "scan_error": scan_error,
         "inventory_incomplete": inventory_source_incomplete,
@@ -450,6 +511,9 @@ def unavailable_home_context(*, inventory_configured: bool, watch_enabled: bool,
             }
             for title, _count_key, _description in _SECONDARY_CARDS
         ],
+        "severity_chart": _severity_chart(
+            {}, "not_configured" if not inventory_configured else "could_not_check", freshness=""
+        ),
         "inventory_state": "not_configured" if not inventory_configured else "could_not_check",
         "scan_error": True,
     }
