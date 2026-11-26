@@ -438,6 +438,8 @@ def test_legacy_evidence_uses_the_full_resource_url_for_hashes(tmp_path, monkeyp
     urls = [prefix + f"/{index}.js" for index in range(2)]
     html = "".join(f'<script src="{url}"></script>' for url in urls)
     monkeypatch.setattr(web, "_load_external_fingerprints", lambda _: (object(), 1, False))
+    # Exercise the one-shot reader path, which these fixtures patch.
+    monkeypatch.setattr(webfingerprints, "ExternalSession", None, raising=False)
 
     def legacy(page, fingerprints, *, page_url=""):
         if page.resources and page.resources[0].url in urls:
@@ -476,6 +478,8 @@ def test_merge_uses_canonical_keys_and_keeps_ambiguous_display_names(monkeypatch
 ], ids=["surrogate", "version", "cpe", "purl"])
 def test_invalid_optional_detection_is_quarantined(tmp_path, monkeypatch, bad):
     monkeypatch.setattr(web, "_load_external_fingerprints", lambda _: (object(), 1, False))
+    # Exercise the one-shot reader path, which these fixtures patch.
+    monkeypatch.setattr(webfingerprints, "ExternalSession", None, raising=False)
     monkeypatch.setattr(webfingerprints, "detect_external", lambda page, *args, **kwargs:
                         (bad,) if page.html else ())
     detail, _, output, _ = run(tmp_path, [asset()], "<html></html>", transport=Transport([
@@ -489,6 +493,8 @@ def test_invalid_optional_detection_is_quarantined(tmp_path, monkeypatch, bad):
 def test_optional_review_size_limit_does_not_block_publication(tmp_path, monkeypatch):
     monkeypatch.setattr(web, "MAX_BYTES", 4000)
     monkeypatch.setattr(web, "_load_external_fingerprints", lambda _: (object(), 1, False))
+    # Exercise the one-shot reader path, which these fixtures patch.
+    monkeypatch.setattr(webfingerprints, "ExternalSession", None, raising=False)
     extras = tuple(detection(f"extra-{index}", version="") for index in range(50))
     monkeypatch.setattr(webfingerprints, "detect_external", lambda page, *args, **kwargs:
                         extras if page.html else ())
@@ -498,3 +504,27 @@ def test_optional_review_size_limit_does_not_block_publication(tmp_path, monkeyp
     assert detail["run"]["review_truncated"] is True
     assert output.with_name(output.name + ".review.json").stat().st_size <= 4000
     assert read_snapshot(output, allow_partial=True, now=NOW).records[0]["product"] == "http_server"
+
+
+@pytest.mark.parametrize("bad", [
+    detection("surrogate", name="\ud800"), detection("oversized", version="1" * 8202),
+    replace(detection("invalid-cpe"), cpe="invalid"),
+], ids=["surrogate", "version", "cpe"])
+def test_invalid_session_detection_is_quarantined(tmp_path, monkeypatch, bad):
+    class Session:
+        def __init__(self, fingerprints, *, deadline, clock):
+            pass
+        def add_page(self, page, page_url):
+            pass
+        def add_resource(self, resource):
+            pass
+        def finish(self):
+            return (bad,), {"stopped": False}
+    monkeypatch.setattr(webfingerprints, "ExternalSession", Session, raising=False)
+    monkeypatch.setattr(web, "_load_external_fingerprints", lambda _: (object(), 1, False))
+    detail, _, output, _ = run(tmp_path, [asset()], "<html></html>", transport=Transport([
+        response(body=b"<html></html>", server="Apache/2.4.62"),
+    ]))
+    assert [item["product"] for item in detail["products"]] == ["http_server"]
+    assert [item["reason"] for item in detail["reviews"]] == ["invalid-detection"]
+    assert [row["product"] for row in read_snapshot(output, allow_partial=True, now=NOW).records] == ["http_server"]
