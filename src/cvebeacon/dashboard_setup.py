@@ -34,11 +34,11 @@ READ_FAILURES = (CVEBeaconError, OSError, sqlite3.Error)
 SOURCES_TITLE = "Turn on watching and get the first data"
 CHANNEL_TITLE = "Set up and test a way to receive alerts"
 RULE_TITLE = "Choose what should trigger an alert"
-CLIENT_TITLE = "Add a client and their software list"
+INVENTORY_TITLE = "Add inventory"
 SCHEDULE_TITLE = "Run CVEBeacon automatically"
 BACKUP_TITLE = "Make a backup"
 WATCH_UNREADABLE = "The watch data could not be read. Open the Watch overview for details."
-CLIENT_UNREADABLE = "Client information could not be read. Open Clients for details."
+INVENTORY_UNREADABLE = "Inventory information could not be read. Open Inventory for details."
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +55,10 @@ class Step:
 
 
 @dataclass(frozen=True, slots=True)
-class ClientInfo:
-    """Already-read client state: managed lists present, scanned clients found."""
+class InventoryInfo:
+    """Whether an inventory exists and how many assets a completed scan read."""
 
-    managed: bool
+    exists: bool
     scanned: int
 
 
@@ -350,29 +350,26 @@ def _rule_step(config: AppConfig, viewer: Viewer) -> Step:
     )
 
 
-def _client_step(config: AppConfig, client_info: ClientInfo | None, viewer: Viewer) -> Step:
-    if client_info is None:
+def _inventory_step(inventory_info: InventoryInfo | None, viewer: Viewer) -> Step:
+    if inventory_info is None:
         return _step(
-            "client", CLIENT_TITLE, "unknown", CLIENT_UNREADABLE,
-            _link(viewer, "view", "watch.clients", "Open Clients", None),
+            "inventory", INVENTORY_TITLE, "unknown", INVENTORY_UNREADABLE,
+            _link(viewer, "view", "client_inventory.index", "Open Inventory", None),
         )
-    if client_info.managed or client_info.scanned > 0:
+    if inventory_info.exists and inventory_info.scanned > 0:
         return _step(
-            "client", CLIENT_TITLE, "done", "At least one client has a software list.",
+            "inventory", INVENTORY_TITLE, "done",
+            "An inventory is available and has been scanned.",
         )
-    if not config.managed_inventory:
-        return _step(
-            "client", CLIENT_TITLE, "na",
-            "Client software lists added in the dashboard are turned off.",
-            _link(viewer, "edit_inventory", "config_editor.inventory",
-                  "Open inventory settings", "Ask an administrator."),
-        )
+    detail = (
+        "Inventory is available, but no completed scan includes its assets yet."
+        if inventory_info.exists else
+        "No inventory has been added yet, so there is nothing to scan."
+    )
     return _step(
-        "client", CLIENT_TITLE, "todo",
-        "No client has a software list yet. Until one does, CVEBeacon cannot say "
-        "which clients are affected.",
-        _link(viewer, "manage_inventory", "client_inventory.add", "Add a client",
-              "Ask someone who may manage client lists."),
+        "inventory", INVENTORY_TITLE, "todo", detail,
+        _link(viewer, "manage_inventory", "client_inventory.inventory_add", "Add inventory",
+              "Ask someone who may manage inventories."),
     )
 
 
@@ -440,18 +437,18 @@ def build_setup(
     backup_info,
     now: datetime,
     viewer: Viewer,
-    client_info: ClientInfo | None = None,
+    inventory_info: InventoryInfo | None = None,
 ) -> list[Step]:
     """Build the checklist from already-read state; reads nothing itself.
 
-    ``None`` for meta, jobs, backup_info or client_info means the read failed
+    ``None`` for meta, jobs, backup_info or inventory_info means the read failed
     and that step is reported as "Could not check".
     """
     steps = [
         _sources_step(config, meta, now, viewer),
         _channel_step(config, jobs, viewer),
         _rule_step(config, viewer),
-        _client_step(config, client_info, viewer),
+        _inventory_step(inventory_info, viewer),
         _schedule_step(schedule_state, viewer),
     ]
     backup_step = _backup_step(backup_info, now, viewer)
@@ -525,16 +522,35 @@ def _completed_scan_exists(path: Path) -> bool:
         return True
 
 
-def _client_info(config: AppConfig):
+def _scan_asset_count(path: Path, run_id: str) -> int:
+    sidecar = any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-journal"))
+    uri = path.resolve().as_uri() + ("?mode=ro" if sidecar else "?mode=ro&immutable=1")
+    with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as db:
+        row = db.execute("SELECT asset_count FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    if row is None:
+        raise sqlite3.DatabaseError("completed inventory scan could not be read")
+    return max(0, int(row[0]))
+
+
+def _inventory_info(config: AppConfig):
     try:
-        managed = has_managed_inventory(config.inventory_directory)
+        source = config.inventory
+        exists = bool(source and source.path is not None and source.path.is_file())
+        if config.managed_inventory and has_managed_inventory(config.inventory_directory):
+            exists = True
+        if source and source.web_snapshots:
+            from .web_inventory import append_snapshots
+            snapshots = append_snapshots([], config.database_path.parent / "web-inventory")
+            exists = exists or bool(snapshots)
+
         path = Path(config.database_path)
-        if not path.is_file() or not _completed_scan_exists(path):
-            return ClientInfo(managed=managed, scanned=0)
-        return ClientInfo(
-            managed=managed,
-            scanned=client_page(path, limit=1)[2],
-        )
+        scanned = 0
+        if path.is_file() and _completed_scan_exists(path):
+            scan, _, _ = client_page(path, limit=1)
+            if scan is None:
+                raise sqlite3.DatabaseError("completed inventory scan could not be read")
+            scanned = _scan_asset_count(path, scan.run_id)
+        return InventoryInfo(exists=exists, scanned=scanned)
     except READ_FAILURES:
         return None
 
@@ -547,7 +563,7 @@ def gather(config: AppConfig, *, viewer: Viewer, now: datetime | None = None) ->
         jobs=_recent_jobs(),
         schedule_state=_schedule_state(config),
         backup_info=_backup_info(config, viewer),
-        client_info=_client_info(config),
+        inventory_info=_inventory_info(config),
         now=now or datetime.now(timezone.utc),
         viewer=viewer,
     )
