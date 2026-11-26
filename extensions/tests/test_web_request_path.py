@@ -384,7 +384,7 @@ def test_external_session_finishes_once_and_keeps_long_url_metadata(tmp_path, mo
             return (detection("external", evidence=(evidence,)),), {"stopped": True}
     monkeypatch.setattr(webfingerprints, "ExternalSession", Session, raising=False)
     monkeypatch.setattr(web, "_load_external_fingerprints", lambda _: (object(), 1, False))
-    detail, _, _, _ = run(tmp_path, [asset()], html, [
+    detail, _, output, _ = run(tmp_path, [asset()], html, [
         response(content_type="text/javascript", body=b"fixture resource"),
     ], clock=clock)
     assert events == [
@@ -393,6 +393,8 @@ def test_external_session_finishes_once_and_keeps_long_url_metadata(tmp_path, mo
         ("resource", "https://origin.invalid/robots.txt"), ("finish",),
     ]
     assert detail["run"]["fingerprint_stopped"] == 1
+    assert detail["run"]["status"] == "partial"
+    assert read_snapshot(output, allow_partial=True, now=NOW).manifest["omissions"] == ["analysis-incomplete"]
     evidence = detail["products"][0]["evidence"][0]
     assert evidence["kind"] == "dom"
     assert evidence["sha256"] == hashlib.sha256(b"fixture resource").hexdigest()
@@ -529,6 +531,71 @@ def test_invalid_session_detection_is_quarantined(tmp_path, monkeypatch, bad):
     assert [item["product"] for item in detail["products"]] == ["http_server"]
     assert [item["reason"] for item in detail["reviews"]] == ["invalid-detection"]
     assert [row["product"] for row in read_snapshot(output, allow_partial=True, now=NOW).records] == ["http_server"]
+
+
+def test_review_serialization_redacts_sensitive_headers_and_url_evidence(tmp_path, monkeypatch):
+    from test_webfingerprints import make_collection
+
+    collection, _ = make_collection(tmp_path, {
+        "Fixture header": {"cats": [2], "headers": {"set-cookie": "fixture_cookie"}},
+    })
+    monkeypatch.setattr(web, "_load_external_fingerprints",
+                        lambda _: (webfingerprints.load_fingerprints(collection), 1, False))
+    source = "https://origin.invalid/fixture.js?query-sentinel#fragment-sentinel"
+    excerpt = "https://userinfo-sentinel@origin.invalid/fixture.js?query-sentinel#fragment-sentinel"
+    evidence = (
+        webrules.Evidence("url", source, excerpt),
+        webrules.Evidence("url", "assets/fixture.js?relative-secret", "relative-secret"),
+        webrules.Evidence("header", "header:authorization", "authorization-sentinel"),
+        webrules.Evidence("cookie", "cookie:fixture_cookie", "cookie-value-sentinel"),
+    )
+    monkeypatch.setattr(webrules, "detect", lambda page: (
+        detection("fixture", evidence=evidence),) if page.html else ())
+    _, _, output, _ = run(tmp_path, [asset()], "", transport=Transport([
+        response(body=b"<html></html>", **{"set-cookie": "fixture_cookie=cookie-value-sentinel"}),
+    ]))
+    saved = web._review_path(output).read_bytes()
+    for sentinel in (b"query-sentinel", b"fragment-sentinel", b"userinfo-sentinel",
+                     b"authorization-sentinel", b"cookie-value-sentinel", b"relative-secret"):
+        assert sentinel not in saved
+    assert b"https://origin.invalid/fixture.js" in saved
+    assert b"fixture_cookie" in saved
+
+
+def test_site_deadline_publishes_partial_with_completed_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(web, "RESOURCE_SITE_TIMEOUT", 1)
+    clock = Clock()
+
+    class Slow(Transport):
+        def fetch(self, endpoint, *args, **kwargs):
+            if endpoint.path == "/slow.js":
+                clock.value = kwargs["deadline"]
+            return super().fetch(endpoint, *args, **kwargs)
+
+    html = '<script src="/slow.js"></script>'
+    detail, _, output, _ = run(tmp_path, [asset()], html, clock=clock, transport=Slow([
+        response(body=html.encode(), server="Apache/2.4.62"),
+        response(content_type="text/javascript", body=b"fixture"),
+    ], clock))
+    saved = read_snapshot(output, allow_partial=True, now=NOW)
+    assert saved.records[0]["product"] == "http_server"
+    assert saved.manifest["omissions"] == ["analysis-incomplete"]
+    assert saved.manifest["status"] == detail["run"]["status"] == "partial"
+    assert detail["run"]["analysis_stopped"] == 1
+
+
+def test_failed_requested_fingerprint_load_publishes_partial(tmp_path):
+    path = write_allowlist(tmp_path, [asset()])
+    output = tmp_path / "snapshot.json"
+    manifest = web.detect_web(path, output, client="acme", source_id="acme-web",
+        resolver=Resolver(), transport=Transport([response(server="Apache/2.4.62")]),
+        host_interval=0, sleep=lambda _: None, now=lambda: NOW,
+        fingerprints=tmp_path / "missing")
+    run_data = json.loads(web._review_path(output).read_bytes())["run"]
+    assert run_data["fingerprint_error"] is True
+    assert manifest["omissions"] == ["analysis-incomplete"]
+    assert manifest["status"] == run_data["status"] == "partial"
+    assert len(read_snapshot(output, allow_partial=True, now=NOW).records) == 1
 
 
 @pytest.mark.parametrize("base,expected", [
@@ -677,3 +744,65 @@ def test_stricter_referrer_policy_is_applied_on_every_discovery_hop(tmp_path, po
                 if call[0].path.endswith(".js")}
     initial = "https://origin.invalid/app/index.html" if policy_source == "redirect" else None
     assert referers == {"/first.js": initial, "/last.js": None, "/nested.js": None}
+
+
+def test_external_loader_leaves_unrelated_tree_entries_to_the_bounded_reader(tmp_path, monkeypatch):
+    from test_webfingerprints import make_collection
+
+    root, _ = make_collection(tmp_path, {"Fixture": {"cats": [2], "html": "fixture-marker"}})
+
+    def unexpected_walk(*args, **kwargs):
+        pytest.fail("the wrapper must not walk the collection tree")
+
+    monkeypatch.setattr(type(root), "rglob", unexpected_walk)
+    loaded, count, failed = web._load_external_fingerprints(root)
+    assert loaded is not None
+    assert count == 1 and not failed
+
+
+def test_publication_joins_full_sources_before_redacting_and_shortening(tmp_path, monkeypatch):
+    prefix = "https://origin.invalid/" + "x" * 530
+    sources = [prefix + f"/{index}.js?hidden-{index}" for index in range(2)]
+    html = "".join(f'<script src="{source}"></script>' for source in sources)
+    bodies = [b"fixture one", b"fixture two"]
+
+    def detect_file(page):
+        if not page.resources or page.resources[0].url not in sources:
+            return ()
+        source = page.resources[0].url
+        excerpt = "https://origin.invalid/fixture.js?hidden-excerpt"
+        return (detection("fixture", evidence=(webrules.Evidence("script", source, excerpt),)),)
+
+    monkeypatch.setattr(webrules, "detect", detect_file)
+    detail, _, _, _ = run(tmp_path, [asset()], html, [
+        response(content_type="text/javascript", body=body) for body in bodies
+    ])
+    evidence = detail["products"][0]["evidence"]
+    assert [item["source"] for item in evidence] == [prefix[:512]] * 2
+    assert [(item["sha256"], item["bytes"]) for item in evidence] == [
+        (hashlib.sha256(body).hexdigest(), len(body)) for body in bodies]
+    assert all(item["excerpt"] == "https://origin.invalid/fixture.js" for item in evidence)
+    assert "hidden-" not in json.dumps(detail)
+
+
+
+def test_real_external_session_joins_long_sources_with_the_same_display_url(tmp_path, monkeypatch):
+    from test_webfingerprints import make_collection
+
+    collection, _ = make_collection(tmp_path, {
+        "Fixture": {"cats": [2], "scripts": r"Fixture/([0-9.]+)\;version:\1"},
+    })
+    loaded = webfingerprints.load_fingerprints(collection)
+    monkeypatch.setattr(web, "_load_external_fingerprints", lambda _: (loaded, 1, False))
+    display_url = "https://origin.invalid/" + "x" * 400 + ".js"
+    urls = [display_url + f"?hidden-{index}=" + "x" * 150 for index in range(2)]
+    html = "".join(f'<script src="{url}"></script>' for url in urls)
+    bodies = [b"Fixture/1.2 // first", b"Fixture/1.2 // second"]
+    detail, _, _, _ = run(tmp_path, [asset()], html, [
+        response(content_type="text/javascript", body=body) for body in bodies
+    ])
+    evidence = detail["products"][0]["evidence"]
+    assert [(item["sha256"], item["bytes"]) for item in evidence] == [
+        (hashlib.sha256(body).hexdigest(), len(body)) for body in bodies]
+    assert [item["source"] for item in evidence] == [display_url] * 2
+    assert "hidden-" not in json.dumps(detail)

@@ -25,14 +25,12 @@ import inspect
 from itertools import islice
 import json
 import logging
-import os
 from pathlib import Path
 import queue
 import random
 import re
 import socket
 import ssl
-import stat
 import threading
 import time
 from typing import Callable, Iterable, Mapping
@@ -101,6 +99,10 @@ _REFERRER_POLICIES = {
     "unsafe-url": _DEFAULT_REFERRER_POLICY,
 }
 _STANDARD_PATHS = {"icon": "/favicon.ico", "robots": "/robots.txt"}
+_ANALYSIS_STOP_REASONS = {"site-time-budget", "run-deadline"}
+_SENSITIVE_HEADERS = frozenset({"set-cookie", "cookie", "authorization", "proxy-authorization"})
+_URL_IN_EXCERPT = re.compile(r"""(?:https?://|(?<![:/])//)[^\s<>"'`]+""", re.IGNORECASE)
+_URL_SUFFIX_IN_EXCERPT = re.compile(r"""[?#][^\s<>"'`]*""")
 
 
 class _FetchFailure(Exception):
@@ -2258,7 +2260,7 @@ def _detection_evidence(detection) -> tuple[_EvidenceRecord, ...]:
     seen = set()
     for item in getattr(detection, "evidence", ()):
         evidence = _EvidenceRecord(_review_text(item.kind), _review_text(item.source),
-                                   _review_text(item.excerpt[:160]))
+                                   _review_text(item.excerpt))
         key = (evidence.kind, evidence.source, evidence.excerpt)
         if key not in seen:
             result.append(evidence)
@@ -2359,12 +2361,44 @@ def _merge_weak_names(detections: Mapping[tuple[str, ...], _DetectionSummary], o
     return merged
 
 
+def _display_url(value: str) -> str:
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return "url"
+    return parts._replace(netloc=parts.netloc.rsplit("@", 1)[-1], query="", fragment="").geturl()
+
+
+def _display_evidence(evidence: _EvidenceRecord) -> tuple[str, str]:
+    source, excerpt = evidence.source, evidence.excerpt
+    header = source.casefold().removeprefix("header:")
+    if (source.casefold().startswith("header:") or evidence.kind == "header") and header in _SENSITIVE_HEADERS:
+        label = f"header:{header}"
+        return label, label
+    if evidence.kind == "cookie" or source.casefold().startswith("cookie:"):
+        match = re.match(r"cookie:([!#$%&'*+.^_`|~0-9A-Za-z-]+)", source, re.IGNORECASE)
+        label = f"cookie:{match[1]}" if match else "cookie"
+        return label, label
+    if (source.casefold().startswith(("http://", "https://", "//", "/", "./", "../"))
+            or (evidence.kind == "url" and ("?" in source or "#" in source))):
+        display = _display_url(source)
+        if evidence.kind == "url" and source != display and excerpt and excerpt in source:
+            # Readers can return a slice that starts inside the private URL fields.
+            excerpt = display
+        source = display
+    excerpt = _URL_IN_EXCERPT.sub(lambda match: _display_url(match[0]), excerpt)
+    if evidence.kind == "url" or excerpt.lstrip().startswith(("/", "./", "../")):
+        excerpt = _URL_SUFFIX_IN_EXCERPT.sub("", excerpt)
+    return source[:512], excerpt[:160]
+
+
 def _public_evidence(detection: _DetectionSummary,
                      file_metadata: Mapping[str, tuple[str, int]]) -> list[dict]:
     result = []
     for evidence in detection.evidence[:20]:
         file_info = file_metadata.get(evidence.source)
-        item = dict(kind=evidence.kind, source=evidence.source[:512], excerpt=evidence.excerpt)
+        source, excerpt = _display_evidence(evidence)
+        item = dict(kind=evidence.kind, source=source, excerpt=excerpt)
         if file_info is not None:
             item["sha256"], item["bytes"] = file_info
         result.append(item)
@@ -2386,11 +2420,13 @@ class _AssetResult:
     fingerprint_stopped: bool = False
     fingerprint_error: bool = False
     run_stopped: bool = False
+    analysis_stopped: bool = False
 
 
 def _stopped_observation(asset: WebAsset, client: str) -> _AssetResult:
     review = dict(_observation_ids(client, asset.endpoint), reason="timeout", detail=RUN_TIMEOUT_REASON)
-    return _AssetResult(asset, [], [review], {"timeout"}, None, run_stopped=True)
+    return _AssetResult(asset, [], [review], {"timeout", "analysis-incomplete"}, None,
+                        run_stopped=True, analysis_stopped=True)
 
 
 def _detect_builtin(page, *, clock, deadline: float):
@@ -2415,6 +2451,7 @@ class _ExternalObservation:
         self.legacy = False
         self.stopped = False
         self.error = False
+        self._resource_keys: dict[tuple[str, str], str | None] = {}
         if fingerprints is not None:
             from . import webfingerprints
 
@@ -2459,6 +2496,10 @@ class _ExternalObservation:
 
     def add_resource(self, resource: Resource) -> None:
         if self.session is not None and self._active():
+            if len(resource.url) >= 512:
+                key = resource.kind, resource.url[:512]
+                if self._resource_keys.setdefault(key, resource.url) != resource.url:
+                    self._resource_keys[key] = None
             try:
                 self.session.add_resource(resource)
             except Exception:
@@ -2486,10 +2527,22 @@ class _ExternalObservation:
                 detections, stats = self.session.finish()
                 self.stopped |= bool(stats.get("stopped"))
                 self.error |= bool(stats.get("error"))
-                return tuple(detections)
+                return tuple(self._restore_resource_keys(detection) for detection in detections)
             except Exception:
                 self.error = True
         return ()
+
+    def _restore_resource_keys(self, detection):
+        # Older readers shortened file excerpts' sources. Restore only a unique
+        # resource of the same kind. The publication join always uses full keys.
+        if not self._resource_keys:
+            return detection
+        evidence = getattr(detection, "evidence", ())
+        restored = []
+        for item in evidence:
+            source = self._resource_keys.get((item.kind, item.source))
+            restored.append(replace(item, source=source) if source and source != item.source else item)
+        return replace(detection, evidence=tuple(restored)) if tuple(restored) != evidence else detection
 
 
 def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
@@ -2539,6 +2592,11 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
     page = None
     if clock() < deadline:
         page = page_from(success.response.headers, html)
+        if {"cookie", "set-cookie"}.intersection(page.headers):
+            # Keep names extracted by older rule readers while shielding the
+            # raw fields from matching before those readers are upgraded.
+            page = replace(page, headers={name: values for name, values in page.headers.items()
+                                          if name not in {"cookie", "set-cookie"}})
         merge(_detect_builtin(page, clock=clock, deadline=deadline), completed=True)
     if on_page is not None:
         observed_at = success.observed_at
@@ -2554,6 +2612,7 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             result.reviews.extend(stopped.reviews)
             result.omissions.update(stopped.omissions)
             result.run_stopped = True
+            result.analysis_stopped = True
             return result
 
         on_page(page_result)
@@ -2569,25 +2628,28 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             state.final_budget = final_budget
             resources_fetched, resources_skipped, file_metadata = _fetch_resources(
                 html, page_endpoint, asset, allowlist, fetcher, state, run_deadline=run_deadline,
-                deadline=deadline, page_policy=success.referrer_policy, on_detections=merge,
-                fingerprints=fingerprints)
+                deadline=deadline, page_policy=success.referrer_policy,
+                on_detections=lambda values: merge(values, completed=True), fingerprints=fingerprints)
         else:
             reason = "run-deadline" if clock() >= run_deadline else "site-time-budget"
             resources_fetched, resources_skipped, file_metadata = 0, Counter({reason: 1}), {}
     except Exception:
         # Resource collection is optional evidence. A parser or auxiliary file
         # failure must leave the page observation usable and path-free.
-        resources_fetched, resources_skipped, file_metadata = 0, Counter({"unreachable": 1}), {}
+        resources_fetched, resources_skipped, file_metadata = 0, Counter({"analysis-error": 1}), {}
     finally:
         if acquired:
             state.final_budget = None
             final_budget.lock.release()
     merge(fingerprints.finish(), completed=True)
+    analysis_stopped = clock() >= deadline or bool(_ANALYSIS_STOP_REASONS.intersection(resources_skipped))
+    if analysis_stopped or fingerprints.stopped or fingerprints.error or resources_skipped["analysis-error"]:
+        omissions.add("analysis-incomplete")
     return _observation_result(
         asset, allowlist.client, success.observed_at, merged, reviews, omissions,
         resources_fetched=resources_fetched, resources_skipped=resources_skipped,
         file_metadata=file_metadata, fingerprint_stopped=fingerprints.stopped,
-        fingerprint_error=fingerprints.error,
+        fingerprint_error=fingerprints.error, analysis_stopped=analysis_stopped,
     )
 
 
@@ -2601,7 +2663,8 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                         omissions: set[str], *,
                         resources_fetched: int = 0, resources_skipped: Counter | None = None,
                         file_metadata: Mapping[str, tuple[str, int]] | None = None,
-                        fingerprint_stopped: bool = False, fingerprint_error: bool = False) -> _AssetResult:
+                        fingerprint_stopped: bool = False, fingerprint_error: bool = False,
+                        analysis_stopped: bool = False) -> _AssetResult:
     base = _observation_ids(client, asset.endpoint)
     rows: list[dict] = []
     if resources_skipped is None:
@@ -2677,6 +2740,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         resources_fetched=resources_fetched, resources_skipped=sum(resources_skipped.values()),
         resources_skipped_by_reason=dict(resources_skipped),
         fingerprint_stopped=fingerprint_stopped, fingerprint_error=fingerprint_error,
+        analysis_stopped=analysis_stopped,
     )
 
 
@@ -2694,8 +2758,7 @@ def _observe_origin(assets: list[WebAsset], allowlist: Allowlist, fetcher: Fetch
             record(endpoint, result)
 
         result = _observe(asset, allowlist, fetcher, run_deadline=run_deadline, external=external,
-                          state=state,
-                          final_budgets=final_budgets, on_page=on_page)
+                          state=state, final_budgets=final_budgets, on_page=on_page)
         record(asset.endpoint, result)
 
 
@@ -2780,14 +2843,10 @@ def _load_external_fingerprints(directory: Path | None):
         return None, 0, False
     try:
         directory = Path(directory)
-        if os.name != "nt":
-            for candidate in (directory, *directory.rglob("*")):
-                details = candidate.lstat()
-                if details.st_mode & 0o002 or stat.S_ISLNK(details.st_mode):
-                    # A world-writable or redirected file could change what scans report.
-                    raise ExtensionError("fingerprint files must not be world-writable or links")
         from .webfingerprints import load_fingerprints
         loaded = load_fingerprints(directory)
+        if not loaded.technology_count:
+            raise ExtensionError("fingerprint layout contains no usable technologies")
         return loaded, loaded.technology_count, False
     except Exception:
         LOG.warning("Web fingerprint files could not be loaded; continuing without them")
@@ -2871,7 +2930,9 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     reviews = [review for result in results for review in result.reviews]
     reviews.sort(key=lambda item: (item["asset_id"], item["reason"], item.get("product", ""),
                                    item.get("detail", "")))
-    omissions = sorted({reason for result in results for reason in result.omissions})
+    omissions = {reason for result in results for reason in result.omissions}
+    if fingerprint_error:
+        omissions.add("analysis-incomplete")
     observed = [result.observed_at for result in results if result.observed_at is not None]
     fetch_failures = [result.failure for result in results if result.failure is not None]
     fetched_count = len(observed)
@@ -2902,7 +2963,8 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                    saved_snapshot_generated_at=saved_snapshot_generated_at, snapshot_updated=False,
                    fingerprint_technologies=fingerprint_count,
                    fingerprint_error=fingerprint_error or any(result.fingerprint_error for result in results),
-                   fingerprint_stopped=sum(result.fingerprint_stopped for result in results))
+                   fingerprint_stopped=sum(result.fingerprint_stopped for result in results),
+                   analysis_stopped=sum(result.analysis_stopped for result in results))
         _publish_review(output, client, source_id, reviews,
                         products=products, run=run)
         if fetch_failure_disallows_run:
@@ -2918,7 +2980,7 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
             print(_fetch_failure_message(fetch_failures, len(allowlist.assets)))
         manifest = write_snapshot(output, rows, source_id=source_id, collector="web-detect",
                                   observed_at=min(observed).isoformat() if observed else None,
-                                  omissions=omissions, lock=False)
+                                  omissions=sorted(omissions), lock=False)
         run["saved_snapshot_generated_at"] = manifest["generated_at"]
         run["snapshot_updated"] = True
         _publish_review(output, client, source_id, reviews, products=products, run=run)
