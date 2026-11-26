@@ -582,7 +582,9 @@ def test_corrupt_inventory_blocks_cli_export_and_dashboard_download(deployment, 
     assert cli.main([*command, "export", "--format", "json", "--output", str(output)]) == 4
     assert not output.exists()
     assert cli.main([*command, "asset", "healthy"]) == 4
-    assert "unreadable client inventories" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "an inventory is unreadable" in error
+    assert "Review or restore it from the Inventory page" in error
 
 
 def test_combined_schedule_can_be_installed_before_the_first_upload(deployment, monkeypatch):

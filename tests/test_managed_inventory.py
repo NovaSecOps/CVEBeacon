@@ -295,5 +295,5 @@ def test_scan_explains_missing_requested_report_when_inventory_is_partial(tmp_pa
         QueryResult(asset, (), ()) for asset in assets
     ])
     assert cli.main(["--config", str(path), "scan", "--report", "json"]) == 4
-    assert "Report not written because a client inventory is unreadable" in capsys.readouterr().err
+    assert "Report not written because an inventory is unreadable" in capsys.readouterr().err
     assert not list(config.output_dir.glob("*.json"))

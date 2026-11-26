@@ -385,6 +385,19 @@ def test_inventory_commands_fail_clearly_without_inventory(tmp_path, capsys):
         error = capsys.readouterr().err
         assert "requires an inventory" in error
         assert "[inventory] path" in error
+        assert "add or restore an inventory from the Inventory page" in error
+        assert "client inventory" not in error.casefold()
+        assert "Clients page" not in error
+
+
+def test_doctor_without_inventory_points_to_the_inventory_page(tmp_path, capsys):
+    config = write_config(
+        tmp_path, inventory=False, enabled=False,
+        extra="[inventory]\nmanaged = true\n",
+    )
+    assert cli.main(["--config", str(config.config_path), "doctor"]) == 0
+    checks = json.loads(capsys.readouterr().out)
+    assert checks["inventory"] == "skipped (add or restore an inventory from the Inventory page)"
 
 
 def test_inventory_validate_accepts_an_explicit_path_without_inventory(tmp_path, capsys):

@@ -865,7 +865,7 @@ def _inventory_config(config: AppConfig) -> InventoryConfig:
     inventory = config.effective_inventory
     if inventory is None:
         raise CVEBeaconError(
-            "this command requires an inventory; add [inventory] path or upload a client inventory in the dashboard"
+            "this command requires an inventory; set [inventory] path or add or restore an inventory from the Inventory page"
         )
     return inventory
 
@@ -1423,7 +1423,7 @@ def run(args: argparse.Namespace) -> int:
             else:
                 checks = {
                     "configuration": "ok",
-                    "inventory": "skipped (upload or restore an inventory from the Clients page)",
+                    "inventory": "skipped (add or restore an inventory from the Inventory page)",
                     "state_directory": _data_directory_check(config.database_path.parent),
                     "schedule": _schedule_check(),
                 }
@@ -1540,7 +1540,7 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
             if not warnings:
                 raise
         if warnings:
-            print("Inventory is incomplete. Replace the unreadable client inventories and retry.", file=sys.stderr)
+            print("Inventory is incomplete. Review or restore it from the Inventory page and retry.", file=sys.stderr)
             return 4
         asset = next((item for item in assets if item.asset_id.casefold() == args.asset_id.casefold()), None)
         if not asset: raise CVEBeaconError(f"asset not found: {args.asset_id}")
@@ -1561,11 +1561,11 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
             assets = _load_inventory(config, inventory_config, managed_warnings=managed_warnings)
         except InventoryValidationError:
             if args.command == "scan" and managed_warnings and args.report:
-                print("Report not written because a client inventory is unreadable.", file=sys.stderr)
+                print("Report not written because an inventory is unreadable.", file=sys.stderr)
             if args.command != "export" or not managed_warnings:
                 raise
         if managed_warnings and args.command == "export":
-            print("Report unavailable. Replace the unreadable client inventories and retry.", file=sys.stderr)
+            print("Report unavailable because an inventory is unreadable. Review or restore it from the Inventory page.", file=sys.stderr)
             return 4
         results = _run_query(config, assets, known_findings=store.latest_findings()) if args.command == "scan" else _run_query(config, assets)
         if args.command == "scan":
@@ -1583,7 +1583,7 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
                     except CVEBeaconError as exc: failures.append(str(exc))
             if args.report:
                 if managed_warnings:
-                    print("Report not written because a client inventory is unreadable.", file=sys.stderr)
+                    print("Report not written because an inventory is unreadable.", file=sys.stderr)
                 else:
                     path = _report_path(config, args.report)
                     (write_xlsx if args.report == "xlsx" else write_json)(results, path)
