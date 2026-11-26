@@ -12,10 +12,12 @@ cvebeacon setup --config cvebeacon.toml --force
 ```
 
 When setting up through the dashboard, follow the **Getting started** list on
-Home: start watch data, test an alert channel, choose a rule, add a client
-software list, install a schedule, and make a backup. **Done** means the listed
-condition is recorded; it does not guarantee complete vulnerability coverage
-or that a person received a test alert. See the [dashboard guide](DASHBOARD.md).
+Home: start watch data, test an alert channel, choose a rule, add an inventory,
+install a schedule, and make a backup. Start in **Inventory → Add inventory**;
+the Client field defaults to **No client**, and a client profile is optional.
+The inventory step is Done after a completed scan includes its assets. **Done**
+does not guarantee complete vulnerability coverage or that a person received a
+test alert. See the [dashboard guide](DASHBOARD.md).
 
 For guided channel setup, open **Configuration → Alert channels → Guided
 setup**, choose the channel type, enter its details, review the change and save
@@ -35,7 +37,9 @@ prints `Configuration saved: <path>`, shows the next steps, and exits 0.
 2. **Inventory.** The file path and format, defaulting to the extension. The
    file is loaded once so a bad path or format can be corrected immediately,
    or skipped and fixed later. Paths in the file are relative to the
-   configuration directory.
+   configuration directory. With dashboard setup, this is the first asset
+   step: add an inventory and leave Client as **No client** unless you want
+   findings grouped with a client.
 3. **Watch sources.** NVD, EUVD, CISA KEV, EU KEV and EPSS are enabled by
    default; NVD cannot be disabled. Disabling EPSS warns that `epss_min` rules
    will be unavailable. Disabling both KEV catalogs or EUVD warns that the

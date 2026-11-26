@@ -36,10 +36,11 @@ A platform-specific standalone executable needs no separate Python installation.
 
 If you use the dashboard, start on **Home** and follow its **Getting started**
 checklist. It guides you through turning on watch data and completing the first
-sync, setting up and testing an alert channel, choosing a rule, adding a client
-software list, installing a schedule, and making a backup. The list reflects
-recorded settings and activity; it is not a coverage guarantee. **Done** means
-only that the condition for that step is recorded. A successful channel test
+sync, setting up and testing an alert channel, choosing a rule, adding an
+inventory, installing a schedule, and making a backup. Inventory comes before
+client setup, and its client assignment is optional. The list reflects recorded
+settings and activity; it is not a coverage guarantee. **Done** means only that
+the condition for that step is recorded. A successful channel test
 means the destination service accepted the message, so check the destination
 yourself. The dashboard keeps the last 200 finished jobs in history; older
 channel tests eventually leave that history. See the [dashboard guide](DASHBOARD.md)
@@ -65,9 +66,11 @@ version = "version"
 
 The legacy product path requires `asset_id`, `vendor`, `product`, and `version` as nonblank text. Explicit package/PURL/CPE/commit identities may omit generic fields; see [identity rules and optional mappings](IDENTITY.md). Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
 
-An inventory is optional in watch-only mode. Set `[watch] enabled = true` and no `[inventory] path` to keep KEV, critical-severity and custom-rule alerting; those alerts work without an inventory. Upload a client inventory in the dashboard or add an `[inventory] path` later to enable asset applicability, findings and reports. See [watch mode](WATCH.md#configuration).
+An inventory is optional in watch-only mode. Set `[watch] enabled = true` and no `[inventory] path` to keep KEV, critical-severity and custom-rule alerting; those alerts work without an inventory. To enable asset applicability, findings and reports, add an inventory from **Inventory → Add inventory** or configure an `[inventory] path`. The Client field is optional and defaults to **No client**. See [watch mode](WATCH.md#configuration).
 
-An optional `client` column labels the client that owns an asset. The value under `[inventory.columns]` is the source column name, not a client name: use `client = "Account"` for a column named `Account`, or `client = "client"` for the default `client` header. A row can then contain `Acme` in that column. Client names are internal, limited to 120 characters, and cannot contain control or format characters. Assets without a client belong to no client. You can keep a shared file with a `client` column and also upload separate client inventories through the dashboard.
+The dashboard assigns one optional client to a whole managed inventory. Leave it at **No client** to keep the list without a client profile; those assets are still scanned, reported and eligible for alerts.
+
+A configured shared file can keep its optional per-asset `client` column for inventories that mix client labels. The value under `[inventory.columns]` is the source column name, not a client name: use `client = "Account"` for a column named `Account`, or `client = "client"` for the default `client` header. A row can then contain `Acme` in that column. Client names are internal, limited to 120 characters, and cannot contain control or format characters. Asset IDs must be unique case-insensitively across the configured file, enabled web snapshots and all dashboard-managed inventories.
 
 Source controls, retry/timeouts, output paths, optional exact CPE mappings, and notification settings are illustrated in the example configuration. A configured product CPE must be a complete CPE 2.3 name with a wildcard version; verify it against NVD before use.
 
@@ -109,47 +112,52 @@ have a 1,000,000-cell limit on the declared range of each sheet. Use a smaller
 used range or split larger inventories. For YAML inventories, write each
 value directly. Aliases and merge keys are refused.
 
-### Clients and inventories
+### Inventory and clients
 
-1. In the dashboard, open **Clients → Add client**. Enter the name and any
-   notes or contact details you want to keep with it.
-2. On the client page, choose **Upload inventory** and select a CSV, XLSX, JSON
-   or YAML file up to 32 MiB, or paste text up to 100 KB and choose CSV, JSON
-   or YAML in the format selector. **Download a CSV template** provides the
-   field headings and an example row. For CSV, use UTF-8 and
-   comma-separated columns. Excel uses the first sheet, with column names in
+1. In the dashboard, open **Inventory → Add inventory**. **Client** defaults
+   to **No client**. Choose an existing client or enter a new client name only
+   when you want the whole list grouped with that client. You do not need a
+   client profile to add assets.
+2. Select a CSV, XLSX, JSON or YAML file up to 32 MiB, or paste text up to
+   100 KB and choose CSV, JSON or YAML in the format selector. **Download a CSV
+   template** provides the field headings and an example row. For CSV, use
+   UTF-8 and comma-separated columns. Excel uses the first sheet, with column names in
    the first row. For JSON and YAML, use a list of records or put one list
    under a top-level field such as `assets`. Use text for versions, including
    in Excel.
 3. Check the first rows and choose the matching column for each field. For
    example, match **Product** to a column called **Application**. Select
    **Check column mapping** to see which rows are ready and which need a fix.
-   Each asset needs a unique Asset ID across all inventories. The client you
-   selected is assigned to every row.
+   Each asset needs a unique Asset ID across all inventories, regardless of
+   letter case. The selected client, if any, is assigned to every row.
 4. **Add these assets to the current inventory** is selected by default and
-   keeps the assets already saved. Choose **Replace this client's inventory**
-   only when the file is the full inventory; assets missing from that file are
-   removed. Then choose **Save inventory**. You can download the saved JSON,
-   restore one of the five previous versions, or remove the current upload from
-   the client page.
+   keeps the assets already saved. Choose **Replace this inventory** for a
+   no-client list or **Replace this client's inventory** for an assigned list
+   only when the file is the full list; assets missing from it are removed.
+   Review the preview, then choose **Save inventory**. The saved list appears
+   on the Inventory page.
+   You can download its JSON, restore one of the five previous versions, or
+   remove it there.
 5. Choose **Run a scan now** if you have permission to start scans. Scheduled
    scans pick up saved changes automatically. If your schedule runs only
    watch jobs, use **Operations → Schedule** to select a schedule that includes
-   scans. The watchlist and client findings use the latest successful scan.
+   scans. Every saved inventory is included in normal scans, including assets
+   with **No client**. Their findings can trigger alerts under the configured
+   watch rules; client impact summaries list named clients only.
 
-Uploads live in the private `inventories` folder next to the state database.
-CVEBeacon merges current uploads with the configured inventory and any enabled
-web snapshots. With no configured inventory, the first upload enables scanning.
-New configurations set `[inventory] managed = true`. Older configurations use
-uploads automatically when the folder contains a current inventory. Set
+The Inventory page lists the dashboard-managed **No client** inventory, lists
+assigned to clients, the configured shared file and saved web results. The
+single no-client list can be added to or replaced like the other managed lists.
+It lives in the same private `inventories/` directory as client-assigned files
+and follows the same backup rule: copy that directory manually with the
+matching state data. It is not included in the regular backup archive. Set
 `managed = false` under `[inventory]` to exclude dashboard uploads. Archived
-versions are used only when restored. Back up the private inventory directory
-with the matching database backups. The JSON download contains the canonical
-records used for inventory input, while collector snapshots also carry a
-separate exchange manifest. Run `cvebeacon inventory validate` or
-`cvebeacon doctor` to check the merged inventory. A corrupt upload is skipped
-with a warning and a duplicate asset ID across inventories prevents the scan.
-Exports wait until unreadable client inventories are replaced or removed.
+versions are used only when restored. The JSON download contains canonical
+inventory records, while web snapshots also carry an exchange manifest. Run
+`cvebeacon inventory validate` or `cvebeacon doctor` to check the merged
+inventory. A corrupt inventory is skipped with a warning and a duplicate
+asset ID across inventories prevents the scan. Review or restore unreadable
+inventories from the Inventory page.
 
 ## 5. First scan
 
@@ -165,7 +173,7 @@ The first scan may be slow without an NVD API key because the default respects N
 
 Exit codes are `0` for a successful operation, `2` for validation/operational failure, `3` for notification failure, and `4` for a scan with uncertain coverage or degraded sources. A completed scan can contain useful findings and still exit `4`; review its report and `source-status`. Notification failure takes precedence if both occur. `cvebeacon run` uses the same codes across its parts: any part failing gives `2`, otherwise a notification or delivery failure gives `3`, otherwise coverage warnings or degraded sources give `4`.
 
-Package/PURL identities, category and system grouping work in all four input formats; `examples/general.toml` demonstrates a mixed inventory. An optional `client` label assigns an asset to a client for alert and dashboard reporting; it never affects applicability or source queries. No accounts or credentials are needed for core scans.
+Package/PURL identities, category and system grouping work in all four input formats; `examples/general.toml` demonstrates a mixed inventory. An optional `client` label assigns an asset to a client for alert and dashboard reporting; it never affects applicability or source queries. Assets with no client stay in scans and findings and can trigger alerts under the configured rules. No accounts or credentials are needed for core scans.
 
 ## 6. Queries and assets
 
@@ -227,7 +235,7 @@ Notifications are created for a new finding or a meaningful change to applicabil
 
 Any change in the selected CVSS score/vector/version is material. When sources provide different scores, the highest reported base score and its associated vector/version are displayed together; the conflict and original metrics remain in the evidence. Reordering equivalent evidence does not create an alert. Schema 3 preserves legacy fingerprints and alias-only changes do not produce an upgrade alert storm. Changed source claims still produce material events.
 
-Watch alerts, initial digests, `watch events` output, webhook documents and statements show which clients are affected. A client is affected when the latest successful inventory scan recorded an `affected` or `needs_review` finding for the CVE on one of that client's assets. Needs-review clients carry a `(review)` marker. The line is omitted when no successful scan or affected client exists, and client names are never sent to public sources.
+Watch alerts, initial digests, `watch events` output, webhook documents and statements show which named clients are affected. A client is affected when the latest successful inventory scan recorded an `affected` or `needs_review` finding for the CVE on one of that client's assets. Needs-review clients carry a `(review)` marker. Assets with **No client** remain part of scans and alert-rule evaluation, while client impact summaries include only named clients. Client names are never sent to public sources.
 
 ## 10. Degraded sources and diagnostics
 

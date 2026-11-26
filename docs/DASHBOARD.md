@@ -16,7 +16,7 @@ cvebeacon serve --host 0.0.0.0 --port 8787
 
 The dashboard is optional. Scheduled scans and watches remain separate short-lived processes. An authenticated account with the `run` permission can start the same `cvebeacon` commands as background jobs from the **Operations** page; every data-changing job shares a single-flight lock with the command line and scheduled runs.
 
-With no configured file or dashboard inventory, `web_snapshots` disabled (the default), and watch mode enabled, the dashboard starts in watch-only mode. Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. Inventory views show a notice with a configuration example and a link to the user guide, and Operations explains that inventory scan and combined run jobs are unavailable.
+With no configured file or dashboard inventory, `web_snapshots` disabled (the default), and watch mode enabled, the dashboard starts in watch-only mode. Inventory, Watch, Clients, Operations with watch jobs, accounts, audit and the native schedule remain available. The Inventory page shows an empty-state notice and the configured sources; Operations explains that inventory scan and combined run jobs are unavailable.
 
 ## Home setup checklist
 
@@ -26,13 +26,15 @@ opens when a step is unfinished or needs attention and otherwise starts
 collapsed.
 
 The steps cover getting watch data, setting up and testing an alert channel,
-choosing an alert rule, adding a client software list, installing a schedule,
-and making a backup. A **Done** badge means only that the condition for that
-step is recorded. It does not mean CVEBeacon found every flaw. For example,
-the watch step needs a recent sync without recorded failures, and the rule step
-needs an enabled rule assigned to an enabled channel. If client uploads are
-disabled, that step is marked unavailable; if state cannot be read, the step
-says it could not be checked.
+choosing an alert rule, adding an inventory, installing a schedule, and making
+a backup. The inventory step is Done when an inventory exists and a completed
+scan includes its assets. A client is optional; a no-client-only inventory can
+complete the step. With no inventory, the step stays To do and links to
+**Inventory → Add inventory**. If the check cannot read its state, the step
+says it could not be checked. A **Done** badge means only that the condition
+for that step is recorded. It does not mean CVEBeacon found every flaw. For
+example, the watch step needs a recent sync without recorded failures, and the
+rule step needs an enabled rule assigned to an enabled channel.
 
 The channel step uses the latest recorded test for each enabled channel. A
 successful test means the destination service accepted the message; open the
@@ -265,38 +267,52 @@ still runs through `cvebeacon watch notify` or `watch run`. The shared-password
 compatibility mode can browse watch pages and generate statements, but cannot
 record a client report because there is no CVEBeacon account identity.
 
-### Clients and inventories
+### Inventory and clients
 
-Open **Clients → Add client**, enter a name and optional notes and contact, then
-open **Upload inventory** on the new client page. Choose a CSV, Excel (.xlsx),
-JSON or YAML file up to 32 MiB. For Excel, the 32 MiB limit also applies to
-each decompressed part and the workbook's total expanded data. Split a larger
-workbook into smaller uploads. You can also paste CSV, JSON or YAML rows up to
-100 KB. Choose exactly one source, a file or pasted text; larger lists need a
-file. **Download a CSV template** provides the expected field names and an
-example row. On the preview, match your column names to fields such as **Asset
-ID**, **Vendor**, **Product** and **Version**. Select **Check column mapping**
-to review row warnings and errors before saving. **Add these assets to the
-current inventory** is selected by default and keeps existing assets while
-adding the new IDs. Choose **Replace this client's inventory** only when the
-file is the full list; assets missing from it are removed.
+Open **Inventory** to see dashboard-managed inventories, the configured shared
+file and saved web results. A managed inventory without a client appears as
+**No client**; client-assigned inventories appear under their client name.
+The configured file remains read-only here and is managed through its
+configuration settings. Web snapshots are listed as a source and are included
+in scans when `web_snapshots` is enabled.
 
-The client page shows the asset count, the last inventory change and who made it, and
-findings from the latest successful scan. Use it to download the current
-inventory, restore one of the five prior versions, or remove the upload. The JSON download
-contains the canonical inventory records and can be uploaded again. The
-collector exchange manifest is available through the separate extension
-workflow. All changes are audited with the account and client. Inventory changes record the
-row count and the action. Uploaded rows, contact details and notes stay out of
-the audit.
+Choose **Add inventory** to upload a CSV, Excel (.xlsx), JSON or YAML file up
+to 32 MiB, or paste CSV, JSON or YAML rows up to 100 KB. For Excel, the 32 MiB
+limit also applies to each decompressed part and the workbook's total expanded
+data. Split a larger workbook into smaller uploads. **Download a CSV template**
+provides the expected field names and an example row. Match columns such as
+**Asset ID**, **Vendor**, **Product** and **Version**, then choose **Check
+column mapping** to review row warnings and errors before saving.
 
-Administrators can manage inventories. To delegate this workflow, assign
-`view` and `manage_inventory` to a role. Add `run` if that person should also
-be able to choose **Run a scan now**. The client page shows whether the
-installed native schedule includes scans. For a watch-only schedule, use
-**Schedule** to select **both**, or start a scan from the client page.
-**Affected clients** on the CVE page reflects the latest successful scan. For format details and how uploads interact with older
-configurations, see the [user guide](USER_GUIDE.md#clients-and-inventories).
+The **Client (optional)** field defaults to **No client**. Select an existing
+client or enter a new name when you want the whole inventory grouped with that
+client; adding assets never requires a client profile. **Add these assets to
+the current inventory** is selected by default, so uploads accumulate. Choose
+**Replace this inventory** for a no-client list or **Replace this client's
+inventory** for an assigned list only when the file is complete. Review the
+preview before **Save inventory**. The saved inventory page shows its current
+rows and history. You can download the canonical JSON, restore one of five
+prior versions, or remove the inventory. The no-client inventory lives
+alongside client-assigned files in the private `inventories/` directory.
+
+Clients remains the place to manage client profiles and view their combined
+findings. Each client page shows its assigned inventory and retains its
+client-specific upload form. The Inventory page also lists these managed lists.
+The **No client** inventory is not shown as a client profile.
+Assets without a client are still scanned, reported and eligible for alert
+rules. Client impact summaries include named clients only. Inventory rows and
+client profile details stay out of the audit; inventory changes record the
+account, action and row count.
+
+Viewers need `view` to browse Inventory. Adding, replacing, restoring or
+removing inventories requires an authenticated account with both `view` and
+`manage_inventory`. Administrators have these capabilities. To delegate the
+workflow, grant those two permissions to a role. Add `run` if that person
+should also be able to choose **Run a scan now**. The Inventory and client
+pages show whether the installed native schedule includes scans. For a
+watch-only schedule, use **Schedule** to select **both**, or start a scan from
+Operations. **Affected clients** on the CVE page reflects the latest successful
+scan. For format details, see the [user guide](USER_GUIDE.md#inventory-and-clients).
 
 ## Freshness and failures
 
@@ -418,7 +434,7 @@ logout, even if its role has no permissions.
 | `edit_inventory` | Edit inventory settings |
 | `edit_http` | Edit HTTP client settings |
 | `edit_system` | View state database and report output paths; changes are administrator-only |
-| `manage_inventory` | Add clients and upload, restore or remove their inventories |
+| `manage_inventory` | Add and manage inventories, with an optional client assignment |
 | `manage_web_assets` | Add, change and remove attested client web assets |
 | `manage_schedule` | View, install and remove the native schedule, including the Windows logged-out password prompt |
 | `manage_secrets` | Change any credential-bearing channel, add/change/remove environment references, and stage file-secret contents; `*_file` paths are administrator-only |
