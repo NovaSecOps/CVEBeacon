@@ -8,7 +8,7 @@
 {% if error %}{% call callout('danger', 'The schedule action failed') %}<p>{{ error }}</p>{% endcall %}{% endif %}
 
 {% if timer_managed %}
-{% call card('Monitoring timer', 'The updater-managed systemd timer that runs CVEBeacon monitoring.') %}
+{% call card('Monitoring timer', 'The systemd timer that runs CVEBeacon monitoring.') %}
 <p>{{ badge(timer_status.state, 'success' if timer_status.state == 'On' else 'neutral' if timer_status.state == 'Off' else 'warning') }}</p>
 <p>Starts at boot: {{ timer_status.boot }}</p>
 {% if timer_control_enabled %}

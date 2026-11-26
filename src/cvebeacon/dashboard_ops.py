@@ -150,16 +150,18 @@ def _schedule_snapshot(config: AppConfig) -> dict:
         timer_control = None
         if platform == "linux":
             managed, timer_units = _update_timer_units()
+            timer_control = scheduling.systemd_timer_control_status(
+                *REFERENCE_UPDATE_UNITS, config.config_path, run=bounded_run
+            )
+            timer_control.pop("enable_command", None)
+            if timer_control["matches"]:
+                managed, timer_units = True, REFERENCE_UPDATE_UNITS
         if managed:
             timer_status = dict(TIMER_STATUS_LABELS)
             if timer_units is not None:
                 timer_status = scheduling.systemd_timer_status(
                     *timer_units, config.config_path, run=bounded_run
                 )
-                timer_control = scheduling.systemd_timer_control_status(
-                    *timer_units, config.config_path, run=bounded_run
-                )
-                timer_control.pop("enable_command", None)
             if timer_status["state"] == "On":
                 scan_state = timer_status["scan_state"]
             elif timer_status["state"] == "Off":
@@ -381,12 +383,11 @@ def _schedule_context(
             timer_schedule_every = saved_schedule.every_hours or 4
             timer_schedule_times = ",".join(saved_schedule.times)
             now = scheduling.local_now()
-            if scheduling.schedule_due(saved_schedule, now):
-                timer_schedule_next_run = snapshot["timer_status"]["next_run"]
-            else:
-                timer_schedule_next_run = scheduling.schedule_next_run(
-                    saved_schedule, now
-                ).strftime("%Y-%m-%d %H:%M")
+            next_run = scheduling.schedule_next_run(saved_schedule, now)
+            if snapshot["timer_status"]["state"] == "On":
+                timer_schedule_next_run = next_run.strftime("%Y-%m-%d %H:%M")
+            elif snapshot["timer_status"]["state"] == "Off":
+                timer_schedule_next_run = "Not scheduled"
         except (CVEBeaconError, OSError, ValueError):
             error = error or "The saved timer schedule could not be read."
     elif snapshot["timer_managed"]:
@@ -395,6 +396,10 @@ def _schedule_context(
                 *REFERENCE_UPDATE_UNITS,
                 config.config_path,
                 run=_bounded_schedule_runner(runner),
+                data_directory=(
+                    None if _policy_is_administrator_owned(UPDATE_POLICY_PATH)
+                    else config.database_path.parent
+                ),
             )
             timer_enable_command = control_details.get("enable_command")
         except (CVEBeaconError, OSError, subprocess.SubprocessError):
@@ -458,11 +463,9 @@ def _timer_schedule_confirmation(config: AppConfig):
         ):
             abort(400)
         try:
-            previous = scheduling.load_timer_schedule(config.database_path.parent)
             schedule = scheduling.build_timer_schedule(
                 pending.get("every_hours"),
                 times=pending.get("times"),
-                last_start=previous.last_start,
             )
             detail = json.dumps(
                 {
@@ -474,7 +477,7 @@ def _timer_schedule_confirmation(config: AppConfig):
                 separators=(",", ":"),
             )
             _record("timer_schedule_update_requested", detail)
-            scheduling.save_timer_schedule(config.database_path.parent, schedule)
+            scheduling.change_timer_schedule(config.database_path.parent, schedule)
             current_app.extensions.pop("operations_schedule_summary", None)
             _record("timer_schedule_updated", detail)
         except (CVEBeaconError, OSError) as exc:
@@ -684,7 +687,7 @@ def create_blueprint(config: AppConfig, *, job_manager=None) -> Blueprint:
         current_app.extensions.pop("operations_schedule_summary", None)
         schedule_snapshot = _schedule_snapshot(config)
         if scheduling.platform.system().casefold() == "linux" and schedule_snapshot["timer_managed"]:
-            if schedule_snapshot.get("timer_control", {}).get("enabled") is True:
+            if (schedule_snapshot.get("timer_control") or {}).get("enabled") is True:
                 return _timer_schedule_confirmation(config)
             return _render_schedule(
                 config,

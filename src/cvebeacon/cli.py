@@ -133,6 +133,7 @@ def _parser() -> argparse.ArgumentParser:
     delete = schedule_sub.add_parser("remove"); delete.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto"); delete.add_argument("--yes", action="store_true")
     timer_control = schedule_sub.add_parser("timer-control", help="enable or inspect dashboard control of a systemd timer")
     timer_control.add_argument("action", choices=("enable", "disable", "status"))
+    timer_control.add_argument("--data-dir", help="administrator-approved data directory for enable")
     watch = commands.add_parser("watch", help="keep a local database of recently changed CVEs")
     watch_sub = watch.add_subparsers(dest="watch_command", required=True)
     watch_refresh = watch_sub.add_parser("refresh", help="fetch or refresh exactly one CVE and evaluate its rules")
@@ -1350,6 +1351,17 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "update":
         from .updater import cli as update_cli
         return update_cli(args)
+    if args.command == "schedule" and args.schedule_command == "timer-control":
+        if args.action == "enable":
+            config_path = None if args.config == "cvebeacon.toml" else args.config
+            print(scheduling.timer_control(
+                "enable", config_path=config_path, data_directory=args.data_dir,
+            ))
+        elif args.data_dir is not None:
+            raise SchedulingError("--data-dir is only used with timer-control enable")
+        else:
+            print(scheduling.timer_control(args.action))
+        return 0
     from .update_transaction import ensure_ready
     ensure_ready(args.command)
     if args.command == "dashboard":
@@ -1368,17 +1380,6 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "schedule" and args.schedule_command == "remove":
         if not args.yes and input("Remove the CVEBeacon schedule? [y/N] ").strip().casefold() not in {"y", "yes"}: print("cancelled"); return 1
         print("removed" if remove(system=args.platform) else "not installed")
-        return 0
-    if args.command == "schedule" and args.schedule_command == "timer-control":
-        if args.action == "status":
-            print(scheduling.timer_control("status"))
-            return 0
-        config = load_config(args.config)
-        print(scheduling.timer_control(
-            args.action,
-            data_directory=config.database_path.parent,
-            config_path=config.config_path,
-        ))
         return 0
     stix_export = (
         args.command == "export"
