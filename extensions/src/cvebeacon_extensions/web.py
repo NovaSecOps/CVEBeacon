@@ -21,12 +21,15 @@ import hashlib
 import http.client
 from html.parser import HTMLParser
 import ipaddress
+import logging
+import os
 from pathlib import Path
 import queue
 import random
 import re
 import socket
 import ssl
+import stat
 import threading
 import time
 from typing import Callable, Iterable, Mapping
@@ -52,6 +55,7 @@ MAX_ASSETS = 1000
 MAX_WORKERS = 4
 DEFAULT_REDIRECTS = 2
 MAX_REDIRECTS = 10
+LOG = logging.getLogger("cvebeacon_extensions.web")
 MAX_RETRIES = 2
 HOST_INTERVAL = 1.0
 USER_AGENT = f"CVEBeacon-web-detect/{__version__}"
@@ -1632,7 +1636,8 @@ def _looks_like_html(body: bytes) -> bool:
 def _fetch_resources(html: str, page_success: _FetchSuccess, page_asset: WebAsset,
                      allowlist: Allowlist, fetcher: Fetcher, *,
                      run_deadline: float,
-                     on_detections: Callable[[Iterable[object]], None]) -> tuple[int, Counter, dict[str, tuple[str, int]]]:
+                     on_detections: Callable[[Iterable[object]], None],
+                     external=None) -> tuple[int, Counter, dict[str, tuple[str, int]]]:
     page_endpoint = page_success.final_endpoint or page_asset.endpoint
     page_url = page_endpoint.url
     state = fetcher._resource_site(page_endpoint)
@@ -1760,6 +1765,9 @@ def _fetch_resources(html: str, page_success: _FetchSuccess, page_asset: WebAsse
             except Exception:
                 detections = ()
                 skipped["analysis-error"] += 1
+            if external is not None:
+                # Only resource-kind patterns can match: the page parts are empty here.
+                detections += _external_detections(external, page_from({}, "", resources=[resource]))
             state.file_detections[candidate.url] = detections
             on_detections(detections)
             resources_fetched += 1
@@ -1853,6 +1861,11 @@ def _merge_detections(target: dict[tuple[str, str], _DetectionSummary], detectio
     confidence_rank = {"low": 0, "medium": 1, "high": 2}
     for detection in detections:
         key = (str(detection.vendor).casefold(), str(detection.product).casefold())
+        name = str(getattr(detection, "name", "") or "").casefold()
+        if key not in target and name:
+            # The same product can carry different identities in different rule sets.
+            key = next((existing for existing, summary in target.items()
+                        if (summary.name or "").casefold() == name), key)
         incoming_evidence = _detection_evidence(detection)
         current = target.get(key)
         if current is None:
@@ -1913,8 +1926,17 @@ class _AssetResult:
     resources_skipped_by_reason: dict[str, int] = field(default_factory=dict)
 
 
+def _external_detections(external, page, page_url: str = "") -> tuple:
+    from .webfingerprints import detect_external
+    try:
+        return tuple(detect_external(page, external, page_url=page_url))
+    except Exception:
+        # Operator-supplied fingerprints are optional evidence; never fail a site on them.
+        return ()
+
+
 def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
-             run_deadline: float) -> _AssetResult:
+             run_deadline: float, external=None) -> _AssetResult:
     system_id = _system_id(allowlist.client, asset.endpoint)
     base = {"asset_id": _asset_id(allowlist.client, asset.endpoint, "", ""),
             "system_id": system_id}
@@ -1939,10 +1961,14 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
     html = _decode_html(success.response.body, success.response.headers)
     merged: dict[tuple[str, str], _DetectionSummary] = {}
     _merge_detections(merged, detect(page_from(success.response.headers, html)))
+    if external is not None:
+        final_endpoint = success.final_endpoint or asset.endpoint
+        _merge_detections(merged, _external_detections(
+            external, page_from(success.response.headers, html), final_endpoint.url))
     try:
         resources_fetched, resources_skipped, file_metadata = _fetch_resources(
             html, success, asset, allowlist, fetcher, run_deadline=run_deadline,
-            on_detections=lambda values: _merge_detections(merged, values))
+            on_detections=lambda values: _merge_detections(merged, values), external=external)
     except Exception:
         # Resource collection is optional evidence. A parser or auxiliary file
         # failure must leave the page observation usable and path-free.
@@ -2069,13 +2095,34 @@ def _publish_review(output: Path, client: str, source_id: str, reviews: list[dic
     _atomic(destination, data)
 
 
+def _load_external_fingerprints(directory: Path | None):
+    """Load operator-supplied Wappalyzer-format fingerprints, or return none."""
+    if directory is None:
+        return None, 0, False
+    try:
+        directory = Path(directory)
+        if os.name != "nt":
+            for candidate in (directory, *directory.rglob("*")):
+                details = candidate.lstat()
+                if details.st_mode & 0o002 or stat.S_ISLNK(details.st_mode):
+                    # A world-writable or redirected file could change what scans report.
+                    raise ExtensionError("fingerprint files must not be world-writable or links")
+        from .webfingerprints import load_fingerprints
+        loaded = load_fingerprints(directory)
+        return loaded, loaded.technology_count, False
+    except Exception:
+        LOG.warning("Web fingerprint files could not be loaded; continuing without them")
+        return None, 0, True
+
+
 def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                allow_partial: bool = False, plan: bool = False,
                resolver=None, transport=None, sleep: Callable[[float], None] = time.sleep,
                clock: Callable[[], float] = time.monotonic,
                now: Callable[[], datetime] = utc_now,
                host_interval: float = HOST_INTERVAL,
-               max_workers: int = MAX_WORKERS) -> dict | None:
+               max_workers: int = MAX_WORKERS,
+               fingerprints: Path | None = None) -> dict | None:
     label(source_id)
     output = Path(output)
     destinations = {output.resolve(), Path(str(output) + ".manifest.json").resolve(),
@@ -2083,6 +2130,7 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     if Path(path).resolve() in destinations:
         raise ExtensionError("output must not overwrite the asset allowlist")
     allowlist = load_allowlist(Path(path), client=client, now=now())
+    external, fingerprint_count, fingerprint_error = _load_external_fingerprints(fingerprints)
     if allowlist.ca_bundle is not None and allowlist.ca_bundle.resolve() in destinations:
         raise ExtensionError("output must not overwrite the CA bundle")
     if plan:
@@ -2096,7 +2144,8 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     workers = max(1, min(max_workers, MAX_WORKERS, len(allowlist.assets)))
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_observe, asset, allowlist, fetcher, run_deadline=run_deadline)
+            futures = [pool.submit(_observe, asset, allowlist, fetcher, run_deadline=run_deadline,
+                                   external=external)
                        for asset in allowlist.assets]
             for future in as_completed(futures):
                 results.append(future.result())
@@ -2134,7 +2183,9 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                    resources_fetched=resources_fetched, resources_skipped=resources_skipped,
                    resources_skipped_by_reason=dict(sorted(resources_skipped_by_reason.items())),
                    products_recognized=len(products), products_with_version=products_with_version,
-                   saved_snapshot_generated_at=saved_snapshot_generated_at, snapshot_updated=False)
+                   saved_snapshot_generated_at=saved_snapshot_generated_at, snapshot_updated=False,
+                   fingerprint_technologies=fingerprint_count,
+                   fingerprint_error=fingerprint_error)
         _publish_review(output, client, source_id, reviews,
                         products=products, run=run)
         if fetch_failure_disallows_run:

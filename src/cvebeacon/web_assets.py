@@ -92,13 +92,19 @@ def temporary_bytes(directory, data):
         raise
 
 
-def companion_command(client, assets, output, *, plan=False):
+def fingerprint_directory(config):
+    """Optional operator-supplied Wappalyzer-format fingerprints, beside the state data."""
+    return config.database_path.parent / "web-fingerprints"
+
+
+def companion_command(client, assets, output, *, plan=False, fingerprints=None):
     require_companion()
     label = client_label(client)
     client_arguments = ["--client=" + label] if label.startswith("-") else ["--client", label]
     return [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
             *client_arguments, "--assets", str(assets), "--output", str(output),
-            "--source-id", "web-" + client_key(client), "--allow-partial", *(["--plan"] if plan else [])]
+            "--source-id", "web-" + client_key(client), "--allow-partial", *(["--plan"] if plan else []),
+            *(["--fingerprints", str(fingerprints)] if fingerprints is not None else [])]
 
 
 def validate_allowlist(config, path, document):
@@ -145,7 +151,9 @@ def run_detection(config, client, *, plan=False):
     if not document["assets"]:
         raise ConfigurationError("Save an attested web asset before running detection")
     # The parent CLI holds the shared scan lock throughout the child process.
-    code = subprocess.call(companion_command(document["client"], assets, output, plan=plan),
+    fingerprints = fingerprint_directory(config)
+    code = subprocess.call(companion_command(document["client"], assets, output, plan=plan,
+                                             fingerprints=fingerprints if fingerprints.is_dir() else None),
                            stdin=subprocess.DEVNULL, env=child_environment(config))
     if not plan and code == 0:
         output.with_name(output.name + ".removed").unlink(missing_ok=True)

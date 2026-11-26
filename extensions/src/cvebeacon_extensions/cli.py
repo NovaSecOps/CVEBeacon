@@ -59,6 +59,8 @@ def parser():
     detect.add_argument("--source-id", required=True)
     detect.add_argument("--allow-partial", action="store_true")
     detect.add_argument("--plan", action="store_true")
+    detect.add_argument("--fingerprints", type=Path,
+                        help="directory of operator-supplied Wappalyzer-format fingerprints")
     return root
 
 
@@ -81,7 +83,7 @@ def main(argv=None):
             from .web import detect_web
             manifest = detect_web(args.assets, args.output, client=args.client,
                                   source_id=args.source_id, allow_partial=args.allow_partial,
-                                  plan=args.plan)
+                                  plan=args.plan, fingerprints=args.fingerprints)
             if manifest is not None:
                 print(f"wrote {manifest['record_count']} records; status={manifest['status']}")
         elif args.command == "collect":
