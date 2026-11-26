@@ -8,7 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from cvebeacon_extensions import contract
+from cvebeacon_extensions import contract, webrules
 from cvebeacon_extensions.contract import read_snapshot
 from cvebeacon_extensions import web as web_module
 from cvebeacon_extensions.web import detect_web
@@ -384,7 +384,7 @@ def test_static_module_imports_and_literal_dynamic_imports_are_fetched(tmp_path)
 def test_only_literal_webpack_and_vite_chunk_map_paths_are_fetched(tmp_path):
     html = '<script src="/runtime.js"></script>'
     source = (
-        'var __webpack_require__ = {}; const chunks = {"one": "/chunks/one.js"}; '
+        '__webpack_require__.u = id => ({"one": "/chunks/one.js"})[id]; '
         'const __vite__mapDeps = ["/chunks/two.js", "./styles/lazy.css"]; '
         'const guessed = "" + chunkId + ".js";'
     )
@@ -400,19 +400,19 @@ def test_only_literal_webpack_and_vite_chunk_map_paths_are_fetched(tmp_path):
 
 
 def test_manifest_icon_and_robots_are_fetched_with_resource_kinds(tmp_path, monkeypatch):
-    import cvebeacon_extensions.web as web_module
-
     html = ('<link rel="manifest" href="/app.webmanifest">'
             '<link rel="icon" href="/favicon.ico">')
     files = [response(content_type="application/manifest+json", body=b'{"name":"demo"}')]
     observed = []
-    original_detect = web_module.detect
+    original_detect = webrules.detect
 
     def recording_detect(page):
+        if page.resources:
+            assert not page.html and not page.headers
         observed.extend((resource.kind, resource.text) for resource in page.resources)
         return original_detect(page)
 
-    monkeypatch.setattr(web_module, "detect", recording_detect)
+    monkeypatch.setattr(webrules, "detect", recording_detect)
     detail, transport, _, _ = run(tmp_path, [asset()], html, files)
     assert {"/app.webmanifest", "/favicon.ico", "/robots.txt"} <= set(_paths(transport))
     assert ("manifest", '{"name":"demo"}') in observed
@@ -422,8 +422,6 @@ def test_manifest_icon_and_robots_are_fetched_with_resource_kinds(tmp_path, monk
 
 
 def test_review_evidence_is_excerpt_limited_file_hashed_and_capped(tmp_path, monkeypatch):
-    import cvebeacon_extensions.web as web_module
-
     html = '<link rel="icon" href="/favicon.ico">' + "".join(
         f'<script src="/bundle-{index}.js"></script>' for index in range(25))
     files = [response(content_type="text/javascript", body=f"bundle-{index}".encode())
@@ -445,7 +443,7 @@ def test_review_evidence_is_excerpt_limited_file_hashed_and_capped(tmp_path, mon
             name="", ecosystem="", package="", implied_by=(), evidence=(evidence,),
         ),)
 
-    monkeypatch.setattr(web_module, "detect", patched_detect)
+    monkeypatch.setattr(webrules, "detect", patched_detect)
     try:
         detail, _, _, _ = run(tmp_path, [asset()], html, files)
     finally:
@@ -466,12 +464,23 @@ def test_review_evidence_is_excerpt_limited_file_hashed_and_capped(tmp_path, mon
 def test_run_deadline_margin_stops_resources_but_keeps_page_result(tmp_path, monkeypatch):
     import cvebeacon_extensions.web as web_module
 
-    monkeypatch.setattr(web_module, "RUN_TIMEOUT", 1.0)
+    monkeypatch.setattr(web_module, "RUN_TIMEOUT", 30.0)
+    clock = Clock()
+    original_detect = webrules.detect
+
+    def recorded_page(page, *, deadline, clock):
+        result = original_detect(page)
+        assert deadline - clock() == 25
+        fake_clock.sleep(25)
+        return result
+
+    fake_clock = clock
+    monkeypatch.setattr(webrules, "detect", recorded_page)
     html = '<script src="/slow.js"></script>'
-    detail, transport, _, _ = run(tmp_path, [asset()], html)
+    detail, transport, _, _ = run(tmp_path, [asset()], html, clock=clock)
     assert _paths(transport) == ["/app/index.html"]
     assert detail["run"]["fetched_count"] == 1
-    assert detail["run"]["resources_skipped_by_reason"] == {"run-deadline": 3}
+    assert detail["run"]["resources_skipped_by_reason"] == {"run-deadline": 1}
 
 
 def test_resource_limits_and_run_deadline_are_named_constants():
@@ -508,6 +517,6 @@ def test_requests_to_one_host_do_not_overlap_across_site_workers(tmp_path):
                     self.active -= 1
 
     transport = OverlapTransport([response(body=html.encode()), response(body=html.encode())], clock)
-    run(tmp_path, [asset(path="/one"), asset(path="/two")], html, clock=clock,
+    run(tmp_path, [asset(path="/one"), asset(path="/two", port=444)], html, clock=clock,
         transport=transport, host_interval=0, max_workers=2)
     assert transport.maximum_active == 1

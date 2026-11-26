@@ -98,34 +98,42 @@ page observation.
   re-checked at every hop.
 - After a page succeeds, requests may follow `<script src>`, stylesheet links,
   module preloads, script or style preloads, CSS `@import`, literal static or
-  dynamic imports in module scripts, and literal chunk paths listed by fetched
-  webpack or Vite runtimes. A same-site `<base href>` is honoured. Repeated
-  URLs are fetched once; paths are never guessed.
+  dynamic imports in module scripts, and literal chunk paths from recognised
+  webpack or Vite loaders and maps. CSS imports must occur in the stylesheet
+  prelude. Module specifiers must be URLs or paths beginning with `/`, `./`
+  or `../`. A same-origin `<base href>` is honoured. Nested references resolve
+  against the final URL of the containing file. References with raw control
+  characters, backslashes or more than 4,096 characters are rejected. Repeated
+  resource URLs are fetched once per starting origin.
 - The page's web manifest and declared icon are fetched. If it declares no
   icon, `/favicon.ico` is requested. `/robots.txt` is requested once per site.
   Manifest and robots text are available to detection; icon bytes are hashed
   but its resource text is empty.
 - A referenced file is fetched only when its scheme, host and port match the
-  final page or another site in that client's allowlist. Other hosts, including
-  CDNs, are not fetched; page rules can inspect their URL text.
+  final page or another site in that client's allowlist. Page rules can inspect
+  linked URL text independently. An HTTPS page or file cannot lead to an HTTP
+  resource request, including through redirects.
 - At most 300 files are fetched per site, each up to 10 MiB decoded and 20 MiB
-  on the wire, with at most 96 MiB decoded across the site's files. The
-  resource phase is limited to 180 seconds per site and the run is limited to
-  60 minutes. When the run deadline is near, resource fetching stops while the
-  page result is retained; a five-second margin prevents starting another file
-  close to that deadline. Oversized, refused, invalid-type and timed-out files
-  are skipped and counted by reason in the review run metadata without changing
-  the site's result.
+  on the wire, with a shared 96 MiB decoded budget across the files for
+  starting paths on the same origin. Decoded bytes count as they are
+  produced, including during failed reads and retries. Resource collection
+  and each page's analysis have 180-second deadlines. The run is limited to
+  60 minutes, with a five-second margin to publish completed results.
+  Oversized, refused, invalid-type and timed-out files are counted by reason
+  in the review run metadata.
 - `User-Agent: CVEBeacon-web-detect/<version>`, `Accept:
   text/html,application/xhtml+xml`, `Accept-Language: en`, `Cache-Control:
   no-cache`, `Accept-Encoding: gzip, deflate` and `Connection: close`.
 - Resource requests use `Accept: */*` for scripts or
-  `Accept: text/css,*/*;q=0.1` for styles, and set `Referer` to the final page
-  URL without its fragment. Requests are sequential within a site, serialized
-  per host, and paced at least 100 ms apart for the same host.
-- No client cookies, authentication headers, request body, `Range`, `POST`,
-  source maps, images, fonts, media, frames or JavaScript execution. Third-party
-  resources are not fetched.
+  `Accept: text/css,*/*;q=0.1` for styles. Each hop uses the
+  `strict-origin-when-cross-origin` Referer policy with the final page as
+  the referrer. Same-origin requests send the full page URL without its
+  fragment. Cross-origin requests send only the page's origin. Downgrades
+  send no request. Requests are sequential within a site, serialized per host
+  and paced at least 100 ms apart for the same host.
+- Requests omit client cookies, authentication headers, request bodies and
+  `Range`. Discovery excludes source maps, images, fonts, media and frames.
+  The detector uses `GET` and inspects scripts without executing them.
 - Fetched files are processed one at a time and never saved. The private review
   file can include up to 20 evidence items per product, with excerpts capped at
   160 characters. File evidence also includes SHA-256 of the decoded bytes and
@@ -167,18 +175,20 @@ option cannot silently fall back to a less safe default.
   not contain credentials, a query or a fragment.
 - `authorized_by` and `authorized_at` are required. `expires_at` is optional.
   Timestamps are ISO 8601 UTC values. A future `authorized_at` is refused.
+  Expiry is checked again after waiting and before each request, including
+  redirects and retries. A refusal records `authorisation expired`.
 - `allow_redirects` defaults to true and `max_redirects` to 2 (the hard maximum
   is 10). Values from 0 through 10 are accepted. The authorisation unit is the
   scheme, host and port of each listed entry; the configured path is only the
   starting point. A redirect may use any
   path and query on an allowlisted host and port, provided the path plus query
   is at most 2,048 characters, contains no credentials and has no fragment. The
-  originating entry's `allow_redirects`, `max_redirects` and
-  `allow_private_address` policy applies to every hop, and an HTTPS to HTTP
-  downgrade is refused. A refused redirect records its fixed reason; an
-  unlisted target records only its scheme, host and port, never its path or
-  query. When the redirect limit is reached, the detail reports how many hops
-  were followed and points to the Maximum redirects setting.
+  originating entry's `allow_redirects` and `max_redirects` apply to every
+  hop. Both the originating and destination entries must permit a non-global
+  address. An HTTPS to HTTP downgrade is refused. A refused redirect records
+  its fixed reason. For an unlisted target, the review records its scheme,
+  host and port. When the redirect limit is reached, the detail reports how
+  many hops were followed and points to the Maximum redirects setting.
 - Private, loopback, link-local, metadata, multicast, reserved, unspecified and
   NAT64 answers are refused. IPv4-mapped and IPv4-compatible IPv6 forms are also
   refused by default, even when the embedded address is public. Set
@@ -225,8 +235,10 @@ cvebeacon-ext web detect --client acme --assets acme-assets.json \
   are parsed, and the decompressed body at 2 MiB. Gzip and deflate streams must
   be complete; concatenated gzip members are decoded under one cumulative cap
   and chunk framing and trailers count toward the 4 MiB compressed wire limit.
-- At most 4 assets run concurrently, with one request per host per second. A
-  run is capped at 1,000 assets and 15 minutes.
+- At most 4 origins run concurrently, with one page request per host per
+  second. A run is capped at 1,000 assets and 60 minutes. The parent allows
+  five more minutes before terminating an unresponsive companion, then waits
+  up to ten seconds before killing it.
 - `429` and `503` stop that host for the rest of the run and record
   `Retry-After`. `401`, `403` and `404` are never retried. Connection errors
   are retried at most twice with bounded backoff.
