@@ -44,6 +44,48 @@ def test_configuration_reserves_advisory_storage(tmp_path):
 
 
 @linux
+@pytest.mark.parametrize("live_paths", ["held", "unavailable"])
+def test_completed_recovery_discovers_live_paths_before_dashboard_stop(transaction, monkeypatch, live_paths):
+    updater, native, _ = transaction
+    original_archive = updater._archive
+    monkeypatch.setattr(updater, "_archive", lambda: (_ for _ in ()).throw(OSError("archive unavailable")))
+    assert updater.apply("0.1.1")["result"] == "updated"
+    monkeypatch.setattr(updater, "_archive", original_archive)
+    updater.policy = replace(updater.policy, wait_seconds=0)
+    live = updater.policy.data / "live"
+    live.mkdir()
+    held = RunLock(live / u.LOCK_NAME)
+    assert held.acquire()
+    original_paths = native.lock_paths
+    calls = []
+
+    def paths(python, backup=None, manifest_hash=None):
+        selected = Path(python).parents[2].name
+        calls.append((selected, backup is not None))
+        if selected == "0.1.1":
+            config_lock = u.ConfigLock(updater.policy.config.with_name(
+                ".config-" + updater.policy.config.name + ".lock"))
+            assert not config_lock.acquire()
+            if live_paths == "unavailable":
+                raise u.UpdateError("current paths unavailable")
+            return (held.path,)
+        return original_paths(python, backup, manifest_hash)
+
+    native.calls.clear()
+    monkeypatch.setattr(native, "lock_paths", paths)
+    try:
+        with pytest.raises(u.UpdateError, match="verification remains incomplete"):
+            updater.recover()
+        assert "freeze" not in native.calls
+        assert ("0.1.1", False) in calls
+        if live_paths == "held":
+            assert ("0.1.0", True) in calls
+        assert u.read_record(updater.policy.prefix)["result"] == "updated"
+    finally:
+        held.release()
+
+
+@linux
 @pytest.mark.parametrize("config", ["/opt/example/data/custom.toml", "custom.toml"])
 def test_invalid_policy_never_selects_a_request_or_advisory_path(monkeypatch, caplog, config):
     monkeypatch.setattr(u, "unsupported_reason", lambda: None)

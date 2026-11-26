@@ -1261,7 +1261,7 @@ class Updater:
         self.failure_reason = reason if reason != "recovery-incomplete" else None
 
     @contextmanager
-    def _locks(self, record):
+    def _locks(self, record, *, completed=False):
         p = self.policy
         locks = []
         deadline = time.monotonic() + p.wait_seconds
@@ -1275,10 +1275,22 @@ class Updater:
             acquire(ConfigLock(p.config.with_name(".config-" + p.config.name + ".lock"), command="update"))
             backup = p.prefix / "backups" / record["backup"] if record["snapshot_ready"] else None
             python = p.prefix / "releases" / record["old"] / ".venv/bin/python"
-            arguments = {"backup": backup, "manifest_hash": record.get("manifest_sha256")} if backup else {}
-            for path in self.native.lock_paths(python, **arguments):
+            paths = set()
+            if completed:
+                selected = record["new"] if record["result"] == "updated" else record["old"]
+                release = self.current()
+                if release.name != selected:
+                    raise UpdateError("completed transaction does not match the selected release")
+                protected_tree(release / ".venv")
+                paths.update(self.native.lock_paths(release / ".venv/bin/python"))
+            if backup:
+                paths.update(self.native.lock_paths(python, backup=backup,
+                                                    manifest_hash=record.get("manifest_sha256")))
+            elif not completed:
+                paths.update(self.native.lock_paths(python))
+            for path in sorted(paths):
                 acquire(RunLock(path, command="update"))
-            yield
+            yield release if completed else None
         finally:
             for lock in reversed(locks):
                 lock.release()
@@ -1570,15 +1582,12 @@ class Updater:
             self.failure_step = "quiesce"
             self.native.stop(p.units)
             self.failure_step = "lock"
-            with self._locks(record):
+            completed = record["phase"] == "complete"
+            with self._locks(record, completed=completed) as release:
                 self.failure_step = "freeze"
                 self.native.freeze(p.units)
-                if record["phase"] == "complete":
-                    self.failure_step = "recovery"
-                    selected = record["new"] if record["result"] == "updated" else record["old"]
-                    if self.current().name != selected:
-                        raise UpdateError("completed transaction does not match the selected release")
-                    release = p.prefix / "releases" / selected
+                if completed:
+                    selected = release.name
                 else:
                     self.failure_step = "recovery"
                     try:
