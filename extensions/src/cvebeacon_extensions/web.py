@@ -88,6 +88,19 @@ _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _PATH = re.compile(r"/[!-~]*")
 _CHARSET = re.compile(r"charset\s*=\s*[\"']?([^;\"'\s]+)", re.IGNORECASE)
 _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
+# Each setting is the maximum disclosure for same-origin and cross-origin requests.
+_DEFAULT_REFERRER_POLICY = (2, 1)
+_REFERRER_POLICIES = {
+    "no-referrer": (0, 0),
+    "same-origin": (2, 0),
+    "origin": (1, 1),
+    "strict-origin": (1, 1),
+    "origin-when-cross-origin": _DEFAULT_REFERRER_POLICY,
+    "strict-origin-when-cross-origin": _DEFAULT_REFERRER_POLICY,
+    "no-referrer-when-downgrade": _DEFAULT_REFERRER_POLICY,
+    "unsafe-url": _DEFAULT_REFERRER_POLICY,
+}
+_STANDARD_PATHS = {"icon": "/favicon.ico", "robots": "/robots.txt"}
 
 
 class _FetchFailure(Exception):
@@ -129,6 +142,18 @@ class _ExpiredFailure(_FetchFailure):
 
 class _RedirectFailure(_FetchFailure):
     reason = "redirect-blocked"
+
+
+class _ResourceFileLimit(_FetchFailure):
+    reason = "file-limit"
+
+
+class _ResourceByteLimit(_FetchFailure):
+    reason = "site-limit"
+
+
+class _StandardPathAlreadyRequested(_FetchFailure):
+    reason = "duplicate"
 
 
 class _UnsupportedEncodingFailure(_FetchFailure):
@@ -212,6 +237,33 @@ class _FetchSuccess:
     redirects: tuple[str, ...]
     observed_at: datetime
     final_endpoint: Endpoint | None = None
+    referrer_policy: tuple[int, int] = _DEFAULT_REFERRER_POLICY
+    vary: frozenset[str] = frozenset()
+
+
+def _header_tokens(headers, name):
+    return (token.strip().casefold() for value in headers.get(name, ()) for token in value.split(","))
+
+
+def _referrer_policy(headers):
+    policy = _DEFAULT_REFERRER_POLICY
+    for token in _header_tokens(headers, "referrer-policy"):
+        if token in _REFERRER_POLICIES:
+            policy = _REFERRER_POLICIES[token]
+    return policy
+
+
+def _restrict_referrer(current, other):
+    return min(current[0], other[0]), min(current[1], other[1])
+
+
+def _referer_value(referrer: Endpoint, endpoint: Endpoint, policy: tuple[int, int]) -> str | None:
+    disclosure = policy[referrer.origin != endpoint.origin]
+    if disclosure == 1:
+        return referrer.origin_url + "/"
+    if disclosure == 2:
+        return referrer.url
+    return None
 
 
 def _client(value: object) -> str:
@@ -1052,6 +1104,7 @@ class _ResourceBudget:
 @dataclass
 class _OriginResourceBudget(_ResourceBudget):
     lock: threading.Lock = field(default_factory=threading.Lock)
+    standard_paths: set[str] = field(default_factory=set)
 
 
 class _OriginResourceBudgets:
@@ -1059,7 +1112,7 @@ class _OriginResourceBudgets:
         self._lock = threading.Lock()
         self._budgets: dict[tuple[str, str, int], _OriginResourceBudget] = {}
 
-    def get(self, endpoint: Endpoint, deadline: float) -> _OriginResourceBudget:
+    def get(self, endpoint: Endpoint, deadline: float = float("inf")) -> _OriginResourceBudget:
         with self._lock:
             budget = self._budgets.get(endpoint.origin)
             if budget is None:
@@ -1071,8 +1124,9 @@ class _OriginResourceBudgets:
 @dataclass
 class _ResourceSiteState(_ResourceBudget):
     final_budget: _OriginResourceBudget | None = None
-    seen_urls: set[str] = field(default_factory=set)
-    files: dict[str, _CachedResource] = field(default_factory=dict)
+    seen_urls: set[tuple] = field(default_factory=set)
+    pending_files: Counter = field(default_factory=Counter)
+    files: dict[tuple[str, str], _CachedResource] = field(default_factory=dict)
 
     @property
     def remaining_files(self) -> int:
@@ -1111,6 +1165,8 @@ class Fetcher:
         self._blocked: dict[str, int | None] = {}
         self._lock = threading.Lock()
         self._host_locks: dict[str, threading.Lock] = {}
+        # Destination counters are used under the host lock at the transport boundary.
+        self._destination_budgets = _OriginResourceBudgets()
 
     def close(self) -> None:
         self._resolver_pool.close()
@@ -1185,6 +1241,9 @@ class Fetcher:
         entries = (originating, destination, *page_authorizations)
         allow_private = originating.allow_private_address and destination.allow_private_address
         attempt = 0
+        reserved = False
+        origin_budget = self._destination_budgets.get(endpoint) if budget is not None else None
+        standard_path = endpoint.path in _STANDARD_PATHS.values()
         while True:
             self._check_expiry(entries)
             if self._clock() >= deadline:
@@ -1209,10 +1268,16 @@ class Fetcher:
                     reported = False
                     debit_site = None
                     attempt_limit = body_limit
-                    if budget is not None:
-                        attempt_limit = min(body_limit, budget.remaining_bytes)
+                    if origin_budget is not None:
+                        if not reserved:
+                            if standard_path and endpoint.path in origin_budget.standard_paths:
+                                raise _StandardPathAlreadyRequested("standard path already requested")
+                            if origin_budget.requested_files >= RESOURCE_MAX_FILES:
+                                raise _ResourceFileLimit("destination file limit reached")
+                        attempt_limit = min(body_limit, budget.remaining_bytes,
+                                            RESOURCE_SITE_LIMIT - origin_budget.decoded_bytes)
                         if attempt_limit <= 0:
-                            raise _TooLargeFailure("site decoded byte limit reached")
+                            raise _ResourceByteLimit("decoded byte limit reached")
 
                         debit_site = budget.debit
 
@@ -1221,6 +1286,7 @@ class Fetcher:
                             if debit_site is not None:
                                 reported = True
                                 debit_site(size)
+                                origin_budget.decoded_bytes += size
 
                         kwargs["on_decoded"] = debit
                     if request_headers is not None:
@@ -1231,6 +1297,11 @@ class Fetcher:
                         kwargs["wire_limit"] = wire_limit
                     with self._lock:
                         self._check_expiry(entries)
+                        if origin_budget is not None and not reserved:
+                            origin_budget.requested_files += 1
+                            if standard_path:
+                                origin_budget.standard_paths.add(endpoint.path)
+                            reserved = True
                         self.request_count += 1
                     try:
                         response = self.transport.fetch(endpoint, address, ca_bundle=ca_bundle,
@@ -1241,9 +1312,15 @@ class Fetcher:
                     if budget is not None and 200 <= response.status < 300:
                         if not reported:
                             # Simple transports can return an already-decoded body.
-                            budget.debit(len(response.body))
+                            size = len(response.body)
+                            budget.debit(size)
+                            origin_budget.decoded_bytes += size
                         if len(response.body) > attempt_limit:
                             raise _TooLargeFailure("response body exceeds its byte limit")
+            except _TooLargeFailure as exc:
+                if origin_budget is not None and origin_budget.decoded_bytes >= RESOURCE_SITE_LIMIT:
+                    raise _ResourceByteLimit("destination decoded byte limit reached") from exc
+                raise
             except _ConnectionFailure as exc:
                 if attempt >= MAX_RETRIES or self._clock() >= deadline:
                     raise
@@ -1306,6 +1383,7 @@ class Fetcher:
               body_limit: int = BODY_LIMIT, wire_limit: int = WIRE_LIMIT,
               budget: _ResourceSiteState | None = None,
               endpoint: Endpoint | None = None, referrer: Endpoint | None = None,
+              referrer_policy: tuple[int, int] = _DEFAULT_REFERRER_POLICY,
               page_authorizations: tuple[WebAsset, ...] = (),
               minimum_host_interval: float = 0.0) -> _FetchSuccess:
         deadline = self._clock() + ASSET_TIMEOUT
@@ -1314,6 +1392,8 @@ class Fetcher:
         current = endpoint or asset.endpoint
         redirects: list[str] = []
         observed_at = self._now()
+        response_policy = _DEFAULT_REFERRER_POLICY
+        vary = set()
         for hop in range(asset.max_redirects + 1):
             if self._clock() >= deadline:
                 raise _TimeoutFailure("asset exceeded the total time limit")
@@ -1321,18 +1401,23 @@ class Fetcher:
             if referrer is not None:
                 if referrer.scheme == "https" and current.scheme == "http":
                     raise _RedirectFailure("HTTPS to HTTP downgrade is not allowed")
-                referer = referrer.url if referrer.origin == current.origin else referrer.origin_url + "/"
-                headers = dict(request_headers or {}, Referer=referer)
+                policy = _restrict_referrer(referrer_policy, response_policy)
+                referer = _referer_value(referrer, current, policy)
+                if referer is not None:
+                    headers = dict(request_headers or {}, Referer=referer)
             destination = allowlist.authorization(current, asset)
             response = self._request(current, asset, destination, deadline, allowlist.ca_bundle,
                                      request_headers=headers, budget=budget,
                                      page_authorizations=page_authorizations,
                                      body_limit=body_limit, wire_limit=wire_limit,
                                      minimum_host_interval=minimum_host_interval)
+            response_policy = _restrict_referrer(response_policy, _referrer_policy(response.headers))
+            vary.update(token for token in _header_tokens(response.headers, "vary") if token)
             if response.status not in REDIRECT_STATUSES:
                 if not 200 <= response.status < 300:
                     raise _ConnectionFailure(f"HTTP {response.status}", status=response.status)
-                return _FetchSuccess(response, tuple(redirects), observed_at, current)
+                return _FetchSuccess(response, tuple(redirects), observed_at, current,
+                                     response_policy, frozenset(vary))
             if not asset.allow_redirects:
                 raise _RedirectFailure("redirects are disabled for this entry", status=response.status,
                                        redirects_followed=len(redirects))
@@ -1379,6 +1464,8 @@ class _ResourceReference:
     url: str
     kind: str
     module: bool = False
+    follow: bool = True
+    referrer_policy: tuple[int, int] = _DEFAULT_REFERRER_POLICY
 
 
 def _valid_reference(value: str) -> bool:
@@ -1665,6 +1752,7 @@ class _ResourceLinkParser(HTMLParser):
         self.clock = clock
         self.deadline = deadline
         self.base_href: str | None = None
+        self.referrer_policy = _DEFAULT_REFERRER_POLICY
         self.links: list[_ResourceReference] = []
         self.skipped: Counter = Counter()
         self.declares_icon = False
@@ -1708,29 +1796,36 @@ class _ResourceLinkParser(HTMLParser):
             if self.base_href is None and "href" in attributes:
                 self.base_href = attributes["href"]
             return
+        if tag == "meta" and attributes.get("name", "").strip().casefold() == "referrer":
+            policy = _REFERRER_POLICIES.get(attributes.get("content", "").strip().casefold())
+            if policy is not None:
+                self.referrer_policy = _restrict_referrer(self.referrer_policy, policy)
+            return
+        policy = _REFERRER_POLICIES.get(attributes.get("referrerpolicy", "").strip().casefold(),
+                                        _DEFAULT_REFERRER_POLICY)
         if tag == "script":
             src = attributes.get("src")
             script_type = attributes.get("type", "").split(";", 1)[0].strip().casefold()
             if src is not None and (not script_type or script_type == "module"
                                     or script_type in _SCRIPT_MIME_TYPES):
-                self._add(_ResourceReference(src, "script", script_type == "module"))
+                self._add(_ResourceReference(src, "script", script_type == "module", referrer_policy=policy))
             return
         if tag == "link" and "href" in attributes:
             rel = set(attributes.get("rel", "").casefold().split())
             href = attributes["href"]
             if "icon" in rel or "apple-touch-icon" in rel or "mask-icon" in rel:
                 self.declares_icon = True
-                self._add(_ResourceReference(href, "icon"))
+                self._add(_ResourceReference(href, "icon", referrer_policy=policy))
             elif "manifest" in rel:
-                self._add(_ResourceReference(href, "manifest"))
+                self._add(_ResourceReference(href, "manifest", referrer_policy=policy))
             elif "stylesheet" in rel:
-                self._add(_ResourceReference(href, "style"))
+                self._add(_ResourceReference(href, "style", referrer_policy=policy))
             elif "modulepreload" in rel:
-                self._add(_ResourceReference(href, "script", True))
+                self._add(_ResourceReference(href, "script", True, referrer_policy=policy))
             elif "preload" in rel:
                 kind = attributes.get("as", "").casefold()
                 if kind in {"script", "style"}:
-                    self._add(_ResourceReference(href, kind, kind == "script"))
+                    self._add(_ResourceReference(href, kind, follow=False, referrer_policy=policy))
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "template" and self.template_depth:
@@ -1754,18 +1849,50 @@ class _ResourceCandidate:
     url: str
     kind: str
     module: bool
+    follow: bool
+    referrer_policy: tuple[int, int]
     authorization: WebAsset
 
+    @property
+    def response_key(self) -> tuple[str, str]:
+        return self.url, self.kind
 
-@dataclass(frozen=True, slots=True)
+    @property
+    def request_key(self) -> tuple:
+        return (*self.response_key, self.referrer_policy)
+
+
+@dataclass(slots=True)
 class _CachedResource:
-    url: str
+    resource: Resource
     metadata: tuple[str, int]
     detections: tuple
-    resource: Resource | None
-    references: tuple[str, ...] = ()
+    referrer_policy: tuple[int, int]
+    vary: frozenset[str]
+    referrer: Endpoint
+    request_policy: tuple[int, int]
+    authorizations: tuple[WebAsset, ...]
+    redirected: bool
     fingerprint_stopped: bool = False
     fingerprint_error: bool = False
+    dependencies: dict[tuple[str, str, bool], tuple[_ResourceReference, ...]] = field(default_factory=dict)
+
+    def matches(self, candidate: _ResourceCandidate, referrer: Endpoint,
+                authorizations: tuple[WebAsset, ...], now: datetime) -> bool:
+        # The response key fixes URL and Accept. The transport's other
+        # headers are constant, apart from the per-request Referer.
+        if self.vary - {"referer", "accept", "accept-encoding", "user-agent"}:
+            return False
+        if (_referer_value(self.referrer, candidate.endpoint, self.request_policy)
+                != _referer_value(referrer, candidate.endpoint, candidate.referrer_policy)):
+            return False
+        if self.redirected and (self.referrer, self.request_policy) != (referrer, candidate.referrer_policy):
+            return False
+        for prior, current in zip(self.authorizations, authorizations, strict=True):
+            if (prior.allow_private_address != current.allow_private_address
+                    or (current.expires_at is not None and current.expires_at <= now)):
+                return False
+        return not self.redirected or self.authorizations == authorizations
 
 
 def _url_origin(value: str) -> tuple[str, str, int]:
@@ -1779,21 +1906,29 @@ def _url_origin(value: str) -> tuple[str, str, int]:
     return scheme, hostname, _port(parts.port, scheme)
 
 
-def _resource_candidate(reference: _ResourceReference, base_url: str, page_asset: WebAsset,
+def _resource_candidate(reference: _ResourceReference, base_url: str | None, page_asset: WebAsset,
                         allowlist: Allowlist, state: _ResourceSiteState, queue,
-                        skipped: Counter, on_cached: Callable[[_CachedResource], None],
-                        *, base_scheme: str, page_scheme: str) -> str | None:
+                        skipped: Counter, lookup: Callable[[_ResourceCandidate], _CachedResource | None],
+                        *, page_scheme: str, referrer_policy: tuple[int, int]) -> None:
     if not _valid_reference(reference.url) or not reference.url.strip():
         skipped["invalid-url"] += 1
         return
     try:
-        absolute = urljoin(base_url, reference.url.strip())
+        value = reference.url.strip()
+        parsed = urlsplit(value)
+        relative = not parsed.scheme
+        if relative and (base_url is None or value.startswith("#")
+                         or (value.startswith("//") and not parsed.netloc)):
+            skipped["invalid-url"] += 1
+            return
+        # A same-scheme URL like "https:relative.js" is ambiguous across parsers.
+        absolute = urljoin(base_url, value) if relative else value
         parts = urlsplit(absolute)
         scheme = parts.scheme.casefold()
         if scheme not in {"http", "https"}:
             skipped["unsupported-scheme"] += 1
             return
-        if scheme == "http" and "https" in {base_scheme, page_scheme}:
+        if scheme == "http" and page_scheme == "https":
             skipped["redirect-blocked"] += 1
             return
         if parts.username is not None or parts.password is not None:
@@ -1816,21 +1951,22 @@ def _resource_candidate(reference: _ResourceReference, base_url: str, page_asset
         skipped["invalid-url"] += 1
         return
     endpoint = Endpoint(*origin, path_and_query)
-    resource_url = endpoint.url
-    if resource_url in state.seen_urls:
+    policy = _restrict_referrer(referrer_policy, reference.referrer_policy)
+    candidate = _ResourceCandidate(endpoint, endpoint.url, reference.kind, reference.module,
+                                   reference.follow, policy, allowlist.authorization(endpoint, page_asset))
+    use_key = (*candidate.request_key, candidate.follow, candidate.module)
+    if use_key in state.seen_urls:
         skipped["duplicate"] += 1
-        cached = state.files.get(resource_url)
-        if cached is not None:
-            on_cached(cached)
-        return resource_url
-    if len(state.seen_urls) >= RESOURCE_MAX_FILES or len(queue) >= state.remaining_files:
-        skipped["file-limit"] += 1
         return
-    policy = allowlist.authorization(endpoint, page_asset)
-    state.seen_urls.add(resource_url)
-    queue.append(_ResourceCandidate(endpoint, resource_url, reference.kind,
-                                    reference.module, policy))
-    return resource_url
+    fetch = lookup(candidate) is None
+    if fetch and candidate.request_key not in state.pending_files:
+        if len(state.pending_files) >= state.remaining_files:
+            skipped["file-limit"] += 1
+            return
+    state.seen_urls.add(use_key)
+    if fetch:
+        state.pending_files[candidate.request_key] += 1
+    queue.append((candidate, fetch))
 
 
 def _resource_references(html: str, clock, deadline: float) -> _ResourceLinkParser:
@@ -1880,7 +2016,7 @@ def _looks_like_html(body: bytes) -> bool:
 
 def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
                      allowlist: Allowlist, fetcher: Fetcher, state: _ResourceSiteState, *,
-                     run_deadline: float, deadline: float, remember_resource: bool,
+                     run_deadline: float, deadline: float, page_policy: tuple[int, int],
                      on_detections: Callable[[Iterable[object]], None],
                      fingerprints: _ExternalObservation) -> tuple[int, Counter, dict[str, tuple[str, int]]]:
     clock = fetcher._clock
@@ -1894,36 +2030,38 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
     page_authorizations = (page_asset, allowlist.authorization(page_endpoint, page_asset))
     parser = _resource_references(html, clock, deadline)
     skipped.update(parser.skipped)
+    document_policy = _restrict_referrer(page_policy, parser.referrer_policy)
     base_url = page_url
-    if parser.base_href is not None and _valid_reference(parser.base_href):
-        try:
-            proposed = urljoin(page_url, parser.base_href)
-            if _url_origin(proposed) == page_endpoint.origin:
+    if parser.base_href is not None and parser.base_href.strip():
+        value = parser.base_href.strip()
+        base_url = None
+        if _valid_reference(parser.base_href):
+            try:
+                parts = urlsplit(value)
+                if value.startswith("//") and not parts.netloc:
+                    raise ValueError("network-path base has no authority")
+                proposed = value if parts.scheme else urljoin(page_url, value)
+                _url_origin(proposed)
                 base_url = urlsplit(proposed)._replace(fragment="").geturl()
-        except (ExtensionError, ValueError, UnicodeError):
-            pass
+            except (ExtensionError, ValueError, UnicodeError):
+                pass
 
     queue = deque()
-    replayed = set()
+    state.seen_urls.clear()
+    state.pending_files.clear()
+    observed = set()
+    conflicting_metadata = set()
 
-    def replay(cached: _CachedResource) -> None:
-        pending = [cached]
-        while pending and clock() < deadline:
-            current = pending.pop()
-            if current.url in replayed:
-                continue
-            replayed.add(current.url)
-            metadata[current.url] = current.metadata
-            on_detections(current.detections)
-            fingerprints.stopped |= current.fingerprint_stopped
-            fingerprints.error |= current.fingerprint_error
-            if current.resource is not None:
-                fingerprints.add_resource(current.resource)
-            pending.extend(state.files[url] for url in reversed(current.references) if url in state.files)
+    def lookup(candidate: _ResourceCandidate) -> _CachedResource | None:
+        cached = state.files.get(candidate.response_key)
+        if cached is not None and cached.matches(
+                candidate, page_endpoint, (candidate.authorization, *page_authorizations), fetcher._now()):
+            return cached
+        return None
 
     remaining_references = RESOURCE_MAX_REFERENCES
 
-    def discover(references: Iterable[_ResourceReference], base: str, scheme: str) -> Iterable[str]:
+    def discover(references: Iterable[_ResourceReference], base: str | None, policy) -> None:
         nonlocal remaining_references
         for reference in references:
             if clock() >= deadline:
@@ -1932,105 +2070,134 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
                 skipped["discovery-limit"] += 1
                 break
             remaining_references -= 1
-            url = _resource_candidate(reference, base, page_asset, allowlist, state, queue, skipped,
-                                      replay, base_scheme=scheme, page_scheme=page_endpoint.scheme)
-            if url is not None:
-                yield url
+            _resource_candidate(reference, base, page_asset, allowlist, state, queue, skipped,
+                                lookup, page_scheme=page_endpoint.scheme, referrer_policy=policy)
 
-    for _ in discover(parser.links, base_url, page_endpoint.scheme):
-        pass
-    # Standard paths remain subject to the same request and file budgets.
-    for kind, path in (("icon", "/favicon.ico"), ("robots", "/robots.txt")):
+    discover(parser.links, base_url, document_policy)
+    for kind, path in _STANDARD_PATHS.items():
         if clock() >= deadline:
             break
         if kind != "icon" or not parser.declares_icon:
             _resource_candidate(_ResourceReference(path, kind), page_url, page_asset, allowlist,
-                                state, queue, skipped, replay, base_scheme=page_endpoint.scheme,
-                                page_scheme=page_endpoint.scheme)
+                                state, queue, skipped, lookup, page_scheme=page_endpoint.scheme,
+                                referrer_policy=document_policy)
 
     resources_fetched = 0
     fetch_deadline = min(state.deadline, deadline)
     if state.final_budget is not None:
         fetch_deadline = min(fetch_deadline, state.final_budget.deadline)
+    time_reason = "run-deadline" if fetch_deadline == run_deadline else "site-time-budget"
     while queue:
         if clock() >= fetch_deadline:
-            skipped["run-deadline" if fetch_deadline == run_deadline else "site-time-budget"] += len(queue)
+            skipped[time_reason] += len(queue)
             break
-        if state.remaining_bytes <= 0:
-            skipped["site-limit"] += len(queue)
-            break
-        candidate = queue.popleft()
-        state.request_file()
-        request_headers = {
-            "Accept": "text/css,*/*;q=0.1" if candidate.kind == "style" else "*/*",
-        }
-        try:
-            success = fetcher.fetch(
-                candidate.authorization, allowlist, endpoint=candidate.endpoint, referrer=page_endpoint,
-                run_deadline=fetch_deadline, request_headers=request_headers, body_limit=RESOURCE_FILE_LIMIT,
-                wire_limit=RESOURCE_WIRE_LIMIT, budget=state, page_authorizations=page_authorizations,
-                minimum_host_interval=RESOURCE_MIN_HOST_INTERVAL,
-            )
-        except _TooLargeFailure:
-            skipped["site-limit" if state.remaining_bytes <= 0 else "too-large"] += 1
-            continue
-        except _FetchFailure as failure:
-            if isinstance(failure, _TimeoutFailure) and clock() >= fetch_deadline:
-                skipped["run-deadline" if fetch_deadline == run_deadline else "site-time-budget"] += 1
-            elif failure.status is not None and failure.reason == "unreachable":
-                skipped["http-status"] += 1
-            else:
-                skipped[failure.reason] += 1
-            continue
-        except Exception:
-            skipped["unreachable"] += 1
-            continue
-
-        if clock() >= deadline:
-            skipped["run-deadline" if deadline == run_deadline else "site-time-budget"] += 1
-            continue
-        if success.response.status != 200:
-            skipped["http-status"] += 1
-            continue
-        body = success.response.body
-        _, accepted_type, is_html = _resource_content_type(success.response.headers, candidate.kind)
-        if is_html or _looks_like_html(body):
-            skipped["html-response"] += 1
-            continue
-        if not accepted_type:
-            skipped["wrong-content-type"] += 1
-            continue
-
-        endpoint = success.final_endpoint or candidate.endpoint
-        digest = hashlib.sha256(body).hexdigest()
-        text = "" if candidate.kind == "icon" else _decode_resource(body, success.response.headers)
-        resource = Resource(endpoint.url, candidate.kind, text)
-        detections = ()
-        if clock() < deadline:
+        candidate, reserved = queue.popleft()
+        if reserved:
+            state.pending_files[candidate.request_key] -= 1
+            if not state.pending_files[candidate.request_key]:
+                del state.pending_files[candidate.request_key]
+        cached = lookup(candidate)
+        if cached is None:
+            if state.remaining_bytes <= 0:
+                skipped["site-limit"] += 1
+                continue
+            if state.remaining_files <= 0:
+                skipped["file-limit"] += 1
+                continue
+            state.request_file()
+            request_headers = {
+                "Accept": "text/css,*/*;q=0.1" if candidate.kind == "style" else "*/*",
+            }
             try:
-                detections = tuple(_detect_builtin(page_from({}, "", resources=[resource]),
-                                                   clock=clock, deadline=deadline))
+                success = fetcher.fetch(
+                    candidate.authorization, allowlist, endpoint=candidate.endpoint, referrer=page_endpoint,
+                    referrer_policy=candidate.referrer_policy, run_deadline=fetch_deadline,
+                    request_headers=request_headers, body_limit=RESOURCE_FILE_LIMIT, wire_limit=RESOURCE_WIRE_LIMIT,
+                    budget=state, page_authorizations=page_authorizations,
+                    minimum_host_interval=RESOURCE_MIN_HOST_INTERVAL,
+                )
+            except _TooLargeFailure:
+                skipped["site-limit" if state.remaining_bytes <= 0 else "too-large"] += 1
+                continue
+            except _FetchFailure as failure:
+                if isinstance(failure, _TimeoutFailure) and clock() >= fetch_deadline:
+                    skipped[time_reason] += 1
+                elif failure.status is not None and failure.reason == "unreachable":
+                    skipped["http-status"] += 1
+                else:
+                    skipped[failure.reason] += 1
+                continue
             except Exception:
-                skipped["analysis-error"] += 1
-        legacy_stopped = legacy_error = False
-        if fingerprints.legacy and clock() < deadline:
-            external_detections, legacy_stopped, legacy_error = fingerprints.legacy_resource(resource)
-            detections += external_detections
-        cached = _CachedResource(resource.url, (digest, len(body)), detections,
-                                 resource if fingerprints.session is not None else None,
-                                 fingerprint_stopped=legacy_stopped, fingerprint_error=legacy_error)
-        replay(cached)
-        resources_fetched += 1
+                skipped["unreachable"] += 1
+                continue
 
-        nested = ()
-        if remaining_references > 0 and clock() < deadline:
-            if candidate.kind == "style":
-                nested = _css_references(text, clock, deadline)
-            elif candidate.kind == "script":
-                nested = _script_references(text, candidate.module, clock, deadline)
-        urls = dict.fromkeys(discover(nested, endpoint.url, endpoint.scheme))
-        state.files[candidate.url] = replace(cached, references=tuple(urls),
-                                             resource=cached.resource if remember_resource else None)
+            if clock() >= fetch_deadline:
+                skipped[time_reason] += 1
+                continue
+            if success.response.status != 200:
+                skipped["http-status"] += 1
+                continue
+            body = success.response.body
+            _, accepted_type, is_html = _resource_content_type(success.response.headers, candidate.kind)
+            if is_html or _looks_like_html(body):
+                skipped["html-response"] += 1
+                continue
+            if not accepted_type:
+                skipped["wrong-content-type"] += 1
+                continue
+
+            endpoint = success.final_endpoint or candidate.endpoint
+            digest = hashlib.sha256(body).hexdigest()
+            text = "" if candidate.kind == "icon" else _decode_resource(body, success.response.headers)
+            resource = Resource(endpoint.url, candidate.kind, text)
+            detections = ()
+            if clock() < deadline:
+                try:
+                    detections = tuple(_detect_builtin(page_from({}, "", resources=[resource]),
+                                                       clock=clock, deadline=deadline))
+                except Exception:
+                    skipped["analysis-error"] += 1
+            legacy_stopped = legacy_error = False
+            if fingerprints.legacy and clock() < deadline:
+                external_detections, legacy_stopped, legacy_error = fingerprints.legacy_resource(resource)
+                detections += external_detections
+            cached = _CachedResource(
+                resource, (digest, len(body)), detections, success.referrer_policy, success.vary,
+                page_endpoint, candidate.referrer_policy, (candidate.authorization, *page_authorizations),
+                bool(success.redirects), legacy_stopped, legacy_error,
+            )
+            resources_fetched += 1
+            if clock() < deadline and not legacy_stopped and not legacy_error:
+                state.files[candidate.response_key] = cached
+
+        resource = cached.resource
+        observation_key = (resource.url, candidate.kind, cached.metadata)
+        if observation_key not in observed:
+            observed.add(observation_key)
+            existing = metadata.get(resource.url)
+            if existing is not None and existing != cached.metadata:
+                conflicting_metadata.add(resource.url)
+                del metadata[resource.url]
+            elif resource.url not in conflicting_metadata:
+                metadata[resource.url] = cached.metadata
+            on_detections(cached.detections)
+            fingerprints.stopped |= cached.fingerprint_stopped
+            fingerprints.error |= cached.fingerprint_error
+            fingerprints.add_resource(resource)
+        if candidate.follow and remaining_references > 0 and clock() < deadline:
+            graph_key = (resource.url, candidate.kind, candidate.module)
+            references = cached.dependencies.get(graph_key)
+            if references is None:
+                nested = ()
+                if candidate.kind == "style":
+                    nested = _css_references(resource.text, clock, deadline)
+                elif candidate.kind == "script":
+                    nested = _script_references(resource.text, candidate.module, clock, deadline)
+                references = tuple(islice(nested, remaining_references + 1))
+                if len(references) <= remaining_references and clock() < deadline:
+                    cached.dependencies[graph_key] = references
+            policy = _restrict_referrer(candidate.referrer_policy, cached.referrer_policy)
+            discover(references, resource.url, policy)
 
     return resources_fetched, skipped, metadata
 
@@ -2327,7 +2494,6 @@ class _ExternalObservation:
 
 def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
              run_deadline: float, external=None, state: _ResourceSiteState | None = None,
-             remember_resource: bool = False,
              final_budgets: _OriginResourceBudgets | None = None,
              on_page: Callable[[Callable[[], _AssetResult]], None] | None = None) -> _AssetResult:
     base = _observation_ids(allowlist.client, asset.endpoint)
@@ -2403,7 +2569,7 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             state.final_budget = final_budget
             resources_fetched, resources_skipped, file_metadata = _fetch_resources(
                 html, page_endpoint, asset, allowlist, fetcher, state, run_deadline=run_deadline,
-                deadline=deadline, remember_resource=remember_resource, on_detections=merge,
+                deadline=deadline, page_policy=success.referrer_policy, on_detections=merge,
                 fingerprints=fingerprints)
         else:
             reason = "run-deadline" if clock() >= run_deadline else "site-time-budget"
@@ -2520,7 +2686,7 @@ def _observe_origin(assets: list[WebAsset], allowlist: Allowlist, fetcher: Fetch
                     record: Callable[[Endpoint, _AssetResult | Callable[[], _AssetResult]], None]) -> None:
     # Grouping starting paths gives the shared budget and cache the lifetime of this worker.
     state = _ResourceSiteState()
-    for index, asset in enumerate(assets):
+    for asset in assets:
         if fetcher._clock() >= run_deadline:
             break
 
@@ -2528,7 +2694,7 @@ def _observe_origin(assets: list[WebAsset], allowlist: Allowlist, fetcher: Fetch
             record(endpoint, result)
 
         result = _observe(asset, allowlist, fetcher, run_deadline=run_deadline, external=external,
-                          state=state, remember_resource=index + 1 < len(assets),
+                          state=state,
                           final_budgets=final_budgets, on_page=on_page)
         record(asset.endpoint, result)
 

@@ -197,7 +197,7 @@ def test_pages_redirected_to_the_same_origin_keep_shared_resource_caps(tmp_path,
 
 
 def test_shared_file_cannot_replay_page_or_response_header_evidence(tmp_path):
-    html = '<script src="/shared.js"></script>'
+    html = '<meta name="referrer" content="no-referrer"><script src="/shared.js"></script>'
     detail, transport, output, _ = run(tmp_path, [asset(path="/one"), asset(path="/two")], html,
         transport=Transport([
             response(body=html.encode(), server="Apache/2.4.62"),
@@ -400,7 +400,8 @@ def test_external_session_finishes_once_and_keeps_long_url_metadata(tmp_path, mo
 
 
 def test_each_observation_replays_a_shared_resource_and_its_children_once(tmp_path, monkeypatch):
-    html = '<script type="module" src="/shared.js"></script>' * 900
+    html = ('<meta name="referrer" content="no-referrer">'
+            + '<script type="module" src="/shared.js"></script>' * 900)
     sessions = []
 
     class Session:
@@ -528,3 +529,151 @@ def test_invalid_session_detection_is_quarantined(tmp_path, monkeypatch, bad):
     assert [item["product"] for item in detail["products"]] == ["http_server"]
     assert [item["reason"] for item in detail["reviews"]] == ["invalid-detection"]
     assert [row["product"] for row in read_snapshot(output, allow_partial=True, now=NOW).records] == ["http_server"]
+
+
+@pytest.mark.parametrize("base,expected", [
+    ("https://foreign.invalid/assets/", "/assets/relative.js"),
+    ("https://outside.invalid/assets/", None),
+    ("https://[invalid/assets/", None),
+])
+def test_relative_resources_are_authorized_against_the_effective_base(tmp_path, base, expected):
+    html = f'<base href="{base}"><script src="relative.js"></script><script src="https://origin.invalid/absolute.js"></script>'
+
+    class Routes(Transport):
+        def fetch(self, endpoint, *args, **kwargs):
+            self.calls.append((endpoint, *args, kwargs))
+            if endpoint.path == "/app/index.html":
+                return web._Response(*response(body=html.encode()))
+            return web._Response(*response(404, "", b""))
+
+    _, transport, _, _ = run(tmp_path, [asset(), asset("foreign.invalid", "/")], html,
+                              transport=Routes([]))
+    scripts = [(call[0].hostname, call[0].path) for call in transport.calls if call[0].path.endswith(".js")]
+    expected_scripts = [("foreign.invalid", expected)] if expected else []
+    assert scripts == [*expected_scripts, ("origin.invalid", "/absolute.js")]
+
+
+@pytest.mark.parametrize("limit", ["files", "bytes"])
+@pytest.mark.parametrize("workers", [1, 3])
+def test_actual_resource_destination_shares_budget_across_page_origins_and_redirects(
+        tmp_path, monkeypatch, limit, workers):
+    if limit == "files":
+        monkeypatch.setattr(web, "RESOURCE_MAX_FILES", 1)
+    else:
+        monkeypatch.setattr(web, "RESOURCE_SITE_LIMIT", 4)
+
+    class Routes(Transport):
+        def fetch(self, endpoint, *args, **kwargs):
+            self.calls.append((endpoint, *args, kwargs))
+            if endpoint.path == "/one":
+                return web._Response(*response(body=b'<script src="/route.js"></script>'))
+            if endpoint.path == "/two":
+                return web._Response(*response(body=b'<script src="https://cdn.invalid/b.js"></script>'))
+            if endpoint.path == "/route.js":
+                return web._Response(*response(302, "", b"", location="https://cdn.invalid/a.js"))
+            if endpoint.hostname == "cdn.invalid" and endpoint.path.endswith(".js"):
+                return web._Response(*response(content_type="text/javascript", body=b"data"))
+            return web._Response(*response(404, "", b""))
+
+    detail, transport, _, _ = run(tmp_path, [
+        asset(path="/one"), asset("other.invalid", "/two"), asset("cdn.invalid", "/"),
+    ], "", transport=Routes([]), max_workers=workers)
+    cdn_paths = [call[0].path for call in transport.calls if call[0].hostname == "cdn.invalid"
+                 and call[0].path.endswith(".js")]
+    if workers == 1:
+        assert cdn_paths == ["/a.js"]
+    else:
+        assert len(cdn_paths) == 1
+    reason = "file-limit" if limit == "files" else "site-limit"
+    assert detail["run"]["resources_skipped_by_reason"][reason] >= 1
+
+
+def test_standard_paths_are_requested_once_per_effective_origin_even_on_http_failure(tmp_path):
+    class Routes(Transport):
+        def fetch(self, endpoint, *args, **kwargs):
+            self.calls.append((endpoint, *args, kwargs))
+            if endpoint.path in {"/start-one", "/start-two"}:
+                return web._Response(*response(302, "", b"", location="https://final.invalid/landing"))
+            if endpoint.path in {"/landing", "/direct"}:
+                return web._Response(*response(server="Apache/2.4.62"))
+            return web._Response(*response(404, "", b""))
+
+    _, transport, _, _ = run(tmp_path, [
+        asset(path="/start-one"), asset("other.invalid", "/start-two"), asset("final.invalid", "/direct"),
+    ], "", transport=Routes([]))
+    assert [(call[0].hostname, call[0].path) for call in transport.calls
+            if call[0].path in {"/favicon.ico", "/robots.txt"}] == [
+        ("final.invalid", "/favicon.ico"), ("final.invalid", "/robots.txt")]
+
+
+@pytest.mark.parametrize("first_is_module", [True, False])
+def test_plain_preload_reuses_bytes_without_replaying_module_children(tmp_path, first_is_module):
+    module = '<script type="module" src="/shared.js"></script>'
+    preload = '<link rel="preload" as="script" href="/shared.js">'
+    policy = '<meta name="referrer" content="no-referrer">'
+
+    class Routes(Transport):
+        def fetch(self, endpoint, *args, **kwargs):
+            self.calls.append((endpoint, *args, kwargs))
+            routes = {
+                "/one": response(body=(policy + (module if first_is_module else preload)).encode(), server="Apache/2.4.62"),
+                "/two": response(body=(policy + (preload if first_is_module else module)).encode(), server="Caddy/2.8.4"),
+                "/shared.js": response(content_type="text/javascript", body=b'import "./child.js";'),
+                "/child.js": response(content_type="text/javascript", body=b"/*! jQuery v3.7.1 | fixture */"),
+            }
+            return web._Response(*routes.get(endpoint.path, response(404, "", b"")))
+
+    _, transport, output, _ = run(tmp_path, [asset(path="/one"), asset(path="/two")], "",
+                                   transport=Routes([]))
+    paths = _paths(transport)
+    assert paths.count("/shared.js") == paths.count("/child.js") == 1
+    assert (paths.index("/child.js") < paths.index("/two")) is first_is_module
+    rows = read_snapshot(output, allow_partial=True, now=NOW).records
+    jquery_systems = [row["system_id"] for row in rows if row["product"] == "jquery"]
+    parent = "http_server" if first_is_module else "caddy"
+    assert jquery_systems == [row["system_id"] for row in rows if row["product"] == parent]
+
+
+@pytest.mark.parametrize("advertises_vary", [False, True])
+def test_cached_resource_evidence_respects_actual_referer(tmp_path, advertises_vary):
+    html = '<script src="/variant.js"></script>'
+
+    class Routes(Transport):
+        def fetch(self, endpoint, *args, **kwargs):
+            self.calls.append((endpoint, *args, kwargs))
+            if endpoint.path in {"/one", "/two"}:
+                server = "Apache/2.4.62" if endpoint.path == "/one" else "Caddy/2.8.4"
+                return web._Response(*response(body=html.encode(), server=server))
+            if endpoint.path == "/variant.js":
+                referer = kwargs["request_headers"]["Referer"]
+                body = b"/*! jQuery v3.7.1 | fixture */" if referer.endswith("/one") else b""
+                headers = {"vary": "Referer"} if advertises_vary else {}
+                return web._Response(*response(content_type="text/javascript", body=body, **headers))
+            return web._Response(*response(404, "", b""))
+
+    _, transport, output, _ = run(tmp_path, [asset(path="/one"), asset(path="/two")], "",
+                                   transport=Routes([]))
+    assert _paths(transport).count("/variant.js") == 2
+    rows = read_snapshot(output, allow_partial=True, now=NOW).records
+    assert [row["system_id"] for row in rows if row["product"] == "jquery"] == [
+        row["system_id"] for row in rows if row["product"] == "http_server"]
+
+
+@pytest.mark.parametrize("policy_source", ["response", "meta", "element", "redirect"])
+def test_stricter_referrer_policy_is_applied_on_every_discovery_hop(tmp_path, policy_source):
+    html = ('<meta name="referrer" content="no-referrer">' if policy_source == "meta" else "")
+    html += '<script type="module" src="/first.js"'
+    html += ' referrerpolicy="no-referrer"' if policy_source == "element" else ""
+    html += "></script>"
+    headers = {"referrer-policy": "no-referrer"} if policy_source == "response" else {}
+    redirects = {"referrer-policy": "no-referrer"} if policy_source == "redirect" else {}
+    _, transport, _, _ = run(tmp_path, [asset()], html, transport=Transport([
+        response(body=html.encode(), **headers),
+        response(302, "", b"", location="/last.js", **redirects),
+        response(content_type="text/javascript", body=b'import "./nested.js";'),
+        response(content_type="text/javascript", body=b""),
+    ]))
+    referers = {call[0].path: call[5]["request_headers"].get("Referer") for call in transport.calls
+                if call[0].path.endswith(".js")}
+    initial = "https://origin.invalid/app/index.html" if policy_source == "redirect" else None
+    assert referers == {"/first.js": initial, "/last.js": None, "/nested.js": None}
