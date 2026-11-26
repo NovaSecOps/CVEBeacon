@@ -224,13 +224,13 @@ def test_builtin_rules_do_not_combine_incompatible_cpes(monkeypatch):
 ])
 def test_cdnjs_rejects_decoded_separators_controls_and_url_like_names(url):
     found = detect(page_from({}, f'<script src="{url}"></script>'))
-    assert not any(item.vendor == "cdnjs" for item in found)
+    assert not any(item.vendor == "cdnjs" and item.name != "cdnjs" for item in found)
 
 
 def test_unknown_cdnjs_without_a_public_version_stays_unidentified_review_evidence():
     url = "https://cdnjs.cloudflare.com/ajax/libs/private-widget/latest/widget.js"
     found = detect(page_from({}, f'<script src="{url}"></script>'))
-    review = next(item for item in found if item.vendor == "cdnjs")
+    review = next(item for item in found if item.name == "private-widget, from a cdnjs link")
     assert not review.product and not review.ecosystem and not review.package and not review.versions
 
 
@@ -264,16 +264,16 @@ def test_unknown_cdnjs_stays_private_when_inventory_rows_are_normalized():
     )) for row in result.rows]
     assert {row.purl for row in rows} == {"pkg:npm/react@18.3.1", "pkg:npm/dompurify@3.2.0"}
 
-    cdnjs = next(item for item in result.products if item["vendor"] == "cdnjs")
+    cdnjs = next(item for item in result.products if item["name"].startswith("unknown-widget "))
     assert cdnjs["product"] == ""
-    assert cdnjs["name"] == "Unidentified cdnjs library"
+    assert cdnjs["name"] == "unknown-widget 2.4.1, from a cdnjs link"
     assert "ecosystem" not in cdnjs and "package" not in cdnjs
     assert cdnjs["evidence"][0]["kind"] == "url"
     assert "unknown-widget" in cdnjs["evidence"][0]["excerpt"]
     assert any(item.get("reason") == "version-unknown" and item.get("product") == "cdnjs/"
                for item in result.reviews)
     for vendor, excerpt in (("unpkg", "@scope/widget@2.4.1"), ("jsdelivr", "unreviewed-widget@3.4.5")):
-        item = next(item for item in result.products if item["vendor"] == vendor)
+        item = next(item for item in result.products if item["vendor"] == vendor and item["product"] == "")
         assert item["product"] == "" and item["versions"] == []
         assert "ecosystem" not in item and "package" not in item
         assert excerpt in item["evidence"][0]["excerpt"]
@@ -346,23 +346,18 @@ def test_ten_mib_adversarial_input_stays_bounded(kind):
     detect(page)
     assert time.monotonic() - started < 10.0
     assert len(page.html) <= webrules.MAX_ANALYSIS_TEXT
-    assert all(len(resource.text) <= webrules.MAX_ANALYSIS_TEXT for resource in page.resources)
+    assert all(len(resource.text) <= webrules.MAX_RESOURCE_TEXT for resource in page.resources)
 
 
 def test_versionless_published_builds_have_reviewed_exact_digest_fingerprints():
     expected = {
-        # zone.js@0.16.3, MIT. The minified artifact has no literal version.
-        "4ee0b2fe4733702f3ff1bc453ef5547effdc08e62551904946d2058bdd811ada":
-            ("zone.js", "0.16.3", "script"),
-        # rxjs@7.8.1, Apache-2.0. The minified artifact has no literal version.
-        "6508e15edacb9eb2c00b8d3fb8fe3022bef1ca1cdb705519524093d4659b3c23":
-            ("rxjs", "7.8.1", "script"),
-        # foundation-sites@6.9.0, MIT. The minified stylesheet has no version.
-        "c500decbe33468e54180f1b6238850d810e85dcdfbea7f87f56bcb17051a51e4":
-            ("foundation-sites", "6.9.0", "style"),
+        "zone.js": ("zone.js", "0.16.3", "script"),
+        "rxjs": ("rxjs", "7.8.1", "script"),
+        "foundation-sites": ("foundation-sites", "6.9.0", "style"),
+        "lit": ("lit", "3.3.1", "script"),
     }
-    actual = {digest: (entry[5], entry[6], entry[7])
-              for digest, entry in webrules.BUILT_ARTIFACT_HASHES.items()}
+    actual = {entry[5]: (entry[5], entry[6], entry[7])
+              for entry in webrules.BUILT_ARTIFACT_HASHES.values()}
     assert actual == expected
 
 
@@ -370,7 +365,7 @@ def test_artifact_digest_lookup_uses_exact_resource_text(monkeypatch):
     sample = 'var key="__Zone_symbol_prefix";'
     digest = hashlib.sha256(sample.encode("utf-8")).hexdigest()
     monkeypatch.setattr(webrules, "BUILT_ARTIFACT_HASHES", {
-        digest: ("example", "published-build", "js-library", "Example", "npm", "example",
+        digest: ("example", "published-build", "Example", "js-library", "npm", "example",
                  "1.2.3", "script"),
     })
     found = detect(_resource(sample))

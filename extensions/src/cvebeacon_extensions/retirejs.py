@@ -14,6 +14,7 @@ from .webrules import (
     Detection,
     Evidence,
     Page,
+    MAX_ANALYSIS_TEXT,
     MAX_DETECTION_TEXT,
     MAX_EVIDENCE_EXCERPT_LENGTH,
     MAX_PAGE_RESOURCES,
@@ -431,11 +432,12 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
             break
         if resource.kind != "script" or not resource.text:
             continue
-        candidates = _filecontent_candidates(resource.text)
+        analysis_text = resource.text[:MAX_ANALYSIS_TEXT]
+        candidates = _filecontent_candidates(analysis_text)
         for signature in candidates:
             if _deadline_passed(deadline, clock):
                 break
-            result = _matches(signature, resource.text)
+            result = _matches(signature, analysis_text)
             if result:
                 excerpt, version = result
                 _append(findings, signature, "script", resource.url, excerpt, version)

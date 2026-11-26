@@ -82,6 +82,11 @@ RULE_CASES = (
     # rxjs@7.8.1, Apache-2.0. Concatenate the short constructor excerpt after a banner.
     ("rxjs-runtime", "script", '/*! Bootstrap v5.3.9 */\nthis.name="ObjectUnsubscribedError";this.message="object unsubscribed"', 'this.name="ObjectUnsubscribedError";this.message="another error"', "RxJS", "rxjs", ""),
     ("core-js", "script", "__core-js_shared__.versions.push({ version: '3.40.0', mode: 'global', copyright: 'Core-js' });", "const build = '3.40.0';", "core-js", "core-js", "3.40.0"),
+    ("core-js-shared-store", "script", '(s.versions||(s.versions=[])).push({version:"3.29.0",mode:"global",copyright:"Core-js contributors"});var s=window.__core-js_shared__;', 'versions.push({version:"3.29.0",mode:"global",copyright:"Other library"});', "core-js", "core-js", "3.29.0"),
+    ("lit-html", "script", '(window.litHtmlVersions||(window.litHtmlVersions=[])).push("3.3.3");', '(window.litHtmlVersion||(window.litHtmlVersion=[])).push("3.3.3");', "lit-html", "lit-html", "3.3.3"),
+    ("lit-element", "script", '(window.litElementVersions||(window.litElementVersions=[])).push("4.2.2");', '(window.litElementVersion||(window.litElementVersion=[])).push("4.2.2");', "lit-element", "lit-element", "4.2.2"),
+    ("lit-reactive-element", "script", '(window.reactiveElementVersions||(window.reactiveElementVersions=[])).push("2.1.1");', '(window.reactiveElementVersion||(window.reactiveElementVersion=[])).push("2.1.1");', "@lit/reactive-element", "@lit/reactive-element", "2.1.1"),
+    ("lit-package", "script", 'import{html,render}from"lit-html";export{LitElement}from"lit-element";', 'import{html,render}from"lit-html";export{LitElement}from"other-element";', "lit", "lit", ""),
     ("zonejs-script", "script", '/*! zone.js v0.15.0 */', '/*! zone.js compatible build 0.15.0 */', "zone.js", "zone.js", "0.15.0"),
     # zone.js@0.16.3, MIT. Use two short markers from the minified runtime.
     ("zonejs-runtime", "script", '/*! Bootstrap v5.3.9 */\n"__zone_symbol__";throw Error("Already loaded patch: "+r)', 'throw Error("Already loaded patch: "+r)', "zone.js", "zone.js", ""),
@@ -92,6 +97,7 @@ RULE_CASES = (
     ("bootstrap", "url", "https://static.example.invalid/bootstrap-5.3.3.min.css", "https://static.example.invalid/bootstrapper-5.3.3.css", "Bootstrap", "bootstrap", "5.3.3"),
     ("bootstrap-script", "script", '/*! Bootstrap v5.3.3 */', '/*! Bootstrap-compatible build v5.3.3 */', "Bootstrap", "bootstrap", "5.3.3"),
     ("bootstrap-style", "style", '/*! Bootstrap v5.3.3 | https://getbootstrap.com/ */', '/*! Bootstrap-like stylesheet v5.3.3 */', "Bootstrap", "bootstrap", "5.3.3"),
+    ("bootstrap-icons-style", "style", '/*! Bootstrap Icons v1.10.5 (https://icons.getbootstrap.com/) */', '/*! Bootstrap Icon-like font v1.10.5 */', "Bootstrap Icons", "bootstrap-icons", "1.10.5"),
     ("font-awesome-style", "style", '/*! Font Awesome Free 6.7.2 by @fontawesome */', '/*! Font Awesome compatible icons 6.7.2 */', "Font Awesome", "@fortawesome/fontawesome-free", "6.7.2"),
     ("tailwind-style", "style", '/*! tailwindcss v3.4.17 | MIT License */', '/*! tailwind-compatible utilities v3.4.17 */', "Tailwind CSS", "tailwindcss", "3.4.17"),
     ("bulma-style", "style", '/*! Bulma v1.0.2 | https://bulma.io */', '/*! Bulma-compatible styles v1.0.2 */', "Bulma", "bulma", "1.0.2"),
@@ -114,9 +120,17 @@ RULE_CASES = (
     ("joomla-robots", "robots", "Disallow: /administrator/", "Disallow: /admin/", "Joomla", "", ""),
     ("angular-manifest", "manifest", '{"serviceworker":{"src":"/ngsw-worker.js"}}', '{"serviceworker":{"src":"/worker.js"}}', "Angular", "@angular/core", ""),
     ("google-maps", "url", "https://maps.googleapis.com/maps/api/js?key=TEST", "https://maps.example.invalid/api/js", "Google Maps", "", ""),
+    ("google-maps-script", "script", 'const maps = "https://maps.googleapis.com/maps/api/js?key=TEST";', 'const maps = "https://maps.example.invalid/api/js";', "Google Maps", "", ""),
     ("google-fonts", "style-url", "https://fonts.googleapis.com/css?family=Inter", "https://fonts.example.invalid/css?family=Inter", "Google Font API", "", ""),
     ("google-analytics", "url", "https://www.google-analytics.com/analytics.js", "https://analytics.example.invalid/analytics.js", "Google Analytics", "", ""),
+    ("google-analytics-script", "script", "gtag('config', 'G-ABC1234567');", "gtag('config', 'UA-ABC1234567');", "Google Analytics", "", ""),
     ("google-tag-manager", "url", "https://www.googletagmanager.com/gtm.js?id=GTM-TEST", "https://tagmanager.example.invalid/gtm.js", "Google Tag Manager", "", ""),
+    ("google-tag-manager-script", "script", 'j.src="https://www.googletagmanager.com/gtm.js?id="+i+d;w["GTM-ABC1234567"]="";', 'j.src="https://tagmanager.example.invalid/gtm.js";', "Google Tag Manager", "", ""),
+    ("open-graph", "html", '<meta property="og:title" content="Example">', '<meta property="twitter:title" content="Example">', "Open Graph", "", ""),
+    ("priority-hints", "html", '<img src="hero.webp" fetchpriority="high">', '<img src="hero.webp" data-fetchpriority="high">', "Priority Hints", "", ""),
+    ("cdn-jsdelivr", "style-url", "https://cdn.jsdelivr.net/npm/example@1.2.3/style.css", "https://static.example.invalid/style.css", "jsDelivr", "", ""),
+    ("cdn-unpkg", "style-url", "https://unpkg.com/example@1.2.3/style.css", "https://static.example.invalid/style.css", "unpkg", "", ""),
+    ("cdnjs-service", "style-url", "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.css", "https://static.example.invalid/jquery.min.css", "cdnjs", "", ""),
     ("google-recaptcha", "url", "https://www.google.com/recaptcha/api.js", "https://captcha.example.invalid/recaptcha/api.js", "Google reCAPTCHA", "", ""),
     ("hcaptcha", "url", "https://js.hcaptcha.com/1/api.js", "https://captcha.example.invalid/1/api.js", "hCaptcha", "", ""),
     ("cloudflare-turnstile", "url", "https://challenges.cloudflare.com/turnstile/v0/api.js", "https://challenges.example.invalid/turnstile/v0/api.js", "Cloudflare Turnstile", "", ""),
@@ -150,6 +164,13 @@ def test_rule_has_narrow_positive_negative_and_identity(key, kind, positive, neg
         assert found.versions == ()
 
 
+def test_nginx_keeps_web_server_as_primary_and_reports_reverse_proxy_too():
+    nginx = next(item for item in detect(_page("header", "Server: nginx/1.26.2"))
+                 if item.name == "Nginx")
+    assert nginx.category == "web-server"
+    assert set(nginx.categories) == {"web-server", "reverse-proxy"}
+
+
 def test_all_new_rules_have_positive_and_negative_cases():
     from cvebeacon_extensions.webrules import RULES
 
@@ -160,11 +181,72 @@ def test_all_new_rules_have_positive_and_negative_cases():
     assert required == case_keys
 
 
+def test_angular_bundle_banner_is_found_after_large_webpack_chunks():
+    padding = "/* dependency module */\n" * (webrules.MAX_ANALYSIS_TEXT // 24 + 8)
+    tail = (
+        'self.webpackChunk_app.push([[42],{42:(module,exports)=>{'
+        '/*! Angular v16.2.12 */ const VERSION=new Version("16.2.12");}}]);'
+    )
+    page = _page("script", padding + tail)
+    angular = next(item for item in detect(page) if item.name == "Angular")
+    typescript = next(item for item in detect(page) if item.name == "TypeScript")
+    assert angular.versions == ("16.2.12",)
+    assert typescript.evidence_types == ("implied",)
+    assert typescript.implied_by == ("Angular",)
+    assert len(page.resources[0].text) == len(padding + tail)
+    assert not any(item.name == "Angular" for item in detect(
+        _page("script", "/*! Angular v16.2.12 */")
+    ))
+
+
+def test_angular_bundle_search_stops_at_the_ten_mib_resource_limit():
+    prefix = "x" * webrules.MAX_RESOURCE_TEXT
+    page = _page("script", prefix + "/*! Angular v16.2.12 */")
+    assert not any(item.name == "Angular" for item in detect(page))
+
+
+@pytest.mark.parametrize("script", [
+    '<script>navigator.serviceWorker.register("/sw.js");</script>',
+])
+def test_pwa_requires_a_linked_manifest_and_service_worker(script):
+    html = '<link rel="manifest" href="/app.webmanifest">' + script
+    pwa = next(item for item in detect(page_from({}, html)) if item.name == "PWA")
+    assert set(pwa.evidence_types) == {"html", "script"}
+    assert not any(item.name == "PWA" for item in detect(page_from({}, script)))
+    assert not any(item.name == "PWA" for item in detect(page_from({}, '<link rel="manifest" href="/app.webmanifest">')))
+
+
+def test_pwa_accepts_service_worker_registration_from_a_fetched_script():
+    page = page_from(
+        {}, '<link rel="manifest" href="/app.webmanifest">',
+        (Resource("https://example.invalid/app.js", "script",
+                  'navigator.serviceWorker.register("/sw.js");'),),
+    )
+    pwa = next(item for item in detect(page) if item.name == "PWA")
+    assert set(pwa.evidence_types) == {"html", "script"}
+
+
+def test_cdn_service_observations_do_not_create_inventory_rows():
+    html = (
+        '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/private-widget@2.4.1/index.css">'
+        '<link rel="stylesheet" href="https://unpkg.com/@scope/private-widget@1.2.3/index.css">'
+        '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/private-widget/3.4.5/index.css">'
+    )
+    detections = detect(page_from({}, html))
+    for name in ("private-widget 2.4.1, from a jsDelivr link",
+                 "@scope/private-widget 1.2.3, from a unpkg link",
+                 "private-widget 3.4.5, from a cdnjs link"):
+        review = next(item for item in detections if item.name == name)
+        assert not review.product and not review.ecosystem and not review.package
+        assert not review.versions
+
+
 @pytest.mark.parametrize("url,package,version", [
     ("https://cdn.jsdelivr.net/npm/core-js@3.40.0/es/index.js", "core-js", "3.40.0"),
     ("https://unpkg.com/@fortawesome/fontawesome-free@6.7.2/css/all.css", "@fortawesome/fontawesome-free", "6.7.2"),
     ("https://cdn.jsdelivr.net/npm/@angular/core@17.3.8/fesm2022/core.mjs", "@angular/core", "17.3.8"),
     ("https://unpkg.com/@popperjs/core@2.11.8/dist/umd/popper.min.js", "@popperjs/core", "2.11.8"),
+    ("https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css", "bootstrap-icons", "1.10.5"),
 ])
 def test_jsdelivr_and_unpkg_keep_reviewed_npm_names_and_versions(url, package, version):
     detections = detect(page_from({}, f'<script src="{url}"></script>'))
@@ -173,14 +255,14 @@ def test_jsdelivr_and_unpkg_keep_reviewed_npm_names_and_versions(url, package, v
     assert "url" in found.evidence_types
 
 
-def test_cdnjs_maps_known_packages_and_leaves_unknown_libraries_unidentified():
+def test_cdnjs_maps_known_packages_and_names_unknown_libraries_for_review():
     html = (
         '<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>'
         '<script src="https://cdnjs.cloudflare.com/ajax/libs/unknown-widget/2.4.1/widget.js"></script>'
     )
     detections = detect(page_from({}, html))
     jquery = next(item for item in detections if item.name == "jQuery")
-    review = next(item for item in detections if item.name == "Unidentified cdnjs library")
+    review = next(item for item in detections if item.name == "unknown-widget 2.4.1, from a cdnjs link")
     assert (jquery.ecosystem, jquery.package, jquery.versions) == ("npm", "jquery", ("3.7.1",))
     assert (review.vendor, review.product, review.ecosystem, review.package, review.versions) == (
         "cdnjs", "", "", "", (),
@@ -204,6 +286,14 @@ def test_versions_are_read_from_the_product_banner_only():
     page = _page("script", '/*! Chart.js library */ /*! unrelated v99.88.77 */')
     chart = next(item for item in detect(page) if item.name == "Chart.js")
     assert chart.versions == ()
+
+
+def test_jquery_minimum_requirement_does_not_become_a_release():
+    minimum = _page(
+        "script",
+        'if (version < "1.9.1") throw new Error("Bootstrap requires jQuery v1.9.1 or higher");',
+    )
+    assert not any(item.name == "jQuery" for item in detect(minimum))
 
 
 @pytest.mark.parametrize("kind,text,expected,source", [
