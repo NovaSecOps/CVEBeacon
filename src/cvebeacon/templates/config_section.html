@@ -42,6 +42,15 @@
 {% else %}<input name="{{ field.id }}" value="{{ field.value }}" {% if field.readonly or read_only %}readonly{% endif %} id="control-{{ field.id }}" placeholder="{{ field.default }}" {% if field.kind == 'number' %}type="{{ 'text' if error else 'number' }}" {% if field.minimum is not none %}min="{{ field.minimum }}"{% endif %} {% if field.maximum is not none %}max="{{ field.maximum }}"{% endif %} step="{{ field.step }}"{% elif field.key == 'url' %}type="password" autocomplete="off"{% else %}type="text"{% endif %}>{% endif %}
 {% if field.default %}<p class="help">Default: {{ field.default }}</p>{% endif %}
 <p class="help">{{ field.help }}{% if field.key != 'condition' and not (section == 'rules' and field.key in ['channels', 'events', 'cvss_providers']) %} Example: <code>{{ field.example }}</code>.{% endif %}</p>
+{% if not read_only and not field.readonly and field.identity == 'watch.initial' %}<div class="form-actions preset-actions">
+<button type="submit" class="btn btn-secondary" name="preset" value="watch-quiet-baseline">Quiet baseline</button>
+<button type="submit" class="btn btn-secondary" name="preset" value="watch-backfill-7-days">Backfill 7 days</button>
+<div><button type="submit" class="btn btn-secondary" name="preset" value="watch-full-history">Full history</button><p class="help">The first check downloads much more data and takes longer.</p></div>
+</div>{% elif not read_only and not field.readonly and field.identity == 'backup.retention_days' %}<div class="form-actions preset-actions">
+<button type="submit" class="btn btn-secondary" name="preset" value="backup-7-days">7 days</button>
+<button type="submit" class="btn btn-secondary" name="preset" value="backup-30-days">30 days</button>
+<button type="submit" class="btn btn-secondary" name="preset" value="backup-90-days">90 days</button>
+</div>{% endif %}
 {% if field.key == 'condition' %}{% call explain('How conditions are written') %}<ul>{% for key, spec in condition_schema.items() %}<li><code>{{ key }} = {{ toml_value(spec.example) }}</code> — {% if spec.kind == 'enum' %}one of {{ spec.choices|join(', ') }}{% elif spec.kind == 'number' %}number from {{ spec.minimum }} to {{ spec.maximum }}{% elif spec.kind == 'cwe' %}array of CWE numbers or identifiers{% else %}nonempty array of strings{% endif %}{% if spec.qualifiers %}. For selected versions, use <code>{{ key }} = {{ toml_value(spec.qualified_example) }}</code>. Versions are {{ spec.qualifiers.versions|join(", ") }}. An optional <code>providers</code> array overrides the rule’s CVSS providers for this condition ({{ spec.qualifiers.providers|join(", ") }}).{% endif %}</li>{% endfor %}</ul><p>Combine with <code>{ any = [{ kev = "cisa" }, { cvss_min = 9.0 }] }</code>, <code>{ all = [{ kev = "eu" }, { epss_min = 0.5 }] }</code> or <code>{ not = { status = "rejected" } }</code>.</p><p>The <code>events</code> list takes these alert types:</p><ul>{% for kind in events %}<li><code>"{{ kind }}"</code>: {{ event_text.labels.get(kind, kind) }}</li>{% endfor %}</ul><p>Example: <code>{{ field.example }}</code>. Lists of channels, alert types and score providers use square brackets, for example <code>channels = ["email"]</code>, <code>events = ["match"]</code> and <code>cvss_providers = ["nvd"]</code>.</p>{% endcall %}{% endif %}
 {% if field.secret and field.allow_new_secret %}<label for="secret-{{ field.id }}">New secret value (optional)</label><input id="secret-{{ field.id }}" type="password" autocomplete="new-password" name="{{ field.id }}_new"><p class="help">{% if field.readonly or field.existing %}Replace the contents of the existing owner-only file. The reference stays unchanged.{% else %}A new owner-only file is staged in the restricted data folder. Its generated reference replaces this field.{% endif %} The value is never shown again. Abandoned previews expire after ten minutes.</p>{% endif %}</div>{% endmacro %}
 {% macro structured_control(field, index) %}{% set field_label = field_labels.get(field.identity, field.key | replace('_', ' ') | capitalize) %}{% set invalid = field_error_control is defined and field_error_control == field.id %}
@@ -53,12 +62,14 @@
 <input type="hidden" name="{{ field.id }}_mode" value="checkboxes">
 {% for source in field.spec.item_choices %}<div class="field field-check"><input type="checkbox" id="control-{{ field.id }}-{{ source }}" name="{{ field.id }}_{{ source }}" value="{{ source }}" {% if source in field.structured.selected %}checked{% endif %} {% if source == 'nvd' %}required{% endif %} {% if field.readonly or read_only %}disabled{% endif %}><label for="control-{{ field.id }}-{{ source }}">{{ source }}{% if source == 'nvd' %} (required){% endif %}</label></div>{% endfor %}
 <p class="help" id="control-{{ field.id }}-help">Choose watch catalogs. This list does not change the separate scan-source toggles. NVD is required and must stay selected.</p>
+{% if not read_only and not field.readonly %}<div class="form-actions preset-actions"><button type="submit" class="btn btn-secondary" name="preset" value="watch-nvd-only">NVD only</button><button type="submit" class="btn btn-secondary" name="preset" value="watch-all-catalogs">All watch catalogs</button></div>{% endif %}
 {% else %}
 <label for="control-{{ field.id }}-text">Watch catalog list (TOML)</label>
 <input type="hidden" name="{{ field.id }}_mode" value="text">
 <textarea name="{{ field.id }}" id="control-{{ field.id }}-text" rows="3" cols="60" {% if invalid %}aria-invalid="true" aria-describedby="control-{{ field.id }}-reason control-{{ field.id }}-help control-{{ field.id }}-error"{% endif %} {% if read_only or field.readonly %}readonly{% endif %}>{{ field.value }}</textarea>
 <p class="help" id="control-{{ field.id }}-reason">{{ field.structured.reason }}</p>
 <p class="help" id="control-{{ field.id }}-help">{{ field.help }}</p>
+{% if not read_only and not field.readonly %}<div class="form-actions preset-actions"><button type="submit" class="btn btn-secondary" name="preset" value="watch-nvd-only">NVD only</button><button type="submit" class="btn btn-secondary" name="preset" value="watch-all-catalogs">All watch catalogs</button></div>{% endif %}
 {% endif %}
 {% elif field.structured.kind == 'columns' %}
 {% if field.structured.mode == 'rows' %}
@@ -84,6 +95,7 @@
 <p class="help" id="control-{{ field.id }}-reason">{{ field.structured.reason }}</p>
 <p class="help" id="control-{{ field.id }}-help">{{ field.help }}</p>
 {% endif %}
+{% if not read_only and not field.readonly %}<div class="form-actions preset-actions"><button type="submit" class="btn btn-secondary" name="preset" value="inventory-required-columns">CVEBeacon required columns</button><button type="submit" class="btn btn-secondary" name="preset" value="inventory-general-inventory">CVEBeacon general inventory</button></div>{% endif %}
 {% elif field.structured.kind in ['address_rows', 'bot_recipient_rows', 'conversation_references'] %}
 {% set form_prefix = field.form_prefix %}
 {% if field.structured.mode == 'rows' %}
