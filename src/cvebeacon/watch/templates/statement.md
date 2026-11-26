@@ -50,3 +50,4 @@ ${references}
 - Reported to clients: ${reported}
 - Reported by: ${reported_by}
 - Reported at: ${reported_at}
+- Assets with no client: ${unassigned_assets}

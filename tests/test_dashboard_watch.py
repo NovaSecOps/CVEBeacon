@@ -12,6 +12,8 @@ import pytest
 
 from cvebeacon import dashboard, dashboard_watch
 from cvebeacon.errors import CVEBeaconError, ConfigurationError
+from cvebeacon.models import Applicability, Asset, Finding, QueryResult, Vulnerability
+from cvebeacon.state import StateStore
 from cvebeacon.watch import feeds
 from cvebeacon.watch.records import (
     CVSSEntry,
@@ -199,6 +201,134 @@ def seeded(tmp_path: Path, *, identity: str = "open"):
 @pytest.fixture
 def watch(tmp_path):
     return seeded(tmp_path)
+
+
+def seed_explorer_clients(config):
+    state = StateStore(config.database_path)
+    acme = Asset("named-acme", "Acme", "Widget", "1", client="Acme")
+    globex = Asset("named-globex", "Acme", "Widget", "2", client="Globex")
+    unassigned_review = Asset("no-client-review", "Acme", "Widget", "3")
+    unassigned_affected = Asset("no-client-affected", "Acme", "Widget", "4")
+    state.record_scan(
+        [
+            QueryResult(
+                acme,
+                (
+                    Finding(
+                        acme,
+                        Vulnerability(cve_id="CVE-2026-0001"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+            QueryResult(
+                unassigned_review,
+                (
+                    Finding(
+                        unassigned_review,
+                        Vulnerability(cve_id="CVE-2026-0001"),
+                        Applicability.NEEDS_REVIEW,
+                        "limited",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+            QueryResult(
+                globex,
+                (
+                    Finding(
+                        globex,
+                        Vulnerability(cve_id="CVE-2026-0002"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+            QueryResult(
+                unassigned_affected,
+                (
+                    Finding(
+                        unassigned_affected,
+                        Vulnerability(cve_id="CVE-2026-0002"),
+                        Applicability.AFFECTED,
+                        "high",
+                        "test",
+                    ),
+                ),
+                (),
+            ),
+        ]
+    )
+
+
+def test_explorer_no_client_and_named_client_filters_are_or_sets(watch):
+    config, _, watch_store, _, client = watch
+    seed_explorer_clients(config)
+    watch_store.upsert_nvd([record("CVE-2026-0003")], catalogs=config.watch.sources)
+    login(client, "reader")
+
+    named = client.get("/watch/cves?client=Acme")
+    assert named.status_code == 200
+    assert "CVE-2026-0001" in named.text
+    assert "CVE-2026-0002" not in named.text
+    assert "CVE-2026-0003" not in named.text
+
+    named_or = client.get("/watch/cves?client=Acme&client=Globex")
+    assert named_or.status_code == 200
+    assert "CVE-2026-0001" in named_or.text
+    assert "CVE-2026-0002" in named_or.text
+    assert "CVE-2026-0003" not in named_or.text
+
+    unassigned = client.get("/watch/cves?unassigned=yes")
+    assert unassigned.status_code == 200
+    assert "CVE-2026-0001" in unassigned.text
+    assert "CVE-2026-0002" in unassigned.text
+    assert "CVE-2026-0003" not in unassigned.text
+
+    combined = client.get("/watch/cves?client=Acme&client=Globex&unassigned=yes")
+    assert combined.status_code == 200
+    assert "CVE-2026-0001" in combined.text
+    assert "CVE-2026-0002" in combined.text
+
+    clients_page = client.get("/watch/clients")
+    assert clients_page.status_code == 200
+    assert "Acme" in clients_page.text and "Globex" in clients_page.text
+    assert "No client" not in clients_page.text
+
+    intersected = client.get(
+        "/watch/cves?client=Acme&unassigned=yes&reported=yes"
+    )
+    assert intersected.status_code == 200
+    assert "CVE-2026-0001" in intersected.text
+    assert "CVE-2026-0002" not in intersected.text
+
+
+def test_explorer_no_client_filter_validates_and_round_trips(watch, monkeypatch):
+    config, _, watch_store, _, client = watch
+    seed_explorer_clients(config)
+    watch_store.upsert_nvd([record("CVE-2026-0003")], catalogs=config.watch.sources)
+    login(client, "reader")
+    original_search = WatchStore.search
+
+    def search_with_next_page(self, *args, **kwargs):
+        result = original_search(self, *args, **kwargs)
+        return replace(result, total=51)
+
+    monkeypatch.setattr(WatchStore, "search", search_with_next_page)
+    response = client.get("/watch/cves?client_names=Acme&unassigned=yes&cvss_min=7")
+    assert response.status_code == 200
+    assert 'name="unassigned" value="yes" checked' in response.text
+    assert 'name="client_names"' in response.text
+    assert "unassigned=yes" in response.text
+    assert "client=Acme" in response.text
+    assert client.get("/watch/cves?unassigned=maybe").status_code == 400
+    assert client.get("/watch/cves?unassigned=yes&unassigned=no").status_code == 400
 
 
 def test_overview_shows_database_cursors_sync_health_and_initial_state(watch):
@@ -586,6 +716,16 @@ def test_statement_builtin_and_uploaded_templates(watch):
     assert "wordprocessingml.document" in docx.headers["Content-Type"]
 
 
+def test_statement_builtin_includes_latest_no_client_asset_counts(watch):
+    config, _, _, _, client = watch
+    seed_explorer_clients(config)
+    login(client, "ops")
+    path = "/watch/cve/CVE-2026-0001/statement"
+    response = client.post(path, data={"csrf": csrf(client, path), "template": "builtin"})
+    assert response.status_code == 200
+    assert b"Assets with no client: 1 needs review" in response.data
+
+
 def test_statement_rejects_bad_uploads(watch, monkeypatch):
     _, _, _, _, client = watch
     login(client, "ops")
@@ -666,7 +806,16 @@ def test_statement_filesystem_error_does_not_disclose_a_temp_path(
     login(client, "ops")
     paths = []
 
-    def fail(store, identifier, *, catalogs, template, out):
+    def fail(
+        store,
+        identifier,
+        *,
+        catalogs,
+        template,
+        out,
+        client_impacts,
+        unassigned_impacts,
+    ):
         paths.append(out)
         raise CVEBeaconError(f"could not write statement: {out}")
 

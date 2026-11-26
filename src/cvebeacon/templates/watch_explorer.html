@@ -43,7 +43,7 @@
 {% block content %}
 {{ page_header('CVE explorer', 'Search the stored security flaws. Add filters to narrow the list, then open a CVE for its full record.') }}
 
-{% set advanced_active = filters.kev or filters.source or filters.exploitation or filters.severity or filters.cvss_version or filters.cvss_provider or filters.epss_min or filters.epss_max or filters.cvss_min or filters.cvss_max or filters.since or filters.until or filters.modified_since or filters.modified_until or filters.client or filters.vendor_names or filters.product_names %}
+{% set advanced_active = filters.kev or filters.source or filters.exploitation or filters.severity or filters.cvss_version or filters.cvss_provider or filters.epss_min or filters.epss_max or filters.cvss_min or filters.cvss_max or filters.since or filters.until or filters.modified_since or filters.modified_until or filters.client or filters.unassigned or filters.vendor_names or filters.product_names %}
 
 {% call card('Search and filter', 'Search by CVE ID or keyword. Use Filter to narrow the results; your choices stay in the address bar so you can bookmark them.') %}
 <form method="get" class="stack explorer-filters">
@@ -76,6 +76,7 @@
       {% endfor %}
     </div>
     <div class="field"><label for="filter-clients">Affected clients, one exact name per line</label><textarea id="filter-clients" name="client_names" rows="3" maxlength="2569">{{ filters.client|join('\n') }}</textarea></div>
+    <div class="field field-check"><input id="filter-unassigned" type="checkbox" name="unassigned" value="yes" {{ 'checked' if filters.unassigned }}><label for="filter-unassigned">No client</label></div>
     <div class="explorer-fields">
       <div class="field"><label for="filter-vendors">Vendors, one exact name per line</label><textarea id="filter-vendors" name="vendor_names" rows="3" maxlength="2419">{{ filters.vendor_names|join('\n') }}</textarea></div>
       <div class="field"><label for="filter-products">Products, one exact name per line</label><textarea id="filter-products" name="product_names" rows="3" maxlength="2419">{{ filters.product_names|join('\n') }}</textarea></div>
@@ -110,6 +111,7 @@
 {% if filters.modified_since %}{% set _ = active.append('modified from ' ~ filters.modified_since) %}{% endif %}
 {% if filters.modified_until %}{% set _ = active.append('modified through ' ~ filters.modified_until) %}{% endif %}
 {% if filters.client %}{% set _ = active.append('client: ' ~ (filters.client | join(', '))) %}{% endif %}
+{% if filters.unassigned %}{% set _ = active.append('No client') %}{% endif %}
 {% if filters.vendor_names %}{% set _ = active.append('vendors: ' ~ (filters.vendor_names | join(', '))) %}{% endif %}
 {% if filters.product_names %}{% set _ = active.append('products: ' ~ (filters.product_names | join(', '))) %}{% endif %}
 {% if active %}<p class="muted">Active filters: {{ active | join(' · ') }}.</p>{% endif %}

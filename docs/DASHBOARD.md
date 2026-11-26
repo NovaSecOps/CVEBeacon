@@ -862,7 +862,10 @@ when moving between pages. Use **Clear filters** to reset them.
   The highest score band uses the explorer's numeric bands across scores.
 - Filter by publication or modification date, source presence, events,
   reported status and affected client. Enter up to ten exact client names,
-  one per line. Clients come from the latest successful scan.
+  one per line. Clients come from the latest successful scan. The client filter
+  also offers **No client** for CVEs with affected or needs-review assets that
+  have no client in that scan. No client combines with named clients as an
+  any-of-these selection.
 - Filter by vendor or product using up to 20 exact names per field, one per
   line. Names come from NVD product data and EUVD; very new CVEs may not have
   them yet, so use text search too. For a PHP search, enter `php` under Vendor

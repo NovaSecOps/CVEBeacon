@@ -40,6 +40,10 @@ ledger.
 | `--include-clients` | Emit one `identity` object per exported client, add client labels to relationship properties, and put a client label in the report name. Off by default. |
 | `--since DATE` | Export only findings whose first-seen time is on or after this UTC date or ISO 8601 timestamp. |
 
+Without `--client`, the export includes findings whether or not their assets
+have a client label. `--client` selects findings for a named client only and
+does not select assets with no client.
+
 The source is the newest inventory run with `status='completed'` in the state
 database. A failed or degraded run does not replace the last successful run.
 An empty state or a filter that matches nothing still produces a valid bundle:

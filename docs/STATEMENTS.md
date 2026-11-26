@@ -95,6 +95,7 @@ Unknown-name diagnostics list every unique unknown name up to 128 names and
 | `cwes` | Comma-separated CWE identifiers, for example `CWE-79, CWE-89`. |
 | `affected_products` | One line per product. When the stored view has exactly one vendor, each line is prefixed with that vendor, for example `acme widget`. With several vendors only product names are listed; with no products the vendor names are listed. |
 | `affected_clients` | Comma-separated clients affected by the CVE in the latest successful inventory scan, for example `Acme, Globex (review)`. Needs-review findings carry `(review)`. Uses `not available` when no successful scan or affected client exists. |
+| `unassigned_assets` | Counts of assets with no client in the latest successful inventory scan, for example `2 affected, 1 needs review`. Empty when there are no such findings. It never includes asset IDs; `${affected_clients}` remains limited to named clients. |
 | `references` | Reference URLs, one per line, for example `https://example.invalid/advisory`. |
 | `nvd_url` | `https://nvd.nist.gov/vuln/detail/<cve_id>`. |
 | `cve_org_url` | `https://www.cve.org/CVERecord?id=<cve_id>`. |

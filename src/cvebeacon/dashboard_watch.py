@@ -32,13 +32,18 @@ from flask import (
 
 from .config import AppConfig
 from .clients import (
+    MAX_CLIENT_CVES,
     affected_clients,
+    affected_clients_and_unassigned,
     cve_findings,
     client_cve_filter,
     client_name,
     client_options,
     client_page,
+    impacts_for,
     latest_successful_scan,
+    unassigned_cve_filter,
+    unassigned_impacts_for,
 )
 from .dashboard import _text, requires
 from .errors import CVEBeaconError, ConfigurationError, StateError
@@ -473,7 +478,21 @@ def explorer():
     if len(request.query_string) > 8192:
         abort(400, description="Explorer filters are too long")
     config, store = _state()
-    filters = {name: _text(request.args, name) for name in ("q", "has_events", "reported", "sort")}
+    filters = {
+        name: _text(request.args, name)
+        for name in ("q", "has_events", "reported", "sort")
+    }
+    unassigned_values = request.args.getlist("unassigned")
+    if (
+        len(unassigned_values) > 1
+        or unassigned_values and unassigned_values[0] not in {"", "yes"}
+    ):
+        abort(400)
+    filters["unassigned"] = (
+        "yes"
+        if unassigned_values and unassigned_values[0] == "yes"
+        else ""
+    )
     for field, choices in EXPLORER_CHOICES.items():
         selected_values = request.args.getlist(field)
         if len(selected_values) > len(choices) + (2 if field == "kev" else 0):
@@ -509,10 +528,25 @@ def explorer():
         abort(400, description="Enter up to 10 client names of at most 256 characters each")
     filters["client"] = tuple(dict.fromkeys(name.strip() for name in names if name.strip()))
     selected = None
-    if filters["client"]:
-        selected, overflow = client_cve_filter(config.database_path, filters["client"])
-        if overflow:
+    if filters["client"] or filters["unassigned"]:
+        selected_ids = set()
+        if filters["client"]:
+            named_selected, overflow = client_cve_filter(
+                config.database_path, filters["client"]
+            )
+            if overflow:
+                abort(400, description="Client filter exceeds the local result limit")
+            selected_ids.update(named_selected)
+        if filters["unassigned"]:
+            unassigned_selected, overflow = unassigned_cve_filter(
+                config.database_path
+            )
+            if overflow:
+                abort(400, description="Client filter exceeds the local result limit")
+            selected_ids.update(unassigned_selected)
+        if len(selected_ids) > MAX_CLIENT_CVES:
             abort(400, description="Client filter exceeds the local result limit")
+        selected = tuple(sorted(selected_ids))
     page = _page_number()
     try:
         result = store.search(query=filters["q"], **{field: filters[field] for field in EXPLORER_CHOICES},
@@ -801,16 +835,16 @@ def statement(cve_id):
                     identifier, error=str(exc), status=400
                 )
         output = Path(directory) / f"statement{output_suffix}"
-        impacts = affected_clients(
+        clients, unassigned = affected_clients_and_unassigned(
             config.database_path, (identifier,)
-        ).get(identifier.upper(), ())
+        )
         statement_args = {
             "catalogs": config.watch.sources,
             "template": template_path,
             "out": output,
+            "client_impacts": impacts_for(clients, identifier),
+            "unassigned_impacts": unassigned_impacts_for(unassigned, identifier),
         }
-        if impacts:
-            statement_args["client_impacts"] = impacts
         try:
             write_statement(
                 store,
