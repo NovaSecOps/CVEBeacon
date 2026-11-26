@@ -158,6 +158,177 @@ def test_each_preset_applies_its_exact_patch_only_after_confirmation(
 
 
 @pytest.mark.parametrize(
+    "preset,expected",
+    [
+        ("watch-nvd-only", ["nvd"]),
+        ("watch-all-catalogs", list(WATCH_SOURCES)),
+    ],
+)
+def test_source_preset_materializes_an_absent_key(accounts, preset, expected):
+    seed = _SEED.replace('sources = ["nvd", "eu_kev"]\n', "")
+    path = _write_seed(accounts, seed)
+    _, _, _, client = accounts
+    login(client, "admin")
+    page = client.get("/config/watch")
+
+    preview = _click_preset(client, "watch", page.text, preset)
+
+    assert preview.status_code == 200, _response_detail(preview)
+    assert path.read_bytes() == seed.encode("utf-8")
+    saved = _confirm(client, "watch", preview)
+    assert saved.status_code == 303, saved.text
+    actual = _document(path)
+    assert "sources" in actual["watch"]
+    assert actual["watch"]["sources"] == expected
+
+
+def test_untouched_absent_source_key_stays_absent(accounts):
+    seed = _SEED.replace('sources = ["nvd", "eu_kev"]\n', "")
+    path = _write_seed(accounts, seed)
+    _, _, _, client = accounts
+    login(client, "admin")
+    page = client.get("/config/watch")
+
+    preview = client.post("/config/watch", data=_browser_form(page.text))
+
+    assert preview.status_code == 200, _response_detail(preview)
+    assert "Nothing has changed" in preview.text
+    saved = _confirm(client, "watch", preview)
+    assert saved.status_code == 303, saved.text
+    assert "sources" not in _document(path)["watch"]
+
+
+def test_untouched_absent_column_key_stays_absent(accounts):
+    start = _SEED.index("[inventory.columns]\n")
+    end = _SEED.index("[state]\n")
+    seed = _SEED[:start] + _SEED[end:]
+    path = _write_seed(accounts, seed)
+    _, _, _, client = accounts
+    login(client, "admin")
+    page = client.get("/config/inventory")
+
+    preview = client.post("/config/inventory", data=_browser_form(page.text))
+
+    assert preview.status_code == 200, _response_detail(preview)
+    assert "Nothing has changed" in preview.text
+    saved = _confirm(client, "inventory", preview)
+    assert saved.status_code == 303, saved.text
+    assert "columns" not in _document(path)["inventory"]
+
+
+def test_required_columns_preset_materializes_an_absent_key(accounts):
+    start = _SEED.index("[inventory.columns]\n")
+    end = _SEED.index("[state]\n")
+    seed = _SEED[:start] + _SEED[end:]
+    path = _write_seed(accounts, seed)
+    _, _, _, client = accounts
+    login(client, "admin")
+    page = client.get("/config/inventory")
+
+    preview = _click_preset(
+        client, "inventory", page.text, "inventory-required-columns",
+    )
+
+    assert preview.status_code == 200, _response_detail(preview)
+    assert path.read_bytes() == seed.encode("utf-8")
+    saved = _confirm(client, "inventory", preview)
+    assert saved.status_code == 303, saved.text
+    actual = _document(path)["inventory"]["columns"]
+    assert actual == _REQUIRED_COLUMNS
+
+
+@pytest.mark.parametrize(
+    "seed,preset,field,submitted,error_text",
+    [
+        (
+            _SEED.replace(
+                'sources = ["nvd", "eu_kev"]',
+                'sources = ["nvd", "eu_kev", "nvd"]',
+            ),
+            "watch-nvd-only", "g0_sources", "[",
+            "watch.sources must be a valid TOML array or table",
+        ),
+        (
+            _SEED.replace('purl = "package ref"', "purl = 7"),
+            "inventory-required-columns", "g0_columns", "[]",
+            "Inventory column mappings are invalid",
+        ),
+        (
+            _SEED.replace('purl = "package ref"', "purl = 7"),
+            "inventory-required-columns", "g0_columns", "{",
+            "inventory.columns must be a valid TOML array or table",
+        ),
+    ],
+)
+def test_invalid_fallback_text_is_reported_before_a_preset(
+    accounts, seed, preset, field, submitted, error_text
+):
+    path = _write_seed(accounts, seed)
+    before = path.read_bytes()
+    _, _, _, client = accounts
+    login(client, "admin")
+    section = "watch" if field == "g0_sources" else "inventory"
+    page = client.get("/config/" + section)
+
+    response = _click_preset(
+        client, section, page.text, preset, changes={field: submitted},
+    )
+
+    assert response.status_code == 400, _response_detail(response)
+    assert error_text in response.text
+    assert 'href="#control-' + field + '"' in response.text
+    assert 'aria-invalid="true"' in response.text
+    assert "<pre>" not in response.text
+    assert path.read_bytes() == before
+
+
+_CUSTOM_COLUMN_ORDER = ["purl", "asset_id", "category", "vendor", "product", "version"]
+_CUSTOM_COLUMNS = '''[inventory.columns]
+purl = "package ref"
+asset_id = "asset key"
+category = "kind"
+vendor = "maker"
+product = "product name"
+version = "release"
+'''
+_CUSTOM_COLUMNS_FALLBACK = _CUSTOM_COLUMNS.replace(
+    'purl = "package ref"', "purl = 7",
+)
+
+
+@pytest.mark.parametrize(
+    "preset,patch",
+    [
+        ("inventory-required-columns", _REQUIRED_COLUMNS),
+        ("inventory-general-inventory", _GENERAL_COLUMNS),
+    ],
+)
+@pytest.mark.parametrize("fallback", [False, True], ids=["rows", "fallback"])
+def test_column_presets_keep_existing_key_order(
+    accounts, preset, patch, fallback
+):
+    custom_columns = _CUSTOM_COLUMNS_FALLBACK if fallback else _CUSTOM_COLUMNS
+    start = _SEED.index("[inventory.columns]\n")
+    end = _SEED.index("[state]\n")
+    seed = _SEED[:start] + custom_columns + "\n" + _SEED[end:]
+    path = _write_seed(accounts, seed)
+    _, _, _, client = accounts
+    login(client, "admin")
+    page = client.get("/config/inventory")
+    if fallback:
+        assert "Inventory column mapping table (TOML)" in page.text
+
+    preview = _click_preset(client, "inventory", page.text, preset)
+
+    assert preview.status_code == 200, _response_detail(preview)
+    saved = _confirm(client, "inventory", preview)
+    assert saved.status_code == 303, saved.text
+    expected_order = list(_CUSTOM_COLUMN_ORDER)
+    expected_order.extend(key for key in patch if key not in expected_order)
+    assert list(_document(path)["inventory"]["columns"]) == expected_order
+
+
+@pytest.mark.parametrize(
     "section,preset,changes,expected_path,expected_value",
     [
         ("watch", "watch-nvd-only", {"g0_overlap_minutes": "41"}, ("watch", "overlap_minutes"), 41),

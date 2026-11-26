@@ -2733,7 +2733,6 @@ def _apply_source_preset(document, form, copied, sources):
             copied.setlist(f"g0_sources_{source}", [source])
     elif mode == "text":
         _posted_one(form, "g0_sources")
-        copied.setlist("g0_sources", [value(list(sources))])
     else:
         abort(400)
 
@@ -2746,17 +2745,7 @@ def _apply_column_preset(document, form, copied, patch):
     if mode != view["mode"]:
         abort(400)
     if mode == "text":
-        text = _posted_one(form, "g0_columns")
-        try:
-            parsed = tomllib.loads("value = " + text)
-        except (ValueError, RecursionError):
-            abort(400, "Inventory column mapping must be valid TOML")
-        if set(parsed) != {"value"}:
-            abort(400)
-        current = parsed["value"]
-        columns = deepcopy(current) if isinstance(current, dict) else {}
-        columns.update(deepcopy(patch))
-        copied.setlist("g0_columns", [value(columns)])
+        _posted_one(form, "g0_columns")
         return
     if mode != "rows":
         abort(400)
@@ -2771,9 +2760,14 @@ def _apply_column_preset(document, form, copied, patch):
         if len(rows) >= INVENTORY_COLUMN_ROW_LIMIT:
             abort(400)
         rows = [*rows, {"key": add_key, "heading": add_heading}]
-    target_keys = set(patch)
-    rows = [row for row in rows if row["key"] not in target_keys]
-    rows.extend({"key": key, "heading": heading} for key, heading in patch.items())
+    rows_by_key = {row["key"]: row for row in rows}
+    for key, heading in patch.items():
+        if key in rows_by_key:
+            rows_by_key[key]["heading"] = heading
+        else:
+            row = {"key": key, "heading": heading}
+            rows.append(row)
+            rows_by_key[key] = row
     if len(rows) > INVENTORY_COLUMN_ROW_LIMIT:
         abort(400)
 
@@ -2810,6 +2804,34 @@ def _apply_config_preset(section, document, form, definition):
             _posted_one(form, name)
             copied.setlist(name, [str(item)])
     return copied
+
+
+def _preset_uses_text_fallback(definition, form):
+    if definition is None:
+        return False
+    _, (section, kind, _) = definition
+    if kind == "watch-sources":
+        return section == "watch" and _posted_one(form, "g0_sources_mode") == "text"
+    if kind == "columns":
+        return section == "inventory" and _posted_one(form, "g0_columns_mode") == "text"
+    return False
+
+
+def _apply_text_fallback_preset(document, definition):
+    _, (_, kind, patch) = definition
+    if kind == "watch-sources":
+        document.setdefault("watch", {})["sources"] = deepcopy(patch)
+    elif kind == "columns":
+        inventory = document.setdefault("inventory", {})
+        if "columns" in inventory:
+            columns = inventory["columns"]
+            if not isinstance(columns, dict):
+                abort(400)
+        else:
+            columns = {}
+        merged = deepcopy(columns)
+        merged.update(deepcopy(patch))
+        inventory["columns"] = _ordered_patch(columns, merged)
 
 
 def _structured_control(groups, key):
@@ -3063,7 +3085,8 @@ def _mapping_from_rows(rows, control):
     return mapping
 
 
-def _prepare_structured_config_form(section, document, form, *, count):
+def _prepare_structured_config_form(section, document, form, *, count,
+                                    preset_intent=None):
     """Translate the two structured controls before the existing parser runs."""
     if section not in {"watch", "inventory"}:
         return form, None
@@ -3071,6 +3094,7 @@ def _prepare_structured_config_form(section, document, form, *, count):
         abort(400)
     groups = groups_for(section, document, count=count)
     copied = _copy_form(form)
+    preset_kind = preset_intent[1][1] if preset_intent is not None else None
     if section == "watch":
         control = _structured_control(groups, "sources")
         view = control["structured"]
@@ -3086,7 +3110,7 @@ def _prepare_structured_config_form(section, document, form, *, count):
                     abort(400)
                 if values:
                     selected.append(source)
-            if set(selected) == set(view["selected"]):
+            if set(selected) == set(view["selected"]) and preset_kind != "watch-sources":
                 replacement = value(view["raw"]) if view["present"] else ""
             else:
                 replacement = value([source for source in WATCH_SOURCES if source in selected])
@@ -3132,7 +3156,7 @@ def _prepare_structured_config_form(section, document, form, *, count):
     mapping = _mapping_from_rows(rows, control)
     original_rows = view["rows"]
     unchanged = rows == original_rows
-    if unchanged:
+    if unchanged and preset_kind != "columns":
         replacement = value(view["raw"]) if view["present"] else ""
     else:
         replacement = value(mapping)
@@ -3755,7 +3779,8 @@ def register_config(app, config, *, host):
                     prepared = preset_form
                     if section in {"watch", "inventory"}:
                         prepared, structured_draft = _prepare_structured_config_form(
-                            section, document, prepared, count=count)
+                            section, document, prepared, count=count,
+                            preset_intent=preset_definition)
                     prepared, list_draft, structured_values, list_action = _prepare_list_controls(
                         groups, prepared)
                     if structured_draft is None:
@@ -3784,6 +3809,16 @@ def register_config(app, config, *, host):
                             can_admin=g.user.is_admin, count=count, form=prepared,
                             structured_values=structured_values,
                         )
+                        if _preset_uses_text_fallback(preset_definition, request.form):
+                            try:
+                                editor.validate(candidate)
+                            except ConfigurationError as exc:
+                                if getattr(exc, "field_key", None) is None:
+                                    field_key = _config_loader_field_key(exc, candidate)
+                                    if field_key is not None:
+                                        exc.field_key = field_key
+                                raise
+                            _apply_text_fallback_preset(candidate, preset_definition)
                         preview, lockout = editor.preview(
                             section, candidate, version, staged, replacements,
                             current_document=document, current_config=current_config,
