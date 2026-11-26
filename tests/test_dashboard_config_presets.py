@@ -1,6 +1,7 @@
 """Scoped configuration presets apply to the current form and still preview."""
 
 from copy import deepcopy
+import os
 import html
 import re
 import tomllib
@@ -501,6 +502,7 @@ def test_rejected_preset_posts_leave_the_file_byte_identical(accounts):
     assert path.read_bytes() == before
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes block writes")
 def test_presets_are_hidden_when_the_configuration_is_read_only(accounts):
     config, _, _, client = accounts
     login(client, "admin")
