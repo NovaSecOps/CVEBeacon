@@ -816,7 +816,7 @@ def test_redirect_limit_and_disabled_redirects(tmp_path):
     assert len(transport.calls) == 1
 
 
-def test_unlisted_redirect_does_not_record_target_authority(tmp_path):
+def test_unlisted_bare_or_www_redirect_records_only_target_authority(tmp_path):
     path = write_allowlist(tmp_path, [asset()])
     secret_path = "/private/path?token=not-for-review"
     body_secret = "PRIVATE_RESPONSE_BODY"
@@ -829,8 +829,7 @@ def test_unlisted_redirect_does_not_record_target_authority(tmp_path):
     detail = json.loads(Path(str(tmp_path / "redirect.json") + ".review.json").read_bytes())
     review = detail["reviews"][0]
     assert review["detail"] == "redirect target is not an allowlisted host and port"
-    assert "redirect_target" not in review
-    assert "www.example.com" not in json.dumps(review)
+    assert review["redirect_target"] == {"scheme": "https", "host": "www.example.com", "port": 443}
     assert secret_path not in json.dumps(review)
     assert body_secret not in json.dumps(review)
     assert "www.example.com" not in str(error.value)
@@ -1577,7 +1576,7 @@ def test_plan_prints_requests_and_sends_nothing(tmp_path, capsys):
     assert main(["web", "detect", "--client", "acme", "--assets", str(path),
                  "--output", str(output), "--source-id", "acme-web", "--plan"]) == 0
     printed = capsys.readouterr().out
-    assert "example.com" not in printed and "/status" not in printed and "https://" not in printed
+    assert "host=example.com" in printed and "port=443" in printed and "path=/status" in printed
     assert "max_requests=2" in printed
     assert "5 requests on the normal path" in printed
     assert f"up to {5 * (1 + MAX_RETRIES)} including connection retries" in printed

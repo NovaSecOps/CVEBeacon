@@ -385,11 +385,14 @@ def format_plan(allowlist: Allowlist) -> str:
     lines = [f"client: {allowlist.client}", f"assets: {len(allowlist.assets)}"]
     normal = 0
     worst = 0
-    for index, asset in enumerate(allowlist.assets, 1):
+    for asset in allowlist.assets:
         maximum = 1 + (asset.max_redirects if asset.allow_redirects else 0)
         normal += maximum
         worst += maximum * (1 + MAX_RETRIES)
-        lines.append(f"asset {index}: GET max_requests={maximum}")
+        lines.append(
+            f"{asset.endpoint.url} GET host={asset.endpoint.hostname} port={asset.endpoint.port} "
+            f"path={asset.endpoint.path} max_requests={maximum}"
+        )
     lines.append(f"planned page requests: {len(allowlist.assets)} assets, {normal} requests on "
                  f"the normal path, up to {worst} including connection retries")
     lines.append(f"browser-referenced resources: up to {RESOURCE_MAX_FILES} additional authorised "
@@ -1927,6 +1930,9 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             review["status"] = failure.status
         if failure.retry_after is not None:
             review["retry_after"] = failure.retry_after
+        if failure.redirect_target is not None:
+            # Scheme, host and port only: the dashboard offers to authorise this target.
+            review["redirect_target"] = failure.redirect_target
         if failure.redirects_followed is not None:
             review["redirects_followed"] = failure.redirects_followed
         return _AssetResult(asset, [], [review], {failure.reason}, None, failure)
