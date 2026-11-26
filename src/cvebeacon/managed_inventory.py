@@ -256,7 +256,7 @@ def publish_managed_inventory(
 
     directory = config.inventory_directory
     is_unassigned = path == directory / f"{UNASSIGNED_KEY}.json"
-    allowed_modes = {"add", "replace", "restore"} if is_unassigned else {
+    allowed_modes = {"add", "replace", "restore", "remove"} if is_unassigned else {
         "add", "replace", "restore", "remove",
     }
     if mode not in allowed_modes:
@@ -270,7 +270,7 @@ def publish_managed_inventory(
                 or client is None or client_key(client) != path.stem
             ))):
         raise StateError("Invalid inventory change target.")
-    if restore_stamp is not None and (is_unassigned or mode != "restore"):
+    if restore_stamp is not None and mode != "restore":
         raise ConfigurationError("That saved version cannot be used. Choose another version or upload the file again.")
     if not config.managed_inventory:
         raise ConfigurationError("Managed inventory is disabled.")
@@ -302,7 +302,10 @@ def publish_managed_inventory(
             if version not in versions(path)[:HISTORY_LIMIT]:
                 raise ConfigurationError("That version is no longer available.")
             try:
-                proposed = read_inventory(read_bytes(version), client=client)
+                proposed = (
+                    read_unassigned_inventory(read_bytes(version)) if is_unassigned
+                    else read_inventory(read_bytes(version), client=client)
+                )
             except (InventoryValidationError, ValueError) as exc:
                 raise ConfigurationError(
                     "That saved version cannot be used. Choose another version or upload the file again."
@@ -339,7 +342,7 @@ def publish_managed_inventory(
                         "Use unique IDs to add rows, or choose Replace if you intend to remove assets not in this file."
                     )
             proposed = [*previous_assets, *proposed]
-        if not proposed and is_unassigned:
+        if not proposed and is_unassigned and mode != "remove":
             raise ConfigurationError("Save at least one inventory row.")
         if len(proposed) > MAX_CONTRACT_ROWS:
             raise ConfigurationError("This inventory would exceed 100,000 rows. Import fewer rows.")
@@ -380,7 +383,7 @@ def publish_managed_inventory(
             else:
                 changes["archive"] = (archive_path(path), previous)
 
-        label = rows[0].client if is_unassigned else client
+        label = (rows[0].client if rows else "") if is_unassigned else client
         detail = {"client": label, "row_count": len(rows), "mode": mode}
         sync_directory(directory.parent)
         try:
@@ -390,7 +393,7 @@ def publish_managed_inventory(
                     users.require_permission_in(db, proof, "view")
                 except ConfigurationError as exc:
                     raise InventoryPermissionDenied() from exc
-                event = "inventory_saved" if is_unassigned or data is not None else "inventory_removed"
+                event = "inventory_saved" if data is not None else "inventory_removed"
                 stage_change(directory, db, users, actor, event, path.stem, detail, changes)
         finally:
             recover(directory, users.path)
@@ -401,14 +404,26 @@ def publish_managed_inventory(
         lock.release()
 
 
-def publish_unassigned_inventory(config, assets, *, expected_revision, users, proof, mode="replace"):
+def publish_unassigned_inventory(
+    config,
+    assets,
+    *,
+    expected_revision,
+    users,
+    proof,
+    mode="replace",
+    restore_stamp=None,
+    precondition=None,
+    after_publish=None,
+):
     """Publish the reserved inventory using the shared managed-write transaction."""
     path = config.inventory_directory / f"{UNASSIGNED_KEY}.json"
     try:
         return publish_managed_inventory(
-            config, path, assets, expected_revision=expected_revision, users=users, proof=proof, mode=mode,
+            config, path, assets, expected_revision=expected_revision, users=users, proof=proof,
+            mode=mode, restore_stamp=restore_stamp, precondition=precondition, after_publish=after_publish,
         )
     except InventoryRevisionConflict as exc:
-        raise ConfigurationError(
+        raise InventoryRevisionConflict(
             "This inventory changed. Review the current inventory before continuing."
         ) from exc

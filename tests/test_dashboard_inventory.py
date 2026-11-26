@@ -694,3 +694,326 @@ def test_restore_with_stale_revision_reports_the_change_before_checking_the_vers
     })
     assert response.status_code == 409
     assert "This inventory changed." in response.text
+
+
+def general_upload(browser, data=CSV, filename="example.csv", *, client="", new_client="", pasted=""):
+    return browser.post("/inventory/upload", data={
+        "csrf": csrf(browser, "/inventory/add"), "client": client, "new_client": new_client,
+        "inventory": (io.BytesIO(data), filename), "pasted_rows": pasted, "paste_format": "csv",
+    })
+
+
+def general_paste(browser, text, format="csv", *, client="", new_client=""):
+    return browser.post("/inventory/upload", data={
+        "csrf": csrf(browser, "/inventory/add"), "client": client, "new_client": new_client,
+        "inventory": (io.BytesIO(b""), ""), "pasted_rows": text, "paste_format": format,
+    }, content_type="multipart/form-data")
+
+
+def general_submit(browser, preview, *, action="save", mode="add", product="2", **options):
+    fields = {
+        "csrf": re.search(r'name="csrf" value="([^"]+)"', preview.text)[1],
+        "token": re.search(r'name="token" value="([^"]+)"', preview.text)[1],
+        "asset_id": "0", "vendor": "1", "product": product, "version": "3",
+        "action": action, "mode": mode, "page": "1",
+    }
+    fields.update(options)
+    return browser.post("/inventory/review", data=fields)
+
+
+def test_inventory_navigation_empty_state_and_no_client_upload(deployment):
+    config, _, _, browser = deployment
+    sidebar = browser.get("/watch").text.split('id="sidebar"', 1)[1].split("</nav>", 1)[0]
+    assert '<a href="/inventory"' in sidebar and "Inventory" in sidebar
+
+    page = browser.get("/inventory")
+    assert page.status_code == 200
+    assert "No inventory yet." in page.text
+    assert "Add a list of the assets you want CVEBeacon to check." in page.text
+    assert 'href="/inventory/add"' in page.text
+
+    form = browser.get("/inventory/add")
+    assert form.status_code == 200
+    assert '<option value="" selected>No client</option>' in form.text
+    assert 'label for="f-new_client">Or a new client name' in form.text
+    assert "Download a CSV template" in form.text
+    assert "Choose a file or paste rows" in form.text
+
+    preview = general_upload(browser)
+    assert preview.status_code == 200
+    assert "Preview inventory for No client" in preview.text
+    assert re.search(r'name="mode" value="add" checked', preview.text)
+    assert "Replace this inventory. Assets not in this file are removed." in preview.text
+    saved = general_submit(browser, preview)
+    assert saved.status_code == 303
+    detail = browser.get(saved.location)
+    assert detail.status_code == 200 and "No client" in detail.text
+    row, = current(browser, "/inventory/unassigned")
+    assert row["client"] == ""
+    page = browser.get("/inventory").text
+    assert "/inventory/unassigned" in page and ">1</td>" in page and "Last saved" in page
+
+
+def test_inventory_lists_client_only_and_mixed_sources(deployment):
+    _, _, _, browser = deployment
+    client_detail = add(browser, "Example client")
+    assert submit(browser, client_detail, upload(browser, client_detail)).status_code == 303
+    page = browser.get("/inventory").text
+    assert "Example client" in page and "/watch/clients/" in page
+    assert "No client" not in page
+
+    assert general_submit(browser, general_upload(
+        browser, CSV.replace(b"private-asset", b"unassigned-asset"),
+    )).status_code == 303
+    page = browser.get("/inventory").text
+    assert "No client" in page and "Example client" in page
+    assert "/inventory/unassigned" in page
+    assert browser.get(client_detail).status_code == 200
+    assert 'href="/inventory"' in browser.get(client_detail).text
+
+
+def test_inventory_add_selects_clients_and_resolves_case_variants_atomically(deployment):
+    config, users, _, browser = deployment
+    add(browser, "Example client")
+    form = browser.get("/inventory/add").text
+    assert '<option value="Example client">Example client</option>' in form
+
+    preview = general_upload(browser, CSV.replace(b"private-asset", b"managed-asset"), client="Example client")
+    assert preview.status_code == 200 and "Preview inventory for Example client" in preview.text
+    assert general_submit(browser, preview).status_code == 303
+    path = config.inventory_directory / f"{client_key('Example client')}.json"
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    assert rows[0]["client"] == "Example client" and rows[0]["asset_id"] == "managed-asset"
+
+    variant = general_paste(
+        browser,
+        "asset_id,vendor,product,version\ncase-variant,Example,Widget,1.0\n",
+        new_client="eXAMPLE CLIENT",
+    )
+    assert variant.status_code == 200 and "Preview inventory for Example client" in variant.text
+    assert general_submit(browser, variant).status_code == 303
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    assert [row["asset_id"] for row in rows] == ["managed-asset", "case-variant"]
+    assert all(row["client"] == "Example client" for row in rows)
+
+    new_preview = general_upload(browser, new_client="Brand new client")
+    assert new_preview.status_code == 200 and "Preview inventory for Brand new client" in new_preview.text
+    assert general_submit(browser, new_preview).status_code == 303
+    key = client_key("Brand new client")
+    profile_path = config.inventory_directory / f"{key}.client"
+    inventory_path = config.inventory_directory / f"{key}.json"
+    assert json.loads(profile_path.read_text(encoding="utf-8"))["name"] == "Brand new client"
+    assert json.loads(inventory_path.read_text(encoding="utf-8"))[0]["client"] == "Brand new client"
+    audits = [entry.action for entry in users.audit_entries() if entry.action.startswith("inventory_saved:")]
+    assert all("private-asset" not in action and "case-variant" not in action for action in audits)
+
+
+def test_inventory_add_uses_the_same_client_options_as_web_assets(deployment, monkeypatch):
+    from cvebeacon import dashboard_web
+
+    _, _, _, browser = deployment
+    names = ("Managed client", "Client from a scan")
+    monkeypatch.setattr(dashboard_web, "_inventory_clients", lambda config: list(names))
+    add_page = browser.get("/inventory/add").text
+    web_page = browser.get("/web-assets").text
+    for name in names:
+        assert f'<option value="{name}">{name}</option>' in add_page
+        assert f'<option value="{name}">' in web_page
+
+
+def test_inventory_new_client_publish_failure_leaves_no_half_created_profile(deployment, monkeypatch):
+    config, _, _, browser = deployment
+    preview = general_upload(browser, new_client="Atomic client")
+    assert preview.status_code == 200
+    original = managed_inventory.stage_change
+
+    def fail_after_staging(*args, **kwargs):
+        original(*args, **kwargs)
+        raise OSError("injected transaction failure")
+
+    monkeypatch.setattr(managed_inventory, "stage_change", fail_after_staging)
+    result = general_submit(browser, preview)
+    assert result.status_code == 503
+    key = client_key("Atomic client")
+    assert not (config.inventory_directory / f"{key}.client").exists()
+    assert not (config.inventory_directory / f"{key}.json").exists()
+    assert not list(config.inventory_directory.glob(".inventory-pending*"))
+
+
+def test_inventory_replace_confirmation_and_paste_path(deployment):
+    _, _, _, browser = deployment
+    first = general_paste(
+        browser, "asset_id,vendor,product,version\npasted-one,Example,Widget,1.0\n",
+    )
+    assert first.status_code == 200 and general_submit(browser, first).status_code == 303
+    next_preview = general_upload(browser, CSV.replace(b"private-asset", b"replacement"))
+    assert next_preview.status_code == 200
+    assert re.search(r'name="mode" value="add" checked', next_preview.text)
+    assert "Assets not in this file are removed." in next_preview.text
+    assert general_submit(browser, next_preview, mode="replace").status_code == 303
+    assert [row["asset_id"] for row in current(browser, "/inventory/unassigned")] == ["replacement"]
+
+
+def test_inventory_preview_errors_and_new_client_name_validation(deployment):
+    config, _, _, browser = deployment
+    invalid_name = general_upload(browser, new_client="bad\u200fname")
+    assert invalid_name.status_code == 400
+    assert "control or format characters" in invalid_name.text
+    preview = general_upload(browser)
+    rejected = general_submit(browser, preview, product="")
+    assert rejected.status_code == 400
+    assert "Fix the errors" in rejected.text and 'name="action" value="save" disabled' in rejected.text
+    assert not (config.inventory_directory / "unassigned.json").exists()
+
+
+def test_no_client_detail_download_restore_remove_and_stale_revision(deployment):
+    _, _, _, browser = deployment
+    assert general_submit(browser, general_upload(browser)).status_code == 303
+    history = general_upload(browser, CSV.replace(b"private-asset", b"newer-asset"))
+    assert general_submit(browser, history, mode="replace").status_code == 303
+    detail = "/inventory/unassigned"
+    page = browser.get(detail)
+    assert page.status_code == 200 and "Asset ID" in page.text and "newer-asset" in page.text
+    assert current(browser, detail)[0]["asset_id"] == "newer-asset"
+    revision = re.search(r'name="revision" value="([^"]+)"', page.text)[1]
+    version, = re.findall(r'name="version" value="([0-9TZ]+)"', page.text)
+    stale = browser.post(detail + "/inventory", data={
+        "csrf": csrf(browser, detail), "revision": "0" * 64, "action": "restore", "version": version,
+    })
+    assert stale.status_code == 409 and "This inventory changed." in stale.text
+    restore = browser.post(detail + "/inventory", data={
+        "csrf": csrf(browser, detail), "revision": revision, "action": "restore", "version": version,
+    })
+    assert restore.status_code == 303
+    assert current(browser, detail)[0]["asset_id"] == "private-asset"
+    stale_remove = browser.post(detail + "/inventory", data={
+        "csrf": csrf(browser, detail), "revision": "0" * 64, "action": "remove", "confirm": "remove",
+    })
+    assert stale_remove.status_code == 409 and "This inventory changed." in stale_remove.text
+    assert change(browser, detail, "remove").status_code == 409
+    assert change(browser, detail, "remove", confirm="remove").status_code == 303
+    assert browser.get(detail + "/download").status_code == 404
+
+
+def test_inventory_read_only_permissions_csrf_and_upload_request_limit(deployment, monkeypatch):
+    config, users, app, manager = deployment
+    assert general_submit(manager, general_upload(manager)).status_code == 303
+    reader = app.test_client()
+    login(reader, "reader")
+    list_page = reader.get("/inventory")
+    assert list_page.status_code == 200 and "private-asset" not in list_page.text
+    assert "Add inventory" not in list_page.text
+    assert reader.get("/inventory/unassigned").status_code == 200
+    assert "Upload inventory" not in reader.get("/inventory/unassigned").text
+    assert reader.get("/inventory/add").status_code == 403
+    assert reader.post("/inventory/upload", data={"csrf": "0" * 64}).status_code == 403
+
+    no_view = users.authenticate("admin", PASSWORD)
+    users.save_role("inventory-no-view", {"manage_inventory"}, authorization=no_view)
+    users.add("inventory-no-view", password=PASSWORD, role="inventory-no-view")
+    denied = app.test_client()
+    login(denied, "inventory-no-view")
+    assert denied.get("/inventory").status_code == 403
+    assert denied.post("/inventory/upload", data={"csrf": "0" * 64}).status_code == 403
+
+    no_csrf = manager.post("/inventory/upload", data={
+        "inventory": (io.BytesIO(CSV), "example.csv"), "client": "", "new_client": "",
+    })
+    assert no_csrf.status_code == 400
+    preview = general_upload(manager, CSV.replace(b"private-asset", b"csrf-review"))
+    token = re.search(r'name="token" value="([^"]+)"', preview.text)[1]
+    no_review_csrf = manager.post("/inventory/review", data={
+        "token": token, "asset_id": "0", "vendor": "1", "product": "2", "version": "3",
+        "action": "save", "mode": "add", "page": "1",
+    })
+    assert no_review_csrf.status_code == 400
+
+    monkeypatch.setattr(dashboard_inventory, "MAX_BYTES", 32 * 1024 * 1024)
+    oversized = manager.post("/inventory/upload", data={
+        "csrf": csrf(manager, "/inventory/add"), "client": "", "new_client": "",
+        "inventory": (io.BytesIO(b"x" * dashboard_inventory.UPLOAD_REQUEST_BYTES), "large.csv"),
+        "pasted_rows": "", "paste_format": "csv",
+    }, content_type="multipart/form-data")
+    assert oversized.status_code == 413
+
+
+def test_inventory_add_is_unavailable_without_accounts(tmp_path):
+    config = write_config(tmp_path, inventory=False, enabled=False, extra="[inventory]\nmanaged=true\n")
+    browser = create_app(config).test_client()
+    assert browser.get("/inventory").status_code == 200
+    assert browser.get("/inventory/unassigned").status_code == 200
+    assert browser.get("/watch/clients/add").status_code == 403
+    assert browser.get("/watch/clients/inventory-template").status_code == 200
+    assert browser.get("/inventory/add").status_code == 403
+    with browser.session_transaction() as session:
+        session["csrf"] = "a" * 64
+    token = "a" * 64
+    result = browser.post("/inventory/upload", data={
+        "csrf": token, "inventory": (io.BytesIO(CSV), "example.csv"),
+        "client": "", "new_client": "", "pasted_rows": "", "paste_format": "csv",
+    })
+    assert result.status_code == 403
+
+
+def test_inventory_page_lists_configured_and_web_asset_rows(tmp_path):
+    import hashlib
+    import os
+    from datetime import datetime, timezone
+
+    from cvebeacon.managed_inventory import encode_records
+    from cvebeacon.models import Asset
+
+    config = write_config(
+        tmp_path, inventory=False, extra='[inventory]\npath = "configured.csv"\nweb_snapshots = true\nmanaged = false\n',
+    )
+    config.inventory.path.write_text(
+        "asset_id,vendor,product,version\nconfigured-row,Example,Configured Product,1.0\n",
+        encoding="utf-8", newline="\n",
+    )
+    data = encode_records([Asset("web-row", "Example", "Web Product", "1.0", client="Web client")])
+    snapshots = config.database_path.parent / "web-inventory"
+    snapshots.mkdir()
+    snapshot = snapshots / "web-example.json"
+    now = datetime.now(timezone.utc).isoformat()
+    manifest = {
+        "contract": "cvebeacon.inventory.v1", "collector": "web-detect", "collector_version": "0.1.0",
+        "source_id": "web-example", "generated_at": now,
+        "observed_at": now, "sha256": hashlib.sha256(data).hexdigest(),
+        "record_count": 1, "status": "success", "omissions": [],
+    }
+    snapshot.write_bytes(data)
+    snapshot.with_name(snapshot.name + ".manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8", newline="\n",
+    )
+    if os.name == "posix":
+        snapshot.chmod(0o600)
+        snapshot.with_name(snapshot.name + ".manifest.json").chmod(0o600)
+
+    page = create_app(config).test_client().get("/inventory")
+    assert page.status_code == 200
+    assert "Set in the configuration file" in page.text and "configured-row" not in page.text
+    assert "Web asset results" in page.text and 'href="/web-assets">Web assets</a>' in page.text
+    assert ">1</td>" in page.text
+
+
+def test_no_client_page_adds_through_the_inventory_page_not_a_client_route(deployment):
+    _, _, _, browser = deployment
+    empty = browser.get("/inventory/unassigned")
+    assert empty.status_code == 200
+    assert "No inventory has been saved without a client." in empty.text
+    assert "for this client" not in empty.text
+    assert general_submit(browser, general_upload(browser)).status_code == 303
+    page = browser.get("/inventory/unassigned")
+    assert 'href="/inventory/add"' in page.text
+    assert "/watch/clients/unassigned/upload" not in page.text
+    assert "Inventory rows" in page.text
+
+
+def test_client_inventory_page_keeps_its_previous_sections(deployment):
+    _, _, _, browser = deployment
+    detail = add(browser)
+    assert submit(browser, detail, upload(browser, detail)).status_code == 303
+    page = browser.get(detail)
+    assert page.status_code == 200
+    assert "Inventory rows" not in page.text
+    assert "All inventory" in page.text

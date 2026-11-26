@@ -105,7 +105,7 @@ def register_watch(app, config: AppConfig) -> None:
         if request.endpoint == "watch.statement":
             request.max_content_length = MAX_REQUEST_BYTES
             request.max_form_memory_size = MAX_REQUEST_BYTES
-        elif request.endpoint == "client_inventory.upload":
+        elif request.endpoint in {"client_inventory.upload", "client_inventory.inventory_upload"}:
             request.max_content_length = UPLOAD_REQUEST_BYTES
             request.max_form_memory_size = 128 * 1024
             request.max_form_parts = 8

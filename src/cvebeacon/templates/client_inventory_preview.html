@@ -1,10 +1,10 @@
 {% extends 'base.html' %}
-{% set nav_active = 'watch.clients' %}
+{% set nav_active = 'client_inventory.index' if general else 'watch.clients' %}
 {% from 'ui.html' import badge, button, card, callout, empty_state, link_button, page_header, steps, table_wrap, term %}
 {% block title %}Preview inventory · CVEBeacon{% endblock %}
 {% block content %}
-{% call page_header('Preview inventory for ' ~ profile.name, 'Match the columns, check the rows and choose how to save these assets.') %}
-{{ link_button('Back to ' ~ profile.name, url_for('client_inventory.detail', key=key, name=profile.name), kind='secondary') }}
+{% call page_header('Preview inventory for ' ~ target_name, 'Match the columns, check the rows and choose how to save these assets.') %}
+{{ link_button(back_label, back_url, kind='secondary') }}
 {% endcall %}
 {{ steps(['Choose a file', 'Review and save'], current=2) }}
 {% call callout('info', 'Nothing is saved yet') %}<p>Changing the column matching or moving between pages only updates this preview. Nothing is stored until you choose Save inventory.</p>{% endcall %}
@@ -23,7 +23,7 @@
 {% endcall %}
 {% endif %}
 
-<form method="post" class="stack inventory-review" action="{{ url_for('client_inventory.review', key=key, name=profile.name) }}">
+<form method="post" class="stack inventory-review" action="{{ review_url }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="token" value="{{ token }}">
   <input type="hidden" name="page" value="{{ preview.page }}">
@@ -79,7 +79,7 @@
   <fieldset class="stack">
     <legend>How should we save these assets?</legend>
     <label for="mode-add"><input id="mode-add" type="radio" name="mode" value="add"{% if mode == 'add' %} checked{% endif %}> Add these assets to the current inventory</label>
-    <label for="mode-replace"><input id="mode-replace" type="radio" name="mode" value="replace"{% if mode == 'replace' %} checked{% endif %}> Replace this client's inventory. Assets not in this file are removed.</label>
+    <label for="mode-replace"><input id="mode-replace" type="radio" name="mode" value="replace"{% if mode == 'replace' %} checked{% endif %}> {% if is_unassigned %}Replace this inventory.{% else %}Replace this client's inventory.{% endif %} Assets not in this file are removed.</label>
     <p class="help">Adding keeps the current assets and appends these rows. Choose Replace only when you want the file to become the full inventory.</p>
   </fieldset>
   <div class="form-actions">

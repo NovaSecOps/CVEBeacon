@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% set nav_active = 'client_inventory.index' %}
+{% from 'ui.html' import button, callout, empty_state, link_button, page_header, table_wrap %}
+{% block title %}{{ 'Add inventory' if add_page|default(false) else 'Inventory' }} · CVEBeacon{% endblock %}
+{% block content %}
+{% if add_page|default(false) %}
+{% call page_header('Add inventory', 'Choose a file or paste rows, then review them before saving.') %}
+{{ link_button('Back to Inventory', url_for('client_inventory.index'), kind='secondary') }}
+{% endcall %}
+{% if error %}{% call callout('danger', 'Inventory could not be checked') %}<p>{{ error }}</p>{% endcall %}{% endif %}
+<section class="card">
+  <form method="post" class="stack" enctype="multipart/form-data" action="{{ url_for('client_inventory.inventory_upload') }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="field">
+      <label for="inventory-client">Client (optional)</label>
+      <select id="inventory-client" name="client" aria-describedby="inventory-client-help">
+        <option value=""{% if not selected_client %} selected{% endif %}>No client</option>
+        {% for name in clients %}<option value="{{ name }}"{% if selected_client == name %} selected{% endif %}>{{ name }}</option>{% endfor %}
+      </select>
+      <p class="help" id="inventory-client-help">Choose a client only if you want findings grouped under that client.</p>
+    </div>
+    <div class="field">
+      <label for="f-new_client">Or a new client name</label>
+      <input id="f-new_client" name="new_client" type="text" maxlength="128" value="{{ new_client_name|default('') }}" aria-describedby="new-client-help">
+      <p class="help" id="new-client-help">Leave this blank to save the inventory with No client.</p>
+    </div>
+    <div class="field">
+      <label for="inventory">Inventory file</label>
+      <input type="file" id="inventory" name="inventory" accept=".csv,.xlsx,.json,.yaml,.yml" aria-describedby="inventory-help">
+      <p class="help" id="inventory-help">Upload a CSV, Excel (.xlsx), JSON or YAML file up to 32 MiB, or paste CSV, JSON or YAML rows up to 100 KB. The limit also applies to Excel files after decompression. Split larger workbooks into smaller uploads.</p>
+    </div>
+    <p class="help">Choose a file or paste rows, not both.</p>
+    <div class="field">
+      <label for="pasted-rows">Or paste rows</label>
+      <textarea id="pasted-rows" name="pasted_rows" rows="8" aria-describedby="inventory-help">{{ pasted_text|default('') }}</textarea>
+    </div>
+    <div class="field">
+      <label for="paste-format">Pasted rows format</label>
+      <select id="paste-format" name="paste_format" aria-describedby="inventory-help">
+        <option value="csv"{% if paste_format|default('csv') == 'csv' %} selected{% endif %}>CSV</option>
+        <option value="json"{% if paste_format|default('csv') == 'json' %} selected{% endif %}>JSON</option>
+        <option value="yaml"{% if paste_format|default('csv') == 'yaml' %} selected{% endif %}>YAML</option>
+      </select>
+    </div>
+    <p class="help">Paste up to 100 KB, or upload a file for larger inventories.</p>
+    {{ link_button('Download a CSV template', url_for('client_inventory.inventory_template'), kind='secondary') }}
+    <div class="form-actions">{{ button('Preview inventory') }}</div>
+  </form>
+</section>
+{% else %}
+{% call page_header('Inventory', 'Lists of software CVEBeacon checks, with an optional client assignment.') %}
+{% if can_manage %}{{ link_button('Add inventory', url_for('client_inventory.inventory_add')) }}{% endif %}
+{% endcall %}
+{% if storage_warning %}{% call callout('warning', 'Inventory storage could not be read') %}<p>Check inventory storage and try again.</p>{% endcall %}{% endif %}
+{% if not has_inventory %}
+{{ empty_state('No inventory yet.', 'Add a list of the assets you want CVEBeacon to check.') }}
+{% endif %}
+{% call table_wrap('Inventory sources') %}
+<table>
+  <thead><tr><th scope="col">Source</th><th scope="col" class="num">Rows</th><th scope="col">Saved</th></tr></thead>
+  <tbody>
+  {% if no_client %}<tr><th scope="row"><a href="{{ url_for('client_inventory.unassigned_detail') }}">No client</a></th><td class="num">{{ no_client.count }}</td><td>Last saved {{ inventory_timestamp(no_client.last_saved) }}</td></tr>{% endif %}
+  {% for item in clients %}<tr><th scope="row"><a href="{{ item.url }}">{{ item.name }}</a></th><td class="num">{{ item.count }}</td><td>Dashboard inventory</td></tr>{% endfor %}
+  {% if configured %}<tr><th scope="row">Set in the configuration file</th><td class="num">{{ configured.count if configured.readable else 'Could not read' }}</td><td>Configuration</td></tr>{% endif %}
+  <tr><th scope="row">Web asset results</th><td class="num">{{ web_count }}</td><td><a href="{{ url_for('web.index') }}">Web assets</a></td></tr>
+  </tbody>
+</table>
+{% endcall %}
+{% endif %}
+{% endblock %}
