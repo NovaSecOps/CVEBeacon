@@ -5,6 +5,7 @@ import importlib.util
 import json
 import re
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,7 +14,9 @@ import pytest
 from cvebeacon.identity import normalize_asset
 from cvebeacon.models import Asset
 from cvebeacon_extensions import retirejs, webrules
-from cvebeacon_extensions.web import Allowlist, Endpoint, WebAsset, _FetchSuccess, _Response, _merge_detections, _observe
+from cvebeacon_extensions.web import (
+    Allowlist, Endpoint, WebAsset, _FetchSuccess, _Response, _merge_detections, _observe,
+)
 from cvebeacon_extensions.webrules import Detection, Resource, detect, page_from
 
 
@@ -95,6 +98,90 @@ def test_react_dom_next_marker_normalizes_to_the_registry_release():
 def test_version_capture_is_bounded_before_normalization():
     assert webrules.normalize_version("1.2.3" + "a" * 64) == ""
     assert webrules.normalize_version(" 1.2.3 ") == "1.2.3"
+
+
+def test_page_exposes_only_valid_cookie_names():
+    page = page_from({
+        "Set-Cookie": ["laravel_session=set-cookie-sentinel; Path=/", "not-a-pair", "has space=x"],
+        "Cookie": ['ci_session="cookie-sentinel"; repeated=1; repeated=2',
+                   'quoted="cookie-sentinel; secret-fragment=still-cookie-sentinel"'],
+        "X-Powered-By": ["PHP/8.2.0"],
+    }, "")
+    assert page.headers == {"x-powered-by": ("PHP/8.2.0",)}
+    assert page.cookie_names == ("laravel_session", "ci_session", "repeated", "quoted")
+    items = detect(page)
+    serialized = json.dumps([asdict(item) for item in items]).encode("utf-8")
+    assert all(sentinel not in serialized for sentinel in (b"cookie-sentinel", b"secret-fragment"))
+    assert {entry.source for item in items for entry in item.evidence if entry.kind == "cookie"} == {
+        "cookie:laravel_session", "cookie:ci_session",
+    }
+
+
+@pytest.mark.parametrize("field", ["authorization", "proxy-authorization"])
+def test_sensitive_header_rule_serializes_only_the_field_label(monkeypatch, field):
+    rule = webrules.Rule("fixture", "fixture", "header", "application", "header", ".+",
+                         subject=field, name="Fixture header")
+    compiled = webrules._CompiledRule(rule, re.compile(".+"), re.compile(r"(\d+\.\d+\.\d+)"))
+    monkeypatch.setattr(webrules, "_rule_index", lambda: (compiled,))
+    item, = detect(page_from({field: ["sentinel 1.2.3"]}, ""))
+    serialized = json.dumps(asdict(item)).encode("utf-8")
+    assert b"sentinel" not in serialized and b"1.2.3" not in serialized
+    assert item.evidence == (webrules.Evidence("header", f"header:{field}", f"header:{field}"),)
+
+
+def test_resource_evidence_keeps_its_full_internal_key():
+    url = "https://example.invalid/" + "a" * 9000 + "/fixture.js"
+    page = page_from({}, "", [Resource(url, "script", "/*! jQuery v3.7.1 */")])
+    item = next(item for item in detect(page) if item.package == "jquery")
+    assert item.evidence
+    assert {entry.source for entry in item.evidence} == {url}
+
+
+@pytest.mark.parametrize("engine", ["builtin", "retirejs"])
+def test_rule_matching_bounds_groups_before_materializing_them(monkeypatch, engine):
+    class SpanOnlyMatch:
+        def __init__(self, match):
+            self.match = match
+            self.string = match.string
+
+        def span(self, index=0):
+            return self.match.span(index)
+
+        def group(self, index=0):
+            start, end = self.span(index)
+            assert end - start <= 160, "copied the oversized match"
+            return self.match.group(index)
+
+    class Matcher:
+        @staticmethod
+        def search(value):
+            return SpanOnlyMatch(re.search(r"(?P<retire_version>\d+)", value))
+
+    page = _resource("9" * 4096)
+    if engine == "builtin":
+        rule = webrules.Rule("fixture", "fixture", "library", "js-library", "script", ".+")
+        compiled = webrules._CompiledRule(rule, Matcher(), Matcher())
+        monkeypatch.setattr(webrules, "_rule_index", lambda: (compiled,))
+        item, = detect(page)
+    else:
+        signature = retirejs._Signature(
+            "fixture:filecontent", "fixture", "fixture", "library", "Fixture", "", "",
+            "js-library", "filecontent", Matcher(), True,
+        )
+        monkeypatch.setattr(retirejs, "_FILECONTENT_FALLBACK", (signature,))
+        item, = retirejs.detect(page)
+    assert item.versions == ()
+    assert item.evidence[0].excerpt == "9" * 160
+
+
+@pytest.mark.parametrize("name", [" ", "\t\n", "a" * 257, "\ud800"])
+def test_detection_names_follow_review_limits(name):
+    item = Detection("fixture", "library", "js-library", "", "high", (), name=name)
+    assert not webrules._valid_detection(item)
+    assert not webrules.valid_detection_name(name)
+    assert webrules.valid_detection_name("é" * 256)
+    assert webrules.is_scalar_text("é", 1)
+    assert not webrules.is_scalar_text("\ud800", 1)
 
 
 @pytest.mark.parametrize("index,value", [
@@ -231,16 +318,11 @@ def test_deadline_stops_between_patterns_and_keeps_completed_page_result(monkeyp
     now = [0.0]
     original = next(item for item in webrules.COMPILED_RULES if item.rule.key == "php-header")
 
-    class Match:
-        @staticmethod
-        def group(index=0):
-            return "PHP/8.2.0"
-
     class SlowMatcher:
         @staticmethod
         def search(value):
             now[0] = 2.0
-            return Match()
+            return original.evidence.search(value)
 
     compiled = webrules._CompiledRule(original.rule, SlowMatcher(), None)
     monkeypatch.setattr(webrules, "_rule_index", lambda: (compiled,))
