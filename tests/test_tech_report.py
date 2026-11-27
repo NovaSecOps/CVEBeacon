@@ -460,13 +460,14 @@ def test_exports_match_page_and_keep_spreadsheet_values_literal(seeded):
         assert book["Technologies"]["B8"].value == "'=nginx"
         assert book["Technologies"]["B8"].data_type == "s"
         assert book["Technologies"]["C8"].value == "'+1.25.3, 1.25.4"
-        assert book["CVEs"]["F8"].value == id_for(1)
-        assert book["CVEs"]["F9"].value == id_for(2)
+        assert book["Technologies"]["D8"].value == "No"
+        assert book["CVEs"]["G8"].value == id_for(1)
+        assert book["CVEs"]["G9"].value == id_for(2)
     finally:
         book.close()
 
     reader = csv.DictReader(StringIO(responses["csv"].text))
-    assert reader.fieldnames[:7] == ["Site", "Technology", "Versions", "Confidence", "Status", "CVE ID", "Advisory ID"]
+    assert reader.fieldnames[:8] == ["Site", "Technology", "Versions", "No version", "Confidence", "Status", "CVE ID", "Advisory ID"]
     rows = list(reader)
     assert [(row["Technology"], row["CVE ID"]) for row in rows] == [
         ("'=nginx", id_for(1)), ("'=nginx", id_for(2)), ("Lodash", ""),
@@ -475,6 +476,25 @@ def test_exports_match_page_and_keep_spreadsheet_values_literal(seeded):
     assert rows[0]["EPSS (%)"] == "72.0"
     assert rows[2]["Exploitation"] == ""
     assert "Lodash" not in export(seeded, "csv", **query, show_empty="0").text
+
+
+def test_report_marks_technologies_without_a_version(seeded):
+    wordpress = next(row for row in export(seeded).json["technologies"]
+                     if row["technology"] == "WordPress")
+    assert wordpress["no_version"] is True and wordpress["versions"] == []
+    assert technology(export(seeded).json)["no_version"] is False
+    text = page(seeded).text
+    assert "No version: may be affected; confirm the version to be sure." in text
+    assert "No version" in text
+    csv_rows = list(csv.DictReader(StringIO(export(seeded, "csv").text)))
+    flags = {(row["Technology"], row["No version"]) for row in csv_rows}
+    assert ("WordPress", "Yes") in flags and ("'=nginx", "No") in flags
+    book = load_workbook(BytesIO(export(seeded, "xlsx").data))
+    try:
+        values = {(row[1], row[3]) for row in book["Technologies"].iter_rows(min_row=8, values_only=True)}
+        assert ("WordPress", "Yes") in values and ("'=nginx", "No") in values
+    finally:
+        book.close()
 
 
 @pytest.mark.parametrize("prefix", ("=", "+", "-", "@", "\t", "\r"))
@@ -568,7 +588,7 @@ def test_links_csp_and_table_header_widths(seeded):
     assert "default-src 'none'" in response.headers["Content-Security-Policy"]
     assert not re.search(r"<style\b|\sstyle=|<script(?![^>]*\ssrc=)", response.text)
     classes = re.findall(r'<th scope="col" class="([^"]+)">', response.text)
-    assert len(classes) == len(set(classes)) == 14
+    assert len(classes) == len(set(classes)) == 15
     css = seeded[1].get("/static/tech_report.css").text
     assert "nth-child" not in css
     assert all(re.search(rf"th\.{name}\s*{{\s*width:", css) for name in classes)

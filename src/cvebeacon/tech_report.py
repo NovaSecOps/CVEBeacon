@@ -165,7 +165,7 @@ def _group_products(products, snapshot_ids, snapshots_on, managed_assets):
         row["covered_ids"].update(covered)
         if item.get("asset_id"):
             row["asset_ids"].add(item["asset_id"])
-        row["versions"].update(actions.detected_versions(item))
+        row["versions"].update(actions.assignable_versions(item))
         row["categories"].update(item.get("categories") or [item.get("category") or "Category not recorded"])
         confidence = item.get("confidence", "").casefold()
         if _CONFIDENCE_RANK.get(confidence, 0) > _CONFIDENCE_RANK.get(row["confidence"], 0):
@@ -173,6 +173,7 @@ def _group_products(products, snapshot_ids, snapshots_on, managed_assets):
     for row in groups.values():
         for key in ("versions", "categories", "asset_ids", "covered_ids"):
             row[key] = sorted(row[key], key=lambda value: (value.casefold(), value))
+        row["no_version"] = not row["versions"]
     return sorted(groups.values(), key=lambda row: (row["site"].casefold(), row["technology"].casefold()))
 
 

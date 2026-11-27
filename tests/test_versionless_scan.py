@@ -110,3 +110,19 @@ def test_wildcard_cpe_keeps_product_qualifiers_and_rejects_incomplete_names():
 def test_known_version_still_rejects_wildcard_text():
     assert known_version("1.2.3")
     assert not known_version("*") and not known_version("latest") and not known_version("")
+
+
+def test_state_stores_a_versionless_finding_and_counts_it(tmp_path):
+    from cvebeacon.models import Finding, QueryResult
+    from cvebeacon.state import StateStore
+
+    asset = Asset("php", vendor="php", product="php", client="Acme")
+    finding = Finding(asset, Vulnerability("CVE-2025-0001"), A.NEEDS_REVIEW, "limited",
+                      VERSION_UNKNOWN_REASON, (nvd_evidence("cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"),))
+    store = StateStore(tmp_path / "state.db")
+    _, events = store.record_scan([QueryResult(asset, (finding,), (), A.NEEDS_REVIEW,
+                                             VERSION_UNKNOWN_REASON)])
+    assert len(events) == 1
+    stored = store.latest_findings()[0]
+    assert stored["asset"]["version"] == "" and stored["applicability"] == "needs_review"
+    assert store.finding_summary(["php"]) == {"php": (1, None)}
