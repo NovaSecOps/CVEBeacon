@@ -2408,8 +2408,17 @@ def _combine_detections(current: _DetectionSummary, incoming: _DetectionSummary)
                               | set(incoming.categories or (incoming.category,))))
     if max(len(versions), len(evidence_types), len(implied_by)) > 64:
         raise ValueError("too many merged detection values")
-    category = incoming.category if _implied_only(current) and not _implied_only(incoming) else current.category
-    cpe = min(filter(None, (current.cpe, incoming.cpe)), default="")
+    category = current.category
+    if _implied_only(current) and not _implied_only(incoming):
+        category = incoming.category
+    elif current.category == "application" and incoming.category != "application":
+        category = incoming.category
+    if len(categories) > 1:
+        categories = tuple(value for value in categories if value != "application")
+    # A package identity carries no CPE; the other identity's CPE must not leak into its row.
+    package_identity = bool((current.ecosystem or incoming.ecosystem)
+                            and (current.package or incoming.package))
+    cpe = "" if package_identity else min(filter(None, (current.cpe, incoming.cpe)), default="")
     return _DetectionSummary(
         current.vendor, current.product, category, cpe,
         confidence, versions, evidence_types, current.name or incoming.name,
@@ -2447,7 +2456,76 @@ def _merge_weak_names(detections: Mapping[tuple[str, ...], _DetectionSummary], o
             merged[key] = detection if current is None else _combine_detections(current, detection)
         except ValueError:
             on_invalid()
-    return merged
+    return _merge_into_packages(merged, on_invalid)
+
+
+def _name_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+
+
+def _merge_into_packages(detections: dict[tuple[str, ...], _DetectionSummary], on_invalid):
+    """Fold name-only and application-CPE detections into the npm detection of the same name."""
+    index: dict[str, set[tuple[str, ...]]] = {}
+    for key, detection in detections.items():
+        if key[0] != "npm":
+            continue
+        for value in (detection.name.casefold(), _name_slug(detection.name),
+                      detection.package.casefold()):
+            if value:
+                index.setdefault(value, set()).add(key)
+    if not index:
+        return detections
+    targets: dict[tuple[str, ...], tuple[str, ...]] = {}
+    for key, detection in detections.items():
+        if key[0] == "npm" or not detection.name:
+            continue
+        if detection.cpe:
+            fields = webrules._cpe_fields(detection.cpe)
+            if not fields or fields[0] != "a":
+                continue
+        matches: set[tuple[str, ...]] = set()
+        for value in {detection.name.casefold(), _name_slug(detection.name)}:
+            matches |= index.get(value, set())
+        if len(matches) == 1:
+            targets[key] = next(iter(matches))
+    if not targets:
+        return detections
+    result = {key: detection for key, detection in detections.items() if key not in targets}
+    for key, target in targets.items():
+        try:
+            result[target] = _combine_detections(result[target], detections[key])
+        except ValueError:
+            on_invalid()
+            result[key] = detections[key]
+    return result
+
+
+_DISPLAY_VERSION = re.compile(r"[A-Za-z][A-Za-z0-9]{0,15}")
+_PATH_VERSION_TOKEN_MIN = 3
+_PATH_VERSION_EVIDENCE = 20
+
+
+def _path_versions(detection: _DetectionSummary) -> tuple[str, ...]:
+    """Read versions from evidence paths such as /bootstrap@5.3.2/ or bootstrap-5.3.2.min.css."""
+    tokens = {detection.package.casefold(), _name_slug(detection.name), detection.product.casefold()}
+    tokens = sorted(token for token in tokens if len(token) >= _PATH_VERSION_TOKEN_MIN
+                    and len(token) <= 128)
+    if not tokens:
+        return ()
+    pattern = re.compile(
+        r"(?:^|[/@])(?:" + "|".join(re.escape(token) for token in tokens)
+        + r")(?:@|/|-|\.)v?(\d+\.\d+(?:\.\d+){0,2})(?=$|[/?#._-])", re.IGNORECASE)
+    found: set[str] = set()
+    for item in detection.evidence[:_PATH_VERSION_EVIDENCE]:
+        if item.kind not in {"url", "script", "style"}:
+            continue
+        texts = (item.source, item.excerpt) if item.source.startswith(("http", "//", "/")) else (item.excerpt,)
+        for text in texts:
+            for match in pattern.finditer(text[:2048]):
+                found.add(match.group(1))
+                if len(found) >= 8:
+                    break
+    return tuple(sorted(found))
 
 
 def _display_url(value: str) -> str:
@@ -2797,6 +2875,11 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
     products = []
     used_ids = set()
     for key, detection in _merge_weak_names(merged, lambda: _quarantine(reviews, omissions, base)).items():
+        if (not detection.versions and detection.vendor not in REVIEW_ONLY_VENDORS
+                and not _implied_only(detection)):
+            path_versions = _path_versions(detection)
+            if path_versions:
+                detection = replace(detection, versions=path_versions)
         display = f"{detection.vendor}/{detection.product}"
         if len(display) > MAX_TEXT:
             _quarantine(reviews, omissions, base)
@@ -2811,7 +2894,9 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
             row_id = _asset_id(client, asset.endpoint, "\0".join(key), "")
         used_ids.add(row_id)
         detail = dict(base, asset_id=row_id)
-        preferred = _preferred_version(detection.versions)
+        # A rule-defined label such as "GA4" is shown but is never an inventory version.
+        preferred = _preferred_version(tuple(
+            v for v in detection.versions if not _DISPLAY_VERSION.fullmatch(v)))
         implied = _implied_only(detection)
         review_only = detection.vendor in REVIEW_ONLY_VENDORS
         row_created = False
