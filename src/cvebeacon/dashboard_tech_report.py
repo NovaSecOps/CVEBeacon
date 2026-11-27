@@ -23,7 +23,7 @@ from .xlsx_safety import neutralize_formula
 
 TECHNOLOGY_COLUMNS = (
     ("site", "Site"), ("technology", "Technology"), ("versions", "Versions"),
-    ("no_version", "No version"), ("confidence", "Confidence"), ("status", "Status"),
+    ("confidence", "Confidence"), ("status", "Status"),
 )
 SUMMARY_COLUMNS = (
     ("window_count", "CVEs in window"), ("current_count", "Total current CVEs"),
@@ -58,8 +58,6 @@ def _cells(record, columns):
                 value = round(value * 100, 5)
             elif key == "status":
                 value = STATUS_LABELS[value]
-            elif key == "no_version":
-                value = "Yes" if value else "No"
             elif key == "exploitation":
                 value = EXPLOITATION[value]
         yield value

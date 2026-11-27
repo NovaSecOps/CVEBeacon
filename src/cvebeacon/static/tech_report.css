@@ -35,7 +35,6 @@ form.tech-report-filters {
 .tech-report-table thead th.tech-report-site { width: 9rem; }
 .tech-report-table thead th.tech-report-name { width: 10rem; }
 .tech-report-table thead th.tech-report-versions { width: 8rem; }
-.tech-report-table thead th.tech-report-no-version { width: 7rem; }
 .tech-report-table thead th.tech-report-confidence-col { width: 7rem; }
 .tech-report-table thead th.tech-report-status { width: 9rem; }
 .tech-report-table thead th.tech-report-window { width: 17rem; }

@@ -422,16 +422,15 @@ def test_prefix_compatible_versions_prefer_the_most_specific(tmp_path):
     assert review["reviews"] == []
 
 
-def test_disjoint_versions_create_a_versionless_row_and_review(tmp_path):
+def test_disjoint_versions_still_require_review(tmp_path):
     manifest, output, _, _ = run(
         tmp_path, [asset()],
         [response(headers={"server": ["nginx/1.25.3", "nginx/1.26.0"]})],
         allow_partial=True)
-    assert manifest["status"] == "partial"
+    assert manifest is None
     detail = json.loads(Path(str(output) + ".review.json").read_bytes())
-    assert detail["run"]["status"] == "partial"
-    records = read_snapshot(output, allow_partial=True).records
-    assert records[0]["version"] == ""
+    assert detail["run"]["status"] == "no-usable-versions"
+    assert not output.exists()
     reviews = detail["reviews"]
     assert reviews[0]["reason"] == "version-conflict"
 
@@ -1399,46 +1398,6 @@ def test_versionless_review_publishes_partial_without_fetch_failure(tmp_path):
     assert records[0]["cpe"].startswith("cpe:2.3:a:php:php:")
 
 
-def test_versionless_non_cpe_product_creates_a_versionless_package_row(tmp_path):
-    manifest, output, _, _ = run(
-        tmp_path, [asset()], [response(body=b'<div data-reactroot=""></div>')],
-        allow_partial=False)
-    assert manifest["status"] == "partial"
-    records = read_snapshot(output, allow_partial=True).records
-    react = next(row for row in records if row["product"] == "react")
-    assert (react["version"], react["ecosystem"], react["purl"]) == ("", "npm", "pkg:npm/react")
-    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
-    product = next(item for item in detail["products"] if item.get("package") == "react")
-    assert product["inventory"] is True and product["versions"] == []
-
-
-def test_url_only_detection_does_not_create_a_versionless_snapshot_row(tmp_path):
-    sites = [asset(path="/"), asset(path="/wordpress"), asset(path="/versioned")]
-    responses = [
-        response(body=b'<html><script src="/jquery.min.js"></script></html>'),
-        response(headers={"content-type": "application/javascript"}, body=b"/* library */"),
-        response(body=b'<html><meta name="generator" content="WordPress"></html>'),
-        response(body=b'<html><script src="/jquery-3.7.1.min.js"></script></html>'),
-        response(headers={"content-type": "application/javascript"}, body=b"/* library */"),
-    ]
-    _, output, _, _ = run(tmp_path, sites, responses)
-    records = read_snapshot(output, allow_partial=True).records
-    jquery = [row for row in records if row["product"] == "jquery"]
-    assert [row["version"] for row in jquery] == ["3.7.1"]
-    wordpress = next(row for row in records if row["product"] == "wordpress")
-    assert wordpress["version"] == "" and wordpress["cpe"].startswith("cpe:2.3:a:wordpress:wordpress:")
-    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
-    site = web_asset_id("acme", "https", "example.com", 443, "/")
-    url_only = next(item for item in detail["products"]
-                    if item["site_id"] == site and item["product"] == "jquery")
-    assert url_only["inventory"] is False and url_only["versions"] == []
-    assert url_only["evidence_types"] == ["url"]
-    reviewed = next(item for item in detail["products"]
-                    if item["site_id"] == web_asset_id("acme", "https", "example.com", 443, "/wordpress")
-                    and item["product"] == "wordpress")
-    assert reviewed["inventory"] is True and reviewed["versions"] == []
-
-
 def test_versionless_edge_technology_without_cpe_stays_in_review(tmp_path, capsys):
     manifest, output, _, _ = run(
         tmp_path, [asset()], [response(headers={"cf-ray": "8a1b2c3d4e5f6a7b-AMS"})],
@@ -1523,6 +1482,8 @@ def test_cli_all_fetch_failures_exit_two_with_counted_path_free_message(tmp_path
     (response(body=b"<html>nothing here</html>"), "no products were recognised", "no-technologies", 0),
     (response(headers={"cf-ray": "8a1b2c3d4e5f6a7b-AMS"}),
      "1 product recognised, none with a disclosed version", "version-unknown", 1),
+    (response(headers={"server": ["nginx/1.25.3", "nginx/1.26.2"]}),
+     "1 product recognised, none with a consistent usable version", "version-conflict", 1),
 ])
 def test_cli_no_usable_versions_exit_zero_and_retain_snapshot(
         tmp_path, monkeypatch, capsys, observed_response, expected_outcome,

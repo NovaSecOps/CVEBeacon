@@ -50,7 +50,7 @@ from . import __version__, webrules
 from .contract import (ExtensionError, MAX_BYTES, MAX_RECORDS, MAX_TEXT, _atomic, _regular,
                        canonical_records, decode_json, json_bytes, label, output_lock,
                        read_bytes, read_snapshot, timestamp, utc_now, write_snapshot)
-from .webrules import REVIEW_ONLY_VENDORS, Resource, detect, package_identity, page_from
+from .webrules import REVIEW_ONLY_VENDORS, Resource, detect, package_url, page_from
 
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
@@ -2347,11 +2347,6 @@ def _implied_only(detection: _DetectionSummary) -> bool:
     return bool(detection.implied_by) and set(detection.evidence_types) <= {"implied"}
 
 
-def _direct_evidence(detection: _DetectionSummary) -> bool:
-    """Whether a detection has evidence beyond a link and inference."""
-    return any(kind not in {"url", "implied"} for kind in detection.evidence_types)
-
-
 def _combine_detections(current: _DetectionSummary, incoming: _DetectionSummary) -> _DetectionSummary:
     evidence = list(current.evidence)
     evidence_seen = {(item.kind, item.source, item.excerpt) for item in evidence}
@@ -2540,9 +2535,6 @@ def _public_evidence(detection: _DetectionSummary,
 
 
 MAX_SKIPPED_RESOURCE_DETAILS = 50
-# Hosted services, analytics and CDNs run elsewhere: there is no installed
-# version or product identity to add to a scan.
-SERVICE_CATEGORIES = frozenset({"hosted-platform", "analytics", "edge"})
 
 
 @dataclass(slots=True)
@@ -2887,24 +2879,17 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
             v for v in detection.versions if not _DISPLAY_VERSION.fullmatch(v)))
         implied = _implied_only(detection)
         review_only = detection.vendor in REVIEW_ONLY_VENDORS
-        service = (detection.category in SERVICE_CATEGORIES
-                   and not (detection.ecosystem and detection.package) and not detection.cpe)
         row_created = False
-        row_version = preferred if preferred is not None else ""
-        named = bool(detection.product or detection.cpe
-                     or (detection.ecosystem and detection.package))
-        # A new version-less row needs evidence other than a referenced URL:
-        # a link alone names a resource, not a product the site is running.
-        publishable = bool(row_version) or _direct_evidence(detection)
-        if not implied and not review_only and not service and named and publishable:
+        if (not implied and not review_only and preferred is not None
+                and (preferred or detection.cpe)):
             try:
-                purl = package_identity(detection.ecosystem, detection.package, row_version)
+                purl = package_url(detection.ecosystem, detection.package, preferred)
                 row = {
                     "asset_id": row_id,
                     "vendor": detection.vendor,
                     # A package identity names the package and carries only its PURL.
                     "product": detection.package if purl else detection.product,
-                    "version": row_version,
+                    "version": preferred,
                     "category": detection.category,
                     "system_id": base["system_id"],
                     "ecosystem": detection.ecosystem if purl else "",

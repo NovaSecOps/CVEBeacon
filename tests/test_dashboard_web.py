@@ -366,7 +366,7 @@ def test_reason_labels_and_hidden_version_hint(web):
         assert label in page.text
     for reason in reasons:
         assert f'<span class="muted">{reason}</span>' in page.text
-    assert "Many sites hide version numbers. Products without a version are marked No version and can still be added to the inventory. Their scans cover every CVE for the product: may be affected; confirm the version to be sure." in page.text
+    assert "Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory." in page.text
 
 
 def test_redirect_detail_prefills_add_site_form_without_saving(web):
@@ -768,7 +768,7 @@ def test_detected_product_table_groups_sorts_and_uses_product_tags(web):
                   "/*! @license React v18.2.0 */", "SHA-256", "512 bytes"):
         assert label in table
     assert "Read 4 script and style files from the sites (2 skipped)." in page.text
-    assert "Many sites hide version numbers. Products without a version are marked No version and can still be added to the inventory. Their scans cover every CVE for the product: may be affected; confirm the version to be sure." in page.text
+    assert "Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory." in page.text
 
 
 def test_detected_product_with_cpe_is_marked_in_inventory(web, monkeypatch):

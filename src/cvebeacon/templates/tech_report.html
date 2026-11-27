@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 {% set nav_active = 'web.index' %}
-{% from 'ui.html' import badge, button, callout, kev_badge, link_button, page_header, severity_badge, table_wrap, no_version_badge %}
+{% from 'ui.html' import badge, button, callout, kev_badge, link_button, page_header, severity_badge, table_wrap %}
 {% set title = 'Technology report · ' ~ report.client %}
 {% block title %}{{ title }}{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='tech_report.css') }}">{% endblock %}
@@ -128,11 +128,6 @@
 <p>{{ report.unmonitored }} detected {{ 'technology is' if report.unmonitored == 1 else 'technologies are' }} not covered by CVE scans, so no CVEs are shown for {{ 'it' if report.unmonitored == 1 else 'them' }}. <a href="{{ web_url }}">Open Web assets to add technologies to inventory</a>.</p>
 {% endcall %}
 {% endif %}
-{% if report.technologies | selectattr('no_version') | list %}
-{% call callout('warning', 'No version') %}
-<p>No version: may be affected; confirm the version to be sure. A technology without a version is scanned against every version of the product.</p>
-{% endcall %}
-{% endif %}
 {% if report.rows_capped or report.cves_capped %}
 {% call callout('info') %}
 {% if report.rows_capped %}<p>The page shows the first {{ page_rows }} technology rows. XLSX and JSON include all matching technologies.</p>{% endif %}
@@ -148,7 +143,6 @@
       <th scope="col" class="tech-report-site">Site</th>
       <th scope="col" class="tech-report-name">Technology</th>
       <th scope="col" class="tech-report-versions">Versions</th>
-      <th scope="col" class="tech-report-no-version">No version</th>
       <th scope="col" class="tech-report-confidence-col">Confidence</th>
       <th scope="col" class="tech-report-status">Status</th>
       <th scope="col" class="tech-report-window">CVEs in window</th>
@@ -168,7 +162,6 @@
       <td>{{ row.site }}</td>
       <th scope="row">{{ row.technology }}</th>
       <td>{{ row.versions | join(', ') or 'Version not disclosed' }}</td>
-      <td>{% if row.no_version %}{{ no_version_badge() }}{% else %}No{% endif %}</td>
       <td>{{ badge(row.confidence | capitalize, row.confidence if row.confidence != 'unknown' else 'neutral') }}</td>
       <td>{{ badge(status_labels[row.status], status_badges[row.status]) }}</td>
       <td>

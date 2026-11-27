@@ -1,12 +1,12 @@
 """Honest inventory status, "Add to inventory" from Web assets, confidence colours and known CVEs."""
 import html
 import json
-import re
 from pathlib import Path
+import re
 
 import pytest
 
-from cvebeacon import dashboard_web, web_assets, web_inventory_actions as actions
+from cvebeacon import dashboard_web, web_assets
 from cvebeacon.config import load_config
 from cvebeacon.dashboard import create_app
 from cvebeacon.inventory import load_inventory
@@ -184,75 +184,6 @@ def test_managed_rows_make_products_monitored_by_manual_id_purl_or_text(blank):
     assert "not covered by CVE scans yet" not in page(client)
 
 
-def test_a_plain_row_covers_a_versioned_unqualified_application_cpe(blank):
-    config = blank[0]
-    cpe = "cpe:2.3:a:sample:sample:*:*:*:*:*:*:*:*"
-    write_managed(config, [Asset("existing-sample", "sample", "sample", "2.1", client="Acme")])
-    detection = dict(asset_id="w-sample", hostname="a.example", vendor="sample", product="sample",
-                     name="Sample", category="framework", categories=["framework"], confidence="high",
-                     versions=["2.1"], evidence_types=["header"], inventory=True, cpe=cpe)
-    client = seed(blank, [detection])
-    assert "Monitored" in row(products_card(page(client)), "Sample")
-    added = preview(client, ["w-sample"])
-    assert "Already monitored" in added.text and "/web-assets/inventory/save" not in added.text
-
-
-def test_a_cpe_row_covers_a_versioned_plain_detection(blank):
-    config = blank[0]
-    cpe = "cpe:2.3:a:sample:sample:*:*:*:*:*:*:*:*"
-    write_managed(config, [Asset("existing-sample", "sample", "sample", "2.1", client="Acme", cpe=cpe)])
-    detection = dict(asset_id="w-sample", hostname="a.example", vendor="sample", product="sample",
-                     name="Sample", category="framework", categories=["framework"], confidence="high",
-                     versions=["2.1"], evidence_types=["header"], inventory=True)
-    client = seed(blank, [detection])
-    assert "Monitored" in row(products_card(page(client)), "Sample")
-    added = preview(client, ["w-sample"])
-    assert "Already monitored" in added.text and "/web-assets/inventory/save" not in added.text
-
-
-def test_an_ecosystem_only_npm_row_covers_an_npm_detection(blank):
-    config = blank[0]
-    write_managed(config, [Asset("npm-row", vendor="lodash", product="lodash",
-                                 version="4.17.21", ecosystem="npm", client="Acme")])
-    client = seed(blank)
-    assert "Monitored" in row(products_card(page(client)), "Lodash")
-
-
-def test_a_versioned_detection_with_a_version_less_row_is_ready_to_add(blank):
-    config = blank[0]
-    write_managed(config, [Asset("other-sample", "sample", "sample", client="Acme")])
-    detection = dict(asset_id="w-sample", hostname="a.example", vendor="sample", product="sample",
-                     name="Sample", category="framework", categories=["framework"], confidence="high",
-                     versions=["2.1"], evidence_types=["header"], inventory=True)
-    client = seed(blank, [detection])
-    card = products_card(page(client))
-    assert "Ready to add" in row(card, "Sample") and "Monitored" not in row(card, "Sample")
-    added = preview(client, ["w-sample"])
-    assert confirmation(added)["pick"] == ["w-sample"]
-
-
-def test_a_version_less_detection_with_a_version_less_row_is_monitored(blank):
-    config = blank[0]
-    write_managed(config, [Asset("sample-row", "sample", "sample", client="Acme")])
-    detection = dict(asset_id="w-sample", hostname="a.example", vendor="sample", product="sample",
-                     name="Sample", category="framework", categories=["framework"], confidence="high",
-                     versions=[], evidence_types=["header"], inventory=True)
-    client = seed(blank, [detection])
-    assert "Monitored" in row(products_card(page(client)), "Sample")
-
-
-def test_a_commit_row_does_not_cover_a_version_less_detection(blank):
-    config = blank[0]
-    write_managed(config, [Asset(
-        "commit-row", vendor="sample", product="sample", client="Acme",
-        repository="https://example.invalid/sample.git", commit="a" * 40)])
-    detection = dict(asset_id="w-sample", hostname="a.example", vendor="sample", product="sample",
-                     name="Sample", category="framework", categories=["framework"], confidence="high",
-                     versions=[], evidence_types=["header"], inventory=True)
-    client = seed(blank, [detection])
-    assert "Ready to add" in row(products_card(page(client)), "Sample")
-
-
 def test_older_review_files_without_inventory_flag_keep_working(blank):
     old = [{key: value for key, value in item.items() if key != "inventory"} for item in PRODUCTS]
     client = seed(blank, old)
@@ -352,22 +283,20 @@ def test_add_appends_to_an_existing_inventory_and_keeps_old_rows(blank):
     assert "Already monitored" in again.text and "/web-assets/inventory/save" not in again.text
 
 
-def test_review_rows_accept_a_typed_version_or_no_version(blank):
+def test_review_rows_need_a_typed_version_and_use_it(blank):
     config = blank[0]
     client = seed(blank)
-    missing = preview(client, ["w-wp"])
-    assert "No version" in missing.text
-    assert confirmation(missing)["pick"] == ["w-wp"]
-    assert not confirmation(missing)["v-w-wp"][0]
-    assert save_inventory(client, missing).status_code == 303
-    typed = preview(client, ["w-multi"], {"w-multi": "2.0"})
+    missing = preview(client, ["w-wp", "w-nginx"])
+    assert "Enter a version for this product." in missing.text
+    assert confirmation(missing)["pick"] == ["w-nginx"]
+    typed = preview(client, ["w-wp", "w-multi"], {"w-wp": "  6.4.2 ", "w-multi": "2.0"})
     fields = confirmation(typed)
-    assert fields["v-w-multi"] == ["2.0"]
+    assert fields["v-w-wp"] == ["6.4.2"] and fields["v-w-multi"] == ["2.0"]
     assert save_inventory(client, typed).status_code == 303
     rows = {asset.asset_id: asset for asset in managed_rows(config)}
-    assert rows["w-wp-m"].version == "" and rows["w-multi-m"].version == "2.0"
-    for bad in ("x" * 101, "1.0\x07", "\t"):
-        refused = preview(client, ["w-multi"], {"w-multi": bad})
+    assert rows["w-wp-m"].version == "6.4.2" and rows["w-multi-m"].version == "2.0"
+    for bad in ("x" * 101, "1.0\x07"):
+        refused = preview(client, ["w-wp"], {"w-wp": bad})
         assert "/web-assets/inventory/save" not in refused.text and refused.status_code == 200
     page_text = page(client)
     assert "badge-success\">Monitored" in row(products_card(page_text), "WordPress")
@@ -386,9 +315,9 @@ def test_label_and_generic_versions_need_review_and_generic_rows_name_no_vendor(
                             categories=["cms"])
     client = seed(blank, [labelled, labelled_service, generic])
     card = products_card(page(client))
-    for name, version in (("Example Analytics CMS", ""), ("Swiper", "8.4.5")):
+    for name, version in (("Example Analytics CMS", "GA4"), ("Swiper", "8.4.5")):
         assert "Needs review" in row(card, name)
-        assert f'value="{version}" placeholder="Enter version (optional)"' in row(card, name)
+        assert f'value="{version}" placeholder="Enter version"' in row(card, name)
     service = row(card, "Google Analytics")
     assert "Third-party service" in service and 'name="v-w-ga"' not in service and "Enter version" not in service
     assert "Not covered by CVE scans yet" not in page(client)
@@ -405,64 +334,17 @@ def test_label_and_generic_versions_need_review_and_generic_rows_name_no_vendor(
     assert (row_added.vendor, row_added.product, row_added.version) == ("swiper", "swiper", "8.4.5")
 
 
-def test_label_only_and_missing_versions_are_ready_when_a_snapshot_row_exists(blank):
-    config = blank[0]
-    products = [
-        dict(asset_id="w-react", hostname="a.example", vendor="facebook", product="react",
-             name="React", category="js-library", categories=["js-library"], confidence="high",
-             versions=[], evidence_types=["html"], inventory=True, ecosystem="npm", package="react"),
-        dict(asset_id="w-label", hostname="a.example", vendor="example", product="analytics-cms",
-             name="Example Analytics CMS", category="cms", categories=["cms"], confidence="high",
-             versions=["GA4"], evidence_types=["script"], inventory=True),
-    ]
-    client = seed(blank, products)
-    card = products_card(page(client))
-    for name in ("React", "Example Analytics CMS"):
-        assert "Ready to add" in row(card, name) and "No version" in row(card, name)
-    assert "Add all 2 ready products" in page(client, view="tech")
-    added = preview(client, action="all")
-    assert "2 products have no version" in added.text
-    assert "No version: may be affected; confirm the version to be sure." in added.text
-    fields = confirmation(added)
-    assert sorted(fields["pick"]) == ["w-label", "w-react"]
-    assert save_inventory(client, added).status_code == 303
-    rows = {asset.asset_id: asset for asset in managed_rows(config)}
-    assert rows["w-react-m"].version == "" and rows["w-react-m"].purl == "pkg:npm/react"
-    assert rows["w-label-m"].version == ""
-    record(config, "w-react-m", 7.5)
-    card = products_card(page(client))
-    react = row(card, "React")
-    assert "Monitored" in react and "No version" in react and "1 CVE" in react
-    download = client.get(f"/watch/clients/{client_key('Acme')}/download")
-    assert download.status_code == 200
-    downloaded = {asset["asset_id"]: asset for asset in json.loads(download.data)}
-    assert downloaded["w-react-m"]["version"] == "" and downloaded["w-react-m"]["purl"] == "pkg:npm/react"
-
-
-def test_a_cpe_product_is_added_without_a_version_and_keeps_its_cpe(blank):
+def test_a_cpe_product_keeps_its_cpe_when_added_with_a_typed_version(blank):
     config = blank[0]
     server = dict(asset_id="w-srv", hostname="a.example", vendor="f5", product="nginx", name="Nginx",
                   category="web-server", categories=["web-server"], confidence="high", versions=[],
                   evidence_types=["header"], inventory=True, cpe="cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*")
     client = seed(blank, [server])
-    assert "Ready to add" in row(products_card(page(client)), "Nginx")
-    added = preview(client, ["w-srv"])
-    assert save_inventory(client, added).status_code == 303
-    (row_added,) = managed_rows(config)
-    assert row_added.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" and row_added.version == ""
-
-def test_a_typed_version_is_preferred_for_a_ready_product_without_one(blank):
-    config = blank[0]
-    server = dict(asset_id="w-srv", hostname="a.example", vendor="f5", product="nginx", name="Nginx",
-                  category="web-server", categories=["web-server"], confidence="high", versions=[],
-                  evidence_types=["header"], inventory=True, cpe="cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*")
-    client = seed(blank, [server])
-    typed = preview(client, ["w-srv"], {"w-srv": " 1.25.3 "})
-    assert confirmation(typed)["v-w-srv"] == ["1.25.3"]
+    assert "Needs review" in row(products_card(page(client)), "Nginx")
+    typed = preview(client, ["w-srv"], {"w-srv": "1.25.3"})
     assert save_inventory(client, typed).status_code == 303
-    (row_added,) = managed_rows(config)
-    assert row_added.version == "1.25.3" and row_added.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"
-
+    (added,) = managed_rows(config)
+    assert added.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" and added.version == "1.25.3"
 
 def test_npm_purl_and_version_agree_for_a_typed_version(blank):
     config = blank[0]
@@ -471,13 +353,6 @@ def test_npm_purl_and_version_agree_for_a_typed_version(blank):
     assert save_inventory(client, preview(client, ["w-npm-none"], {"w-npm-none": "3.1.0"})).status_code == 303
     asset = managed_rows(config)[0]
     assert (asset.version, asset.purl) == ("3.1.0", "pkg:npm/lodash@3.1.0")
-
-
-def test_typed_version_rejects_controls_before_stripping():
-    assert actions.typed_version("") == "" and actions.typed_version("   ") == ""
-    for value in ("\t", "\n", "\x7f"):
-        with pytest.raises(actions.RowRefused, match="unsupported character"):
-            actions.typed_version(value)
 
 
 def test_rows_are_rebuilt_from_the_saved_review_not_the_form(blank):
@@ -654,21 +529,6 @@ def test_known_cves_aggregate_in_the_technology_view_and_one_finding_wording(sna
     assert 'badge-high">High' in tech and "2 CVEs" in tech
     sites = products_card(page(client))
     assert ">1 CVE</a>" in row(sites, "nginx")
-
-
-def test_known_cves_use_only_the_exact_version_row(blank):
-    config = blank[0]
-    client = seed(blank)
-    write_managed(config, [
-        Asset("versionless-nginx", vendor="nginx", product="nginx", system_id="a.example", client="Acme"),
-        Asset("exact-nginx", vendor="nginx", product="nginx", version="1.25.3",
-              system_id="a.example", client="Acme"),
-    ])
-    record(config, "versionless-nginx", 9.8)
-    record(config, "exact-nginx", 5.0)
-    nginx = row(products_card(page(client)), "nginx")
-    assert ">1 CVE</a>" in nginx and 'badge-medium">Medium' in nginx
-    assert "Critical" not in nginx and "2 CVEs" not in nginx
 
 
 def test_known_cves_lookup_failure_shows_unavailable_and_keeps_the_page(snapshots_on, monkeypatch):

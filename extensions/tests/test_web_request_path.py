@@ -507,8 +507,7 @@ def test_optional_review_size_limit_does_not_block_publication(tmp_path, monkeyp
     ]))
     assert detail["run"]["review_truncated"] is True
     assert output.with_name(output.name + ".review.json").stat().st_size <= 4000
-    assert "http_server" in {row["product"] for row in
-                             read_snapshot(output, allow_partial=True, now=NOW).records}
+    assert read_snapshot(output, allow_partial=True, now=NOW).records[0]["product"] == "http_server"
 
 
 @pytest.mark.parametrize("bad", [

@@ -434,7 +434,7 @@ def _coverage_identity(vendor, product, *, cpe="", ecosystem="", package=""):
 
 
 def _row_coverage(asset):
-    if identity_conflict(asset) or asset.commit:
+    if not asset.version or identity_conflict(asset) or asset.commit:
         return None
     if asset.purl:
         purl = parse_purl(asset.purl)
