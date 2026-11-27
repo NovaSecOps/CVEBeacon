@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import WATCH_INITIAL_MODES, WATCH_SOURCES, INVENTORY_FORMATS
+from .config import WATCH_INITIAL_MODES, WATCH_SOURCES, INVENTORY_FORMATS, WEB_SYNC_MODES
 from .watch.catalog import SUPPORTED_LANGUAGES
 from .watch.channels import (CHANNEL_TYPES, COMMON_KEYS, GROUPING_MODES, MESSAGE_FORMATS,
                              SMTP_SECURITY, SMTP_DEFAULT_PORTS, TEAMS_BOT_FORMATS, TYPE_KEYS)
@@ -33,6 +33,7 @@ ENUMS = {
     "watch.language": SUPPORTED_LANGUAGES,
     "watch.reporting.identity": IDENTITY_MODES,
     "inventory.format": INVENTORY_FORMATS,
+    "web.inventory_sync": WEB_SYNC_MODES,
     "watch.rules.old_cves": OLD_CVES_MODES,
     "channel.type": CHANNEL_TYPES,
     "channel.grouping": GROUPING_MODES,
@@ -50,6 +51,7 @@ BOUNDS = {
     "http.retries": (0, 10, "1"),
     "sources.minimum_request_interval": (0, None, "any"),
     "inventory.header_row": (1, None, "1"),
+    "web.removal_grace_days": (0, 365, "1"),
     "watch.backfill_days": (1, 120, "1"),
     "watch.overlap_minutes": (0, 1440, "1"),
     "dashboard.session_lifetime_seconds": (60, 86400, "1"),
@@ -90,6 +92,8 @@ HELP = {
     "cvss_providers": "List of accepted score providers.",
     "columns": "Match software list fields to their column headings.",
     "managed": "Include current client inventories saved from the dashboard.",
+    "inventory_sync": "Default for Web assets clients. Off leaves inventory unchanged, review asks for decisions, and auto applies eligible changes.",
+    "removal_grace_days": "Days to wait after two complete misses before automatic removal. Use zero for immediate removal.",
     "to": "Comma-separated email addresses or a list. Spaces and duplicate addresses are removed.",
     "cc": "Optional copy recipients, separated by commas or entered as a list.",
     "bcc": "Optional hidden-copy recipients, separated by commas or entered as a list.",
@@ -141,6 +145,8 @@ _BASE_FIELD_LABELS = {
     "inventory.columns": "Column names",
     "inventory.web_snapshots": "Include saved web snapshots in scans",
     "inventory.managed": "Include client lists saved in the dashboard",
+    "web.inventory_sync": "Web inventory sync default",
+    "web.removal_grace_days": "Web inventory removal grace days",
     "dashboard.password_hash_env": "Password hash (environment variable)",
     "dashboard.session_lifetime_seconds": "Maximum sign-in age (seconds)",
     "dashboard.secure_cookie": "Secure sign-in cookie only",
