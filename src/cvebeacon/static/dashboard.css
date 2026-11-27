@@ -729,6 +729,10 @@ details.site-item > summary { display: grid; grid-template-columns: minmax(0, 1.
 .site-meta { grid-column: 1 / -1; }
 .site-panel { padding: var(--space-4); }
 .summary-line { color: var(--text-muted); font-size: .92rem; }
+/* The remove-all disclosure must read as destructive before it is opened. */
+details.danger-zone { border-color: var(--danger-border); }
+details.danger-zone > summary { color: var(--danger-text); font-weight: 700; }
+details.danger-zone .card-danger { box-shadow: none; }
 
 /* Filter bar: sticky on desktop, a static card on smaller screens. */
 .filter-bar {
