@@ -35,12 +35,16 @@ import threading
 import time
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
+import uuid
 import zlib
 
 from cvebeacon.errors import InventoryValidationError
 from cvebeacon.identity import normalize_asset, validate_client_name
 from cvebeacon.models import Asset
 from cvebeacon.web_assets import RUN_TIMEOUT, RUN_TIMEOUT_REASON
+from cvebeacon.web_endpoints import (VISIBLE_PATH as _PATH, canonical_endpoint,
+                                    endpoint_hostname as _hostname, endpoint_port as _port)
+from cvebeacon.web_inventory import WEB_SYNC_SCHEMA, valid_sync_identity, web_asset_id
 
 from . import __version__, webrules
 from .contract import (ExtensionError, MAX_BYTES, MAX_RECORDS, MAX_TEXT, _atomic, _regular,
@@ -82,8 +86,6 @@ REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 BLOCKED_STATUSES = {429, 503}
 NO_RETRY_STATUSES = {401, 403, 404}
 _NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
-_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
-_PATH = re.compile(r"/[!-~]*")
 _CHARSET = re.compile(r"charset\s*=\s*[\"']?([^;\"'\s]+)", re.IGNORECASE)
 _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 # Each setting is the maximum disclosure for same-origin and cross-origin requests.
@@ -212,6 +214,7 @@ class Allowlist:
     client: str
     ca_bundle: Path | None
     assets: tuple[WebAsset, ...]
+    revision: str = ""
 
     endpoints: frozenset[tuple[str, str, int]] = field(init=False, repr=False)
     _by_origin: dict[tuple[str, str, int], WebAsset] = field(init=False, repr=False, compare=False)
@@ -236,6 +239,14 @@ class _Response:
     status: int
     headers: Mapping[str, tuple[str, ...]]
     body: bytes
+    body_complete: bool = True
+
+
+def _response_complete(response):
+    return (getattr(response, "body_complete", True) and response.status == 200
+            and "content-range" not in response.headers
+            and not any(value.split(";", 1)[0].strip().casefold() == "multipart/byteranges"
+                        for value in response.headers.get("content-type", ())))
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,93 +311,11 @@ def _boolean(entry: dict, field: str, default: bool) -> bool:
     return value
 
 
-def _port(value: object, scheme: str, field: str = "port") -> int:
-    if value is None:
-        return 443 if scheme == "https" else 80
-    if type(value) is not int or not 1 <= value <= 65535:
-        raise ExtensionError(f"{field} must be an integer from 1 to 65535")
-    return value
-
-
-def _path(value: object) -> str:
-    if not isinstance(value, str) or not value.startswith("/") or len(value) > 2048:
-        raise ExtensionError("path must be an absolute URL path of at most 2048 characters")
-    if not _PATH.fullmatch(value) or "#" in value or "?" in value:
-        raise ExtensionError("path must be one visible ASCII path without query or fragment")
-    return value
-
-
-def _hostname(value: object) -> str:
-    if not isinstance(value, str):
-        raise ExtensionError("hostname must be text")
-    text = value.strip()
-    if not text or len(text) > 253:
-        raise ExtensionError("hostname must be bounded text")
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1]
-    if any(character.isspace() or character in "/\\@?#" for character in text):
-        raise ExtensionError("hostname contains a forbidden character")
-    # socket.inet_aton also accepts decimal, hexadecimal and abbreviated IPv4
-    # spellings; canonicalise them so the address policy sees the real target.
-    try:
-        return socket.inet_ntoa(socket.inet_aton(text))
-    except OSError:
-        pass
-    try:
-        return str(ipaddress.ip_address(text))
-    except ValueError:
-        pass
-    try:
-        text = text.encode("idna").decode("ascii")
-    except UnicodeError as exc:
-        raise ExtensionError("hostname is not valid IDNA") from exc
-    text = text.rstrip(".").lower()
-    if not text or len(text) > 253:
-        raise ExtensionError("hostname must be bounded text")
-    labels = text.split(".")
-    if any(not _HOST_LABEL.fullmatch(item) for item in labels):
-        raise ExtensionError("hostname is not a valid DNS name or IP address")
-    return text
-
-
-def _scheme(value: object) -> str:
-    if not isinstance(value, str) or value.casefold() not in {"http", "https"}:
-        raise ExtensionError("scheme must be http or https")
-    return value.casefold()
-
-
 def _endpoint(entry: dict) -> Endpoint:
-    if ("hostname" in entry) == ("url" in entry):
-        raise ExtensionError("each asset must set exactly one of hostname or url")
-    if "url" in entry:
-        value = entry["url"]
-        if not isinstance(value, str):
-            raise ExtensionError("url must be text")
-        try:
-            parts = urlsplit(value)
-            parsed_port = parts.port
-            parsed_host = parts.hostname
-        except ValueError as exc:
-            raise ExtensionError("url is not a valid absolute URL") from exc
-        if parts.scheme.casefold() not in {"http", "https"} or not parsed_host:
-            raise ExtensionError("url must be an absolute http or https URL")
-        if parts.username is not None or parts.password is not None:
-            raise ExtensionError("url must not contain credentials")
-        if parts.query or parts.fragment:
-            raise ExtensionError("url must not contain a query or fragment")
-        scheme = _scheme(parts.scheme)
-        host = _hostname(parsed_host)
-        port = _port(parsed_port, scheme)
-        path = _path(parts.path or "/")
-        for field, parsed in (("scheme", scheme), ("port", port), ("path", path)):
-            if field in entry and entry[field] != parsed:
-                raise ExtensionError(f"{field} contradicts the url")
-    else:
-        scheme = _scheme(entry.get("scheme", "https"))
-        host = _hostname(entry["hostname"])
-        port = _port(entry.get("port"), scheme)
-        path = _path(entry.get("path", "/"))
-    return Endpoint(scheme, host, port, path)
+    try:
+        return Endpoint(*canonical_endpoint(entry))
+    except ValueError as exc:
+        raise ExtensionError(str(exc)) from exc
 
 
 def _timestamp(value: object, field: str) -> datetime:
@@ -407,7 +336,8 @@ _ALLOWED_ASSET = {
 
 def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> Allowlist:
     client = _client(client)
-    document = decode_json(read_bytes(Path(path)))
+    data = read_bytes(Path(path))
+    document = decode_json(data)
     if not isinstance(document, dict):
         raise ExtensionError("asset allowlist must be a JSON object")
     unknown = set(document) - _ALLOWED_CONFIG
@@ -470,7 +400,7 @@ def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> A
             raise ExtensionError(f"asset {index} conflicts with another entry for the same endpoint")
         assets.append(WebAsset(endpoint, authorized_by, authorized_at, expires_at, allow_redirects,
                                max_redirects, allow_private))
-    return Allowlist(client, ca_bundle, tuple(assets))
+    return Allowlist(client, ca_bundle, tuple(assets), hashlib.sha256(data).hexdigest())
 
 
 def format_plan(allowlist: Allowlist) -> str:
@@ -1036,7 +966,7 @@ class StdlibTransport:
                              clock=self._clock, limit=body_limit, wire_limit=wire_limit,
                              before_read=lambda: self._timeout(connection.sock, deadline),
                              on_decoded=on_decoded)
-            return _Response(response.status, headers, body)
+            return _Response(response.status, headers, body, response.length in (None, 0))
         except ssl.SSLError as exc:
             if self._clock() >= deadline:
                 raise _TimeoutFailure("asset exceeded the total time limit") from exc
@@ -1370,7 +1300,7 @@ class Fetcher:
         try:
             hostname = _hostname(target_host)
             port = _port(target_port, scheme)
-        except ExtensionError as exc:
+        except ValueError as exc:
             raise _RedirectFailure("redirect target is not a valid host and port") from exc
         path = (target.path or "/") + (("?" + target.query) if target.query else "")
         if len(path) > 2048:
@@ -1487,7 +1417,7 @@ _CSS_IMPORT = re.compile(
 )
 
 
-def _css_references(text: str, clock, deadline: float) -> Iterable[_ResourceReference]:
+def _css_references(text: str, clock, deadline: float, on_truncated) -> Iterable[_ResourceReference]:
     # Imports apply only before ordinary rules, apart from charset and layer statements.
     position = 0
     while position < len(text) and clock() < deadline:
@@ -1554,10 +1484,13 @@ def _css_references(text: str, clock, deadline: float) -> Iterable[_ResourceRefe
             if value and (value.end() == end or text[value.end()].isspace()
                           or text.startswith("/*", value.end())):
                 yield _ResourceReference(value[2] or value[4] or value[5], "style")
+            else:
+                on_truncated()
         position = end + 1
 
 
-def _js_tokens(text: str, clock=time.monotonic, deadline=float("inf")) -> Iterable[tuple[str, str]]:
+def _js_tokens(text: str, clock=time.monotonic, deadline: float = float("inf"),
+               on_truncated=lambda: None) -> Iterable[tuple[str, str]]:
     """Yield bounded literal tokens without retaining a token list for the script."""
     index = 0
     next_check = 0
@@ -1606,6 +1539,8 @@ def _js_tokens(text: str, clock=time.monotonic, deadline=float("inf")) -> Iterab
             if valid and index - start <= MAX_REFERENCE_LENGTH:
                 yield "string", text[start:index]
             else:
+                if valid:
+                    on_truncated()
                 yield "other", ""
             index += 1
             regex_allowed = False
@@ -1619,6 +1554,8 @@ def _js_tokens(text: str, clock=time.monotonic, deadline=float("inf")) -> Iterab
                         return
                     next_check = index + 4096
                 index += 1
+            if index - start > MAX_REFERENCE_LENGTH:
+                on_truncated()
             value = text[start:index] if index - start <= MAX_REFERENCE_LENGTH else ""
             yield ("number" if character.isdigit() else "identifier"), value
             regex_allowed = value in {"return", "case", "throw", "yield", "void", "typeof"}
@@ -1640,9 +1577,9 @@ def _chunk_reference(value: str, module: bool) -> _ResourceReference | None:
                                   module)
 
 
-def _script_references(text: str, module: bool, clock, deadline: float) -> Iterable[_ResourceReference]:
+def _script_references(text: str, module: bool, clock, deadline: float, on_truncated) -> Iterable[_ResourceReference]:
     """Recognise module specifiers and a fixed set of literal runtime loaders."""
-    tokens = iter(_js_tokens(text, clock, deadline))
+    tokens = iter(_js_tokens(text, clock, deadline, on_truncated))
     lookahead = deque(islice(tokens, 12))
     previous = ""
     static_left = 0
@@ -1671,6 +1608,8 @@ def _script_references(text: str, module: bool, clock, deadline: float) -> Itera
                     static_left = 0
                 elif value == ";":
                     static_left = 0
+                elif not static_left:
+                    on_truncated()
             if specifier and _MODULE_URL.match(specifier):
                 yield _ResourceReference(specifier, "script", True)
 
@@ -1698,15 +1637,15 @@ def _script_references(text: str, module: bool, clock, deadline: float) -> Itera
                                 ("punctuation", "="), ("punctuation", ">"),
                                 ("punctuation", "("), ("punctuation", "{"))):
                         yield from _literal_chunk_map(lookahead, tokens, arrow + 4, module,
-                                                      argument[1], clock, deadline)
+                                                      argument[1], clock, deadline, on_truncated)
             elif (value == "__vite__mapDeps" and count >= 2
                   and lookahead[0] == ("punctuation", "=") and lookahead[1] == ("punctuation", "[")):
-                yield from _literal_chunk_map(lookahead, tokens, 2, True, None, clock, deadline)
+                yield from _literal_chunk_map(lookahead, tokens, 2, True, None, clock, deadline, on_truncated)
         previous = value
 
 
 def _literal_chunk_map(lookahead, tokens, start: int, module: bool, argument: str | None,
-                       clock, deadline: float) -> Iterable[_ResourceReference]:
+                       clock, deadline: float, on_truncated) -> Iterable[_ResourceReference]:
     def take():
         current = lookahead.popleft() if lookahead else ("", "")
         following = next(tokens, None)
@@ -1739,6 +1678,7 @@ def _literal_chunk_map(lookahead, tokens, start: int, module: bool, argument: st
         if delimiter != ("punctuation", ","):
             return
     else:
+        on_truncated()
         return
     if argument is not None:
         if tuple(islice(lookahead, 4)) != (
@@ -1843,10 +1783,14 @@ class _ResourceLinkParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         if self.style_depth and not self.template_depth and not self.noscript_depth:
-            for reference in _css_references(data, self.clock, self.deadline):
-                self._add(reference)
+            def mark_truncated():
+                self.skipped["discovery-limit"] += 1
+
+            for reference in _css_references(data, self.clock, self.deadline, mark_truncated):
                 if len(self.links) >= RESOURCE_MAX_REFERENCES:
+                    mark_truncated()
                     break
+                self._add(reference)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1881,6 +1825,7 @@ class _CachedResource:
     redirected: bool
     fingerprint_stopped: bool = False
     fingerprint_error: bool = False
+    analysis_truncated: bool = False
     dependencies: dict[tuple[str, str, bool], tuple[_ResourceReference, ...]] = field(default_factory=dict)
 
     def matches(self, candidate: _ResourceCandidate, referrer: Endpoint,
@@ -2136,13 +2081,16 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
 
     remaining_references = RESOURCE_MAX_REFERENCES
 
+    def mark_truncated():
+        skipped["discovery-limit"] += 1
+
     def discover(references: Iterable[_ResourceReference], base: str | None, policy) -> None:
         nonlocal remaining_references
         for reference in references:
             if clock() >= deadline:
                 break
             if remaining_references <= 0:
-                skipped["discovery-limit"] += 1
+                mark_truncated()
                 break
             remaining_references -= 1
             _resource_candidate(reference, base, page_asset, allowlist, state, queue, skipped,
@@ -2199,6 +2147,9 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
                     skip(time_reason, candidate)
                 elif failure.status is not None and failure.reason == "unreachable":
                     skip("http-status", candidate)
+                    if (failure.status in {404, 410}
+                            and _STANDARD_PATHS.get(candidate.kind) == candidate.endpoint.path):
+                        skip_details.absent_optional += 1
                 else:
                     skip(failure.reason, candidate)
                 continue
@@ -2212,7 +2163,7 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             if clock() >= fetch_deadline:
                 skip(time_reason, candidate, response_type, len(body))
                 continue
-            if success.response.status != 200:
+            if not _response_complete(success.response):
                 skip("http-status", candidate, response_type, len(body))
                 continue
             _, accepted_type, is_html = _resource_content_type(success.response.headers, candidate.kind)
@@ -2230,11 +2181,13 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             text = "" if candidate.kind == "icon" else _decode_resource(body, success.response.headers)
             resource = Resource(endpoint.url, candidate.kind, text)
             detections = ()
+            truncated = analysis_error = False
             if clock() < deadline:
                 try:
-                    detections = tuple(_detect_builtin(page_from({}, "", resources=[resource]),
-                                                       clock=clock, deadline=deadline))
+                    detections, truncated = _detect_builtin(page_from({}, "", resources=[resource]),
+                                                           clock=clock, deadline=deadline)
                 except Exception:
+                    analysis_error = True
                     skip("analysis-error", candidate, response_type, len(body))
             legacy_stopped = legacy_error = False
             if fingerprints.legacy and clock() < deadline:
@@ -2243,10 +2196,10 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             cached = _CachedResource(
                 resource, (digest, len(body)), detections, success.referrer_policy, success.vary,
                 page_endpoint, candidate.referrer_policy, (candidate.authorization, *page_authorizations),
-                bool(success.redirects), legacy_stopped, legacy_error,
+                bool(success.redirects), legacy_stopped, legacy_error, truncated,
             )
             resources_fetched += 1
-            if clock() < deadline and not legacy_stopped and not legacy_error:
+            if clock() < deadline and not (analysis_error or legacy_stopped or legacy_error):
                 state.files[candidate.response_key] = cached
 
         resource = cached.resource
@@ -2256,24 +2209,31 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             existing = metadata.get(resource.url)
             if existing is not None and existing != cached.metadata:
                 conflicting_metadata.add(resource.url)
+                skip("analysis-error", candidate)
                 del metadata[resource.url]
             elif resource.url not in conflicting_metadata:
                 metadata[resource.url] = cached.metadata
             on_detections(cached.detections)
+            if cached.analysis_truncated:
+                skip("analysis-limit", candidate)
             fingerprints.stopped |= cached.fingerprint_stopped
             fingerprints.error |= cached.fingerprint_error
             fingerprints.add_resource(resource)
-        if candidate.follow and remaining_references > 0 and clock() < deadline:
+        if candidate.follow and candidate.kind in {"style", "script"} and clock() < deadline:
+            if remaining_references <= 0:
+                mark_truncated()
+                continue
             graph_key = (resource.url, candidate.kind, candidate.module)
             references = cached.dependencies.get(graph_key)
             if references is None:
-                nested = ()
+                prior_skips = skipped["discovery-limit"]
                 if candidate.kind == "style":
-                    nested = _css_references(resource.text, clock, deadline)
-                elif candidate.kind == "script":
-                    nested = _script_references(resource.text, candidate.module, clock, deadline)
+                    nested = _css_references(resource.text, clock, deadline, mark_truncated)
+                else:
+                    nested = _script_references(resource.text, candidate.module, clock, deadline, mark_truncated)
                 references = tuple(islice(nested, remaining_references + 1))
-                if len(references) <= remaining_references and clock() < deadline:
+                if (len(references) <= remaining_references and clock() < deadline
+                        and skipped["discovery-limit"] == prior_skips):
                     cached.dependencies[graph_key] = references
             policy = _restrict_referrer(candidate.referrer_policy, cached.referrer_policy)
             discover(references, resource.url, policy)
@@ -2287,9 +2247,8 @@ def _system_id(client: str, endpoint: Endpoint) -> str:
 
 
 def _asset_id(client: str, endpoint: Endpoint, vendor: str, product: str) -> str:
-    value = "\0".join((client, endpoint.scheme, endpoint.hostname, str(endpoint.port),
-                       endpoint.path, vendor, product)).encode("utf-8")
-    return "web-" + hashlib.sha256(value).hexdigest()[:32]
+    return web_asset_id(client, endpoint.scheme, endpoint.hostname, endpoint.port,
+                        endpoint.path, vendor, product)
 
 
 def _observation_ids(client: str, endpoint: Endpoint) -> dict[str, str]:
@@ -2583,6 +2542,7 @@ class _SkipDetails:
     """Bounded per-resource skip records, kept for the private review only."""
     entries: list[dict] = field(default_factory=list)
     truncated: int = 0
+    absent_optional: int = 0
 
     def add(self, reason: str, kind: str, url: str, content_type: str = "",
             size: int | None = None) -> None:
@@ -2612,6 +2572,7 @@ class _AssetResult:
     fingerprint_error: bool = False
     run_stopped: bool = False
     analysis_stopped: bool = False
+    response_complete: bool = False
 
 
 def _stopped_observation(asset: WebAsset, client: str) -> _AssetResult:
@@ -2622,15 +2583,24 @@ def _stopped_observation(asset: WebAsset, client: str) -> _AssetResult:
 
 def _detect_builtin(page, *, clock, deadline: float):
     if clock() >= deadline:
-        return ()
+        return (), True
     detector = getattr(webrules, "detect", detect)
     parameters = inspect.signature(detector).parameters
+    truncated = page.truncated
+
+    def mark_truncated():
+        nonlocal truncated
+        truncated = True
+
+    kwargs = {}
     if "deadline" in parameters:
-        kwargs = {"deadline": deadline}
+        kwargs["deadline"] = deadline
         if "clock" in parameters:
             kwargs["clock"] = clock
-        return detector(page, **kwargs)
-    return detector(page)
+    if "on_truncated" in parameters:
+        kwargs["on_truncated"] = mark_truncated
+    detections = tuple(detector(page, **kwargs))
+    return detections, truncated
 
 
 class _ExternalObservation:
@@ -2642,6 +2612,7 @@ class _ExternalObservation:
         self.legacy = False
         self.stopped = False
         self.error = False
+        self.truncated = False
         self._resource_keys: dict[tuple[str, str], str | None] = {}
         if fingerprints is not None:
             from . import webfingerprints
@@ -2666,7 +2637,8 @@ class _ExternalObservation:
         try:
             results = detect_external(page, self.fingerprints, page_url=page_url)
             stats = getattr(results, "stats", None)
-            return tuple(results), bool(getattr(stats, "stopped_at_time_limit", False)), False
+            return (tuple(results), bool(getattr(stats, "stopped_at_time_limit", False)),
+                    bool(getattr(stats, "truncated", False)))
         except Exception:
             return (), False, True
 
@@ -2718,6 +2690,7 @@ class _ExternalObservation:
                 detections, stats = self.session.finish()
                 self.stopped |= bool(stats.get("stopped"))
                 self.error |= bool(stats.get("error"))
+                self.truncated |= bool(stats.get("truncated"))
                 return tuple(self._restore_resource_keys(detection) for detection in detections)
             except Exception:
                 self.error = True
@@ -2781,6 +2754,7 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
 
     html = _decode_html(success.response.body, success.response.headers)
     page = None
+    truncated = False
     if clock() < deadline:
         page = page_from(success.response.headers, html)
         if {"cookie", "set-cookie"}.intersection(page.headers):
@@ -2788,7 +2762,8 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             # raw fields from matching before those readers are upgraded.
             page = replace(page, headers={name: values for name, values in page.headers.items()
                                           if name not in {"cookie", "set-cookie"}})
-        merge(_detect_builtin(page, clock=clock, deadline=deadline), completed=True)
+        detections, truncated = _detect_builtin(page, clock=clock, deadline=deadline)
+        merge(detections, completed=True)
     if on_page is not None:
         observed_at = success.observed_at
         page_detections = merged.copy()
@@ -2835,7 +2810,9 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             state.final_budget = None
             final_budget.lock.release()
     merge(fingerprints.finish(), completed=True)
-    analysis_stopped = clock() >= deadline or bool(_ANALYSIS_STOP_REASONS.intersection(resources_skipped))
+    analysis_stopped = (truncated or fingerprints.truncated or clock() >= deadline
+                        or bool(resources_skipped["analysis-limit"])
+                        or bool(_ANALYSIS_STOP_REASONS.intersection(resources_skipped)))
     if analysis_stopped or fingerprints.stopped or fingerprints.error or resources_skipped["analysis-error"]:
         omissions.add("analysis-incomplete")
     return _observation_result(
@@ -2844,6 +2821,7 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
         file_metadata=file_metadata, skip_details=skip_details,
         fingerprint_stopped=fingerprints.stopped,
         fingerprint_error=fingerprints.error, analysis_stopped=analysis_stopped,
+        response_complete=_response_complete(success.response),
     )
 
 
@@ -2859,7 +2837,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                         file_metadata: Mapping[str, tuple[str, int]] | None = None,
                         skip_details: _SkipDetails | None = None,
                         fingerprint_stopped: bool = False, fingerprint_error: bool = False,
-                        analysis_stopped: bool = False) -> _AssetResult:
+                        analysis_stopped: bool = False, response_complete: bool = False) -> _AssetResult:
     base = _observation_ids(client, asset.endpoint)
     rows: list[dict] = []
     if resources_skipped is None:
@@ -2886,10 +2864,14 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         # its row keeps the same ID across scans whatever else is found beside it. The
         # legacy vendor/product ID stays with the plain application identity.
         scoped = isinstance(key, tuple) and len(key) > 3 and key[0] == "product"
-        row_id = (_asset_id(client, asset.endpoint, "\0".join(key), "") if scoped
-                  else _asset_id(client, asset.endpoint, detection.vendor, detection.product))
+        identity = ["\0".join(key), ""] if scoped else [detection.vendor, detection.product]
+        row_id = _asset_id(client, asset.endpoint, *identity)
         if row_id in used_ids:
-            row_id = _asset_id(client, asset.endpoint, "\0".join(key), "")
+            identity = ["\0".join(key), ""]
+            row_id = _asset_id(client, asset.endpoint, *identity)
+        if not valid_sync_identity(identity):
+            _quarantine(reviews, omissions, base)
+            continue
         used_ids.add(row_id)
         detail = dict(base, asset_id=row_id)
         # A rule-defined label such as "GA4" is shown but is never an inventory version.
@@ -2924,7 +2906,8 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                 _quarantine(reviews, omissions, base)
                 continue
 
-        product = dict(asset_id=row_id, hostname=asset.endpoint.hostname, vendor=detection.vendor,
+        product = dict(asset_id=row_id, site_id=base["asset_id"], sync_identity=identity,
+                       hostname=asset.endpoint.hostname, vendor=detection.vendor,
                        product=detection.product, versions=list(detection.versions),
                        category=detection.category, evidence_types=list(detection.evidence_types),
                        categories=list(detection.categories or (detection.category,)),
@@ -2957,7 +2940,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         resources_skipped_by_reason=dict(resources_skipped),
         skip_details=skip_details if skip_details is not None else _SkipDetails(),
         fingerprint_stopped=fingerprint_stopped, fingerprint_error=fingerprint_error,
-        analysis_stopped=analysis_stopped,
+        analysis_stopped=analysis_stopped, response_complete=response_complete,
     )
 
 
@@ -3074,6 +3057,32 @@ def _load_external_fingerprints(directory: Path | None):
         return None, 0, True
 
 
+def _sync_site_complete(result):
+    # A complete observation can still lack a version or any technology. A
+    # skipped source leaves coverage uncertain unless it repeats a source
+    # already inspected or is a standard probe that confirmed absence.
+    skipped = result.resources_skipped_by_reason
+    return (result.observed_at is not None and result.response_complete and not result.run_stopped
+            and not result.analysis_stopped and not result.fingerprint_stopped
+            and not result.fingerprint_error
+            and result.omissions <= {"no-technologies", "version-unknown", "version-conflict"}
+            and sum(count for reason, count in skipped.items() if reason != "duplicate")
+            == result.skip_details.absent_optional)
+
+
+def _previous_sync_run(output):
+    try:
+        detail = decode_json(read_bytes(_review_path(output)))
+        metadata = detail["run"]["inventory_sync"]
+        value = metadata["id"]
+        if (metadata.get("schema") == WEB_SYNC_SCHEMA and isinstance(value, str)
+                and re.fullmatch(r"[0-9a-f]{32}", value)):
+            return value
+    except (OSError, ExtensionError, TypeError, KeyError, ValueError):
+        pass
+    return ""
+
+
 def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                allow_partial: bool = False, plan: bool = False,
                resolver=None, transport=None, sleep: Callable[[float], None] = time.sleep,
@@ -3081,8 +3090,10 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                now: Callable[[], datetime] = utc_now,
                host_interval: float = HOST_INTERVAL,
                max_workers: int = MAX_WORKERS,
-               fingerprints: Path | None = None) -> dict | None:
+               fingerprints: Path | None = None, run_id: str | None = None) -> dict | None:
     label(source_id)
+    if run_id is not None and (not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id)):
+        raise ExtensionError("invalid detection run ID")
     output = Path(output)
     destinations = {output.resolve(), Path(str(output) + ".manifest.json").resolve(),
                     _review_path(output).resolve(), Path(str(output) + ".lock").resolve()}
@@ -3179,6 +3190,16 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     else:
         status = "partial" if omissions else "success"
     with output_lock(output):
+        sites = {}
+        for result in results:
+            endpoint = result.asset.endpoint
+            sites[_asset_id(client, endpoint, "", "")] = [
+                endpoint.scheme, endpoint.hostname, endpoint.port, endpoint.path,
+                status != "failed" and not (run_stopped or fingerprint_error) and _sync_site_complete(result),
+            ]
+        sync = {"schema": WEB_SYNC_SCHEMA, "id": run_id or uuid.uuid4().hex,
+                "previous": _previous_sync_run(output),
+                "allowlist": allowlist.revision, "sites": sites}
         saved_snapshot_generated_at = _saved_snapshot_time(output, now())
         run = dict(started_at=started_at, ended_at=now().isoformat(), status=status,
                    request_count=fetcher.request_count,
@@ -3192,6 +3213,11 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                    fingerprint_error=fingerprint_error or any(result.fingerprint_error for result in results),
                    fingerprint_stopped=sum(result.fingerprint_stopped for result in results),
                    analysis_stopped=sum(result.analysis_stopped for result in results))
+        # A run with usable rows only releases its sync evidence after its
+        # snapshot has been published. A failed final write leaves the review
+        # useful for inspection but ineligible for sync.
+        if not rows:
+            run["inventory_sync"] = sync
         _publish_review(output, client, source_id, reviews,
                         products=products, run=run, skipped=skipped_entries,
                         skipped_truncated=skipped_truncated)
@@ -3211,6 +3237,7 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                                   omissions=sorted(omissions), lock=False)
         run["saved_snapshot_generated_at"] = manifest["generated_at"]
         run["snapshot_updated"] = True
+        run["inventory_sync"] = sync
         _publish_review(output, client, source_id, reviews, products=products, run=run,
                         skipped=skipped_entries, skipped_truncated=skipped_truncated)
         return manifest

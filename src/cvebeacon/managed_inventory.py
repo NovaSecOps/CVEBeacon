@@ -12,7 +12,7 @@ import unicodedata
 
 from .errors import ConfigurationError, InventoryValidationError, StateError, ValidationIssue
 from .private_storage import private_directory
-from .inventory_journal import pending_exists, recover, sync_directory
+from .inventory_journal import SYNC_STATE_NAME, pending_exists, recover, sync_directory
 from .web_assets import client_key as web_client_key, client_label
 from .web_inventory import MAX_BYTES, decode_json, read_bytes, read_contract
 
@@ -51,7 +51,11 @@ def _names(directory):
 
 
 def is_managed_file(path):
-    return MANAGED_FILE.fullmatch(path.name) is not None
+    return MANAGED_FILE.fullmatch(path.name) is not None or is_web_sync_file(path)
+
+
+def is_web_sync_file(path):
+    return SYNC_STATE_NAME.fullmatch(path.name) is not None
 
 
 def inventory_files(directory, *, configured=None):
@@ -66,7 +70,7 @@ def has_managed_inventory(directory):
 
 
 def has_managed_storage(directory):
-    return pending_exists(directory) or any(is_managed_file(path) for path in _names(directory))
+    return pending_exists(directory) or any(MANAGED_FILE.fullmatch(path.name) for path in _names(directory))
 
 
 def read_inventory(data, *, client=None, preserve_client=False):

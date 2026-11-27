@@ -67,6 +67,17 @@ The legacy product path requires `asset_id`, `vendor`, `product`, and `version` 
 
 An inventory is optional in watch-only mode. Set `[watch] enabled = true` and no `[inventory] path` to keep KEV, critical-severity and custom-rule alerting; those alerts work without an inventory. Upload a client inventory in the dashboard or add an `[inventory] path` later to enable asset applicability, findings and reports. See [watch mode](WATCH.md#configuration).
 
+For products added from Web assets, `[web]` defines the inventory sync defaults.
+Each client can override the mode and automatic removal on the Web assets page.
+
+| Option | Default | Accepted values and effect |
+| --- | --- | --- |
+| `inventory_sync` | `"off"` | `"off"` flags missing products, `"review"` also proposes additions and version changes, and `"auto"` applies eligible additions and version changes. |
+| `inventory_auto_remove` | `false` | `true` allows automatic removal only in `"auto"` mode. Otherwise missing products stay in the inventory until manually removed. |
+| `removal_grace_days` | `30` | Integer from `0` to `365`. Days to wait after a product is flagged before automatic removal is allowed. |
+
+See [Web assets inventory sync](DASHBOARD.md#inventory-sync).
+
 An optional `client` column labels the client that owns an asset. The value under `[inventory.columns]` is the source column name, not a client name: use `client = "Account"` for a column named `Account`, or `client = "client"` for the default `client` header. A row can then contain `Acme` in that column. Client names are internal, limited to 120 characters, and cannot contain control or format characters. Assets without a client belong to no client. You can keep a shared file with a `client` column and also upload separate client inventories through the dashboard.
 
 Source controls, retry/timeouts, output paths, optional exact CPE mappings, and notification settings are illustrated in the example configuration. A configured product CPE must be a complete CPE 2.3 name with a wildcard version; verify it against NVD before use.

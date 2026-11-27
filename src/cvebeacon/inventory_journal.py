@@ -8,20 +8,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 
-from .errors import StateError
+from .errors import ConfigurationError, StateError
 from .private_storage import private_directory
 from .snapshot import sync_directory
-from .web_assets import replace_bytes
+from .web_assets import client_key as web_client_key, replace_bytes
 from .web_inventory import decode_json, read_bytes
 
 LOG = logging.getLogger("cvebeacon")
 
 MARKER = ".inventory-pending"
-PARTS = {kind: f"{MARKER}-{kind}" for kind in ("current", "profile", "archive")}
+PARTS = {kind: f"{MARKER}-{kind}" for kind in ("current", "profile", "archive", "sync")}
+SYNC_STATE_NAME = re.compile(r"[a-f0-9]{64}(?:\.[a-f0-9]{64})?\.web-sync")
 TARGETS = {
     "current": re.compile(r"[a-f0-9]{64}\.json"),
     "profile": re.compile(r"[a-f0-9]{64}\.client"),
     "archive": re.compile(r"[a-f0-9]{64}\.[0-9]{8}T[0-9]{12}Z\.json"),
+    "sync": SYNC_STATE_NAME,
 }
 
 
@@ -40,23 +42,44 @@ def pending_exists(directory):
     return marker.exists() or marker.is_symlink()
 
 
-def stage_change(directory, db, users, actor, event, key, detail, changes):
+def _sync_target(key, client):
+    from .managed_inventory import client_key
+
+    if client_key(client) != key:
+        raise ValueError("web allowlist belongs to a different inventory")
+    return f"{key}.{web_client_key(client)}.web-sync"
+
+
+def _validate_sync_payload(data, client):
+    state = decode_json(data)
+    if not isinstance(state, dict) or state.get("client") != web_client_key(client):
+        raise ValueError("sync state belongs to a different web allowlist")
+
+
+def stage_change(directory, db, users, actor, event, key, detail, changes, *, sync_client=None):
     """Stage all bytes before committing the audit transaction; publish nothing here."""
     if pending_exists(directory):
         raise StateError("A client inventory change is awaiting recovery.")
     action = event + ":" + json.dumps(detail, ensure_ascii=True, separators=(",", ":"))
+    username = actor if isinstance(actor, str) else actor.username
     row_id = users._append_audit(
-        db, action, actor.username, datetime.now(timezone.utc).isoformat(), actor=actor.username,
+        db, action, username, datetime.now(timezone.utc).isoformat(), actor=username,
     )
     targets = {}
     for kind, (path, data) in changes.items():
-        if path.parent != directory or not TARGETS[kind].fullmatch(path.name):
+        if path.parent != directory or not TARGETS[kind].fullmatch(path.name) or path.name[:64] != key:
             raise StateError("Invalid inventory change target.")
+        if kind == "sync":
+            if sync_client is None or path.name != _sync_target(key, sync_client) or data is None:
+                raise StateError("Invalid web inventory sync target.")
+            _validate_sync_payload(data, sync_client)
         if data is not None:
             replace_bytes(directory / PARTS[kind], data)
         targets[kind] = [path.name, data is not None]
     chain = db.execute("SELECT chain FROM cb_user_audit WHERE id=?", (row_id,)).fetchone()["chain"]
     marker = {"row": row_id, "chain": chain, "key": key, "targets": targets}
+    if "sync" in targets:
+        marker["web_client"] = sync_client
     replace_bytes(directory / MARKER, json.dumps(marker, ensure_ascii=True).encode("ascii"))
 
 
@@ -71,8 +94,16 @@ def _read_marker(directory):
         for kind, (name, publish) in targets.items():
             if not TARGETS[kind].fullmatch(name) or name[:64] != key or type(publish) is not bool:
                 raise ValueError
-        return row, chain, targets
-    except (KeyError, ValueError, TypeError, IndexError) as exc:
+        web_client = marker.get("web_client")
+        if "sync" in targets:
+            # A journal from before per-allowlist state has only the inventory key.
+            expected = _sync_target(key, web_client) if web_client is not None else f"{key}.web-sync"
+            if targets["sync"] != [expected, True]:
+                raise ValueError
+        elif web_client is not None:
+            raise ValueError
+        return row, chain, targets, web_client
+    except (ConfigurationError, KeyError, ValueError, TypeError, IndexError) as exc:
         raise StateError("A pending client inventory change could not be read.") from exc
 
 
@@ -104,11 +135,17 @@ def recover(directory: Path, users_path: Path | None):
         if not pending_exists(directory):
             _discard_orphans(parts)
             return
-        row, chain, targets = _read_marker(directory)
+        row, chain, targets, web_client = _read_marker(directory)
         committed = db.execute("SELECT 1 FROM cb_user_audit WHERE id=? AND chain=?", (row, chain)).fetchone()
         if committed:
+            if web_client is not None:
+                # Validate before publishing any part of the transaction.
+                try:
+                    _validate_sync_payload(read_bytes(directory / PARTS["sync"]), web_client)
+                except ValueError as exc:
+                    raise StateError("A pending web inventory sync change could not be read.") from exc
             # Publish the current file last. Replaying any prefix is harmless.
-            for kind in ("profile", "archive", "current"):
+            for kind in ("profile", "archive", "sync", "current"):
                 if kind in targets:
                     name, publish = targets[kind]
                     path = directory / name
