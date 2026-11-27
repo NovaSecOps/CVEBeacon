@@ -436,6 +436,10 @@ a.stat:hover { border-color: var(--accent); }
 .badge-success { background: var(--success-bg); color: var(--success-text); border-color: var(--success-border); }
 .badge-warning { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning-border); }
 .badge-danger { background: var(--danger-bg); color: var(--danger-text); border-color: var(--danger-border); }
+/* Confidence reads the other way round from severity: high is good. */
+.badge-conf-high { background: var(--success-bg); color: var(--success-text); border-color: var(--success-border); }
+.badge-conf-medium { background: var(--info-bg); color: var(--info-text); border-color: var(--info-border); }
+.badge-conf-low { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning-border); }
 
 /* Callouts. The legacy .warning class is the same look without the icon layout. */
 .warning { padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-4); border: 1px solid var(--warning-border); border-left-width: 4px; border-radius: var(--radius-sm); }
@@ -484,6 +488,8 @@ main > table { background: var(--surface); border: 1px solid var(--border); }
 .web-product-cell { width: 36%; overflow-wrap: anywhere; }
 .web-version-cell { width: 18%; }
 .web-confidence-cell { width: 18%; }
+.web-version-input { width: 100%; max-width: 12rem; }
+.web-select-cell { width: 1%; }
 .web-evidence-cell { width: 28%; }
 .web-product-tags { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
 .web-product-tags .badge, .web-version-badge { white-space: normal; overflow-wrap: anywhere; }
