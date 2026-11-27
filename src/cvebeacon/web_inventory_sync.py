@@ -14,7 +14,7 @@ from .applicability import exact_cpe_version
 from .config import WEB_SYNC_MODES, AppConfig
 from .dashboard_inventory import _commit_change, _publish, inventory_lock
 from .errors import CVEBeaconError, ConfigurationError
-from .identity import normalize_asset, parse_purl, purl_string
+from .identity import identity_conflict, normalize_asset, package_name, parse_purl, purl_string
 from .inventory import MAX_CONTRACT_ROWS
 from .inventory_journal import pending_exists, recover, remove_file
 from .managed_inventory import client_key
@@ -24,7 +24,8 @@ from .sources.nvd import split_cpe23
 from .web_endpoints import canonical_endpoint
 from .web_inventory import (MAX_BYTES, UNSAFE_ID_TEXT, WEB_ASSET_ID, WEB_SYNC_SCHEMA, _timestamp,
                             decode_json, read_bytes, read_web_snapshot, sync_identity_matches,
-                            valid_sync_identity, web_asset_id)
+                            valid_npm_name, valid_sync_identity, web_asset_id, web_cpe_fields,
+                            web_product_key)
 
 LOG = logging.getLogger("cvebeacon")
 MISSES_REQUIRED = 2
@@ -413,6 +414,34 @@ def _addition(observation, identity, item, client, managed, snapshots_on):
                      item.get("name") or item["product"], item["hostname"], new=new)
 
 
+def _coverage_identity(vendor, product, *, cpe="", ecosystem="", package=""):
+    if ecosystem or package:
+        if ecosystem == "npm" and valid_npm_name(package) and not cpe:
+            return "npm", package
+        return None
+    if cpe:
+        if web_cpe_fields(cpe):
+            # Even an unqualified application CPE must match a CPE here.
+            return "cpe", *web_product_key(vendor, product, cpe=cpe)
+        return None
+    if vendor and product:
+        return web_product_key(vendor, product)
+    return None
+
+
+def _row_coverage(asset):
+    if not asset.version or identity_conflict(asset) or asset.commit:
+        return None
+    if asset.purl:
+        purl = parse_purl(asset.purl)
+        identity = _coverage_identity("", "", ecosystem=purl.type, package=package_name(purl))
+    else:
+        identity = _coverage_identity(asset.vendor, asset.product, cpe=asset.cpe,
+                                      ecosystem=asset.ecosystem,
+                                      package=asset.product if asset.ecosystem else "")
+    return (asset.version, identity) if identity is not None else None
+
+
 def _product_changes(observation, entries, profile, assets, web_rows, snapshots_on):
     if observation.failed:
         return {}
@@ -582,7 +611,7 @@ class Session:
         for change in selected.values():
             if change.kind == "add":
                 projected[change.new.asset_id] = change.new
-        after = actions.ManagedIndex(projected.values())
+        managed_coverage = {_row_coverage(asset) for asset in projected.values()}
         _, output = web_assets.paths(self.config, self.client)
         try:
             rows, _ = read_web_snapshot(output)
@@ -590,13 +619,15 @@ class Session:
             rows = []
         snapshot = {asset.asset_id: asset for asset in rows if asset.client == self.client}
         for identity, item in self.evidence.products.items():
-            version = actions.ready_version(item)
-            if (version is None
-                    or any(projected[row_id].version == version for row_id in after.covering(item))):
+            if not item["in_inventory"]:
                 continue
+            version = actions.ready_version(item)
+            key = _coverage_identity(item["vendor"], item["product"], cpe=item.get("cpe", ""),
+                                     ecosystem=item.get("ecosystem", ""), package=item.get("package", ""))
             asset = snapshot.get(identity)
-            if (asset is not None and asset.version == version
-                    and actions._row_keys(asset) & actions._identity_keys(item)):
+            if version is not None and key is not None and (
+                    (version, key) in managed_coverage
+                    or (asset is not None and _row_coverage(asset) == (version, key))):
                 continue
             # Keep the old rows when a detected replacement would lose coverage.
             for removal in [key for key, change in selected.items() if change.kind == "remove"]:

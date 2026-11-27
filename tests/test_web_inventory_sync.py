@@ -1,6 +1,6 @@
 """Inventory sync uses saved observations and publishes reversible client changes."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -913,6 +913,67 @@ def test_conflicting_scoped_product_identity_cannot_update_same_site_row(blank):
     assert sync.RESULTS_WARNING in text
     assert "Version changed ·" not in text
     assert managed_rows(config) == [old]
+
+
+@pytest.mark.parametrize("source", ["managed", "snapshot"])
+@pytest.mark.parametrize("conflict", ["cpe-part", "cpe-qualifier", "unstructured", "npm-package"])
+def test_due_removal_requires_matching_product_identity(snapshots_on, monkeypatch, source, conflict):
+    from cvebeacon_extensions.contract import write_snapshot
+
+    config, users, client = setup(snapshots_on, "auto", auto_remove="on")
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    assert save(client, path="/about").status_code == 303
+    original = product("sample", "1", identity=SCOPED_IDENTITY)
+    old = replace(row("sample", "1"), asset_id=original["asset_id"] + "-m", cpe=SAMPLE_CPE)
+    if conflict == "npm-package":
+        detected = product("sample", "1", site=PATH_SITE, npm=True)
+        detected["package"] = "@scope/sample"
+        matching = replace(row("@scope/sample", "1", npm=True),
+                           asset_id=detected["asset_id"], vendor="sample")
+        replacement = replace(matching, product="sample", purl="pkg:npm/sample@1")
+    else:
+        detected = product("sample", "1", site=PATH_SITE, identity=SCOPED_IDENTITY)
+        matching = replace(old, asset_id=detected["asset_id"],
+                           cpe=SAMPLE_CPE.replace(":sample:sample:*:", ":sample:sample:1:"))
+        replacement = replace(matching, cpe={
+            "cpe-part": SAMPLE_CPE.replace(":o:", ":a:"),
+            "cpe-qualifier": SAMPLE_CPE.replace(":o:sample:sample:*:*:", ":o:sample:sample:*:sp1:"),
+            "unstructured": "",
+        }[conflict])
+    write_managed(config, [old])
+    sites = {BASE_SITE: True, PATH_SITE: True}
+    run(config, 1, [original], sites=sites)
+    page(client)
+    for number in (2, 3):
+        run(config, number, [detected], sites=sites)
+        text = page(client)
+        assert ("Not detected since" in card(text)) == (number == 3)
+
+    _, output = web_assets.paths(config, "Acme")
+
+    def publish(candidate):
+        if source == "managed":
+            write_managed(config, [old, replace(candidate, asset_id="other")])
+        else:
+            write_snapshot(output, [asdict(candidate)], source_id="test-web",
+                           collector="web-detect", observed_at=NOW.isoformat())
+
+    publish(replacement)
+    before = managed_rows(config)
+    count = len(users.audit_entries())
+    clock[0] += timedelta(days=30)
+    assert sync.COVERAGE_WARNING in page(client)
+    assert managed_rows(config) == before
+    assert len(users.audit_entries()) == count
+
+    publish(matching)
+    assert sync.COVERAGE_WARNING not in page(client)
+    assert len(users.audit_entries()) == count + 1
+    if source == "managed":
+        assert [asset.asset_id for asset in managed_rows(config)] == ["other"]
+    else:
+        assert not (config.inventory_directory / f"{client_key('Acme')}.json").exists()
 
 
 def test_review_cannot_substitute_another_path_at_the_same_origin(blank):
