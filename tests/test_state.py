@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
+import sqlite3
 
 from cvebeacon.models import Applicability, Asset, Evidence, Finding, QueryResult, Vulnerability
 from cvebeacon.state import StateStore, material_fingerprint
@@ -41,6 +42,29 @@ def test_state_new_unchanged_changed_and_channel_isolation(tmp_path):
     with store._connect() as db:
         current = db.execute("SELECT first_seen,last_seen FROM current_findings").fetchone()
         assert current["first_seen"] <= current["last_seen"]
+
+
+def test_large_delivery_acknowledgement_chunks_sql_bind_parameters(tmp_path, monkeypatch):
+    store = StateStore(tmp_path / "state.db")
+    asset = Asset("a1", "Acme", "Widget", "1")
+    findings = tuple(
+        Finding(asset, Vulnerability(f"CVE-2026-{1000 + number}"), Applicability.AFFECTED,
+                "high", "test")
+        for number in range(1200))
+    _, ids = store.record_scan([QueryResult(asset, findings, ())], channels=("teams",))
+    assert len(ids) == 1200
+    original = StateStore._connect
+
+    def limited(self):
+        connection = original(self)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return connection
+
+    monkeypatch.setattr(StateStore, "_connect", limited)
+    store.mark_delivery("teams", ids, accepted=True)
+    assert store.pending_events("teams") == []
+    with store._connect() as db:
+        assert db.execute("SELECT count(*) FROM deliveries WHERE state='accepted'").fetchone()[0] == 1200
 
 
 def test_failed_transaction_does_not_commit_partial_run(tmp_path, monkeypatch):
