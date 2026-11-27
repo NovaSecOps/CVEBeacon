@@ -120,7 +120,7 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
             result.asset.category, result.asset.system_id, result.asset.ecosystem,
         ]])
     findings = workbook.create_sheet("Findings")
-    findings.append(["Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability", "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile", "EPSS Date", "CISA KEV", "EU KEV", "Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts"])
+    findings.append(["Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability", "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile", "EPSS Date", "CISA KEV", "EU KEV", "VulnCheck KEV", "VulnCheck Date Added", "VulnCheck Ransomware", "VulnCheck Reported Exploits", "VulnCheck Exploit References", "Shodan CVEDB KEV", "Shodan CVEDB Ransomware", "Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts"])
     for result in values:
         for item in result.findings:
             vuln = item.vulnerability
@@ -129,7 +129,11 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
                 vuln.primary_id, item.applicability.value, item.confidence, item.reason,
                 vuln.cvss_score, vuln.cvss_vector, vuln.epss_score, vuln.epss_percentile,
                 vuln.epss_date.isoformat() if vuln.epss_date else None,
-                vuln.cisa_kev, vuln.eu_kev, vuln.rejected, vuln.published, vuln.modified,
+                vuln.cisa_kev, vuln.eu_kev, vuln.vulncheck_kev,
+                vuln.vulncheck_date_added, vuln.vulncheck_ransomware,
+                vuln.vulncheck_reported_exploits, vuln.vulncheck_exploit_references,
+                vuln.shodan_cvedb_kev, vuln.shodan_cvedb_ransomware,
+                vuln.rejected, vuln.published, vuln.modified,
                 vuln.summary, ", ".join(sorted({x.source for x in item.evidence})),
                 "; ".join(item.conflicts),
             ]])

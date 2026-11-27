@@ -85,6 +85,13 @@ class Vulnerability:
     epss_date: date | None = None
     cisa_kev: bool | None = None
     eu_kev: bool | None = None
+    vulncheck_kev: bool | None = None
+    vulncheck_date_added: str | None = None
+    vulncheck_ransomware: bool | None = None
+    vulncheck_reported_exploits: int | None = None
+    vulncheck_exploit_references: int | None = None
+    shodan_cvedb_kev: bool | None = None
+    shodan_cvedb_ransomware: bool | None = None
     references: tuple[str, ...] = ()
     advisory_id: str = ""
     aliases: tuple[str, ...] = ()

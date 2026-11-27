@@ -354,7 +354,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
             "Coverage unknown assets": sum(row["coverage"] == "coverage_unknown" for row in data["coverage"]),
             "Assets needing coverage review": sum(row["coverage"] == "needs_review" for row in data["coverage"]),
             "CISA KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"]["cisa_kev"] is True}),
-            "EU KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"]["eu_kev"] is True})}
+            "EU KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"]["eu_kev"] is True}),
+            "VulnCheck KEV CVEs": len({row["vulnerability"]["cve_id"] for row in current if row["vulnerability"].get("vulncheck_kev") is True})}
         return data
 
     def inventory_required(title: str, *, status: int = 200):
@@ -373,12 +374,12 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
         if config.effective_inventory is None:
             return inventory_required("Findings")
         data = snapshot()
-        filters = {key: _text(request.args, key) for key in ("q", "asset", "vendor", "product", "version", "category", "system_id", "ecosystem", "purl", "advisory", "cve", "applicability", "cvss", "severity", "cisa", "eu")}
+        filters = {key: _text(request.args, key) for key in ("q", "asset", "vendor", "product", "version", "category", "system_id", "ecosystem", "purl", "advisory", "cve", "applicability", "cvss", "severity", "cisa", "eu", "vulncheck")}
         if filters["applicability"] not in {"", *(item.value for item in Applicability)}:
             abort(400)
         if filters["severity"] not in {"", "critical", "high", "medium", "low", "none", "unknown"}:
             abort(400)
-        if any(filters[key] not in {"", "yes", "no", "unknown"} for key in ("cisa", "eu")):
+        if any(filters[key] not in {"", "yes", "no", "unknown"} for key in ("cisa", "eu", "vulncheck")):
             abort(400)
         try:
             minimum = float(filters["cvss"]) if filters["cvss"] else None
@@ -407,13 +408,13 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
                 continue
             def kev_label(value):
                 return "unknown" if value is None else "yes" if value else "no"
-            if any(filters[key] and kev_label(vuln[field]) != filters[key] for key, field in (("cisa", "cisa_kev"), ("eu", "eu_kev"))):
+            if any(filters[key] and kev_label(vuln.get(field)) != filters[key] for key, field in (("cisa", "cisa_kev"), ("eu", "eu_kev"), ("vulncheck", "vulncheck_kev"))):
                 continue
             rows.append(row)
         data["coverage"] = [row for row in data["coverage"] if row["coverage"] and
             filters["applicability"] in {"", row["coverage"]} and not filters["cve"] and not filters["advisory"] and not filters["cvss"] and
             filters["severity"] in {"", "unknown"} and
-            all(filters[key] in {"", "unknown"} for key in ("cisa", "eu")) and
+            all(filters[key] in {"", "unknown"} for key in ("cisa", "eu", "vulncheck")) and
             all(filters[key].casefold() in row["asset"].get(field, "").casefold() for key, field in
                 (("asset", "asset_id"), *((key, key) for key in ("vendor", "product", "version", "category", "system_id", "ecosystem", "purl")))) and
             filters["q"].casefold() in " ".join(row["asset"].values()).casefold()]

@@ -28,7 +28,7 @@ TECHNOLOGY_COLUMNS = (
 SUMMARY_COLUMNS = (
     ("window_count", "CVEs in window"), ("current_count", "Total current CVEs"),
     ("severity", "Highest severity"), ("max_cvss", "Max CVSS"), ("cisa_kev", "CISA KEV"),
-    ("eu_kev", "EU KEV"), ("exploitation", "Exploitation"), ("max_epss", "Max EPSS (%)"),
+    ("eu_kev", "EU KEV"), ("vulncheck_kev", "VulnCheck KEV"), ("exploitation", "Exploitation"), ("max_epss", "Max EPSS (%)"),
     ("newest_published", "Newest published"), ("first_found", "First found"),
 )
 CVE_COLUMNS = (
@@ -36,6 +36,7 @@ CVE_COLUMNS = (
     ("applicability", "Applicability"), ("severity", "Severity"), ("cvss_score", "CVSS"),
     ("cvss_version", "CVSS version"), ("epss_score", "EPSS (%)"),
     ("epss_percentile", "EPSS percentile (%)"), ("cisa_kev", "CISA KEV"), ("eu_kev", "EU KEV"),
+    ("vulncheck_kev", "VulnCheck KEV"), ("vulncheck_date_added", "VulnCheck date added"),
     ("exploitation", "Exploitation"), ("exploitation_sources", "Exploitation sources"),
     ("published", "Published"), ("modified", "Last modified"), ("first_seen", "First found"),
     ("last_seen", "Last seen"), ("fixed_versions", "Fixed versions"), ("references", "References"),

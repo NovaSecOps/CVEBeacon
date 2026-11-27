@@ -130,7 +130,7 @@ def read_filters(args, sites, categories):
         "conf": chosen or list(CONFIDENCE_CHOICES),
         "status": _choice(args, "status", actions.STATUS_LABELS, "any"),
         "severity": _choice(args, "severity", SEVERITIES[2:], "any"),
-        "kev": _choice(args, "kev", ("cisa", "eu", "either"), "any"),
+        "kev": _choice(args, "kev", ("cisa", "eu", "vulncheck", "either"), "any"),
         "exploited": _choice(args, "exploited", ("active", "poc"), "any"),
         "show_empty": _choice(args, "show_empty", ("0", "1"),
                               "0" if marker else "1") == "1",
@@ -253,6 +253,8 @@ def _finding(record):
         "epss_score": _number(vuln.get("epss_score"), 1),
         "epss_percentile": _number(vuln.get("epss_percentile"), 1),
         "cisa_kev": vuln.get("cisa_kev"), "eu_kev": vuln.get("eu_kev"),
+        "vulncheck_kev": vuln.get("vulncheck_kev"),
+        "vulncheck_date_added": _timestamp(vuln.get("vulncheck_date_added")),
         "fixed_versions": _finding_list(vuln.get("fixed_versions")), "references": _finding_list(vuln.get("references")),
     }
 
@@ -311,7 +313,8 @@ def _merge_finding(left, right):
             left[key] = right[key]
     for key in ("published", "first_seen"):
         left[key] = _ignore_missing((left[key], right[key]), min)
-    for key in ("modified", "last_seen", "epss_score", "epss_percentile", "cisa_kev", "eu_kev"):
+    for key in ("modified", "last_seen", "epss_score", "epss_percentile", "cisa_kev", "eu_kev",
+                "vulncheck_kev", "vulncheck_date_added"):
         left[key] = _ignore_missing((left[key], right[key]))
     for key in ("fixed_versions", "references"):
         left[key] = list(dict.fromkeys((*left[key], *right[key])))
@@ -374,7 +377,8 @@ def _cve_matches(cve, window, filters):
         window.includes(cve[window.field])
         and (minimum == "any" or SEVERITIES.index(cve["severity"]) >= SEVERITIES.index(minimum))
         and (kev == "any" or kev in ("cisa", "either") and cve["cisa_kev"]
-             or kev in ("eu", "either") and cve["eu_kev"])
+             or kev in ("eu", "either") and cve["eu_kev"]
+             or kev in ("vulncheck", "either") and cve["vulncheck_kev"])
     )
 
 
@@ -396,6 +400,7 @@ def _row_summary(cves, current_count, coverage):
         "severity": _severity_level(max_cvss), "max_cvss": max_cvss,
         "cisa_kev": any(cve["cisa_kev"] for cve in cves),
         "eu_kev": any(cve["eu_kev"] for cve in cves),
+        "vulncheck_kev": any(cve["vulncheck_kev"] for cve in cves),
         "exploitation": next((level for level in EXPLOITATION
                               if any(cve["exploitation"] == level for cve in cves)), "unknown"),
         "max_epss": _ignore_missing(cve["epss_score"] for cve in cves),
@@ -456,7 +461,7 @@ def build_report(config, client, args, *, export=False, now=None):
                 identifier = cve["cve_id"]
                 rank = SEVERITIES.index(cve["severity"])
                 severities[identifier] = max(rank, severities.get(identifier, 0))
-                for key in ("cisa_kev", "eu_kev", "active"):
+                for key in ("cisa_kev", "eu_kev", "vulncheck_kev", "active"):
                     if cve.get(key) or cve["exploitation"] == key:
                         chip_sets[key].add(identifier)
             if export or len(rows) < PAGE_ROWS:
@@ -473,7 +478,7 @@ def build_report(config, client, args, *, export=False, now=None):
                 retained_cves += len(retained)
                 cves_capped |= capped
     summary = {
-        **{key: len(chip_sets[key]) for key in ("sites", "cisa_kev", "eu_kev", "active")},
+        **{key: len(chip_sets[key]) for key in ("sites", "cisa_kev", "eu_kev", "vulncheck_kev", "active")},
         "cves": len(severities),
         "critical": sum(rank == SEVERITIES.index("critical") for rank in severities.values()),
         "high": sum(rank == SEVERITIES.index("high") for rank in severities.values()),

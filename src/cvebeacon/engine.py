@@ -13,10 +13,11 @@ from .http import HttpClient
 from .identity import identity_conflict, normalize_asset
 from .models import Applicability, Asset, Evidence, HealthStatus, QueryResult, SourceHealth, Vulnerability
 from .reconcile import merge_vulnerabilities, reconcile
-from .sources import CVEListSource, EPSSSource, EUVDSource, KEVSource, NVDSource
+from .sources import CVEListSource, EPSSSource, EUVDSource, KEVSource, NVDSource, ShodanCVEDBSource, VulnCheckSource
 from .sources.common import now_health, as_float
 from .sources.epss import EPSS_URL
 from .sources.osv import OSVSource, OSVResult
+from .sources.shodan_cvedb import CVE_URL as CVEDB_CVE_URL
 
 
 class QueryEngine:
@@ -31,6 +32,8 @@ class QueryEngine:
         self.kev = KEVSource(self.http)
         self.epss = EPSSSource(self.http)
         self.osv = OSVSource(self.http)
+        self.vulncheck = VulnCheckSource(self.http)
+        self.cvedb = ShodanCVEDBSource(self.http)
         self._catalogs: dict[str, dict[str, Evidence] | SourceError] = {}
         self._cve_records: dict[str, tuple[Evidence, ...] | SourceError] = {}
 
@@ -79,11 +82,25 @@ class QueryEngine:
         except ValueError as exc:
             return None, str(exc)
 
+    def _vulncheck_token(self) -> str | None:
+        accessor = getattr(self.config, "vulncheck_api_key", None)
+        return accessor() if callable(accessor) else None
+
     def _catalog(self, name: str) -> dict[str, Evidence]:
         cached = self._catalogs.get(name)
         if cached is None:
             try:
-                cached = self.kev.cisa() if name == "cisa_kev" else self.kev.eu()
+                if name == "cisa_kev":
+                    cached = self.kev.cisa()
+                elif name == "eu_kev":
+                    cached = self.kev.eu()
+                elif name == "vulncheck":
+                    token = self._vulncheck_token()
+                    if not token:
+                        raise SourceError("vulncheck", "no API token")
+                    cached = self.vulncheck.kev(token)
+                else:
+                    raise SourceError(name, "unknown catalog")
             except SourceError as exc:
                 cached = exc
             self._catalogs[name] = cached
@@ -102,6 +119,51 @@ class QueryEngine:
         if isinstance(cached, SourceError):
             raise cached
         return cached
+
+    @staticmethod
+    def _cvedb_vulnerability(record, *, metadata_only: bool = False) -> Vulnerability:
+        if metadata_only:
+            return Vulnerability(
+                record.cve_id,
+                shodan_cvedb_kev=record.kev,
+                shodan_cvedb_ransomware=record.ransomware,
+            )
+        return Vulnerability(
+            record.cve_id,
+            record.summary,
+            record.published,
+            cvss_score=record.cvss_score,
+            cvss_vector=record.cvss_vector,
+            cvss_version=record.cvss_version,
+            shodan_cvedb_kev=record.kev,
+            shodan_cvedb_ransomware=record.ransomware,
+            references=record.references,
+        )
+
+    @staticmethod
+    def _cvedb_evidence(record, *, cisa: bool, eu: bool, epss_score: float | None) -> Evidence:
+        details = {
+            "cve_id": record.cve_id,
+            "kev": record.kev,
+            "ransomware": record.ransomware,
+            "epss": record.epss,
+            "epss_percentile": record.epss_percentile,
+            "cisa_kev": cisa,
+            "eu_kev": eu,
+        }
+        if record.kev is True and not cisa and not eu:
+            details["kev_disagreement"] = True
+        if (record.epss is not None and epss_score is not None
+                and abs(record.epss - epss_score) >= 0.01):
+            details["epss_difference"] = True
+        return Evidence(
+            "shodan_cvedb",
+            "independent_enrichment",
+            "Shodan CVEDB cross-check for KEV, EPSS and ransomware evidence",
+            CVEDB_CVE_URL.format(identifier=record.cve_id),
+            record.published,
+            details=details,
+        )
 
     def query_asset(self, asset: Asset) -> QueryResult:
         asset = normalize_asset(asset)
@@ -163,6 +225,71 @@ class QueryEngine:
             health.append(now_health("euvd", HealthStatus.DISABLED, "disabled by configuration"))
 
         identifiers = sorted(claims)
+        cvedb_enabled = bool(getattr(self.config.sources, "shodan_cvedb_enabled", False))
+        cvedb_records: dict[str, object] = {}
+        cvedb_only: set[str] = set()
+        cvedb_messages: list[str] = []
+        cvedb_failed = False
+        cvedb_truncated = False
+        if cvedb_enabled:
+            if cpe is None:
+                try:
+                    configured = self._configured_cpe(asset)
+                    if configured:
+                        cpe = exact_cpe_version(configured, asset.version)
+                except (SourceError, ValueError):
+                    cpe = None
+            if cpe:
+                try:
+                    discovered, cvedb_truncated = self.cvedb.discover(cpe)
+                    cvedb_records.update(discovered)
+                    for record in discovered.values():
+                        self.cvedb.remember(record)
+                        if record.cve_id not in claims:
+                            cvedb_only.add(record.cve_id)
+                            claims[record.cve_id].append(self._cvedb_vulnerability(record))
+                            decisions[record.cve_id].append(Decision(
+                                Applicability.NEEDS_REVIEW,
+                                "reported by Shodan CVEDB only; confirm applicability",
+                            ))
+                        else:
+                            claims[record.cve_id].append(
+                                self._cvedb_vulnerability(record, metadata_only=True)
+                            )
+                    cvedb_messages.append(f"{len(discovered)} CVE results for the exact CPE")
+                    if cvedb_truncated:
+                        cvedb_messages.append("results truncated")
+                except SourceError as exc:
+                    cvedb_failed = True
+                    cvedb_messages.append(str(exc))
+            else:
+                cvedb_messages.append("not requested; no resolved CPE")
+        identifiers = sorted(claims)
+        if cvedb_enabled and identifiers:
+            pending = [identifier for identifier in identifiers if identifier not in cvedb_records]
+            lookup_failures = 0
+            completed = 0
+            for identifier in pending:
+                try:
+                    record = self.cvedb.lookup(identifier)
+                except SourceError:
+                    lookup_failures += 1
+                    continue
+                completed += 1
+                if record is not None:
+                    cvedb_records[identifier] = record
+                    claims[identifier].append(self._cvedb_vulnerability(record, metadata_only=True))
+            if pending:
+                cvedb_messages.append(
+                    f"{completed}/{len(pending)} CVE lookups completed"
+                )
+            if lookup_failures:
+                cvedb_messages.append(f"{lookup_failures} CVE lookups failed")
+                cvedb_failed = True
+            if self.cvedb.cap_reached:
+                cvedb_messages.append("lookup cap reached")
+                cvedb_failed = True
+
         if self.config.sources.cve_enabled:
             failures = 0
             for identifier in identifiers:
@@ -222,18 +349,57 @@ class QueryEngine:
         else:
             health.append(now_health("epss", HealthStatus.OK, "not requested; no discovered CVEs"))
 
+        vulncheck: dict[str, Evidence] = {}
+        vulncheck_enabled = bool(getattr(self.config.sources, "vulncheck_enabled", False))
+        vulncheck_token = self._vulncheck_token()
+        if not vulncheck_enabled:
+            health.append(now_health("vulncheck", HealthStatus.DISABLED, "off: disabled"))
+        elif not vulncheck_token:
+            health.append(now_health("vulncheck", HealthStatus.DISABLED, "off: no token (skipped: no token)"))
+        elif not identifiers:
+            health.append(now_health("vulncheck", HealthStatus.OK, "on; not requested; no discovered CVEs"))
+        else:
+            try:
+                vulncheck = self._catalog("vulncheck")
+                health.append(now_health("vulncheck", HealthStatus.OK, f"on; catalog loaded; {len(vulncheck)} CVEs"))
+            except SourceError as exc:
+                health.append(now_health("vulncheck", HealthStatus.FAILED, f"on; {exc}"))
+
+        if cvedb_enabled:
+            if cvedb_failed:
+                status = HealthStatus.DEGRADED if cvedb_records else HealthStatus.FAILED
+            elif cvedb_truncated:
+                status = HealthStatus.DEGRADED
+            else:
+                status = HealthStatus.OK
+            health.append(now_health("shodan_cvedb", status, "on" + ("; " + "; ".join(cvedb_messages) if cvedb_messages else "")))
+        else:
+            health.append(now_health("shodan_cvedb", HealthStatus.DISABLED, "off: disabled"))
+
         findings = []
         for identifier in identifiers:
             vuln = merge_vulnerabilities(claims[identifier])
             vuln = replace(vuln,
                 cisa_kev=(identifier in cisa) if any(h.source == "cisa_kev" and h.status == HealthStatus.OK for h in health) else None,
-                eu_kev=(identifier in eu) if any(h.source == "eu_kev" and h.status == HealthStatus.OK for h in health) else None)
+                eu_kev=(identifier in eu) if any(h.source == "eu_kev" and h.status == HealthStatus.OK for h in health) else None,
+                vulncheck_kev=(identifier in vulncheck) if any(h.source == "vulncheck" and h.status == HealthStatus.OK for h in health) else None)
             if identifier in cisa:
                 vuln = replace(vuln, cisa_kev=True)
                 evidence[identifier].append(cisa[identifier])
             if identifier in eu:
                 vuln = replace(vuln, eu_kev=True)
                 evidence[identifier].append(eu[identifier])
+            if identifier in vulncheck:
+                details = vulncheck[identifier].details
+                vuln = replace(
+                    vuln,
+                    vulncheck_kev=True,
+                    vulncheck_date_added=details.get("date_added"),
+                    vulncheck_ransomware=details.get("ransomware"),
+                    vulncheck_reported_exploits=details.get("reported_exploited"),
+                    vulncheck_exploit_references=len(details.get("exploit_references") or ()),
+                )
+                evidence[identifier].append(vulncheck[identifier])
             if identifier in scores:
                 score, percentile, score_date = scores[identifier]
                 vuln = replace(vuln, epss_score=score, epss_percentile=percentile, epss_date=score_date)
@@ -242,15 +408,33 @@ class QueryEngine:
                     EPSS_URL, score_date.isoformat(),
                     details={"score": score, "percentile": percentile, "score_date": score_date.isoformat()},
                 ))
+            if identifier in cvedb_records:
+                record = cvedb_records[identifier]
+                score = scores[identifier][0] if identifier in scores else None
+                evidence[identifier].append(self._cvedb_evidence(
+                    record, cisa=identifier in cisa, eu=identifier in eu, epss_score=score
+                ))
             if any(item.source in {"nvd", "cve_list", "euvd"} and item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for item in health):
                 decisions[identifier].append(Decision(Applicability.NEEDS_REVIEW, "core applicability sources are incomplete"))
             finding = reconcile(asset, vuln, evidence[identifier], decisions[identifier])
+            if identifier in cvedb_only:
+                finding = replace(
+                    finding,
+                    applicability=Applicability.NEEDS_REVIEW,
+                    confidence="limited",
+                    reason="reported by Shodan CVEDB only; confirm applicability",
+                )
             severities = {(value.cvss_score, value.cvss_vector, value.cvss_version) for value in claims[identifier] if value.cvss_score is not None}
             if len(severities) > 1:
                 finding = replace(finding, conflicts=finding.conflicts + ("CVSS claims differ; the highest reported base score is displayed; see source evidence",))
             findings.append(finding)
-        findings.sort(key=lambda item: (not item.vulnerability.cisa_kev, not item.vulnerability.eu_kev, -(item.vulnerability.cvss_score or -1), item.vulnerability.cve_id))
-        any_failed = any(item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} or (item.source in {"nvd", "cve_list", "euvd"} and item.status == HealthStatus.DISABLED) for item in health)
+        findings.sort(key=lambda item: (not item.vulnerability.cisa_kev, not item.vulnerability.eu_kev, not item.vulnerability.vulncheck_kev, -(item.vulnerability.cvss_score or -1), item.vulnerability.cve_id))
+        any_failed = any(
+            item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED}
+            or (item.source in {"nvd", "cve_list", "euvd"} and item.status == HealthStatus.DISABLED)
+            for item in health
+            if item.source not in {"vulncheck", "shodan_cvedb"}
+        )
         if not cpe:
             coverage, reason = Applicability.COVERAGE_UNKNOWN, "product identity could not be resolved unambiguously"
         elif any_failed:
