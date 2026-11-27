@@ -898,6 +898,40 @@ def test_due_removal_rechecks_projected_snapshot_coverage(snapshots_on, monkeypa
             assert len(users.audit_entries()) == count
 
 
+@pytest.mark.parametrize("snapshot", ["matching", "missing", "wrong-scope"])
+def test_due_removal_accepts_a_version_less_snapshot_row(snapshots_on, monkeypatch, snapshot):
+    from cvebeacon_extensions.contract import write_snapshot
+
+    config, users, client = setup(snapshots_on, "auto", auto_remove="on")
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    assert save(client, path="/about").status_code == 303
+    old = row("sample", "1")
+    other = product("sample", "", site=PATH_SITE, identity=SCOPED_IDENTITY)
+    write_managed(config, [old])
+    _, output = web_assets.paths(config, "Acme")
+    if snapshot != "missing":
+        cpe = SAMPLE_CPE if snapshot == "matching" else SAMPLE_CPE.replace(":o:", ":a:")
+        write_snapshot(output, [asdict(Asset(
+            other["asset_id"], "sample", "sample", "", system_id=HOST, cpe=cpe, client="Acme"))],
+            source_id="test-web", collector="web-detect", observed_at=NOW.isoformat())
+    for number in (1, 2):
+        run(config, number, [other], sites={BASE_SITE: True, PATH_SITE: True})
+        page(client)
+    assert managed_rows(config) == [old]
+    clock[0] += timedelta(days=30)
+    count = len(users.audit_entries())
+    text = page(client)
+    if snapshot == "matching":
+        assert sync.COVERAGE_WARNING not in text
+        assert not (config.inventory_directory / f"{client_key('Acme')}.json").exists()
+        assert len(users.audit_entries()) == count + 1
+    else:
+        assert sync.COVERAGE_WARNING in text
+        assert managed_rows(config) == [old]
+        assert len(users.audit_entries()) == count
+
+
 def test_conflicting_scoped_product_identity_cannot_update_same_site_row(blank):
     config, _, client = setup(blank)
     item = product("sample", "1", identity=SCOPED_IDENTITY)
@@ -1134,11 +1168,21 @@ def test_review_updates_the_version_of_a_version_less_scoped_row(blank):
         item["asset_id"] + "-m", "1", SAMPLE_CPE)
 
 
-def test_a_broad_row_for_another_identity_does_not_hide_a_detection(blank):
+def test_a_plain_row_covers_a_versioned_unqualified_application_cpe(blank):
+    config, _, client = setup(blank, "review")
+    write_managed(config, [Asset("existing-sample", "sample", "sample", "2.1",
+                                 system_id=HOST, client="Acme")])
+    item = dict(product("sample", "2.1"), inventory=True,
+                cpe="cpe:2.3:a:sample:sample:*:*:*:*:*:*:*:*")
+    run(config, 1, [item])
+    assert "New · 1" not in card(page(client))
+
+
+def test_a_version_less_row_for_another_identity_does_not_hide_a_detection(blank):
     config, _, client = setup(blank, "review")
     item = dict(product("sample", "1"), inventory=True)
-    broad = replace(row("sample", "1"), asset_id="other-platform", version="",
-                    cpe="cpe:2.3:a:sample:sample:*:*:*:*:*:linux:*:*")
-    write_managed(config, [broad])
+    versionless = replace(row("sample", "1"), asset_id="other-platform", version="",
+                          cpe="cpe:2.3:a:sample:sample:*:*:*:*:*:linux:*:*")
+    write_managed(config, [versionless])
     run(config, 1, [item])
     assert "New · 1" in card(page(client))
