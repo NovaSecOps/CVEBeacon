@@ -1117,3 +1117,28 @@ def test_auto_applies_the_version_for_a_version_less_row(blank):
     (updated,) = managed_rows(config)
     assert (updated.version, updated.purl) == ("2", "pkg:npm/sample@2")
     assert "1 updated" in card(page(client))
+
+
+def test_review_updates_the_version_of_a_version_less_scoped_row(blank):
+    config, _, client = setup(blank, "review")
+    item = product("sample", "1", identity=SCOPED_IDENTITY)
+    versionless = replace(row("sample", "1"), asset_id=item["asset_id"] + "-m",
+                          version="", cpe=SAMPLE_CPE)
+    write_managed(config, [versionless])
+    run(config, 1, [item])
+    text = page(client)
+    assert "Version changed" in card(text)
+    assert post(client, "update", **selection(text, item)).status_code == 303
+    (updated,) = managed_rows(config)
+    assert (updated.asset_id, updated.version, updated.cpe) == (
+        item["asset_id"] + "-m", "1", SAMPLE_CPE)
+
+
+def test_a_broad_row_for_another_identity_does_not_hide_a_detection(blank):
+    config, _, client = setup(blank, "review")
+    item = dict(product("sample", "1"), inventory=True)
+    broad = replace(row("sample", "1"), asset_id="other-platform", version="",
+                    cpe="cpe:2.3:a:sample:sample:*:*:*:*:*:linux:*:*")
+    write_managed(config, [broad])
+    run(config, 1, [item])
+    assert "New · 1" in card(page(client))

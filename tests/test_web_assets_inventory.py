@@ -1,12 +1,13 @@
 """Honest inventory status, "Add to inventory" from Web assets, confidence colours and known CVEs."""
 import html
 import json
-from pathlib import Path
 import re
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from cvebeacon import dashboard_web, web_assets
+from cvebeacon import dashboard_web, web_assets, web_inventory_actions as actions
 from cvebeacon.config import load_config
 from cvebeacon.dashboard import create_app
 from cvebeacon.inventory import load_inventory
@@ -182,6 +183,84 @@ def test_managed_rows_make_products_monitored_by_manual_id_purl_or_text(blank):
     assert page(client, inv="monitored").count("<strong>") >= 3
     # The notice only appears while nothing is monitored.
     assert "not covered by CVE scans yet" not in page(client)
+
+
+def test_broad_coverage_uses_the_strongest_identity_and_the_observed_site():
+    def widget_cpe(*, part="a", platform="*"):
+        return f"cpe:2.3:{part}:example:widget:*:*:*:*:*:{platform}:*:*"
+
+    broad = Asset("broad", vendor="Example", product="Widget", system_id="a.example",
+                  cpe=widget_cpe(platform="linux"))
+    for cpe in (widget_cpe(platform="windows"), widget_cpe(part="o")):
+        item = dict(asset_id="w-widget", hostname="a.example", vendor="Example", product="Widget",
+                    versions=["2.1"], cpe=cpe, in_inventory=True, category="framework",
+                    confidence="high")
+        assert actions.classify(item, snapshots_on=False, snapshot_ids=set(),
+                                managed=actions.ManagedIndex([broad])) == ("ready", [])
+    item = dict(asset_id="w-widget", hostname="a.example", vendor="Example", product="Widget",
+                versions=["2.1"], cpe=widget_cpe(platform="linux"), in_inventory=True,
+                category="framework", confidence="high")
+    assert actions.classify(item, snapshots_on=False, snapshot_ids=set(),
+                            managed=actions.ManagedIndex([broad])) == ("monitored", ["broad"])
+    same_site = dict(item, hostname=broad.system_id)
+    assert actions.classify(same_site, snapshots_on=False, snapshot_ids=set(),
+                            managed=actions.ManagedIndex([broad])) == ("monitored", ["broad"])
+
+
+def test_broad_package_coverage_keeps_the_purl_scope_and_qualifiers():
+    row = Asset("scope-a", vendor="npm", product="core", version="1", ecosystem="npm",
+                purl="pkg:npm/@scope-a/core@1", system_id="a.example")
+    item = dict(asset_id="w-core", hostname="a.example", vendor="npm", product="core",
+                package="@scope-b/core", ecosystem="npm", versions=["1"], in_inventory=True,
+                category="js-library", confidence="high")
+    assert actions.classify(item, snapshots_on=False, snapshot_ids=set(),
+                            managed=actions.ManagedIndex([row])) == ("ready", [])
+    qualified = replace(row, asset_id="qualified", product="core",
+                        purl="pkg:npm/core@1?repository_url=https://example.invalid/repo")
+    plain = dict(asset_id="w-core", hostname="a.example", vendor="npm", product="core",
+                 ecosystem="npm", package="core", versions=["1"], in_inventory=True,
+                 category="js-library", confidence="high")
+    assert actions.classify(plain, snapshots_on=False, snapshot_ids=set(),
+                            managed=actions.ManagedIndex([qualified])) == ("ready", [])
+
+
+def test_broad_coverage_does_not_cross_sites():
+    row = Asset("broad", vendor="Example", product="Widget", system_id="a.example")
+    item = dict(asset_id="w-widget", hostname="b.example", vendor="Example", product="Widget",
+                versions=["2.1"], in_inventory=True, category="framework", confidence="high")
+    assert actions.classify(item, snapshots_on=False, snapshot_ids=set(),
+                            managed=actions.ManagedIndex([row])) == ("ready", [])
+    assert actions.classify(dict(item, hostname="a.example"), snapshots_on=False,
+                            snapshot_ids=set(),
+                            managed=actions.ManagedIndex([row])) == ("monitored", ["broad"])
+
+
+def test_exact_coverage_wins_over_a_broad_row_at_the_same_site():
+    rows = [
+        Asset("broad", vendor="Example", product="Widget", system_id="a.example"),
+        Asset("exact", vendor="Example", product="Widget", version="2.1", system_id="a.example"),
+    ]
+    item = dict(asset_id="w-widget", hostname="a.example", vendor="Example", product="Widget",
+                versions=["2.1"], in_inventory=True, category="framework", confidence="high")
+    assert actions.classify(item, snapshots_on=False, snapshot_ids=set(),
+                            managed=actions.ManagedIndex(rows)) == ("monitored", ["exact"])
+    assert actions.ManagedIndex(rows).covering(item) == ["exact", "broad"]
+
+
+def test_a_broad_cpe_row_for_another_platform_leaves_the_detection_ready(blank):
+    config = blank[0]
+    write_managed(config, [Asset(
+        "linux-widget", vendor="Example", product="Widget", system_id="a.example", client="Acme",
+        cpe="cpe:2.3:a:example:widget:*:*:*:*:*:linux:*:*")])
+    server = dict(asset_id="w-widget", hostname="a.example", vendor="Example", product="Widget",
+                  name="Widget", category="framework", categories=["framework"],
+                  confidence="high", versions=["2.1"], evidence_types=["header"],
+                  inventory=True, cpe="cpe:2.3:a:example:widget:*:*:*:*:*:windows:*:*")
+    client = seed(blank, [server])
+    card = products_card(page(client))
+    assert "Ready to add" in row(card, "Widget") and "Monitored" not in row(card, "Widget")
+    added = preview(client, ["w-widget"])
+    assert confirmation(added)["pick"] == ["w-widget"]
 
 
 def test_older_review_files_without_inventory_flag_keep_working(blank):
@@ -578,6 +657,21 @@ def test_known_cves_aggregate_in_the_technology_view_and_one_finding_wording(sna
     assert 'badge-high">High' in tech and "2 CVEs" in tech
     sites = products_card(page(client))
     assert ">1 CVE</a>" in row(sites, "nginx")
+
+
+def test_known_cves_uses_only_the_exact_row_when_broad_and_exact_rows_coexist(blank):
+    config = blank[0]
+    client = seed(blank)
+    write_managed(config, [
+        Asset("broad-nginx", vendor="nginx", product="nginx", system_id="a.example", client="Acme"),
+        Asset("exact-nginx", vendor="nginx", product="nginx", version="1.25.3",
+              system_id="a.example", client="Acme"),
+    ])
+    record(config, "broad-nginx", 9.8)
+    record(config, "exact-nginx", 5.0)
+    nginx = row(products_card(page(client)), "nginx")
+    assert ">1 CVE</a>" in nginx and 'badge-medium">Medium' in nginx
+    assert "Critical" not in nginx and "2 CVEs" not in nginx
 
 
 def test_known_cves_lookup_failure_shows_unavailable_and_keeps_the_page(snapshots_on, monkeypatch):
