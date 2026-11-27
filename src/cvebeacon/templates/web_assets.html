@@ -23,7 +23,7 @@
 {{ stat(total_products, 'Products', chips.with_version ~ ' with a version', href=url_for('web.index', client=client, _anchor='detected-products')) }}
 {{ stat(chips.monitored, 'Covered by scans', chips.ready ~ ' ready to add, ' ~ chips.review ~ ' need review', href=url_for('web.index', client=client, inv='monitored', _anchor='detected-products')) }}
 {{ stat(last_run_short or 'Not run yet', 'Last detection', last_run_help, tone=run_tone or none, href=url_for('web.index', client=client, _anchor='detection')) }}
-{% if show_changes %}{{ stat(tab_counts.changes, 'Open changes', change_counts.add ~ ' new, ' ~ change_counts.update ~ ' updated, ' ~ change_counts.remove ~ ' missing', href=url_for('web.index', client=client, _anchor='inventory-sync')) }}{% endif %}
+{% if show_changes %}{{ stat(tab_counts.changes, 'Open changes', change_counts['add'] ~ ' new, ' ~ change_counts['update'] ~ ' updated, ' ~ change_counts['remove'] ~ ' missing', href=url_for('web.index', client=client, _anchor='inventory-sync')) }}{% endif %}
 {% endcall %}
 
 {% call card('Next steps', 'Per-client work, in the order it matters most.') %}
