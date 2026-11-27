@@ -13,7 +13,7 @@
 <table>
   <thead><tr><th scope="col">Client</th></tr></thead>
   <tbody>{% for key, profile in managed_clients.items() %}
-    <tr><td><a href="{{ url_for('client_inventory.detail', key=key) }}">{{ profile.name }}</a></td></tr>
+    <tr><td><a href="{{ url_for('client_inventory.detail', key=key) }}">{{ profile.name }}</a><br><a href="{{ url_for('web.index', client=profile.name) }}">Web assets</a></td></tr>
   {% endfor %}</tbody>
 </table>
 {% endcall %}
@@ -32,7 +32,7 @@
   <thead><tr><th scope="col">Client</th><th scope="col" class="num">Assets</th><th scope="col">Currently affected CVEs</th><th scope="col">Activity</th></tr></thead>
   <tbody>{% for client in clients %}
   <tr>
-    <td><a href="{{ url_for('client_inventory.detail', key=client_links[client.name], name=client.name) }}">{{ client.name }}</a></td>
+    <td><a href="{{ url_for('client_inventory.detail', key=client_links[client.name], name=client.name) }}">{{ client.name }}</a><br><a href="{{ url_for('web.index', client=client.name) }}">Web assets</a></td>
     <td class="num">{{ client.assets }}</td>
     <td>{% for finding in client.findings %}
       {% if finding.is_cve %}<a href="{{ url_for('watch.cve', cve_id=finding.cve_id) }}">{{ finding.cve_id }}</a>{% else %}<span class="break">{{ finding.cve_id }}</span>{% endif %}

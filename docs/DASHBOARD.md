@@ -103,6 +103,18 @@ Operations observes existing lock files without creating storage. Missing locks 
 
 ## Client web technology detection
 
+**Web assets** is its own section in the sidebar. **Overview** summarises the
+client's sites, detected products, latest detection and next actions. **Sites**
+holds the saved list, add and change forms and bulk import. **Detection**,
+**Products** and **Changes** link to the current content on Overview until those
+pages are split out, and **Report** opens the technology report. The client
+switcher in the section header changes clients without returning to the landing
+page. `/web-assets/overview?client=...` redirects to `/web-assets?client=...`,
+and an old product or filter query keeps working while the Products page is
+still on Overview. Where product checkboxes are shown, **Select all** and
+**Clear** act on the visible rows; the server-side **Add all** actions remain
+the fallback when scripts are disabled.
+
 Open **Web assets**, choose an inventory client or enter a new client label,
 and save each authorised hostname, scheme, port and starting path. A typed name
 that matches an inventory client is saved with that client's exact name. `view`
@@ -121,7 +133,7 @@ attestation.
 
 ### Importing many sites
 
-**Import sites from a file** on the Web assets page adds many authorised sites
+**Import sites from a file** on the Sites page adds many authorised sites
 at once. **Download a CSV template** gives a ready-to-fill file with the header
 `hostname,scheme,port,path,allow_redirects,max_redirects,expires_at,allow_private_address`
 and two example rows. Only `hostname` is required. Empty cells use the defaults:
@@ -264,7 +276,8 @@ existing trimmed, case-folded client label.
 #### Inventory sync
 
 On **Web assets**, choose the client's mode under **Inventory sync**. **Default**
-uses **Configuration → Inventory**. The global default is **Off**.
+uses **Configuration → Inventory**. The global default is **Off**. The
+**Changes** tab appears only while the client's mode is **Review** or **Auto**.
 
 | Mode | What a rescan does |
 | --- | --- |

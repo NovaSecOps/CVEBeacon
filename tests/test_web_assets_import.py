@@ -85,7 +85,7 @@ def test_template_downloads_and_parses_to_two_rows(web):
 
 def test_import_card_and_template_link_on_page(web):
     _, _, _, client = web
-    page = client.get("/web-assets?client=Acme").text
+    page = client.get("/web-assets/sites?client=Acme").text
     assert "/web-assets/import-template" in page and 'name="csv_file"' in page
     assert "<style" not in page.split("import-sites")[1].split("</form>")[0]
 
@@ -590,7 +590,7 @@ def test_confirmation_page_markup_and_csp(web):
     assert not re.search(r"<script(?![^>]*\ssrc=)|style=|\son[a-z]+=", page)
     assert not nested_forms(page)
     assert "unsafe-inline" not in response.headers.get("Content-Security-Policy", "")
-    index = client.get("/web-assets?client=Acme").text
+    index = client.get("/web-assets/sites?client=Acme").text
     assert not re.search(r"<script(?![^>]*\ssrc=)|style=", index.split('id="import-sites"')[1][:3000])
     assert not nested_forms(index)
 

@@ -1,103 +1,81 @@
 {% extends 'base.html' %}
-{% from 'ui.html' import page_header, card, callout, empty_state, definition_list, table_wrap, button, severity_badge %}
+{% set nav_active = 'web.index' %}
+{% block head %}<script src="{{ url_for('static', filename='web-assets.js') }}" defer></script>{% endblock %}
 {% block title %}Web assets · CVEBeacon{% endblock %}
-{% macro asset_fields(entry, document, prefix) %}
-<div class="field"><label for="{{ prefix }}-hostname">Hostname</label><input id="{{ prefix }}-hostname" name="hostname" value="{{ entry.get('hostname', '') }}" required maxlength="256"><p class="help">The site address without https://, for example shop.example.com.</p></div>
-<div class="field"><label for="{{ prefix }}-scheme">Scheme</label><select name="scheme" id="{{ prefix }}-scheme">{% for scheme in ['https','http'] %}<option {% if entry.get('scheme', 'https') == scheme %}selected{% endif %}>{{ scheme }}</option>{% endfor %}</select><p class="help">Use https unless the site only offers http.</p></div>
-<div class="field"><label for="{{ prefix }}-port">Port</label><input id="{{ prefix }}-port" name="port" type="number" min="1" max="65535" value="{{ entry.get('port', 443) }}" required><p class="help">Usually 443 for https and 80 for http.</p></div>
-<div class="field"><label for="{{ prefix }}-path">Starting path</label><input id="{{ prefix }}-path" name="path" value="{{ entry.get('path', '/') }}" maxlength="2048" required><p class="help">Start from / unless the site lives in a subfolder.</p></div>
-<div class="field"><label for="{{ prefix }}-expires">Expiry <span class="optional">(optional)</span></label><input id="{{ prefix }}-expires" name="expires_at" value="{{ entry.get('expires_at', '') }}" placeholder="2027-11-01T00:00:00Z"><p class="help">Use ISO 8601 UTC, for example 2027-11-01T00:00:00Z. Leave blank for no expiry. The date must be in the future.</p></div>
-<div class="field field-check"><input id="{{ prefix }}-redirects" name="allow_redirects" type="checkbox" value="yes" {% if entry.get('allow_redirects', true) %}checked{% endif %}><label for="{{ prefix }}-redirects">Allow redirects to listed hosts and ports</label></div>
-<div class="field"><label for="{{ prefix }}-max-redirects">Maximum redirects</label><input id="{{ prefix }}-max-redirects" name="max_redirects" type="number" min="0" max="10" value="{{ entry.get('max_redirects', 2) }}" required><p class="help">0 to 10. Each redirect must stay on a listed host and port.</p></div>
-<div class="field field-check"><input id="{{ prefix }}-private" name="allow_private_address" type="checkbox" value="yes" {% if entry.get('allow_private_address') %}checked{% endif %}><label for="{{ prefix }}-private">I authorise access to private addresses for this asset (including loopback)</label><p class="help">Only tick this if the client has approved checking an internal address.</p></div>
-{% if current_user.is_admin %}<div class="field"><label for="{{ prefix }}-ca">Client CA bundle path <span class="optional">(optional)</span></label><input id="{{ prefix }}-ca" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}"><p class="help">Changing the client CA bundle renews authorisation on every saved entry.</p></div>{% else %}<input type="hidden" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}">{% endif %}
-<div class="field field-check"><input id="{{ prefix }}-attest" name="attest" type="checkbox" value="yes" required><label for="{{ prefix }}-attest">I attest that this client authorises observation of this asset and the selected redirect and address policy.</label></div>
-{% endmacro %}
+{% from 'ui.html' import card, callout, table_wrap, button, severity_badge, stat_grid, stat, task_list, bulk_select_controls %}
+{% from '_web_assets_chooser.html' import client_chooser with context %}{% set section = {'page': 'overview', 'endpoint': 'web.index', 'description': section_description,
+                  'primary_action': section_primary_action, 'primary_url': section_primary_url,
+                  'primary_label': section_primary_label} %}
 {% macro conf_badge(klass, label) %}<span class="badge badge-{{ 'conf-' ~ klass if klass in ['high', 'medium', 'low'] else 'neutral' }}">{{ label }}</span>{% endmacro %}
 {% macro cve_cell(cve) %}{% if cve.state == 'found' %}{{ severity_badge(cve.level) }} <a href="{{ url_for('findings', asset=cve.asset) }}">{{ cve.count }} CVE{{ '' if cve.count == 1 else 's' }}</a>{% elif cve.state == 'clear' %}<span class="muted">No CVEs found yet</span>{% elif cve.state == 'unavailable' %}<span class="muted">Unavailable</span>{% else %}<span class="muted">Not monitored</span>{% endif %}{% endmacro %}
 {% macro filter_fields(flt) %}{% for level in flt.conf | sort %}<input type="hidden" name="conf" value="{{ level }}">{% endfor %}<input type="hidden" name="version" value="{{ flt.version }}"><input type="hidden" name="inv" value="{{ flt.inv }}"><input type="hidden" name="rep" value="{{ flt.rep }}"><input type="hidden" name="category" value="{{ flt.category }}"><input type="hidden" name="site" value="{{ flt.site }}"><input type="hidden" name="tech" value="{{ flt.tech }}">{% endmacro %}
 {% macro reported_cell(item) %}{% if item.mark %}<div>{{ watch_stamp(item.mark.reported_at) }}</div><div class="muted">by {{ item.mark.by }}</div>{% if item.mark.note %}<div class="muted">{{ item.mark.note }}</div>{% endif %}{% if item.rep == 'changed' %}<div><span class="badge badge-warning">Changed since reported</span></div><div class="muted">Reported with {{ item.mark.version or 'no version' }}</div>{% endif %}{% else %}<span class="muted">Not reported</span>{% endif %}{% endmacro %}
 {% macro quick_forms(actions_list, client) %}{% for quick in actions_list %}<form method="post" class="web-quick-form" action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="filtered">{% for level in quick.levels %}<input type="hidden" name="conf" value="{{ level }}">{% endfor %}<button class="btn btn-secondary" type="submit">{{ quick.label }} ({{ quick.count }})</button></form>{% endfor %}{% endmacro %}
-{% from 'web_assets_import_card.html' import notice as import_notice, import_card with context %}
 {% block content %}
-{{ page_header('Web assets', 'Record the websites a client has authorised you to check, then look for software on them. Detection is manual and results are hints for review.') }}
-{% if error %}{% call callout('danger', 'That web asset change was not saved') %}<p>{{ error }}</p>{% endcall %}{% endif %}
-{% if added and client %}{% call callout('success', 'Products added') %}<p>Added {{ added }} product{{ '' if added == 1 else 's' }} to {{ client }}'s inventory. The next scan checks {{ 'it' if added == 1 else 'them' }} for CVEs. <a href="{{ url_for('client_inventory.detail', key=client_key, name=client) }}">Open the client's inventory</a>.</p>{% endcall %}{% endif %}
-{% if marked is not none and client %}{% call callout('success', 'Report marks saved') %}<p>Marked {{ marked }} technolog{{ 'y' if marked == 1 else 'ies' }} as reported.</p>{% endcall %}{% endif %}
-{% if withdrawn is not none and client %}{% call callout('success', 'Report marks withdrawn') %}<p>Withdrew {{ withdrawn }} report mark{{ '' if withdrawn == 1 else 's' }}.</p>{% endcall %}{% endif %}
-{% if client %}{{ import_notice() }}{% endif %}
-{% if not available %}{% call callout('warning', 'Web detection is not available') %}<p>{{ notice }} The saved list below can still be viewed and edited, but detection buttons stay disabled until the optional Extensions package is installed.</p>{% endcall %}{% endif %}
+{% include '_web_assets_section.html' %}
 
-{% call card('Choose a client', 'Open a client to see their saved sites, or type a client name to start.') %}
-<form class="filters" method="get"><div class="field"><label for="web-client">Client name</label><input id="web-client" name="client" value="{{ client }}" list="inventory-client-names" required maxlength="256"><datalist id="inventory-client-names">{% for name in inventory_clients %}<option value="{{ name }}">{% endfor %}</datalist><p class="help">Choose an existing inventory client or enter a new name.</p></div><div class="form-actions">{{ button('Open client') }}</div></form>
-{% if clients %}<p class="muted">Saved clients:</p><p>{% for name in clients %}<a href="{{ url_for('web.index', client=name) }}">{{ name }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+{% if not client %}
+{{ client_chooser() }}
+{% elif document %}
+{% set site_help = (site_summary.soon ~ ' expires within 30 days') if site_summary.soon == 1 else ((site_summary.soon ~ ' expire within 30 days') if site_summary.soon else ((site_summary.expired ~ ' expired') if site_summary.expired == 1 else ((site_summary.expired ~ ' expired') if site_summary.expired else 'No expiries within 30 days'))) %}
+{% call stat_grid() %}
+{{ stat(site_count, 'Sites', site_help, href=url_for('web.sites', client=client)) }}
+{{ stat(total_products, 'Products', chips.with_version ~ ' with a version', href=url_for('web.index', client=client, _anchor='detected-products')) }}
+{{ stat(chips.monitored, 'Covered by scans', chips.ready ~ ' ready to add, ' ~ chips.review ~ ' need review', href=url_for('web.index', client=client, inv='monitored', _anchor='detected-products')) }}
+{{ stat(last_run_short or 'Not run yet', 'Last detection', last_run_help, tone=run_tone or none, href=url_for('web.index', client=client, _anchor='detection')) }}
+{% if show_changes %}{{ stat(tab_counts.changes, 'Open changes', change_counts.add ~ ' new, ' ~ change_counts.update ~ ' updated, ' ~ change_counts.remove ~ ' missing', href=url_for('web.index', client=client, _anchor='inventory-sync')) }}{% endif %}
 {% endcall %}
 
-{% if document %}
-{% call card('Authorised sites for ' ~ client, 'Only these saved sites can be checked. Saving records your signed-in name and the current UTC time. Unsaved entries are never checked.') %}
-{% call callout('info', 'Only check sites you are allowed to check') %}<p>Web detection may only target sites you own or that the client has authorised in writing. Do not add a public site just because it is reachable. Results are hints for review, not proof of what is installed.</p>{% endcall %}
-{% for entry in document.assets %}
-<h3>{{ entry.get('hostname', entry.get('url', '')) }} · {{ entry.get('scheme', 'https') }}:{{ entry.get('port', 443) }}{{ entry.get('path', '/') }}</h3>
-{{ definition_list([
-  ('Authorised by', entry.get('authorized_by', '')),
-  ('Authorised at', watch_stamp(entry.get('authorized_at')) or 'Not recorded'),
-  ('Expires', watch_stamp(entry.get('expires_at')) if entry.get('expires_at') else 'No expiry'),
-  ('Redirects', ('Allowed' if entry.get('allow_redirects', true) else 'Not allowed') ~ ' (maximum ' ~ entry.get('max_redirects', 2) ~ ')'),
-  ('Private addresses', 'Allowed' if entry.get('allow_private_address', false) else 'Not allowed'),
-]) }}
-{% if accounts and 'manage_web_assets' in permissions %}
-<details class="disclosure"><summary>Change this site</summary><form method="post" class="stack" action="{{ url_for('web.save') }}">
-<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="change"><input type="hidden" name="index" value="{{ loop.index0 }}">
-{{ asset_fields(entry, document, 'change-' ~ loop.index0) }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
-<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="index" value="{{ loop.index0 }}"><div class="form-actions">{{ button('Remove this site', kind='danger', confirm='Remove this site from the authorised list?', name='action', value='remove', disabled=not available) }}</div></form>
-{% endif %}
-{% else %}<p class="muted">No authorised sites saved yet. Add one below and tick the authorisation box.</p>{% endfor %}
+{% call card('Next steps', 'Per-client work, in the order it matters most.') %}
+{{ task_list(next_steps) }}
 {% endcall %}
 
-{% if accounts and 'manage_web_assets' in permissions %}
-{% call card('Add an authorised site', 'Record a site the client has authorised. The attestation box must be ticked before the site can be saved.') %}
-<details class="disclosure" id="add-asset" {% if prefill_entry %}open{% endif %}><summary>Add authorised site</summary><form method="post" class="stack" action="{{ url_for('web.save') }}">
-<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="add">
-{{ asset_fields(prefill_entry, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
+{% call card('Report', 'The technology report uses the latest saved snapshot.') %}
+<p>{% if snapshot %}{{ chips.technologies }} technolog{{ 'y' if chips.technologies == 1 else 'ies' }} in the saved snapshot from {{ watch_stamp(snapshot.generated_at) }}.{% else %}No saved snapshot is available yet.{% endif %}</p>
+<a class="btn btn-secondary" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>
 {% endcall %}
-{{ import_card() }}
-{% if document.assets or snapshot or removed or run or products or reviews %}
-{% call card('Remove all sites and results', 'Delete every saved site and all saved detection results for this client. This cannot be undone.', tone='danger') %}
-<form method="post" class="stack" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><div class="field field-check"><input id="remove-all-confirm" type="checkbox" name="confirm" value="yes" required><label for="remove-all-confirm">I want to remove every saved asset and all saved detection results for this client.</label></div><div class="form-actions"><button class="btn btn-danger" type="submit" name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></div></form>
-{% endcall %}
-{% endif %}
-{% endif %}
 
+<div class="section-block" id="detection">
 {% if accounts and 'run' in permissions %}
-{% call card('Check the saved sites', 'Preview the requests first, or run detection now. Detection contacts only the saved sites above.') %}
+{% call card('Check the saved sites', 'Preview the requests first, or run detection now. Detection contacts only the saved sites and a plan sends nothing.') %}
 <form method="post" class="stack" action="{{ url_for('web.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><div class="form-actions"><button class="btn btn-secondary" type="submit" name="action" value="web-plan" {% if not available or not document.assets %}disabled{% endif %}>Show planned requests (sends nothing)</button><button class="btn" type="submit" name="action" value="web-detect" {% if not available or not document.assets %}disabled{% endif %}>Detect web technologies</button></div></form>
 {% endcall %}
 {% endif %}
 
 {% call card('Latest detection', 'When detection last ran and what it saved.') %}
 {% if removed %}{% call callout('warning') %}<p>Results include assets removed since the last run. Run detection again to refresh retained results.</p>{% endcall %}{% endif %}
-{% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ watch_stamp(last_job.created_at) }} · {{ last_job.exit_meaning }}</p>{% endif %}
 {% if run %}
-{% set site_count = run.get('asset_count', document.assets|length if document else 0) %}
+{% set run_site_count = run.get('asset_count', site_count) %}
 {% set fetched_count = run.get('fetched_count', 0) %}
 {% set product_count = run.get('products_recognized', 0) %}
 {% set version_count = run.get('products_with_version', 0) %}
-<p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · requests: {{ run.get('request_count', '') }} · duration: {% set seconds = run.get('duration_seconds') %}{{ '%.1f' | format(seconds) if seconds is number else '' }} seconds.</p>
-<p>{% if fetched_count == 0 %}Could not fetch any of {{ site_count }} authorised site{{ '' if site_count == 1 else 's' }}.{% elif fetched_count < site_count %}Fetched {{ fetched_count }} of {{ site_count }} authorised sites.{% else %}Fetched all {{ site_count }} authorised site{{ '' if site_count == 1 else 's' }}.{% endif %} {{ product_count }} product{{ '' if product_count == 1 else 's' }} recognised; {{ version_count }} product{{ '' if version_count == 1 else 's' }} had a disclosed version.</p>
-{% if 'resources_fetched' in run %}<p>Read {{ run.get('resources_fetched', 0) }} script and style files from the sites ({{ run.get('resources_skipped', 0) }} skipped).</p>{% endif %}
-{% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
-{% if snapshot %}<p>Saved results are from {% if run and run.get('snapshot_updated', false) %}this run{% else %}an earlier run{% endif %} ({{ watch_stamp(snapshot.generated_at) }}): {{ snapshot.record_count }} products.</p>{% else %}<p>No saved inventory snapshot is available.</p>{% endif %}
-{% if versions_hidden %}<p class="help">Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory.</p>{% endif %}
-{% if run and run.get('review_truncated') %}<p class="muted">The saved review reached its size limit. Some entries were omitted.</p>{% endif %}
-{% if truncated %}<p class="muted">Showing the first 1,000 saved entries per table. Additional saved entries are in the private data directory.</p>{% endif %}
-{% if run and run.get('analysis_stopped') %}{% set count = run['analysis_stopped'] %}<p class="muted">Web analysis reached its time limit on {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
-{% if run and run.get('fingerprint_stopped') %}{% set count = run['fingerprint_stopped'] %}<p class="muted">Fingerprint analysis stopped early for {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
-{% if run and run.get('fingerprint_error') %}<p class="muted">Fingerprint analysis encountered an error. Saved results include the evidence collected successfully.</p>{% endif %}
-<p class="muted">Response bodies and cookies are never stored or displayed.</p>
+<p><span class="badge badge-{{ run_badge }}">{{ run_label }}</span> · Last checked {{ watch_stamp(run.get('started_at', '')) }}{% set seconds = run.get('duration_seconds') %}{% if seconds is number %} · {{ '%.1f' | format(seconds) }} seconds{% endif %}</p>
+{% call stat_grid() %}
+{{ stat(fetched_count ~ '/' ~ run_site_count, 'Sites fetched') }}
+{{ stat(product_count, 'Products') }}
+{{ stat(version_count, 'With a version') }}
+{{ stat(run.get('request_count', 0), 'Requests') }}
 {% endcall %}
+<details class="disclosure"><summary>Run details</summary>
+<p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · requests: {{ run.get('request_count', '') }} · duration: {{ '%.1f' | format(seconds) if seconds is number else '' }} seconds.</p>
+<p>{% if fetched_count == 0 %}Could not fetch any of {{ run_site_count }} authorised site{{ '' if run_site_count == 1 else 's' }}.{% elif fetched_count < run_site_count %}Fetched {{ fetched_count }} of {{ run_site_count }} authorised sites.{% else %}Fetched all {{ run_site_count }} authorised site{{ '' if run_site_count == 1 else 's' }}.{% endif %} {{ product_count }} product{{ '' if product_count == 1 else 's' }} recognised; {{ version_count }} product{{ '' if version_count == 1 else 's' }} had a disclosed version.</p>
+{% if 'resources_fetched' in run %}<p>Read {{ run.get('resources_fetched', 0) }} script and style files from the sites ({{ run.get('resources_skipped', 0) }} skipped).</p>{% endif %}
+{% if snapshot %}<p>Saved results are from {% if run.get('snapshot_updated', false) %}this run{% else %}an earlier run{% endif %} ({{ watch_stamp(snapshot.generated_at) }}): {{ snapshot.record_count }} products.</p>{% else %}<p>No saved inventory snapshot is available.</p>{% endif %}
+{% if run.get('review_truncated') %}<p class="muted">The saved review reached its size limit. Some entries were omitted.</p>{% endif %}
+{% if run.get('analysis_stopped') %}{% set count = run['analysis_stopped'] %}<p class="muted">Web analysis reached its time limit on {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
+{% if run.get('fingerprint_stopped') %}{% set count = run['fingerprint_stopped'] %}<p class="muted">Fingerprint analysis stopped early for {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
+{% if run.get('fingerprint_error') %}<p class="muted">Fingerprint analysis encountered an error. Saved results include the evidence collected successfully.</p>{% endif %}
+<p class="muted">Response bodies and cookies are never stored or displayed.</p>
+</details>
+{% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
+{% if versions_hidden %}<p class="help">Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory.</p>{% endif %}
+{% if truncated %}<p class="muted">Showing the first 1,000 saved entries per table. Additional saved entries are in the private data directory.</p>{% endif %}
+{% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ watch_stamp(last_job.created_at) }} · {{ last_job.exit_meaning }}</p>{% endif %}
+{% endcall %}
+</div>
 
-{% if document %}
-{% include 'web_inventory_sync.html' %}
+<div class="section-block" id="inventory-sync">{% include 'web_inventory_sync.html' %}</div>
+
 {% call card('Filter results', 'Narrow the detected products below. Filters apply to both views.') %}
 <form class="web-filters" method="get" action="{{ url_for('web.index') }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="view" value="{{ flt.view }}">
 <fieldset class="web-filter-confidence"><legend>Confidence</legend>{% for level in confidence_choices %}<span class="field field-check"><input id="f-conf-{{ level }}" type="checkbox" name="conf" value="{{ level }}" {% if level in flt.conf %}checked{% endif %}><label for="f-conf-{{ level }}">{{ level | title }}</label></span>{% endfor %}</fieldset>
@@ -109,7 +87,6 @@
 <div class="field"><label for="f-tech">Technology</label><input id="f-tech" name="tech" value="{{ flt.tech }}" maxlength="80"><p class="help">Part of a product name.</p></div>
 <div class="form-actions">{{ button('Apply filters') }}<a class="btn btn-secondary" href="{{ url_for('web.index', client=client, view=flt.view) }}">Clear filters</a></div></form>
 {% endcall %}
-{% endif %}
 
 {% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.', id='detected-products') %}
 {% if client %}<a class="btn btn-secondary btn-small" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>{% endif %}
@@ -139,7 +116,9 @@
 {% set selectable = can_add or can_report %}
 {% set cols = 6 + (1 if selectable else 0) %}
 {% if can_add and ready_total and quick_actions %}<div class="form-actions web-quick-actions">{{ quick_forms(quick_actions, client) }}</div>{% endif %}
-{% if selectable and products %}<form method="post" class="stack web-add-form" action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">{{ filter_fields(flt) }}<div class="form-actions">{% if can_add %}<button class="btn" type="submit" name="action" value="selected">Add selected to inventory</button>{% if flt.active and ready_shown %}<button class="btn btn-secondary" type="submit" name="action" value="filtered">Add all {{ ready_shown }} ready products shown</button>{% endif %}{% if ready_total %}<button class="btn btn-secondary" type="submit" name="action" value="all">Add all {{ ready_total }} ready products</button>{% endif %}{% endif %}</div>
+{% if selectable and products %}<form method="post" class="stack web-add-form" data-bulk-form action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">{{ filter_fields(flt) }}
+{{ bulk_select_controls() }}
+<div class="form-actions">{% if can_add %}<button class="btn" type="submit" name="action" value="selected">Add selected to inventory</button>{% if flt.active and ready_shown %}<button class="btn btn-secondary" type="submit" name="action" value="filtered">Add all {{ ready_shown }} ready products shown</button>{% endif %}{% if ready_total %}<button class="btn btn-secondary" type="submit" name="action" value="all">Add all {{ ready_total }} ready products</button>{% endif %}{% endif %}</div>
 {% if can_report %}<div class="field web-report-note"><label for="report-note">Report note <span class="optional">(optional)</span></label><input id="report-note" name="note" maxlength="200"><p class="help">Saved with the report mark, for example the month of the report.</p></div><div class="form-actions"><button class="btn btn-secondary" type="submit" formaction="{{ url_for('web.reported') }}" name="action" value="mark">Mark selected as reported</button><button class="btn btn-secondary" type="submit" formaction="{{ url_for('web.reported') }}" name="action" value="withdraw">Withdraw report mark</button></div>{% endif %}
 <p class="help">Tick the products to {% if can_add %}add{% if can_report %} or mark{% endif %}{% else %}mark{% endif %}. {% if can_add %}For a product marked Needs review, enter its version first.{% endif %}</p>{% endif %}
 {% call table_wrap('Detected products') %}
@@ -156,10 +135,8 @@
 {% call card('Entries to review', 'Detection results that need a person to decide. Compare each one with the site before relying on it.') %}
 {% call table_wrap('Web detection entries to review') %}
 <table><thead><tr><th scope="col">Asset</th><th scope="col">Reason</th><th scope="col">Detail</th><th scope="col">Product</th><th scope="col">Conflicting versions</th><th scope="col">HTTP status</th><th scope="col">Retry after (seconds)</th></tr></thead><tbody>
-{% for item in reviews %}<tr><td>{{ item.get('asset_id', '') }}</td><td>{{ reason_labels.get(item.get('reason', ''), 'Needs review') }}{% if item.get('reason') %}<br><span class="muted">{{ item.get('reason') }}</span>{% endif %}</td><td>{{ item.get('detail', '') }}{% if item.get('redirect_display') %}<p>This site redirects to {{ item.get('redirect_display') }}, which is not on the authorised list.{% if accounts and 'manage_web_assets' in permissions %} If the client authorises it, add it as a site.{% endif %}</p>{% if accounts and 'manage_web_assets' in permissions %}<a class="btn btn-secondary" href="{{ url_for('web.index', client=client, prefill_url=item.get('redirect_url')) }}#add-asset">Add this redirect target as an authorised site</a>{% endif %}{% endif %}</td><td>{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') }}</td><td>{{ item.get('status', '') }}</td><td class="num">{{ item.get('retry_after', '') }}</td></tr>{% else %}<tr><td colspan="7">No entries need review.</td></tr>{% endfor %}</tbody></table>
+{% for item in reviews %}<tr><td>{{ item.get('asset_id', '') }}</td><td>{{ reason_labels.get(item.get('reason', ''), 'Needs review') }}{% if item.get('reason') %}<br><span class="muted">{{ item.get('reason') }}</span>{% endif %}</td><td>{{ item.get('detail', '') }}{% if item.get('redirect_display') %}<p>This site redirects to {{ item.get('redirect_display') }}, which is not on the authorised list.{% if accounts and 'manage_web_assets' in permissions %} If the client authorises it, add it as a site.{% endif %}</p>{% if accounts and 'manage_web_assets' in permissions %}<a class="btn btn-secondary" href="{{ url_for('web.sites', client=client, prefill_url=item.get('redirect_url'), _anchor='add-asset') }}">Add this redirect target as an authorised site</a>{% endif %}{% endif %}</td><td>{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') }}</td><td>{{ item.get('status', '') }}</td><td class="num">{{ item.get('retry_after', '') }}</td></tr>{% else %}<tr><td colspan="7">No entries need review.</td></tr>{% endfor %}</tbody></table>
 {% endcall %}
 {% endcall %}
-{% elif not clients %}
-{{ empty_state('No web assets yet', 'Type a client name above and open it. Then add a site the client has authorised you to check.') }}
 {% endif %}
 {% endblock %}

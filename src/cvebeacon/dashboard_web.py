@@ -1,7 +1,7 @@
 """Forms and results for explicitly authorised client web assets."""
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import math
 import re
@@ -36,6 +36,17 @@ from .web_assets_import import register as register_import
 from .web_inventory import decode_json, read_bytes, read_web_snapshot
 
 _RUN_STATUSES = {"success", "partial", "failed", "no-usable-versions"}
+_RUN_STATE_LABELS = {
+    "success": ("Succeeded", "success"),
+    "partial": ("Partial", "warning"),
+    "failed": ("Failed", "danger"),
+    "no-usable-versions": ("No usable versions", "warning"),
+}
+_LEGACY_QUERY_LIMITS = {
+    "view": 8, "version": 16, "inv": 16, "rep": 16, "category": 80, "site": 256,
+    "tech": 80, "sync_page": 6, "sync_result": 20, "added": 6, "marked": 6,
+    "withdrawn": 6, "imported": 6, "prefill_url": 2048,
+}
 _EVIDENCE_KINDS = frozenset({
     "header", "cookie", "meta", "url", "html", "script", "style", "manifest",
     "robots", "icon", "implied", "dom", "text",
@@ -74,6 +85,73 @@ def _sync_page_number(values):
     if not 1 <= len(value) <= 6 or not value.isascii() or not value.isdecimal():
         return 1
     return max(1, int(value))
+
+
+def _passthrough_query(values):
+    """Known legacy query values for a redirect; unknown or malformed values are ignored."""
+    result = {}
+    for name, limit in _LEGACY_QUERY_LIMITS.items():
+        entries = values.getlist(name)
+        if len(entries) != 1:
+            continue
+        value = entries[0].strip()
+        if not value or len(value) > limit or any(ord(char) < 32 for char in value):
+            continue
+        result[name] = value
+    confidence = [value for value in values.getlist("conf")[:8] if value in _CONFIDENCE_CHOICES]
+    if confidence:
+        result["conf"] = confidence
+    return result
+
+
+def _site_url(entry):
+    """The saved target as a display URL; malformed entries show what was stored."""
+    try:
+        scheme = str(entry.get("scheme", "https")).casefold()
+        if scheme not in {"http", "https"}:
+            scheme = "https"
+        host = entry.get("hostname") or urlsplit(entry.get("url", "")).hostname or ""
+        port = int(entry.get("port") or (443 if scheme == "https" else 80))
+        path = entry.get("path") or "/"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{scheme}://{host}:{port}{path}" if host else str(entry.get("url", ""))
+    except (TypeError, ValueError, AttributeError):
+        return str(entry.get("url", "") or entry.get("hostname", ""))
+
+
+def _expiry_state(value, now):
+    """Server-side expiry state: none, active, soon (30 days), expired or invalid."""
+    if not value:
+        return "none"
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        moment = moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return "invalid"
+    if moment <= now:
+        return "expired"
+    if moment <= now + timedelta(days=30):
+        return "soon"
+    return "active"
+
+
+def _short_date(value):
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        moment = moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    return moment.strftime("%d %b")
+
+
+def _run_is_stale(value, now):
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        moment = moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return True
+    return now - moment > timedelta(days=7)
 
 
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
@@ -534,16 +612,18 @@ def create_web_blueprint(config):
         """The client's report marks; a missing file is FileNotFoundError, a bad one ValueError."""
         return web_reported.parse(read_bytes(web_reported.marks_path(output)), web_assets.client_key, client)
 
-    def render(client="", *, error=None, status=200, prefill_url="", added=0, marked=None, withdrawn=None,
-               sync_notice=None):
+    def render(client="", *, page="overview", error=None, status=200, prefill_url="", added=0, marked=None,
+               withdrawn=None, sync_notice=None):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot, snapshot_rows = [], [], None, None, []
         last_job, truncated, removed = None, False, False
+        site_rows, site_summary = [], {}
         inventory_clients = _inventory_clients(config)
         prefill_entry = _prefill_entry(prefill_url) if prefill_url else {}
         versions_hidden = False
         available = web_assets.companion_available()
         sync_settings, sync_view, sync_warning = None, None, None
+        now = datetime.now(timezone.utc)
         try:
             assets_dir, _ = directories(config)
             for path in sorted(assets_dir.glob("*.json"))[:1000]:
@@ -570,6 +650,19 @@ def create_web_blueprint(config):
                 ca = document.get("ca_bundle", "")
                 if not isinstance(ca, str) or any(0xD800 <= ord(char) <= 0xDFFF for char in ca):
                     document["ca_bundle"] = ""
+                site_rows = [
+                    {"entry": entry, "index": index, "url": _site_url(entry),
+                     "expiry": _expiry_state(entry.get("expires_at"), now)}
+                    for index, entry in enumerate(document["assets"])
+                ]
+                site_summary = {
+                    "redirects": sum(1 for entry in document["assets"]
+                                     if entry.get("allow_redirects", True)),
+                    "private": sum(1 for entry in document["assets"]
+                                   if entry.get("allow_private_address", False)),
+                    "soon": sum(1 for row in site_rows if row["expiry"] == "soon"),
+                    "expired": sum(1 for row in site_rows if row["expiry"] == "expired"),
+                }
                 removed = output.with_name(output.name + ".removed").exists()
                 if output.exists() or output.is_symlink():
                     try:
@@ -714,7 +807,94 @@ def create_web_blueprint(config):
         sync_pages = max(1, (len(sync_changes) + _ROW_LIMIT - 1) // _ROW_LIMIT)
         sync_page = min(_sync_page_number(request.args), sync_pages)
         sync_start = (sync_page - 1) * _ROW_LIMIT
-        return render_template("web_assets.html", clients=sorted(clients, key=str.casefold),
+        site_count = len(document["assets"]) if document else 0
+        show_changes = bool(document and config.managed_inventory and sync_settings
+                            and sync_settings.mode in {"review", "auto"})
+        change_counts = {"add": 0, "update": 0, "remove": 0}
+        for _, change in sync_changes:
+            change_counts[change.kind] = change_counts.get(change.kind, 0) + 1
+        run_label, run_badge = _RUN_STATE_LABELS.get((run or {}).get("status"), ("Not run yet", "neutral"))
+        last_run_short = _short_date(run.get("started_at")) if run else ""
+        last_run_help = (
+            f"{run.get('fetched_count', 0)} of {run.get('asset_count', site_count)} sites fetched"
+            if run else "No detection run yet")
+        run_tone = ""
+        if run:
+            run_tone = "success" if run.get("status") == "success" else "warning"
+            if _run_is_stale(run.get("started_at"), now):
+                run_tone = "warning"
+        can_manage = bool(g.accounts and "manage_web_assets" in g.permissions)
+        section_primary_action = (
+            "run" if page == "overview" and client and document and document["assets"] and g.accounts
+            and "run" in g.permissions and available else "")
+        section_primary_url, section_primary_label = "", ""
+        if client and can_manage:
+            section_primary_url = url_for("web.sites", client=client, _anchor="add-asset")
+            section_primary_label = "Add site"
+        if page == "sites":
+            section_description = ("Add, change and remove the sites this client has authorised you to check."
+                                   if client else "Record the websites a client has authorised you to check.")
+        elif client:
+            section_description = (
+                f"{site_count} authorised site{'' if site_count == 1 else 's'}, "
+                f"{len(products)} detected product{'' if len(products) == 1 else 's'}, "
+                f"{'last checked ' + last_run_short if run else 'no detection run yet'}.")
+        else:
+            section_description = "Record the websites a client has authorised you to check."
+        next_steps = []
+        if client and document:
+            if not site_count:
+                next_steps.append({
+                    "state": "todo", "title": "Add the first authorised site",
+                    "detail": "No sites are authorised for this client yet.",
+                    "url": url_for("web.sites", client=client, _anchor="add-asset"),
+                    "action_label": "Add site"})
+            else:
+                if not run:
+                    next_steps.append({
+                        "state": "todo", "title": "Run the first detection",
+                        "detail": "Detection is manual and has not run for this client.",
+                        "url": url_for("web.index", client=client, _anchor="detection"),
+                        "action_label": "Run detection"})
+                if reviews:
+                    next_steps.append({
+                        "state": "attention",
+                        "title": f"Review {len(reviews)} detection entr{'y' if len(reviews) == 1 else 'ies'}",
+                        "detail": "Saved results include entries that need a person to decide.",
+                        "url": url_for("web.index", client=client, _anchor="detection"),
+                        "action_label": "Review"})
+                if chips["ready"]:
+                    next_steps.append({
+                        "state": "todo",
+                        "title": f"Add {chips['ready']} product{'' if chips['ready'] == 1 else 's'} to inventory",
+                        "detail": "Ready products can be added to this client's inventory for CVE checks.",
+                        "url": url_for("web.index", client=client, _anchor="detected-products"),
+                        "action_label": "Open"})
+                if show_changes and sync_changes:
+                    next_steps.append({
+                        "state": "todo",
+                        "title": f"Review {len(sync_changes)} inventory change{'' if len(sync_changes) == 1 else 's'}",
+                        "detail": "Detection proposes additions, updates or removals in the inventory.",
+                        "url": url_for("web.index", client=client, _anchor="inventory-sync"),
+                        "action_label": "Open"})
+            if not next_steps:
+                next_steps.append({
+                    "state": "done", "title": "Open the technology report",
+                    "detail": "No outstanding work for this client.",
+                    "url": url_for("tech_report.index", client=client),
+                    "action_label": "Open report"})
+        next_steps = next_steps[:3]
+        tab_counts = {
+            "sites": site_count,
+            "detection": len(reviews),
+            "products": chips["ready"],
+            "changes": len(sync_changes) if show_changes else 0,
+        }
+        has_client_inventory = bool(
+            client and config.managed_inventory
+            and (config.inventory_directory / f"{inventory_client_key(client)}.client").is_file())
+        template = "web_assets_sites.html" if page == "sites" else "web_assets.html"
+        return render_template(template, clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
                                run=run, snapshot=snapshot, available=available, notice=COMPANION_NOTICE,
@@ -736,7 +916,17 @@ def create_web_blueprint(config):
                                sync_removal_choices=sync.REMOVAL_CHOICES,
                                sync_notice=sync_notice, sync_waiting=sync.WAITING,
                                added=added, client_key=inventory_client_key(client) if client else "",
-                               status_labels=actions.STATUS_LABELS, status_badges=actions.STATUS_BADGES), status
+                               status_labels=actions.STATUS_LABELS, status_badges=actions.STATUS_BADGES,
+                               page=page, section_page=page, site_rows=site_rows, site_count=site_count,
+                               site_summary=site_summary, tab_counts=tab_counts, show_changes=show_changes,
+                               next_steps=next_steps, run_label=run_label, run_badge=run_badge,
+                               run_tone=run_tone, last_run_short=last_run_short,
+                               last_run_help=last_run_help, change_counts=change_counts,
+                               has_client_inventory=has_client_inventory,
+                               section_description=section_description,
+                               section_primary_action=section_primary_action,
+                               section_primary_url=section_primary_url,
+                               section_primary_label=section_primary_label), status
 
     @blueprint.get("")
     @requires("view")
@@ -747,10 +937,40 @@ def create_web_blueprint(config):
             value = _text(request.args, name, limit=6)
             return int(value) if value.isascii() and value.isdecimal() else None
         try:
+            client = _canonical_client(config, client_label(label)) if label else ""
+        except (ConfigurationError, ValueError):
+            abort(400)
+        imported = count("imported")
+        if client and imported:
+            return redirect(url_for("web.sites", client=client, imported=imported), code=302)
+        if client and prefill_url:
+            return redirect(url_for("web.sites", client=client, prefill_url=prefill_url,
+                                    _anchor="add-asset"), code=302)
+        return render(client, prefill_url=prefill_url, added=count("added") or 0,
+                      marked=count("marked"), withdrawn=count("withdrawn"),
+                      sync_notice=_SYNC_MESSAGES.get(_text(request.args, "sync_result", limit=20)))
+
+    @blueprint.get("/overview")
+    @requires("view")
+    def overview():
+        label = _text(request.args, "client", limit=256)
+        try:
+            client = _canonical_client(config, client_label(label)) if label else ""
+        except (ConfigurationError, ValueError):
+            abort(400)
+        params = _passthrough_query(request.args)
+        params.pop("client", None)
+        return redirect(url_for("web.index", client=client, **params) if client
+                        else url_for("web.index", **params), code=302)
+
+    @blueprint.get("/sites")
+    @requires("view")
+    def sites():
+        label = _text(request.args, "client", limit=256)
+        prefill_url = _text(request.args, "prefill_url", limit=2048)
+        try:
             return render(_canonical_client(config, client_label(label)) if label else "",
-                          prefill_url=prefill_url, added=count("added") or 0,
-                          marked=count("marked"), withdrawn=count("withdrawn"),
-                          sync_notice=_SYNC_MESSAGES.get(_text(request.args, "sync_result", limit=20)))
+                          page="sites", prefill_url=prefill_url)
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -768,7 +988,7 @@ def create_web_blueprint(config):
             abort(400)
         lock = OperationLock(config, "web-assets")
         if not lock.acquire():
-            return render(client, error=str(RunInProgress(lock.holder)), status=409)
+            return render(client, page="sites", error=str(RunInProgress(lock.holder)), status=409)
         try:
             extra_changes = []
             path, output = paths(config, client)
@@ -909,10 +1129,10 @@ def create_web_blueprint(config):
         except (CVEBeaconError, ValueError, OSError) as exc:
             message = (str(exc) if isinstance(exc, (ConfigurationError, PublicationTimeout))
                        else "The web allowlist could not be saved")
-            return render(client, error=message, status=400)
+            return render(client, page="sites", error=message, status=400)
         finally:
             lock.release()
-        return redirect(url_for("web.index", client=client), code=303)
+        return redirect(url_for("web.sites", client=client), code=303)
 
     def saved_products(client):
         """The client's detected products, re-read from the saved review (never from the form)."""
@@ -1202,5 +1422,5 @@ def create_web_blueprint(config):
                           else "The web detection job could not be started", status=400)
         return redirect(url_for("operations.job_detail", job_id=job.id), code=303)
 
-    register_import(blueprint, config, render)
+    register_import(blueprint, config, lambda client, **kwargs: render(client, page="sites", **kwargs))
     return blueprint
