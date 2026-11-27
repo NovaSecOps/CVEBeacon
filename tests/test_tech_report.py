@@ -21,7 +21,8 @@ from cvebeacon.watch.store import WatchStore
 from cvebeacon.watch.users import BOOTSTRAP, UserStore
 
 from test_dashboard_accounts import PASSWORD, login
-from test_web_assets_inventory import PRODUCTS, write_managed
+from test_web_assets_inventory import PRODUCTS, save_snapshot, write_managed
+from test_web_inventory import snapshot
 from watch_support import write_config
 
 PAGE = "/web-assets/report"
@@ -207,22 +208,79 @@ def test_correlation_and_status(seeded):
     assert "Critical · 1" in rendered and "High · 1" in rendered
 
 
-def test_snapshot_coverage_with_older_review_metadata(seeded):
+@pytest.mark.parametrize("saved_client", ["", "Other Client", "ＡＣＭＥ"])
+def test_findings_require_the_saved_web_client_key(seeded, saved_client):
+    config, client = seeded
+    save_review(config, [PRODUCTS[0]], "ACME")
+    write_managed(config, [Asset("w-nginx-m", vendor="nginx", product="nginx",
+                                 version="1.25.3", client="ACME")], "ACME")
+    with StateStore(config.database_path).transaction() as db:
+        write_finding(db, 20, client=saved_client)
+        write_finding(db, 21, client="acme")
+    row = export((config, client), client="ACME").json["technologies"][0]
+    assert row["covered_ids"] == ["w-nginx-m"]
+    assert {cve["cve_id"] for cve in row["cves"]} == {id_for(21)}
+
+
+def test_managed_inventory_owner_must_match_the_web_client_key(seeded):
+    config, client = seeded
+    save_review(config, [PRODUCTS[0]], "ACME")
+    write_managed(config, [Asset("w-nginx-m", vendor="nginx", product="nginx",
+                                 version="1.25.3", client="ＡＣＭＥ")], "ACME")
+    with StateStore(config.database_path).transaction() as db:
+        write_finding(db, 20, client="ACME")
+    result = export((config, client), client="ACME").json
+    assert result["technologies"][0]["covered_ids"] == []
+    assert result["technologies"][0]["cves"] == []
+    assert any("managed inventory could not be read" in notice for notice in result["notices"])
+
+
+def test_managed_identity_matches_require_the_detection_site(seeded):
+    config, _ = seeded
+    product = PRODUCTS[0]
+    save_review(config, [product, dict(product, asset_id="w-second-nginx", hostname="b.example"),
+                         {key: value for key, value in dict(product, asset_id="w-unknown").items()
+                          if key != "hostname"}])
+    write_managed(config, [
+        Asset(asset_id, vendor="nginx", product="nginx", version="1.25.3", system_id=site, client=CLIENT)
+        for asset_id, site in (("w-nginx-m", "different.example"), ("imported-widget", "a.example"),
+                               ("other-site", "c.example"), ("unknown-site", ""))
+    ], CLIENT)
+    with StateStore(config.database_path).transaction() as db:
+        for number, asset_id in enumerate(("imported-widget", "other-site", "unknown-site"), start=20):
+            write_finding(db, number, asset_id=asset_id)
+    rows = {row["site"]: row for row in export(seeded).json["technologies"]}
+    assert rows["a.example"]["covered_ids"] == ["imported-widget", "w-nginx-m"]
+    assert id_for(20) in {cve["cve_id"] for cve in rows["a.example"]["cves"]}
+    assert rows["b.example"]["covered_ids"] == rows["Site not recorded"]["covered_ids"] == []
+
+
+@pytest.mark.parametrize("snapshot_id", ["w-nginx", "w-lodash", "foreign", None])
+def test_snapshot_coverage_requires_a_saved_snapshot_row(seeded, snapshot_id):
     config, _ = seeded
     with StateStore(config.database_path).transaction() as db:
         write_finding(db, 19, asset_id="w-nginx", cvss_score=6)
     config.config_path.write_text("[inventory]\nweb_snapshots = true\n\n"
                                   + config.config_path.read_text(encoding="utf-8"),
                                   encoding="utf-8", newline="\n")
-    old = [{key: value for key, value in product.items() if key != "inventory"} for product in PRODUCTS]
-    save_review(config, old)
+    if snapshot_id == "foreign":
+        _, output = web_assets.paths(config, CLIENT)
+        snapshot(output.parent, name=output.stem, asset_id="w-nginx", client="Other Client")
+    elif snapshot_id:
+        save_snapshot(config, snapshot_id, client=CLIENT)
+    products = [dict(product) for product in PRODUCTS]
+    if snapshot_id == "w-nginx":
+        for product in products:
+            product.pop("inventory")
+    save_review(config, products)
     from cvebeacon.config import load_config
     app = create_app(load_config(config.config_path))
     try:
         row = next(row for row in export((config, app.test_client())).json["technologies"]
                    if row["technology"] == "nginx")
-        assert "w-nginx" in row["covered_ids"]
-        assert id_for(19) in {cve["cve_id"] for cve in row["cves"]}
+        present = snapshot_id == "w-nginx"
+        assert ("w-nginx" in row["covered_ids"]) == present
+        assert (id_for(19) in {cve["cve_id"] for cve in row["cves"]}) == present
     finally:
         app.extensions["dashboard_jobs"].shutdown()
 

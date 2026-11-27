@@ -16,11 +16,10 @@ from .dashboard_web import (
     _severity_level, _site_label, _snapshot_ids,
 )
 from .errors import CVEBeaconError, ConfigurationError, StateError
-from .managed_inventory import normalized_client
 from .watch.reported import normalize_cve_id
 from .watch.rules import _exploitation_level, _exploitation_sources
 from .watch.store import WatchStore
-from .web_assets import paths, read_allowlist
+from .web_assets import client_key, paths, read_allowlist
 from .web_inventory import decode_json, read_bytes, read_web_snapshot
 
 PRESETS = ("7", "30", "60", "90")
@@ -137,16 +136,7 @@ def _technology_key(item):
 
 
 def _group_products(products, snapshot_ids, snapshots_on, managed_assets):
-    managed = actions.ManagedIndex(managed_assets)
-    empty_inventory = actions.ManagedIndex()
-    manual_sites = {
-        (item["asset_id"] + actions.MANUAL_SUFFIX).casefold(): _site_label(item).casefold()
-        for item in products if item.get("asset_id")
-    }
-    for asset in managed_assets:
-        asset_id = asset.asset_id.casefold()
-        if re.fullmatch(r"web-[0-9a-f]{32}" + re.escape(actions.MANUAL_SUFFIX), asset_id):
-            manual_sites.setdefault(asset_id, asset.system_id.casefold())
+    managed = actions.ManagedIndex(managed_assets, require_same_site=True)
     groups = {}
     for item in products:
         key = _technology_key(item)
@@ -157,15 +147,10 @@ def _group_products(products, snapshot_ids, snapshots_on, managed_assets):
             "asset_ids": set(), "covered_ids": set(), "status": "service", "confidence": "unknown",
         })
         item["in_inventory"] = _in_snapshot(item, snapshot_ids)
-        status, covered = actions.classify(item, snapshots_on=snapshots_on, managed=managed)
-        # Identity matching can find a manual row that belongs to another site.
-        # Keep the coverage tied to the detection that created that row.
-        same_site = {asset_id for asset_id in covered
-                     if manual_sites.get(asset_id.casefold(), key[0]) == key[0]}
-        if covered and not same_site:
-            status, _ = actions.classify(item, snapshots_on=snapshots_on, managed=empty_inventory)
+        status, covered = actions.classify(item, snapshots_on=snapshots_on,
+                                           snapshot_ids=snapshot_ids, managed=managed)
         row["status"] = actions.best_status((row["status"], status))
-        row["covered_ids"].update(same_site)
+        row["covered_ids"].update(covered)
         if item.get("asset_id"):
             row["asset_ids"].add(item["asset_id"])
         row["versions"].update(actions.detected_versions(item))
@@ -192,13 +177,16 @@ def _read_technologies(config, client, notices):
     products, _, _ = _review_metadata(detail, client)
     if output.exists() or output.is_symlink():
         try:
-            snapshot_ids = _snapshot_ids(read_web_snapshot(output)[0])
+            snapshot_ids = _snapshot_ids(read_web_snapshot(output, preserve_client=True)[0], client)
         except (CVEBeaconError, OSError, ValueError):
             snapshots_on = False
             notices.append("The saved web snapshot could not be read. Snapshot coverage is unavailable.")
     if config.managed_inventory and products:
         try:
-            _, managed_assets = _read_managed(config, client)
+            _, assets = _read_managed(config, client, preserve_client=True)
+            if assets and client_key(assets[0].client) != client_key(client):
+                raise ConfigurationError("Managed inventory owner differs from the report client.")
+            managed_assets = assets
         except ConfigurationError:
             notices.append("The managed inventory could not be read. Managed inventory coverage is unavailable.")
     return _group_products(products, snapshot_ids, snapshots_on, managed_assets)
@@ -257,6 +245,13 @@ def _finding(record):
     }
 
 
+def _is_client(value, expected_key):
+    try:
+        return client_key(value) == expected_key
+    except ConfigurationError:
+        return False
+
+
 def _read_findings(path, client, asset_ids):
     """Read only the covered assets, in one snapshot and without creating a database."""
     by_asset = defaultdict(list)
@@ -267,7 +262,7 @@ def _read_findings(path, client, asset_ids):
         db.execute("BEGIN")
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='current_findings' AND type='table'").fetchone():
             return by_asset
-        client_key = normalized_client(client).casefold()
+        expected_key = client_key(client)
         for start in range(0, len(asset_ids), 500):
             chunk = asset_ids[start:start + 500]
             placeholders = ",".join("?" for _ in chunk)
@@ -282,7 +277,7 @@ def _read_findings(path, client, asset_ids):
                 "AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY f.asset_id, f.cve_id",
                 chunk,
             ):
-                if record["client"] and normalized_client(record["client"]).casefold() != client_key:
+                if not _is_client(record["client"], expected_key):
                     continue
                 finding = _finding(record)
                 if finding is not None:

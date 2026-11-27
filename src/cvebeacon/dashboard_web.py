@@ -175,9 +175,12 @@ def _merge_cve(cells):
             "level": _severity_level(top), "asset": found[0]["asset"]}
 
 
-def _snapshot_ids(rows):
-    return {getattr(record, "asset_id", "") for record in rows
-            if getattr(record, "version", "") or getattr(record, "cpe", "")}
+def _snapshot_ids(rows, client):
+    if not rows:
+        return set()
+    key = web_assets.client_key(client)
+    return {record.asset_id for record in rows
+            if record.client.strip() and web_assets.client_key(record.client) == key}
 
 
 def _in_snapshot(item, snapshot_ids):
@@ -187,14 +190,14 @@ def _in_snapshot(item, snapshot_ids):
     return bool([v for v in item.get("versions", []) if v.strip()]) or item.get("asset_id") in snapshot_ids
 
 
-def _read_managed(config, client):
+def _read_managed(config, client, *, preserve_client=False):
     """The client's managed inventory as (raw bytes or None, rows). A missing file is empty."""
     directory = config.inventory_directory
     try:
         if directory.is_symlink():
             raise ValueError("inventory storage is a symbolic link")
         data = _current(directory / f"{inventory_client_key(client)}.json")
-        return data, ([] if data is None else read_inventory(data))
+        return data, ([] if data is None else read_inventory(data, preserve_client=preserve_client))
     except (OSError, ValueError, CVEBeaconError):
         raise ConfigurationError(_INVENTORY_UNREADABLE) from None
 
@@ -464,7 +467,7 @@ def create_web_blueprint(config):
                 removed = output.with_name(output.name + ".removed").exists()
                 if output.exists() or output.is_symlink():
                     try:
-                        snapshot_rows, snapshot = read_web_snapshot(output)
+                        snapshot_rows, snapshot = read_web_snapshot(output, preserve_client=True)
                     except (CVEBeaconError, ValueError, OSError):
                         error = error or "The saved snapshot is invalid; it will be skipped by scans"
                 review_path = output.with_name(output.name + ".review.json")
@@ -503,7 +506,7 @@ def create_web_blueprint(config):
             "style": "stylesheet", "manifest": "manifest", "robots": "robots.txt",
         }
         confidence_classes = {"high": "high", "medium": "medium", "low": "low"}
-        snapshot_inventory_ids = _snapshot_ids(snapshot_rows)
+        snapshot_inventory_ids = _snapshot_ids(snapshot_rows, client)
         for item in products:
             item["display_name"] = item.get("name") or (
                 f"{item.get('vendor', '')}/{item.get('product', '')}"
@@ -539,7 +542,7 @@ def create_web_blueprint(config):
         managed = actions.ManagedIndex(managed_assets)
         for item in products:
             item["status"], item["covered_ids"] = actions.classify(
-                item, snapshots_on=snapshots_on, managed=managed)
+                item, snapshots_on=snapshots_on, snapshot_ids=snapshot_inventory_ids, managed=managed)
             item["status_label"] = actions.STATUS_LABELS[item["status"]]
             item["status_badge"] = actions.STATUS_BADGES[item["status"]]
             item["pickable"] = bool(item.get("asset_id")) and item["status"] not in {"monitored", "service"}
@@ -789,21 +792,21 @@ def create_web_blueprint(config):
         client = read_allowlist(path, client)[0]["client"]
         review_path = output.with_name(output.name + ".review.json")
         if not (review_path.exists() or review_path.is_symlink()):
-            return []
+            return [], set()
         snapshot_rows = []
         if output.exists() or output.is_symlink():
             try:
-                snapshot_rows = read_web_snapshot(output)[0]
+                snapshot_rows = read_web_snapshot(output, preserve_client=True)[0]
             except (CVEBeaconError, ValueError, OSError):
                 pass
         try:
             products = _review_metadata(decode_json(read_bytes(review_path)), client)[0][:1000]
         except (CVEBeaconError, ValueError, OSError):
             raise ConfigurationError("The saved detection results could not be read.") from None
-        snapshot_ids = _snapshot_ids(snapshot_rows)
+        snapshot_ids = _snapshot_ids(snapshot_rows, client)
         for item in products:
             item["in_inventory"] = _in_snapshot(item, snapshot_ids)
-        return products
+        return products, snapshot_ids
 
     def plan(client):
         """Rebuild everything to add from saved data plus the asset IDs and versions typed."""
@@ -817,12 +820,12 @@ def create_web_blueprint(config):
         if mode == "selected" and not picks:
             raise ConfigurationError("Select at least one product to add.")
         versions = {pick: request.form.get("v-" + pick, "") for pick in set(picks)}
-        products = saved_products(client)
+        products, snapshot_ids = saved_products(client)
         profile = _client_profile(config, client)
         data, assets = _read_managed(config, profile["name"])
         snapshots_on = config.inventory is not None and config.inventory.web_snapshots
         rows, skipped, unknown = actions.plan_rows(
-            products, picks, versions, profile["name"], snapshots_on=snapshots_on,
+            products, picks, versions, profile["name"], snapshots_on=snapshots_on, snapshot_ids=snapshot_ids,
             managed=actions.ManagedIndex(assets), everything=mode == "all")
         return profile, data, assets, rows, skipped, unknown
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -13,7 +13,7 @@ import re
 
 from .config import CANONICAL_FIELDS, OPTIONAL_FIELDS
 from .errors import InventoryValidationError, ValidationIssue
-from .identity import identity_conflict
+from .identity import identity_conflict, validate_client_name
 from .inventory import MAX_CONTRACT_ROWS, MAX_CONTRACT_TEXT, validate_records
 from .private_storage import private_directory, private_file
 
@@ -90,7 +90,7 @@ def _timestamp(value):
     return stamp
 
 
-def read_web_snapshot(path: Path):
+def read_web_snapshot(path: Path, *, preserve_client=False):
     data = read_bytes(path)
     manifest = decode_json(read_bytes(Path(str(path) + ".manifest.json"), 65536))
     if (not isinstance(manifest, dict) or set(manifest) != MANIFEST_KEYS
@@ -113,13 +113,13 @@ def read_web_snapshot(path: Path):
     generated, observed = (_timestamp(manifest[key]) for key in ("generated_at", "observed_at"))
     if observed > generated or generated > datetime.now(timezone.utc):
         raise ValueError("invalid future timestamp")
-    assets = read_contract(data)
+    assets = read_contract(data, preserve_client=preserve_client)
     if type(manifest["record_count"]) is not int or manifest["record_count"] != len(assets):
         raise ValueError("snapshot record count mismatch")
     return assets, manifest
 
 
-def read_contract(data: bytes):
+def read_contract(data: bytes, *, preserve_client=False):
     """Validate the canonical record list used by the inventory exchange contract."""
     rows = decode_json(data)
     if not isinstance(rows, list) or not 0 < len(rows) <= MAX_CONTRACT_ROWS:
@@ -132,6 +132,9 @@ def read_contract(data: bytes):
     assets = validate_records(rows)
     if len(assets) != len(rows) or any(identity_conflict(asset) for asset in assets):
         raise ValueError("invalid snapshot identity")
+    if preserve_client:
+        assets = [replace(asset, client=validate_client_name(row.get("client", "")))
+                  for asset, row in zip(assets, rows)]
     if any(len(value) > MAX_CONTRACT_TEXT for asset in assets for value in asdict(asset).values()):
         raise ValueError("normalized inventory value exceeds text limit")
     return assets

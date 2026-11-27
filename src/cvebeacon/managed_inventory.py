@@ -69,8 +69,8 @@ def has_managed_storage(directory):
     return pending_exists(directory) or any(is_managed_file(path) for path in _names(directory))
 
 
-def read_inventory(data, *, client=None):
-    assets = read_contract(data)
+def read_inventory(data, *, client=None, preserve_client=False):
+    assets = read_contract(data, preserve_client=preserve_client)
     label = assets[0].client
     if not label or any(asset.client != label for asset in assets) or (client is not None and label != client):
         raise ValueError("inventory rows must belong to the same client")

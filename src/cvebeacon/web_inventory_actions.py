@@ -105,28 +105,34 @@ def _row_keys(asset):
 class ManagedIndex:
     """Find which rows of a client's managed inventory already cover a detected product."""
 
-    def __init__(self, assets=()):
+    def __init__(self, assets=(), *, require_same_site=False):
         self.ids = {}
         self.keys = {}
+        self.require_same_site = require_same_site
         for asset in assets:
             self.ids.setdefault(asset.asset_id.casefold(), asset.asset_id)
+            site = asset.system_id.casefold() if require_same_site else ""
             for key in _row_keys(asset):
-                self.keys.setdefault(key, []).append(asset.asset_id)
+                self.keys.setdefault((site, key), []).append(asset.asset_id)
 
     def covering(self, item):
         found = []
-        manual = self.ids.get((str(item.get("asset_id", "")) + MANUAL_SUFFIX).casefold())
-        if manual:
-            found.append(manual)
+        if asset_id := item.get("asset_id"):
+            manual = self.ids.get((asset_id + MANUAL_SUFFIX).casefold())
+            if manual:
+                found.append(manual)
+        site = (item.get("hostname") or "").casefold() if self.require_same_site else ""
+        if self.require_same_site and not site:
+            return found
         for key in _identity_keys(item):
-            found.extend(self.keys.get(key, ()))
+            found.extend(self.keys.get((site, key), ()))
         return found
 
 
-def classify(item, *, snapshots_on, managed):
+def classify(item, *, snapshots_on, snapshot_ids, managed):
     """Return (status, asset IDs whose scans cover the product)."""
     covered = []
-    if snapshots_on and item.get("in_inventory") and item.get("asset_id"):
+    if snapshots_on and item.get("asset_id") in snapshot_ids:
         covered.append(item["asset_id"])
     covered.extend(managed.covering(item))
     covered = list(dict.fromkeys(covered))
@@ -187,7 +193,7 @@ def build_row(item, client, version):
     return asset
 
 
-def plan_rows(products, picks, versions, client, *, snapshots_on, managed, everything=False):
+def plan_rows(products, picks, versions, client, *, snapshots_on, snapshot_ids, managed, everything=False):
     """Decide what to add. Returns (rows, skipped, unknown) from the saved products only.
 
     ``picks`` are asset IDs and ``versions`` maps an asset ID to the text typed for it.
@@ -197,9 +203,9 @@ def plan_rows(products, picks, versions, client, *, snapshots_on, managed, every
     for item in products:
         if item.get("asset_id"):
             by_id.setdefault(item["asset_id"], item)
-    wanted = [item["asset_id"] for item in by_id.values()
-              if classify(item, snapshots_on=snapshots_on, managed=managed)[0] == "ready"] \
-        if everything else list(dict.fromkeys(picks))
+    wanted = ([asset_id for asset_id, item in by_id.items()
+               if classify(item, snapshots_on=snapshots_on, snapshot_ids=snapshot_ids, managed=managed)[0] == "ready"]
+              if everything else list(dict.fromkeys(picks)))
     rows, skipped, unknown = [], [], 0
     for asset_id in wanted:
         item = by_id.get(asset_id)
@@ -208,7 +214,8 @@ def plan_rows(products, picks, versions, client, *, snapshots_on, managed, every
             continue
         name = item.get("name") or f"{item.get('vendor', '')}/{item.get('product', '')}"
         label = f"{name} on {item.get('hostname') or 'a site not recorded'}"
-        status, _ = classify(item, snapshots_on=snapshots_on, managed=managed)
+        status = "ready" if everything else classify(
+            item, snapshots_on=snapshots_on, snapshot_ids=snapshot_ids, managed=managed)[0]
         if status == "monitored":
             skipped.append((label, "Already monitored."))
             continue
