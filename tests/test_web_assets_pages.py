@@ -217,6 +217,8 @@ def test_shared_section_components_are_styled():
         assert re.search(re.escape(selector) + r"\b", css), selector
     assert re.search(r"\.filters > label\s*\{", css)
     assert not re.search(r"\.filters label\s*\{", css)
+    assert re.search(r"\.section-tabs\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;", css, re.S)
+    assert ".section-tabs a:focus-visible" in css
     script = (Path(dashboard_web.__file__).parent / "static" / "web-assets.js").read_text(encoding="utf-8")
     assert "data-bulk-select-all" in script and "data-bulk-clear" in script
 

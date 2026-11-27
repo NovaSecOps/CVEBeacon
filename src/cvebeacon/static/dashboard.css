@@ -820,6 +820,13 @@ a.filter-chip:hover { border-color: var(--link); }
   .js .sidebar { display: none; }
   .js[data-nav="open"] .sidebar { display: block; }
   .card-grid { grid-template-columns: 1fr; }
+  /* One scrollable row of tabs; the page itself never scrolls sideways. */
+  .section-tabs {
+    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+    padding: 2px 2px 0; scrollbar-width: thin;
+  }
+  .section-tabs a { flex: 0 0 auto; white-space: nowrap; }
+  .section-tabs a:focus-visible { outline-offset: -3px; }
 }
 
 @media (max-width: 640px) {
