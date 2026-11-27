@@ -63,7 +63,9 @@ product = "product"
 version = "version"
 ```
 
-The legacy product path requires `asset_id`, `vendor`, `product`, and `version` as nonblank text. Explicit package/PURL/CPE/commit identities may omit generic fields; see [identity rules and optional mappings](IDENTITY.md). Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
+The legacy product path requires `asset_id`, `vendor`, and `product` as nonblank text; `version` is optional on every path. Explicit package/PURL/CPE/commit identities may omit generic fields; see [identity rules and optional mappings](IDENTITY.md). Asset IDs must be unique without regard to case. CVEBeacon normalizes surrounding whitespace but does not rewrite the source inventory. Store versions as text, including `7.0`, `7.0.0`, and leading zeros; numeric, date, boolean, and compound values are rejected because their original spelling cannot be recovered reliably. Quote versions in JSON and YAML and format Excel cells as text before entering them.
+
+A row without a version is accepted from every identity path: vendor/product, ecosystem/package, a PURL without a version, and a CPE whose version is `*`. Such a row is scanned against every version of the product. Its findings are `needs_review` with the reason "version unknown: may be affected depending on the version". This is deliberately overzealous: CVEBeacon would rather warn about a possible exposure than omit a product whose version is unknown. Confirm the version when you can. The dashboard marks these rows **No version**.
 
 An inventory is optional in watch-only mode. Set `[watch] enabled = true` and no `[inventory] path` to keep KEV, critical-severity and custom-rule alerting; those alerts work without an inventory. Upload a client inventory in the dashboard or add an `[inventory] path` later to enable asset applicability, findings and reports. See [watch mode](WATCH.md#configuration).
 
@@ -112,7 +114,7 @@ cvebeacon inventory validate --identities
 cvebeacon inventory validate path/to/alternate.csv
 ```
 
-Validation reports source locations for malformed records, missing mapped columns, blank fields, duplicate IDs, invalid structure, and unreadable files.
+Validation reports source locations for malformed records, missing mapped columns, blank fields, duplicate IDs, invalid structure, and unreadable files. A row without a version is a warning, not an error: it is accepted and scanned for every version of the product.
 
 XLSX parts and total expanded data are limited to 32 MiB. A workbook can
 contain up to 1,000,000 cells across all sheets. Configured workbooks also
@@ -229,6 +231,8 @@ It exports only affected or needs-review findings from the latest successful inv
 - `coverage_unknown`: exact product identity or authoritative coverage could not be established.
 
 `not_affected` is never inferred from zero search results. Human-oriented or custom version ranges are preserved but not forced through a generic comparator. A known-exploitation catalog entry is prioritization evidence; it does not by itself prove product-version applicability. EPSS is predictive and remains distinct from known exploitation.
+
+A row without a version cannot produce `affected` or `not_affected`. It is scanned for every known CVE of the product and each finding is `needs_review` with the reason "version unknown: may be affected depending on the version". The NVD lookup uses the product's CPE with `*` in the version field, OSV uses the package identity without a version, and other enabled sources search by product as usual. A product-wide NVD response is capped at 2,000 CVEs per asset; when the cap is reached, source health reports the limit and coverage stays unknown rather than appearing complete. These findings still count on Findings, Assets, the Known CVEs column and the technology report, and they follow the same event and notification path as other `needs_review` findings.
 
 SemVer and Python version ranges use their respective ordering rules. Generic product schemes and partial-version wildcards without a supported comparator require review. Package-native ranges additionally support declared ecosystem ordering; see [supported semantics](IDENTITY.md). Product punctuation is significant; automatic CPE resolution allows CPE underscores to represent spaces, but does not guess vendor aliases. Configure a verified mapping when names differ. Configured edition, update, and platform fields are retained. NVD AND/negated/environment-dependent configurations and CVE platform-scoped claims require review when the inventory cannot establish those conditions. A CPE API search hit alone does not prove the full configuration applies.
 
