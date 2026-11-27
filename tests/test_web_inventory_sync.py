@@ -307,21 +307,19 @@ def test_auto_zero_grace_publishes_on_detection_completion_and_restores(blank, m
     sync.inspect(config, "Acme")
 
     class Child:
+        def __init__(self, run_id):
+            self.run_id = run_id
+
         def wait(self, *, timeout):
-            run(config, 2, run_id=invocation_id(command))
+            run(config, 2, run_id=self.run_id)
             return 0
 
-    def launch(args, **kwargs):
-        nonlocal command
-        command = args
-        return Child()
-
-    command = []
     lock = OperationLock(config, "web-detect")
     assert lock.acquire()
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(web_assets.subprocess, "Popen", launch)
+            patch.setattr(web_assets.subprocess, "Popen",
+                          lambda args, *, env, **kwargs: Child(env["CVEBEACON_WEB_RUN_ID"]))
             assert web_assets.run_detection(config, "Acme") == 0
     finally:
         lock.release()
@@ -997,11 +995,9 @@ def test_review_cannot_substitute_another_path_at_the_same_origin(blank):
     assert managed_rows(config) == [old]
 
 
-def invocation_id(command):
-    return command[command.index("--run-id") + 1] if "--run-id" in command else None
-
-
-def test_invalid_old_review_can_be_replaced_but_timeout_still_blocks_evidence(blank, monkeypatch):
+@pytest.mark.parametrize("unconfirmed_review", ["unchanged", "legacy", "different-id"])
+def test_invalid_old_review_can_be_replaced_but_timeout_still_blocks_evidence(blank, monkeypatch,
+                                                                             unconfirmed_review):
     config, _, client = setup(blank, "auto")
     _, output = web_assets.paths(config, "Acme")
     run(config, 1)
@@ -1011,15 +1007,18 @@ def test_invalid_old_review_can_be_replaced_but_timeout_still_blocks_evidence(bl
     launches = []
 
     class Child:
-        def __init__(self, command, num):
-            self.run_id = invocation_id(command)
+        def __init__(self, run_id, num):
+            self.run_id = run_id
             self.num = num
 
         def wait(self, *, timeout):
             if timeout == web_assets.CHILD_STOP_GRACE:
                 return -15
-            if self.num != 3:  # A successful exit without this invocation’s review stays blocked.
+            if self.num != 3:
                 run(config, self.num, [item], run_id=self.run_id)
+            elif unconfirmed_review != "unchanged":
+                # An older companion can succeed and publish a review without echoing this ID.
+                run(config, self.num, [item], started=unconfirmed_review != "legacy")
             if self.num == 2:
                 raise subprocess.TimeoutExpired("web detection", timeout)
             return 0
@@ -1027,9 +1026,9 @@ def test_invalid_old_review_can_be_replaced_but_timeout_still_blocks_evidence(bl
         def terminate(self):
             pass
 
-    def launch(command, **kwargs):
-        launches.append(command)
-        return Child(command, len(launches) + 1)
+    def launch(command, *, env, **kwargs):
+        launches.append(env["CVEBEACON_WEB_RUN_ID"])
+        return Child(launches[-1], len(launches) + 1)
 
     monkeypatch.setattr(web_assets.subprocess, "Popen", launch)
     lock = OperationLock(config, "web-detect")
@@ -1067,15 +1066,16 @@ def test_successful_detection_can_retry_inventory_publication_on_get(blank, monk
         return published(*args, **kwargs)
 
     class Child:
-        def __init__(self, command):
-            self.run_id = invocation_id(command)
+        def __init__(self, run_id):
+            self.run_id = run_id
 
         def wait(self, *, timeout):
             run(config, 1, [item], run_id=self.run_id)
             return 0
 
     monkeypatch.setattr(sync, "_publish", publish)
-    monkeypatch.setattr(web_assets.subprocess, "Popen", lambda command, **kwargs: Child(command))
+    monkeypatch.setattr(web_assets.subprocess, "Popen",
+                        lambda command, *, env, **kwargs: Child(env["CVEBEACON_WEB_RUN_ID"]))
     lock = OperationLock(config, "web-detect")
     assert lock.acquire()
     try:

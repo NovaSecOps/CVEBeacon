@@ -101,15 +101,14 @@ def fingerprint_directory(config):
     return config.database_path.parent / "web-fingerprints"
 
 
-def companion_command(client, assets, output, *, plan=False, fingerprints=None, run_id=None):
+def companion_command(client, assets, output, *, plan=False, fingerprints=None):
     require_companion()
     label = client_label(client)
     client_arguments = ["--client=" + label] if label.startswith("-") else ["--client", label]
     return [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
             *client_arguments, "--assets", str(assets), "--output", str(output),
             "--source-id", "web-" + client_key(client), "--allow-partial", *(["--plan"] if plan else []),
-            *(["--fingerprints", str(fingerprints)] if fingerprints is not None else []),
-            *(["--run-id", run_id] if run_id is not None else [])]
+            *(["--fingerprints", str(fingerprints)] if fingerprints is not None else [])]
 
 
 def validate_allowlist(config, path, document):
@@ -166,13 +165,16 @@ def run_detection(config, client, *, plan=False):
             fingerprints = None
     run_id = None if plan else secrets.token_hex(16)
     command = companion_command(document["client"], assets, output, plan=plan,
-                                fingerprints=fingerprints, run_id=run_id)
+                                fingerprints=fingerprints)
+    environment = child_environment(config)
+    environment.pop("CVEBEACON_WEB_RUN_ID", None)
     if run_id is not None:
         from . import web_inventory_sync
 
         web_inventory_sync.detection_started(config, document["client"], run_id)
+        environment["CVEBEACON_WEB_RUN_ID"] = run_id
     # Popen's context manager waits without a timeout on exit.
-    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config))
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=environment)
     try:
         code = child.wait(timeout=RUN_TIMEOUT + 5 * 60)
     except subprocess.TimeoutExpired as exc:

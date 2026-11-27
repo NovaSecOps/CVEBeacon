@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
-dependencies = ["cvebeacon>=0.2.7,<0.3"]
+dependencies = ["cvebeacon>=0.2.9,<0.3"]
 
 [project.scripts]
 cvebeacon-ext = "cvebeacon_extensions.cli:main"
