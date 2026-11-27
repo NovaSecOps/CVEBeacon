@@ -6,6 +6,8 @@ the users transaction, the operation lock, chained audit entries and private sto
 Nothing here contacts a host.
 """
 
+import base64
+import binascii
 import csv
 from datetime import date, datetime, time, timezone
 import hashlib
@@ -22,6 +24,8 @@ import unicodedata
 from urllib.parse import urlsplit
 
 from flask import abort, current_app, g, redirect, render_template, request, send_file, url_for
+from werkzeug.formparser import FormDataParser, MultiPartParser
+from werkzeug.http import parse_options_header
 
 from .dashboard import _text, requires
 from .dashboard_ops import require_accounts
@@ -35,12 +39,12 @@ from .web_inventory import read_bytes
 MAX_ROWS = 1000
 MAX_ASSETS = 1000
 MAX_IMPORT_BYTES = 256 * 1024
+MAX_ENCODED_BYTES = 4 * ((MAX_IMPORT_BYTES + 2) // 3)
 MAX_CSV_COLUMNS = 32
 MAX_CSV_FIELD = 4096
 MAX_LINE = 16384
 PREVIEW_TTL = 15 * 60
 MAX_PREVIEWS = 32
-# Posted text travels as a form field and may grow when percent-encoded.
 IMPORT_REQUEST_BYTES = 1024 * 1024
 TEMPLATE_FIELDS = ("hostname", "scheme", "port", "path", "allow_redirects", "max_redirects",
                    "expires_at", "allow_private_address")
@@ -62,6 +66,31 @@ CHANGED = "This list changed; review the import again."
 
 class ImportRefused(ConfigurationError):
     """The whole input is refused; the message is safe to show."""
+
+
+class _ImportMultipartParser(MultiPartParser):
+    def get_part_charset(self, headers):
+        _, options = parse_options_header(headers.get("Content-Disposition"))
+        if options.get("name") == "csv_text":
+            # Preserve the bytes through the standard multipart parser's
+            # decoding step so the route can enforce strict UTF-8.
+            return "latin-1"
+        return super().get_part_charset(headers)
+
+
+class ImportFormDataParser(FormDataParser):
+    """Use the standard multipart limits and retain the import field's bytes."""
+
+    def _parse_multipart(self, stream, mimetype, content_length, options):
+        boundary = options.get("boundary", "").encode("ascii")
+        if not boundary:
+            raise ValueError("Missing boundary")
+        parser = _ImportMultipartParser(
+            stream_factory=self.stream_factory, max_form_memory_size=self.max_form_memory_size,
+            max_form_parts=self.max_form_parts, cls=self.cls,
+        )
+        form, files = parser.parse(stream, boundary, content_length)
+        return stream, form, files
 
 
 class PendingPreviews:
@@ -101,17 +130,30 @@ def template_csv():
     return output.getvalue().encode("utf-8")
 
 
-def decode_text(data):
+def decode_text(data, *, allow_bom=True):
     """Strict UTF-8 text (a BOM is allowed), bounded, with no binary content."""
     if len(data) > MAX_IMPORT_BYTES:
         raise ImportRefused("The import is larger than 256 KiB. Split it into smaller files.")
     try:
-        text = data.decode("utf-8-sig")
+        text = data.decode("utf-8-sig" if allow_bom else "utf-8")
     except UnicodeDecodeError:
         raise ImportRefused("The import must be a UTF-8 text file. Save the CSV as UTF-8 and try again.") from None
     if "\x00" in text:
         raise ImportRefused("The import must be a plain text CSV file, not a binary file.")
     return text
+
+
+def _confirmation_text(value):
+    message = "The import confirmation text is invalid. Review the import again."
+    if not value or len(value) > MAX_ENCODED_BYTES:
+        raise ImportRefused(message)
+    try:
+        data = base64.b64decode(value, altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error):
+        raise ImportRefused(message) from None
+    if base64.urlsafe_b64encode(data).decode("ascii") != value:
+        raise ImportRefused(message)
+    return decode_text(data, allow_bom=False)
 
 
 def _site_cell(value):
@@ -391,12 +433,12 @@ def register(blueprint, config, render):
 
     def posted_text():
         upload = request.files.get("csv_file")
-        pasted = request.form.get("csv_text", "")
+        pasted = decode_text(request.form.get("csv_text", "").encode("latin-1"))
         if upload is not None and upload.filename:
             if pasted.strip():
                 raise ImportRefused("Choose a file or paste text, not both.")
             return decode_text(upload.stream.read(MAX_IMPORT_BYTES + 1))
-        return decode_text(_encode_form_text(pasted))
+        return pasted
 
     def client_from_form():
         require_accounts()
@@ -440,7 +482,8 @@ def register(blueprint, config, render):
         return render_template(
             "web_assets_import.html", client=client, rows=rows, counts=counts, unknown=unknown,
             version=version, digest=rows_digest, preview_token=preview_token,
-            import_text=text, add_count=len(to_add),
+            import_text=base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii"),
+            add_count=len(to_add),
             private_count=sum(1 for entry in to_add if entry["allow_private_address"]),
             status_labels=STATUS_LABELS, status_badges=STATUS_BADGES, display_url=display_url,
             available=web_assets.companion_available()), 200
@@ -459,7 +502,7 @@ def register(blueprint, config, render):
             return render(client, error=str(RunInProgress(lock.holder)), status=409)
         try:
             try:
-                text = decode_text(_encode_form_text(request.form.get("csv_text", "")))
+                text = _confirmation_text(request.form.get("csv_text", ""))
                 path, _ = paths(config, client)
                 current, version = read_allowlist(path, client)
                 client = current["client"]
@@ -524,13 +567,6 @@ def register(blueprint, config, render):
         finally:
             lock.release()
         return redirect(url_for("web.index", client=client, imported=len(to_add)), code=303)
-
-
-def _encode_form_text(value):
-    try:
-        return value.encode("utf-8")
-    except UnicodeEncodeError:
-        raise ImportRefused("The import must be a UTF-8 text file.") from None
 
 
 def _message(exc, fallback):

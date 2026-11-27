@@ -1,4 +1,5 @@
 """Bulk import of authorised web sites from CSV or URL lists."""
+import base64
 import csv
 from datetime import datetime, timedelta, timezone
 import html
@@ -38,8 +39,12 @@ def nested_forms(page):
     return depth != 0
 
 
+def post_import(client, endpoint, data):
+    return client.post(f"/web-assets/import/{endpoint}", data=data, content_type="multipart/form-data")
+
+
 def preview(client, text, client_name="Acme", **extra):
-    return client.post("/web-assets/import/preview", data={
+    return post_import(client, "preview", {
         "csrf": csrf(client), "client": client_name, "csv_text": text, **extra})
 
 
@@ -55,7 +60,7 @@ def do_import(client, text, client_name="Acme", attest=True, private=False, muta
         data["attest_private"] = "yes"
     if mutate:
         mutate(data)
-    return client.post("/web-assets/import/save", data=data)
+    return post_import(client, "save", data)
 
 
 def saved(config, name="Acme"):
@@ -63,7 +68,9 @@ def saved(config, name="Acme"):
 
 
 def test_template_downloads_and_parses_to_two_rows(web):
-    _, _, _, client = web
+    _, users, _, client = web
+    grant(users, {"view"})
+    login(client, "reader")
     response = client.get("/web-assets/import-template")
     assert response.status_code == 200
     assert response.mimetype == "text/csv"
@@ -162,11 +169,16 @@ def test_bad_rows_are_errors_and_good_rows_still_save(web, row, reason):
 def test_row_numbers_and_normalised_expiry(web):
     config, _, _, client = web
     year = datetime.now(timezone.utc).year + 2
-    text = HEADER + f"a.example.com,https,443,/,no,5,{year}-03-04,no\nb.example.com,,,,,,{year}-03-04T10:00:00+02:00,\n"
+    text = HEADER + (f"a.example.com,https,443,/,no,5,{year}-03-04,no\n"
+                     f"b.example.com,,,,,,{year}-03-04T10:00:05.123456+02:00,\n")
+    page = preview(client, text)
+    assert page.status_code == 200
+    assert f"{year}-03-04T23:59:59+00:00" in page.text
+    assert f"{year}-03-04T08:00:05.123456+00:00" in page.text
     assert do_import(client, text).status_code == 303
     a, b = saved(config)
     assert a["expires_at"] == f"{year}-03-04T23:59:59+00:00" and a["allow_redirects"] is False
-    assert b["expires_at"] == f"{year}-03-04T08:00:00+00:00"
+    assert b["expires_at"] == f"{year}-03-04T08:00:05.123456+00:00"
 
 
 @pytest.mark.parametrize("text", [
@@ -324,13 +336,13 @@ def test_private_addresses_need_a_second_confirmation(web):
 def test_requests_without_csrf_permission_or_accounts_are_refused(web):
     config, users, app, client = web
     base = {"client": "Acme", "csv_text": "hostname\na.example.com\n"}
-    for url in ("/web-assets/import/preview", "/web-assets/import/save"):
-        assert client.post(url, data={**base, "attest": "yes"}).status_code == 400
-        assert client.post(url, data={**base, "attest": "yes", "csrf": "wrong"}).status_code == 400
+    for endpoint in ("preview", "save"):
+        assert post_import(client, endpoint, {**base, "attest": "yes"}).status_code == 400
+        assert post_import(client, endpoint, {**base, "attest": "yes", "csrf": "wrong"}).status_code == 400
     login(client, "reader")
     token = csrf(client)
-    for url in ("/web-assets/import/preview", "/web-assets/import/save"):
-        assert client.post(url, data={**base, "csrf": token, "attest": "yes"}).status_code == 403
+    for endpoint in ("preview", "save"):
+        assert post_import(client, endpoint, {**base, "csrf": token, "attest": "yes"}).status_code == 403
     assert not paths(config, "Acme")[0].exists()
     grant(users, {"view", "manage_web_assets"})
     login(client, "reader")
@@ -341,11 +353,14 @@ def test_requests_without_csrf_permission_or_accounts_are_refused(web):
 def test_no_accounts_refuses_import(setup):
     pytest.importorskip("cvebeacon_extensions")
     config, _, client = setup[:3]
-    token = client.get("/").text
-    for url in ("/web-assets/import/preview", "/web-assets/import/save"):
-        response = client.post(url, data={"client": "Acme", "csv_text": "hostname\na.example.com\n",
-                                          "attest": "yes", "version": "new", "digest": "0" * 64})
-        assert response.status_code in {400, 403}
+    assert client.get("/web-assets?client=Acme").status_code == 200
+    with client.session_transaction() as session:
+        token = session["csrf"]
+    for endpoint in ("preview", "save"):
+        response = post_import(client, endpoint, {"csrf": token, "client": "Acme",
+                                                  "csv_text": "hostname\na.example.com\n",
+                                                  "attest": "yes", "version": "new", "digest": "0" * 64})
+        assert response.status_code == 403
     assert not paths(config, "Acme")[0].exists()
 
 
@@ -364,7 +379,7 @@ def test_permission_revoked_before_commit_writes_nothing(web, monkeypatch):
     data = fields(page.text)
     monkeypatch.setattr(dashboard_web, "validate_allowlist", revoke)
     data.update(csrf=csrf(client), attest="yes")
-    assert client.post("/web-assets/import/save", data=data).status_code == 400
+    assert post_import(client, "save", data).status_code == 400
     assert not paths(config, "Acme")[0].exists()
     assert not any("a.example.com" in e.action for e in users.audit_entries())
 
@@ -376,7 +391,7 @@ def test_allowlist_changed_between_preview_and_save_writes_nothing(web):
     assert save(client, hostname="other.example.com").status_code == 303
     before = paths(config, "Acme")[0].read_bytes()
     data.update(csrf=csrf(client), attest="yes")
-    response = client.post("/web-assets/import/save", data=data)
+    response = post_import(client, "save", data)
     assert response.status_code == 400 and imp.CHANGED in response.text
     assert paths(config, "Acme")[0].read_bytes() == before
 
@@ -384,7 +399,8 @@ def test_allowlist_changed_between_preview_and_save_writes_nothing(web):
 def test_tampered_text_or_digest_writes_nothing(web):
     config, _, _, client = web
     text = "hostname\na.example.com\n"
-    response = do_import(client, text, mutate=lambda d: d.update(csv_text="hostname\nb.example.com\n"))
+    changed = fields(preview(client, "hostname\nb.example.com\n").text)["csv_text"]
+    response = do_import(client, text, mutate=lambda d: d.update(csv_text=changed))
     assert response.status_code == 400 and imp.CHANGED in response.text
     response = do_import(client, text, mutate=lambda d: d.update(digest="0" * 64))
     assert response.status_code == 400
@@ -413,7 +429,7 @@ def test_replacing_rows_and_digest_together_is_refused(web):
     data, replacement = fields(original.text), fields(changed.text)
     data.update(csv_text=replacement["csv_text"], digest=replacement["digest"],
                 csrf=csrf(client), attest="yes", attest_private="yes")
-    response = client.post("/web-assets/import/save", data=data)
+    response = post_import(client, "save", data)
     assert response.status_code == 400 and imp.CHANGED in response.text
     assert not paths(config, "Acme")[0].exists()
 
@@ -436,7 +452,7 @@ def test_preview_is_bound_to_the_signed_in_session(web):
     data = fields(page.text)
     other = app.test_client()
     login(other, "reader")
-    response = other.post("/web-assets/import/save", data={**data, "csrf": csrf(other), "attest": "yes"})
+    response = post_import(other, "save", {**data, "csrf": csrf(other), "attest": "yes"})
     assert response.status_code == 400 and imp.CHANGED in response.text
     assert not paths(config, "Acme")[0].exists()
 
@@ -449,10 +465,10 @@ def test_preview_cannot_be_replayed_after_restoring_allowlist(web):
     page = preview(client, "hostname\na.example.com\n")
     assert page.status_code == 200
     data = {**fields(page.text), "csrf": csrf(client), "attest": "yes"}
-    assert client.post("/web-assets/import/save", data=data).status_code == 303
+    assert post_import(client, "save", data).status_code == 303
     web_assets.replace_bytes(path, original)
     audit = users.audit_entries()
-    response = client.post("/web-assets/import/save", data=data)
+    response = post_import(client, "save", data)
     assert response.status_code == 400 and imp.CHANGED in response.text
     assert path.read_bytes() == original and users.audit_entries() == audit
 
@@ -464,7 +480,7 @@ def test_expired_preview_cannot_be_saved(web, monkeypatch):
     page = preview(client, "hostname\na.example.com\n")
     assert page.status_code == 200
     clock[0] += 901
-    response = client.post("/web-assets/import/save", data={**fields(page.text), "csrf": csrf(client), "attest": "yes"})
+    response = post_import(client, "save", {**fields(page.text), "csrf": csrf(client), "attest": "yes"})
     assert response.status_code == 400 and imp.CHANGED in response.text
     assert not paths(config, "Acme")[0].exists()
 
@@ -494,7 +510,7 @@ def test_busy_lock_gives_409_and_no_write(web):
     lock = OperationLock(config, "web-assets")
     assert lock.acquire()
     try:
-        response = client.post("/web-assets/import/save", data=data)
+        response = post_import(client, "save", data)
     finally:
         lock.release()
     assert response.status_code == 409
@@ -508,13 +524,15 @@ def test_companion_refusal_is_shown_and_nothing_saved(web, monkeypatch):
     def refuse(*args):
         raise ConfigurationError("companion says no")
 
+    text = "hostname\na.example.com\n"
+    page = preview(client, text)
+    assert page.status_code == 200 and "Save 1 site" in page.text
+    data = {**fields(page.text), "csrf": csrf(client), "attest": "yes"}
     monkeypatch.setattr(dashboard_web, "validate_allowlist", refuse)
-    response = preview(client, "hostname\na.example.com\n")
+    response = preview(client, text)
     assert response.status_code == 400 and "companion says no" in response.text
-    data = {"csrf": csrf(client), "client": "Acme", "csv_text": "hostname\na.example.com\n",
-            "version": "new", "digest": imp.digest([]), "attest": "yes"}
-    response = client.post("/web-assets/import/save", data=data)
-    assert response.status_code == 400
+    response = post_import(client, "save", data)
+    assert response.status_code == 400 and "companion says no" in response.text
     assert not paths(config, "Acme")[0].exists()
     assert not any(e.action.startswith("web_asset") for e in users.audit_entries())
 
@@ -533,11 +551,11 @@ def test_write_failure_rolls_back(web, monkeypatch):
         raise OSError("disk")
 
     monkeypatch.setattr(imp, "save_allowlist", fail)
-    assert client.post("/web-assets/import/save", data=data).status_code == 400
+    assert post_import(client, "save", data).status_code == 400
     assert paths(config, "Acme")[0].read_bytes() == before
     assert not any("a.example.com" in e.action for e in users.audit_entries())
     monkeypatch.setattr(imp, "save_allowlist", real)
-    assert client.post("/web-assets/import/save", data=data).status_code == 303
+    assert post_import(client, "save", data).status_code == 303
 
 
 def test_new_client_name_creates_allowlist(web):
@@ -557,8 +575,18 @@ def test_formula_cells_are_text_and_rejected(web):
 
 def test_confirmation_page_markup_and_csp(web):
     _, _, _, client = web
-    response = preview(client, HEADER + "10.0.0.5,http,80,/,yes,2,,yes\n")
+    sentinel = """<img src=x onerror="alert(1)" title='quoted'>"""
+    source = io.StringIO(newline="")
+    writer = csv.writer(source, lineterminator="\n")
+    writer.writerow(["hostname", "allow_private_address", "note"])
+    writer.writerow(["10.0.0.5", "yes", sentinel])
+    response = preview(client, source.getvalue())
     page = response.text
+    assert response.status_code == 200
+    assert sentinel not in page and "alert(1)" not in page
+    carried = re.search(r'name="csv_text" value="([A-Za-z0-9_=-]+)"', page)[1]
+    assert base64.urlsafe_b64decode(carried) == source.getvalue().encode("utf-8")
+    assert re.search(r'<form[^>]+enctype="multipart/form-data"[^>]+/import/save"', page)
     assert not re.search(r"<script(?![^>]*\ssrc=)|style=|\son[a-z]+=", page)
     assert not nested_forms(page)
     assert "unsafe-inline" not in response.headers.get("Content-Security-Policy", "")
@@ -567,11 +595,68 @@ def test_confirmation_page_markup_and_csp(web):
     assert not nested_forms(index)
 
 
-def test_import_endpoints_have_their_own_request_limits(web):
-    _, _, app, client = web
-    big = "hostname\n" + "a" * (1024 * 1024 + 10)
-    response = client.post("/web-assets/import/preview", data={
-        "csrf": csrf(client), "client": "Acme", "csv_text": big})
+@pytest.mark.parametrize("endpoint", ["preview", "save"])
+def test_import_endpoints_have_their_own_request_limits(web, endpoint):
+    config, _, _, client = web
+    text = "hostname\na.example.com\n"
+    data = {"csrf": csrf(client), "client": "Acme", "csv_text": text}
+    if endpoint == "save":
+        page = preview(client, text)
+        assert page.status_code == 200
+        data.update(fields(page.text), attest="yes")
+    oversized = {**data, "csv_text": "a" * (1024 * 1024 + 1)}
+    assert post_import(client, endpoint, oversized).status_code == 413
+    nine_parts = {**data, **{f"extra{n}": "x" for n in range(9 - len(data))}}
+    assert post_import(client, endpoint, nine_parts).status_code == 413
+    response = client.post(f"/web-assets/import/{endpoint}", data=data)
+    assert response.status_code == 400
+    assert not paths(config, "Acme")[0].exists()
+
+
+def test_single_site_request_keeps_small_body_limit(web):
+    _, _, _, client = web
+    response = client.post("/web-assets/save", data={"csrf": csrf(client), "client": "Acme", "pad": "a" * 9000})
     assert response.status_code == 413
-    other = client.post("/web-assets/save", data={"csrf": "x", "client": "Acme", "pad": "a" * 9000})
-    assert other.status_code in {400, 403, 413}
+
+
+def test_multipart_paste_rejects_invalid_utf8(web):
+    config, _, _, client = web
+    token = csrf(client)
+    body = (f'--test\r\nContent-Disposition: form-data; name="csrf"\r\n\r\n{token}\r\n'
+            '--test\r\nContent-Disposition: form-data; name="client"\r\n\r\nAcme\r\n'
+            '--test\r\nContent-Disposition: form-data; name="csv_text"\r\n'
+            'Content-Type: text/plain; charset=iso-8859-1\r\n\r\n').encode("ascii")
+    body += b"hostname,note\na.example.com,\xff\r\n--test--\r\n"
+    response = client.post("/web-assets/import/preview", data=body,
+                           content_type="multipart/form-data; boundary=test")
+    assert response.status_code == 400 and "UTF-8" in response.text
+    assert not paths(config, "Acme")[0].exists()
+
+
+@pytest.mark.parametrize("encoded,message", [
+    ("@@==", "confirmation text is invalid"),
+    ("+w==", "confirmation text is invalid"),
+    ("YR==", "confirmation text is invalid"),
+    ("YQ==\n", "confirmation text is invalid"),
+    (base64.urlsafe_b64encode(b"a" * (256 * 1024 + 1)).decode("ascii"), "larger than 256 KiB"),
+    ("A" * (4 * ((256 * 1024 + 2) // 3) + 1), "confirmation text is invalid"),
+])
+def test_confirmation_payload_is_strictly_decoded_and_bounded(web, encoded, message):
+    config, _, _, client = web
+    response = do_import(client, "hostname\na.example.com\n", mutate=lambda d: d.update(csv_text=encoded))
+    assert response.status_code == 400 and message in response.text
+    assert not paths(config, "Acme")[0].exists()
+
+
+def test_near_limit_lf_upload_survives_confirmation_round_trip(web):
+    config, _, _, client = web
+    path = "/" + "a" * 239
+    text = "hostname,path\n" + "".join(f"site{index:04}.example.com,{path}\n" for index in range(1000))
+    assert len(text) <= imp.MAX_IMPORT_BYTES < len(text.replace("\n", "\r\n"))
+    page = post_import(client, "preview", {"csrf": csrf(client), "client": "Acme",
+                                           "csv_file": (io.BytesIO(text.encode("utf-8")), "sites.csv")})
+    assert page.status_code == 200 and "Save 1000 sites" in page.text
+    data = {**fields(page.text), "csrf": csrf(client), "attest": "yes"}
+    assert "\n" not in data["csv_text"] and "\r" not in data["csv_text"]
+    assert post_import(client, "save", data).status_code == 303
+    assert len(saved(config)) == 1000
