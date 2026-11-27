@@ -1674,7 +1674,8 @@ def _angular_assignment(text: str, variable: str, *, deadline, clock):
     return None
 
 
-def _angular_unbannered_versions(text: str, *, deadline, clock, on_truncated) -> list[tuple[str, str]]:
+def _angular_unbannered_versions(text: str, *, deadline, clock,
+                                  on_truncated=lambda: None) -> list[tuple[str, str]]:
     """Versions from ng-version records in builds that strip the licence banner."""
     found = []
     assignments: dict[str, re.Match | None] = {}

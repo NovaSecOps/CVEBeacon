@@ -521,6 +521,16 @@ def test_foreign_product_ids_cannot_drive_sync(blank, inputs):
     assert managed_rows(config) == [imported]
 
 
+def test_review_only_product_keeps_its_identity_without_becoming_a_row(blank):
+    config, _, client = setup(blank, "auto")
+    review_only = product("cdn", "", identity=["cdn", ""])
+    review_only.update(product="", name="CDN library", versions=[], inventory=False)
+    run(config, 1, [review_only, product("sample", "1")])
+    text = page(client)
+    assert "CDN library" in text and sync.RESULTS_WARNING not in text
+    assert managed_rows(config) == [row("sample", "1")]
+
+
 def test_scoped_product_association_cannot_move_to_another_endpoint(blank):
     config, _, client = setup(blank, "auto", auto_remove="on")
     config = replace(config, web=WebConfig(removal_grace_days=0))

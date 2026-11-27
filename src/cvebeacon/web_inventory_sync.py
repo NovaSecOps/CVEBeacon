@@ -261,9 +261,9 @@ def _observation(output, client, allowlist_revision, asset_count):
                     or identity == site or identity in by_id or site not in sites
                     or item.get("hostname") != sites[site][1] or type(item.get("inventory")) is not bool
                     or not valid_sync_identity(inputs)
-                    or any(not isinstance(item.get(field), str) or not item[field]
-                           for field in ("vendor", "product"))
-                    or (inputs[1] and inputs != [item.get("vendor"), item.get("product")])
+                    or not isinstance(item.get("vendor"), str) or not item["vendor"]
+                    or not isinstance(item.get("product"), str)
+                    or ("\0" not in inputs[0] and inputs != [item["vendor"], item["product"]])
                     or identity != web_asset_id(client, *sites[site][:4], *inputs)):
                 raise ValueError
             item["in_inventory"] = item["inventory"]

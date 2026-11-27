@@ -38,8 +38,10 @@ def valid_sync_identity(inputs):
             or any(not isinstance(part, str) or len(part) > 8192 for part in inputs)):
         return False
     vendor, product = inputs
-    if product:
+    if "\0" not in vendor:
         return bool(vendor and not any(UNSAFE_ID_TEXT.search(part) for part in inputs))
+    if product:
+        return False
     # Scoped CPEs and disambiguated products use the detector's NUL-delimited
     # identity key as the first input and an empty second input.
     parts = vendor.split("\0")

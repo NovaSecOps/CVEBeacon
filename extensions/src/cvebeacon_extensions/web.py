@@ -241,11 +241,12 @@ class _Response:
     body: bytes
     body_complete: bool = True
 
-    @property
-    def complete(self):
-        return (self.body_complete and self.status == 200 and "content-range" not in self.headers
-                and not any(value.split(";", 1)[0].strip().casefold() == "multipart/byteranges"
-                            for value in self.headers.get("content-type", ())))
+
+def _response_complete(response):
+    return (getattr(response, "body_complete", True) and response.status == 200
+            and "content-range" not in response.headers
+            and not any(value.split(";", 1)[0].strip().casefold() == "multipart/byteranges"
+                        for value in response.headers.get("content-type", ())))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2227,7 +2228,7 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             if clock() >= fetch_deadline:
                 skip(time_reason, candidate, response_type, len(body))
                 continue
-            if not success.response.complete:
+            if not _response_complete(success.response):
                 skip("http-status", candidate, response_type, len(body))
                 continue
             _, accepted_type, is_html = _resource_content_type(success.response.headers, candidate.kind)
@@ -2875,7 +2876,7 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
         file_metadata=file_metadata, skip_details=skip_details,
         fingerprint_stopped=fingerprints.stopped,
         fingerprint_error=fingerprints.error, analysis_stopped=analysis_stopped,
-        response_complete=success.response.complete,
+        response_complete=_response_complete(success.response),
     )
 
 
