@@ -36,6 +36,12 @@ class NVDResult:
     records: tuple[tuple[Vulnerability, Evidence], ...] = ()
     truncated: bool = False
 
+    def __iter__(self):
+        return iter(self.records)
+
+    def __len__(self) -> int:
+        return len(self.records)
+
 
 def _unescape(value: str) -> str:
     return re.sub(r"\\(.)", r"\1", value)
