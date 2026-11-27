@@ -1412,6 +1412,33 @@ def test_versionless_non_cpe_product_creates_a_versionless_package_row(tmp_path)
     assert product["inventory"] is True and product["versions"] == []
 
 
+def test_url_only_detection_does_not_create_a_versionless_snapshot_row(tmp_path):
+    sites = [asset(path="/"), asset(path="/wordpress"), asset(path="/versioned")]
+    responses = [
+        response(body=b'<html><script src="/jquery.min.js"></script></html>'),
+        response(headers={"content-type": "application/javascript"}, body=b"/* library */"),
+        response(body=b'<html><meta name="generator" content="WordPress"></html>'),
+        response(body=b'<html><script src="/jquery-3.7.1.min.js"></script></html>'),
+        response(headers={"content-type": "application/javascript"}, body=b"/* library */"),
+    ]
+    _, output, _, _ = run(tmp_path, sites, responses)
+    records = read_snapshot(output, allow_partial=True).records
+    jquery = [row for row in records if row["product"] == "jquery"]
+    assert [row["version"] for row in jquery] == ["3.7.1"]
+    wordpress = next(row for row in records if row["product"] == "wordpress")
+    assert wordpress["version"] == "" and wordpress["cpe"].startswith("cpe:2.3:a:wordpress:wordpress:")
+    detail = json.loads(Path(str(output) + ".review.json").read_bytes())
+    site = web_asset_id("acme", "https", "example.com", 443, "/")
+    url_only = next(item for item in detail["products"]
+                    if item["site_id"] == site and item["product"] == "jquery")
+    assert url_only["inventory"] is False and url_only["versions"] == []
+    assert url_only["evidence_types"] == ["url"]
+    reviewed = next(item for item in detail["products"]
+                    if item["site_id"] == web_asset_id("acme", "https", "example.com", 443, "/wordpress")
+                    and item["product"] == "wordpress")
+    assert reviewed["inventory"] is True and reviewed["versions"] == []
+
+
 def test_versionless_edge_technology_without_cpe_stays_in_review(tmp_path, capsys):
     manifest, output, _, _ = run(
         tmp_path, [asset()], [response(headers={"cf-ray": "8a1b2c3d4e5f6a7b-AMS"})],

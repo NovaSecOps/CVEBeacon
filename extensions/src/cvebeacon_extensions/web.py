@@ -2347,6 +2347,11 @@ def _implied_only(detection: _DetectionSummary) -> bool:
     return bool(detection.implied_by) and set(detection.evidence_types) <= {"implied"}
 
 
+def _direct_evidence(detection: _DetectionSummary) -> bool:
+    """Whether a detection has evidence beyond a link and inference."""
+    return any(kind not in {"url", "implied"} for kind in detection.evidence_types)
+
+
 def _combine_detections(current: _DetectionSummary, incoming: _DetectionSummary) -> _DetectionSummary:
     evidence = list(current.evidence)
     evidence_seen = {(item.kind, item.source, item.excerpt) for item in evidence}
@@ -2888,7 +2893,10 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         row_version = preferred if preferred is not None else ""
         named = bool(detection.product or detection.cpe
                      or (detection.ecosystem and detection.package))
-        if not implied and not review_only and not service and named:
+        # A new version-less row needs evidence other than a referenced URL:
+        # a link alone names a resource, not a product the site is running.
+        publishable = bool(row_version) or _direct_evidence(detection)
+        if not implied and not review_only and not service and named and publishable:
             try:
                 purl = package_identity(detection.ecosystem, detection.package, row_version)
                 row = {
