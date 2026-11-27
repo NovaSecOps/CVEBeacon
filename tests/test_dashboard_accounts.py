@@ -98,7 +98,8 @@ def test_every_route_declares_and_enforces_its_permission(accounts, path, endpoi
     login(client)
     path = path.replace("<username>", "reader").replace("<int:event_id>", "1").replace("<int:job_id>", "1")
     if needed & (PERMISSIONS | {"admin"}):
-        response = client.open(path, method=method, data={"csrf": csrf(client)})
+        content_type = "multipart/form-data" if endpoint in {"web.import_preview", "web.import_save"} else None
+        response = client.open(path, method=method, data={"csrf": csrf(client)}, content_type=content_type)
         assert response.status_code == 403
         if method == "GET":
             assert client.head(path).status_code == 403
@@ -124,8 +125,9 @@ def test_every_post_rejects_missing_and_foreign_csrf(accounts, path, endpoint, m
     stranger = app.test_client()
     foreign = csrf(stranger, "/login")
     path = path.replace("<username>", "reader")
-    assert client.post(path).status_code == 400
-    assert client.post(path, data={"csrf": foreign}).status_code == 400
+    content_type = "multipart/form-data" if endpoint in {"web.import_preview", "web.import_save"} else None
+    assert client.post(path, content_type=content_type).status_code == 400
+    assert client.post(path, data={"csrf": foreign}, content_type=content_type).status_code == 400
 
 
 def test_bootstrap_cannot_claim_existing_non_admin_store(setup):

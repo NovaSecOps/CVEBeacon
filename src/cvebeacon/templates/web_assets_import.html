@@ -13,7 +13,7 @@
 {% call table_wrap('Sites in this import') %}
 <table><thead><tr><th scope="col">Row</th><th scope="col">URL</th><th scope="col">Redirects</th><th scope="col">Expiry</th><th scope="col">Private addresses</th><th scope="col">Status</th></tr></thead><tbody>
 {% for row in rows %}{% set entry = row.entry %}<tr><td>{{ row.number }}</td>
-{% if entry %}<td class="break">{{ display_url(entry) }}</td><td>{{ ('Allowed (maximum ' ~ entry.max_redirects ~ ')') if entry.allow_redirects else 'Not allowed' }}</td><td>{{ watch_stamp(entry.expires_at) if entry.expires_at else 'No expiry' }}</td><td>{{ 'Allowed' if entry.allow_private_address else 'Not allowed' }}</td>
+{% if entry %}<td class="break">{{ display_url(entry) }}</td><td>{{ ('Allowed (maximum ' ~ entry.max_redirects ~ ')') if entry.allow_redirects else 'Not allowed' }}</td><td>{% if entry.expires_at %}<time datetime="{{ entry.expires_at }}">{{ entry.expires_at }}</time>{% else %}No expiry{% endif %}</td><td>{{ 'Allowed' if entry.allow_private_address else 'Not allowed' }}</td>
 {% else %}<td class="muted">Not read</td><td></td><td></td><td></td>{% endif %}
 <td>{{ badge(status_labels[row.status], status_badges[row.status]) }}{% if row.reason %} {{ row.reason }}{% endif %}</td></tr>
 {% endfor %}</tbody></table>
@@ -21,8 +21,9 @@
 {% endcall %}
 {% if add_count %}
 {% call card('Save ' ~ add_count ~ ' site' ~ ('' if add_count == 1 else 's')) %}
-<form method="post" class="stack" action="{{ url_for('web.import_save') }}">
+<form method="post" class="stack" enctype="multipart/form-data" action="{{ url_for('web.import_save') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="digest" value="{{ digest }}"><input type="hidden" name="csv_text" value="{{ import_text }}">
+<input type="hidden" name="preview_token" value="{{ preview_token }}">
 <div class="field field-check"><input id="import-attest" name="attest" type="checkbox" value="yes" required><label for="import-attest">I attest that {{ client }} authorises observation of all {{ add_count }} site{{ '' if add_count == 1 else 's' }} listed above, with the redirect, expiry and address settings shown.</label></div>
 {% if private_count %}<div class="field field-check"><input id="import-private" name="attest_private" type="checkbox" value="yes" required><label for="import-private">I confirm that {{ private_count }} of these site{{ '' if private_count == 1 else 's' }} may be reached on private or internal addresses, and that {{ client }} authorises this.</label></div>{% endif %}
 <div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save {{ add_count }} site{{ '' if add_count == 1 else 's' }}</button><a class="btn btn-secondary" href="{{ url_for('web.index', client=client) }}">Back</a></div>
