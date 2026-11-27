@@ -15,10 +15,12 @@
 {% endmacro %}
 {% macro conf_badge(klass, label) %}<span class="badge badge-{{ 'conf-' ~ klass if klass in ['high', 'medium', 'low'] else 'neutral' }}">{{ label }}</span>{% endmacro %}
 {% macro cve_cell(cve) %}{% if cve.state == 'found' %}{{ severity_badge(cve.level) }} <a href="{{ url_for('findings', asset=cve.asset) }}">{{ cve.count }} CVE{{ '' if cve.count == 1 else 's' }}</a>{% elif cve.state == 'clear' %}<span class="muted">No CVEs found yet</span>{% elif cve.state == 'unavailable' %}<span class="muted">Unavailable</span>{% else %}<span class="muted">Not monitored</span>{% endif %}{% endmacro %}
+{% from 'web_assets_import_card.html' import notice as import_notice, import_card with context %}
 {% block content %}
 {{ page_header('Web assets', 'Record the websites a client has authorised you to check, then look for software on them. Detection is manual and results are hints for review.') }}
 {% if error %}{% call callout('danger', 'That web asset change was not saved') %}<p>{{ error }}</p>{% endcall %}{% endif %}
 {% if added and client %}{% call callout('success', 'Products added') %}<p>Added {{ added }} product{{ '' if added == 1 else 's' }} to {{ client }}'s inventory. The next scan checks {{ 'it' if added == 1 else 'them' }} for CVEs. <a href="{{ url_for('client_inventory.detail', key=client_key, name=client) }}">Open the client's inventory</a>.</p>{% endcall %}{% endif %}
+{% if client %}{{ import_notice() }}{% endif %}
 {% if not available %}{% call callout('warning', 'Web detection is not available') %}<p>{{ notice }} The saved list below can still be viewed and edited, but detection buttons stay disabled until the optional Extensions package is installed.</p>{% endcall %}{% endif %}
 
 {% call card('Choose a client', 'Open a client to see their saved sites, or type a client name to start.') %}
@@ -53,6 +55,7 @@
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="add">
 {{ asset_fields(prefill_entry, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
 {% endcall %}
+{{ import_card() }}
 {% if document.assets or snapshot or removed or run or products or reviews %}
 {% call card('Remove all sites and results', 'Delete every saved site and all saved detection results for this client. This cannot be undone.', tone='danger') %}
 <form method="post" class="stack" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><div class="field field-check"><input id="remove-all-confirm" type="checkbox" name="confirm" value="yes" required><label for="remove-all-confirm">I want to remove every saved asset and all saved detection results for this client.</label></div><div class="form-actions"><button class="btn btn-danger" type="submit" name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></div></form>
