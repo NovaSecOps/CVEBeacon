@@ -11,10 +11,9 @@ import unicodedata
 from packageurl import PackageURL
 
 from .errors import InventoryValidationError
-from .identity import normalize_asset, parse_purl, purl_string
+from .identity import normalize_asset, purl_string
 from .managed_inventory import encode_records, read_inventory
 from .models import Asset
-from .sources.nvd import split_cpe23
 
 # A row added by hand never reuses the ID of the row a web snapshot would create for the
 # same product. If web snapshots are switched on later, both rows can coexist in one scan
@@ -83,80 +82,39 @@ def _package_purl(item, version):
                                   version=version or None))
 
 
-def _cpe_base(cpe):
-    fields = list(split_cpe23(cpe, keep_escapes=True))
-    if len(fields) != 11:
-        return ""
-    fields[3] = "*"
-    return "cpe:2.3:" + ":".join(fields)
-
-
 def _identity_keys(item):
-    """Exact and product-wide keys for one saved detection.
+    """Exact keys for one saved detection, with the version as it is.
 
-    Broad coverage uses the strongest identity the detection carries: the full
-    CPE scope with the version removed, or the canonical package PURL with only
-    the version removed. Vendor/product text is a fallback only when both the
-    detection and the inventory row have no structured identity.
+    An empty version is an exact value: a version-less row covers only a
+    version-less detection of the same identity.
     """
-    exact, broad = set(), set()
-    versions = detected_versions(item)
+    keys = set()
+    vendor = str(item.get("vendor", "")).casefold()
+    names = {str(item.get(field, "")).casefold() for field in ("product", "package")} - {""}
+    versions = assignable_versions(item) or [""]
     cpe = item.get("cpe") if isinstance(item.get("cpe"), str) else ""
-    try:
-        base_purl = _package_purl(item, "")
-    except ValueError:
-        base_purl = ""
-    if base_purl:
-        broad.add(("purl-base", base_purl))
-        for version in versions:
-            try:
-                purl = _package_purl(item, version)
-            except ValueError:
-                purl = ""
-            if purl:
-                exact.add(("purl", purl))
-    elif cpe and (scope := _cpe_base(cpe)):
-        broad.add(("cpe-base", scope))
-        exact.update(("cpe", scope, version) for version in versions)
-    else:
-        vendor = str(item.get("vendor", "")).casefold()
-        product = str(item.get("product", "")).casefold()
-        if vendor and product:
-            broad.add(("vp", vendor, product))
-            exact.update(("vpv", vendor, product, version) for version in versions)
-    return exact, broad
+    for version in versions:
+        keys.update(("vpv", vendor, name, version) for name in names)
+        if cpe:
+            keys.add(("cpe", cpe, version))
+        try:
+            purl = _package_purl(item, version)
+        except ValueError:
+            purl = ""
+        if purl:
+            keys.add(("purl", purl))
+    return keys
 
 
 def _row_keys(asset):
-    """Exact and product-wide keys for one managed inventory row."""
-    exact, broad = set(), set()
+    keys = set()
     if asset.purl:
-        try:
-            purl = parse_purl(asset.purl)
-        except ValueError:
-            return exact, broad
-        version = asset.version or purl.version or ""
-        base = purl_string(purl._replace(version=None))
-        if version:
-            exact.add(("purl", purl_string(purl._replace(version=version))))
-        else:
-            broad.add(("purl-base", base))
-    elif asset.cpe:
-        scope = _cpe_base(asset.cpe)
-        fields = split_cpe23(asset.cpe, keep_escapes=True)
-        version = asset.version or (
-            fields[3] if len(fields) == 11 and fields[3] not in {"*", "-"} else "")
-        if scope:
-            if version:
-                exact.add(("cpe", scope, version))
-            else:
-                broad.add(("cpe-base", scope))
-    elif asset.vendor and asset.product:
-        if asset.version:
-            exact.add(("vpv", asset.vendor.casefold(), asset.product.casefold(), asset.version))
-        else:
-            broad.add(("vp", asset.vendor.casefold(), asset.product.casefold()))
-    return exact, broad
+        keys.add(("purl", asset.purl))
+    if asset.cpe:
+        keys.add(("cpe", asset.cpe, asset.version))
+    if asset.vendor and asset.product:
+        keys.add(("vpv", asset.vendor.casefold(), asset.product.casefold(), asset.version))
+    return keys
 
 
 class ManagedIndex:
@@ -165,54 +123,34 @@ class ManagedIndex:
     def __init__(self, assets=(), *, require_same_site=False):
         self.ids = {}
         self.keys = {}
-        self.broad = {}
         self.require_same_site = require_same_site
         for asset in assets:
             self.ids.setdefault(asset.asset_id.casefold(), asset.asset_id)
-            exact, broad = _row_keys(asset)
             site = asset.system_id.casefold() if require_same_site else ""
-            for key in exact:
+            for key in _row_keys(asset):
                 self.keys.setdefault((site, key), []).append(asset.asset_id)
-            # A product-wide row covers only detections observed at its own site.
-            for key in broad:
-                self.broad.setdefault((asset.system_id.casefold(), key), []).append(asset.asset_id)
 
-    def coverage(self, item):
-        """Return (exact, broad) asset IDs that cover a detection item."""
-        exact = []
+    def covering(self, item):
+        found = []
         if asset_id := item.get("asset_id"):
             manual = self.ids.get((asset_id + MANUAL_SUFFIX).casefold())
             if manual:
-                exact.append(manual)
+                found.append(manual)
         site = (item.get("hostname") or "").casefold() if self.require_same_site else ""
         if self.require_same_site and not site:
-            return list(dict.fromkeys(exact)), []
-        exact_keys, broad_keys = _identity_keys(item)
-        for key in exact_keys:
-            exact.extend(self.keys.get((site, key), ()))
-        broad = []
-        observed_site = (item.get("hostname") or "").casefold()
-        for key in broad_keys:
-            broad.extend(self.broad.get((observed_site, key), ()))
-        return list(dict.fromkeys(exact)), list(dict.fromkeys(broad))
-
-    def covering(self, item):
-        exact, broad = self.coverage(item)
-        return list(dict.fromkeys((*exact, *broad)))
+            return found
+        for key in _identity_keys(item):
+            found.extend(self.keys.get((site, key), ()))
+        return list(dict.fromkeys(found))
 
 
 def classify(item, *, snapshots_on, snapshot_ids, managed):
-    """Return (status, asset IDs whose scans cover the product).
-
-    Exact matches take precedence so a version-less row cannot add its wider
-    findings to a detection that already has an exact row.
-    """
-    exact = []
+    """Return (status, asset IDs whose scans cover the product)."""
+    covered = []
     if snapshots_on and item.get("asset_id") in snapshot_ids:
-        exact.append(item["asset_id"])
-    managed_exact, broad = managed.coverage(item)
-    exact.extend(managed_exact)
-    covered = list(dict.fromkeys(exact)) or list(dict.fromkeys(broad))
+        covered.append(item["asset_id"])
+    covered.extend(managed.covering(item))
+    covered = list(dict.fromkeys(covered))
     if covered:
         return "monitored", covered
     if is_service(item):
