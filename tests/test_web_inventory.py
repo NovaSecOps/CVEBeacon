@@ -18,20 +18,21 @@ from cvebeacon.web_assets import save_allowlist
 from cvebeacon.web_inventory import read_web_snapshot
 
 
-def snapshot(directory, *, name="acme", asset_id="web-acme", partial=False):
+def snapshot(directory, *, name="acme", asset_id="web-acme", partial=False, client="Acme", rows=None):
     private_directory(directory, owner_only=True)
     output = directory / (name + ".json")
-    rows = [dict(asset_id=asset_id, vendor="nginx", product="nginx", version="1.26.2", client="Acme")]
+    if rows is None:
+        rows = [dict(asset_id=asset_id, vendor="nginx", product="nginx", version="1.26.2", client=client)]
     timestamp = datetime.now(timezone.utc).isoformat()
     manifest = dict(contract="cvebeacon.inventory.v1", collector="web-detect", collector_version="0.1.0",
                     source_id="web-acme", generated_at=timestamp, observed_at=timestamp,
-                    sha256="", record_count=1,
+                    sha256="", record_count=len(rows),
                     status="partial" if partial else "success", omissions=["blocked"] if partial else [])
     save_allowlist(output, rows)
     # save_allowlist uses a different JSON representation; bind the exact bytes.
     manifest["sha256"] = hashlib.sha256(output.read_bytes()).hexdigest()
     save_allowlist(Path(str(output) + ".manifest.json"), manifest)
-    save_allowlist(Path(str(output) + ".review.json"), {"client": "Acme", "reviews": [{"reason": "blocked"}]})
+    save_allowlist(Path(str(output) + ".review.json"), {"client": client, "reviews": [{"reason": "blocked"}]})
     return output
 
 

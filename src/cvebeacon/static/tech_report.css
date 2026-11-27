@@ -1,0 +1,61 @@
+form.tech-report-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+.tech-report-filters fieldset { min-width: 0; }
+.tech-report-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: var(--space-3);
+}
+.tech-report-fields .field { min-width: 0; }
+.tech-report-filters .field label { max-width: none; }
+.tech-report-filters .tech-report-confidence { margin-block: var(--space-3); }
+.tech-report-confidence label, .tech-report-checkbox {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+  margin-inline-end: var(--space-3);
+}
+.tech-report-filters input[type="checkbox"] { width: 1.1rem; flex: none; }
+.tech-report-filters .tech-report-checkbox { max-width: none; }
+
+.tech-report-table { min-width: 112rem; table-layout: fixed; }
+.tech-report-table th, .tech-report-table td { min-width: 0; overflow-wrap: anywhere; vertical-align: top; }
+.tech-report-table th { white-space: normal; }
+.tech-report-table tbody th {
+  background: inherit;
+  color: var(--text);
+  font-size: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.tech-report-table thead th.tech-report-site { width: 9rem; }
+.tech-report-table thead th.tech-report-name { width: 10rem; }
+.tech-report-table thead th.tech-report-versions { width: 8rem; }
+.tech-report-table thead th.tech-report-confidence-col { width: 7rem; }
+.tech-report-table thead th.tech-report-status { width: 9rem; }
+.tech-report-table thead th.tech-report-window { width: 17rem; }
+.tech-report-table thead th.tech-report-current { width: 6rem; }
+.tech-report-table thead th.tech-report-severity { width: 7rem; }
+.tech-report-table thead th.tech-report-cvss { width: 5rem; }
+.tech-report-table thead th.tech-report-kev { width: 7rem; }
+.tech-report-table thead th.tech-report-exploit { width: 7rem; }
+.tech-report-table thead th.tech-report-epss { width: 6rem; }
+.tech-report-table thead th.tech-report-published { width: 7rem; }
+.tech-report-table thead th.tech-report-found { width: 7rem; }
+.tech-report-cves summary { cursor: pointer; color: var(--accent); }
+.tech-report-cves ul { list-style: none; padding: 0; }
+.tech-report-cves li { border-top: 1px solid var(--border); padding-block: var(--space-2); }
+.tech-report-cves dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 var(--space-2); }
+.tech-report-cves dd { margin: 0; }
+
+/* Printing: drop controls and let the tables use the page width. */
+@media print {
+  .tech-report-filters, .page-header .btn, .tech-report-print-hint { display: none; }
+  .table-wrap { overflow: visible; box-shadow: none; }
+  .tech-report-table { min-width: 0; }
+  .tech-report-cves > summary { list-style: none; }
+}

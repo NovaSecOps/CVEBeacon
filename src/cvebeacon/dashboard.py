@@ -694,6 +694,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     register_config(app, config, host=host)
     from .dashboard_web import create_web_blueprint
     app.register_blueprint(create_web_blueprint(config))
+    from .dashboard_tech_report import create_blueprint as create_tech_report_blueprint
+    app.register_blueprint(create_tech_report_blueprint(config))
     from .dashboard_inventory import create_blueprint as create_inventory_blueprint
     app.register_blueprint(create_inventory_blueprint(config))
     from .dashboard_update import create_blueprint as create_update_blueprint

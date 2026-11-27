@@ -110,7 +110,8 @@
 {% endcall %}
 {% endif %}
 
-{% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.') %}
+{% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.', id='detected-products') %}
+{% if client %}<a class="btn btn-secondary btn-small" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>{% endif %}
 {% if products %}
 {% if managed_warning %}{% call callout('warning') %}<p>{{ managed_warning }}</p>{% endcall %}{% endif %}
 {% if reported_warning %}{% call callout('warning', 'Report marks unavailable') %}<p>{{ reported_warning }}</p>{% endcall %}{% endif %}

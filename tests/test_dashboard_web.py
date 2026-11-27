@@ -782,9 +782,9 @@ def test_detected_product_with_cpe_is_marked_in_inventory(web, monkeypatch):
         "reviews": [],
     }
     web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
-    cpe_asset = Asset("web-cpe-only", vendor="Example", product="Widget",
+    cpe_asset = Asset("web-cpe-only", vendor="Example", product="Widget", client="Acme",
                       cpe="cpe:2.3:a:example:widget:*:*:*:*:*:*:*:*")
-    monkeypatch.setattr(dashboard_web, "read_web_snapshot", lambda path: (
+    monkeypatch.setattr(dashboard_web, "read_web_snapshot", lambda path, *, preserve_client: (
         [cpe_asset], {"generated_at": "2026-11-25T00:00:00Z", "record_count": 1}))
     page = client.get("/web-assets?client=Acme")
     table = (

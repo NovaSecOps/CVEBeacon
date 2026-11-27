@@ -20,6 +20,7 @@ from cvebeacon.watch.users import BOOTSTRAP, UserStore
 
 from test_dashboard_accounts import PASSWORD, csrf, login
 from test_dashboard_web import save
+from test_web_inventory import snapshot
 from watch_support import write_config
 
 PRODUCTS = [
@@ -76,6 +77,13 @@ def seed(env, products=PRODUCTS):
     detail = {"client": "Acme", "products": [dict(item) for item in products], "reviews": []}
     web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
     return client
+
+
+def save_snapshot(config, *asset_ids, client="Acme"):
+    _, output = paths(config, client)
+    rows = [dict(asset_id=asset_id, vendor="nginx", product="nginx", version="1.25.3", client=client)
+            for asset_id in asset_ids]
+    snapshot(output.parent, name=output.stem, client=client, rows=rows)
 
 
 def page(client, **query):
@@ -147,6 +155,7 @@ def test_blank_install_shows_ready_to_add_never_monitored(blank):
 
 
 def test_web_snapshots_on_marks_rows_monitored(snapshots_on):
+    save_snapshot(snapshots_on[0], "w-nginx", "w-lodash")
     client = seed(snapshots_on)
     text = page(client)
     card = products_card(text)
@@ -511,6 +520,7 @@ def test_known_cves_column_for_monitored_unmonitored_and_clear(blank):
 
 def test_known_cves_aggregate_in_the_technology_view_and_one_finding_wording(snapshots_on):
     config = snapshots_on[0]
+    save_snapshot(config, "s1", "s2")
     products = [dict(PRODUCTS[0], asset_id="s1"), dict(PRODUCTS[0], asset_id="s2", hostname="c.example")]
     client = seed(snapshots_on, products)
     record(config, "s1", 5.0)
@@ -522,6 +532,7 @@ def test_known_cves_aggregate_in_the_technology_view_and_one_finding_wording(sna
 
 
 def test_known_cves_lookup_failure_shows_unavailable_and_keeps_the_page(snapshots_on, monkeypatch):
+    save_snapshot(snapshots_on[0], "w-nginx")
     client = seed(snapshots_on)
     from cvebeacon.errors import StateError
 
@@ -530,6 +541,21 @@ def test_known_cves_lookup_failure_shows_unavailable_and_keeps_the_page(snapshot
     monkeypatch.setattr(StateStore, "finding_summary", broken)
     text = page(client)
     assert "Unavailable" in row(products_card(text), "nginx")
+
+
+@pytest.mark.parametrize("has_snapshot", [False, True])
+def test_review_prediction_does_not_provide_snapshot_status_or_known_cves(snapshots_on, has_snapshot):
+    config = snapshots_on[0]
+    if has_snapshot:
+        save_snapshot(config, "w-lodash")
+    client = seed(snapshots_on)
+    record(config, "w-nginx", 9.8)
+    card = products_card(page(client))
+    nginx = row(card, "nginx")
+    assert "Ready to add" in nginx and "Not monitored" in nginx
+    assert "Critical" not in nginx and "1 CVE" not in nginx
+    if has_snapshot:
+        assert "badge-success\">Monitored" in row(card, "Lodash")
 
 
 def test_finding_summary_is_chunked_and_read_only(tmp_path):
