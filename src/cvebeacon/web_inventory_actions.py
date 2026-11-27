@@ -112,7 +112,7 @@ def _row_keys(asset):
         keys.add(("purl", asset.purl))
     if asset.cpe:
         keys.add(("cpe", asset.cpe, asset.version))
-    if asset.vendor and asset.product:
+    if asset.vendor and asset.product and (asset.version or not asset.commit):
         keys.add(("vpv", asset.vendor.casefold(), asset.product.casefold(), asset.version))
     return keys
 

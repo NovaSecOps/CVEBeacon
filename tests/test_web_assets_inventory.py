@@ -241,6 +241,18 @@ def test_a_version_less_detection_with_a_version_less_row_is_monitored(blank):
     assert "Monitored" in row(products_card(page(client)), "Sample")
 
 
+def test_a_commit_row_does_not_cover_a_version_less_detection(blank):
+    config = blank[0]
+    write_managed(config, [Asset(
+        "commit-row", vendor="sample", product="sample", client="Acme",
+        repository="https://example.invalid/sample.git", commit="a" * 40)])
+    detection = dict(asset_id="w-sample", hostname="a.example", vendor="sample", product="sample",
+                     name="Sample", category="framework", categories=["framework"], confidence="high",
+                     versions=[], evidence_types=["header"], inventory=True)
+    client = seed(blank, [detection])
+    assert "Ready to add" in row(products_card(page(client)), "Sample")
+
+
 def test_older_review_files_without_inventory_flag_keep_working(blank):
     old = [{key: value for key, value in item.items() if key != "inventory"} for item in PRODUCTS]
     client = seed(blank, old)
