@@ -145,7 +145,7 @@ def append_snapshots(assets, directory: Path):
     seen = {asset.asset_id.casefold() for asset in assets}
     merged = list(assets)
     for path in sorted(directory.glob("*.json")):
-        if path.name.endswith((".manifest.json", ".review.json")):
+        if path.name.endswith((".manifest.json", ".review.json", ".reported.json")):
             continue
         try:
             rows, manifest = read_web_snapshot(path)

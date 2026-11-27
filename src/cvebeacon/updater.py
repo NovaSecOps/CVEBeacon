@@ -61,6 +61,12 @@ ADVISORY_MARKER_BYTES = b"CVEBeacon update advisory\n"
 _JSON_TOKENS = re.compile(r'\\.|["{}\[\]]', re.DOTALL)
 MAX_REQUEST = 1024
 MAX_ASSETS = 256
+# GitHub returns every asset's metadata with each release, about 2 KB per asset. A
+# release with the full runtime wheelhouse is about 85 KB, so a fixed 512 KiB cap
+# failed once seven releases were published. Allow MAX_ASSETS per release.
+RELEASE_PAGE = 10
+RELEASE_BYTES = 1024 * 1024
+RELEASE_LIST_BYTES = RELEASE_PAGE * RELEASE_BYTES
 MAX_ARTIFACT = 256 * 1024 * 1024
 MAX_TOTAL = 1024 * 1024 * 1024
 PACKAGES = ("cvebeacon", "cvebeacon-extensions", "cvebeacon-automation")
@@ -555,7 +561,7 @@ class Releases:
             raise UpdateError("invalid release repository")
 
     def _api(self, target):
-        suffix = "/tags/v" + quote(target, safe="") if target else "?per_page=30"
+        suffix = "/tags/v" + quote(target, safe="") if target else f"?per_page={RELEASE_PAGE}"
         return "https://api.github.com/repos/" + self.settings.repository + "/releases" + suffix
 
     def _request(self, url, limit, *, api=False):
@@ -575,12 +581,12 @@ class Releases:
             return None
         if target:
             release_version(target)
-        reply = self._request(self._api(target), 512 * 1024, api=True)
+        reply = self._request(self._api(target), RELEASE_BYTES if target else RELEASE_LIST_BYTES, api=True)
         if reply.status_code != 200:
             raise UpdateError("release API check failed")
         payload = _json(reply.body)
         rows = [payload] if target else payload
-        if not isinstance(rows, list) or len(rows) > 30:
+        if not isinstance(rows, list) or len(rows) > RELEASE_PAGE:
             raise UpdateError("invalid release API response")
         candidates = []
         for row in rows:

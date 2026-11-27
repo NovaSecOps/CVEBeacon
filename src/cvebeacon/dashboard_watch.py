@@ -92,10 +92,11 @@ WEB_INVENTORY_REQUEST_BYTES = 512 * 1024
 def register_watch(app, config: AppConfig) -> None:
     """Attach the watch blueprint and its per-application state."""
     from .dashboard_inventory import UPLOAD_REQUEST_BYTES
+    from .web_assets_import import IMPORT_REQUEST_BYTES, ImportFormDataParser
 
     app.config["MAX_CONTENT_LENGTH"] = max(
         int(app.config.get("MAX_CONTENT_LENGTH") or 0), MAX_REQUEST_BYTES, UPLOAD_REQUEST_BYTES,
-        WEB_INVENTORY_REQUEST_BYTES,
+        WEB_INVENTORY_REQUEST_BYTES, IMPORT_REQUEST_BYTES,
     )
 
     def limit_request_body():
@@ -111,10 +112,18 @@ def register_watch(app, config: AppConfig) -> None:
             request.max_content_length = UPLOAD_REQUEST_BYTES
             request.max_form_memory_size = 128 * 1024
             request.max_form_parts = 8
-        elif request.endpoint in {"web.inventory_preview", "web.inventory_save"}:
+        elif request.endpoint in {"web.inventory_preview", "web.inventory_save", "web.reported"}:
             # Up to 2,000 picked products and their typed versions travel as plain form fields.
             request.max_content_length = WEB_INVENTORY_REQUEST_BYTES
             request.max_form_memory_size = WEB_INVENTORY_REQUEST_BYTES
+        elif request.endpoint in {"web.import_preview", "web.import_save"}:
+            # A bounded CSV file or pasted text, carried again as one hidden field on save.
+            if request.mimetype != "multipart/form-data" and (request.mimetype or request.content_length):
+                abort(400)
+            request.max_content_length = IMPORT_REQUEST_BYTES
+            request.max_form_memory_size = IMPORT_REQUEST_BYTES
+            request.max_form_parts = 8
+            request.form_data_parser_class = ImportFormDataParser
         elif request.endpoint == "config_editor.rules" and request.method == "POST":
             # Reject before the shared CSRF guard reads the body.
             if not app.extensions["dashboard_users"].dashboard_accounts():

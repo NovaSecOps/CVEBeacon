@@ -435,6 +435,7 @@ def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> A
         raise ExtensionError(f"at most {MAX_ASSETS} assets are allowed per run")
     current = now or utc_now()
     seen = set()
+    private_by_endpoint = {}
     assets = []
     for index, raw in enumerate(raw_assets):
         if not isinstance(raw, dict):
@@ -465,11 +466,8 @@ def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> A
             raise ExtensionError(f"asset {index} duplicates another allowlist entry")
         seen.add(key)
         allow_private = _boolean(raw, "allow_private_address", False)
-        for previous in assets:
-            if ((previous.endpoint.scheme, previous.endpoint.hostname, previous.endpoint.port)
-                    == (endpoint.scheme, endpoint.hostname, endpoint.port)
-                    and previous.allow_private_address != allow_private):
-                raise ExtensionError(f"asset {index} conflicts with another entry for the same endpoint")
+        if private_by_endpoint.setdefault(key[:3], allow_private) != allow_private:
+            raise ExtensionError(f"asset {index} conflicts with another entry for the same endpoint")
         assets.append(WebAsset(endpoint, authorized_by, authorized_at, expires_at, allow_redirects,
                                max_redirects, allow_private))
     return Allowlist(client, ca_bundle, tuple(assets))

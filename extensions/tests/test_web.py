@@ -451,6 +451,23 @@ def test_allowlist_accepts_hostname_and_url_forms(tmp_path):
     assert loaded.assets[4].max_redirects == 10
 
 
+def test_private_address_setting_must_match_across_paths_on_the_same_endpoint(tmp_path):
+    entries = [
+        asset(hostname="example.com", path="/"),
+        asset(hostname="EXAMPLE.com.", path="/about"),
+        asset(hostname="example.com", path="/about", port=8443, allow_private_address=True),
+        asset(hostname="example.com", path="/about", scheme="http", port=443,
+              allow_private_address=True),
+    ]
+    path = write_allowlist(tmp_path, entries)
+    loaded = load_allowlist(path, client="acme", now=NOW)
+    assert [entry.allow_private_address for entry in loaded.assets] == [False, False, True, True]
+    entries[1]["allow_private_address"] = True
+    write_allowlist(tmp_path, entries)
+    with pytest.raises(ExtensionError, match="asset 1 conflicts with another entry for the same endpoint"):
+        load_allowlist(path, client="acme", now=NOW)
+
+
 @pytest.mark.parametrize("change", [
     {"authorized_by": ""},
     {"authorized_by": None},

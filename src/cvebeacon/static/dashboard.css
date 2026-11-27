@@ -482,24 +482,30 @@ main > table { background: var(--surface); border: 1px solid var(--border); }
 .web-products-table td { min-width: 0; }
 /* Widths follow the header classes, so the optional select column cannot shift them. */
 .web-products-table thead th.web-select-cell { width: 2.75rem; }
-.web-products-table thead th.web-product-cell { width: 30%; }
-.web-products-table thead th.web-version-cell { width: 17%; }
-.web-products-table thead th.web-confidence-cell { width: 11%; }
-.web-products-table thead th.web-cve-cell { width: 16%; }
-.web-products-table thead th.web-evidence-cell { width: 26%; }
+.web-products-table thead th.web-product-cell { width: 24%; }
+.web-products-table thead th.web-version-cell { width: 15%; }
+.web-products-table thead th.web-confidence-cell { width: 12%; }
+.web-products-table thead th.web-cve-cell { width: 14%; }
+.web-products-table thead th.web-reported-cell { width: 15%; }
+.web-products-table thead th.web-evidence-cell { width: 20%; }
 .web-tech-table { min-width: 56rem; table-layout: fixed; }
-.web-tech-table thead th.web-product-cell { width: 26%; }
-.web-tech-table thead th.web-sites-cell { width: 7%; }
-.web-tech-table thead th.web-version-cell { width: 20%; }
-.web-tech-table thead th.web-confidence-cell { width: 11%; }
-.web-tech-table thead th.web-cve-cell { width: 15%; }
-.web-tech-table thead th.web-evidence-cell { width: 21%; }
+.web-tech-table thead th.web-product-cell { width: 22%; }
+.web-tech-table thead th.web-sites-cell { width: 6%; }
+.web-tech-table thead th.web-version-cell { width: 16%; }
+.web-tech-table thead th.web-confidence-cell { width: 12%; }
+.web-tech-table thead th.web-cve-cell { width: 13%; }
+.web-tech-table thead th.web-reported-cell { width: 15%; }
+.web-tech-table thead th.web-evidence-cell { width: 16%; }
 .web-products-table .web-site-group {
   text-transform: none; letter-spacing: normal; color: var(--text); font-size: .9rem;
 }
 .web-product-cell { width: 36%; overflow-wrap: anywhere; }
 .web-version-cell { width: 18%; }
 .web-confidence-cell { width: 18%; }
+.web-reported-cell { overflow-wrap: anywhere; }
+.web-quick-actions { margin-bottom: var(--space-2); }
+.web-quick-form { margin: 0; }
+.web-report-note { max-width: 28rem; }
 .web-version-input { width: 100%; max-width: 12rem; }
 .web-select-cell { width: 1%; }
 .web-evidence-cell { width: 28%; }
