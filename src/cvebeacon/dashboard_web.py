@@ -68,7 +68,7 @@ _CONFIDENCE_CHOICES = ("high", "medium", "low")
 _NO_SITE = "Site not recorded"
 _INVENTORY_UNREADABLE = ("The saved inventory for this client could not be read. "
                          "Open the client's Inventory page to check it.")
-_STATUS_CHOICES = ("monitored", "ready", "review")
+_STATUS_CHOICES = ("monitored", "ready", "review", "service")
 
 
 def _site_label(item):
@@ -542,7 +542,7 @@ def create_web_blueprint(config):
                 item, snapshots_on=snapshots_on, managed=managed)
             item["status_label"] = actions.STATUS_LABELS[item["status"]]
             item["status_badge"] = actions.STATUS_BADGES[item["status"]]
-            item["pickable"] = bool(item.get("asset_id")) and item["status"] != "monitored"
+            item["pickable"] = bool(item.get("asset_id")) and item["status"] not in {"monitored", "service"}
             distinct = list(dict.fromkeys(actions.detected_versions(item)))
             item["prefill"] = distinct[0] if len(distinct) == 1 else ""
         covered = sorted({asset_id for item in products for asset_id in item["covered_ids"]})
@@ -563,7 +563,7 @@ def create_web_blueprint(config):
         flt = _filter_args(request.args, set(categories), set(site_names))
         needle = flt["tech"].casefold()
         chips = dict(high=0, medium=0, low=0, with_version=0, without_version=0,
-                     monitored=0, ready=0, review=0)
+                     monitored=0, ready=0, review=0, service=0)
         matched, technologies, chip_sites = [], set(), set()
         for item in products:
             chip_sites.add(_site_label(item))

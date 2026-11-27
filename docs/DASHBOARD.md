@@ -133,8 +133,10 @@ through the client's inventory or through saved web snapshots when
 usable version but no scan covers it yet. **Needs review** means a person must
 confirm the version first: none was disclosed, several conflict, the version is
 only a label such as `GA4`, or the result is a low-confidence banner or file
-name. Confidence badges read the other way round from severity: High is green
-and Low is amber.
+name. **Third-party service** marks hosted services, analytics tags and CDNs
+with no package or CPE identity: they run elsewhere, so there is no installed
+version to add or scan. Confidence badges read the other way round from
+severity: High is green and Low is amber.
 
 Users with `manage_inventory` can tick products in the **By site** view and
 choose **Add selected to inventory**, typing the version for products that need

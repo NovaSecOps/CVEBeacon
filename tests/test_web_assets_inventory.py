@@ -302,14 +302,23 @@ def test_label_and_generic_versions_need_review_and_generic_rows_name_no_vendor(
     generic = dict(asset_id="w-swiper", hostname="a.example", vendor="banner", product="swiper",
                    name="Swiper", category="js-library", categories=["js-library"], confidence="low",
                    versions=["8.4.5"], evidence_types=["script"], inventory=False)
-    client = seed(blank, [labelled, generic])
+    labelled_service = dict(labelled, asset_id="w-ga-cms", name="Example Analytics CMS", category="cms",
+                            categories=["cms"])
+    client = seed(blank, [labelled, labelled_service, generic])
     card = products_card(page(client))
-    for name, version in (("Google Analytics", "GA4"), ("Swiper", "8.4.5")):
+    for name, version in (("Example Analytics CMS", "GA4"), ("Swiper", "8.4.5")):
         assert "Needs review" in row(card, name)
         assert f'value="{version}" placeholder="Enter version"' in row(card, name)
+    service = row(card, "Google Analytics")
+    assert "Third-party service" in service and 'name="pick"' not in service and "Enter version" not in service
     assert "Not covered by CVE scans yet" not in page(client)
+    assert "Google Analytics" in products_card(page(client, inv="service"))
+    assert "Swiper" not in products_card(page(client, inv="service"))
     everything = preview(client, action="all")
     assert "/web-assets/inventory/save" not in everything.text
+    forged = preview(client, ["w-ga"], {"w-ga": "GA4"})
+    assert "has no installed version to scan" in forged.text
+    assert "/web-assets/inventory/save" not in forged.text
     typed = preview(client, ["w-swiper"], {"w-swiper": "8.4.5"})
     assert save_inventory(client, typed).status_code == 303
     (row_added,) = managed_rows(config)
@@ -555,3 +564,16 @@ def test_markup_has_no_inline_code_and_forms_are_not_nested(blank):
     assert "Add all 2 ready products" in page(client, view="tech")
     assert "switch to By site" in page(client, view="tech")
     assert re.search(r'<label class="visually-hidden" for="ver-\d+">Version of WordPress', site)
+
+
+def test_table_columns_take_widths_from_header_classes_not_positions(blank):
+    client = seed(blank)
+    css = (Path(dashboard_web.__file__).parent / "static" / "dashboard.css").read_text(encoding="utf-8")
+    assert "web-products-table thead th:nth-child" not in css
+    for view, table in (("site", "web-products-table"), ("tech", "web-tech-table")):
+        text = page(client, view=view)
+        head = text.split(f'class="{table}"', 1)[1].split("</thead>", 1)[0]
+        for name in ("web-product-cell", "web-version-cell", "web-confidence-cell", "web-cve-cell",
+                     "web-evidence-cell"):
+            assert f'<th class="{name}"' in head, (view, name)
+            assert f".{table} thead th.{name} {{ width:" in css, (table, name)

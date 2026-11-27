@@ -21,9 +21,12 @@ MANUAL_SUFFIX = "-m"
 GENERIC_VENDORS = frozenset({"banner", "file-name"})
 MAX_PICKS = 2000
 MAX_VERSION = 100
-STATUS_ORDER = {"monitored": 0, "ready": 1, "review": 2}
-STATUS_LABELS = {"monitored": "Monitored", "ready": "Ready to add", "review": "Needs review"}
-STATUS_BADGES = {"monitored": "success", "ready": "info", "review": "warning"}
+STATUS_ORDER = {"monitored": 0, "ready": 1, "review": 2, "service": 3}
+STATUS_LABELS = {"monitored": "Monitored", "ready": "Ready to add", "review": "Needs review",
+                 "service": "Third-party service"}
+STATUS_BADGES = {"monitored": "success", "ready": "info", "review": "warning", "service": "neutral"}
+# Hosted services, analytics and CDNs run elsewhere: there is no installed version to confirm.
+SERVICE_CATEGORIES = frozenset({"hosted-platform", "analytics", "edge"})
 
 
 class RowRefused(ValueError):
@@ -129,7 +132,17 @@ def classify(item, *, snapshots_on, managed):
     covered = list(dict.fromkeys(covered))
     if covered:
         return "monitored", covered
-    return ("ready" if ready_version(item) is not None else "review"), []
+    if ready_version(item) is not None:
+        return "ready", []
+    if is_service(item):
+        return "service", []
+    return "review", []
+
+
+def is_service(item):
+    """A third-party service with no package or CPE identity, such as an analytics tag."""
+    return (item.get("category") in SERVICE_CATEGORIES and not item.get("package")
+            and not item.get("cpe"))
 
 
 def best_status(statuses):
@@ -198,6 +211,9 @@ def plan_rows(products, picks, versions, client, *, snapshots_on, managed, every
         status, _ = classify(item, snapshots_on=snapshots_on, managed=managed)
         if status == "monitored":
             skipped.append((label, "Already monitored."))
+            continue
+        if status == "service":
+            skipped.append((label, "A third-party service has no installed version to scan."))
             continue
         try:
             version = ready_version(item) if status == "ready" else typed_version(versions.get(asset_id, ""))
