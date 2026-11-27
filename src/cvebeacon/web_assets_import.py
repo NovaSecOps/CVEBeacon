@@ -13,7 +13,10 @@ import io
 import ipaddress
 import json
 import re
+import secrets
 import socket
+from threading import Lock
+from time import monotonic
 from urllib.parse import urlsplit
 
 from flask import abort, current_app, g, redirect, render_template, request, send_file, url_for
@@ -24,12 +27,14 @@ from .errors import CVEBeaconError, ConfigurationError
 from .locking import OperationLock, RunInProgress
 from .publication import PublicationTimeout
 from . import web_assets
-from .web_assets import client_label, paths, read_allowlist, save_allowlist
+from .web_assets import client_key, client_label, paths, read_allowlist, save_allowlist
 from .web_inventory import read_bytes
 
 MAX_ROWS = 1000
 MAX_ASSETS = 1000
 MAX_IMPORT_BYTES = 256 * 1024
+PREVIEW_TTL = 15 * 60
+MAX_PREVIEWS = 32
 # Posted text travels as a form field and may grow when percent-encoded.
 IMPORT_REQUEST_BYTES = 1024 * 1024
 TEMPLATE_FIELDS = ("hostname", "scheme", "port", "path", "allow_redirects", "max_redirects",
@@ -51,6 +56,35 @@ CHANGED = "This list changed; review the import again."
 
 class ImportRefused(ConfigurationError):
     """The whole input is refused; the message is safe to show."""
+
+
+class PendingPreviews:
+    """Keep session-bound confirmations in bounded memory under the caller's lock."""
+
+    def __init__(self):
+        self.lock = Lock()
+        self.items = {}
+
+    def add(self, binding):
+        now = monotonic()
+        for token, (expires, _) in list(self.items.items()):
+            if expires <= now:
+                del self.items[token]
+        if len(self.items) >= MAX_PREVIEWS:
+            del self.items[next(iter(self.items))]
+        token = secrets.token_urlsafe(24)
+        self.items[token] = (now + PREVIEW_TTL, binding)
+        return token
+
+    def require(self, token, binding):
+        item = self.items.get(token)
+        if item is not None:
+            expires, expected = item
+            if expires <= monotonic():
+                del self.items[token]
+            elif expected == binding:
+                return item
+        raise ConfigurationError(CHANGED)
 
 
 def template_csv():
@@ -310,6 +344,8 @@ def register(blueprint, config, render):
     """Add the import routes to the Web assets blueprint."""
     from . import dashboard_web
 
+    previews = PendingPreviews()
+
     @blueprint.get("/import-template")
     @requires("view")
     def import_template():
@@ -353,10 +389,21 @@ def register(blueprint, config, render):
                 dashboard_web.validate_allowlist(config, path, candidate)
         except (CVEBeaconError, ValueError, OSError) as exc:
             return render(client, error=_message(exc, "The import could not be checked"), status=400)
+        users = current_app.extensions["dashboard_users"]
+        rows_digest = digest(to_add)
+        preview_token = ""
+        with previews.lock, users.transaction() as db:
+            try:
+                users.require_permission_in(db, g.entry.proof, "manage_web_assets")
+            except ConfigurationError:
+                abort(403)
+            if to_add:
+                preview_token = previews.add((g.sid, client_key(client), version, rows_digest))
         counts = {name: sum(1 for row in rows if row["status"] == name) for name in STATUS_LABELS}
         return render_template(
             "web_assets_import.html", client=client, rows=rows, counts=counts, unknown=unknown,
-            version=version, digest=digest(to_add), import_text=text, add_count=len(to_add),
+            version=version, digest=rows_digest, preview_token=preview_token,
+            import_text=text, add_count=len(to_add),
             private_count=sum(1 for entry in to_add if entry["allow_private_address"]),
             status_labels=STATUS_LABELS, status_badges=STATUS_BADGES, display_url=display_url,
             available=web_assets.companion_available()), 200
@@ -367,6 +414,7 @@ def register(blueprint, config, render):
         client = client_from_form()
         version_in = _text(request.form, "version", required=True, limit=64)
         digest_in = _text(request.form, "digest", required=True, limit=64)
+        token = _text(request.form, "preview_token", required=True, limit=64)
         if _text(request.form, "attest") != "yes":
             return render(client, error="Attest authorisation before importing these sites", status=400)
         lock = OperationLock(config, "web-assets")
@@ -382,8 +430,12 @@ def register(blueprint, config, render):
                     raise ConfigurationError(CHANGED)
                 stamp_now = datetime.now(timezone.utc)
                 _, to_add, _ = plan(text, current["assets"], stamp_now)
-                if not to_add or digest(to_add) != digest_in:
+                rows_digest = digest(to_add)
+                if not to_add or rows_digest != digest_in:
                     raise ConfigurationError(CHANGED)
+                binding = (g.sid, client_key(client), version, rows_digest)
+                with previews.lock:
+                    previews.require(token, binding)
                 if (sum(1 for entry in to_add if entry["allow_private_address"])
                         and _text(request.form, "attest_private") != "yes"):
                     raise ConfigurationError(
@@ -399,30 +451,36 @@ def register(blueprint, config, render):
                 users = current_app.extensions["dashboard_users"]
                 original = read_bytes(path) if path.exists() or path.is_symlink() else None
                 writing = False
-                try:
-                    with users.transaction() as db:
-                        actor = users.require_permission_in(db, g.entry.proof, "manage_web_assets")
-                        stamp = datetime.now(timezone.utc).isoformat()
+                with previews.lock:
+                    try:
+                        with users.transaction() as db:
+                            actor = users.require_permission_in(db, g.entry.proof, "manage_web_assets")
+                            pending = previews.require(token, binding)
+                            stamp = datetime.now(timezone.utc).isoformat()
 
-                        def audit(name, detail):
-                            if len(detail) > 1024 or any(ord(char) < 32 for char in detail):
-                                raise ConfigurationError("invalid audit detail")
-                            users._append_audit(db, name + ":" + detail, actor.username, stamp,
-                                                actor=actor.username)
+                            def audit(name, detail):
+                                if len(detail) > 1024 or any(ord(char) < 32 for char in detail):
+                                    raise ConfigurationError("invalid audit detail")
+                                users._append_audit(db, name + ":" + detail, actor.username, stamp,
+                                                    actor=actor.username)
 
-                        for entry in to_add:
-                            audit("web_asset_add", dashboard_web._audit_detail(client, entry["hostname"]))
-                        audit("web_asset_import", json.dumps(
-                            {"client": client, "count": len(to_add)}, ensure_ascii=False))
-                        writing = True
-                        save_allowlist(path, candidate)
-                except BaseException:
-                    if writing:
-                        if original is None:
-                            path.unlink(missing_ok=True)
-                        else:
-                            web_assets.replace_bytes(path, original)
-                    raise
+                            for entry in to_add:
+                                audit("web_asset_add", dashboard_web._audit_detail(client, entry["hostname"]))
+                            audit("web_asset_import", json.dumps(
+                                {"client": client, "count": len(to_add)}, ensure_ascii=False))
+                            writing = True
+                            save_allowlist(path, candidate)
+                            del previews.items[token]
+                    except BaseException:
+                        if writing:
+                            if original is None:
+                                path.unlink(missing_ok=True)
+                            else:
+                                web_assets.replace_bytes(path, original)
+                            # Publication consumes the token only on success. If the
+                            # audit commit failed, restore it with its original expiry.
+                            previews.items[token] = pending
+                        raise
             except (CVEBeaconError, ValueError, OSError) as exc:
                 return render(client, error=_message(exc, "The sites could not be imported"), status=400)
         finally:

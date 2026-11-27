@@ -329,6 +329,101 @@ def test_tampered_text_or_digest_writes_nothing(web):
     assert not paths(config, "Acme")[0].exists()
 
 
+@pytest.mark.parametrize("token", [None, "unknown"])
+def test_missing_or_unknown_preview_token_writes_nothing(web, token):
+    config, _, _, client = web
+
+    def mutate(data):
+        if token is None:
+            data.pop("preview_token", None)
+        else:
+            data["preview_token"] = token
+
+    assert do_import(client, "hostname\na.example.com\n", mutate=mutate).status_code == 400
+    assert not paths(config, "Acme")[0].exists()
+
+
+def test_replacing_rows_and_digest_together_is_refused(web):
+    config, _, _, client = web
+    original = preview(client, "hostname\na.example.com\n")
+    changed = preview(client, "hostname,allow_private_address\nb.example.com,yes\n")
+    assert original.status_code == changed.status_code == 200
+    data, replacement = fields(original.text), fields(changed.text)
+    data.update(csv_text=replacement["csv_text"], digest=replacement["digest"],
+                csrf=csrf(client), attest="yes", attest_private="yes")
+    response = client.post("/web-assets/import/save", data=data)
+    assert response.status_code == 400 and imp.CHANGED in response.text
+    assert not paths(config, "Acme")[0].exists()
+
+
+def test_preview_is_bound_to_the_canonical_client(web):
+    config, _, _, client = web
+    name = "Other Client"
+    response = do_import(client, "hostname\na.example.com\n", mutate=lambda d: d.update(client=name))
+    assert response.status_code == 400 and imp.CHANGED in response.text
+    assert not paths(config, name)[0].exists()
+    assert do_import(client, "hostname\na.example.com\n", mutate=lambda d: d.update(client="acme")).status_code == 303
+    assert [a["hostname"] for a in saved(config)] == ["a.example.com"]
+
+
+def test_preview_is_bound_to_the_signed_in_session(web):
+    config, users, app, client = web
+    grant(users, {"view", "manage_web_assets"})
+    page = preview(client, "hostname\na.example.com\n")
+    assert page.status_code == 200
+    data = fields(page.text)
+    other = app.test_client()
+    login(other, "reader")
+    response = other.post("/web-assets/import/save", data={**data, "csrf": csrf(other), "attest": "yes"})
+    assert response.status_code == 400 and imp.CHANGED in response.text
+    assert not paths(config, "Acme")[0].exists()
+
+
+def test_preview_cannot_be_replayed_after_restoring_allowlist(web):
+    config, users, _, client = web
+    assert save(client, hostname="keep.example.com").status_code == 303
+    path = paths(config, "Acme")[0]
+    original = path.read_bytes()
+    page = preview(client, "hostname\na.example.com\n")
+    assert page.status_code == 200
+    data = {**fields(page.text), "csrf": csrf(client), "attest": "yes"}
+    assert client.post("/web-assets/import/save", data=data).status_code == 303
+    web_assets.replace_bytes(path, original)
+    audit = users.audit_entries()
+    response = client.post("/web-assets/import/save", data=data)
+    assert response.status_code == 400 and imp.CHANGED in response.text
+    assert path.read_bytes() == original and users.audit_entries() == audit
+
+
+def test_expired_preview_cannot_be_saved(web, monkeypatch):
+    config, _, _, client = web
+    clock = [100.0]
+    monkeypatch.setattr(imp, "monotonic", lambda: clock[0], raising=False)
+    page = preview(client, "hostname\na.example.com\n")
+    assert page.status_code == 200
+    clock[0] += 901
+    response = client.post("/web-assets/import/save", data={**fields(page.text), "csrf": csrf(client), "attest": "yes"})
+    assert response.status_code == 400 and imp.CHANGED in response.text
+    assert not paths(config, "Acme")[0].exists()
+
+
+def test_permission_revoked_during_preview_is_refused(web, monkeypatch):
+    config, users, _, client = web
+    grant(users, {"view", "manage_web_assets"})
+    login(client, "reader")
+    proof = users.authenticate("admin", PASSWORD)
+    validate = dashboard_web.validate_allowlist
+
+    def revoke(*args):
+        validate(*args)
+        users.save_role("web-editor", {"view"}, authorization=proof)
+
+    monkeypatch.setattr(dashboard_web, "validate_allowlist", revoke)
+    response = preview(client, "hostname\na.example.com\n")
+    assert response.status_code == 403 and "Save 1 site" not in response.text
+    assert not paths(config, "Acme")[0].exists()
+
+
 def test_busy_lock_gives_409_and_no_write(web):
     config, users, _, client = web
     page = preview(client, "hostname\na.example.com\n")
@@ -379,6 +474,8 @@ def test_write_failure_rolls_back(web, monkeypatch):
     assert client.post("/web-assets/import/save", data=data).status_code == 400
     assert paths(config, "Acme")[0].read_bytes() == before
     assert not any("a.example.com" in e.action for e in users.audit_entries())
+    monkeypatch.setattr(imp, "save_allowlist", real)
+    assert client.post("/web-assets/import/save", data=data).status_code == 303
 
 
 def test_new_client_name_creates_allowlist(web):
