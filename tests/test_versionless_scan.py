@@ -1,10 +1,13 @@
 """Version-less inventory rows are scanned conservatively across all versions."""
 
+import httpx
+
 from cvebeacon.applicability import VERSION_UNKNOWN_REASON, known_version, wildcard_cpe_version
-from cvebeacon.config import AppConfig, InventoryConfig, SourceConfig
+from cvebeacon.config import AppConfig, HttpConfig, InventoryConfig, SourceConfig
 from cvebeacon.engine import QueryEngine
+from cvebeacon.http import HttpClient
 from cvebeacon.models import Applicability as A, Asset, Evidence, HealthStatus as H, Vulnerability
-from cvebeacon.sources.nvd import CPECandidate
+from cvebeacon.sources.nvd import CPECandidate, NVDSource, NVDResult
 from cvebeacon.sources.osv import OSVResult
 
 from test_osv import record
@@ -24,7 +27,25 @@ def nvd_evidence(cpe):
     }]})
 
 
-def test_versionless_product_scan_uses_a_wildcard_cpe_and_needs_review(tmp_path):
+def nvd_record(identifier, cpe, *, vulnerable=True):
+    return {"id": identifier, "descriptions": [{"lang": "en", "value": "test"}],
+            "configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [
+                {"vulnerable": vulnerable, "criteria": cpe}]}]}]}
+
+
+def recording_engine(tmp_path, handler):
+    settings = SourceConfig(nvd_enabled=True, cve_enabled=False, euvd_enabled=False,
+                            cisa_kev_enabled=False, eu_kev_enabled=False, epss_enabled=False,
+                            minimum_request_interval=0)
+    settings = AppConfig(tmp_path / "c.toml", InventoryConfig(tmp_path / "i.csv"),
+                         tmp_path / "s.db", tmp_path, sources=settings)
+    http = HttpClient(HttpConfig(retries=0),
+                      client=httpx.Client(transport=httpx.MockTransport(handler)),
+                      sleep=lambda _: None)
+    return QueryEngine(settings, http=http), http
+
+
+def test_versionless_product_scan_uses_a_product_wide_lookup_and_needs_review(tmp_path):
     php = Asset("php", vendor="php", product="php")
     cpe = "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"
     with QueryEngine(config(tmp_path, nvd=True, catalog=True)) as engine:
@@ -35,14 +56,14 @@ def test_versionless_product_scan_uses_a_wildcard_cpe_and_needs_review(tmp_path)
             Evidence("cve_list", "cna", "test", details={"affected": []}),)
         calls = []
 
-        def vulnerabilities(*, cpe_name, limit=None):
-            calls.append((cpe_name, limit))
-            return [(Vulnerability("CVE-2025-0001"), nvd_evidence(cpe))]
+        def vulnerabilities(**kwargs):
+            calls.append(kwargs)
+            return NVDResult(((Vulnerability("CVE-2025-0001"), nvd_evidence(cpe)),))
 
         engine.nvd.vulnerabilities = vulnerabilities
         result = engine.query_asset(php)
 
-    assert calls == [(cpe, 2000)]
+    assert calls == [{"virtual_match": cpe, "limit": 2000}]
     finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2025-0001")
     assert len(result.findings) == 2
     assert finding.applicability is A.NEEDS_REVIEW
@@ -64,14 +85,80 @@ def test_versionless_product_scan_reports_a_truncated_nvd_result(tmp_path):
             (Vulnerability("CVE-2025-0002"), Evidence("euvd", "enrichment", "test"))]
         engine._official_evidence = lambda identifier: (
             Evidence("cve_list", "cna", "test", details={"affected": []}),)
-        engine.nvd.truncated = True
-        engine.nvd.vulnerabilities = lambda **kwargs: [
-            (Vulnerability("CVE-2025-0001"), nvd_evidence(cpe))]
+        engine.nvd.vulnerabilities = lambda **kwargs: NVDResult(
+            ((Vulnerability("CVE-2025-0001"), nvd_evidence(cpe)),), True)
         result = engine.query_asset(php)
 
     assert result.coverage is A.COVERAGE_UNKNOWN
     assert any(health.source == "nvd" and health.status is H.DEGRADED
                and "result limit reached" in health.message for health in result.source_health)
+
+
+def test_nvd_product_wide_request_parameters_and_prerequisite_filter(tmp_path):
+    wildcard = "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"
+    exact = "cpe:2.3:a:php:php:8.3.0:*:*:*:*:*:*:*"
+    params = []
+
+    def handler(request):
+        values = dict(request.url.params)
+        params.append(values)
+        if "virtualMatchString" in values:
+            return httpx.Response(200, json={
+                "startIndex": 0, "resultsPerPage": 2, "totalResults": 2,
+                "vulnerabilities": [
+                    {"cve": nvd_record("CVE-2026-0001", wildcard)},
+                    {"cve": nvd_record("CVE-2026-0002", wildcard, vulnerable=False)},
+                ]})
+        return httpx.Response(200, json={
+            "startIndex": 0, "resultsPerPage": 1, "totalResults": 1,
+            "vulnerabilities": [{"cve": nvd_record("CVE-2026-0003", exact)}]})
+
+    engine, http = recording_engine(tmp_path, handler)
+    try:
+        engine.nvd.resolve_cpes = lambda asset: [CPECandidate(wildcard, "", "a", "php", "php")]
+        versionless = engine.query_asset(Asset("php", vendor="php", product="php"))
+        versioned = engine.query_asset(Asset("php-830", vendor="php", product="php",
+                                             version="8.3.0", cpe=wildcard))
+    finally:
+        http.close()
+
+    assert params == [
+        {"virtualMatchString": wildcard, "startIndex": "0", "resultsPerPage": "2000"},
+        {"cpeName": exact, "isVulnerable": "", "startIndex": "0", "resultsPerPage": "2000"},
+    ]
+    assert [item.vulnerability.cve_id for item in versionless.findings] == ["CVE-2026-0001"]
+    only = versionless.findings[0]
+    assert only.applicability is A.NEEDS_REVIEW and only.reason == VERSION_UNKNOWN_REASON
+    assert all("exact CPE name" not in item.statement for item in only.evidence if item.source == "nvd")
+    assert [item.vulnerability.cve_id for item in versioned.findings] == ["CVE-2026-0003"]
+    assert versioned.findings[0].applicability is A.AFFECTED
+
+
+def test_nvd_product_wide_2001_total_stops_after_one_request(tmp_path):
+    cpe = "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"
+    calls = []
+
+    def handler(request):
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json={
+            "startIndex": 0, "resultsPerPage": 2000, "totalResults": 2001,
+            "vulnerabilities": [{"cve": {"id": f"CVE-2026-{number:04d}"}}
+                                for number in range(1, 2001)]})
+
+    engine, http = recording_engine(tmp_path, handler)
+    try:
+        engine.nvd.resolve_cpes = lambda asset: [CPECandidate(cpe, "", "a", "php", "php")]
+        result = engine.query_asset(Asset("php", vendor="php", product="php"))
+    finally:
+        http.close()
+
+    assert len(calls) == 1 and calls[0]["virtualMatchString"] == cpe
+    assert "cpeName" not in calls[0] and "isVulnerable" not in calls[0]
+    assert len(result.findings) == 2000
+    assert result.coverage is A.COVERAGE_UNKNOWN
+    assert any(health.source == "nvd" and health.status is H.DEGRADED
+               and "result limit reached after 2000 CVEs" in health.message
+               for health in result.source_health)
 
 
 def test_versionless_package_scan_queries_osv_without_a_version(tmp_path):

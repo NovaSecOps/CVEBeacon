@@ -134,7 +134,7 @@ def test_nvd_pagination_uses_reported_offsets():
             identifier = "CVE-2026-0001" if start == 0 else "CVE-2026-0002"
             return {"startIndex": start, "resultsPerPage": 1, "totalResults": 2, "vulnerabilities": [{"cve": {"id": identifier}}]}
     http = FakeHttp(); source = NVDSource(http, interval=0)
-    assert len(source.vulnerabilities(cpe_name="cpe:2.3:a:a:b:1:*:*:*:*:*:*:*")) == 2
+    assert len(source.vulnerabilities(cpe_name="cpe:2.3:a:a:b:1:*:*:*:*:*:*:*").records) == 2
     assert http.starts == [0, 1]
 
 
@@ -143,13 +143,38 @@ def test_nvd_product_wide_lookup_stops_at_the_result_limit():
         def __init__(self): self.calls = 0
         def get_json(self, url, **kwargs):
             self.calls += 1
+            assert "virtualMatchString" in kwargs["params"] and "cpeName" not in kwargs["params"]
             return {"startIndex": 0, "resultsPerPage": 2, "totalResults": 5, "vulnerabilities": [
                 {"cve": {"id": "CVE-2026-0001"}}, {"cve": {"id": "CVE-2026-0002"}}]}
 
     http = FakeHttp()
     source = NVDSource(http, interval=0)
-    found = source.vulnerabilities(cpe_name="cpe:2.3:a:a:b:*:*:*:*:*:*:*:*", limit=2)
-    assert len(found) == 2 and source.truncated is True and http.calls == 1
+    found = source.vulnerabilities(virtual_match="cpe:2.3:a:a:b:*:*:*:*:*:*:*:*", limit=2)
+    assert len(found.records) == 2 and found.truncated is True and http.calls == 1
+
+
+def test_nvd_product_wide_short_pages_advance_by_the_returned_count():
+    class FakeHttp:
+        def __init__(self):
+            self.starts = []
+            self.pages = [
+                {"startIndex": 0, "resultsPerPage": 500, "totalResults": 1200,
+                 "vulnerabilities": [{"cve": {"id": f"CVE-2026-{n:04d}"}} for n in range(1, 501)]},
+                {"startIndex": 500, "resultsPerPage": 500, "totalResults": 1200,
+                 "vulnerabilities": [{"cve": {"id": f"CVE-2026-{n:04d}"}} for n in range(501, 1001)]},
+                {"startIndex": 1000, "resultsPerPage": 200, "totalResults": 1200,
+                 "vulnerabilities": [{"cve": {"id": f"CVE-2026-{n:04d}"}} for n in range(1001, 1201)]},
+            ]
+
+        def get_json(self, url, **kwargs):
+            self.starts.append(kwargs["params"]["startIndex"])
+            return self.pages.pop(0)
+
+    http = FakeHttp()
+    found = NVDSource(http, interval=0).vulnerabilities(
+        virtual_match="cpe:2.3:a:a:b:*:*:*:*:*:*:*:*", limit=2000)
+    assert len(found.records) == 1200 and found.truncated is False
+    assert http.starts == [0, 500, 1000]
 
 
 def test_malformed_success_response_is_a_source_failure():

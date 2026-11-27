@@ -7,7 +7,8 @@ from dataclasses import replace
 from typing import Iterable
 
 from .applicability import (Decision, VERSION_UNKNOWN_REASON, evaluate_cve_evidence, evaluate_nvd_evidence,
-                            exact_cpe_version, identity_text, known_version, wildcard_cpe_version)
+                            exact_cpe_version, identity_text, known_version, nvd_prerequisite_only,
+                            wildcard_cpe_version)
 from .config import AppConfig
 from .errors import SourceError
 from .http import HttpClient
@@ -143,15 +144,18 @@ class QueryEngine:
             try:
                 cpe, resolution = self._resolve_cpe(asset)
                 if cpe:
-                    for vuln, item in self.nvd.vulnerabilities(
-                            cpe_name=cpe, limit=None if version_known else MAX_WILDCARD_RESULTS):
+                    data = (self.nvd.vulnerabilities(cpe_name=cpe) if version_known
+                            else self.nvd.vulnerabilities(virtual_match=cpe, limit=MAX_WILDCARD_RESULTS))
+                    for vuln, item in data.records:
+                        if not version_known and nvd_prerequisite_only(cpe, item):
+                            continue
                         claims[vuln.cve_id].append(vuln)
                         evidence[vuln.cve_id].append(item)
                         decisions[vuln.cve_id].append(
                             evaluate_nvd_evidence(cpe, item) if version_known
                             else Decision(Applicability.NEEDS_REVIEW, VERSION_UNKNOWN_REASON))
                         nvd_ids.add(vuln.cve_id)
-                    if getattr(self.nvd, "truncated", False):
+                    if data.truncated:
                         health.append(now_health(
                             "nvd", HealthStatus.DEGRADED,
                             f"{resolution}; result limit reached after {len(nvd_ids)} CVEs"))
