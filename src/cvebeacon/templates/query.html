@@ -21,7 +21,7 @@
 {% if result.coverage %}{% call callout('warning', 'Coverage was incomplete') %}<p>{{ applicability_badge(result.coverage) }}</p><p>{{ result.coverage_reason or 'Some sources could not be checked, so the coverage of this query is unknown.' }}</p><p>This is not proof that the software is unaffected.</p>{% endcall %}{% endif %}
 {% for f in result.findings %}<section>
 <h3>{{ f.vulnerability.advisory_id or f.vulnerability.cve_id }}</h3>
-{{ finding_detail(f) }}
+{{ finding_detail(f, vulncheck_on) }}
 </section>{% if not loop.last %}<hr>{% endif %}{% else %}
 {{ empty_state('No advisories returned', 'This is not proof of complete vulnerability coverage. Check the source observations below and try again when more sources are available.') }}
 {% endfor %}

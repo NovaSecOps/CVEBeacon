@@ -115,7 +115,7 @@ def _choice(args, key, choices, default="", limit=32):
     return value if value in choices else default
 
 
-def read_filters(args, sites, categories):
+def read_filters(args, sites, categories, *, vulncheck=False):
     # A hidden field distinguishes an unchecked checkbox from the initial GET.
     marker = args.getlist("filters")
     if marker and marker != ["1"]:
@@ -130,7 +130,9 @@ def read_filters(args, sites, categories):
         "conf": chosen or list(CONFIDENCE_CHOICES),
         "status": _choice(args, "status", actions.STATUS_LABELS, "any"),
         "severity": _choice(args, "severity", SEVERITIES[2:], "any"),
-        "kev": _choice(args, "kev", ("cisa", "eu", "vulncheck", "either"), "any"),
+        "kev": _choice(args, "kev",
+                       ("cisa", "eu", "vulncheck", "either") if vulncheck else ("cisa", "eu", "either"),
+                       "any"),
         "exploited": _choice(args, "exploited", ("active", "poc"), "any"),
         "show_empty": _choice(args, "show_empty", ("0", "1"),
                               "0" if marker else "1") == "1",
@@ -425,7 +427,8 @@ def build_report(config, client, args, *, export=False, now=None):
         technologies = []
     sites = sorted({row["site"] for row in technologies}, key=str.casefold)
     categories = sorted({category for row in technologies for category in row["categories"]}, key=str.casefold)
-    filters = read_filters(args, sites, categories)
+    vulncheck_on = bool(getattr(config, "vulncheck_active", lambda: False)())
+    filters = read_filters(args, sites, categories, vulncheck=vulncheck_on)
     selected = [row for row in technologies if _technology_matches(row, filters)]
     unmonitored = sum(row["status"] != "monitored" for row in selected)
     asset_ids = sorted({asset_id for row in selected for asset_id in row["covered_ids"]})
@@ -477,8 +480,17 @@ def build_report(config, client, args, *, export=False, now=None):
                                           for cve in retained)
                 retained_cves += len(retained)
                 cves_capped |= capped
+    if not vulncheck_on:
+        for row in rows:
+            row.pop("vulncheck_kev", None)
+            for cve in row["cves"]:
+                cve.pop("vulncheck_kev", None)
+                cve.pop("vulncheck_date_added", None)
+    summary_keys = ("sites", "cisa_kev", "eu_kev", "active")
+    if vulncheck_on:
+        summary_keys = ("sites", "cisa_kev", "eu_kev", "vulncheck_kev", "active")
     summary = {
-        **{key: len(chip_sets[key]) for key in ("sites", "cisa_kev", "eu_kev", "vulncheck_kev", "active")},
+        **{key: len(chip_sets[key]) for key in summary_keys},
         "cves": len(severities),
         "critical": sum(rank == SEVERITIES.index("critical") for rank in severities.values()),
         "high": sum(rank == SEVERITIES.index("high") for rank in severities.values()),

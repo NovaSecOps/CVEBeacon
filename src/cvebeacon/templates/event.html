@@ -22,6 +22,6 @@
 {% endcall %}
 
 {% call card('Finding at that time', 'The evidence and assessment stored with this event.') %}
-{{ finding_detail(event.finding) }}
+{{ finding_detail(event.finding, vulncheck_on) }}
 {% endcall %}
 {% endblock %}

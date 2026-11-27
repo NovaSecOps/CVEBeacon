@@ -88,7 +88,7 @@
         {{ select('category', 'Category', report.categories, filters.category, 'All categories') }}
         {{ select('status', 'Status', [('any', 'Any status')] + (status_labels.items() | list), filters.status) }}
         {{ select('severity', 'Minimum severity', severities, filters.severity) }}
-        {{ select('kev', 'KEV only', [('any', 'Any'), ('cisa', 'CISA'), ('eu', 'EU'), ('vulncheck', 'VulnCheck'), ('either', 'Any catalog')], filters.kev) }}
+        {{ select('kev', 'KEV only', [('any', 'Any'), ('cisa', 'CISA'), ('eu', 'EU')] + ([('vulncheck', 'VulnCheck')] if vulncheck_on else []) + [('either', 'Any catalog')], filters.kev) }}
         {{ select('exploited', 'Exploited only', [('any', 'Any'), ('active', 'Active'), ('poc', 'Active or PoC')], filters.exploited) }}
       </div>
       <fieldset class="tech-report-confidence">
@@ -119,7 +119,7 @@
   {% for key, label in [('technologies', 'Technology rows'), ('sites', 'Sites'),
       ('monitored', 'Monitored'), ('unmonitored', 'Not monitored'), ('cves', 'CVEs in window'),
       ('critical', 'Critical'), ('high', 'High'), ('cisa_kev', 'CISA KEV'),
-      ('eu_kev', 'EU KEV'), ('vulncheck_kev', 'VulnCheck KEV'), ('active', 'Actively exploited')] %}
+      ('eu_kev', 'EU KEV')] + ([('vulncheck_kev', 'VulnCheck KEV')] if vulncheck_on else []) + [('active', 'Actively exploited')] %}
   <li>{{ badge(label ~ ' · ' ~ summary[key]) }}</li>
   {% endfor %}
 </ul>
@@ -180,7 +180,7 @@
                 <dt>Applicability</dt><dd>{{ cve.applicability | replace('_', ' ') | capitalize if cve.applicability else 'Unknown' }}</dd>
                 <dt>CVSS</dt><dd>{{ score(cve.cvss_score) }}</dd>
                 <dt>EPSS</dt><dd>{{ percentage(cve.epss_score) }}</dd>
-                <dt>KEV</dt><dd>{{ kev(cve.cisa_kev, cve.eu_kev, cve.vulncheck_kev) }}</dd>
+                <dt>KEV</dt><dd>{{ kev(cve.cisa_kev, cve.eu_kev, cve.vulncheck_kev if vulncheck_on else none) }}</dd>
                 <dt>Exploitation</dt><dd>{{ exploit(cve.exploitation, cve.exploitation_sources) }}</dd>
                 <dt>Published</dt><dd>{{ day(cve.published) }}</dd>
                 <dt>First found</dt><dd>{{ day(cve.first_seen) }}</dd>
@@ -196,7 +196,7 @@
       <td>{{ row.current_count if row.current_count is not none else 'Unavailable' }}</td>
       <td>{{ severity_badge(row.severity) }}</td>
       <td>{{ score(row.max_cvss) }}</td>
-      <td>{{ kev(row.cisa_kev, row.eu_kev, row.vulncheck_kev) }}</td>
+      <td>{{ kev(row.cisa_kev, row.eu_kev, row.vulncheck_kev if vulncheck_on else none) }}</td>
       <td>{{ exploit(row.exploitation) }}</td>
       <td>{{ percentage(row.max_epss) }}</td>
       <td>{{ day(row.newest_published) }}</td>

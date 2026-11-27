@@ -261,6 +261,13 @@ class AppConfig:
             self.sources.vulncheck_api_key_env, self.sources.vulncheck_api_key_file
         )
 
+    def vulncheck_active(self) -> bool:
+        """Whether the effective scan and display state has a usable token."""
+        return bool(self.sources.vulncheck_enabled and self.vulncheck_api_key())
+
+    def cvedb_active(self) -> bool:
+        return bool(self.sources.shodan_cvedb_enabled)
+
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:
     value = data.get(key, {})

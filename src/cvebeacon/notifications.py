@@ -28,7 +28,7 @@ class AlertItem:
     vulncheck_kev: bool = False
 
 
-def alert_items(rows: Iterable[Mapping[str, Any]]) -> list[AlertItem]:
+def alert_items(rows: Iterable[Mapping[str, Any]], *, vulncheck: bool = False) -> list[AlertItem]:
     output = []
     for row in rows:
         payload = json.loads(str(row["payload_json"]))
@@ -37,7 +37,7 @@ def alert_items(rows: Iterable[Mapping[str, Any]]) -> list[AlertItem]:
             int(row["event_id"]), str(row["asset_id"]), str(row["cve_id"]), str(row["event_type"]),
             str(payload["applicability"]), vuln.get("cvss_score"), bool(vuln.get("cisa_kev")), bool(vuln.get("eu_kev")),
             *(str(payload.get("asset", {}).get(key, "")) for key in ("category", "system_id", "ecosystem")),
-            vulncheck_kev=bool(vuln.get("vulncheck_kev")),
+            vulncheck_kev=bool(vuln.get("vulncheck_kev")) if vulncheck else False,
         ))
     return output
 
