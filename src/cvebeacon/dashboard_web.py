@@ -640,7 +640,7 @@ def create_web_blueprint(config):
                 client = document["client"]
                 try:
                     sync_settings = sync.mode(config, path)
-                    if status == 200 and config.managed_inventory:
+                    if page == "overview" and status == 200 and config.managed_inventory:
                         sync_view = sync.inspect(config, client)
                 except ConfigurationError as exc:
                     sync_warning = str(exc)

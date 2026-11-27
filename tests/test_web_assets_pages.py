@@ -188,6 +188,18 @@ def test_bulk_select_controls_are_marked_for_the_script(web):
     assert 'name="pick" value="web-1"' in form
 
 
+def test_sites_page_does_not_inspect_inventory_sync(web, monkeypatch):
+    from cvebeacon import web_inventory_sync as sync
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("the Sites page must not inspect inventory sync")
+
+    monkeypatch.setattr(sync, "inspect", unexpected)
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    assert client.get("/web-assets/sites?client=Acme").status_code == 200
+
+
 def test_clients_list_links_to_each_clients_web_assets(web):
     config, _, _, client = web
     StateStore(config.database_path).record_scan([QueryResult(
