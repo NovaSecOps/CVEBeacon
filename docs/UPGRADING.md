@@ -461,6 +461,20 @@ withheld. An administrator can run `cvebeacon update apply` to see safe command
 details. If recovery is incomplete, run `cvebeacon update recover` before
 retrying an update.
 
+**"The release check failed" on 0.2.6 and older.** Those versions refuse a
+release list larger than 512 KiB. GitHub lists every artifact of each release, so
+the list outgrew that limit once 0.2.6 was published, and every check from the
+Updates page or the daily timer fails. Version 0.2.7 reads larger lists. Update
+once from the command line with an explicit version, which fetches only that
+release:
+
+```sh
+sudo /opt/cvebeacon/current/.venv/bin/cvebeacon update apply --version 0.2.7
+```
+
+Replace `/opt/cvebeacon` with your installation prefix if needed. After this
+update, the Updates page works again.
+
 | Reason code | Meaning |
 | --- | --- |
 | `preflight-crontab-unreadable` | The crontab could not be read inside the update service. |
