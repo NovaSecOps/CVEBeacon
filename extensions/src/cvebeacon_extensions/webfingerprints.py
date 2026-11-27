@@ -247,7 +247,12 @@ def _category_name(value: str) -> str:
         "frameworks": "framework", "framework": "framework",
         "cdn": "edge", "content delivery network": "edge", "content delivery networks": "edge",
         "paas": "hosted-platform", "hosting": "hosted-platform", "hosted platforms": "hosted-platform",
-        "dev tools": "ops-tool", "developer tools": "ops-tool", "analytics": "ops-tool",
+        "dev tools": "ops-tool", "developer tools": "ops-tool", "analytics": "analytics",
+        "tag managers": "analytics",
+        "ui frameworks": "css-library", "font scripts": "css-library",
+        "javascript graphics": "js-library", "maps": "js-library",
+        "rich text editors": "js-library", "video players": "js-library",
+        "static site generator": "framework",
         "operating systems": "application", "databases": "application",
         "ecommerce": "application", "email": "application", "widgets": "application",
     }
