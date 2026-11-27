@@ -2,12 +2,13 @@
 
 import httpx
 
-from cvebeacon.applicability import VERSION_UNKNOWN_REASON, known_version, wildcard_cpe_version
+from cvebeacon.applicability import (VERSION_UNKNOWN_REASON, known_version, nvd_prerequisite_only,
+                                      wildcard_cpe_version)
 from cvebeacon.config import AppConfig, HttpConfig, InventoryConfig, SourceConfig
 from cvebeacon.engine import QueryEngine
 from cvebeacon.http import HttpClient
 from cvebeacon.models import Applicability as A, Asset, Evidence, HealthStatus as H, Vulnerability
-from cvebeacon.sources.nvd import CPECandidate, NVDSource, NVDResult
+from cvebeacon.sources.nvd import CPECandidate, NVDResult
 from cvebeacon.sources.osv import OSVResult
 
 from test_osv import record
@@ -159,6 +160,21 @@ def test_nvd_product_wide_2001_total_stops_after_one_request(tmp_path):
     assert any(health.source == "nvd" and health.status is H.DEGRADED
                and "result limit reached after 2000 CVEs" in health.message
                for health in result.source_health)
+
+
+def test_nvd_prerequisite_filter_keeps_ambiguous_records():
+    cpe = "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"
+    other = "cpe:2.3:a:other:other:*:*:*:*:*:*:*:*"
+
+    def evidence(matches=None):
+        configurations = [] if matches is None else [{"nodes": [{"operator": "OR", "cpeMatch": matches}]}]
+        return Evidence("nvd", "applicability", "test", details={"configurations": configurations})
+
+    prerequisite = [{"vulnerable": False, "criteria": cpe}]
+    assert nvd_prerequisite_only(cpe, evidence()) is False
+    assert nvd_prerequisite_only(cpe, evidence(prerequisite)) is True
+    assert nvd_prerequisite_only(cpe, evidence(prerequisite + [{"vulnerable": True, "criteria": cpe}])) is False
+    assert nvd_prerequisite_only(cpe, evidence([{"vulnerable": False, "criteria": other}])) is False
 
 
 def test_versionless_package_scan_queries_osv_without_a_version(tmp_path):
