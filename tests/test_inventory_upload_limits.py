@@ -72,7 +72,7 @@ def test_preview_reports_physical_lines_and_the_first_error_page():
     preview = preview_upload(upload, ".csv", "Example")
     assert [row[0] for row in preview.validation] == [2, 5]
     rows = b"".join(f"{i},Example,Widget,1\n".encode() for i in range(50))
-    preview = preview_upload(b"asset_id,vendor,product,version\n" + rows + b"bad,Example,Widget,\n", ".csv", "Example")
+    preview = preview_upload(b"asset_id,vendor,product,version\n" + rows + b"bad,Example,,\n", ".csv", "Example")
     assert preview.first_error == (52, 2)
 
 

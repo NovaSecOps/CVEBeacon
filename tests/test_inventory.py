@@ -38,10 +38,10 @@ def test_all_formats_produce_same_model(tmp_path, kind):
 
 def test_validation_reports_duplicate_and_blank(tmp_path):
     path = tmp_path / "bad.json"
-    path.write_text(json.dumps(ROWS + [{**ROWS[0], "Release": ""}]), encoding="utf-8")
+    path.write_text(json.dumps(ROWS + [{**ROWS[0], "Asset": "srv-2", "Name": ""}]), encoding="utf-8")
     with pytest.raises(InventoryValidationError) as error:
         load_inventory(_config(path))
-    assert "blank required field: version" in str(error.value)
+    assert "blank required field: product" in str(error.value)
 
 
 def test_duplicate_ids_are_case_insensitive(tmp_path):

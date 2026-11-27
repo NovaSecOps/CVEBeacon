@@ -94,7 +94,7 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
         values: dict[str, str] = {}
         mapped = {name: columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
         advanced = any(row.get(mapped[name]) for name in ("purl", "cpe", "ecosystem", "commit"))
-        required = ("asset_id",) if advanced else CANONICAL_FIELDS
+        required = ("asset_id",) if advanced else ("asset_id", "vendor", "product")
         if any(mapped[name] not in row for name in required):
             issues.append(ValidationIssue("record is missing mapped fields", location))
             continue
@@ -199,7 +199,8 @@ def _xlsx_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[t
             )
         header_lookup = {name.casefold(): name for name in headers}
         mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
-        required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
+        advanced = any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit"))
+        required = ("asset_id",) if advanced else ("asset_id", "vendor", "product")
         missing = [mapped[name] for name in required if mapped[name].casefold() not in header_lookup]
         if missing and not unmapped:
             raise InventoryValidationError(
@@ -256,7 +257,8 @@ def _csv_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[tu
                 )
             header_lookup = {name.casefold(): name for name in headers}
             mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
-            required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
+            advanced = any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit"))
+            required = ("asset_id",) if advanced else ("asset_id", "vendor", "product")
             missing = [mapped[name] for name in required if mapped[name].casefold() not in header_lookup]
             if missing and not unmapped:
                 raise InventoryValidationError(
