@@ -250,15 +250,22 @@ class HttpClient:
         allow_not_modified: bool = False,
         redirect_hosts: tuple[str, ...] = (),
         redirect_limit: int = 3,
+        identity_only: bool = False,
     ) -> Iterator[bytes]:
         """Stream a bounded response body without holding it in memory.
 
         Redirects are never followed and the compressed byte count is capped
-        while reading, so an oversized file cannot be buffered first.
+        while reading, so an oversized file cannot be buffered first. With
+        ``identity_only`` the request requires an uncompressed reply so the
+        cap applies to the bytes before any decoding; other callers keep the
+        client's normal content-encoding negotiation.
         """
         last_error: Exception | None = None
         retry_count = self.config.retries
-        request_headers = {**dict(headers or {}), "Accept-Encoding": "identity"}
+        request_headers = (
+            {**dict(headers or {}), "Accept-Encoding": "identity"}
+            if identity_only else headers
+        )
         for attempt in range(retry_count + 1):
             self.requests += 1
             self._pace(source, minimum_interval)
@@ -290,14 +297,16 @@ class HttpClient:
                         yield from self.stream_bytes(target, source=source, byte_cap=byte_cap,
                                                      headers=headers, counter=counter,
                                                      response_headers=response_headers,
-                                                     redirect_hosts=redirect_hosts, redirect_limit=redirect_limit - 1)
+                                                     redirect_hosts=redirect_hosts, redirect_limit=redirect_limit - 1,
+                                                     identity_only=identity_only)
                         return
                     if response.status_code == 200:
-                        encoding = response.headers.get("content-encoding", "identity").strip().casefold()
-                        if encoding not in {"", "identity"}:
-                            raise SourceError(
-                                source, "source returned an unsupported content encoding"
-                            )
+                        if identity_only:
+                            encoding = response.headers.get("content-encoding", "identity").strip().casefold()
+                            if encoding not in {"", "identity"}:
+                                raise SourceError(
+                                    source, "source returned an unsupported content encoding"
+                                )
                         total = 0
                         for chunk in response.iter_bytes(chunk_size=65536):
                             total += len(chunk)

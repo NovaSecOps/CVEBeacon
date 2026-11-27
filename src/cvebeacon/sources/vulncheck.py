@@ -213,6 +213,7 @@ class VulnCheckSource:
                 byte_cap=remaining_bytes,
                 params=params,
                 headers=headers,
+                identity_only=True,
             ))
             used += len(raw)
             try:

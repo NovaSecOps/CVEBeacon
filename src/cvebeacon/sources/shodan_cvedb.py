@@ -196,7 +196,8 @@ def _percentile(item: dict[str, Any]) -> float | None:
 
 def _json(http: HttpClient, url: str, *, byte_cap: int, params: Any = None) -> Any:
     raw = b"".join(http.stream_bytes(
-        url, source="shodan_cvedb", byte_cap=byte_cap, params=params
+        url, source="shodan_cvedb", byte_cap=byte_cap, params=params,
+        identity_only=True,
     ))
     if not raw:
         raise SourceError("shodan_cvedb", "source returned an empty response")
