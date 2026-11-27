@@ -31,6 +31,7 @@ from . import web_inventory_actions as actions
 from . import web_reported
 from .web_assets import (COMPANION_NOTICE, client_label, directories,
                          paths, read_allowlist, save_allowlist, validate_allowlist)
+from .web_assets_import import register as register_import
 from .web_inventory import decode_json, read_bytes, read_web_snapshot
 
 _RUN_STATUSES = {"success", "partial", "failed", "no-usable-versions"}
@@ -1087,4 +1088,5 @@ def create_web_blueprint(config):
                           else "The web detection job could not be started", status=400)
         return redirect(url_for("operations.job_detail", job_id=job.id), code=303)
 
+    register_import(blueprint, config, render)
     return blueprint

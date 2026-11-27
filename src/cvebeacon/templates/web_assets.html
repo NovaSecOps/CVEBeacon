@@ -18,12 +18,14 @@
 {% macro filter_fields(flt) %}{% for level in flt.conf | sort %}<input type="hidden" name="conf" value="{{ level }}">{% endfor %}<input type="hidden" name="version" value="{{ flt.version }}"><input type="hidden" name="inv" value="{{ flt.inv }}"><input type="hidden" name="rep" value="{{ flt.rep }}"><input type="hidden" name="category" value="{{ flt.category }}"><input type="hidden" name="site" value="{{ flt.site }}"><input type="hidden" name="tech" value="{{ flt.tech }}">{% endmacro %}
 {% macro reported_cell(item) %}{% if item.mark %}<div>{{ watch_stamp(item.mark.reported_at) }}</div><div class="muted">by {{ item.mark.by }}</div>{% if item.mark.note %}<div class="muted">{{ item.mark.note }}</div>{% endif %}{% if item.rep == 'changed' %}<div><span class="badge badge-warning">Changed since reported</span></div><div class="muted">Reported with {{ item.mark.version or 'no version' }}</div>{% endif %}{% else %}<span class="muted">Not reported</span>{% endif %}{% endmacro %}
 {% macro quick_forms(actions_list, client) %}{% for quick in actions_list %}<form method="post" class="web-quick-form" action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="filtered">{% for level in quick.levels %}<input type="hidden" name="conf" value="{{ level }}">{% endfor %}<button class="btn btn-secondary" type="submit">{{ quick.label }} ({{ quick.count }})</button></form>{% endfor %}{% endmacro %}
+{% from 'web_assets_import_card.html' import notice as import_notice, import_card with context %}
 {% block content %}
 {{ page_header('Web assets', 'Record the websites a client has authorised you to check, then look for software on them. Detection is manual and results are hints for review.') }}
 {% if error %}{% call callout('danger', 'That web asset change was not saved') %}<p>{{ error }}</p>{% endcall %}{% endif %}
 {% if added and client %}{% call callout('success', 'Products added') %}<p>Added {{ added }} product{{ '' if added == 1 else 's' }} to {{ client }}'s inventory. The next scan checks {{ 'it' if added == 1 else 'them' }} for CVEs. <a href="{{ url_for('client_inventory.detail', key=client_key, name=client) }}">Open the client's inventory</a>.</p>{% endcall %}{% endif %}
 {% if marked is not none and client %}{% call callout('success', 'Report marks saved') %}<p>Marked {{ marked }} technolog{{ 'y' if marked == 1 else 'ies' }} as reported.</p>{% endcall %}{% endif %}
 {% if withdrawn is not none and client %}{% call callout('success', 'Report marks withdrawn') %}<p>Withdrew {{ withdrawn }} report mark{{ '' if withdrawn == 1 else 's' }}.</p>{% endcall %}{% endif %}
+{% if client %}{{ import_notice() }}{% endif %}
 {% if not available %}{% call callout('warning', 'Web detection is not available') %}<p>{{ notice }} The saved list below can still be viewed and edited, but detection buttons stay disabled until the optional Extensions package is installed.</p>{% endcall %}{% endif %}
 
 {% call card('Choose a client', 'Open a client to see their saved sites, or type a client name to start.') %}
@@ -58,6 +60,7 @@
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="add">
 {{ asset_fields(prefill_entry, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
 {% endcall %}
+{{ import_card() }}
 {% if document.assets or snapshot or removed or run or products or reviews %}
 {% call card('Remove all sites and results', 'Delete every saved site and all saved detection results for this client. This cannot be undone.', tone='danger') %}
 <form method="post" class="stack" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><div class="field field-check"><input id="remove-all-confirm" type="checkbox" name="confirm" value="yes" required><label for="remove-all-confirm">I want to remove every saved asset and all saved detection results for this client.</label></div><div class="form-actions"><button class="btn btn-danger" type="submit" name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></div></form>

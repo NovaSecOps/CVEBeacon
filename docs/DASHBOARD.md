@@ -119,6 +119,38 @@ host is audited. Client CA bundle paths are
 administrator-only; changing one renews and audits all entries under the same
 attestation.
 
+### Importing many sites
+
+**Import sites from a file** on the Web assets page adds many authorised sites
+at once. **Download a CSV template** gives a ready-to-fill file with the header
+`hostname,scheme,port,path,allow_redirects,max_redirects,expires_at,allow_private_address`
+and two example rows. Only `hostname` is required. Empty cells use the defaults:
+`https`, port 443, path `/`, redirects allowed with a maximum of 2, no expiry
+and private addresses not allowed. Column names are case-insensitive, and
+unknown columns are reported and ignored. Booleans accept yes, no, true, false,
+1 and 0. `expires_at` is an ISO date (valid to the end of that day, UTC) or date
+and time, and must be in the future.
+
+Instead of the template, a CSV with a single `url` column, or a plain list of
+URLs with one per line such as `https://shop.example.com:8443/app`, supplies
+the scheme, host, port and path from each URL. A URL must not contain a user
+name, password, query or fragment.
+
+Upload a file or paste the text. The input must be UTF-8 (a byte order mark is
+allowed), at most 256 KiB and 1,000 rows, and a client can hold at most 1,000
+sites in total. Cells are read as plain text and never evaluated.
+
+The preview lists each row as **Will be added**, **Already saved**, **Duplicate
+in this file** or an error with the reason. Skipped and invalid rows are left
+out. The companion validator then checks the whole resulting list, and a
+refusal saves nothing. One attestation covers every listed site with the
+settings shown, and a second confirmation is required when any listed site
+allows private addresses. Saving re-reads the list under the web assets lock
+and writes nothing if the saved sites or the import changed since the preview.
+It records the signed-in username and the current UTC time for every site,
+writes one `web_asset_add` audit entry per site, plus a `web_asset_import`
+summary entry, in the same transaction that rechecks your permission.
+
 The Detected products table groups results by site and sorts each site by
 category and display name. It shows the version when one was observed, or
 **Version not disclosed**, plus plain evidence labels such as response header,
