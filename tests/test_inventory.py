@@ -58,6 +58,29 @@ def test_control_only_versions_are_rejected_before_stripping(tmp_path, kind):
         load_inventory(InventoryConfig(path=path))
 
 
+@pytest.mark.parametrize("kind", ["json", "csv"])
+def test_padded_versions_load_without_the_padding(tmp_path, kind):
+    path = tmp_path / f"inventory.{kind}"
+    if kind == "json":
+        path.write_text(json.dumps([{
+            "asset_id": "a", "vendor": "v", "product": "p", "version": "\t2.1\n"}]), encoding="utf-8")
+    else:
+        path.write_text('asset_id,vendor,product,version\na,v,p,"\t2.1\n"\n',
+                        encoding="utf-8", newline="\n")
+    asset = load_inventory(InventoryConfig(path=path))[0]
+    assert asset.version == "2.1"
+
+
+def test_managed_and_snapshot_contract_reads_accept_a_padded_version():
+    from cvebeacon.managed_inventory import read_inventory
+    from cvebeacon.web_inventory import read_contract
+
+    data = json.dumps([{"asset_id": "a", "vendor": "v", "product": "p",
+                        "version": "\t2.1\n", "client": "Acme"}]).encode("utf-8")
+    for reader in (read_contract, read_inventory):
+        assert [asset.version for asset in reader(data)] == ["2.1"]
+
+
 def test_empty_and_space_only_versions_remain_valid(tmp_path):
     path = tmp_path / "inventory.json"
     path.write_text(json.dumps([
