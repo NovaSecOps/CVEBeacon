@@ -404,7 +404,11 @@ def _version_update(item, old):
 
 
 def _addition(observation, identity, item, client, managed, snapshots_on):
-    if actions.classify(item, snapshots_on=snapshots_on, managed=managed)[0] != "ready":
+    # Readiness follows the saved review's snapshot prediction; removals separately confirm
+    # coverage against the readable snapshot (defer_uncovered_removals).
+    predicted = {item["asset_id"]} if item.get("in_inventory") and item.get("asset_id") else set()
+    if actions.classify(item, snapshots_on=snapshots_on, snapshot_ids=predicted,
+                        managed=managed)[0] != "ready":
         return None
     try:
         new = actions.build_row(item, client, actions.ready_version(item))
