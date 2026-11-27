@@ -846,8 +846,13 @@ a.filter-chip:hover { border-color: var(--link); }
   form.stack { max-width: none; }
   .task-item { grid-template-columns: minmax(0, 1fr); align-items: start; }
   .task-item .btn { justify-self: start; }
-  details.site-item > summary { grid-template-columns: minmax(0, 1fr); }
-  .site-badges { justify-content: flex-start; }
+  details.site-item > summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .site-identity { grid-column: 1; grid-row: 1; }
+  details.site-item > summary .chevron {
+    grid-column: 2; grid-row: 1; align-self: start; margin-left: 0; margin-top: var(--space-1);
+  }
+  .site-badges { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
+  .site-meta { grid-column: 1 / -1; grid-row: 3; }
   .client-switcher-panel { position: static; width: auto; margin-top: var(--space-2); }
 }
 
