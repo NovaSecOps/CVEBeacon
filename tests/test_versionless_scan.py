@@ -2,8 +2,7 @@
 
 import httpx
 
-from cvebeacon.applicability import (VERSION_UNKNOWN_REASON, known_version, nvd_prerequisite_only,
-                                      wildcard_cpe_version)
+from cvebeacon.applicability import (VERSION_UNKNOWN_REASON, known_version, wildcard_cpe_version)
 from cvebeacon.config import AppConfig, HttpConfig, InventoryConfig, SourceConfig
 from cvebeacon.engine import QueryEngine
 from cvebeacon.http import HttpClient
@@ -95,7 +94,7 @@ def test_versionless_product_scan_reports_a_truncated_nvd_result(tmp_path):
                and "result limit reached" in health.message for health in result.source_health)
 
 
-def test_nvd_product_wide_request_parameters_and_prerequisite_filter(tmp_path):
+def test_nvd_product_wide_request_parameters_and_prerequisite_record(tmp_path):
     wildcard = "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"
     exact = "cpe:2.3:a:php:php:8.3.0:*:*:*:*:*:*:*"
     params = []
@@ -127,9 +126,14 @@ def test_nvd_product_wide_request_parameters_and_prerequisite_filter(tmp_path):
         {"virtualMatchString": wildcard, "startIndex": "0", "resultsPerPage": "2000"},
         {"cpeName": exact, "isVulnerable": "", "startIndex": "0", "resultsPerPage": "2000"},
     ]
-    assert [item.vulnerability.cve_id for item in versionless.findings] == ["CVE-2026-0001"]
+    assert [item.vulnerability.cve_id for item in versionless.findings] == [
+        "CVE-2026-0001", "CVE-2026-0002"]
+    prerequisite = versionless.findings[1]
+    assert prerequisite.applicability is A.NEEDS_REVIEW
+    assert prerequisite.reason == VERSION_UNKNOWN_REASON
+    assert all(item.applicability is A.NEEDS_REVIEW and item.reason == VERSION_UNKNOWN_REASON
+               for item in versionless.findings)
     only = versionless.findings[0]
-    assert only.applicability is A.NEEDS_REVIEW and only.reason == VERSION_UNKNOWN_REASON
     assert all("exact CPE name" not in item.statement for item in only.evidence if item.source == "nvd")
     assert [item.vulnerability.cve_id for item in versioned.findings] == ["CVE-2026-0003"]
     assert versioned.findings[0].applicability is A.AFFECTED
@@ -160,21 +164,6 @@ def test_nvd_product_wide_2001_total_stops_after_one_request(tmp_path):
     assert any(health.source == "nvd" and health.status is H.DEGRADED
                and "result limit reached after 2000 CVEs" in health.message
                for health in result.source_health)
-
-
-def test_nvd_prerequisite_filter_keeps_ambiguous_records():
-    cpe = "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"
-    other = "cpe:2.3:a:other:other:*:*:*:*:*:*:*:*"
-
-    def evidence(matches=None):
-        configurations = [] if matches is None else [{"nodes": [{"operator": "OR", "cpeMatch": matches}]}]
-        return Evidence("nvd", "applicability", "test", details={"configurations": configurations})
-
-    prerequisite = [{"vulnerable": False, "criteria": cpe}]
-    assert nvd_prerequisite_only(cpe, evidence()) is False
-    assert nvd_prerequisite_only(cpe, evidence(prerequisite)) is True
-    assert nvd_prerequisite_only(cpe, evidence(prerequisite + [{"vulnerable": True, "criteria": cpe}])) is False
-    assert nvd_prerequisite_only(cpe, evidence([{"vulnerable": False, "criteria": other}])) is False
 
 
 def test_versionless_package_scan_queries_osv_without_a_version(tmp_path):

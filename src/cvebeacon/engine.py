@@ -7,8 +7,7 @@ from dataclasses import replace
 from typing import Iterable
 
 from .applicability import (Decision, VERSION_UNKNOWN_REASON, evaluate_cve_evidence, evaluate_nvd_evidence,
-                            exact_cpe_version, identity_text, known_version, nvd_prerequisite_only,
-                            wildcard_cpe_version)
+                            exact_cpe_version, identity_text, known_version, wildcard_cpe_version)
 from .config import AppConfig
 from .errors import SourceError
 from .http import HttpClient
@@ -147,8 +146,6 @@ class QueryEngine:
                     data = (self.nvd.vulnerabilities(cpe_name=cpe) if version_known
                             else self.nvd.vulnerabilities(virtual_match=cpe, limit=MAX_WILDCARD_RESULTS))
                     for vuln, item in data.records:
-                        if not version_known and nvd_prerequisite_only(cpe, item):
-                            continue
                         claims[vuln.cve_id].append(vuln)
                         evidence[vuln.cve_id].append(item)
                         decisions[vuln.cve_id].append(
