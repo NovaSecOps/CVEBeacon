@@ -19,6 +19,9 @@ from urllib.parse import quote, unquote, urlsplit
 from cvebeacon.identity import normalize_asset
 from cvebeacon.models import Asset
 from cvebeacon.sources.nvd import split_cpe23
+from cvebeacon.web_inventory import (REVIEWED_ALIASES, valid_npm_name as _npm_name,
+                                    web_cpe_fields as _cpe_fields, web_cpe_scope as _cpe_scope,
+                                    web_product_key)
 
 CATEGORIES = {
     "web-server",
@@ -1280,71 +1283,7 @@ def _rule_index():
     return COMPILED_RULES
 
 
-def _npm_name(value: str) -> bool:
-    if len(value) > 214:
-        return False
-    if value.startswith("@"):
-        parts = value[1:].split("/", 1)
-        return (len(parts) == 2 and bool(parts[0]) and bool(parts[1])
-                and re.fullmatch(r"[a-z0-9][a-z0-9._~-]{0,213}", parts[0]) is not None
-                and re.fullmatch(r"[a-z0-9][a-z0-9._~-]{0,213}", parts[1]) is not None)
-    return re.fullmatch(r"[a-z0-9][a-z0-9._~-]*", value) is not None
-
-
-REVIEWED_ALIASES = {
-    # Each value is the preferred vendor/product, including for emitted CPEs.
-    # Prefer established built-in CPEs, then reviewed published CPEs where the
-    # built-in has none (for example f5/nginx). Name-only matches add no CPE.
-    ("apache_http_server", "apache_http_server"): ("apache", "http_server"),
-    ("apache-http-server", "apache-http-server"): ("apache", "http_server"),
-    ("microsoft", "iis"): ("microsoft", "internet_information_services"),
-    ("microsoft_iis", "internet_information_services"): ("microsoft", "internet_information_services"),
-    ("nginx", "nginx"): ("f5", "nginx"),
-    ("nginxinc", "nginx"): ("f5", "nginx"),
-    ("apache_tomcat", "apache_tomcat"): ("apache", "tomcat"),
-    ("eclipse_jetty", "jetty"): ("eclipse", "jetty"),
-    ("oracle", "weblogic"): ("oracle", "weblogic_server"),
-    ("ibm", "websphere"): ("ibm", "websphere_application_server"),
-    ("websphere", "websphere"): ("ibm", "websphere_application_server"),
-    ("php_language", "php"): ("php", "php"),
-    ("microsoft", "asp_net"): ("microsoft", "asp.net"),
-    ("microsoft_asp_net", "asp_net"): ("microsoft", "asp.net"),
-    ("ruby_on_rails", "rails"): ("rubyonrails", "rails"),
-    ("symfony", "symfony"): ("sensiolabs", "symfony"),
-    ("wordpress", "wordpress_cms"): ("wordpress", "wordpress"),
-    ("drupal", "drupal_cms"): ("drupal", "drupal"),
-    ("joomla", "joomla"): ("joomla", "joomla!"),
-    ("joomla", "joomla_cms"): ("joomla", "joomla!"),
-    ("adobe", "magento"): ("magento", "magento"),
-    ("adobe", "magento_commerce"): ("magento", "magento"),
-    ("prestashop", "prestashop_ecommerce"): ("prestashop", "prestashop"),
-    ("typo3_cms", "typo3"): ("typo3", "typo3"),
-    ("microsoft", "sharepoint"): ("microsoft", "sharepoint_server"),
-    ("umbraco_cms", "umbraco"): ("umbraco", "umbraco"),
-    ("sitecore", "sitecore"): ("sitecore", "sitecore_experience_platform"),
-    ("sitecore_experience_platform", "sitecore_experience_platform"): ("sitecore", "sitecore_experience_platform"),
-    ("elasticsearch", "kibana"): ("elastic", "kibana"),
-    ("paypal", "paypal-sdk"): ("paypal", "paypal"),
-    ("recaptcha", "recaptcha"): ("google", "recaptcha"),
-    ("microsoft_clarity", "microsoft_clarity"): ("microsoft", "clarity"),
-}
 _CANONICAL_ALIAS_KEYS = frozenset(REVIEWED_ALIASES.values())
-
-
-def _cpe_fields(cpe: str, *, keep_escapes: bool = False) -> tuple[str, ...]:
-    fields = split_cpe23(cpe, keep_escapes=keep_escapes)
-    if (len(fields) == 11 and fields[0] in {"a", "o", "h"}
-            and all(fields) and all(field not in {"*", "-"} for field in fields[1:3])):
-        return fields
-    return ()
-
-
-def _cpe_scope(fields: tuple[str, ...]) -> tuple[str, ...]:
-    # The unqualified application identity also matches a reviewed detection
-    # with no CPE. Keep the scope of OS, hardware and qualified CPEs explicit.
-    if not fields or (fields[0] == "a" and all(field == "*" for field in fields[4:])):
-        return ()
-    return fields[0], *(field.casefold() for field in fields[4:])
 
 
 def canonical_cpe(cpe: str) -> str:
@@ -1363,19 +1302,9 @@ def canonical_cpe(cpe: str) -> str:
 
 def identity_key(detection: Detection) -> tuple[str, ...]:
     """Return the strongest reviewed identity available for a detection."""
-    if (detection.ecosystem == "npm" and isinstance(detection.package, str)
-            and _npm_name(detection.package)):
-        return "npm", detection.package
-    fields = _cpe_fields(detection.cpe)
-    if fields:
-        pair = (fields[1].casefold(), fields[2].casefold())
-        if fields[0] == "a":
-            pair = REVIEWED_ALIASES.get(pair, pair)
-        return "product", *pair, *_cpe_scope(_cpe_fields(detection.cpe, keep_escapes=True))
-    pair = (detection.vendor.casefold(), detection.product.casefold())
-    if getattr(detection, "name_only", False) and detection.name and pair not in REVIEWED_ALIASES:
-        return "name", detection.name.casefold()
-    return "product", *REVIEWED_ALIASES.get(pair, pair)
+    return web_product_key(detection.vendor, detection.product, cpe=detection.cpe,
+                           ecosystem=detection.ecosystem, package=detection.package,
+                           name=detection.name, name_only=getattr(detection, "name_only", False))
 
 
 def _url_parts(value: str):

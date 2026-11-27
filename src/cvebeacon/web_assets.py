@@ -101,14 +101,15 @@ def fingerprint_directory(config):
     return config.database_path.parent / "web-fingerprints"
 
 
-def companion_command(client, assets, output, *, plan=False, fingerprints=None):
+def companion_command(client, assets, output, *, plan=False, fingerprints=None, run_id=None):
     require_companion()
     label = client_label(client)
     client_arguments = ["--client=" + label] if label.startswith("-") else ["--client", label]
     return [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
             *client_arguments, "--assets", str(assets), "--output", str(output),
             "--source-id", "web-" + client_key(client), "--allow-partial", *(["--plan"] if plan else []),
-            *(["--fingerprints", str(fingerprints)] if fingerprints is not None else [])]
+            *(["--fingerprints", str(fingerprints)] if fingerprints is not None else []),
+            *(["--run-id", run_id] if run_id is not None else [])]
 
 
 def validate_allowlist(config, path, document):
@@ -151,7 +152,7 @@ def replace_bytes(path, data):
 
 def run_detection(config, client, *, plan=False):
     assets, output = paths(config, client)
-    document, revision = read_allowlist(assets, client)
+    document, _ = read_allowlist(assets, client)
     if not document["assets"]:
         raise ConfigurationError("Save an attested web asset before running detection")
     # The parent CLI holds the shared scan lock throughout the child process.
@@ -163,12 +164,13 @@ def run_detection(config, client, *, plan=False):
     else:
         if not stat.S_ISDIR(details.st_mode) or getattr(details, "st_file_attributes", 0) & 0x400:
             fingerprints = None
-    command = companion_command(document["client"], assets, output, plan=plan, fingerprints=fingerprints)
-    managed_sync = not plan and getattr(config, "managed_inventory", False)
-    if managed_sync:
+    run_id = None if plan else secrets.token_hex(16)
+    command = companion_command(document["client"], assets, output, plan=plan,
+                                fingerprints=fingerprints, run_id=run_id)
+    if run_id is not None:
         from . import web_inventory_sync
-        web_inventory_sync.detection_started(config, document["client"], output,
-                                             revision, len(document["assets"]))
+
+        web_inventory_sync.detection_started(config, document["client"], run_id)
     # Popen's context manager waits without a timeout on exit.
     child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config))
     try:
@@ -186,6 +188,5 @@ def run_detection(config, client, *, plan=False):
         raise ConfigurationError(RUN_TIMEOUT_REASON) from exc
     if not plan and code == 0:
         output.with_name(output.name + ".removed").unlink(missing_ok=True)
-        if managed_sync:
-            web_inventory_sync.detection_finished(config, document["client"])
+        web_inventory_sync.detection_finished(config, document["client"], run_id)
     return code

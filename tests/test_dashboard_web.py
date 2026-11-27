@@ -226,9 +226,11 @@ def test_detection_companion_argument_list(web, monkeypatch):
     monkeypatch.setattr(web_assets.subprocess, "Popen",
                         lambda argv, **kwargs: calls.append((argv, kwargs)) or child)
     assert web_assets.run_detection(config, "Acme") == 0
+    run_id = calls[0][0][-1]
+    assert re.fullmatch(r"[a-f0-9]{32}", run_id)
     assert calls[0][0] == [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
                            "--client", "Acme", "--assets", str(asset_path), "--output", str(output),
-                           "--source-id", "web-" + client_key("Acme"), "--allow-partial"]
+                           "--source-id", "web-" + client_key("Acme"), "--allow-partial", "--run-id", run_id]
     web_assets.run_detection(config, "Acme", plan=True)
     assert calls[-1][0][-1] == "--plan"
 

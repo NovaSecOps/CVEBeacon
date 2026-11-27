@@ -27,6 +27,7 @@ HOST = "example.invalid"
 BASE_SITE = ("https", HOST, 443, "/")
 PATH_SITE = ("https", HOST, 443, "/about")
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+SAMPLE_CPE = "cpe:2.3:o:sample:sample:*:*:*:*:*:*:*:*"
 SCOPED_IDENTITY = ["\0".join(("product", "sample", "sample", "o", *("*",) * 7)), ""]
 
 
@@ -35,6 +36,8 @@ def product(name, version, *, npm=False, site=BASE_SITE, client="Acme", identity
     item = dict(asset_id=web_asset_id(client, *site, *identity),
                 site_id=web_asset_id(client, *site), hostname=site[1], vendor=name,
                 product=name, versions=[version], inventory=True, sync_identity=identity)
+    if identity == SCOPED_IDENTITY:
+        item["cpe"] = SAMPLE_CPE
     if npm:
         item.update(ecosystem="npm", package=name)
     return item
@@ -48,7 +51,7 @@ def row(name, version, *, client="Acme", site=BASE_SITE, npm=False, manual=True)
 
 
 def run(config, number, products=(), *, sites=None, status="success", started=True, stopped=0,
-        client="Acme", sync_schema=True):
+        client="Acme", sync_schema=True, run_id=None):
     allowlist, output = web_assets.paths(config, client)
     _, revision = web_assets.read_allowlist(allowlist, client)
     sites = {BASE_SITE: True} if sites is None else sites
@@ -58,7 +61,7 @@ def run(config, number, products=(), *, sites=None, status="success", started=Tr
                     products_with_version=len(products), analysis_stopped=stopped,
                     review_truncated=False)
     if started:
-        metadata["inventory_sync"] = {"id": f"{number:032x}",
+        metadata["inventory_sync"] = {"id": run_id or f"{number:032x}",
                                       "previous": f"{number - 1:032x}" if number > 1 else "",
                                       "allowlist": revision,
                                       "sites": {web_asset_id(client, *site): [*site, complete]
@@ -305,14 +308,20 @@ def test_auto_zero_grace_publishes_on_detection_completion_and_restores(blank, m
 
     class Child:
         def wait(self, *, timeout):
-            run(config, 2)
+            run(config, 2, run_id=invocation_id(command))
             return 0
 
+    def launch(args, **kwargs):
+        nonlocal command
+        command = args
+        return Child()
+
+    command = []
     lock = OperationLock(config, "web-detect")
     assert lock.acquire()
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(web_assets.subprocess, "Popen", lambda *args, **kwargs: Child())
+            patch.setattr(web_assets.subprocess, "Popen", launch)
             assert web_assets.run_detection(config, "Acme") == 0
     finally:
         lock.release()
@@ -574,8 +583,9 @@ def test_unrepresentable_flag_deadline_warns_without_changing_inventory(blank):
     assert managed_rows(config) == [old]
 
 
-@pytest.mark.parametrize("write_fails", [True, False])
-def test_detection_requires_start_marker_and_blocks_unchanged_review_on_timeout(blank, monkeypatch, write_fails):
+@pytest.mark.parametrize("managed,write_fails", [(True, True), (True, False), (False, False)])
+def test_detection_requires_start_marker_and_blocks_unchanged_review_on_timeout(blank, monkeypatch,
+                                                                               managed, write_fails):
     config, _, client = setup(blank, "auto", auto_remove="on")
     clock = [NOW]
     monkeypatch.setattr(sync, "_now", lambda: clock[0])
@@ -614,7 +624,7 @@ def test_detection_requires_start_marker_and_blocks_unchanged_review_on_timeout(
             assert not started
         else:
             with pytest.raises(ConfigurationError, match=re.escape(web_assets.RUN_TIMEOUT_REASON)):
-                web_assets.run_detection(config, "Acme")
+                web_assets.run_detection(replace(config, managed_inventory=managed), "Acme")
             assert started == [True]
     finally:
         lock.release()
@@ -842,3 +852,136 @@ def test_omitted_producer_evidence_cannot_count_as_absence(blank, monkeypatch, l
         assert all(asset in managed_rows(config) for asset in old)
         assert all(current.state["entries"][asset.asset_id[:-2]]["misses"] == 0 for asset in old)
         assert not any(site[-1] for site in sites.values())
+
+
+def test_conflicting_scoped_product_identity_cannot_update_same_site_row(blank):
+    config, _, client = setup(blank)
+    item = product("sample", "1", identity=SCOPED_IDENTITY)
+    old = replace(row("sample", "1"), asset_id=item["asset_id"] + "-m", cpe=SAMPLE_CPE)
+    write_managed(config, [old])
+    run(config, 1, [item])
+    assert sync.RESULTS_WARNING not in page(client)
+    run(config, 2, [dict(item, vendor="wrong", product="wrong", versions=["9"],
+                         cpe=SAMPLE_CPE.replace(":sample:sample:", ":wrong:wrong:"))])
+    text = page(client)
+    assert sync.RESULTS_WARNING in text
+    assert "Version changed ·" not in text
+    assert managed_rows(config) == [old]
+
+
+def test_review_cannot_substitute_another_path_at_the_same_origin(blank):
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    config = replace(config, web=WebConfig(removal_grace_days=0))
+    old = row("sample", "1", site=PATH_SITE)
+    write_managed(config, [old])
+    allowlist, _ = web_assets.paths(config, "Acme")
+    document, _ = web_assets.read_allowlist(allowlist, "Acme")
+    entry = document["assets"][0]
+    entry.pop("hostname")
+    entry["url"] = "HTTPS://EXAMPLE.INVALID./"
+    web_assets.save_allowlist(allowlist, document)
+    run(config, 1)
+    assert sync.RESULTS_WARNING not in page(client)
+    for number in (2, 3):
+        run(config, number, sites={PATH_SITE: True})
+        assert sync.RESULTS_WARNING in page(client)
+        with pytest.raises(ConfigurationError, match=re.escape(sync.RESULTS_WARNING)):
+            sync.inspect(config, "Acme")
+    assert managed_rows(config) == [old]
+
+
+def invocation_id(command):
+    return command[command.index("--run-id") + 1] if "--run-id" in command else None
+
+
+def test_invalid_old_review_can_be_replaced_but_timeout_still_blocks_evidence(blank, monkeypatch):
+    config, _, client = setup(blank, "auto")
+    _, output = web_assets.paths(config, "Acme")
+    run(config, 1)
+    page(client)
+    web_assets.replace_bytes(output.with_name(output.name + ".review.json"), b'{"run":')
+    item = product("sample", "1")
+    launches = []
+
+    class Child:
+        def __init__(self, command, num):
+            self.run_id = invocation_id(command)
+            self.num = num
+
+        def wait(self, *, timeout):
+            if timeout == web_assets.CHILD_STOP_GRACE:
+                return -15
+            if self.num != 3:  # A successful exit without this invocation’s review stays blocked.
+                run(config, self.num, [item], run_id=self.run_id)
+            if self.num == 2:
+                raise subprocess.TimeoutExpired("web detection", timeout)
+            return 0
+
+        def terminate(self):
+            pass
+
+    def launch(command, **kwargs):
+        launches.append(command)
+        return Child(command, len(launches) + 1)
+
+    monkeypatch.setattr(web_assets.subprocess, "Popen", launch)
+    lock = OperationLock(config, "web-detect")
+    assert lock.acquire()
+    try:
+        with pytest.raises(ConfigurationError, match=re.escape(web_assets.RUN_TIMEOUT_REASON)):
+            web_assets.run_detection(config, "Acme")
+    finally:
+        lock.release()
+    assert sync.WAITING in page(client)
+    assert not (config.inventory_directory / f"{client_key('Acme')}.json").exists()
+    for _ in range(2):
+        assert lock.acquire()
+        try:
+            assert web_assets.run_detection(config, "Acme") == 0
+        finally:
+            lock.release()
+        if len(launches) == 2:
+            assert sync.WAITING in page(client)
+            assert not (config.inventory_directory / f"{client_key('Acme')}.json").exists()
+    assert len(launches) == 3
+    assert managed_rows(config) == [row("sample", "1")]
+
+
+def test_successful_detection_can_retry_inventory_publication_on_get(blank, monkeypatch, caplog):
+    config, users, client = setup(blank, "auto")
+    item = product("sample", "1")
+    published = sync._publish
+    attempts = []
+
+    def publish(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise OSError("test inventory publication failure")
+        return published(*args, **kwargs)
+
+    class Child:
+        def __init__(self, command):
+            self.run_id = invocation_id(command)
+
+        def wait(self, *, timeout):
+            run(config, 1, [item], run_id=self.run_id)
+            return 0
+
+    monkeypatch.setattr(sync, "_publish", publish)
+    monkeypatch.setattr(web_assets.subprocess, "Popen", lambda command, **kwargs: Child(command))
+    lock = OperationLock(config, "web-detect")
+    assert lock.acquire()
+    try:
+        assert web_assets.run_detection(config, "Acme") == 0
+    finally:
+        lock.release()
+    assert sync.WRITE_WARNING in caplog.text
+    assert not (config.inventory_directory / f"{client_key('Acme')}.json").exists()
+    assert attempts == [True]
+    page(client)
+    assert managed_rows(config) == [row("sample", "1")]
+    audit(users, '"added":1', actor="system (inventory sync)")
+    count = len(users.audit_entries())
+    page(client)
+    assert attempts == [True, True]
+    assert len(users.audit_entries()) == count

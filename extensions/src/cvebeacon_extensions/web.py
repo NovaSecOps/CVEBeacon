@@ -42,6 +42,8 @@ from cvebeacon.errors import InventoryValidationError
 from cvebeacon.identity import normalize_asset, validate_client_name
 from cvebeacon.models import Asset
 from cvebeacon.web_assets import RUN_TIMEOUT, RUN_TIMEOUT_REASON
+from cvebeacon.web_endpoints import (VISIBLE_PATH as _PATH, canonical_endpoint,
+                                    endpoint_hostname as _hostname, endpoint_port as _port)
 from cvebeacon.web_inventory import WEB_SYNC_SCHEMA, valid_sync_identity, web_asset_id
 
 from . import __version__, webrules
@@ -84,8 +86,6 @@ REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 BLOCKED_STATUSES = {429, 503}
 NO_RETRY_STATUSES = {401, 403, 404}
 _NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
-_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
-_PATH = re.compile(r"/[!-~]*")
 _CHARSET = re.compile(r"charset\s*=\s*[\"']?([^;\"'\s]+)", re.IGNORECASE)
 _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 # Each setting is the maximum disclosure for same-origin and cross-origin requests.
@@ -311,93 +311,11 @@ def _boolean(entry: dict, field: str, default: bool) -> bool:
     return value
 
 
-def _port(value: object, scheme: str, field: str = "port") -> int:
-    if value is None:
-        return 443 if scheme == "https" else 80
-    if type(value) is not int or not 1 <= value <= 65535:
-        raise ExtensionError(f"{field} must be an integer from 1 to 65535")
-    return value
-
-
-def _path(value: object) -> str:
-    if not isinstance(value, str) or not value.startswith("/") or len(value) > 2048:
-        raise ExtensionError("path must be an absolute URL path of at most 2048 characters")
-    if not _PATH.fullmatch(value) or "#" in value or "?" in value:
-        raise ExtensionError("path must be one visible ASCII path without query or fragment")
-    return value
-
-
-def _hostname(value: object) -> str:
-    if not isinstance(value, str):
-        raise ExtensionError("hostname must be text")
-    text = value.strip()
-    if not text or len(text) > 253:
-        raise ExtensionError("hostname must be bounded text")
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1]
-    if any(character.isspace() or character in "/\\@?#" for character in text):
-        raise ExtensionError("hostname contains a forbidden character")
-    # socket.inet_aton also accepts decimal, hexadecimal and abbreviated IPv4
-    # spellings; canonicalise them so the address policy sees the real target.
-    try:
-        return socket.inet_ntoa(socket.inet_aton(text))
-    except OSError:
-        pass
-    try:
-        return str(ipaddress.ip_address(text))
-    except ValueError:
-        pass
-    try:
-        text = text.encode("idna").decode("ascii")
-    except UnicodeError as exc:
-        raise ExtensionError("hostname is not valid IDNA") from exc
-    text = text.rstrip(".").lower()
-    if not text or len(text) > 253:
-        raise ExtensionError("hostname must be bounded text")
-    labels = text.split(".")
-    if any(not _HOST_LABEL.fullmatch(item) for item in labels):
-        raise ExtensionError("hostname is not a valid DNS name or IP address")
-    return text
-
-
-def _scheme(value: object) -> str:
-    if not isinstance(value, str) or value.casefold() not in {"http", "https"}:
-        raise ExtensionError("scheme must be http or https")
-    return value.casefold()
-
-
 def _endpoint(entry: dict) -> Endpoint:
-    if ("hostname" in entry) == ("url" in entry):
-        raise ExtensionError("each asset must set exactly one of hostname or url")
-    if "url" in entry:
-        value = entry["url"]
-        if not isinstance(value, str):
-            raise ExtensionError("url must be text")
-        try:
-            parts = urlsplit(value)
-            parsed_port = parts.port
-            parsed_host = parts.hostname
-        except ValueError as exc:
-            raise ExtensionError("url is not a valid absolute URL") from exc
-        if parts.scheme.casefold() not in {"http", "https"} or not parsed_host:
-            raise ExtensionError("url must be an absolute http or https URL")
-        if parts.username is not None or parts.password is not None:
-            raise ExtensionError("url must not contain credentials")
-        if parts.query or parts.fragment:
-            raise ExtensionError("url must not contain a query or fragment")
-        scheme = _scheme(parts.scheme)
-        host = _hostname(parsed_host)
-        port = _port(parsed_port, scheme)
-        path = _path(parts.path or "/")
-        for field, parsed in (("scheme", scheme), ("port", port), ("path", path)):
-            if field in entry and entry[field] != parsed:
-                raise ExtensionError(f"{field} contradicts the url")
-    else:
-        scheme = _scheme(entry.get("scheme", "https"))
-        host = _hostname(entry["hostname"])
-        port = _port(entry.get("port"), scheme)
-        path = _path(entry.get("path", "/"))
-    return Endpoint(scheme, host, port, path)
+    try:
+        return Endpoint(*canonical_endpoint(entry))
+    except ValueError as exc:
+        raise ExtensionError(str(exc)) from exc
 
 
 def _timestamp(value: object, field: str) -> datetime:
@@ -1382,7 +1300,7 @@ class Fetcher:
         try:
             hostname = _hostname(target_host)
             port = _port(target_port, scheme)
-        except ExtensionError as exc:
+        except ValueError as exc:
             raise _RedirectFailure("redirect target is not a valid host and port") from exc
         path = (target.path or "/") + (("?" + target.query) if target.query else "")
         if len(path) > 2048:
@@ -3172,8 +3090,10 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                now: Callable[[], datetime] = utc_now,
                host_interval: float = HOST_INTERVAL,
                max_workers: int = MAX_WORKERS,
-               fingerprints: Path | None = None) -> dict | None:
+               fingerprints: Path | None = None, run_id: str | None = None) -> dict | None:
     label(source_id)
+    if run_id is not None and (not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id)):
+        raise ExtensionError("invalid detection run ID")
     output = Path(output)
     destinations = {output.resolve(), Path(str(output) + ".manifest.json").resolve(),
                     _review_path(output).resolve(), Path(str(output) + ".lock").resolve()}
@@ -3277,7 +3197,7 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                 endpoint.scheme, endpoint.hostname, endpoint.port, endpoint.path,
                 status != "failed" and not (run_stopped or fingerprint_error) and _sync_site_complete(result),
             ]
-        sync = {"schema": WEB_SYNC_SCHEMA, "id": uuid.uuid4().hex,
+        sync = {"schema": WEB_SYNC_SCHEMA, "id": run_id or uuid.uuid4().hex,
                 "previous": _previous_sync_run(output),
                 "allowlist": allowlist.revision, "sites": sites}
         saved_snapshot_generated_at = _saved_snapshot_time(output, now())

@@ -16,6 +16,7 @@ from .errors import InventoryValidationError, ValidationIssue
 from .identity import identity_conflict
 from .inventory import MAX_CONTRACT_ROWS, MAX_CONTRACT_TEXT, validate_records
 from .private_storage import private_directory, private_file
+from .sources.nvd import split_cpe23
 
 LOG = logging.getLogger("cvebeacon")
 MAX_BYTES = 32 * 1024 * 1024
@@ -51,6 +52,103 @@ def valid_sync_identity(inputs):
     if length == 2:
         return parts[0] in {"npm", "name"}
     return parts[0] == "product" and (length == 3 or parts[3] in {"a", "o", "h"})
+
+
+def valid_npm_name(value: str) -> bool:
+    if len(value) > 214:
+        return False
+    if value.startswith("@"):
+        parts = value[1:].split("/", 1)
+        return (len(parts) == 2 and bool(parts[0]) and bool(parts[1])
+                and re.fullmatch(r"[a-z0-9][a-z0-9._~-]{0,213}", parts[0]) is not None
+                and re.fullmatch(r"[a-z0-9][a-z0-9._~-]{0,213}", parts[1]) is not None)
+    return re.fullmatch(r"[a-z0-9][a-z0-9._~-]*", value) is not None
+
+
+REVIEWED_ALIASES = {
+    # Each value is the preferred vendor/product, including for emitted CPEs.
+    # Prefer established built-in CPEs, then reviewed published CPEs where the
+    # built-in has none (for example f5/nginx). Name-only matches add no CPE.
+    ("apache_http_server", "apache_http_server"): ("apache", "http_server"),
+    ("apache-http-server", "apache-http-server"): ("apache", "http_server"),
+    ("microsoft", "iis"): ("microsoft", "internet_information_services"),
+    ("microsoft_iis", "internet_information_services"): ("microsoft", "internet_information_services"),
+    ("nginx", "nginx"): ("f5", "nginx"),
+    ("nginxinc", "nginx"): ("f5", "nginx"),
+    ("apache_tomcat", "apache_tomcat"): ("apache", "tomcat"),
+    ("eclipse_jetty", "jetty"): ("eclipse", "jetty"),
+    ("oracle", "weblogic"): ("oracle", "weblogic_server"),
+    ("ibm", "websphere"): ("ibm", "websphere_application_server"),
+    ("websphere", "websphere"): ("ibm", "websphere_application_server"),
+    ("php_language", "php"): ("php", "php"),
+    ("microsoft", "asp_net"): ("microsoft", "asp.net"),
+    ("microsoft_asp_net", "asp_net"): ("microsoft", "asp.net"),
+    ("ruby_on_rails", "rails"): ("rubyonrails", "rails"),
+    ("symfony", "symfony"): ("sensiolabs", "symfony"),
+    ("wordpress", "wordpress_cms"): ("wordpress", "wordpress"),
+    ("drupal", "drupal_cms"): ("drupal", "drupal"),
+    ("joomla", "joomla"): ("joomla", "joomla!"),
+    ("joomla", "joomla_cms"): ("joomla", "joomla!"),
+    ("adobe", "magento"): ("magento", "magento"),
+    ("adobe", "magento_commerce"): ("magento", "magento"),
+    ("prestashop", "prestashop_ecommerce"): ("prestashop", "prestashop"),
+    ("typo3_cms", "typo3"): ("typo3", "typo3"),
+    ("microsoft", "sharepoint"): ("microsoft", "sharepoint_server"),
+    ("umbraco_cms", "umbraco"): ("umbraco", "umbraco"),
+    ("sitecore", "sitecore"): ("sitecore", "sitecore_experience_platform"),
+    ("sitecore_experience_platform", "sitecore_experience_platform"): ("sitecore", "sitecore_experience_platform"),
+    ("elasticsearch", "kibana"): ("elastic", "kibana"),
+    ("paypal", "paypal-sdk"): ("paypal", "paypal"),
+    ("recaptcha", "recaptcha"): ("google", "recaptcha"),
+    ("microsoft_clarity", "microsoft_clarity"): ("microsoft", "clarity"),
+}
+def web_cpe_fields(cpe: str, *, keep_escapes: bool = False) -> tuple[str, ...]:
+    fields = split_cpe23(cpe, keep_escapes=keep_escapes)
+    if (len(fields) == 11 and fields[0] in {"a", "o", "h"}
+            and all(fields) and all(field not in {"*", "-"} for field in fields[1:3])):
+        return fields
+    return ()
+
+
+def web_cpe_scope(fields: tuple[str, ...]) -> tuple[str, ...]:
+    # The unqualified application identity also matches a reviewed detection
+    # with no CPE. Keep the scope of OS, hardware and qualified CPEs explicit.
+    if not fields or (fields[0] == "a" and all(field == "*" for field in fields[4:])):
+        return ()
+    return fields[0], *(field.casefold() for field in fields[4:])
+
+
+def web_product_key(vendor: str, product: str, *, cpe: str = "", ecosystem: str = "",
+                    package: str = "", name: str = "", name_only: bool = False) -> tuple[str, ...]:
+    """Return the strongest reviewed identity available for a detection."""
+    if (ecosystem == "npm" and isinstance(package, str)
+            and valid_npm_name(package)):
+        return "npm", package
+    fields = web_cpe_fields(cpe)
+    if fields:
+        pair = (fields[1].casefold(), fields[2].casefold())
+        if fields[0] == "a":
+            pair = REVIEWED_ALIASES.get(pair, pair)
+        return "product", *pair, *web_cpe_scope(web_cpe_fields(cpe, keep_escapes=True))
+    pair = (vendor.casefold(), product.casefold())
+    if name_only and name and pair not in REVIEWED_ALIASES:
+        return "name", name.casefold()
+    return "product", *REVIEWED_ALIASES.get(pair, pair)
+
+
+def sync_identity_matches(inputs, item):
+    """Bind the serialized ID inputs to the product identity in the review."""
+    if not valid_sync_identity(inputs):
+        return False
+    vendor, product = item["vendor"], item["product"]
+    scoped = "\0" in inputs[0]
+    key = web_product_key(vendor, product, cpe=item.get("cpe", ""),
+                          ecosystem=item.get("ecosystem", ""), package=item.get("package", ""),
+                          name=item.get("name", ""), name_only=inputs[0].startswith("name\0"))
+    if scoped:
+        return inputs == ["\0".join(key), ""]
+    # Scoped CPEs always have a separate ID, even if the unscoped ID is unused.
+    return len(key) != 11 and inputs == [vendor, product]
 
 
 def read_bytes(path: Path, limit: int = MAX_BYTES) -> bytes:

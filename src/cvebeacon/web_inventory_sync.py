@@ -21,8 +21,10 @@ from .managed_inventory import client_key
 from .models import Asset
 from .private_storage import private_directory
 from .sources.nvd import split_cpe23
+from .web_endpoints import canonical_endpoint
 from .web_inventory import (MAX_BYTES, UNSAFE_ID_TEXT, WEB_ASSET_ID, WEB_SYNC_SCHEMA, _timestamp,
-                            decode_json, read_bytes, valid_sync_identity, web_asset_id)
+                            decode_json, read_bytes, sync_identity_matches,
+                            valid_sync_identity, web_asset_id)
 
 LOG = logging.getLogger("cvebeacon")
 MISSES_REQUIRED = 2
@@ -121,7 +123,7 @@ def state_path(config, client):
 
 def _empty_state(client):
     return {"client": web_assets.client_key(client), "run": "", "blocked": "",
-            "detecting": False, "applied": False, "entries": {}, "summary": None}
+            "detecting": False, "confirmed": "", "applied": False, "entries": {}, "summary": None}
 
 
 def _empty_entry(site, identity=None):
@@ -136,13 +138,15 @@ def _read_state(path, client, *, legacy=False):
         if legacy and isinstance(state, dict) and _matches(_DIGEST, state.get("client")):
             if state["client"] != initial["client"]:
                 return None
-        if isinstance(state, dict) and set(state) == set(initial) - {"detecting"}:
-            state["detecting"] = False
+        if isinstance(state, dict) and set(state) in (
+                set(initial) - {"confirmed"}, set(initial) - {"confirmed", "detecting"}):
+            state.setdefault("detecting", False)
+            state["confirmed"] = ""
         if (not isinstance(state, dict) or set(state) != set(initial)
                 or state["client"] != initial["client"] or type(state["applied"]) is not bool
                 or type(state["detecting"]) is not bool
                 or any(state[key] != "" and not _matches(_RUN_ID, state[key])
-                       for key in ("run", "blocked"))
+                       for key in ("run", "blocked", "confirmed"))
                 or not isinstance(state["entries"], dict) or len(state["entries"]) > MAX_CONTRACT_ROWS):
             raise ValueError
         for identity, entry in state["entries"].items():
@@ -209,7 +213,7 @@ class Observation:
         return not self.failed and all(site[-1] for site in self.sites.values())
 
 
-def _observation(output, client, allowlist_revision, asset_count):
+def _observation(output, client, allowlist_revision, allowlisted):
     from .dashboard_web import _review_metadata
 
     review_file = output.with_name(output.name + ".review.json")
@@ -233,6 +237,7 @@ def _observation(output, client, allowlist_revision, asset_count):
         if metadata["allowlist"] != allowlist_revision:
             return None
         sites = metadata["sites"]
+        asset_count = len(allowlisted)
         if (asset_count != len(sites) or run.get("asset_count") != asset_count
                 or run.get("products_recognized") != len(products)):
             raise ValueError
@@ -247,6 +252,9 @@ def _observation(output, client, allowlist_revision, asset_count):
                     or type(endpoint[4]) is not bool
                     or identity != web_asset_id(client, *endpoint[:4])):
                 raise ValueError
+        if {tuple(endpoint[:4]) for endpoint in sites.values()} != {
+                canonical_endpoint(entry) for entry in allowlisted}:
+            raise ValueError
         failed = run["status"] == "failed"
         complete_count = sum(site[-1] for site in sites.values())
         if (complete_count > min(run["fetched_count"], asset_count - run.get("analysis_stopped", 0),
@@ -261,10 +269,9 @@ def _observation(output, client, allowlist_revision, asset_count):
             if (not _matches(WEB_ASSET_ID, identity) or not _matches(WEB_ASSET_ID, site)
                     or identity == site or identity in by_id or site not in sites
                     or item.get("hostname") != sites[site][1] or type(item.get("inventory")) is not bool
-                    or not valid_sync_identity(inputs)
                     or not isinstance(item.get("vendor"), str) or not item["vendor"]
                     or not isinstance(item.get("product"), str)
-                    or ("\0" not in inputs[0] and inputs != [item["vendor"], item["product"]])
+                    or not sync_identity_matches(inputs, item)
                     or identity != web_asset_id(client, *sites[site][:4], *inputs)):
                 raise ValueError
             item["in_inventory"] = item["inventory"]
@@ -348,7 +355,7 @@ def _advance(state, observation, client, web_rows, applied_at):
                 entry["since"] = applied_at.isoformat()
         else:
             entry["misses"] = 0
-    state.update(run=observation.id, blocked="", detecting=False, applied=False)
+    state.update(run=observation.id, blocked="", confirmed="", applied=False)
 
 
 @dataclass(frozen=True)
@@ -596,7 +603,7 @@ class Session:
         self.finish_migration()
 
 
-def session(config, client, *, finishing=False):
+def session(config, client):
     """Build a view of saved evidence. Publishing it requires the operation lock."""
     from .dashboard_web import _client_profile, _read_managed
 
@@ -617,12 +624,13 @@ def session(config, client, *, finishing=False):
     state, legacy_path = _load_state(state_file, client)
     before = _encoded(state)
     observation = None
-    if finishing or not state["detecting"]:
-        observation = _observation(output, client, revision, len(document["assets"]))
+    if not state["detecting"]:
+        observation = _observation(output, client, revision, document["assets"])
     now = _now()
     proposals = {}
     web_rows = _web_rows(assets)
-    if observation is not None and observation.id == state["blocked"]:
+    if observation is not None and (observation.id == state["blocked"]
+                                    or (state["confirmed"] and observation.id != state["confirmed"])):
         observation = None
     if observation is not None:
         _advance(state, observation, client, web_rows, now)
@@ -652,17 +660,16 @@ def inspect(config, client):
         lock.release()
 
 
-def detection_started(config, client, output, revision, asset_count):
+def detection_started(config, client, run_id):
     """Prevent an interrupted detection from making an older review actionable."""
     try:
         recover(config.inventory_directory, config.watch.users_database)
         path = state_path(config, client)
         state, legacy_path = _load_state(path, client)
-        latest = _observation(output, client, revision, asset_count)
-        if state["detecting"] or state["blocked"]:
+        if state["detecting"] or state["blocked"] or state["confirmed"]:
             for entry in state["entries"].values():
                 entry["misses"] = 0
-        state.update(detecting=True, blocked=latest.id if latest is not None else state["run"])
+        state.update(detecting=True, blocked=run_id, confirmed="")
         private_directory(path.parent, owner_only=True)
         web_assets.replace_bytes(path, _encoded(state))
         if legacy_path is not None:
@@ -671,11 +678,22 @@ def detection_started(config, client, output, revision, asset_count):
         raise ConfigurationError(WRITE_WARNING) from None
 
 
-def detection_finished(config, client):
+def detection_finished(config, client, run_id):
     """The detection command already holds the shared inventory operation lock."""
     try:
         recover(config.inventory_directory, config.watch.users_database)
-        current = session(config, client, finishing=True)
+        allowlist, output = web_assets.paths(config, client)
+        document, revision = web_assets.read_allowlist(allowlist, client)
+        observation = _observation(output, client, revision, document["assets"])
+        path = state_path(config, client)
+        state, _ = _load_state(path, client)
+        if not (state["detecting"] and state["blocked"] == run_id
+                and observation is not None and observation.id == run_id):
+            raise ConfigurationError(RESULTS_WARNING)
+        # Save the parent-confirmed review before attempting the separate inventory transaction.
+        state.update(detecting=False, blocked="", confirmed=run_id)
+        web_assets.replace_bytes(path, _encoded(state))
+        current = session(config, client)
         if current is not None:
             if current.settings.mode == "auto":
                 current.apply_auto()

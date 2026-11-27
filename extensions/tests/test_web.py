@@ -231,9 +231,11 @@ def test_sync_metadata_records_complete_endpoints_and_links_runs(tmp_path):
     assert metadata["allowlist"] == hashlib.sha256((tmp_path / "assets.json").read_bytes()).hexdigest()
     assert first["products"][0]["site_id"] == home
 
-    _, _, _, _ = run(tmp_path, assets, [response(), response()])
+    run_id = "1234567890abcdef" * 2
+    _, _, _, _ = run(tmp_path, assets, [response(), response()], run_id=run_id)
     second = json.loads(review.read_text(encoding="utf-8"))["run"]
     assert second["status"] == "no-usable-versions"
+    assert second["inventory_sync"]["id"] == run_id
     assert second["inventory_sync"]["previous"] == metadata["id"]
     assert all(site[-1] for site in second["inventory_sync"]["sites"].values())
 
