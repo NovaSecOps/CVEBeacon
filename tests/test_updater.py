@@ -79,8 +79,38 @@ def test_valid_signature_and_every_artifact_are_verified(signed, tmp_path):
     destination.mkdir()
     assert set(remote.verify(release, destination, signers)) == {name for name in files if name.endswith(".whl")}
     assert len(calls) == 1 + len(files)
-    assert calls[0] == "https://api.github.com/repos/NovaSecOps/CVEBeacon/releases?per_page=30"
+    assert calls[0] == "https://api.github.com/repos/NovaSecOps/CVEBeacon/releases?per_page=10"
 
+
+
+def _published_list(newest, count, assets):
+    """A release list shaped like GitHub's: each asset carries about 2 KB of metadata."""
+    rows = []
+    for index in range(count):
+        version = f"0.2.{newest - index}"
+        names = ["SHA256SUMS", "SHA256SUMS.sig"] + [f"dependency{n}-1.0-py3-none-any.whl" for n in range(assets - 2)]
+        rows.append({"tag_name": "v" + version, "draft": False, "prerelease": False, "body": "x" * 6000,
+                     "assets": [{"name": name, "uploader": {"login": "release-bot", "padding": "p" * 1800},
+                                 "browser_download_url": "https://github.invalid/" + name} for name in names]})
+    return rows
+
+
+def test_a_release_list_larger_than_the_old_512_kib_cap_is_read():
+    rows = _published_list(6, 7, 45)
+    body = json.dumps(rows).encode()
+    assert len(body) > 512 * 1024
+    http = HttpClient(HttpConfig(retries=0), client=httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=body))))
+    release = u.Releases(UpdateConfig(enabled=True), http).check("0.2.5")
+    assert release.version == "0.2.6" and len(release.assets) == 45
+
+
+def test_a_release_list_beyond_the_bounded_cap_is_still_refused():
+    body = b"[" + b" " * u.RELEASE_LIST_BYTES + b"]"
+    http = HttpClient(HttpConfig(retries=0), client=httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=body))))
+    with pytest.raises(u.UpdateError, match="size limit"):
+        u.Releases(UpdateConfig(enabled=True), http).check("0.2.5")
 
 @pytest.mark.parametrize("mode", ["invalid", "missing", "wrong-key", "checksum"])
 def test_unsigned_tampered_or_wrong_key_release_is_refused(signed, tmp_path, mode):
