@@ -129,7 +129,8 @@ def query_package(engine, asset, data):
     except SourceError as exc:
         health.append(now_health("epss", H.FAILED, str(exc)))
     enriched = []
-    version_known = known_version(asset.version)
+    # A commit identity establishes applicability without a release version.
+    version_unknown = asset.identity_path in {"purl", "ecosystem"} and not known_version(asset.version)
     for finding in findings:
         original = finding.vulnerability
         cves = [identifier for identifier in original.identifiers if cve_id(identifier)]
@@ -149,14 +150,14 @@ def query_package(engine, asset, data):
         updated = replace(finding, vulnerability=vuln, evidence=tuple(evidence),
             applicability=A.NEEDS_REVIEW if vuln.rejected else finding.applicability,
             reason="An authoritative advisory or CVE alias was withdrawn/rejected" if vuln.rejected else finding.reason)
-        if not version_known:
+        if version_unknown:
             updated = replace(updated, applicability=A.NEEDS_REVIEW, confidence="limited",
                               reason=VERSION_UNKNOWN_REASON)
         enriched.append(updated)
     uncertain = any(f.applicability in {A.COVERAGE_UNKNOWN, A.NEEDS_REVIEW} for f in enriched)
     coverage = A.COVERAGE_UNKNOWN if data.error or not enriched or any(f.applicability == A.COVERAGE_UNKNOWN for f in enriched) else A.NEEDS_REVIEW if uncertain else None
     reason = ("required package source is incomplete" if data.error else
-              VERSION_UNKNOWN_REASON if not version_known and enriched else
+              VERSION_UNKNOWN_REASON if version_unknown and enriched else
               "no results is not proof of complete vulnerability coverage" if not enriched else
               "one or more package assessments require review" if uncertain else None)
     return QueryResult(asset, tuple(sorted(enriched, key=lambda f: f.vulnerability.primary_id)), tuple(health), coverage, reason)
