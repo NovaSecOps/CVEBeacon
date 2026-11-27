@@ -35,16 +35,20 @@ Asset IDs, system IDs, categories, owners, comments, hostnames and local paths a
 
 | Purpose | Destination | Sent data |
 | --- | --- | --- |
-| VulnCheck KEV bulk index | `api.vulncheck.com` | A bearer token in the request header; the response is a public catalog. |
-| Shodan CVEDB CVE and CPE lookup | `cvedb.shodan.io` | A CVE identifier or a CPE 2.3 name. |
+| VulnCheck KEV cursor-paginated index | `api.vulncheck.com` | A bearer token in the request header and pagination parameters; the response is a public catalog. |
+| Shodan CVEDB CVE lookup and CPE count/pages | `cvedb.shodan.io` | A CVE identifier or a CPE 2.3 name, with count and paging parameters. |
 
 VulnCheck is enabled by default but stays off without a token; a missing token
-sends nothing and is not a failure. Shodan CVEDB needs no key but is disabled
-by default and contacts its endpoint only after an explicit
-`shodan_cvedb_enabled = true`. Neither request includes client names, hostnames,
-IP addresses, asset IDs, system IDs, categories or local paths. See
-[source limits](SOURCES.md) and check Shodan's and VulnCheck's terms of use for
-your use case.
+sends nothing and is not a failure. Its catalog is read in up to 300 bounded
+pages and 64 MiB per run, and the bearer value is never retained, logged or
+copied from a response. Shodan CVEDB needs no key but is disabled by default
+and contacts its endpoint only after an explicit
+`shodan_cvedb_enabled = true`. Discovery asks for a count and then at most five
+100-row pages per CPE, with an aggregate per-run request cap. Neither request
+includes client names, hostnames, IP addresses, asset IDs, system IDs, categories
+or local paths. Shodan describes keyless CVEDB access as free for
+non-commercial use; check Shodan's and VulnCheck's terms of use for your use
+case. See [source limits](SOURCES.md).
 
 ## Optional update checks
 

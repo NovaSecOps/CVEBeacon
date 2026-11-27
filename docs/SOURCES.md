@@ -165,53 +165,80 @@ its failure is degraded coverage and cannot hold NVD/EUVD initialization open.
 ## VulnCheck Known Exploited Vulnerabilities
 
 - Purpose: an independent known-exploitation list and enrichment for CVEs found by other sources.
-- Interface: the VulnCheck v3 bulk KEV index at
+- Interface: the cursor-paginated VulnCheck v3 index at
   `https://api.vulncheck.com/v3/index/vulncheck-kev`, authenticated with
-  `Authorization: Bearer <token>`.
-- Data used: CVE identifiers, date added, known ransomware use, reported
-  exploitation, and exploit references. References are stored as evidence;
-  they do not create findings on their own.
+  `Authorization: Bearer <token>`. A page is requested with `limit=100` and
+  either the initial `start_cursor` flag or the `cursor` value from
+  `_meta.next_cursor`. `_meta` provides `total_documents`, `next_cursor` and,
+  on size-shortened pages, `truncated`. The request follows each new cursor and
+  requires a terminal page without a cursor and with consistent totals.
+- Data used: the `cve` array, `date_added`, the case-sensitive
+  `knownRansomwareCampaignUse` value, `vulncheck_xdb[].xdb_url` and
+  `vulncheck_reported_exploitation[].url` with its `date_added`. Both reference
+  sets are bounded and stored as evidence; they do not create findings.
 - Setup: get a free community token at
   [vulncheck.com](https://vulncheck.com/) and set `VULNCHECK_API_TOKEN`, another
   environment variable named by `vulncheck_api_key_env`, or an owner-only file
   named by `vulncheck_api_key_file`. The token is a secret and is never
-  displayed, logged, exported, written to reports or included in backups.
+  displayed, logged, exported, written to reports or state, or retained from a
+  response. The token file follows the same backup rule as the NVD key file:
+  excluded by default and copied only when secret inclusion is selected.
 - State: the source is enabled by default but stays off until a token is
   configured. A missing token is reported as `off: no token`; it never fails a
   scan or configuration load. Disabling it explicitly reports
   `off: disabled`. Settings and the sources health view show the effective
   state.
-- Limits: one bounded catalog download per run, up to 64 MiB and 250,000
-  entries, using the shared HTTP timeouts, retries and backoff. An oversized or
-  failed download degrades only this source's health.
-- Limitations: the response envelope is parsed defensively. Confirm field names
-  and plan limits against your VulnCheck API documentation. Absence from this
-  list is not evidence that a flaw is not exploited.
+- Limits: at most 300 pages, a cumulative 64 MiB, 250,000 records and 250,000
+  unique CVE identifiers per run, with 100 identifiers per entry and 100
+  references per set. Every page is read as an identity-encoded bounded stream
+  before decoding. A truncated or inconsistent page, a repeated cursor,
+  malformed metadata, a failed page or an exhausted budget is a sanitized
+  source error.
+- Evidence only: VulnCheck membership and reference counts are not part of the
+  scan material fingerprint, so enabling the source never creates a material
+  change by itself. CISA KEV remains the alerting known-exploitation source.
+  Absence from this list is not evidence that a flaw is not exploited; only a
+  complete successful load can mark a CVE as not in VulnCheck KEV.
+- Limitations: response fields are validated against the documented shapes.
+  Confirm plan limits against your VulnCheck API documentation.
 
 Check VulnCheck's terms of use for your use case.
 
 ## Shodan Common Vulnerabilities and Exposures database (CVEDB)
 
-- Purpose: a free, keyless CVE database used to corroborate findings and to
-  discover CVEs for an exact product CPE.
+- Purpose: a keyless CVE database used to corroborate findings and to discover
+  CVEs for an exact product CPE.
 - Interfaces: `https://cvedb.shodan.io/cve/{cve_id}` for one CVE and
-  `https://cvedb.shodan.io/cves?cpe23=...&skip=...&limit=...` for discovery.
-- Data used: CVE identifiers, descriptions, CVSS, EPSS and its percentile,
-  KEV membership, ransomware use, publish dates and references.
+  `https://cvedb.shodan.io/cves?cpe23=...&count=true` followed by
+  `skip`/`limit` pages for discovery. The documented fields include `cve_id`,
+  `summary`, `published_time`, `cvss`, numeric `cvss_version`, `cvss_v2`,
+  `cvss_v3`, `cvss_v4`, `epss`, `ranking_epss`, boolean `kev`, nullable
+  `ransomware_campaign`, `references` and `cpes`.
+- Data used: CVE identifiers, descriptions, CVSS, EPSS and its relative
+  percentile (`ranking_epss`, 0–1 and preserved at zero), KEV membership, the
+  ransomware campaign status, publish dates and references.
 - Privacy: a request carries a CVE identifier or a CPE 2.3 name. No client
   names, hostnames, IP addresses, asset IDs or local paths are sent.
 - State and limits: disabled by default and enabled only by an explicit
   `shodan_cvedb_enabled = true`. Per-CVE enrichment stops after 500 lookups per
-  run; discovery reads at most five pages and 500 results per CPE. A reached cap
-  or truncated page set is shown as degraded health. Results are cached within
-  a run.
+  run. Discovery requests `count=true` first, requires a nonnegative integer
+  total, then reads at most five 100-row pages and verifies the count and
+  unique CVE identifiers. Totals over 500, duplicates, missing or inconsistent
+  pages and invalid counts are shown as degraded health; an aggregate discovery
+  request cap applies per run. A CPE-search 404 is a failure; a per-CVE 404 is
+  "no record". Every response is read through a bounded identity-encoded
+  stream. Results are cached within a run.
 - Applicability: CVEDB's `cpe23` matching is not documented as reliably
   version-aware. CVEBeacon therefore passes an exact-version CPE but treats a
   CVEDB-only CVE as `needs_review` with the reason
-  `reported by Shodan CVEDB only; confirm applicability`. It never changes an
-  existing NVD or OSV applicability decision; it only adds evidence and
-  needs-review findings.
-- Limitations: a missing CVEDB record is not proof that a product is unaffected.
+  `reported by Shodan CVEDB only; confirm applicability`. Authoritative
+  decisions are reconciled and frozen before CVEDB rows are added. CVEDB-only
+  official lookups and their failures affect only those rows and CVEDB health,
+  never the authoritative rows or the core source health. A prior CVEDB-only
+  finding is not carried into the next scan as an authoritative discovery.
+- Limitations: a missing CVEDB record is not proof that a product is
+  unaffected. Shodan describes keyless CVEDB access as free for non-commercial
+  use; check both providers' terms of use for your use case.
 
 Check Shodan's and VulnCheck's terms of use for your use case.
 

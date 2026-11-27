@@ -84,7 +84,7 @@ Source controls, retry/timeouts, output paths, optional exact CPE mappings, and 
 
 Two optional sources extend exploitation and discovery evidence:
 
-- **VulnCheck KEV** is enabled by default but stays off until a token is set. Get a free community token at [vulncheck.com](https://vulncheck.com/) and set `VULNCHECK_API_TOKEN`, another environment variable named by `vulncheck_api_key_env`, or an owner-only file named by `vulncheck_api_key_file`. Without a token, the source reports `off: no token` and never fails a scan or configuration load. The token is never displayed, logged, exported or backed up.
+- **VulnCheck KEV** is enabled by default but stays off until a token is set. Get a free community token at [vulncheck.com](https://vulncheck.com/) and set `VULNCHECK_API_TOKEN`, another environment variable named by `vulncheck_api_key_env`, or an owner-only file named by `vulncheck_api_key_file`. Without a token, the source reports `off: no token` and never fails a scan or configuration load. The token is never displayed, logged, exported, written to state or retained from a response. The token file follows the same backup rule as the NVD key file: excluded by default and copied only when secret inclusion is selected.
 - **Shodan CVEDB** is free and needs no key, but is disabled by default. When explicitly enabled it sends product CPE identifiers and CVE IDs to `cvedb.shodan.io`; no client names, hostnames or IP addresses are sent. It adds corroborating evidence and, for a CVE only it reports, a `needs_review` finding with the reason `reported by Shodan CVEDB only; confirm applicability`. It never changes an NVD or OSV applicability decision and is capped at 500 CVE lookups and 500 discovery results per run.
 
 Settings shows each source as `on`, `off: no token` or `off: disabled`. Check Shodan's and VulnCheck's terms of use for your use case. See [vulnerability data sources](SOURCES.md) for endpoints, fields and limits.
@@ -241,7 +241,7 @@ SemVer and Python version ranges use their respective ordering rules. Generic pr
 
 ## 9. Material changes
 
-Notifications are created for a new finding or a meaningful change to applicability, affected evidence, rejection/withdrawal state, CVSS, CISA KEV membership, EU KEV membership, VulnCheck KEV membership, or a comparable remediation-relevant claim. Upstream modification timestamps and ordinary EPSS movement are stored when available but do not independently trigger alerts.
+Notifications are created for a new finding or a meaningful change to applicability, affected evidence, rejection/withdrawal state, CVSS, CISA KEV membership, EU KEV membership, or a comparable remediation-relevant claim. VulnCheck KEV is evidence and a badge only; enabling it does not create a material change. Upstream modification timestamps and ordinary EPSS movement are stored when available but do not independently trigger alerts.
 
 Any change in the selected CVSS score/vector/version is material. When sources provide different scores, the highest reported base score and its associated vector/version are displayed together; the conflict and original metrics remain in the evidence. Reordering equivalent evidence does not create an alert. Schema 3 preserves legacy fingerprints and alias-only changes do not produce an upgrade alert storm. Changed source claims still produce material events.
 
