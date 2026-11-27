@@ -354,6 +354,8 @@ button:disabled, .btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed;
 form { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; margin: var(--space-4) 0; }
 form.stack { flex-direction: column; align-items: stretch; gap: var(--space-4); max-width: 560px; }
 form.stack.inventory-review { max-width: none; }
+/* The Add to inventory form wraps the full-width products table. */
+form.stack.web-add-form { max-width: none; }
 #upload-inventory input[type="file"], .inventory-review select {
   width: 100%; min-width: 0;
 }
@@ -436,6 +438,10 @@ a.stat:hover { border-color: var(--accent); }
 .badge-success { background: var(--success-bg); color: var(--success-text); border-color: var(--success-border); }
 .badge-warning { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning-border); }
 .badge-danger { background: var(--danger-bg); color: var(--danger-text); border-color: var(--danger-border); }
+/* Confidence reads the other way round from severity: high is good. */
+.badge-conf-high { background: var(--success-bg); color: var(--success-text); border-color: var(--success-border); }
+.badge-conf-medium { background: var(--info-bg); color: var(--info-text); border-color: var(--info-border); }
+.badge-conf-low { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning-border); }
 
 /* Callouts. The legacy .warning class is the same look without the icon layout. */
 .warning { padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-4); border: 1px solid var(--warning-border); border-left-width: 4px; border-radius: var(--radius-sm); }
@@ -472,18 +478,30 @@ tr:last-child > td { border-bottom: 0; }
 main > table { background: var(--surface); border: 1px solid var(--border); }
 
 /* Web detection results keep their tags together and constrain evidence panels. */
-.web-products-table { min-width: 50rem; table-layout: fixed; }
+.web-products-table { min-width: 56rem; table-layout: fixed; }
 .web-products-table td { min-width: 0; }
-.web-products-table thead th:nth-child(1) { width: 36%; }
-.web-products-table thead th:nth-child(2) { width: 18%; }
-.web-products-table thead th:nth-child(3) { width: 18%; }
-.web-products-table thead th:nth-child(4) { width: 28%; }
+/* Widths follow the header classes, so the optional select column cannot shift them. */
+.web-products-table thead th.web-select-cell { width: 2.75rem; }
+.web-products-table thead th.web-product-cell { width: 30%; }
+.web-products-table thead th.web-version-cell { width: 17%; }
+.web-products-table thead th.web-confidence-cell { width: 11%; }
+.web-products-table thead th.web-cve-cell { width: 16%; }
+.web-products-table thead th.web-evidence-cell { width: 26%; }
+.web-tech-table { min-width: 56rem; table-layout: fixed; }
+.web-tech-table thead th.web-product-cell { width: 26%; }
+.web-tech-table thead th.web-sites-cell { width: 7%; }
+.web-tech-table thead th.web-version-cell { width: 20%; }
+.web-tech-table thead th.web-confidence-cell { width: 11%; }
+.web-tech-table thead th.web-cve-cell { width: 15%; }
+.web-tech-table thead th.web-evidence-cell { width: 21%; }
 .web-products-table .web-site-group {
   text-transform: none; letter-spacing: normal; color: var(--text); font-size: .9rem;
 }
 .web-product-cell { width: 36%; overflow-wrap: anywhere; }
 .web-version-cell { width: 18%; }
 .web-confidence-cell { width: 18%; }
+.web-version-input { width: 100%; max-width: 12rem; }
+.web-select-cell { width: 1%; }
 .web-evidence-cell { width: 28%; }
 .web-product-tags { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
 .web-product-tags .badge, .web-version-badge { white-space: normal; overflow-wrap: anywhere; }

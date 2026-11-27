@@ -127,6 +127,32 @@ shows the source and a short matched excerpt as text; file evidence may also sho
 its SHA-256 and byte count. Inferred products name the technology they follow
 and remain out of inventory rows when they have no direct evidence.
 
+Each product shows a status. **Monitored** means CVE scans cover it, either
+through the client's inventory or through saved web snapshots when
+`[inventory] web_snapshots = true`. **Ready to add** means detection found a
+usable version but no scan covers it yet. **Needs review** means a person must
+confirm the version first: none was disclosed, several conflict, the version is
+only a label such as `GA4`, or the result is a low-confidence banner or file
+name. **Third-party service** marks hosted services, analytics tags and CDNs
+with no package or CPE identity: they run elsewhere, so there is no installed
+version to add or scan. Confidence badges read the other way round from
+severity: High is green and Low is amber.
+
+Users with `manage_inventory` can tick products in the **By site** view and
+choose **Add selected to inventory**, typing the version for products that need
+review, or choose **Add all ready products**. A confirmation page lists the rows
+before anything is saved. Rows are rebuilt from the saved detection results, so
+only the selection and typed versions come from the form. Saving adds the rows
+to the client's managed inventory through the same validated, journaled and
+audited path as the Inventory page, and creates the client and its inventory
+when none exists yet. Added rows use their own asset IDs, so turning on web
+snapshots later cannot cause an asset ID collision. Added rows do not follow
+later detections; update or remove them on the client's Inventory page.
+
+The **Known CVEs** column shows the highest severity and the number of current
+findings for monitored products after a scan has checked them, with a link to
+those findings.
+
 The optional Extensions package must be installed in the dashboard's Python
 environment. Without it the page explains the requirement and disables the
 companion actions. **Show planned requests** validates the saved document and
@@ -155,7 +181,7 @@ message gives the failed-site count and reason codes without naming a host.
 When versions are hidden, the page explains where to review those products.
 When resource counts are present, it also says how many script and style files
 were read from the sites and how many were skipped. Products without a version
-are listed for review and are not added to the inventory.
+are listed for review and are not added to the inventory automatically.
 Entries to review translate reason codes into plain wording and retain the raw
 code in muted text. Redirect details explain why the hop was blocked. For an
 unlisted host and port, the page offers to pre-fill the add-site form; saving

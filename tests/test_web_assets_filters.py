@@ -56,7 +56,8 @@ def test_each_filter_alone_and_combined(web):
     assert sorted(names(results(client, version="with"))) == ["Alpha", "Alpha", "Alpha", "Delta"]
     assert sorted(names(results(client, version="without"))) == ["Beta", "Gamma"]
     assert sorted(names(results(client, inv="review"))) == ["Beta", "Gamma"]
-    assert len(names(results(client, inv="in"))) == 4
+    assert len(names(results(client, inv="ready"))) == 4
+    assert names(results(client, inv="monitored")) == []
     assert sorted(names(results(client, category="server"))) == ["Beta"]
     assert sorted(names(results(client, site="b.example"))) == ["Alpha", "Delta", "Gamma"]
     assert sorted(names(results(client, tech="ALP"))) == ["Alpha"] * 3
@@ -87,10 +88,10 @@ def test_by_technology_view(web):
     assert '<td class="num">3</td>' in alpha
     assert 'web-version-badge">1.0</span> <span class="muted">x2</span>' in alpha
     assert 'web-version-badge">2.0</span> <span class="muted">x1</span>' in alpha
-    assert 'badge-high">High</span>' in alpha
+    assert 'badge-conf-high">High</span>' in alpha
     assert "Sites (3)" in alpha
     beta = table.split("<tr>")[3]
-    assert "version not disclosed x1" in beta and "badge-medium" in beta
+    assert "version not disclosed x1" in beta and "badge-conf-medium" in beta
     assert "Sites (1)" in beta
     assert len(names(results(client, view="tech", conf="low"))) == 3
 
@@ -135,20 +136,20 @@ def test_markup_has_no_inline_code_and_disclosures_are_closed(web):
 
 def test_explicit_inventory_status_and_older_files(web):
     client = seed(web, [
-        product("a.example", "Swiper", versions=["8.4.5"], confidence="low", inventory=False),
+        product("a.example", "Swiper", versions=["8.4.5"], confidence="low", inventory=False, vendor="file-name"),
         product("a.example", "Widget", versions=["2.0"], inventory=True),
         product("a.example", "Legacy", versions=["3.0"]),
     ])
     table = results(client)
     rows = {name: next(row for row in table.split("<tr>") if f"<strong>{name}</strong>" in row)
             for name in ("Swiper", "Widget", "Legacy")}
-    assert "Review only" in rows["Swiper"] and "In inventory" not in rows["Swiper"]
+    assert "Needs review" in rows["Swiper"] and "Ready to add" not in rows["Swiper"]
     assert 'web-version-badge">8.4.5</span>' in rows["Swiper"]
-    assert "In inventory" in rows["Widget"]
-    assert "In inventory" in rows["Legacy"]
-    assert names(results(client, inv="in")) == ["Legacy", "Widget"]
+    assert "Ready to add" in rows["Widget"]
+    assert "Ready to add" in rows["Legacy"]
+    assert names(results(client, inv="ready")) == ["Legacy", "Widget"]
     assert names(results(client, inv="review")) == ["Swiper"]
-    assert "Review only" in results(client, view="tech", inv="review")
+    assert "Needs review" in results(client, view="tech", inv="review")
 
 
 def test_versions_of_one_technology_group_into_a_single_row(web):

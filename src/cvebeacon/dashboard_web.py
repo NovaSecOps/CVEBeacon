@@ -12,13 +12,21 @@ from flask import Blueprint, abort, current_app, g, redirect, render_template, r
 
 from .clients import client_name, client_page
 from .dashboard import _text, requires
+from .dashboard_inventory import MANAGE, _changes_allowed, _current, _publish, _revision, inventory_lock
 from .dashboard_jobs import JobQueueFull, build_command
 from .dashboard_ops import require_accounts
-from .errors import CVEBeaconError, ConfigurationError
+from .errors import CVEBeaconError, ConfigurationError, InventoryValidationError, StateError
+from .inventory import MAX_CONTRACT_ROWS
 from .locking import OperationLock, RunInProgress
-from .managed_inventory import client_key as inventory_client_key, normalized_client, profiles
+from .managed_inventory import (
+    ManagedInventoryCollision, client_key as inventory_client_key, normalized_client, profiles,
+    read_inventory, read_profile,
+)
+from .private_storage import private_directory
 from .publication import PublicationTimeout
+from .state import StateStore
 from . import web_assets
+from . import web_inventory_actions as actions
 from .web_assets import (COMPANION_NOTICE, client_label, directories,
                          paths, read_allowlist, save_allowlist, validate_allowlist)
 from .web_inventory import decode_json, read_bytes, read_web_snapshot
@@ -32,6 +40,7 @@ _EVIDENCE_KINDS = frozenset({
 _WEB_PRODUCT_CATEGORIES = frozenset({
     "web-server", "application-server", "language", "framework", "cms", "js-library",
     "css-library", "edge", "ops-tool", "hosted-platform", "application", "reverse-proxy",
+    "analytics",
 })
 _NPM_NAME_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
 _NPM_SCOPE_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
@@ -57,6 +66,9 @@ _ROW_LIMIT = 500
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 _CONFIDENCE_CHOICES = ("high", "medium", "low")
 _NO_SITE = "Site not recorded"
+_INVENTORY_UNREADABLE = ("The saved inventory for this client could not be read. "
+                         "Open the client's Inventory page to check it.")
+_STATUS_CHOICES = ("monitored", "ready", "review", "service")
 
 
 def _site_label(item):
@@ -80,7 +92,7 @@ def _filter_args(args, categories, sites):
     return {
         "conf": conf,
         "version": version if version in {"with", "without"} else "any",
-        "inv": inventory if inventory in {"in", "review"} else "any",
+        "inv": inventory if inventory in _STATUS_CHOICES else "any",
         "category": category if category in categories else "",
         "site": site if site in sites else "",
         "tech": single("tech"),
@@ -94,8 +106,9 @@ def _technology_rows(rows):
     for item in rows:
         group = groups.setdefault(item["display_name"].casefold(), {
             "name": item["display_name"], "sites": {}, "versions": {}, "categories": [],
-            "rank": 0, "label": "Unknown", "class": "neutral", "in_inventory": False,
+            "rank": 0, "label": "Unknown", "class": "neutral", "items": [],
         })
+        group["items"].append(item)
         site = _site_label(item)
         versions = [v for v in item.get("versions", []) if v.strip()]
         group["sites"].setdefault(site, []).append((", ".join(versions), item))
@@ -107,9 +120,10 @@ def _technology_rows(rows):
         rank = _CONFIDENCE_RANK.get(item.get("confidence", "").casefold(), 0)
         if rank > group["rank"] or (rank == group["rank"] == 0):
             group["rank"], group["label"], group["class"] = rank, item["confidence_label"], item["confidence_class"]
-        group["in_inventory"] = group["in_inventory"] or item["in_inventory"]
     result = []
     for group in groups.values():
+        group["status"] = actions.best_status(entry["status"] for entry in group["items"])
+        group["cve"] = _merge_cve(entry["cve"] for entry in group["items"])
         group["site_count"] = len(group["sites"])
         group["version_counts"] = sorted(
             ((v, n) for v, n in group["versions"].items() if v), key=lambda pair: (-pair[1], pair[0]))
@@ -122,6 +136,84 @@ def _technology_rows(rows):
         result.append(group)
     result.sort(key=lambda g: (-g["site_count"], g["name"].casefold()))
     return result
+
+
+def _severity_level(score):
+    if score is None:
+        return "unknown"
+    return "critical" if score >= 9 else "high" if score >= 7 else "medium" if score >= 4 else "low" if score > 0 else "none"
+
+
+def _cve_cell(item, summary, unavailable):
+    """What the Known CVEs column shows for one product."""
+    if item["status"] != "monitored":
+        return {"state": "unmonitored"}
+    if unavailable:
+        return {"state": "unavailable"}
+    found = [(asset_id, *summary[asset_id]) for asset_id in item["covered_ids"] if asset_id in summary]
+    if not found:
+        return {"state": "clear"}
+    scores = [score for _, _, score in found if score is not None]
+    top = max(scores) if scores else None
+    return {"state": "found", "count": sum(count for _, count, _ in found), "score": top,
+            "level": _severity_level(top), "asset": found[0][0]}
+
+
+def _merge_cve(cells):
+    """The highest severity across the sites of one technology."""
+    cells = [cell for cell in cells if cell["state"] != "unmonitored"]
+    if not cells:
+        return {"state": "unmonitored"}
+    if any(cell["state"] == "unavailable" for cell in cells):
+        return {"state": "unavailable"}
+    found = [cell for cell in cells if cell["state"] == "found"]
+    if not found:
+        return {"state": "clear"}
+    scores = [cell["score"] for cell in found if cell["score"] is not None]
+    top = max(scores) if scores else None
+    return {"state": "found", "count": sum(cell["count"] for cell in found), "score": top,
+            "level": _severity_level(top), "asset": found[0]["asset"]}
+
+
+def _snapshot_ids(rows):
+    return {getattr(record, "asset_id", "") for record in rows
+            if getattr(record, "version", "") or getattr(record, "cpe", "")}
+
+
+def _in_snapshot(item, snapshot_ids):
+    """Whether the product has a row in the saved snapshot. Older review files are guessed."""
+    if isinstance(item.get("inventory"), bool):
+        return item["inventory"]
+    return bool([v for v in item.get("versions", []) if v.strip()]) or item.get("asset_id") in snapshot_ids
+
+
+def _read_managed(config, client):
+    """The client's managed inventory as (raw bytes or None, rows). A missing file is empty."""
+    directory = config.inventory_directory
+    try:
+        if directory.is_symlink():
+            raise ValueError("inventory storage is a symbolic link")
+        data = _current(directory / f"{inventory_client_key(client)}.json")
+        return data, ([] if data is None else read_inventory(data))
+    except (OSError, ValueError, CVEBeaconError):
+        raise ConfigurationError(_INVENTORY_UNREADABLE) from None
+
+
+def _client_profile(config, client):
+    """The saved client details, or the details a first add will create."""
+    directory = config.inventory_directory
+    key = inventory_client_key(client)
+    path = directory / f"{key}.client"
+    if directory.is_symlink():
+        raise ConfigurationError(_INVENTORY_UNREADABLE)
+    if path.exists() or path.is_symlink():
+        try:
+            return read_profile(directory, key)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, CVEBeaconError):
+            raise ConfigurationError(_INVENTORY_UNREADABLE) from None
+    return {"name": normalized_client(client), "notes": "", "contact": ""}
 
 
 def _host(entry):
@@ -181,7 +273,7 @@ def _review_metadata(detail, client):
         return _NPM_NAME_PART.fullmatch(value) is not None
     for item in products + reviews:
         for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence",
-                      "reason", "detail", "name", "ecosystem", "package"):
+                      "reason", "detail", "name", "ecosystem", "package", "cpe"):
             if field in item and not text(item[field]):
                 raise ValueError("invalid review text")
         if "name" in item and (not item["name"].strip() or len(item["name"]) > 256):
@@ -343,7 +435,7 @@ def create_web_blueprint(config):
     def manager():
         return current_app.extensions["dashboard_jobs"]
 
-    def render(client="", *, error=None, status=200, prefill_url=""):
+    def render(client="", *, error=None, status=200, prefill_url="", added=0):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot, snapshot_rows = [], [], None, None, []
         last_job, truncated, removed = None, False, False
@@ -411,10 +503,7 @@ def create_web_blueprint(config):
             "style": "stylesheet", "manifest": "manifest", "robots": "robots.txt",
         }
         confidence_classes = {"high": "high", "medium": "medium", "low": "low"}
-        snapshot_inventory_ids = {
-            getattr(record, "asset_id", "") for record in snapshot_rows
-            if getattr(record, "version", "") or getattr(record, "cpe", "")
-        }
+        snapshot_inventory_ids = _snapshot_ids(snapshot_rows)
         for item in products:
             item["display_name"] = item.get("name") or (
                 f"{item.get('vendor', '')}/{item.get('product', '')}"
@@ -431,16 +520,40 @@ def create_web_blueprint(config):
                 "categories", [item.get("category") or "Category not recorded"]
             )
             # Newer review files record whether a row was created; older ones are guessed.
-            item["in_inventory"] = (
-                item["inventory"] if isinstance(item.get("inventory"), bool)
-                else item["has_version"] or item.get("asset_id") in snapshot_inventory_ids
-            )
+            item["in_inventory"] = _in_snapshot(item, snapshot_inventory_ids)
             labels = [evidence_words[kind] for kind in item.get("evidence_types", [])
                       if kind in evidence_words]
             labels.extend(f"Inferred from {source}" for source in item.get("implied_by", []))
             if not labels and "implied" in item.get("evidence_types", []):
                 labels.append("Inferred")
             item["evidence_labels"] = list(dict.fromkeys(labels))
+        snapshots_on = config.inventory is not None and config.inventory.web_snapshots
+        managed_warning = None
+        managed_assets = []
+        if client and products and config.managed_inventory:
+            try:
+                managed_assets = _read_managed(config, client)[1]
+            except ConfigurationError:
+                managed_warning = ("The inventory saved for this client could not be read, so none of "
+                                   "these products are shown as monitored. Check it on the client's Inventory page.")
+        managed = actions.ManagedIndex(managed_assets)
+        for item in products:
+            item["status"], item["covered_ids"] = actions.classify(
+                item, snapshots_on=snapshots_on, managed=managed)
+            item["status_label"] = actions.STATUS_LABELS[item["status"]]
+            item["status_badge"] = actions.STATUS_BADGES[item["status"]]
+            item["pickable"] = bool(item.get("asset_id")) and item["status"] not in {"monitored", "service"}
+            distinct = list(dict.fromkeys(actions.detected_versions(item)))
+            item["prefill"] = distinct[0] if len(distinct) == 1 else ""
+        covered = sorted({asset_id for item in products for asset_id in item["covered_ids"]})
+        findings, findings_unavailable = {}, False
+        if covered:
+            try:
+                findings = StateStore(config.database_path).finding_summary(covered)
+            except (StateError, OSError):
+                findings_unavailable = True
+        for item in products:
+            item["cve"] = _cve_cell(item, findings, findings_unavailable)
         products.sort(key=lambda item: (
             item.get("hostname", "").casefold(), item.get("category", "").casefold(),
             item["display_name"].casefold(),
@@ -449,7 +562,8 @@ def create_web_blueprint(config):
         site_names = sorted({_site_label(item) for item in products}, key=str.casefold)
         flt = _filter_args(request.args, set(categories), set(site_names))
         needle = flt["tech"].casefold()
-        chips = dict(high=0, medium=0, low=0, with_version=0, without_version=0)
+        chips = dict(high=0, medium=0, low=0, with_version=0, without_version=0,
+                     monitored=0, ready=0, review=0, service=0)
         matched, technologies, chip_sites = [], set(), set()
         for item in products:
             chip_sites.add(_site_label(item))
@@ -457,10 +571,11 @@ def create_web_blueprint(config):
             if item["confidence_class"] in chips:
                 chips[item["confidence_class"]] += 1
             chips["with_version" if item["has_version"] else "without_version"] += 1
+            chips[item["status"]] += 1
             if ((item["confidence_class"] in flt["conf"] or (
                     item["confidence_class"] == "neutral" and flt["conf"] == set(_CONFIDENCE_CHOICES)))
                     and (flt["version"] == "any" or item["has_version"] == (flt["version"] == "with"))
-                    and (flt["inv"] == "any" or item["in_inventory"] == (flt["inv"] == "in"))
+                    and (flt["inv"] == "any" or item["status"] == flt["inv"])
                     and (not flt["category"] or flt["category"] in item["category_labels"])
                     and (not flt["site"] or _site_label(item) == flt["site"])
                     and (not needle or needle in item["display_name"].casefold())):
@@ -468,6 +583,8 @@ def create_web_blueprint(config):
         chips.update(technologies=len(technologies), sites=len(chip_sites))
         flt["active"] = (flt["conf"] != set(_CONFIDENCE_CHOICES) or flt["version"] != "any"
                          or flt["inv"] != "any" or bool(flt["category"] or flt["site"] or flt["tech"]))
+        can_add = bool(g.accounts and config.managed_inventory and {"view", "manage_inventory"} <= g.permissions)
+        ready_total = chips["ready"]
         tech_rows, site_groups = [], []
         if flt["view"] == "tech":
             tech_rows = _technology_rows(matched)
@@ -475,7 +592,8 @@ def create_web_blueprint(config):
             tech_rows = tech_rows[:_ROW_LIMIT]
         else:
             list_total = len(matched)
-            for item in matched[:_ROW_LIMIT]:
+            for number, item in enumerate(matched[:_ROW_LIMIT], 1):
+                item["row_no"] = number
                 if not site_groups or site_groups[-1][0] != _site_label(item):
                     site_groups.append((_site_label(item), []))
                 site_groups[-1][1].append(item)
@@ -488,16 +606,21 @@ def create_web_blueprint(config):
                                prefill_entry=prefill_entry, prefill_url=prefill_url, flt=flt, chips=chips,
                                categories=categories, site_names=site_names, matched_count=len(matched),
                                total_products=len(products), tech_rows=tech_rows, site_groups=site_groups,
-                               row_limit=_ROW_LIMIT, list_total=list_total, confidence_choices=_CONFIDENCE_CHOICES), status
+                               row_limit=_ROW_LIMIT, list_total=list_total, confidence_choices=_CONFIDENCE_CHOICES,
+                               can_add=can_add, managed_enabled=config.managed_inventory,
+                               ready_total=ready_total, managed_warning=managed_warning,
+                               added=added, client_key=inventory_client_key(client) if client else "",
+                               status_labels=actions.STATUS_LABELS, status_badges=actions.STATUS_BADGES), status
 
     @blueprint.get("")
     @requires("view")
     def index():
         label = _text(request.args, "client", limit=256)
         prefill_url = _text(request.args, "prefill_url", limit=2048)
+        added = _text(request.args, "added", limit=6)
         try:
             return render(_canonical_client(config, client_label(label)) if label else "",
-                          prefill_url=prefill_url)
+                          prefill_url=prefill_url, added=int(added) if added.isascii() and added.isdecimal() else 0)
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -659,6 +782,104 @@ def create_web_blueprint(config):
         finally:
             lock.release()
         return redirect(url_for("web.index", client=client), code=303)
+
+    def saved_products(client):
+        """The client's detected products, re-read from the saved review (never from the form)."""
+        path, output = paths(config, client)
+        client = read_allowlist(path, client)[0]["client"]
+        review_path = output.with_name(output.name + ".review.json")
+        if not (review_path.exists() or review_path.is_symlink()):
+            return []
+        snapshot_rows = []
+        if output.exists() or output.is_symlink():
+            try:
+                snapshot_rows = read_web_snapshot(output)[0]
+            except (CVEBeaconError, ValueError, OSError):
+                pass
+        try:
+            products = _review_metadata(decode_json(read_bytes(review_path)), client)[0][:1000]
+        except (CVEBeaconError, ValueError, OSError):
+            raise ConfigurationError("The saved detection results could not be read.") from None
+        snapshot_ids = _snapshot_ids(snapshot_rows)
+        for item in products:
+            item["in_inventory"] = _in_snapshot(item, snapshot_ids)
+        return products
+
+    def plan(client):
+        """Rebuild everything to add from saved data plus the asset IDs and versions typed."""
+        mode = _text(request.form, "action", required=True)
+        if mode not in {"selected", "all"}:
+            abort(400)
+        picks = request.form.getlist("pick")
+        if len(picks) > actions.MAX_PICKS:
+            raise ConfigurationError(
+                "Too many products were selected at once. Select at most 2,000, or use Add all ready products.")
+        if mode == "selected" and not picks:
+            raise ConfigurationError("Select at least one product to add.")
+        versions = {pick: request.form.get("v-" + pick, "") for pick in set(picks)}
+        products = saved_products(client)
+        profile = _client_profile(config, client)
+        data, assets = _read_managed(config, profile["name"])
+        snapshots_on = config.inventory is not None and config.inventory.web_snapshots
+        rows, skipped, unknown = actions.plan_rows(
+            products, picks, versions, profile["name"], snapshots_on=snapshots_on,
+            managed=actions.ManagedIndex(assets), everything=mode == "all")
+        return profile, data, assets, rows, skipped, unknown
+
+    def form_client():
+        _changes_allowed(config)
+        try:
+            return client_label(_canonical_client(config, _text(request.form, "client", required=True)))
+        except ConfigurationError:
+            abort(400)
+
+    @blueprint.post("/inventory/preview")
+    @requires(MANAGE)
+    def inventory_preview():
+        client = form_client()
+        try:
+            profile, data, _, rows, skipped, unknown = plan(client)
+        except (ConfigurationError, ValueError, OSError, StateError, InventoryValidationError) as exc:
+            return render(client, error=str(exc) if isinstance(exc, ConfigurationError)
+                          else "The products could not be checked. Check storage and retry.", status=400)
+        new_assets = [asset for _, asset in rows]
+        return render_template(
+            "web_inventory_preview.html", client=client, rows=rows, skipped=skipped, unknown=unknown,
+            revision=_revision(data), digest=actions.digest(new_assets),
+            new_inventory=data is None, label=profile["name"]), 200
+
+    @blueprint.post("/inventory/save")
+    @requires(MANAGE)
+    def inventory_save():
+        client = form_client()
+        revision = _text(request.form, "revision", required=True, limit=64)
+        digest = _text(request.form, "digest", required=True, limit=64)
+        try:
+            lock = inventory_lock(config)
+        except ConfigurationError as exc:
+            return render(client, error=str(exc), status=409)
+        try:
+            profile, data, assets, rows, _, _ = plan(client)
+            new_assets = [asset for _, asset in rows]
+            if _revision(data) != revision or actions.digest(new_assets) != digest or not new_assets:
+                raise ConfigurationError(
+                    "The inventory or the detection results changed since you checked them. "
+                    "Nothing was added. Select the products again.")
+            directory = config.inventory_directory
+            private_directory(directory, owner_only=True)
+            seen = {asset.asset_id.casefold() for asset in assets}
+            added = [asset for asset in new_assets if asset.asset_id.casefold() not in seen]
+            if len(assets) + len(added) > MAX_CONTRACT_ROWS:
+                raise ConfigurationError("This inventory would exceed 100,000 rows. Add fewer products.")
+            path = directory / f"{inventory_client_key(profile['name'])}.json"
+            _publish(config, path, profile, data, assets + added, "add")
+        except (ConfigurationError, ManagedInventoryCollision) as exc:
+            return render(client, error=str(exc), status=409)
+        except (OSError, ValueError, StateError, InventoryValidationError):
+            return render(client, error="The inventory could not be saved. Check storage and retry.", status=503)
+        finally:
+            lock.release()
+        return redirect(url_for("web.index", client=client, added=len(added)), code=303)
 
     @blueprint.post("/run")
     @requires("run")

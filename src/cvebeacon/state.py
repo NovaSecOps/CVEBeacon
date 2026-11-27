@@ -515,6 +515,39 @@ class StateStore:
         with closing(self._connect()) as db:
             return [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM current_findings f WHERE NOT EXISTS (SELECT 1 FROM advisory_aliases a WHERE a.asset_id=f.asset_id AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY asset_id,cve_id")]
 
+    def finding_summary(self, asset_ids: Sequence[str]) -> dict[str, tuple[int, float | None]]:
+        """Return the count of current findings and the highest CVSS score per asset ID.
+
+        Read-only. Assets without findings are absent. A finding with no score counts
+        toward the total, and the score is None when no finding of the asset has one.
+        """
+        unique = list(dict.fromkeys(asset_ids))
+        if not unique or not self.path.exists():
+            return {}
+        summary: dict[str, tuple[int, float | None]] = {}
+        try:
+            with closing(self._connect()) as db:
+                for start in range(0, len(unique), 500):
+                    chunk = unique[start:start + 500]
+                    marks = ",".join("?" for _ in chunk)
+                    for row in db.execute(
+                        "SELECT asset_id, COUNT(*), MAX(json_extract(payload_json,'$.vulnerability.cvss_score')) "
+                        f"FROM current_findings f WHERE asset_id IN ({marks}) "
+                        "AND COALESCE(json_extract(payload_json,'$.applicability'),'') != 'not_affected' "
+                        "AND NOT EXISTS (SELECT 1 FROM advisory_aliases a WHERE a.asset_id=f.asset_id "
+                        "AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) GROUP BY asset_id",
+                        chunk,
+                    ):
+                        score = row[2]
+                        summary[row[0]] = (int(row[1]), float(score) if isinstance(score, (int, float)) else None)
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return {}
+            raise StateError(f"cannot read findings: {exc}") from exc
+        except sqlite3.Error as exc:
+            raise StateError(f"cannot read findings: {exc}") from exc
+        return summary
+
     def history_event(self, event_id: int) -> dict | None:
         self.initialize()
         with closing(self._connect()) as db:

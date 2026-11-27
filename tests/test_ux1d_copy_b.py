@@ -423,6 +423,11 @@ def test_web_assets_points_to_the_inventory_settings(tmp_path, monkeypatch):
         "read_web_snapshot",
         lambda path: ([], {"generated_at": "2026-11-25T00:00:00Z", "status": "success", "record_count": 0}),
     )
+    (tmp_path / "snapshot.json.review.json").write_text(json.dumps({"client": "Acme", "reviews": [], "products": [{
+        "asset_id": "web-1", "hostname": "a.example", "vendor": "nginx", "product": "nginx",
+        "category": "web-server", "confidence": "high", "versions": ["1.25.3"],
+        "evidence_types": ["header"]}]}), encoding="utf-8")
+    monkeypatch.setattr(dashboard_web, "read_bytes", lambda path: path.read_bytes())
     response = client.get("/web-assets?client=Acme")
     assert response.status_code == 200
     with app.test_request_context():
@@ -431,4 +436,4 @@ def test_web_assets_points_to_the_inventory_settings(tmp_path, monkeypatch):
     assert link is not None
     assert link.group(1) == expected_destination
     assert "web_snapshots = true" not in response.text
-    assert "turn on web snapshots in the" in response.text
+    assert "turn on 'Include saved web snapshots in scans' in the" in response.text

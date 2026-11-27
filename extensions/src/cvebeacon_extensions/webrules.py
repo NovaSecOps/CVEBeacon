@@ -33,6 +33,7 @@ CATEGORIES = {
     "hosted-platform",
     "application",
     "reverse-proxy",
+    "analytics",
 }
 
 MAX_GENERATORS = 4096
@@ -73,6 +74,8 @@ class Rule:
     hint: str = ""
     version_group: int = 1
     categories: tuple[str, ...] = ()
+    # A version the rule itself defines, for example "GA4"; used when the pattern matches.
+    fixed_version: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,7 +205,7 @@ def _validated_cpe(value: str) -> str:
 
 def _rule(key, vendor, product, category, kind, pattern, *, subject="", version="", cpe="",
           confidence="medium", name="", ecosystem="", package="", hint="", version_group=1,
-          categories=()):
+          categories=(), fixed_version=""):
     if category not in CATEGORIES:
         raise ValueError(f"unknown rule category: {category}")
     if kind not in {"header", "cookie", "meta", "url", "html", "script", "style", "manifest", "robots"}:
@@ -218,6 +221,9 @@ def _rule(key, vendor, product, category, kind, pattern, *, subject="", version=
         raise ValueError(f"rule {key} has invalid categories")
     if (ecosystem or package) and (ecosystem != "npm" or not package):
         raise ValueError(f"rule {key} has an invalid package identity")
+    if fixed_version and (not isinstance(fixed_version, str)
+                          or not re.fullmatch(r"[A-Za-z0-9]{1,16}", fixed_version)):
+        raise ValueError(f"rule {key} has an invalid fixed version")
     pattern = _versioned(pattern)
     if version:
         version = _versioned(version)
@@ -230,7 +236,7 @@ def _rule(key, vendor, product, category, kind, pattern, *, subject="", version=
     all_categories = tuple(dict.fromkeys((category, *categories)))
     return Rule(key, vendor, product, category, kind, pattern, subject.casefold(), version,
                 _validated_cpe(cpe), confidence, name, ecosystem, package, hint.casefold(),
-                version_group, all_categories)
+                version_group, all_categories, fixed_version)
 
 
 RULES: tuple[Rule, ...] = (
@@ -687,19 +693,35 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           name="Google Maps", confidence="high", hint="google"),
     _rule("expanded-google-fonts", "google", "google-font-api", "hosted-platform", "url",
           r"(?:fonts\.googleapis\.com/|fonts\.gstatic\.com/)", name="Google Font API", confidence="high"),
-    _rule("expanded-google-analytics", "google", "google-analytics", "hosted-platform", "url",
-          r"google-analytics\.com/(?:analytics\.js|ga\.js)", name="Google Analytics", confidence="high"),
-    _rule("expanded-google-analytics-script", "google", "google-analytics-ga4", "hosted-platform", "script",
+    _rule("expanded-google-analytics", "google", "google-analytics", "analytics", "url",
+          r"google-analytics\.com/(?:analytics\.js|ga\.js)", name="Google Analytics",
+          confidence="high", fixed_version="UA"),
+    _rule("expanded-google-analytics-script", "google", "google-analytics", "analytics", "script",
           r"\bgtag\s*\(\s*[\"']config[\"']\s*,\s*[\"']G-[A-Z0-9]{6,}[\"']",
-          name="Google Analytics (GA4)", confidence="high", hint="gtag"),
-    _rule("expanded-google-analytics-ga4-url", "google", "google-analytics-ga4", "hosted-platform", "url",
+          name="Google Analytics", confidence="high", hint="gtag", fixed_version="GA4"),
+    _rule("expanded-google-analytics-ga4-url", "google", "google-analytics", "analytics", "url",
           r"googletagmanager\.com/gtag/js\?(?:[^\"'\s]*&)?id=G-[A-Z0-9]{6,}",
-          name="Google Analytics (GA4)", confidence="high"),
-    _rule("expanded-google-tag-manager", "google", "tag-manager", "hosted-platform", "url",
+          name="Google Analytics", confidence="high", fixed_version="GA4"),
+    _rule("expanded-google-tag-manager", "google", "tag-manager", "analytics", "url",
           r"googletagmanager\.com/gtm\.js", name="Google Tag Manager", confidence="high"),
-    _rule("expanded-google-tag-manager-script", "google", "tag-manager", "hosted-platform", "script",
-          r"(?:googletagmanager\.com/gtm\.js|\bGTM-[A-Z0-9]{6,}\b)",
+    _rule("expanded-google-tag-manager-script", "google", "tag-manager", "analytics", "script",
+          r"(?:googletagmanager\.com/gtm\.js|(?-i:\bGTM-[A-Z0-9]{6,}\b))",
           name="Google Tag Manager", confidence="high", hint="gtm"),
+    # The Google tag runs on Tag Manager, so loading it is medium evidence of Tag Manager.
+    _rule("expanded-google-tag-manager-gtag-url", "google", "tag-manager", "analytics", "url",
+          r"googletagmanager\.com/gtag/js", name="Google Tag Manager", confidence="medium"),
+    _rule("expanded-google-tag-manager-gtag-script", "google", "tag-manager", "analytics", "script",
+          r"googletagmanager\.com/gtag/js", name="Google Tag Manager", confidence="medium",
+          hint="googletagmanager"),
+    _rule("expanded-google-tag-manager-noscript", "google", "tag-manager", "analytics", "html",
+          r"googletagmanager\.com/ns\.html", name="Google Tag Manager", confidence="high",
+          hint="googletagmanager"),
+    _rule("expanded-google-tag-manager-comment", "google", "tag-manager", "analytics", "html",
+          r"<!--\s{0,8}(?:End )?Google Tag Manager\s{0,8}-->", name="Google Tag Manager",
+          confidence="high", hint="google tag manager"),
+    # Container ids are upper case; class names such as "gtm-link" must not match.
+    _rule("expanded-google-tag-manager-id", "google", "tag-manager", "analytics", "html",
+          r"(?-i:\bGTM-[A-Z0-9]{4,}\b)", name="Google Tag Manager", confidence="high", hint="gtm-"),
     _rule("expanded-cdn-jsdelivr", "jsdelivr", "cdn", "edge", "url",
           r"cdn\.jsdelivr\.net/", name="jsDelivr", confidence="high"),
     _rule("expanded-cdn-unpkg", "unpkg", "cdn", "edge", "url",
@@ -719,15 +741,15 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           r"js\.hcaptcha\.com/\d+/api\.js", name="hCaptcha", confidence="high"),
     _rule("expanded-cloudflare-turnstile", "cloudflare", "turnstile", "hosted-platform", "url",
           r"challenges\.cloudflare\.com/turnstile/v0/api\.js", name="Cloudflare Turnstile", confidence="high"),
-    _rule("expanded-cloudflare-web-analytics", "cloudflare", "web-analytics", "hosted-platform", "url",
+    _rule("expanded-cloudflare-web-analytics", "cloudflare", "web-analytics", "analytics", "url",
           r"static\.cloudflareinsights\.com/beacon\.min\.js", name="Cloudflare Web Analytics", confidence="high"),
     _rule("expanded-facebook-pixel", "meta", "facebook-pixel", "hosted-platform", "url",
           r"connect\.facebook\.net/[^/]{1,20}/fbevents\.js", name="Facebook Pixel", confidence="high"),
-    _rule("expanded-hotjar", "hotjar", "hotjar", "hosted-platform", "url",
+    _rule("expanded-hotjar", "hotjar", "hotjar", "analytics", "url",
           r"(?:static|script)\.hotjar\.com/", name="Hotjar", confidence="high"),
-    _rule("expanded-microsoft-clarity", "microsoft", "clarity", "hosted-platform", "url",
+    _rule("expanded-microsoft-clarity", "microsoft", "clarity", "analytics", "url",
           r"clarity\.ms/tag/", name="Microsoft Clarity", confidence="high"),
-    _rule("expanded-matomo", "matomo", "matomo", "hosted-platform", "url",
+    _rule("expanded-matomo", "matomo", "matomo", "analytics", "url",
           r"/(?:matomo|piwik)\.js(?:\?|$)", name="Matomo", confidence="medium"),
     _rule("expanded-stripe-js", "stripe", "stripe-js", "hosted-platform", "url",
           r"js\.stripe\.com/v3(?:/|\?|$)", name="Stripe.js", ecosystem="npm",
@@ -2006,6 +2028,8 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
             if start == end:
                 continue
             matched = True
+            if rule.fixed_version:
+                versions.add(rule.fixed_version)
             if compiled.version is not None and not sensitive_header:
                 version_match = compiled.version.search(value)
                 if version_match:
