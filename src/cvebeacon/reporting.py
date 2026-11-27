@@ -16,16 +16,16 @@ from openpyxl.utils import get_column_letter
 
 from .models import Applicability, QueryResult
 from .errors import ReportingError
+from .xlsx_safety import neutralize_formula
 
 
 def _safe(value):
     if isinstance(value, str):
-        value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", lambda match: f"\\x{ord(match.group()):02x}", value)
+        value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]",
+                       lambda match: f"\\x{ord(match.group()):02x}", value)
         if len(value) > 32_000:
             value = value[:31_980] + "…[truncated]"
-        if value.startswith(("=", "+", "-", "@")):
-            return "'" + value
-    return value
+    return neutralize_formula(value)
 
 
 def _one_line(value):
@@ -78,6 +78,26 @@ def _finish_sheet(sheet) -> None:
     for column in range(1, sheet.max_column + 1):
         width = max((len(str(sheet.cell(row, column).value or "")) for row in range(1, min(sheet.max_row, 200) + 1)), default=10)
         sheet.column_dimensions[get_column_letter(column)].width = min(max(width + 2, 10), 55)
+
+
+def write_xlsx_tables(stream, metadata, tables):
+    """Write report tables and metadata using the same cell safety as query reports."""
+    workbook = Workbook(write_only=True)
+    for name, headers, rows in tables:
+        sheet = workbook.create_sheet(name)
+        sheet.freeze_panes = f"A{len(metadata) + 3}"
+        for column, header in enumerate(headers, 1):
+            sheet.column_dimensions[get_column_letter(column)].width = max(16, len(header) + 2)
+        for label, value in metadata:
+            sheet.append([_safe(label), _safe(value)])
+        sheet.append([])
+        sheet.append([_safe(header) for header in headers])
+        last_row = len(metadata) + 2
+        for row in rows:
+            sheet.append([_safe(value) for value in row])
+            last_row += 1
+        sheet.auto_filter.ref = f"A{len(metadata) + 2}:{get_column_letter(len(headers))}{last_row}"
+    workbook.save(stream)
 
 
 def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
