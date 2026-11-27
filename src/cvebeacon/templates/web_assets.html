@@ -101,7 +101,8 @@
 {% endcall %}
 {% endif %}
 
-{% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.') %}
+{% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.', id='detected-products') %}
+{% if client %}<a class="btn btn-secondary btn-small" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>{% endif %}
 {% if products %}
 {% if managed_warning %}{% call callout('warning') %}<p>{{ managed_warning }}</p>{% endcall %}{% endif %}
 {% if ready_total and not chips.monitored %}{% call callout('info', 'Not covered by CVE scans yet') %}<p>{{ ready_total }} detected product{{ ' is' if ready_total == 1 else 's are' }} not covered by CVE scans yet. {% if can_add %}{% if flt.view == 'site' %}Select {{ 'it' if ready_total == 1 else 'them' }} below and choose <em>Add to inventory</em>.{% else %}Choose <em>Add all {{ ready_total }} ready products</em> below, or switch to By site to pick individual products.{% endif %}{% else %}Ask someone who can manage inventories to add {{ 'it' if ready_total == 1 else 'them' }}.{% endif %} To monitor every detection with a version automatically after each web scan, turn on 'Include saved web snapshots in scans' in the <a href="{{ url_for('config_editor.inventory') }}">Inventory settings</a>.</p>{% endcall %}{% endif %}

@@ -222,6 +222,43 @@ audit entries. If a result path is a directory, move that directory out of
 Normal scans preserve the client label in assets and
 in **Affected clients** alert lines.
 
+### Technology report
+
+Open **Technology report** from **Detected products** on **Web assets** or from
+the client's inventory page. Viewing and exporting require `view`. The report
+uses saved detections and current local scan findings. A technology can appear
+at multiple sites. Its status shows whether CVE scans cover it, and its expanded
+CVE list shows applicability, severity, dates and fixed versions when available.
+The total current count includes CVEs outside the selected window. The headline
+CVE counts count distinct CVE IDs across the selected technologies and sites.
+
+Choose the last 7, 30, 60 or 90 days, any number of days from 1 to 3,650, a date
+range, or all time. Relative windows include today in UTC. A custom range includes
+both dates, spans at most 3,650 calendar days and ends no later than today in UTC.
+The window applies to CVE publication by default. It can also use the date
+CVEBeacon first detected the finding or the CVE's modification date. Findings
+without the selected date appear only in **All time**. Invalid windows reset to
+the last 30 days by publication date.
+
+Filter technologies by site, category, confidence or monitoring status. Filter
+their CVEs by minimum severity, membership in either or both known-exploited
+vulnerability (KEV) catalogs, or exploitation evidence. Technologies with no
+matching CVEs stay visible by default. Clear **Show technologies with no CVEs in
+the window** to hide them.
+
+The exploitation column uses watch catalog evidence. SSVC active exploitation
+or an EUVD exploited-since date means **Active**. SSVC proof of concept means
+**PoC** when neither active signal is present. **None** means the catalog view
+has no active or PoC indicator. **Unknown** means the catalog view is unavailable
+for that CVE. KEV flags are displayed separately from exploitation.
+
+The same filters apply to XLSX, CSV and JSON downloads. XLSX includes a window
+and filter header and separate **Technologies** and **CVEs** sheets. CSV includes
+the CVE rows and an empty CVE entry for each visible technology with zero matching
+CVEs. JSON nests CVEs under each technology and includes the window and filters.
+The page shows up to 1,000 technologies and 200 CVEs per technology. Exports
+include up to 50,000 CVE entries across all technologies.
+
 ## Native schedule
 
 The **Schedule** page requires `manage_schedule`. The Linux dashboard checks
