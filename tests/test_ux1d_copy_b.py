@@ -421,7 +421,9 @@ def test_web_assets_points_to_the_inventory_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(
         dashboard_web,
         "read_web_snapshot",
-        lambda path: ([], {"generated_at": "2026-11-25T00:00:00Z", "status": "success", "record_count": 0}),
+        lambda path, *, preserve_client: (
+            [], {"generated_at": "2026-11-25T00:00:00Z", "status": "success", "record_count": 0},
+        ),
     )
     (tmp_path / "snapshot.json.review.json").write_text(json.dumps({"client": "Acme", "reviews": [], "products": [{
         "asset_id": "web-1", "hostname": "a.example", "vendor": "nginx", "product": "nginx",
