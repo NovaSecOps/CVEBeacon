@@ -22,7 +22,7 @@ MAX_BYTES = 32 * 1024 * 1024
 MANIFEST_KEYS = {"contract", "collector", "collector_version", "source_id", "generated_at",
                  "observed_at", "sha256", "record_count", "status", "omissions"}
 WEB_ASSET_ID = re.compile(r"web-[0-9a-f]{32}")
-WEB_SYNC_SCHEMA = 1
+WEB_SYNC_SCHEMA = 2
 UNSAFE_ID_TEXT = re.compile(r"[\x00-\x1f\x7f\ud800-\udfff]")
 
 

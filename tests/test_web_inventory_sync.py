@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+import os
 import re
 import subprocess
 
@@ -14,7 +15,7 @@ from cvebeacon.errors import ConfigurationError
 from cvebeacon.locking import OperationLock
 from cvebeacon.managed_inventory import client_key, versions
 from cvebeacon.models import Asset
-from cvebeacon.web_inventory import read_bytes, web_asset_id
+from cvebeacon.web_inventory import WEB_SYNC_SCHEMA, read_bytes, web_asset_id
 
 from test_dashboard_accounts import PASSWORD, csrf, login
 from test_dashboard_config import confirm, preview
@@ -63,7 +64,7 @@ def run(config, number, products=(), *, sites=None, status="success", started=Tr
                                       "sites": {web_asset_id(client, *site): [*site, complete]
                                                 for site, complete in sites.items()}}
         if sync_schema:
-            metadata["inventory_sync"]["schema"] = 1
+            metadata["inventory_sync"]["schema"] = (WEB_SYNC_SCHEMA if sync_schema is True else sync_schema)
     detail = {"client": client, "products": list(products), "reviews": [], "run": metadata}
     web_assets.replace_bytes(output.with_name(output.name + ".review.json"), json.dumps(detail).encode("utf-8"))
 
@@ -550,12 +551,13 @@ def test_scoped_product_association_cannot_move_to_another_endpoint(blank):
         assert old in managed_rows(config)
 
 
-def test_previous_producer_schema_cannot_authorize_absence(blank):
+@pytest.mark.parametrize("schema", [False, 1])
+def test_previous_producer_schema_cannot_authorize_absence(blank, schema):
     config, _, client = setup(blank)
     old = row("missing", "1")
     write_managed(config, [old])
     for number in (1, 2):
-        run(config, number, sync_schema=False)
+        run(config, number, sync_schema=schema)
         assert "Not detected since" not in card(page(client))
     assert managed_rows(config) == [old]
 
@@ -713,3 +715,130 @@ def test_older_upgrade_manifest_preserves_live_sync_state(blank, tmp_path_factor
     update_state.restore(config, data, snapshot)
     update_state.verify_restore(config, data, snapshot)
     assert read_bytes(saved) == decision
+
+
+@pytest.mark.parametrize("limit", [
+    "inline-imports", "chunk-map", "nested-budget", "external-resource", "cached-error",
+    *[pytest.param(kind, marks=pytest.mark.skipif(os.name == "nt", reason="fingerprints are POSIX-only"))
+      for kind in ("meta", "dom", "text")],
+])
+def test_omitted_producer_evidence_cannot_count_as_absence(blank, monkeypatch, limit):
+    from cvebeacon_extensions import web, webfingerprints
+
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    config = replace(config, web=WebConfig(removal_grace_days=0))
+    cached = limit == "cached-error"
+    if cached:
+        assert save(client, path="/about").status_code == 303
+    allowlist, output = web_assets.paths(config, "Acme")
+    document, _ = web_assets.read_allowlist(allowlist, "Acme")
+    for entry in document["assets"]:
+        entry.update(hostname="example.com", allow_private_address=True, authorized_at="2026-01-01T00:00:00Z",
+                     expires_at="2027-01-01T00:00:00Z")
+    web_assets.save_allowlist(allowlist, document)
+
+    fingerprints = None
+    external = limit in {"meta", "dom", "text"}
+    if external:
+        fingerprints = web_assets.fingerprint_directory(config)
+        directory = fingerprints / "technologies"
+        directory.mkdir(parents=True)
+        (fingerprints / "categories.json").write_text(
+            '{"2": {"name": "JavaScript libraries"}}', encoding="utf-8", newline="\n")
+        pattern = {
+            "meta": {"meta": {"application-name": r"Demo ([0-9.]+)\;version:\1"}},
+            "dom": {"dom": {"#example": {"text": r"Demo ([0-9.]+)\;version:\1"}}},
+            "text": {"text": [r"Demo ([0-9.]+)\;version:\1"]},
+        }
+        rules = {"Demo": {"cats": [2], **pattern[limit]}}
+        (directory / "d.json").write_text(json.dumps(rules), encoding="utf-8", newline="\n")
+
+    style_import = b'@import "/framework.css";'
+    empty_import = b'@import "/empty.css";'
+    empty_imports = empty_import * web.RESOURCE_MAX_REFERENCES
+    root = b'<style>' + style_import + b'</style>'
+    if limit == "meta":
+        root = b'<meta name="application-name" content="Demo 2.4.0">'
+    elif limit == "dom":
+        monkeypatch.setattr(webfingerprints, "MAX_DOM_NODES", 64)
+        root = b'<span id="example">Demo 2.4.0</span>'
+    elif limit == "text":
+        monkeypatch.setattr(webfingerprints, "MAX_TEXT_LENGTH", 64)
+        root = b'<span>Demo 2.4.0</span>'
+    elif limit == "cached-error":
+        root = b'<link rel="stylesheet" href="/framework.css">'
+    elif limit == "chunk-map":
+        root = b'<script type="module" src="/loader.js"></script>'
+    elif limit == "nested-budget":
+        root = b'<link rel="stylesheet" href="/nested.css">'
+
+    loader = b'__vite__mapDeps=["/framework.css"];'
+    prefix = b""
+    if limit == "inline-imports":
+        prefix = b'<style>' + empty_imports + style_import + b'</style>'
+    elif limit == "nested-budget":
+        prefix = root + b'<style>' + empty_import * (web.RESOURCE_MAX_REFERENCES - 1) + b'</style>'
+    elif limit == "external-resource":
+        prefix = b'<link rel="stylesheet" href="https://example.invalid/framework.css">'
+    elif limit == "meta":
+        prefix = b'<meta name="other" content="unrelated">' * webfingerprints.MAX_META_TAGS
+    elif limit == "dom":
+        prefix = b'<div></div>' * webfingerprints.MAX_DOM_NODES
+    elif limit == "text":
+        prefix = b'x' * webfingerprints.MAX_TEXT_LENGTH
+    actual_page = root
+    fail_resource = False
+    detect_builtin = web._detect_builtin
+
+    def builtin(page, **kwargs):
+        if fail_resource and any(resource.url.endswith("/framework.css") for resource in page.resources):
+            raise ValueError("test resource analysis failure")
+        return detect_builtin(page, **kwargs)
+
+    class Transport:
+        def fetch(self, endpoint, address, **kwargs):
+            if endpoint.path in {"/", "/about"}:
+                return web._Response(200, {"server": ("nginx/1.25.3",),
+                                           "referrer-policy": ("no-referrer",)}, actual_page)
+            if endpoint.path == "/loader.js":
+                return web._Response(200, {"content-type": ("application/javascript",)}, loader)
+            styles = {"/framework.css": b"/*! Bootstrap v5.3.3 | https://getbootstrap.com/ */",
+                      "/nested.css": style_import, "/empty.css": b""}
+            if endpoint.path in styles:
+                return web._Response(200, {"content-type": ("text/css",)}, styles[endpoint.path])
+            return web._Response(404, {}, b"")
+
+    class Resolver:
+        def resolve(self, hostname, port):
+            return ("203.0.113.10",)
+
+    def observe():
+        web.detect_web(allowlist, output, client="Acme", source_id="test-web",
+                       resolver=Resolver(), transport=Transport(), fingerprints=fingerprints,
+                       host_interval=0, max_workers=1, now=lambda: NOW + timedelta(days=1))
+        detail = json.loads(read_bytes(output.with_name(output.name + ".review.json")))
+        return detail["run"]["inventory_sync"]["sites"], detail["products"]
+
+    monkeypatch.setattr(web, "_detect_builtin", builtin)
+    sites, products = observe()
+    assert all(site[-1] for site in sites.values())
+    name = "Demo" if external else "bootstrap"
+    detected = [item for item in products if item.get("name") == name or item["product"] == name]
+    assert len(detected) == (2 if cached else 1)
+    old = [Asset(item["asset_id"] + "-m", item["vendor"], item["product"], item["versions"][0],
+                 system_id=item["hostname"], client="Acme") for item in detected]
+    write_managed(config, old)
+    sync.inspect(config, "Acme")
+    if prefix:
+        actual_page = prefix + (root if external else b"")
+    if limit == "chunk-map":
+        loader = b'__vite__mapDeps=[' + b'"/empty.css",' * web.RESOURCE_MAX_REFERENCES + b'"/framework.css"];'
+    fail_resource = cached
+    for _ in range(2):
+        sites, products = observe()
+        assert any(item["product"] == "nginx" for item in products)
+        assert not {item["asset_id"] for item in detected} & {item["asset_id"] for item in products}
+        current = sync.inspect(config, "Acme")
+        assert all(asset in managed_rows(config) for asset in old)
+        assert all(current.state["entries"][asset.asset_id[:-2]]["misses"] == 0 for asset in old)
+        assert not any(site[-1] for site in sites.values())

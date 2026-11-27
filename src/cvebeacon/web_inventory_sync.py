@@ -219,7 +219,8 @@ def _observation(output, client, allowlist_revision, asset_count):
         metadata = run and run.get("inventory_sync")
         if metadata is None or (run and run.get("review_truncated")):
             return None
-        if isinstance(metadata, dict) and "schema" not in metadata:
+        if isinstance(metadata, dict) and ("schema" not in metadata
+                                          or type(metadata["schema"]) is int and metadata["schema"] == 1):
             return None  # Earlier producers could mark incomplete pages complete.
         if (not isinstance(metadata, dict)
                 or set(metadata) != {"schema", "id", "previous", "allowlist", "sites"}

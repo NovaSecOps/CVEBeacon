@@ -1499,7 +1499,7 @@ _CSS_IMPORT = re.compile(
 )
 
 
-def _css_references(text: str, clock, deadline: float) -> Iterable[_ResourceReference]:
+def _css_references(text: str, clock, deadline: float, on_truncated) -> Iterable[_ResourceReference]:
     # Imports apply only before ordinary rules, apart from charset and layer statements.
     position = 0
     while position < len(text) and clock() < deadline:
@@ -1566,10 +1566,13 @@ def _css_references(text: str, clock, deadline: float) -> Iterable[_ResourceRefe
             if value and (value.end() == end or text[value.end()].isspace()
                           or text.startswith("/*", value.end())):
                 yield _ResourceReference(value[2] or value[4] or value[5], "style")
+            else:
+                on_truncated()
         position = end + 1
 
 
-def _js_tokens(text: str, clock=time.monotonic, deadline=float("inf")) -> Iterable[tuple[str, str]]:
+def _js_tokens(text: str, clock=time.monotonic, deadline: float = float("inf"),
+               on_truncated=lambda: None) -> Iterable[tuple[str, str]]:
     """Yield bounded literal tokens without retaining a token list for the script."""
     index = 0
     next_check = 0
@@ -1618,6 +1621,8 @@ def _js_tokens(text: str, clock=time.monotonic, deadline=float("inf")) -> Iterab
             if valid and index - start <= MAX_REFERENCE_LENGTH:
                 yield "string", text[start:index]
             else:
+                if valid:
+                    on_truncated()
                 yield "other", ""
             index += 1
             regex_allowed = False
@@ -1631,6 +1636,8 @@ def _js_tokens(text: str, clock=time.monotonic, deadline=float("inf")) -> Iterab
                         return
                     next_check = index + 4096
                 index += 1
+            if index - start > MAX_REFERENCE_LENGTH:
+                on_truncated()
             value = text[start:index] if index - start <= MAX_REFERENCE_LENGTH else ""
             yield ("number" if character.isdigit() else "identifier"), value
             regex_allowed = value in {"return", "case", "throw", "yield", "void", "typeof"}
@@ -1652,9 +1659,9 @@ def _chunk_reference(value: str, module: bool) -> _ResourceReference | None:
                                   module)
 
 
-def _script_references(text: str, module: bool, clock, deadline: float) -> Iterable[_ResourceReference]:
+def _script_references(text: str, module: bool, clock, deadline: float, on_truncated) -> Iterable[_ResourceReference]:
     """Recognise module specifiers and a fixed set of literal runtime loaders."""
-    tokens = iter(_js_tokens(text, clock, deadline))
+    tokens = iter(_js_tokens(text, clock, deadline, on_truncated))
     lookahead = deque(islice(tokens, 12))
     previous = ""
     static_left = 0
@@ -1683,6 +1690,8 @@ def _script_references(text: str, module: bool, clock, deadline: float) -> Itera
                     static_left = 0
                 elif value == ";":
                     static_left = 0
+                elif not static_left:
+                    on_truncated()
             if specifier and _MODULE_URL.match(specifier):
                 yield _ResourceReference(specifier, "script", True)
 
@@ -1710,15 +1719,15 @@ def _script_references(text: str, module: bool, clock, deadline: float) -> Itera
                                 ("punctuation", "="), ("punctuation", ">"),
                                 ("punctuation", "("), ("punctuation", "{"))):
                         yield from _literal_chunk_map(lookahead, tokens, arrow + 4, module,
-                                                      argument[1], clock, deadline)
+                                                      argument[1], clock, deadline, on_truncated)
             elif (value == "__vite__mapDeps" and count >= 2
                   and lookahead[0] == ("punctuation", "=") and lookahead[1] == ("punctuation", "[")):
-                yield from _literal_chunk_map(lookahead, tokens, 2, True, None, clock, deadline)
+                yield from _literal_chunk_map(lookahead, tokens, 2, True, None, clock, deadline, on_truncated)
         previous = value
 
 
 def _literal_chunk_map(lookahead, tokens, start: int, module: bool, argument: str | None,
-                       clock, deadline: float) -> Iterable[_ResourceReference]:
+                       clock, deadline: float, on_truncated) -> Iterable[_ResourceReference]:
     def take():
         current = lookahead.popleft() if lookahead else ("", "")
         following = next(tokens, None)
@@ -1751,6 +1760,7 @@ def _literal_chunk_map(lookahead, tokens, start: int, module: bool, argument: st
         if delimiter != ("punctuation", ","):
             return
     else:
+        on_truncated()
         return
     if argument is not None:
         if tuple(islice(lookahead, 4)) != (
@@ -1855,10 +1865,14 @@ class _ResourceLinkParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         if self.style_depth and not self.template_depth and not self.noscript_depth:
-            for reference in _css_references(data, self.clock, self.deadline):
-                self._add(reference)
+            def mark_truncated():
+                self.skipped["discovery-limit"] += 1
+
+            for reference in _css_references(data, self.clock, self.deadline, mark_truncated):
                 if len(self.links) >= RESOURCE_MAX_REFERENCES:
+                    mark_truncated()
                     break
+                self._add(reference)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2149,13 +2163,16 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
 
     remaining_references = RESOURCE_MAX_REFERENCES
 
+    def mark_truncated():
+        skipped["discovery-limit"] += 1
+
     def discover(references: Iterable[_ResourceReference], base: str | None, policy) -> None:
         nonlocal remaining_references
         for reference in references:
             if clock() >= deadline:
                 break
             if remaining_references <= 0:
-                skipped["discovery-limit"] += 1
+                mark_truncated()
                 break
             remaining_references -= 1
             _resource_candidate(reference, base, page_asset, allowlist, state, queue, skipped,
@@ -2246,12 +2263,13 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             text = "" if candidate.kind == "icon" else _decode_resource(body, success.response.headers)
             resource = Resource(endpoint.url, candidate.kind, text)
             detections = ()
-            truncated = False
+            truncated = analysis_error = False
             if clock() < deadline:
                 try:
                     detections, truncated = _detect_builtin(page_from({}, "", resources=[resource]),
                                                            clock=clock, deadline=deadline)
                 except Exception:
+                    analysis_error = True
                     skip("analysis-error", candidate, response_type, len(body))
             legacy_stopped = legacy_error = False
             if fingerprints.legacy and clock() < deadline:
@@ -2263,7 +2281,7 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
                 bool(success.redirects), legacy_stopped, legacy_error, truncated,
             )
             resources_fetched += 1
-            if clock() < deadline and not legacy_stopped and not legacy_error:
+            if clock() < deadline and not (analysis_error or legacy_stopped or legacy_error):
                 state.files[candidate.response_key] = cached
 
         resource = cached.resource
@@ -2273,6 +2291,7 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             existing = metadata.get(resource.url)
             if existing is not None and existing != cached.metadata:
                 conflicting_metadata.add(resource.url)
+                skip("analysis-error", candidate)
                 del metadata[resource.url]
             elif resource.url not in conflicting_metadata:
                 metadata[resource.url] = cached.metadata
@@ -2282,17 +2301,21 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             fingerprints.stopped |= cached.fingerprint_stopped
             fingerprints.error |= cached.fingerprint_error
             fingerprints.add_resource(resource)
-        if candidate.follow and remaining_references > 0 and clock() < deadline:
+        if candidate.follow and candidate.kind in {"style", "script"} and clock() < deadline:
+            if remaining_references <= 0:
+                mark_truncated()
+                continue
             graph_key = (resource.url, candidate.kind, candidate.module)
             references = cached.dependencies.get(graph_key)
             if references is None:
-                nested = ()
+                prior_skips = skipped["discovery-limit"]
                 if candidate.kind == "style":
-                    nested = _css_references(resource.text, clock, deadline)
-                elif candidate.kind == "script":
-                    nested = _script_references(resource.text, candidate.module, clock, deadline)
+                    nested = _css_references(resource.text, clock, deadline, mark_truncated)
+                else:
+                    nested = _script_references(resource.text, candidate.module, clock, deadline, mark_truncated)
                 references = tuple(islice(nested, remaining_references + 1))
-                if len(references) <= remaining_references and clock() < deadline:
+                if (len(references) <= remaining_references and clock() < deadline
+                        and skipped["discovery-limit"] == prior_skips):
                     cached.dependencies[graph_key] = references
             policy = _restrict_referrer(candidate.referrer_policy, cached.referrer_policy)
             discover(references, resource.url, policy)
@@ -2671,6 +2694,7 @@ class _ExternalObservation:
         self.legacy = False
         self.stopped = False
         self.error = False
+        self.truncated = False
         self._resource_keys: dict[tuple[str, str], str | None] = {}
         if fingerprints is not None:
             from . import webfingerprints
@@ -2695,7 +2719,8 @@ class _ExternalObservation:
         try:
             results = detect_external(page, self.fingerprints, page_url=page_url)
             stats = getattr(results, "stats", None)
-            return tuple(results), bool(getattr(stats, "stopped_at_time_limit", False)), False
+            return (tuple(results), bool(getattr(stats, "stopped_at_time_limit", False)),
+                    bool(getattr(stats, "truncated", False)))
         except Exception:
             return (), False, True
 
@@ -2747,6 +2772,7 @@ class _ExternalObservation:
                 detections, stats = self.session.finish()
                 self.stopped |= bool(stats.get("stopped"))
                 self.error |= bool(stats.get("error"))
+                self.truncated |= bool(stats.get("truncated"))
                 return tuple(self._restore_resource_keys(detection) for detection in detections)
             except Exception:
                 self.error = True
@@ -2866,7 +2892,8 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             state.final_budget = None
             final_budget.lock.release()
     merge(fingerprints.finish(), completed=True)
-    analysis_stopped = (truncated or clock() >= deadline or bool(resources_skipped["analysis-limit"])
+    analysis_stopped = (truncated or fingerprints.truncated or clock() >= deadline
+                        or bool(resources_skipped["analysis-limit"])
                         or bool(_ANALYSIS_STOP_REASONS.intersection(resources_skipped)))
     if analysis_stopped or fingerprints.stopped or fingerprints.error or resources_skipped["analysis-error"]:
         omissions.add("analysis-incomplete")
@@ -3114,23 +3141,24 @@ def _load_external_fingerprints(directory: Path | None):
 
 def _sync_site_complete(result):
     # A complete observation can still lack a version or any technology. A
-    # skipped source of evidence is different, except for intentional skips
-    # and standard probes that explicitly returned that the file was absent.
+    # skipped source leaves coverage uncertain unless it repeats a source
+    # already inspected or is a standard probe that confirmed absence.
     skipped = result.resources_skipped_by_reason
-    harmless = {"duplicate", "external-origin", "source-map", "unsupported-scheme"}
     return (result.observed_at is not None and result.response_complete and not result.run_stopped
             and not result.analysis_stopped and not result.fingerprint_stopped
             and not result.fingerprint_error
             and result.omissions <= {"no-technologies", "version-unknown", "version-conflict"}
-            and sum(count for reason, count in skipped.items() if reason not in harmless)
+            and sum(count for reason, count in skipped.items() if reason != "duplicate")
             == result.skip_details.absent_optional)
 
 
 def _previous_sync_run(output):
     try:
         detail = decode_json(read_bytes(_review_path(output)))
-        value = detail["run"]["inventory_sync"]["id"]
-        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+        metadata = detail["run"]["inventory_sync"]
+        value = metadata["id"]
+        if (metadata.get("schema") == WEB_SYNC_SCHEMA and isinstance(value, str)
+                and re.fullmatch(r"[0-9a-f]{32}", value)):
             return value
     except (OSError, ExtensionError, TypeError, KeyError, ValueError):
         pass
@@ -3249,7 +3277,8 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                 endpoint.scheme, endpoint.hostname, endpoint.port, endpoint.path,
                 status != "failed" and not (run_stopped or fingerprint_error) and _sync_site_complete(result),
             ]
-        sync = {"schema": WEB_SYNC_SCHEMA, "id": uuid.uuid4().hex, "previous": _previous_sync_run(output),
+        sync = {"schema": WEB_SYNC_SCHEMA, "id": uuid.uuid4().hex,
+                "previous": _previous_sync_run(output),
                 "allowlist": allowlist.revision, "sites": sites}
         saved_snapshot_generated_at = _saved_snapshot_time(output, now())
         run = dict(started_at=started_at, ended_at=now().isoformat(), status=status,
