@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
+from contextlib import closing
 import sqlite3
 
+import pytest
+
+from cvebeacon.errors import StateError
 from cvebeacon.models import Applicability, Asset, Evidence, Finding, QueryResult, Vulnerability
 from cvebeacon.state import StateStore, material_fingerprint
 
@@ -65,6 +69,49 @@ def test_large_delivery_acknowledgement_chunks_sql_bind_parameters(tmp_path, mon
     assert store.pending_events("teams") == []
     with store._connect() as db:
         assert db.execute("SELECT count(*) FROM deliveries WHERE state='accepted'").fetchone()[0] == 1200
+
+
+def _delivery_ids(store, count):
+    asset = Asset("a1", "Acme", "Widget", "1")
+    findings = tuple(
+        Finding(asset, Vulnerability(f"CVE-2026-{3000 + number}"), Applicability.AFFECTED,
+                "high", "test")
+        for number in range(count))
+    _, ids = store.record_scan([QueryResult(asset, findings, ())], channels=("teams",))
+    assert len(ids) == count
+    return ids
+
+
+def test_failed_acknowledgement_deduplicates_an_event_across_chunks(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    ids = _delivery_ids(store, 500)
+    store.mark_delivery("teams", [*ids, ids[0]], accepted=False, error="temporary")
+    with closing(store._connect()) as db:
+        rows = db.execute(
+            "SELECT state, attempts FROM deliveries WHERE channel='teams'").fetchall()
+    assert len(rows) == 500
+    assert {row["state"] for row in rows} == {"failed"}
+    assert {row["attempts"] for row in rows} == {1}
+    assert len(store.pending_events("teams")) == 500
+
+
+def test_failed_second_acknowledgement_chunk_rolls_back(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    ids = _delivery_ids(store, 501)
+    with closing(store._connect()) as db:
+        db.execute(
+            "CREATE TRIGGER fail_second_chunk BEFORE UPDATE OF state ON deliveries "
+            f"WHEN NEW.event_id={int(ids[-1])} BEGIN SELECT RAISE(ABORT, 'second chunk'); END",
+        )
+        db.commit()
+    with pytest.raises(StateError, match="state transaction failed"):
+        store.mark_delivery("teams", ids, accepted=False, error="temporary")
+    with closing(store._connect()) as db:
+        rows = db.execute(
+            "SELECT state, attempts FROM deliveries WHERE channel='teams'").fetchall()
+    assert len(rows) == 501
+    assert {row["state"] for row in rows} == {"pending"}
+    assert {row["attempts"] for row in rows} == {0}
 
 
 def test_failed_transaction_does_not_commit_partial_run(tmp_path, monkeypatch):
