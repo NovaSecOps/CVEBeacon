@@ -1,16 +1,17 @@
 {% extends 'base.html' %}
-{% from 'ui.html' import page_header, card, callout, table_wrap, button %}
+{% from 'ui.html' import page_header, card, callout, table_wrap, button, no_version_badge %}
 {% block title %}Add to inventory · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Add to inventory', 'Check what will be added to ' ~ label ~ '. Nothing is saved until you choose Save to inventory.') }}
 {% if description %}{% call callout('info', 'Selected by filter') %}<p>{{ description }}.</p>{% endcall %}{% endif %}
 {% if new_inventory %}{% call callout('info') %}<p>{{ label }} has no inventory yet. Saving creates it, and the next scan will check these products for CVEs.</p>{% endcall %}{% endif %}
+{% if no_version_rows %}{% call callout('warning', 'No version') %}<p>{{ no_version_rows }} product{{ ' has' if no_version_rows == 1 else 's have' }} no version and will be scanned for every CVE of the product. No version: may be affected; confirm the version to be sure.</p>{% endcall %}{% endif %}
 {% if unknown %}{% call callout('warning') %}<p>{{ unknown }} selected product{{ ' was' if unknown == 1 else 's were' }} not found in the saved results and {{ 'was' if unknown == 1 else 'were' }} ignored.</p>{% endcall %}{% endif %}
 {% call card('To add (' ~ rows | length ~ ')') %}
 {% if rows %}
 {% call table_wrap('Products to add') %}
 <table><thead><tr><th scope="col">Product</th><th scope="col">Version</th><th scope="col">Category</th><th scope="col">Site</th><th scope="col">Identifier</th></tr></thead><tbody>
-{% for item, asset in rows %}<tr><td>{{ item.get('name') or asset.vendor ~ '/' ~ asset.product }}</td><td>{{ asset.version or 'Not set' }}</td><td>{{ asset.category }}</td><td>{{ asset.system_id or 'Site not recorded' }}</td><td class="break">{{ asset.purl or asset.cpe or (asset.vendor ~ ' / ' ~ asset.product) }}</td></tr>{% endfor %}
+{% for item, asset in rows %}<tr><td>{{ item.get('name') or asset.vendor ~ '/' ~ asset.product }}</td><td>{% if asset.version %}{{ asset.version }}{% else %}{{ no_version_badge() }}{% endif %}</td><td>{{ asset.category }}</td><td>{{ asset.system_id or 'Site not recorded' }}</td><td class="break">{{ asset.purl or asset.cpe or (asset.vendor ~ ' / ' ~ asset.product) }}</td></tr>{% endfor %}
 </tbody></table>
 {% endcall %}
 <form method="post" class="stack" action="{{ url_for('web.inventory_save') }}">

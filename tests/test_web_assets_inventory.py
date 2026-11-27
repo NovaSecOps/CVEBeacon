@@ -283,20 +283,22 @@ def test_add_appends_to_an_existing_inventory_and_keeps_old_rows(blank):
     assert "Already monitored" in again.text and "/web-assets/inventory/save" not in again.text
 
 
-def test_review_rows_need_a_typed_version_and_use_it(blank):
+def test_review_rows_accept_a_typed_version_or_no_version(blank):
     config = blank[0]
     client = seed(blank)
-    missing = preview(client, ["w-wp", "w-nginx"])
-    assert "Enter a version for this product." in missing.text
-    assert confirmation(missing)["pick"] == ["w-nginx"]
-    typed = preview(client, ["w-wp", "w-multi"], {"w-wp": "  6.4.2 ", "w-multi": "2.0"})
+    missing = preview(client, ["w-wp"])
+    assert "No version" in missing.text
+    assert confirmation(missing)["pick"] == ["w-wp"]
+    assert not confirmation(missing)["v-w-wp"][0]
+    assert save_inventory(client, missing).status_code == 303
+    typed = preview(client, ["w-multi"], {"w-multi": "2.0"})
     fields = confirmation(typed)
-    assert fields["v-w-wp"] == ["6.4.2"] and fields["v-w-multi"] == ["2.0"]
+    assert fields["v-w-multi"] == ["2.0"]
     assert save_inventory(client, typed).status_code == 303
     rows = {asset.asset_id: asset for asset in managed_rows(config)}
-    assert rows["w-wp-m"].version == "6.4.2" and rows["w-multi-m"].version == "2.0"
+    assert rows["w-wp-m"].version == "" and rows["w-multi-m"].version == "2.0"
     for bad in ("x" * 101, "1.0\x07"):
-        refused = preview(client, ["w-wp"], {"w-wp": bad})
+        refused = preview(client, ["w-multi"], {"w-multi": bad})
         assert "/web-assets/inventory/save" not in refused.text and refused.status_code == 200
     page_text = page(client)
     assert "badge-success\">Monitored" in row(products_card(page_text), "WordPress")
@@ -315,9 +317,9 @@ def test_label_and_generic_versions_need_review_and_generic_rows_name_no_vendor(
                             categories=["cms"])
     client = seed(blank, [labelled, labelled_service, generic])
     card = products_card(page(client))
-    for name, version in (("Example Analytics CMS", "GA4"), ("Swiper", "8.4.5")):
+    for name, version in (("Example Analytics CMS", ""), ("Swiper", "8.4.5")):
         assert "Needs review" in row(card, name)
-        assert f'value="{version}" placeholder="Enter version"' in row(card, name)
+        assert f'value="{version}" placeholder="Enter version (optional)"' in row(card, name)
     service = row(card, "Google Analytics")
     assert "Third-party service" in service and 'name="v-w-ga"' not in service and "Enter version" not in service
     assert "Not covered by CVE scans yet" not in page(client)
@@ -334,17 +336,51 @@ def test_label_and_generic_versions_need_review_and_generic_rows_name_no_vendor(
     assert (row_added.vendor, row_added.product, row_added.version) == ("swiper", "swiper", "8.4.5")
 
 
-def test_a_cpe_product_keeps_its_cpe_when_added_with_a_typed_version(blank):
+def test_label_only_and_missing_versions_are_ready_when_a_snapshot_row_exists(blank):
+    config = blank[0]
+    products = [
+        dict(asset_id="w-react", hostname="a.example", vendor="facebook", product="react",
+             name="React", category="js-library", categories=["js-library"], confidence="high",
+             versions=[], evidence_types=["html"], inventory=True, ecosystem="npm", package="react"),
+        dict(asset_id="w-label", hostname="a.example", vendor="example", product="analytics-cms",
+             name="Example Analytics CMS", category="cms", categories=["cms"], confidence="high",
+             versions=["GA4"], evidence_types=["script"], inventory=True),
+    ]
+    client = seed(blank, products)
+    card = products_card(page(client))
+    for name in ("React", "Example Analytics CMS"):
+        assert "Ready to add" in row(card, name) and "No version" in row(card, name)
+    assert "Add all 2 ready products" in page(client, view="tech")
+    added = preview(client, action="all")
+    assert "2 products have no version" in added.text
+    assert "No version: may be affected; confirm the version to be sure." in added.text
+    fields = confirmation(added)
+    assert sorted(fields["pick"]) == ["w-label", "w-react"]
+    assert save_inventory(client, added).status_code == 303
+    rows = {asset.asset_id: asset for asset in managed_rows(config)}
+    assert rows["w-react-m"].version == "" and rows["w-react-m"].purl == "pkg:npm/react"
+    assert rows["w-label-m"].version == ""
+    record(config, "w-react-m", 7.5)
+    card = products_card(page(client))
+    react = row(card, "React")
+    assert "Monitored" in react and "No version" in react and "1 CVE" in react
+    download = client.get(f"/watch/clients/{client_key('Acme')}/download")
+    assert download.status_code == 200
+    downloaded = {asset["asset_id"]: asset for asset in json.loads(download.data)}
+    assert downloaded["w-react-m"]["version"] == "" and downloaded["w-react-m"]["purl"] == "pkg:npm/react"
+
+
+def test_a_cpe_product_is_added_without_a_version_and_keeps_its_cpe(blank):
     config = blank[0]
     server = dict(asset_id="w-srv", hostname="a.example", vendor="f5", product="nginx", name="Nginx",
                   category="web-server", categories=["web-server"], confidence="high", versions=[],
                   evidence_types=["header"], inventory=True, cpe="cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*")
     client = seed(blank, [server])
-    assert "Needs review" in row(products_card(page(client)), "Nginx")
-    typed = preview(client, ["w-srv"], {"w-srv": "1.25.3"})
-    assert save_inventory(client, typed).status_code == 303
-    (added,) = managed_rows(config)
-    assert added.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" and added.version == "1.25.3"
+    assert "Ready to add" in row(products_card(page(client)), "Nginx")
+    added = preview(client, ["w-srv"])
+    assert save_inventory(client, added).status_code == 303
+    (row_added,) = managed_rows(config)
+    assert row_added.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" and row_added.version == ""
 
 def test_npm_purl_and_version_agree_for_a_typed_version(blank):
     config = blank[0]

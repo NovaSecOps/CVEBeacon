@@ -1092,3 +1092,28 @@ def test_successful_detection_can_retry_inventory_publication_on_get(blank, monk
     page(client)
     assert attempts == [True, True]
     assert len(users.audit_entries()) == count
+
+
+def test_review_proposes_the_version_for_a_version_less_row(blank):
+    config, _, client = setup(blank, "review")
+    versionless = replace(row("sample", "2", npm=True), version="", purl="pkg:npm/sample")
+    write_managed(config, [versionless])
+    item = product("sample", "2", npm=True)
+    run(config, 1, [item])
+    text = page(client)
+    assert "Version changed" in card(text)
+    assert post(client, "update", **selection(text, item)).status_code == 303
+    (updated,) = managed_rows(config)
+    assert (updated.version, updated.purl) == ("2", "pkg:npm/sample@2")
+
+
+def test_auto_applies_the_version_for_a_version_less_row(blank):
+    config, _, client = setup(blank, "auto")
+    versionless = replace(row("sample", "2", npm=True), version="", purl="pkg:npm/sample")
+    write_managed(config, [versionless])
+    item = product("sample", "2", npm=True)
+    run(config, 1, [item])
+    sync.inspect(config, "Acme")
+    (updated,) = managed_rows(config)
+    assert (updated.version, updated.purl) == ("2", "pkg:npm/sample@2")
+    assert "1 updated" in card(page(client))

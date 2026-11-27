@@ -63,6 +63,16 @@ def test_merge_opt_in_keeps_supplied_inventory(tmp_path, enabled):
         assert rows[-1].client == "Acme"
 
 
+def test_web_snapshot_accepts_a_versionless_row(tmp_path):
+    config = config_file(tmp_path, enabled=True)
+    directory = config.database_path.parent / "web-inventory"
+    snapshot(directory, rows=[dict(asset_id="web-php", vendor="php", product="php",
+                                   version="", client="Acme")])
+    rows = load_inventory(config.inventory, snapshot_directory=directory)
+    assert [row.asset_id for row in rows] == ["supplied", "web-php"]
+    assert rows[-1].version == ""
+
+
 def test_partial_snapshot_is_used_and_corrupt_snapshot_warns(tmp_path, caplog):
     config = config_file(tmp_path, enabled=True)
     directory = config.database_path.parent / "web-inventory"

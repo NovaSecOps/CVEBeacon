@@ -170,9 +170,12 @@ def _filter_text(flt):
 def _decorate_product(item):
     """Display fields derived from one saved product; shared by the page and the add actions."""
     item["display_name"] = item.get("name") or f"{item.get('vendor', '')}/{item.get('product', '')}"
-    versions = [version for version in item.get("versions", []) if version.strip()]
+    labels = [version for version in item.get("versions", []) if version.strip()]
+    versions = actions.assignable_versions(item)
     item["has_version"] = bool(versions)
-    item["display_version"] = ", ".join(versions) or "Version not disclosed"
+    item["no_version"] = not versions
+    item["display_version"] = ", ".join(versions)
+    item["display_labels"] = [value for value in labels if value not in versions]
     confidence = item.get("confidence", "").casefold()
     item["confidence_label"] = confidence.title() if confidence in _CONFIDENCE_NAMES else "Unknown"
     item["confidence_class"] = confidence if confidence in _CONFIDENCE_NAMES else "neutral"
@@ -194,11 +197,13 @@ def _technology_rows(rows):
     for item in rows:
         group = groups.setdefault(item["display_name"].casefold(), {
             "name": item["display_name"], "sites": {}, "versions": {}, "categories": [],
-            "rank": 0, "label": "Unknown", "class": "neutral", "items": [],
+            "labels": set(), "rank": 0, "label": "Unknown", "class": "neutral", "items": [],
         })
         group["items"].append(item)
         site = _site_label(item)
-        versions = [v for v in item.get("versions", []) if v.strip()]
+        raw_versions = [v for v in item.get("versions", []) if v.strip()]
+        versions = [v for v in raw_versions if not actions.DISPLAY_VERSION.fullmatch(v)]
+        group["labels"].update(value for value in raw_versions if value not in versions)
         group["sites"].setdefault(site, []).append((", ".join(versions), item))
         for version in versions or [""]:
             group["versions"][version] = group["versions"].get(version, 0) + 1
@@ -220,6 +225,8 @@ def _technology_rows(rows):
         group["version_counts"] = sorted(
             ((v, n) for v, n in group["versions"].items() if v), key=lambda pair: (-pair[1], pair[0]))
         group["undisclosed"] = group["versions"].get("", 0)
+        group["no_version"] = not group["version_counts"]
+        group["display_labels"] = sorted(group["labels"])
         group["site_rows"] = [
             (site, version, entry["confidence_label"], entry["confidence_class"])
             for site, entries in sorted(group["sites"].items(), key=lambda pair: pair[0].casefold())
@@ -646,7 +653,7 @@ def create_web_blueprint(config):
             item["status_label"] = actions.STATUS_LABELS[item["status"]]
             item["status_badge"] = actions.STATUS_BADGES[item["status"]]
             item["pickable"] = bool(item.get("asset_id")) and item["status"] not in {"monitored", "service"}
-            distinct = list(dict.fromkeys(actions.detected_versions(item)))
+            distinct = list(dict.fromkeys(actions.assignable_versions(item)))
             item["prefill"] = distinct[0] if len(distinct) == 1 else ""
         covered = sorted({asset_id for item in products for asset_id in item["covered_ids"]})
         findings, findings_unavailable = {}, False
@@ -1064,7 +1071,8 @@ def create_web_blueprint(config):
         return render_template(
             "web_inventory_preview.html", client=client, rows=rows, skipped=skipped, unknown=unknown,
             revision=_revision(data), digest=actions.digest(new_assets),
-            new_inventory=data is None, label=profile["name"], description=description, sync_token=token), 200
+            new_inventory=data is None, label=profile["name"], description=description, sync_token=token,
+            no_version_rows=sum(not asset.version for asset in new_assets)), 200
 
     @blueprint.post("/inventory/save")
     @requires(MANAGE)

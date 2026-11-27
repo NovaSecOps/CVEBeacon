@@ -50,7 +50,7 @@ from . import __version__, webrules
 from .contract import (ExtensionError, MAX_BYTES, MAX_RECORDS, MAX_TEXT, _atomic, _regular,
                        canonical_records, decode_json, json_bytes, label, output_lock,
                        read_bytes, read_snapshot, timestamp, utc_now, write_snapshot)
-from .webrules import REVIEW_ONLY_VENDORS, Resource, detect, package_url, page_from
+from .webrules import REVIEW_ONLY_VENDORS, Resource, detect, package_identity, page_from
 
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
@@ -2535,6 +2535,9 @@ def _public_evidence(detection: _DetectionSummary,
 
 
 MAX_SKIPPED_RESOURCE_DETAILS = 50
+# Hosted services, analytics and CDNs run elsewhere: there is no installed
+# version or product identity to add to a scan.
+SERVICE_CATEGORIES = frozenset({"hosted-platform", "analytics", "edge"})
 
 
 @dataclass(slots=True)
@@ -2879,17 +2882,21 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
             v for v in detection.versions if not _DISPLAY_VERSION.fullmatch(v)))
         implied = _implied_only(detection)
         review_only = detection.vendor in REVIEW_ONLY_VENDORS
+        service = (detection.category in SERVICE_CATEGORIES
+                   and not (detection.ecosystem and detection.package) and not detection.cpe)
         row_created = False
-        if (not implied and not review_only and preferred is not None
-                and (preferred or detection.cpe)):
+        row_version = preferred if preferred is not None else ""
+        named = bool(detection.product or detection.cpe
+                     or (detection.ecosystem and detection.package))
+        if not implied and not review_only and not service and named:
             try:
-                purl = package_url(detection.ecosystem, detection.package, preferred)
+                purl = package_identity(detection.ecosystem, detection.package, row_version)
                 row = {
                     "asset_id": row_id,
                     "vendor": detection.vendor,
                     # A package identity names the package and carries only its PURL.
                     "product": detection.package if purl else detection.product,
-                    "version": preferred,
+                    "version": row_version,
                     "category": detection.category,
                     "system_id": base["system_id"],
                     "ecosystem": detection.ecosystem if purl else "",

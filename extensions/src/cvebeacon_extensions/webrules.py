@@ -128,13 +128,20 @@ class Resource:
     text: str
 
 
-def package_url(ecosystem: str, package: str, version: str) -> str:
-    """Return a PURL for a supported package ecosystem, or an empty string."""
-    if ecosystem != "npm" or not package or not version:
+def package_identity(ecosystem: str, package: str, version: str = "") -> str:
+    """Return a PURL for a supported package, with or without a version."""
+    if ecosystem != "npm" or not package:
         return ""
     namespace, _, name = package.rpartition("/")
     path = (quote(namespace, safe="") + "/" if namespace else "") + quote(name, safe="")
-    return f"pkg:npm/{path}@{quote(version, safe='')}"
+    return f"pkg:npm/{path}" + (f"@{quote(version, safe='')}" if version else "")
+
+
+def package_url(ecosystem: str, package: str, version: str) -> str:
+    """Return a PURL for a supported package ecosystem, or an empty string."""
+    if not version:
+        return ""
+    return package_identity(ecosystem, package, version)
 
 
 _VERSION_BODY = r"\d+(?:\.\d+){0,3}"

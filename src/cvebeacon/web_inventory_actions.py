@@ -5,14 +5,16 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import re
 import unicodedata
 
 from packageurl import PackageURL
 
 from .errors import InventoryValidationError
-from .identity import normalize_asset, purl_string
+from .identity import normalize_asset, parse_purl, purl_string
 from .managed_inventory import encode_records, read_inventory
 from .models import Asset
+from .sources.nvd import split_cpe23
 
 # A row added by hand never reuses the ID of the row a web snapshot would create for the
 # same product. If web snapshots are switched on later, both rows can coexist in one scan
@@ -27,6 +29,8 @@ STATUS_LABELS = {"monitored": "Monitored", "ready": "Ready to add", "review": "N
 STATUS_BADGES = {"monitored": "success", "ready": "info", "review": "warning", "service": "neutral"}
 # Hosted services, analytics and CDNs run elsewhere: there is no installed version to confirm.
 SERVICE_CATEGORIES = frozenset({"hosted-platform", "analytics", "edge"})
+# Rule-defined labels such as "GA4" are display text, never an inventory version.
+DISPLAY_VERSION = re.compile(r"[A-Za-z][A-Za-z0-9]{0,15}")
 
 
 class RowRefused(ValueError):
@@ -35,6 +39,11 @@ class RowRefused(ValueError):
 
 def detected_versions(item):
     return [version.strip() for version in item.get("versions", []) if version.strip()]
+
+
+def assignable_versions(item):
+    """Detected values that can be stored as an inventory version."""
+    return [version for version in detected_versions(item) if not DISPLAY_VERSION.fullmatch(version)]
 
 
 def preferred_version(versions):
@@ -56,29 +65,57 @@ def _implied_only(item):
 def ready_version(item):
     """The version a ready product is added with, or None when the product needs review.
 
-    Only a product whose detection produced an inventory row is ready. Labels such as
-    "GA4", conflicting versions and low-confidence generic results need a person to
-    confirm the version first.
+    An empty string means the product is ready without a version. Only a product
+    whose detection produced an inventory row is ready; a conflict between
+    unrelated versions still needs a person to choose or confirm.
     """
-    if _implied_only(item) or not item.get("in_inventory"):
+    if _implied_only(item) or not item.get("in_inventory") or is_service(item):
         return None
-    return preferred_version(detected_versions(item)) or None
+    return preferred_version(assignable_versions(item))
 
 
 def _package_purl(item, version):
     package = item.get("package")
-    if item.get("ecosystem") != "npm" or not isinstance(package, str) or not package or not version:
+    if item.get("ecosystem") != "npm" or not isinstance(package, str) or not package:
         return ""
     namespace, _, name = package.rpartition("/")
-    return purl_string(PackageURL(type="npm", namespace=namespace or None, name=name, version=version))
+    return purl_string(PackageURL(type="npm", namespace=namespace or None, name=name,
+                                  version=version or None))
+
+
+def _purl_base(purl):
+    try:
+        return purl_string(parse_purl(purl)._replace(version=None))
+    except ValueError:
+        return ""
+
+
+def _cpe_base(cpe):
+    fields = list(split_cpe23(cpe, keep_escapes=True))
+    if len(fields) != 11:
+        return ""
+    fields[3] = "*"
+    return "cpe:2.3:" + ":".join(fields)
 
 
 def _identity_keys(item):
     keys = set()
     vendor = str(item.get("vendor", "")).casefold()
     names = {str(item.get(field, "")).casefold() for field in ("product", "package")} - {""}
+    versions = detected_versions(item)
     cpe = item.get("cpe") if isinstance(item.get("cpe"), str) else ""
-    for version in detected_versions(item):
+    # Product-wide keys let a version-less inventory row cover every version of
+    # the same product that a later detection reports.
+    keys.update(("vp", vendor, name) for name in names)
+    if cpe and (base := _cpe_base(cpe)):
+        keys.add(("cpe-base", base))
+    try:
+        base = _package_purl(item, "")
+    except ValueError:
+        base = ""
+    if base:
+        keys.add(("purl-base", base))
+    for version in versions:
         keys.update(("vpv", vendor, name, version) for name in names)
         if cpe:
             keys.add(("cpe", cpe, version))
@@ -95,10 +132,17 @@ def _row_keys(asset):
     keys = set()
     if asset.purl:
         keys.add(("purl", asset.purl))
+        if not asset.version and (base := _purl_base(asset.purl)):
+            keys.add(("purl-base", base))
     if asset.cpe:
         keys.add(("cpe", asset.cpe, asset.version))
-    if asset.vendor and asset.product and asset.version:
-        keys.add(("vpv", asset.vendor.casefold(), asset.product.casefold(), asset.version))
+        if not asset.version and (base := _cpe_base(asset.cpe)):
+            keys.add(("cpe-base", base))
+    if asset.vendor and asset.product:
+        if asset.version:
+            keys.add(("vpv", asset.vendor.casefold(), asset.product.casefold(), asset.version))
+        else:
+            keys.add(("vp", asset.vendor.casefold(), asset.product.casefold()))
     return keys
 
 
@@ -138,10 +182,10 @@ def classify(item, *, snapshots_on, snapshot_ids, managed):
     covered = list(dict.fromkeys(covered))
     if covered:
         return "monitored", covered
-    if ready_version(item) is not None:
-        return "ready", []
     if is_service(item):
         return "service", []
+    if ready_version(item) is not None:
+        return "ready", []
     return "review", []
 
 
@@ -158,7 +202,7 @@ def best_status(statuses):
 def typed_version(text):
     value = text.strip() if isinstance(text, str) else ""
     if not value:
-        raise RowRefused("Enter a version for this product.")
+        return ""
     if len(value) > MAX_VERSION:
         raise RowRefused("Enter a version of at most 100 characters.")
     if any(unicodedata.category(char) in {"Cc", "Cs"} for char in value):
@@ -187,8 +231,6 @@ def build_row(item, client, version):
         ))
         read_inventory(encode_records([asset]), client=client)
     except (ValueError, InventoryValidationError, KeyError):
-        if not version:
-            raise RowRefused("Enter a version for this product.") from None
         raise RowRefused("These details cannot be saved as an inventory row.") from None
     return asset
 
@@ -223,7 +265,13 @@ def plan_rows(products, picks, versions, client, *, snapshots_on, snapshot_ids, 
             skipped.append((label, "A third-party service has no installed version to scan."))
             continue
         try:
-            version = ready_version(item) if status == "ready" else typed_version(versions.get(asset_id, ""))
+            auto = ready_version(item)
+            if status == "ready" and auto:
+                # A ready product already has a detected version; a form value
+                # cannot replace it.
+                version = auto
+            else:
+                version = typed_version(versions.get(asset_id, "")) or (auto or "")
             rows.append((item, build_row(item, client, version)))
         except RowRefused as exc:
             skipped.append((label, str(exc)))

@@ -29,7 +29,7 @@
   <input type="hidden" name="page" value="{{ preview.page }}">
 
   <h3>Match your columns</h3>
-  <p class="help" id="column-help">Choose the matching column for each field. Use a unique Asset ID for each row. For most software, match Vendor, Product and Version too.</p>
+  <p class="help" id="column-help">Choose the matching column for each field. Use a unique Asset ID for each row. Vendor and Product identify most software; Version is optional, and a row without one is scanned for every version of the product.</p>
   <p class="help">{{ term('CPE', 'a standard name for a product and version') }} and {{ term('PURL', 'a standard name for a software package') }} are optional.</p>
   <div class="card-grid">
   {% for field, label in fields.items() %}

@@ -1,9 +1,10 @@
 {% extends 'base.html' %}{% from 'macros.html' import status %}
-{% from 'ui.html' import page_header, card, empty_state, table_wrap, applicability_badge, button, link_button, help %}
+{% from 'ui.html' import page_header, card, empty_state, table_wrap, applicability_badge, button, link_button, help, no_version_badge %}
 {% block title %}Assets · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Assets', 'The software and systems in your inventory, with the coverage recorded by the latest scan.') }}
 {{ help('Coverage means whether the last scan could check an item. Unknown coverage is not the same as no vulnerabilities.') }}
+{{ help('No version: may be affected; confirm the version to be sure. A row without a version is scanned against every version of the product.') }}
 {{ status(data) }}
 {% call card('Find an asset', 'Search by asset ID, client, vendor, product, version, category, system, ecosystem or package name.') %}
 <form method="get" class="filters">
@@ -22,7 +23,7 @@
 <td>{{ row.asset.client or 'Unassigned' }}</td>
 <td>{{ row.asset.vendor }}</td>
 <td>{{ row.asset.product }}<br><span class="muted">{{ row.asset.ecosystem or 'No ecosystem' }}</span></td>
-<td>{{ row.asset.version }}</td>
+<td>{% if row.asset.version %}{{ row.asset.version }}{% else %}{{ no_version_badge() }}{% endif %}</td>
 <td>{% if row.coverage %}{{ applicability_badge(row.coverage) }}{% else %}<span class="muted">Evaluated; review findings and source status</span>{% endif %}{% if row.reason %}<br><span class="muted">{{ row.reason }}</span>{% endif %}</td>
 </tr>{% endfor %}</tbody>
 </table>
