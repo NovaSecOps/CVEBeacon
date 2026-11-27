@@ -430,6 +430,61 @@ def test_report_limits_keep_counts_and_export_all_technologies(seeded, monkeypat
     assert capped["window_count"] == 3 and len(capped["cves"]) == 2 and capped["cves_capped"]
 
 
+def test_report_stops_at_the_scoped_findings_cap(seeded, monkeypatch):
+    config, _ = seeded
+    with StateStore(config.database_path).transaction() as db:
+        write_finding(db, 0, asset_id="w-extra-path-m", client="Other Client")
+    assert tech_report.FINDINGS_CAP == 200_000
+    monkeypatch.setattr(tech_report, "FINDINGS_CAP", 2)
+    decoded = []
+    original = tech_report._finding
+
+    def record_decode(record):
+        decoded.append(record["cve_id"])
+        return original(record)
+
+    monkeypatch.setattr(tech_report, "_finding", record_decode)
+    notice = "Results were truncated at 2 findings; narrow the window or filters."
+    assert notice in page(seeded, window="all").text
+    assert decoded == [id_for(1), id_for(1)]
+    result = export(seeded, window="all")
+    assert result.headers["X-CVEBeacon-Report-Truncated"] == "true"
+    assert notice in result.json["notices"]
+    assert technology(result.json)["current_count"] == 1
+    assert result.json["technologies"][0]["cves_capped"] is False
+    assert export(seeded, "csv").headers["X-CVEBeacon-Report-Notices"] == notice
+    book = load_workbook(BytesIO(export(seeded, "xlsx").data))
+    try:
+        assert ("Notices", notice) in book["Technologies"].iter_rows(max_col=2, values_only=True)
+    finally:
+        book.close()
+
+
+def test_watch_cache_retains_only_cves_in_the_output(seeded, monkeypatch):
+    config, _ = seeded
+    other = dict(PRODUCTS[0], name="Second technology", product="other", asset_id="second")
+    save_review(config, [dict(PRODUCTS[0], name="=nginx"), other])
+    write_managed(config, [
+        Asset(asset_id, vendor="example", product=product, version="1", client=CLIENT)
+        for asset_id, product in (("w-nginx-m", "nginx"), ("second-m", "other"))
+    ], CLIENT)
+    with StateStore(config.database_path).transaction() as db:
+        write_finding(db, 1, asset_id="second-m", cvss_score=9.8)
+        write_finding(db, 2, asset_id="second-m", cvss_score=7.5)
+    WatchStore(config.watch.database).initialize()
+    calls = []
+
+    def view(self, db, identifier, catalogs):
+        calls.append(identifier)
+        return None
+
+    monkeypatch.setattr(WatchStore, "_view", view)
+    monkeypatch.setattr(tech_report, "PAGE_CVES_PER_ROW", 1)
+    page(seeded)
+    assert calls.count(id_for(1)) == 1
+    assert calls.count(id_for(2)) == 2
+
+
 def test_links_csp_and_table_header_widths(seeded):
     response = page(seeded)
     assert "default-src 'none'" in response.headers["Content-Security-Policy"]

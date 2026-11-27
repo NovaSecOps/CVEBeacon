@@ -174,8 +174,10 @@ def create_blueprint(config):
         payload = {"csv": _csv, "json": _json, "xlsx": _xlsx}[kind](result)
         response = send_file(payload, as_attachment=True, download_name=_download_name(result, kind),
                              mimetype=MIMETYPES[kind])
-        if result["cves_capped"]:
+        if result["cves_capped"] or result["findings_capped"]:
             response.headers["X-CVEBeacon-Report-Truncated"] = "true"
+        if kind == "csv" and result["notices"]:
+            response.headers["X-CVEBeacon-Report-Notices"] = " ".join(result["notices"])
         return response
 
     return blueprint

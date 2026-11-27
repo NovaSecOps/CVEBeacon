@@ -4,7 +4,6 @@ from collections import defaultdict
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from functools import cache
 import json
 import re
 import sqlite3
@@ -33,6 +32,7 @@ EXPLOITATION = {"active": "Active", "poc": "PoC", "none": "None", "unknown": "Un
 PAGE_ROWS = 1_000
 PAGE_CVES_PER_ROW = 200
 EXPORT_CVES = 50_000
+FINDINGS_CAP = 200_000
 
 
 @dataclass(frozen=True)
@@ -253,36 +253,39 @@ def _is_client(value, expected_key):
 
 
 def _read_findings(path, client, asset_ids):
-    """Read only the covered assets, in one snapshot and without creating a database."""
+    """Read bounded, client-scoped findings in one read-only transaction."""
     by_asset = defaultdict(list)
     if not asset_ids or not path.exists():
-        return by_asset
+        return by_asset, False
     with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)) as db:
         db.row_factory = sqlite3.Row
         db.execute("BEGIN")
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='current_findings' AND type='table'").fetchone():
-            return by_asset
+            return by_asset, False
         expected_key = client_key(client)
+        db.create_function("report_client_matches", 1, lambda value: _is_client(value, expected_key))
+        remaining = FINDINGS_CAP
         for start in range(0, len(asset_ids), 500):
             chunk = asset_ids[start:start + 500]
             placeholders = ",".join("?" for _ in chunk)
             for record in db.execute(
                 "SELECT f.asset_id, f.cve_id, f.first_seen, f.last_seen, "
-                "json_extract(f.payload_json, '$.asset.client') AS client, "
                 "json_extract(f.payload_json, '$.applicability') AS applicability, "
                 "json_extract(f.payload_json, '$.vulnerability') AS vulnerability "
                 f"FROM current_findings f WHERE f.asset_id IN ({placeholders}) "
+                "AND report_client_matches(json_extract(f.payload_json, '$.asset.client')) "
                 "AND COALESCE(json_extract(f.payload_json, '$.applicability'), '') != 'not_affected' "
                 "AND NOT EXISTS (SELECT 1 FROM advisory_aliases a WHERE a.asset_id=f.asset_id "
-                "AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY f.asset_id, f.cve_id",
-                chunk,
+                "AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY f.asset_id, f.cve_id LIMIT ?",
+                (*chunk, remaining),
             ):
-                if not _is_client(record["client"], expected_key):
-                    continue
                 finding = _finding(record)
                 if finding is not None:
                     by_asset[record["asset_id"]].append(finding)
-    return by_asset
+                remaining -= 1
+                if not remaining:
+                    return by_asset, True
+    return by_asset, False
 
 
 def _ignore_missing(values, select=max):
@@ -319,7 +322,7 @@ def _current_cves(row, by_asset):
 
 
 def _watch_exploitation(config, stack):
-    # One read snapshot and one view per distinct CVE for the whole report.
+    # Use one read snapshot for the whole report.
     if not config.watch.enabled:
         return lambda _identifier: ("unknown", ())
     store = WatchStore(config.watch.database)
@@ -330,7 +333,6 @@ def _watch_exploitation(config, stack):
     except (StateError, OSError, ValueError):
         return lambda _identifier: ("unknown", ())
 
-    @cache
     def exploitation(identifier):
         try:
             view = store._view(db, identifier, config.watch.sources)
@@ -410,19 +412,26 @@ def build_report(config, client, args, *, export=False, now=None):
     selected = [row for row in technologies if _technology_matches(row, filters)]
     unmonitored = sum(row["status"] != "monitored" for row in selected)
     asset_ids = sorted({asset_id for row in selected for asset_id in row["covered_ids"]})
-    findings_unavailable = False
+    findings_unavailable = findings_capped = False
     try:
-        by_asset = _read_findings(config.database_path, client, asset_ids)
+        by_asset, findings_capped = _read_findings(config.database_path, client, asset_ids)
     except (CVEBeaconError, sqlite3.Error, OSError, ValueError, TypeError, KeyError):
         by_asset = {}
         findings_unavailable = True
         notices.append("Current CVE findings could not be read. Counts for monitored technologies are unavailable.")
+    if findings_capped:
+        notices.append(f"Results were truncated at {FINDINGS_CAP:,} findings; narrow the window or filters.")
 
     rows, chip_sets, severities = [], defaultdict(set), {}
     matched_rows = monitored = retained_cves = 0
     cves_capped = False
     with ExitStack() as stack:
-        exploitation = _watch_exploitation(config, stack)
+        lookup = _watch_exploitation(config, stack)
+        exploitation_cache = {}
+
+        def exploitation(identifier):
+            return exploitation_cache.get(identifier) or lookup(identifier)
+
         for row in selected:
             current = _current_cves(row, by_asset)
             cves = list(_matching_cves(current, window, filters, exploitation))
@@ -445,8 +454,11 @@ def build_report(config, client, args, *, export=False, now=None):
                 totals = _row_summary(cves, len(current), coverage)
                 cves.sort(key=lambda cve: (-SEVERITIES.index(cve["severity"]), cve["cve_id"]))
                 capped = len(cves) > limit
-                rows.append({**row, **totals, "cves": cves[:limit], "cves_capped": capped})
-                retained_cves += min(len(cves), limit)
+                retained = cves[:limit]
+                rows.append({**row, **totals, "cves": retained, "cves_capped": capped})
+                exploitation_cache.update((cve["cve_id"], (cve["exploitation"], cve["exploitation_sources"]))
+                                          for cve in retained)
+                retained_cves += len(retained)
                 cves_capped |= capped
     summary = {
         **{key: len(chip_sets[key]) for key in ("sites", "cisa_kev", "eu_kev", "active")},
@@ -459,5 +471,5 @@ def build_report(config, client, args, *, export=False, now=None):
         "client": client, "window": window.as_dict(), "generated_at": now.isoformat(),
         "filters": filters, "technologies": rows, "summary": summary, "notices": notices,
         "sites": sites, "categories": categories, "unmonitored": unmonitored,
-        "rows_capped": matched_rows > len(rows), "cves_capped": cves_capped,
+        "rows_capped": matched_rows > len(rows), "cves_capped": cves_capped, "findings_capped": findings_capped,
     }

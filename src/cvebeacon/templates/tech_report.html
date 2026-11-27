@@ -123,7 +123,7 @@
 {% if report.rows_capped or report.cves_capped %}
 {% call callout('info') %}
 {% if report.rows_capped %}<p>The page shows the first {{ page_rows }} technology rows. XLSX and JSON include all matching technologies.</p>{% endif %}
-{% if report.cves_capped %}<p>The page shows up to {{ page_cves }} CVEs per technology row. Counts include all matching CVEs.</p>{% endif %}
+{% if report.cves_capped %}<p>The page shows up to {{ page_cves }} CVEs per technology row.{% if not report.findings_capped %} Counts include all matching CVEs.{% endif %}</p>{% endif %}
 {% endcall %}
 {% endif %}
 
