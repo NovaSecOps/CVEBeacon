@@ -39,13 +39,18 @@
 {% if not sync_view.evidence %}
 <p>{{ sync_waiting }}</p>
 {% elif not sync_view.evidence.complete %}<p>Detection was incomplete. Automatic updates and removals wait for a complete scan.</p>{% endif %}
-{% set changes = sync_view.proposals.items() | list if sync_settings.mode == 'review' else sync_view.proposals.items() | selectattr('1.kind', 'equalto', 'remove') | list %}
-{% if changes %}
-{% if changes | length > row_limit %}<p>Showing the first {{ row_limit }} of {{ changes | length }} changes.</p>{% endif %}
+{% if sync_changes %}
+{% if sync_pages > 1 %}
+<nav class="form-actions" aria-label="Inventory changes pages">
+{% if sync_page > 1 %}<a href="{{ url_for('web.index', client=client, sync_page=sync_page - 1) }}">Previous</a>{% endif %}
+<span>Page {{ sync_page }} of {{ sync_pages }}</span>
+{% if sync_page < sync_pages %}<a href="{{ url_for('web.index', client=client, sync_page=sync_page + 1) }}">Next</a>{% endif %}
+</nav>
+{% endif %}
 {% call table_wrap('Changes since the last scan') %}
 <table><thead><tr><th scope="col">Product</th><th scope="col">Site</th><th scope="col">Change</th>{% if can_add %}<th scope="col">Actions</th>{% endif %}</tr></thead>
 <tbody>
-{% for identity, change in changes[:row_limit] %}
+{% for identity, change in sync_changes %}
 <tr>
 <th scope="row">{{ change.product }}</th>
 <td>{{ change.site }}</td>
@@ -59,6 +64,7 @@
 {% if can_add %}
 <td><form method="post" action="{{ url_for('web.inventory_sync') }}" class="form-actions">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">
+<input type="hidden" name="sync_page" value="{{ sync_page }}">
 <input type="hidden" name="asset_id" value="{{ identity }}"><input type="hidden" name="sync_token" value="{{ change.token }}">
 {% if change.kind == 'add' %}
 <input type="hidden" name="pick" value="{{ identity }}">

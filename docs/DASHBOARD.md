@@ -289,6 +289,7 @@ grace date. The grace period starts when the product is first flagged and
 defaults to 30 days. A delay of zero allows removal as soon as the flag is set.
 Due removals are checked when a detection finishes and when the Web assets page
 opens. Inventory sync touches only rows added from Web assets for this client.
+Use **Previous** and **Next** when the changes span several pages.
 It records inventory changes in the audit log and saves the previous inventory
 for restore. Changing sync settings or acting on a proposal requires
 `manage_inventory`. Unreadable inventory or sync state stops sync and displays

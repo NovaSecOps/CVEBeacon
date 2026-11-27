@@ -67,6 +67,15 @@ _REASON_LABELS = {
 
 
 _ROW_LIMIT = 500
+
+
+def _sync_page_number(values):
+    value = values.get("sync_page", "")
+    if not 1 <= len(value) <= 6 or not value.isascii() or not value.isdecimal():
+        return 1
+    return max(1, int(value))
+
+
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 _CONFIDENCE_CHOICES = ("high", "medium", "low")
 _NO_SITE = "Site not recorded"
@@ -694,6 +703,14 @@ def create_web_blueprint(config):
                 if not site_groups or site_groups[-1][0] != _site_label(item):
                     site_groups.append((_site_label(item), []))
                 site_groups[-1][1].append(item)
+        sync_changes = [] if sync_view is None else sorted(
+            ((identity, change) for identity, change in sync_view.proposals.items()
+             if sync_settings.mode == "review" or change.kind == "remove"),
+            key=lambda item: (item[1].product.casefold(), item[1].site.casefold(), item[0]),
+        )
+        sync_pages = max(1, (len(sync_changes) + _ROW_LIMIT - 1) // _ROW_LIMIT)
+        sync_page = min(_sync_page_number(request.args), sync_pages)
+        sync_start = (sync_page - 1) * _ROW_LIMIT
         return render_template("web_assets.html", clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
@@ -709,6 +726,8 @@ def create_web_blueprint(config):
                                marked=marked, withdrawn=withdrawn, managed_enabled=config.managed_inventory,
                                ready_total=ready_total, managed_warning=managed_warning,
                                sync_settings=sync_settings, sync_view=sync_view,
+                               sync_changes=sync_changes[sync_start:sync_start + _ROW_LIMIT],
+                               sync_page=sync_page, sync_pages=sync_pages,
                                sync_warning=sync_warning, sync_choices=sync.MODE_CHOICES,
                                sync_removal_choices=sync.REMOVAL_CHOICES,
                                sync_notice=sync_notice, sync_waiting=sync.WAITING,
@@ -1012,7 +1031,9 @@ def create_web_blueprint(config):
         finally:
             if lock is not None:
                 lock.release()
-        return redirect(url_for("web.index", client=client, sync_result=action), code=303)
+        sync_page = _sync_page_number(request.form)
+        return redirect(url_for("web.index", client=client, sync_result=action,
+                                sync_page=sync_page if sync_page > 1 else None), code=303)
 
     @blueprint.post("/inventory/preview")
     @requires(MANAGE)

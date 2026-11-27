@@ -390,3 +390,21 @@ def test_automatic_removal_requires_auto_mode(blank, mode):
     sync.inspect(config, "Acme")
     assert managed_rows(config) == [old]
     assert "Not detected since" in card(page(client))
+
+
+def test_keep_on_second_proposal_page_survives_deadline(blank, monkeypatch):
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    rows = [row(f"sample-{index:03}", "1") for index in range(501)]
+    write_managed(config, rows)
+    for number in (1, 2):
+        run(config, number)
+        first = page(client)
+    last = product("sample-500", "1")
+    assert "sync_page=2" in card(first) and last["asset_id"] not in card(first)
+    second = page(client, sync_page=2)
+    assert post(client, "keep-removal", **selection(second, last)).status_code == 303
+    clock[0] += timedelta(days=30)
+    page(client)
+    assert managed_rows(config) == [rows[-1]]
