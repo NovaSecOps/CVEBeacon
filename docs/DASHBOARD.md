@@ -149,6 +149,40 @@ when none exists yet. Added rows use their own asset IDs, so turning on web
 snapshots later cannot cause an asset ID collision. Added rows do not follow
 later detections; update or remove them on the client's Inventory page.
 
+### Add by filters and confidence
+
+The filters above apply to both views. With any filter active, **Add all N
+ready products shown** adds the ready products that match, in either view. The
+server reads the filter values again, ignores any that do not exist in the
+saved results, and rebuilds the list from the saved detection results, so the
+page and the action always agree. Two quick actions add every ready product with
+High confidence (**Add all High confidence ready products**) or every ready
+product except Low confidence (**Add all except Low confidence**). Each shows
+its count and is hidden when there is nothing to add. All of them open the same
+confirmation page, which names the filter that produced the list, for example
+"Ready products with High or Medium confidence". **Add all N ready products**
+still ignores the filters.
+
+### Reported marks
+
+Users with the `report` permission can record which technologies were already
+included in a report to the client. In the **By site** view, tick products
+(monitored products too), optionally type a short note, and choose **Mark
+selected as reported** or **Withdraw report mark**. Each mark stores the date
+(UTC), the signed-in user, the note and the version shown at that time. The
+**Reported** column shows them, or **Not reported**. When the detected version
+later differs from the marked one, the row shows **Changed since reported**.
+**By technology** shows how many of the technology's sites were reported and the
+latest date. The **Reported** filter selects reported, not reported, or changed
+since reported, and the summary chips count them. Users without the permission
+see the column but no actions. Each action enters the chained audit with the
+client, the action, the count and the user, without the note.
+
+Marks are kept per client in a private file next to the saved detection results
+(`<data>/web-inventory/<client-key>.json.reported.json`), under the same lock as
+other Web assets writes. A file that is not valid shows a warning and no marks.
+**Remove all sites and results** deletes it.
+
 The **Known CVEs** column shows the highest severity and the number of current
 findings for monitored products after a scan has checked them, with a link to
 those findings.

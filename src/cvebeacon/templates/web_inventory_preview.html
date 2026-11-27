@@ -3,6 +3,7 @@
 {% block title %}Add to inventory · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Add to inventory', 'Check what will be added to ' ~ label ~ '. Nothing is saved until you choose Save to inventory.') }}
+{% if description %}{% call callout('info', 'Selected by filter') %}<p>{{ description }}.</p>{% endcall %}{% endif %}
 {% if new_inventory %}{% call callout('info') %}<p>{{ label }} has no inventory yet. Saving creates it, and the next scan will check these products for CVEs.</p>{% endcall %}{% endif %}
 {% if unknown %}{% call callout('warning') %}<p>{{ unknown }} selected product{{ ' was' if unknown == 1 else 's were' }} not found in the saved results and {{ 'was' if unknown == 1 else 'were' }} ignored.</p>{% endcall %}{% endif %}
 {% call card('To add (' ~ rows | length ~ ')') %}
