@@ -994,6 +994,16 @@ def _live_source_checks(
             operations.append(("eu_kev", kev.eu))
         if wanted("epss", config.sources.epss_enabled):
             operations.append(("epss", lambda: EPSSSource(http).scores([target])))
+        if wanted("vulncheck", config.sources.vulncheck_enabled):
+            token = config.vulncheck_api_key()
+            if token:
+                from .sources.vulncheck import VulnCheckSource
+                operations.append(("vulncheck", lambda: VulnCheckSource(http).kev(token)))
+            else:
+                checks["vulncheck"] = "skipped: no token"
+        if wanted("shodan_cvedb", config.sources.shodan_cvedb_enabled):
+            from .sources.shodan_cvedb import fetch_cve
+            operations.append(("shodan_cvedb", lambda: fetch_cve(http, target)))
         for name, operation in operations:
             try:
                 operation()

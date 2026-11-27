@@ -19,7 +19,9 @@ from .watch.rules import Rule, parse_rules, validate_rule_sources
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
 OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit", "client")
-WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list")
+WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list", "vulncheck")
+# VulnCheck watch is opt-in; its scan source is enabled by default but needs a token.
+DEFAULT_WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list")
 INVENTORY_FORMATS = ("auto", "xlsx", "csv", "json", "yaml")
 WATCH_INITIAL_MODES = ("baseline", "backfill", "full")
 WATCH_SETTINGS = {
@@ -104,6 +106,10 @@ class SourceConfig:
     cisa_kev_enabled: bool = True
     eu_kev_enabled: bool = True
     epss_enabled: bool = True
+    vulncheck_enabled: bool = True
+    vulncheck_api_key_env: str = "VULNCHECK_API_TOKEN"
+    vulncheck_api_key_file: Path | None = None
+    shodan_cvedb_enabled: bool = False
     nvd_api_key_env: str = "NVD_API_KEY"
     nvd_api_key_file: Path | None = None
     minimum_request_interval: float = 6.0
@@ -144,7 +150,7 @@ class DashboardConfig:
 class WatchConfig:
     enabled: bool = False
     database: Path = Path("cvebeacon-watch.db")
-    sources: tuple[str, ...] = WATCH_SOURCES
+    sources: tuple[str, ...] = DEFAULT_WATCH_SOURCES
     initial: str = "baseline"
     backfill_days: int = 7
     overlap_minutes: int = 15
@@ -238,17 +244,24 @@ class AppConfig:
             raise ConfigurationError(f"required environment variable is not set: {env_name}")
         return value
 
-    def nvd_api_key(self) -> str | None:
-        value = self.secret(self.sources.nvd_api_key_env)
+    def _api_key(self, env_name: str, path: Path | None) -> str | None:
+        value = self.secret(env_name)
         if value and value.strip():
             return value.strip()
-        path = self.sources.nvd_api_key_file
         if path is None:
             return None
         try:
             return path.read_text(encoding="utf-8").strip() or None
         except (OSError, UnicodeError):
             return None
+
+    def nvd_api_key(self) -> str | None:
+        return self._api_key(self.sources.nvd_api_key_env, self.sources.nvd_api_key_file)
+
+    def vulncheck_api_key(self) -> str | None:
+        return self._api_key(
+            self.sources.vulncheck_api_key_env, self.sources.vulncheck_api_key_file
+        )
 
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -318,7 +331,7 @@ def load_config(
     if unknown_watch:
         raise ConfigurationError("unknown watch setting: " + ", ".join(unknown_watch))
     watch_enabled = _boolean(watch_data, "enabled", False)
-    raw_watch_sources = watch_data.get("sources", list(WATCH_SOURCES))
+    raw_watch_sources = watch_data.get("sources", list(DEFAULT_WATCH_SOURCES))
     if not isinstance(raw_watch_sources, list) or not all(
         isinstance(value, str) and value.strip() for value in raw_watch_sources
     ):
@@ -456,28 +469,35 @@ def load_config(
     nvd_api_key_env = source_data.get("nvd_api_key_env", "NVD_API_KEY")
     if not isinstance(nvd_api_key_env, str) or not nvd_api_key_env.strip():
         raise ConfigurationError("sources.nvd_api_key_env cannot be blank")
-    raw_nvd_key_file = source_data.get("nvd_api_key_file")
-    nvd_api_key_file: Path | None = None
-    if raw_nvd_key_file is not None:
-        if not isinstance(raw_nvd_key_file, str) or not raw_nvd_key_file.strip():
-            raise ConfigurationError("sources.nvd_api_key_file must be a nonempty path")
-        nvd_api_key_file = _resolve(base, raw_nvd_key_file.strip())
+
+    def secret_file(key: str) -> Path | None:
+        raw = source_data.get(key)
+        if raw is None:
+            return None
+        if not isinstance(raw, str) or not raw.strip():
+            raise ConfigurationError(f"sources.{key} must be a nonempty path")
+        path = _resolve(base, raw.strip())
         try:
-            details = nvd_api_key_file.stat()
+            details = path.stat()
         except OSError as exc:
-            raise ConfigurationError(
-                "sources.nvd_api_key_file cannot be read"
-            ) from exc
-        if not nvd_api_key_file.is_file():
-            raise ConfigurationError(
-                "sources.nvd_api_key_file must be a file"
-            )
+            raise ConfigurationError(f"sources.{key} cannot be read") from exc
+        if not path.is_file():
+            raise ConfigurationError(f"sources.{key} must be a file")
         if details.st_size > 16 * 1024:
-            raise ConfigurationError("sources.nvd_api_key_file must be at most 16384 bytes")
+            raise ConfigurationError(f"sources.{key} must be at most 16384 bytes")
         if os.name == "posix" and stat.S_IMODE(details.st_mode) & 0o077:
             raise ConfigurationError(
-                "sources.nvd_api_key_file must not be group or other accessible"
+                f"sources.{key} must not be group or other accessible"
             )
+        return path
+
+    nvd_api_key_file = secret_file("nvd_api_key_file")
+    vulncheck_api_key_env = source_data.get(
+        "vulncheck_api_key_env", "VULNCHECK_API_TOKEN"
+    )
+    if not isinstance(vulncheck_api_key_env, str) or not vulncheck_api_key_env.strip():
+        raise ConfigurationError("sources.vulncheck_api_key_env cannot be blank")
+    vulncheck_api_key_file = secret_file("vulncheck_api_key_file")
     raw_recipients = notification_recipients(email_data.get("recipients", []))
     sender = str(email_data.get("sender", "")).strip()
     if email_enabled and (not sender or not raw_recipients):
@@ -541,6 +561,10 @@ def load_config(
             cisa_kev_enabled=_boolean(source_data, "cisa_kev_enabled", True),
             eu_kev_enabled=_boolean(source_data, "eu_kev_enabled", True),
             epss_enabled=_boolean(source_data, "epss_enabled", True),
+            vulncheck_enabled=_boolean(source_data, "vulncheck_enabled", True),
+            vulncheck_api_key_env=vulncheck_api_key_env.strip(),
+            vulncheck_api_key_file=vulncheck_api_key_file,
+            shodan_cvedb_enabled=_boolean(source_data, "shodan_cvedb_enabled", False),
             nvd_api_key_env=nvd_api_key_env.strip(),
             nvd_api_key_file=nvd_api_key_file,
             minimum_request_interval=_positive_number(

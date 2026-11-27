@@ -211,6 +211,8 @@ def _secret_files(config: AppConfig, extra=()) -> dict[Path, list[str]]:
 
     if config.sources.nvd_api_key_file is not None:
         add(config.sources.nvd_api_key_file, "sources.nvd_api_key_file")
+    if config.sources.vulncheck_api_key_file is not None:
+        add(config.sources.vulncheck_api_key_file, "sources.vulncheck_api_key_file")
     for channel in config.watch.channels:
         for key, value in channel.options.items():
             if isinstance(value, SecretRef) and value.file is not None:
