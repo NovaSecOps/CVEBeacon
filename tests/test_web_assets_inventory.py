@@ -315,6 +315,19 @@ def test_label_and_generic_versions_need_review_and_generic_rows_name_no_vendor(
     (row_added,) = managed_rows(config)
     assert (row_added.vendor, row_added.product, row_added.version) == ("swiper", "swiper", "8.4.5")
 
+
+def test_a_cpe_product_keeps_its_cpe_when_added_with_a_typed_version(blank):
+    config = blank[0]
+    server = dict(asset_id="w-srv", hostname="a.example", vendor="f5", product="nginx", name="Nginx",
+                  category="web-server", categories=["web-server"], confidence="high", versions=[],
+                  evidence_types=["header"], inventory=True, cpe="cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*")
+    client = seed(blank, [server])
+    assert "Needs review" in row(products_card(page(client)), "Nginx")
+    typed = preview(client, ["w-srv"], {"w-srv": "1.25.3"})
+    assert save_inventory(client, typed).status_code == 303
+    (added,) = managed_rows(config)
+    assert added.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" and added.version == "1.25.3"
+
 def test_npm_purl_and_version_agree_for_a_typed_version(blank):
     config = blank[0]
     products = [dict(PRODUCTS[1], asset_id="w-npm-none", versions=[], inventory=False)]

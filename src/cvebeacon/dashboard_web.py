@@ -273,7 +273,7 @@ def _review_metadata(detail, client):
         return _NPM_NAME_PART.fullmatch(value) is not None
     for item in products + reviews:
         for field in ("asset_id", "hostname", "vendor", "product", "category", "confidence",
-                      "reason", "detail", "name", "ecosystem", "package"):
+                      "reason", "detail", "name", "ecosystem", "package", "cpe"):
             if field in item and not text(item[field]):
                 raise ValueError("invalid review text")
         if "name" in item and (not item["name"].strip() or len(item["name"]) > 256):

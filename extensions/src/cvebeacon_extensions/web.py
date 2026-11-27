@@ -2934,6 +2934,9 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                        inventory=row_created)
         if detection.name:
             product["name"] = detection.name
+        if detection.cpe and not (detection.ecosystem and detection.package):
+            # Lets a row added by hand from the dashboard keep the exact CPE identity.
+            product["cpe"] = detection.cpe
         if detection.ecosystem and detection.package:
             product["ecosystem"], product["package"] = detection.ecosystem, detection.package
         if detection.implied_by:

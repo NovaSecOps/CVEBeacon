@@ -203,6 +203,17 @@ def test_path_version_gives_a_collection_detection_a_version_and_a_row():
     assert product["versions"] == ["2.4.1"]
     row, = result.rows
     assert row["version"] == "2.4.1" and product["inventory"] is True
+    assert product["cpe"] == "cpe:2.3:a:example:example_widget:*:*:*:*:*:*:*:*"
+
+
+def test_package_products_carry_no_cpe():
+    found = external("Bootstrap", cpe="cpe:2.3:a:getbootstrap:bootstrap:*:*:*:*:*:*:*:*",
+                     evidence=(ev("url", "https://cdn.example.com/bootstrap@5.3.2/a.css", "a.css"),))
+    package = web._detection_summary(Detection(
+        "getbootstrap", "bootstrap", "js-library", "", "high", ("5.3.2",), ("style",), name="Bootstrap",
+        ecosystem="npm", package="bootstrap"))
+    product, = observe((found, package)).products
+    assert product["package"] == "bootstrap" and "cpe" not in product
 
 
 def test_path_versions_skip_implied_only_and_generic_detections():
