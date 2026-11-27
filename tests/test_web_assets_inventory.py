@@ -222,6 +222,11 @@ def test_broad_package_coverage_keeps_the_purl_scope_and_qualifiers():
                  category="js-library", confidence="high")
     assert actions.classify(plain, snapshots_on=False, snapshot_ids=set(),
                             managed=actions.ManagedIndex([qualified])) == ("ready", [])
+    package_row = Asset("package", product="core", version="1", ecosystem="npm",
+                        purl="pkg:npm/core@1", system_id="a.example")
+    both = dict(plain, cpe="cpe:2.3:a:other:other:*:*:*:*:*:*:*:*")
+    assert actions.classify(both, snapshots_on=False, snapshot_ids=set(),
+                            managed=actions.ManagedIndex([package_row])) == ("monitored", ["package"])
 
 
 def test_broad_coverage_does_not_cross_sites():

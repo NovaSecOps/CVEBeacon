@@ -106,10 +106,7 @@ def _identity_keys(item):
         base_purl = _package_purl(item, "")
     except ValueError:
         base_purl = ""
-    if cpe and (scope := _cpe_base(cpe)):
-        broad.add(("cpe-base", scope))
-        exact.update(("cpe", scope, version) for version in versions)
-    elif base_purl:
+    if base_purl:
         broad.add(("purl-base", base_purl))
         for version in versions:
             try:
@@ -118,6 +115,9 @@ def _identity_keys(item):
                 purl = ""
             if purl:
                 exact.add(("purl", purl))
+    elif cpe and (scope := _cpe_base(cpe)):
+        broad.add(("cpe-base", scope))
+        exact.update(("cpe", scope, version) for version in versions)
     else:
         vendor = str(item.get("vendor", "")).casefold()
         product = str(item.get("product", "")).casefold()
