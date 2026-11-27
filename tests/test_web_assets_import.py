@@ -139,6 +139,8 @@ def test_url_list_with_and_without_header(web):
     ("a.example.com,https,443,/,yes,11,,no", "0 to 10"),
     ("a.example.com,https,443,/,yes,2,2000-01-01,no", "future"),
     ("a.example.com,https,443,/,yes,2,soon,no", "ISO"),
+    ("a.example.com,https,443,/,yes,2,9999-12-31T23:59:59-01:00,no", "ISO"),
+    ("a.example.com,https,443,/,yes,2," + "1" * 65 + ",no", "64 characters"),
     ("https://a.example.com/x,https,443,/,yes,2,,no", "scheme"),
     ("a.example.com/path,https,443,/,yes,2,,no", "path"),
     ("user@a.example.com,https,443,/,yes,2,,no", "user name"),
@@ -165,6 +167,66 @@ def test_row_numbers_and_normalised_expiry(web):
     a, b = saved(config)
     assert a["expires_at"] == f"{year}-03-04T23:59:59+00:00" and a["allow_redirects"] is False
     assert b["expires_at"] == f"{year}-03-04T08:00:00+00:00"
+
+
+@pytest.mark.parametrize("text", [
+    'url\n"https://exam\tple.com/"\n',
+    'url\n"https://exam\r\nple.com/"\n',
+    "url\nhttps://example.com/\t\n",
+    "https://example.com/\u2028https://other.example.com/\n",
+    "hostname\nfe80::1%lab\x7f\n",
+    "hostname\nexam\u00adple.com\n",
+])
+def test_hostname_and_url_controls_are_row_errors(text):
+    rows, to_add, _ = imp.plan(text, [], NOW)
+    assert len(rows) == 1
+    assert rows[0]["status"] == imp.ERROR and "control or format" in rows[0]["reason"]
+    assert to_add == []
+
+
+def test_ipv6_scope_is_validated():
+    rows, to_add, _ = imp.plan("hostname\n[FE80::1%Lab-1]\nfe80::1%bad!scope\n", [], NOW)
+    assert to_add[0]["hostname"] == "fe80::1%Lab-1"
+    assert rows[1]["status"] == imp.ERROR and "scope" in rows[1]["reason"]
+
+
+def test_canonical_host_is_previewed_saved_and_audited_once(web):
+    config, users, _, client = web
+    text = "hostname,path\nBücher.example.,/\nxn--bcher-kva.example,/app\nother.example,/\n"
+    page = preview(client, text)
+    assert page.status_code == 200
+    assert all(f"https://xn--bcher-kva.example{path}<" in page.text for path in ("/", "/app"))
+    assert do_import(client, text).status_code == 303
+    assert [(a["hostname"], a["path"]) for a in saved(config)] == [
+        ("xn--bcher-kva.example", "/"), ("xn--bcher-kva.example", "/app"), ("other.example", "/")]
+    adds = [json.loads(e.action.split(":", 1)[1]) for e in users.audit_entries()
+            if e.action.startswith("web_asset_add:")]
+    assert sorted(detail["host"] for detail in adds) == ["other.example", "xn--bcher-kva.example"]
+    summary = next(e for e in users.audit_entries() if e.action.startswith("web_asset_import:"))
+    assert json.loads(summary.action.split(":", 1)[1]) == {"client": "Acme", "count": 3}
+
+
+@pytest.mark.parametrize("character", ["\x1f", "\x7f", "\x85"])
+def test_audit_rejects_control_characters(web, monkeypatch, character):
+    config, users, _, client = web
+    real_detail = dashboard_web._audit_detail
+    monkeypatch.setattr(dashboard_web, "_audit_detail", lambda *args: real_detail(*args) + character)
+    response = do_import(client, "hostname\na.example.com\n")
+    assert response.status_code == 400 and "invalid audit detail" in response.text
+    assert not paths(config, "Acme")[0].exists()
+    assert not any(e.action.startswith("web_asset") for e in users.audit_entries())
+
+
+@pytest.mark.parametrize("text,message", [
+    ('hostname,note\none.example,"unterminated\ntwo.example,second\n', "Check quotes"),
+    ("hostname" + ",note" * 32 + "\n", "32 columns"),
+    ("hostname,note\none.example" + ",x" * 32, "32 columns"),
+    ("hostname,note\none.example," + "x" * 4097, "4,096 characters"),
+    ("hostname,note\none.example," + ",".join(["x" * 4096] * 4), "16,384 characters"),
+])
+def test_csv_syntax_and_shape_limits(text, message):
+    with pytest.raises(imp.ImportRefused, match=message):
+        imp.parse_rows(text, NOW)
 
 
 def test_duplicates_and_already_saved_are_skipped(web):

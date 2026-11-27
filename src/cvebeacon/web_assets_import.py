@@ -11,12 +11,14 @@ from datetime import date, datetime, time, timezone
 import hashlib
 import io
 import ipaddress
+from itertools import chain
 import json
 import re
 import secrets
 import socket
 from threading import Lock
 from time import monotonic
+import unicodedata
 from urllib.parse import urlsplit
 
 from flask import abort, current_app, g, redirect, render_template, request, send_file, url_for
@@ -33,6 +35,9 @@ from .web_inventory import read_bytes
 MAX_ROWS = 1000
 MAX_ASSETS = 1000
 MAX_IMPORT_BYTES = 256 * 1024
+MAX_CSV_COLUMNS = 32
+MAX_CSV_FIELD = 4096
+MAX_LINE = 16384
 PREVIEW_TTL = 15 * 60
 MAX_PREVIEWS = 32
 # Posted text travels as a form field and may grow when percent-encoded.
@@ -46,6 +51,7 @@ TEMPLATE_ROWS = (
 _KNOWN = frozenset(TEMPLATE_FIELDS) | {"url"}
 _BOOLEANS = {"yes": True, "true": True, "1": True, "no": False, "false": False, "0": False}
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_SCOPE_ID = re.compile(r"[A-Za-z0-9_.~-]+")
 _PATH = re.compile(r"/[!-~]*")
 ADD, SAVED, DUPLICATE, ERROR = "add", "saved", "duplicate", "error"
 STATUS_LABELS = {ADD: "Will be added", SAVED: "Already saved", DUPLICATE: "Duplicate in this file",
@@ -108,9 +114,14 @@ def decode_text(data):
     return text
 
 
-def _canonical_host(value):
-    """The companion validator's spelling of a host, used for duplicate checks."""
-    text = value.strip()
+def _site_cell(value):
+    if any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in value):
+        raise ValueError("The hostname or URL contains a control or format character.")
+    return value.strip()
+
+
+def _canonical_host(text):
+    """Use the companion validator's spelling of a host."""
     if not text or len(text) > 253:
         raise ValueError("The hostname is empty or too long.")
     if text.startswith("[") and text.endswith("]"):
@@ -124,9 +135,14 @@ def _canonical_host(value):
     except (OSError, ValueError, UnicodeError):
         pass
     try:
-        return str(ipaddress.ip_address(text))
+        address = ipaddress.ip_address(text)
     except ValueError:
         pass
+    else:
+        if isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None:
+            if not _SCOPE_ID.fullmatch(address.scope_id):
+                raise ValueError("The IPv6 scope ID contains an unsupported character.")
+        return str(address)
     try:
         text = text.encode("idna").decode("ascii")
     except UnicodeError:
@@ -170,6 +186,8 @@ def _path(value):
 def _expiry(value, now):
     if not value:
         return ""
+    if len(value) > 64:
+        raise ValueError("The expiry is longer than 64 characters.")
     try:
         if len(value) <= 10 and "T" not in value.upper():
             moment = datetime.combine(date.fromisoformat(value), time(23, 59, 59), timezone.utc)
@@ -177,7 +195,7 @@ def _expiry(value, now):
             moment = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
             moment = (moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None
                       else moment.astimezone(timezone.utc))
-    except ValueError:
+    except (ValueError, OverflowError):
         raise ValueError("The expiry must be an ISO date or date and time, such as 2027-01-31.") from None
     if moment <= now:
         raise ValueError("The expiry must be in the future.")
@@ -201,8 +219,8 @@ def _from_url(value):
 
 
 def _row_entry(cells, now):
-    """One validated entry from a mapping of cleaned cells; raises ValueError with a plain reason."""
-    url, host = cells.get("url", ""), cells.get("hostname", "")
+    """One validated entry from the supplied cells; raises ValueError with a plain reason."""
+    url, host = _site_cell(cells.get("url", "")), _site_cell(cells.get("hostname", ""))
     if url and host:
         raise ValueError("Give either a hostname or a URL, not both.")
     if not url and not host:
@@ -215,7 +233,7 @@ def _row_entry(cells, now):
         scheme, port, path = cells.get("scheme", "").casefold() or "https", cells.get("port", ""), cells.get("path", "")
         if scheme not in {"http", "https"}:
             raise ValueError("The scheme must be http or https.")
-    _canonical_host(host)
+    host = _canonical_host(host)
     redirects = _boolean(cells.get("allow_redirects", ""), "Allow redirects", True)
     maximum = cells.get("max_redirects", "")
     if maximum and not (maximum.isascii() and maximum.isdecimal() and len(maximum) <= 2 and int(maximum) <= 10):
@@ -230,69 +248,88 @@ def _row_entry(cells, now):
     return entry
 
 
+def _physical_lines(text):
+    for line in io.StringIO(text, newline=""):
+        if len(line.rstrip("\r\n")) > MAX_LINE:
+            raise ImportRefused("An import line is longer than 16,384 characters.")
+        yield line
+
+
+def _check_csv_cells(cells):
+    if len(cells) > MAX_CSV_COLUMNS:
+        raise ImportRefused("The CSV has more than 32 columns in a record.")
+    if any(len(cell) > MAX_CSV_FIELD for cell in cells):
+        raise ImportRefused("A CSV field is longer than 4,096 characters.")
+
+
+def _record(number, cells, now):
+    try:
+        return number, _row_entry(cells, now), None
+    except ValueError as exc:
+        return number, None, str(exc)
+
+
 def parse_rows(text, now):
     """Return (records, unknown_columns). A record is (line number, entry or None, error or None)."""
-    lines = [line for line in text.splitlines() if line.strip()]
-    if not lines:
+    lines = _physical_lines(text)
+    for number, first in enumerate(lines, 1):
+        if first.strip():
+            break
+    else:
         raise ImportRefused("The import is empty. Add a header and at least one site.")
-    reader = csv.reader(io.StringIO(text, newline=""))
-    header = None
-    try:
-        for cells in reader:
-            if any(cell.strip() for cell in cells):
-                header = [cell.strip().casefold() for cell in cells]
-                break
-    except csv.Error:
-        raise ImportRefused("The CSV could not be read. Check quotes and commas.") from None
-    result, unknown = [], []
-    if header is not None and ({"hostname", "url"} & set(header)):
-        if len(set(header)) != len(header) or "" in header:
-            raise ImportRefused("The header repeats or leaves out a column name.")
-        unknown = [name for name in header if name not in _KNOWN]
+    result = []
+    if not first.lstrip().casefold().startswith(("http://", "https://")):
+        reader = csv.reader(chain((first,), lines), strict=True)
         try:
             for cells in reader:
-                if not any(cell.strip() for cell in cells):
-                    continue
-                if len(result) >= MAX_ROWS:
-                    raise ImportRefused("The import has more than 1,000 rows. Split it into smaller files.")
-                number = reader.line_num
-                if len(cells) > len(header):
-                    result.append((number, None, "The row has more cells than the header."))
-                    continue
-                values = {name: cell.strip() for name, cell in zip(header, cells) if name in _KNOWN}
-                try:
-                    result.append((number, _row_entry(values, now), None))
-                except ValueError as exc:
-                    result.append((number, None, str(exc)))
+                _check_csv_cells(cells)
+                if any(cell.strip() for cell in cells):
+                    break
+            else:
+                cells = []
+            header = [cell.strip().casefold() for cell in cells]
+            if {"hostname", "url"} & set(header):
+                if len(set(header)) != len(header) or "" in header:
+                    raise ImportRefused("The header repeats or leaves out a column name.")
+                unknown = [name for name in header if name not in _KNOWN]
+                for cells in reader:
+                    _check_csv_cells(cells)
+                    if not any(cell.strip() for cell in cells):
+                        continue
+                    if len(result) >= MAX_ROWS:
+                        raise ImportRefused("The import has more than 1,000 rows. Split it into smaller files.")
+                    line_number = number + reader.line_num - 1
+                    if len(cells) > len(header):
+                        result.append((line_number, None, "The row has more cells than the header."))
+                        continue
+                    values = {name: cell if name in {"hostname", "url"} else cell.strip()
+                              for name, cell in zip(header, cells) if name in _KNOWN}
+                    result.append(_record(line_number, values, now))
+                return result, unknown
         except csv.Error:
             raise ImportRefused("The CSV could not be read. Check quotes and commas.") from None
-        return result, unknown
     # A plain list of URLs, one per line.
-    for number, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
-        if not line:
+    for number, line in enumerate(_physical_lines(text), 1):
+        if not line.strip():
             continue
         if len(result) >= MAX_ROWS:
             raise ImportRefused("The import has more than 1,000 rows. Split it into smaller files.")
-        try:
-            result.append((number, _row_entry({"url": line}, now), None))
-        except ValueError as exc:
-            result.append((number, None, str(exc)))
-    return result, unknown
+        result.append(_record(number, {"url": line.rstrip("\r\n")}, now))
+    return result, []
 
 
 def _entry_key(entry):
     """(scheme, host, port, path) for a saved or new entry, or None if it cannot be read."""
     try:
         if "url" in entry:
-            scheme, host, port, path = _from_url(entry["url"])
+            scheme, host, port, path = _from_url(_site_cell(entry["url"]))
         else:
             scheme, host = str(entry.get("scheme", "https")).casefold(), entry.get("hostname", "")
             port, path = entry.get("port"), entry.get("path", "/")
         if scheme not in {"http", "https"}:
             return None
         port = int(port) if port not in (None, "") else (443 if scheme == "https" else 80)
-        return scheme, _canonical_host(str(host)), port, path or "/"
+        return scheme, _canonical_host(_site_cell(str(host))), port, path or "/"
     except (ValueError, TypeError):
         return None
 
@@ -318,7 +355,7 @@ def plan(text, current_assets, now):
     for number, entry, error in records:
         row = {"number": number, "entry": entry, "status": ERROR, "reason": error or ""}
         if entry is not None:
-            key = _entry_key(entry)
+            key = (entry["scheme"], entry["hostname"], entry["port"], entry["path"])
             if key in saved:
                 row["status"] = SAVED
             elif key in added:
@@ -459,13 +496,14 @@ def register(blueprint, config, render):
                             stamp = datetime.now(timezone.utc).isoformat()
 
                             def audit(name, detail):
-                                if len(detail) > 1024 or any(ord(char) < 32 for char in detail):
+                                if len(detail) > 1024 or any(
+                                        ord(char) < 32 or 127 <= ord(char) <= 159 for char in detail):
                                     raise ConfigurationError("invalid audit detail")
                                 users._append_audit(db, name + ":" + detail, actor.username, stamp,
                                                     actor=actor.username)
 
-                            for entry in to_add:
-                                audit("web_asset_add", dashboard_web._audit_detail(client, entry["hostname"]))
+                            for host in dict.fromkeys(entry["hostname"] for entry in to_add):
+                                audit("web_asset_add", dashboard_web._audit_detail(client, host))
                             audit("web_asset_import", json.dumps(
                                 {"client": client, "count": len(to_add)}, ensure_ascii=False))
                             writing = True
