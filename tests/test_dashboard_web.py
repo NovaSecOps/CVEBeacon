@@ -223,14 +223,18 @@ def test_detection_companion_argument_list(web, monkeypatch):
     calls = []
     child = MagicMock()
     child.wait.return_value = 0
+    monkeypatch.setenv("CVEBEACON_WEB_RUN_ID", "parent-value")
     monkeypatch.setattr(web_assets.subprocess, "Popen",
                         lambda argv, **kwargs: calls.append((argv, kwargs)) or child)
     assert web_assets.run_detection(config, "Acme") == 0
     assert calls[0][0] == [sys.executable, "-I", "-u", "-m", "cvebeacon_extensions", "web", "detect",
                            "--client", "Acme", "--assets", str(asset_path), "--output", str(output),
                            "--source-id", "web-" + client_key("Acme"), "--allow-partial"]
+    assert re.fullmatch(r"[a-f0-9]{32}", calls[0][1]["env"]["CVEBEACON_WEB_RUN_ID"])
+    assert os.environ["CVEBEACON_WEB_RUN_ID"] == "parent-value"
     web_assets.run_detection(config, "Acme", plan=True)
     assert calls[-1][0][-1] == "--plan"
+    assert "CVEBEACON_WEB_RUN_ID" not in calls[-1][1]["env"]
 
 
 def test_private_atomic_storage_does_not_follow_links(web, monkeypatch):

@@ -163,9 +163,18 @@ def run_detection(config, client, *, plan=False):
     else:
         if not stat.S_ISDIR(details.st_mode) or getattr(details, "st_file_attributes", 0) & 0x400:
             fingerprints = None
-    command = companion_command(document["client"], assets, output, plan=plan, fingerprints=fingerprints)
+    run_id = None if plan else secrets.token_hex(16)
+    command = companion_command(document["client"], assets, output, plan=plan,
+                                fingerprints=fingerprints)
+    environment = child_environment(config)
+    environment.pop("CVEBEACON_WEB_RUN_ID", None)
+    if run_id is not None:
+        from . import web_inventory_sync
+
+        web_inventory_sync.detection_started(config, document["client"], run_id)
+        environment["CVEBEACON_WEB_RUN_ID"] = run_id
     # Popen's context manager waits without a timeout on exit.
-    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config))
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=environment)
     try:
         code = child.wait(timeout=RUN_TIMEOUT + 5 * 60)
     except subprocess.TimeoutExpired as exc:
@@ -181,4 +190,5 @@ def run_detection(config, client, *, plan=False):
         raise ConfigurationError(RUN_TIMEOUT_REASON) from exc
     if not plan and code == 0:
         output.with_name(output.name + ".removed").unlink(missing_ok=True)
+        web_inventory_sync.detection_finished(config, document["client"], run_id)
     return code

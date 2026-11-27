@@ -16,7 +16,7 @@ import time
 from .config import UPDATE_STATUS_DIR, load_config
 from .errors import CVEBeaconError
 from .inventory_journal import recover, remove_file
-from .managed_inventory import is_managed_file
+from .managed_inventory import is_managed_file, is_web_sync_file
 from .private_storage import private_directory, private_file
 from .publication import replace_file
 from .snapshot import (
@@ -171,6 +171,9 @@ def _manifest(source, data):
     manifest = json.loads(raw)
     if manifest.get("format") != 1 or not isinstance(manifest.get("databases"), list):
         raise SnapshotError("invalid snapshot manifest")
+    if ("managed_web_sync" in manifest
+            and (manifest["managed_web_sync"] is not True or "managed_inventories" not in manifest)):
+        raise SnapshotError("invalid managed web sync snapshot manifest")
     seen = set()
     for row in manifest["databases"]:
         relative = Path(row["path"])
@@ -185,10 +188,11 @@ def _manifest(source, data):
 
 
 
-def _managed_files(config):
+def _managed_files(config, *, include_sync=True):
     directory = config.inventory_directory
     try:
         files = sorted(path for path in directory.iterdir() if is_managed_file(path)
+                       and (include_sync or not is_web_sync_file(path))
                        and (config.inventory is None or config.inventory.path != path))
     except (FileNotFoundError, NotADirectoryError):
         return []
@@ -226,6 +230,7 @@ def _managed_entries(config, source, manifest):
         if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
             raise SnapshotError("invalid managed inventory snapshot checksum")
         if (not isinstance(name, str) or Path(name).name != name or not is_managed_file(Path(name))
+                or ("managed_web_sync" not in manifest and is_web_sync_file(Path(name)))
                 or name in files or not isinstance(saved, str) or not re.fullmatch(r"inventory-[0-9]+\.copy", saved)
                 or saved in blobs):
             raise SnapshotError("invalid managed inventory snapshot filename")
@@ -245,11 +250,11 @@ def _verified_managed_bytes(source, saved, expected):
     return payload
 
 
-def _restore_managed(config, source, files):
+def _restore_managed(config, source, files, *, include_sync):
     if files is None:
         return
     directory = config.inventory_directory
-    existing = _managed_files(config)
+    existing = _managed_files(config, include_sync=include_sync)
     if files:
         private_directory(directory, owner_only=True)
     for name, (saved, expected) in files.items():
@@ -276,7 +281,7 @@ def backup(config, data, destination):
     destination = Path(destination)
     paths = databases(config, data)
     manifest = {"format": 1, "databases": [], "config": config.config_path.name,
-                "managed_inventories": _managed_snapshot(config, destination)}
+                "managed_web_sync": True, "managed_inventories": _managed_snapshot(config, destination)}
     for index, path in enumerate(paths):
         exists = path.is_file()
         entry = {"path": path.relative_to(data).as_posix(), "backup": str(index) + ".db", "exists": exists}
@@ -357,7 +362,7 @@ def restore(config, data, source):
             sync_directory(path.parent)
         finally:
             temporary.unlink(missing_ok=True)
-    _restore_managed(config, source, managed)
+    _restore_managed(config, source, managed, include_sync="managed_web_sync" in manifest)
     restore_config(config.config_path, data, source)
 
 
@@ -378,7 +383,7 @@ def verify_restore(config, data, source):
         raise SnapshotError("unexpected database remains after restore")
     managed = _managed_entries(config, Path(source), manifest)
     if managed is not None:
-        actual = {path.name: path for path in _managed_files(config)}
+        actual = {path.name: path for path in _managed_files(config, include_sync="managed_web_sync" in manifest)}
         if actual.keys() != managed.keys() or any(
             hashlib.sha256(read_bytes(actual[name])).hexdigest() != checksum
             for name, (_, checksum) in managed.items()

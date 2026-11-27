@@ -97,6 +97,7 @@ class DetectionStats:
     unsupported_kinds: tuple[tuple[str, int], ...]
     stopped_at_time_limit: int = 0
     patterns_evaluated: int = 0
+    truncated: bool = False
 
 
 class DetectionResults(tuple):
@@ -176,9 +177,10 @@ class _LiteralIndex:
     outputs: tuple[tuple[int, ...], ...]
     literal_lengths: Mapping[int, int]
 
-    def find(self, text: str, deadline: float, clock=time.monotonic) -> tuple[dict[int, set[int]], bool]:
+    def find(self, text: str, deadline: float, clock, on_truncated) -> tuple[dict[int, set[int]], bool]:
         candidates: dict[int, set[int]] = {}
         positions_are_exact = text.isascii()
+        truncated = False
         folded = _fold_for_index(text)
         state = 0
         for position, char in enumerate(folded):
@@ -188,10 +190,15 @@ class _LiteralIndex:
             if self.outputs[state]:
                 for pattern_id in self.outputs[state]:
                     found = candidates.setdefault(pattern_id, set())
-                    if positions_are_exact and len(found) < MAX_LITERAL_HITS_PER_PATTERN:
-                        found.add(position - self.literal_lengths[pattern_id] + 1)
+                    if positions_are_exact:
+                        if len(found) < MAX_LITERAL_HITS_PER_PATTERN:
+                            found.add(position - self.literal_lengths[pattern_id] + 1)
+                        else:
+                            truncated = True
             if position and position % 65_536 == 0 and clock() >= deadline:
                 return candidates, True
+        if truncated:
+            on_truncated()
         return candidates, clock() >= deadline
 
 
@@ -1335,7 +1342,10 @@ def _load_uncached(snapshot: _DirectorySnapshot) -> Fingerprints:
                 continue
             bytes_seen += file_size
             payload = _read_json_file(technologies_dir, filename, MAX_FILE_BYTES, expected_stamp)
-            if not isinstance(payload, dict) or not payload or len(payload) > MAX_TECHNOLOGIES_PER_FILE:
+            if isinstance(payload, dict) and len(payload) > MAX_TECHNOLOGIES_PER_FILE:
+                skipped_technologies["technologies per file limit"] += 1
+                continue
+            if not isinstance(payload, dict) or not payload:
                 skipped_technologies["malformed technology file"] += 1
                 continue
             for name, data in payload.items():
@@ -1443,6 +1453,9 @@ INCOMPLETE_LOAD_REASONS = frozenset({
     "technology file changed during loading", "technology file unavailable",
     "technology file unavailable or untrusted", "categories file unavailable",
     "fingerprint collections are not supported on this platform",
+    "directory entry limit", "technology file count limit", "technology file too large",
+    "total fingerprint byte limit", "technologies per file limit", "technology pattern count limit",
+    "total pattern limit", "categories file too large", "technology file is not a regular file",
 })
 _LOAD_CACHE: dict[tuple, Fingerprints] = {}
 _LOAD_CACHE_ORDER: deque[tuple] = deque()
@@ -1524,7 +1537,8 @@ class _PageParser(HTMLParser):
         self.capture_tag = ""
         self.capture_text: list[str] = []
         self.capture_length = 0
-        self.html = html[:MAX_HTML_LENGTH]
+        self.truncated = False
+        self.html = self.bound_text(html, MAX_HTML_LENGTH)
         self.id_index: dict[str, list[int]] = {}
         self.class_index: dict[str, list[int]] = {}
         self.tag_index: dict[str, list[int]] = {}
@@ -1543,7 +1557,20 @@ class _PageParser(HTMLParser):
         except Exception:
             # HTMLParser is intentionally lenient; malformed pages simply
             # contribute the bounded prefix that was parsed successfully.
-            pass
+            self.mark_truncated()
+
+    def mark_truncated(self) -> None:
+        self.truncated = True
+
+    def bound_text(self, value: object, limit: int) -> str:
+        return _bounded_text(value, limit, self.mark_truncated)
+
+    def bound_items(self, values, limit):
+        for index, value in enumerate(islice(values, limit + 1)):
+            if index == limit:
+                self.mark_truncated()
+                break
+            yield value
 
     def check_deadline(self) -> None:
         if self.clock() >= self.deadline:
@@ -1553,17 +1580,24 @@ class _PageParser(HTMLParser):
         self.check_deadline()
         tag = tag.casefold()
         values = {str(name).casefold(): "" if value is None else str(value) for name, value in attrs}
-        if tag == "meta" and len(self.meta) < MAX_META_TAGS:
+        if tag == "meta":
             name = values.get("name") or values.get("property") or values.get("http-equiv")
             if name and "content" in values:
-                self.meta.append((name, values["content"]))
-        if tag == "script" and len(self.script_urls) < MAX_SCRIPT_URLS and values.get("src"):
-            self.script_urls.append(values["src"])
+                if len(self.meta) < MAX_META_TAGS:
+                    self.meta.append((name, values["content"]))
+                else:
+                    self.mark_truncated()
+        if tag == "script" and values.get("src"):
+            if len(self.script_urls) < MAX_SCRIPT_URLS:
+                self.script_urls.append(values["src"])
+            else:
+                self.mark_truncated()
         if tag in {"script", "style"}:
             self.capture_tag = tag
             self.capture_text = []
             self.capture_length = 0
         if len(self.nodes) >= MAX_DOM_NODES:
+            self.mark_truncated()
             return
         parent = self.stack[-1] if self.stack else None
         index = len(self.nodes)
@@ -1602,17 +1636,18 @@ class _PageParser(HTMLParser):
 
     def handle_data(self, data: str):
         self.check_deadline()
-        if self.capture_tag and self.capture_length < MAX_RESOURCE_LENGTH:
-            remaining = MAX_RESOURCE_LENGTH - self.capture_length
-            chunk = data[:remaining]
-            self.capture_text.append(chunk)
-            self.capture_length += len(chunk)
+        if self.capture_tag:
+            chunk = self.bound_text(data, MAX_RESOURCE_LENGTH - self.capture_length)
+            if chunk:
+                self.capture_text.append(chunk)
+                self.capture_length += len(chunk)
         if self.stack:
             self.nodes[self.stack[-1]].text.append(data)
-        if not self.capture_tag and self.visible_text_length < MAX_TEXT_LENGTH:
-            chunk = data[:MAX_TEXT_LENGTH - self.visible_text_length]
-            self.visible_text.append(chunk)
-            self.visible_text_length += len(chunk)
+        if not self.capture_tag:
+            chunk = self.bound_text(data, MAX_TEXT_LENGTH - self.visible_text_length)
+            if chunk:
+                self.visible_text.append(chunk)
+                self.visible_text_length += len(chunk)
 
     def _charge_text_work(self, amount: int) -> None:
         # Count traversed nodes and text characters, including repeated cache hits.
@@ -1643,6 +1678,8 @@ class _PageParser(HTMLParser):
                 if total >= MAX_TEXT_LENGTH:
                     break
             pending.extend(reversed(node.children))
+        if total == MAX_TEXT_LENGTH:
+            self.mark_truncated()
         value = "".join(output)
         byte_length = len(value.encode("utf-8", errors="replace"))
         if self._node_text_cache_bytes + byte_length <= MAX_DOM_TEXT_CACHE_BYTES:
@@ -1663,13 +1700,18 @@ def _resource_source(resource: webrules.Resource) -> str:
     return url if isinstance(url, str) and url else "page"
 
 
-def _bounded_text(value: object, limit: int) -> str:
-    return value[:limit] if isinstance(value, str) else ""
+def _bounded_text(value: object, limit: int, on_truncated) -> str:
+    if not isinstance(value, str):
+        return ""
+    if len(value) > limit:
+        on_truncated()
+    return value[:limit]
 
 
 def _page_sources(page: webrules.Page, page_url: str, *, deadline: float, clock):
-    html = _bounded_text(getattr(page, "html", ""), MAX_HTML_LENGTH)
-    parser = _PageParser(html, deadline=deadline, clock=clock)
+    parser = _PageParser(getattr(page, "html", ""), deadline=deadline, clock=clock)
+    if getattr(page, "truncated", False):
+        parser.mark_truncated()
     sources: dict[str, list[_Source]] = {kind: [] for kind in SUPPORTED_KINDS}
     for name, values in getattr(page, "headers", {}).items():
         if not isinstance(name, str):
@@ -1677,25 +1719,25 @@ def _page_sources(page: webrules.Page, page_url: str, *, deadline: float, clock)
         name = name.casefold()
         if name in _COOKIE_HEADERS:
             continue
-        for value in islice(values, 64):
-            sources["headers"].append(_Source(_bounded_text(value, 16_384), f"header:{name}", name))
+        for value in parser.bound_items(values, 64):
+            sources["headers"].append(_Source(parser.bound_text(value, 16_384), f"header:{name}", name))
     for name, content in parser.meta:
-        sources["meta"].append(_Source(_bounded_text(content, 16_384), "page", name))
-    for cookie in islice(getattr(page, "cookie_names", ()), 4096):
+        sources["meta"].append(_Source(parser.bound_text(content, 16_384), "page", name))
+    for cookie in parser.bound_items(getattr(page, "cookie_names", ()), 4096):
         if isinstance(cookie, str):
-            sources["cookies"].append(_Source(cookie[:256], f"cookie:{cookie}"))
+            sources["cookies"].append(_Source(parser.bound_text(cookie, 256), f"cookie:{cookie}"))
     for url in parser.script_urls:
-        sources["scriptSrc"].append(_Source(url[:4096], "page"))
+        sources["scriptSrc"].append(_Source(parser.bound_text(url, 4096), "page"))
     resource_budget = MAX_RESOURCE_BYTES_PER_PAGE
-    for resource in islice(getattr(page, "resources", ()), MAX_PAGE_RESOURCES):
+    for resource in parser.bound_items(getattr(page, "resources", ()), MAX_PAGE_RESOURCES):
         parser.check_deadline()
         kind = getattr(resource, "kind", "")
         source = _resource_source(resource)
-        url = _bounded_text(getattr(resource, "url", ""), 4096)
+        url = parser.bound_text(getattr(resource, "url", ""), 4096)
         resource_text = getattr(resource, "text", "")
         per_resource_limit = MAX_ROBOTS_LENGTH if kind == "robots" else MAX_RESOURCE_LENGTH
         available = min(per_resource_limit, resource_budget)
-        bounded_resource = _bounded_text(resource_text, available)
+        bounded_resource = parser.bound_text(resource_text, available)
         resource_budget -= len(bounded_resource)
         if kind == "script":
             if url:
@@ -1709,7 +1751,7 @@ def _page_sources(page: webrules.Page, page_url: str, *, deadline: float, clock)
     sources["css"].extend(_Source(value, "page") for value in parser.inline_styles)
     sources["html"].append(_Source(parser.html, "page"))
     sources["text"].append(_Source("".join(parser.visible_text), "page"))
-    sources["url"].append(_Source(_bounded_text(page_url, 4096), "page"))
+    sources["url"].append(_Source(parser.bound_text(page_url, 4096), "page"))
     return sources, parser
 
 
@@ -1987,7 +2029,7 @@ def _merge_direct_record(records: dict[tuple[str, str], _DetectionRecord], techn
 
 
 def _candidate_patterns(fingerprints: Fingerprints, kind: str, source: _Source,
-                        deadline: float, clock) -> tuple[tuple[int, ...], bool, Mapping[int, set[int]]]:
+                        deadline: float, clock, on_truncated) -> tuple[tuple[int, ...], bool, Mapping[int, set[int]]]:
     index = fingerprints.literal_indexes.get(kind)
     no_literal = fingerprints.no_literal.get(kind, ())
     if index is None:
@@ -2004,7 +2046,7 @@ def _candidate_patterns(fingerprints: Fingerprints, kind: str, source: _Source,
             elif pattern.kind == kind and pattern.literal and pattern.literal in folded:
                 found.append(pattern.index)
         return tuple(found), clock() >= deadline, MappingProxyType({})
-    positions, expired = index.find(source.value, deadline, clock)
+    positions, expired = index.find(source.value, deadline, clock, on_truncated)
     candidates = set(positions)
     candidates.update(no_literal)
     return tuple(candidates), expired, MappingProxyType(positions)
@@ -2015,7 +2057,7 @@ def _category_ids_available(records: Mapping[tuple[str, str], _DetectionRecord])
 
 
 def _resolve_relationships(fingerprints: Fingerprints, direct: dict[tuple[str, str], _DetectionRecord],
-                           known_exclusions: set[str], deadline: float, clock):
+                           known_exclusions: set[str], deadline: float, clock, on_truncated):
     by_name: dict[str, _Technology | None] = {}
     for technology in fingerprints.technologies:
         if clock() >= deadline:
@@ -2039,6 +2081,8 @@ def _resolve_relationships(fingerprints: Fingerprints, direct: dict[tuple[str, s
                 return direct, True
             source, source_confidence, origin, depth = pending.popleft()
             if depth >= 32:
+                if source.implies:
+                    on_truncated()
                 continue
             for relation in source.implies:
                 if clock() >= deadline:
@@ -2111,7 +2155,11 @@ class ExternalSession:
         }
         self._patterns_evaluated = 0
         self._stopped = False
+        self._truncated = False
         self._result = None
+
+    def _mark_truncated(self) -> None:
+        self._truncated = True
 
     def _expired(self) -> bool:
         if self._stopped or self.clock() >= self.deadline:
@@ -2130,7 +2178,7 @@ class ExternalSession:
                 if self._expired():
                     return
                 candidate_ids, expired, literal_positions = _candidate_patterns(
-                    self.fingerprints, kind, source, self.deadline, self.clock
+                    self.fingerprints, kind, source, self.deadline, self.clock, self._mark_truncated
                 )
                 if expired:
                     self._stopped = True
@@ -2201,23 +2249,24 @@ class ExternalSession:
         self._match_sources(sources)
         if not self._stopped:
             self._match_dom(parser)
+        self._truncated |= parser.truncated
 
     def add_resource(self, resource: webrules.Resource) -> None:
         if self._result is not None or self._expired():
             return
         kind = getattr(resource, "kind", "")
         source = _resource_source(resource)
-        url = _bounded_text(getattr(resource, "url", ""), 4096)
+        url = _bounded_text(getattr(resource, "url", ""), 4096, self._mark_truncated)
         value = getattr(resource, "text", "")
         if kind == "robots":
-            sources = {"robots": (_Source(_bounded_text(value, MAX_ROBOTS_LENGTH), source),)}
+            sources = {"robots": (_Source(_bounded_text(value, MAX_ROBOTS_LENGTH, self._mark_truncated), source),)}
         elif kind == "script":
             sources = {
                 "scriptSrc": (_Source(url, source),) if url else (),
-                "scripts": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH), source),),
+                "scripts": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH, self._mark_truncated), source),),
             }
         elif kind in {"style", "css"}:
-            sources = {"css": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH), source),)}
+            sources = {"css": (_Source(_bounded_text(value, MAX_RESOURCE_LENGTH, self._mark_truncated), source),)}
         else:
             return
         self._match_sources(sources)
@@ -2238,7 +2287,7 @@ class ExternalSession:
         else:
             resolved, relation_stopped = _resolve_relationships(
                 self.fingerprints, self._direct, self._known_exclusions,
-                self.deadline - RELATION_FINALIZATION_RESERVE_SECONDS, self.clock,
+                self.deadline - RELATION_FINALIZATION_RESERVE_SECONDS, self.clock, self._mark_truncated,
             )
             if relation_stopped:
                 self._stopped = True
@@ -2252,6 +2301,7 @@ class ExternalSession:
             "skipped_patterns": self.fingerprints.stats.skipped_patterns,
             "unsupported_kinds": self.fingerprints.stats.unsupported_kinds,
             "stopped": self._stopped,
+            "truncated": self._truncated,
             "patterns_evaluated": self._patterns_evaluated,
         }
         self._result = (detections, stats)
@@ -2268,6 +2318,6 @@ def detect_external(page: webrules.Page, fingerprints: Fingerprints, *, page_url
         detections,
         DetectionStats(
             stats["technologies_loaded"], stats["skipped_patterns"], stats["unsupported_kinds"],
-            int(stats["stopped"]), stats["patterns_evaluated"],
+            int(stats["stopped"]), stats["patterns_evaluated"], stats["truncated"],
         ),
     )

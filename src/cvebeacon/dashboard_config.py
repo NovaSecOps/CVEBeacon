@@ -28,7 +28,7 @@ from werkzeug.exceptions import HTTPException
 
 from .config import (CANONICAL_FIELDS, OPTIONAL_FIELDS, BackupConfig, DashboardConfig,
                      EmailConfig, HttpConfig, InventoryConfig, SourceConfig,
-                     TeamsConfig, WatchConfig, load_config, notification_recipients)
+                     TeamsConfig, WatchConfig, WebConfig, load_config, notification_recipients)
 from .dashboard_config_fields import metadata
 from .errors import CVEBeaconError, ConfigurationError
 from .locking import (LOCK_NAME, run_lock_path, owner_storage_paths,
@@ -207,7 +207,7 @@ SCHEMAS = {
     "watch": [("watch", WATCH_FIELDS)],
     "sources": [("sources", defaults(SourceConfig))],
     "reporting": [("watch.reporting", {"identity": "open"})],
-    "inventory": [("inventory", INVENTORY_FIELDS)],
+    "inventory": [("inventory", INVENTORY_FIELDS), ("web", defaults(WebConfig))],
     "dashboard": [("dashboard", defaults(DashboardConfig))],
     "http": [("http", defaults(HttpConfig))],
     "system": [("state", {"database": ".cvebeacon/state.db"}), ("output", {"directory": "reports"})],
@@ -224,11 +224,13 @@ SECTIONS = {
 }
 RULE_FIELDS = defaults(Rule)
 MAPPING_FIELDS = dict.fromkeys(("vendor", "product", "cpe"))
-BOOLEAN_FIELDS = {"managed", "web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported", "compress"}
+BOOLEAN_FIELDS = {"managed", "web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported",
+                  "compress", "inventory_auto_remove"}
 NUMBER_FIELDS = {"port", "max_items", "priority", "min_interval_seconds", "timeout_seconds",
                  "connect_timeout", "read_timeout", "retries", "backoff_seconds", "header_row",
                  "minimum_request_interval", "backfill_days", "overlap_minutes",
-                 "session_lifetime_seconds", "session_idle_seconds", "retention_days", "keep_min"}
+                 "session_lifetime_seconds", "session_idle_seconds", "retention_days", "keep_min",
+                 "removal_grace_days"}
 COMPLEX_FIELDS = {"sources", "channels", "events", "cvss_providers", "condition", "columns",
                   "to", "cc", "bcc", "recipients", "conversation_references"}
 
@@ -240,6 +242,7 @@ _SESSION_SAFE_TABLES = {
     "sources": {"osv_enabled", "nvd_enabled", "cve_enabled", "euvd_enabled", "cisa_kev_enabled",
                 "eu_kev_enabled", "epss_enabled", "nvd_api_key_env", "nvd_api_key_file", "minimum_request_interval"},
     "inventory": {"path", "format", "worksheet", "header_row", "records_path", "delimiter", "encoding", "web_snapshots", "managed"},
+    "web": {"inventory_sync", "removal_grace_days", "inventory_auto_remove"},
     "http": {"connect_timeout", "read_timeout", "retries", "backoff_seconds", "user_agent"},
     "state": {"database"}, "output": {"directory"},
     "backup": {"directory", "retention_days", "keep_min", "compress"},
@@ -394,7 +397,7 @@ def session_settings_changed(before, after):
         }),
         "product_mappings": lambda old, new: _session_rows_changed(old, new, "mapping"),
     }
-    for section in ("sources", "http", "state", "output"):
+    for section in ("sources", "http", "state", "output", "web"):
         nested[section] = lambda a, b, section=section: _session_table_changed(a, b, _SESSION_SAFE_TABLES[section])
     nested["backup"] = lambda a, b: _session_table_changed(a, b, _SESSION_SAFE_TABLES["backup"])
     return _session_table_changed(before, after, set(), nested)
@@ -1422,6 +1425,10 @@ class Editor:
             if env_changed and "manage_secrets" not in early_permissions:
                 abort(403)
             updated, content = self.validate(pending.document)
+            if updated.web != checks_config.web or updated.web != self.config.web:
+                if "manage_inventory" not in early_permissions:
+                    abort(403)
+                permission = {*permission, "manage_inventory"}
             if ((path_authority_changed(updated, checks_config, self.config)
                     or dashboard_authority_changed(updated, checks_config, self.config))
                     and not probe.is_admin):

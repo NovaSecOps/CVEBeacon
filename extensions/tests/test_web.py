@@ -4,6 +4,7 @@ import json
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import shutil
 import socket
@@ -46,6 +47,7 @@ from cvebeacon_extensions.web import (
     read_body,
 )
 from cvebeacon_extensions.webrules import RULES, detect, normalize_version, page_from
+from cvebeacon.web_inventory import web_asset_id
 
 NOW = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
 PUBLIC = "93.184.216.34"
@@ -211,6 +213,31 @@ def run(tmp_path, assets, responses, *, mapping=None, allow_partial=True, client
                         allow_partial=allow_partial, resolver=resolver, transport=transport,
                         now=lambda: NOW, host_interval=0, max_workers=max_workers, **kwargs)
     return result, output, resolver, transport
+
+
+def test_sync_metadata_records_complete_endpoints_and_links_runs(tmp_path):
+    assets = [asset(path="/"), asset(path="/about")]
+    responses = [response(headers={"server": "nginx/1.25.3"}), response(403)]
+    _, output, _, _ = run(tmp_path, assets, responses)
+    review = output.with_name(output.name + ".review.json")
+    first = json.loads(review.read_text(encoding="utf-8"))
+    metadata = first["run"]["inventory_sync"]
+    home = web_asset_id("acme", "https", "example.com", 443, "/")
+    about = web_asset_id("acme", "https", "example.com", 443, "/about")
+    assert metadata["sites"] == {
+        home: ["https", "example.com", 443, "/", True],
+        about: ["https", "example.com", 443, "/about", False],
+    }
+    assert metadata["allowlist"] == hashlib.sha256((tmp_path / "assets.json").read_bytes()).hexdigest()
+    assert first["products"][0]["site_id"] == home
+
+    run_id = "1234567890abcdef" * 2
+    _, _, _, _ = run(tmp_path, assets, [response(), response()], run_id=run_id)
+    second = json.loads(review.read_text(encoding="utf-8"))["run"]
+    assert second["status"] == "no-usable-versions"
+    assert second["inventory_sync"]["id"] == run_id
+    assert second["inventory_sync"]["previous"] == metadata["id"]
+    assert all(site[-1] for site in second["inventory_sync"]["sites"].values())
 
 
 def fixture_page(fixture):
