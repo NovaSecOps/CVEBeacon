@@ -86,6 +86,7 @@ MARKS = {
 }
 
 bp = Blueprint("watch", __name__, url_prefix="/watch")
+WEB_INVENTORY_REQUEST_BYTES = 512 * 1024
 
 
 def register_watch(app, config: AppConfig) -> None:
@@ -93,7 +94,8 @@ def register_watch(app, config: AppConfig) -> None:
     from .dashboard_inventory import UPLOAD_REQUEST_BYTES
 
     app.config["MAX_CONTENT_LENGTH"] = max(
-        int(app.config.get("MAX_CONTENT_LENGTH") or 0), MAX_REQUEST_BYTES, UPLOAD_REQUEST_BYTES
+        int(app.config.get("MAX_CONTENT_LENGTH") or 0), MAX_REQUEST_BYTES, UPLOAD_REQUEST_BYTES,
+        WEB_INVENTORY_REQUEST_BYTES,
     )
 
     def limit_request_body():
@@ -109,6 +111,10 @@ def register_watch(app, config: AppConfig) -> None:
             request.max_content_length = UPLOAD_REQUEST_BYTES
             request.max_form_memory_size = 128 * 1024
             request.max_form_parts = 8
+        elif request.endpoint in {"web.inventory_preview", "web.inventory_save"}:
+            # Up to 2,000 picked products and their typed versions travel as plain form fields.
+            request.max_content_length = WEB_INVENTORY_REQUEST_BYTES
+            request.max_form_memory_size = WEB_INVENTORY_REQUEST_BYTES
         elif request.endpoint == "config_editor.rules" and request.method == "POST":
             # Reject before the shared CSRF guard reads the body.
             if not app.extensions["dashboard_users"].dashboard_accounts():
