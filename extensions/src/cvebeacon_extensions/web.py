@@ -35,12 +35,14 @@ import threading
 import time
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
+import uuid
 import zlib
 
 from cvebeacon.errors import InventoryValidationError
 from cvebeacon.identity import normalize_asset, validate_client_name
 from cvebeacon.models import Asset
 from cvebeacon.web_assets import RUN_TIMEOUT, RUN_TIMEOUT_REASON
+from cvebeacon.web_inventory import web_asset_id
 
 from . import __version__, webrules
 from .contract import (ExtensionError, MAX_BYTES, MAX_RECORDS, MAX_TEXT, _atomic, _regular,
@@ -212,6 +214,7 @@ class Allowlist:
     client: str
     ca_bundle: Path | None
     assets: tuple[WebAsset, ...]
+    revision: str = ""
 
     endpoints: frozenset[tuple[str, str, int]] = field(init=False, repr=False)
     _by_origin: dict[tuple[str, str, int], WebAsset] = field(init=False, repr=False, compare=False)
@@ -407,7 +410,8 @@ _ALLOWED_ASSET = {
 
 def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> Allowlist:
     client = _client(client)
-    document = decode_json(read_bytes(Path(path)))
+    data = read_bytes(Path(path))
+    document = decode_json(data)
     if not isinstance(document, dict):
         raise ExtensionError("asset allowlist must be a JSON object")
     unknown = set(document) - _ALLOWED_CONFIG
@@ -470,7 +474,7 @@ def load_allowlist(path: Path, *, client: str, now: datetime | None = None) -> A
             raise ExtensionError(f"asset {index} conflicts with another entry for the same endpoint")
         assets.append(WebAsset(endpoint, authorized_by, authorized_at, expires_at, allow_redirects,
                                max_redirects, allow_private))
-    return Allowlist(client, ca_bundle, tuple(assets))
+    return Allowlist(client, ca_bundle, tuple(assets), hashlib.sha256(data).hexdigest())
 
 
 def format_plan(allowlist: Allowlist) -> str:
@@ -2199,6 +2203,9 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
                     skip(time_reason, candidate)
                 elif failure.status is not None and failure.reason == "unreachable":
                     skip("http-status", candidate)
+                    if (failure.status in {404, 410}
+                            and _STANDARD_PATHS.get(candidate.kind) == candidate.endpoint.path):
+                        skip_details.absent_optional += 1
                 else:
                     skip(failure.reason, candidate)
                 continue
@@ -2287,9 +2294,8 @@ def _system_id(client: str, endpoint: Endpoint) -> str:
 
 
 def _asset_id(client: str, endpoint: Endpoint, vendor: str, product: str) -> str:
-    value = "\0".join((client, endpoint.scheme, endpoint.hostname, str(endpoint.port),
-                       endpoint.path, vendor, product)).encode("utf-8")
-    return "web-" + hashlib.sha256(value).hexdigest()[:32]
+    return web_asset_id(client, endpoint.scheme, endpoint.hostname, endpoint.port,
+                        endpoint.path, vendor, product)
 
 
 def _observation_ids(client: str, endpoint: Endpoint) -> dict[str, str]:
@@ -2583,6 +2589,7 @@ class _SkipDetails:
     """Bounded per-resource skip records, kept for the private review only."""
     entries: list[dict] = field(default_factory=list)
     truncated: int = 0
+    absent_optional: int = 0
 
     def add(self, reason: str, kind: str, url: str, content_type: str = "",
             size: int | None = None) -> None:
@@ -2924,7 +2931,8 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                 _quarantine(reviews, omissions, base)
                 continue
 
-        product = dict(asset_id=row_id, hostname=asset.endpoint.hostname, vendor=detection.vendor,
+        product = dict(asset_id=row_id, site_id=base["asset_id"],
+                       hostname=asset.endpoint.hostname, vendor=detection.vendor,
                        product=detection.product, versions=list(detection.versions),
                        category=detection.category, evidence_types=list(detection.evidence_types),
                        categories=list(detection.categories or (detection.category,)),
@@ -3074,6 +3082,31 @@ def _load_external_fingerprints(directory: Path | None):
         return None, 0, True
 
 
+def _sync_site_complete(result):
+    # A complete observation can still lack a version or any technology. A
+    # skipped source of evidence is different, except for intentional skips
+    # and standard probes that explicitly returned that the file was absent.
+    skipped = result.resources_skipped_by_reason
+    harmless = {"duplicate", "external-origin", "source-map", "unsupported-scheme"}
+    return (result.observed_at is not None and not result.run_stopped
+            and not result.analysis_stopped and not result.fingerprint_stopped
+            and not result.fingerprint_error
+            and result.omissions <= {"no-technologies", "version-unknown", "version-conflict"}
+            and sum(count for reason, count in skipped.items() if reason not in harmless)
+            == result.skip_details.absent_optional)
+
+
+def _previous_sync_run(output):
+    try:
+        detail = decode_json(read_bytes(_review_path(output)))
+        value = detail["run"]["inventory_sync"]["id"]
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+            return value
+    except (OSError, ExtensionError, TypeError, KeyError, ValueError):
+        pass
+    return ""
+
+
 def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                allow_partial: bool = False, plan: bool = False,
                resolver=None, transport=None, sleep: Callable[[float], None] = time.sleep,
@@ -3179,6 +3212,15 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
     else:
         status = "partial" if omissions else "success"
     with output_lock(output):
+        sites = {}
+        for result in results:
+            endpoint = result.asset.endpoint
+            sites[_asset_id(client, endpoint, "", "")] = [
+                endpoint.scheme, endpoint.hostname, endpoint.port, endpoint.path,
+                status != "failed" and not (run_stopped or fingerprint_error) and _sync_site_complete(result),
+            ]
+        sync = {"id": uuid.uuid4().hex, "previous": _previous_sync_run(output),
+                "allowlist": allowlist.revision, "sites": sites}
         saved_snapshot_generated_at = _saved_snapshot_time(output, now())
         run = dict(started_at=started_at, ended_at=now().isoformat(), status=status,
                    request_count=fetcher.request_count,
@@ -3192,6 +3234,11 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                    fingerprint_error=fingerprint_error or any(result.fingerprint_error for result in results),
                    fingerprint_stopped=sum(result.fingerprint_stopped for result in results),
                    analysis_stopped=sum(result.analysis_stopped for result in results))
+        # A run with usable rows only releases its sync evidence after its
+        # snapshot has been published. A failed final write leaves the review
+        # useful for inspection but ineligible for sync.
+        if not rows:
+            run["inventory_sync"] = sync
         _publish_review(output, client, source_id, reviews,
                         products=products, run=run, skipped=skipped_entries,
                         skipped_truncated=skipped_truncated)
@@ -3211,6 +3258,7 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                                   omissions=sorted(omissions), lock=False)
         run["saved_snapshot_generated_at"] = manifest["generated_at"]
         run["snapshot_updated"] = True
+        run["inventory_sync"] = sync
         _publish_review(output, client, source_id, reviews, products=products, run=run,
                         skipped=skipped_entries, skipped_truncated=skipped_truncated)
         return manifest

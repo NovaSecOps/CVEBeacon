@@ -21,6 +21,13 @@ LOG = logging.getLogger("cvebeacon")
 MAX_BYTES = 32 * 1024 * 1024
 MANIFEST_KEYS = {"contract", "collector", "collector_version", "source_id", "generated_at",
                  "observed_at", "sha256", "record_count", "status", "omissions"}
+WEB_ASSET_ID = re.compile(r"web-[0-9a-f]{32}")
+
+
+def web_asset_id(client, scheme, hostname, port, path, vendor="", product=""):
+    """Derive the stable ID of a web observation or one of its products."""
+    value = "\0".join((client, scheme, hostname, str(port), path, vendor, product)).encode("utf-8")
+    return "web-" + hashlib.sha256(value).hexdigest()[:32]
 
 
 def read_bytes(path: Path, limit: int = MAX_BYTES) -> bytes:
