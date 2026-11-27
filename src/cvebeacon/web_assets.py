@@ -164,9 +164,10 @@ def run_detection(config, client, *, plan=False):
         if not stat.S_ISDIR(details.st_mode) or getattr(details, "st_file_attributes", 0) & 0x400:
             fingerprints = None
     command = companion_command(document["client"], assets, output, plan=plan, fingerprints=fingerprints)
-    if not plan:
+    managed_sync = not plan and getattr(config, "managed_inventory", False)
+    if managed_sync:
         from . import web_inventory_sync
-        web_inventory_sync.detection_started(config, document["client"], assets, output,
+        web_inventory_sync.detection_started(config, document["client"], output,
                                              revision, len(document["assets"]))
     # Popen's context manager waits without a timeout on exit.
     child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config))
@@ -183,11 +184,8 @@ def run_detection(config, client, *, plan=False):
             except subprocess.TimeoutExpired:
                 pass
         raise ConfigurationError(RUN_TIMEOUT_REASON) from exc
-    if not plan:
-        if code == 0:
-            output.with_name(output.name + ".removed").unlink(missing_ok=True)
+    if not plan and code == 0:
+        output.with_name(output.name + ".removed").unlink(missing_ok=True)
+        if managed_sync:
             web_inventory_sync.detection_finished(config, document["client"])
-        else:
-            web_inventory_sync.detection_started(config, document["client"], assets, output,
-                                                 revision, len(document["assets"]))
     return code

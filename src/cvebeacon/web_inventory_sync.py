@@ -16,7 +16,7 @@ from .dashboard_inventory import _commit_change, _publish, inventory_lock
 from .errors import CVEBeaconError, ConfigurationError
 from .identity import normalize_asset, parse_purl, purl_string
 from .inventory import MAX_CONTRACT_ROWS
-from .inventory_journal import recover, remove_file
+from .inventory_journal import pending_exists, recover, remove_file
 from .managed_inventory import client_key
 from .models import Asset
 from .private_storage import private_directory
@@ -116,12 +116,12 @@ def save_mode(config, allowlist, client, value, removal, users, proof):
 
 
 def state_path(config, client):
-    return config.inventory_directory / f"{client_key(client)}.web-sync"
+    return config.inventory_directory / f"{client_key(client)}.{web_assets.client_key(client)}.web-sync"
 
 
 def _empty_state(client):
     return {"client": web_assets.client_key(client), "run": "", "blocked": "",
-            "applied": False, "entries": {}, "summary": None}
+            "detecting": False, "applied": False, "entries": {}, "summary": None}
 
 
 def _empty_entry(site, identity=None):
@@ -129,12 +129,18 @@ def _empty_entry(site, identity=None):
             "decision": "", "signature": ""}
 
 
-def _read_state(path, client):
+def _read_state(path, client, *, legacy=False):
     initial = _empty_state(client)
     try:
         state = decode_json(read_bytes(path), max_items=MAX_CONTRACT_ROWS * 10 + 32)
+        if legacy and isinstance(state, dict) and _matches(_DIGEST, state.get("client")):
+            if state["client"] != initial["client"]:
+                return None
+        if isinstance(state, dict) and set(state) == set(initial) - {"detecting"}:
+            state["detecting"] = False
         if (not isinstance(state, dict) or set(state) != set(initial)
                 or state["client"] != initial["client"] or type(state["applied"]) is not bool
+                or type(state["detecting"]) is not bool
                 or any(state[key] != "" and not _matches(_RUN_ID, state[key])
                        for key in ("run", "blocked"))
                 or not isinstance(state["entries"], dict) or len(state["entries"]) > MAX_CONTRACT_ROWS):
@@ -169,9 +175,18 @@ def _read_state(path, client):
             _timestamp(summary["at"])
         return state
     except FileNotFoundError:
-        return initial
+        return None
     except (CVEBeaconError, OSError, ValueError):
         raise ConfigurationError(STATE_WARNING) from None
+
+
+def _load_state(path, client):
+    state = _read_state(path, client)
+    if state is not None:
+        return state, None
+    old_path = path.parent / f"{client_key(client)}.web-sync"
+    state = _read_state(old_path, client, legacy=True)
+    return (_empty_state(client), None) if state is None else (state, old_path)
 
 
 def _encoded(state):
@@ -332,7 +347,7 @@ def _advance(state, observation, client, web_rows, applied_at):
                 entry["since"] = applied_at.isoformat()
         else:
             entry["misses"] = 0
-    state.update(run=observation.id, blocked="", applied=False)
+    state.update(run=observation.id, blocked="", detecting=False, applied=False)
 
 
 @dataclass(frozen=True)
@@ -452,7 +467,10 @@ def _missing_products(observation, state, web_rows, grace, client):
 class Session:
     config: AppConfig
     settings: Settings
+    client: str
     path: Path
+    state_file: Path
+    legacy_path: Path | None
     profile: dict
     previous: bytes | None
     assets: list[Asset]
@@ -462,15 +480,25 @@ class Session:
     before: bytes
     now: datetime
 
-    @property
-    def state_file(self):
-        return self.path.with_suffix(".web-sync")
-
     def save_observations(self):
         data = _encoded(self.state)
-        if data != self.before:
+        if data != self.before or self.legacy_path is not None:
             private_directory(self.path.parent, owner_only=True)
             web_assets.replace_bytes(self.state_file, data)
+            self.finish_migration()
+
+    def finish_migration(self):
+        if self.legacy_path is not None:
+            remove_file(self.legacy_path)
+
+    def removal_due(self, change):
+        return (self.settings.auto_remove and change.kind == "remove" and change.can_remove
+                and not change.kept and change.due <= self.now)
+
+    def needs_write(self):
+        return (self.legacy_path is not None or self.before != _encoded(self.state)
+                or (self.settings.mode == "auto" and self.evidence is not None and self.evidence.complete
+                    and (not self.state["applied"] or any(map(self.removal_due, self.proposals.values())))))
 
     def require(self, identity, token):
         proposal = self.proposals.get(identity)
@@ -499,12 +527,9 @@ class Session:
             self.state["summary"] = {"at": self.now.isoformat(), **counts}
         private_directory(self.path.parent, owner_only=True)
         _publish(self.config, self.path, self.profile, self.previous, list(current.values()), operation,
-                 sync=(self.state_file, _encoded(self.state)), detail=detail, system=automatic)
-
-    def removal_due(self, change):
-        return (self.settings.auto_remove and change.kind == "remove" and change.can_remove
-                and not change.kept and change.due <= self.now)
-
+                 sync=(self.state_file, _encoded(self.state)), sync_client=self.client,
+                 detail=detail, system=automatic)
+        self.finish_migration()
 
     def apply_auto(self):
         if self.evidence is None or not self.evidence.complete:
@@ -521,7 +546,6 @@ class Session:
                 self.proposals.pop(identity, None)
         else:
             self.save_observations()
-
 
     def select_additions(self, selected):
         projected = {asset.asset_id: asset for asset in self.assets}
@@ -567,11 +591,12 @@ class Session:
         private_directory(self.path.parent, owner_only=True)
         _commit_change(self.config, "web_inventory_sync_" + action.replace("-", "_"), self.path.stem,
                        {"client": self.profile["name"], "asset_id": identity},
-                       {"sync": (self.state_file, _encoded(self.state))})
+                       {"sync": (self.state_file, _encoded(self.state))}, sync_client=self.client)
+        self.finish_migration()
 
 
-def session(config, client):
-    """Read and reconcile under the caller's inventory operation lock."""
+def session(config, client, *, finishing=False):
+    """Build a view of saved evidence. Publishing it requires the operation lock."""
     from .dashboard_web import _client_profile, _read_managed
 
     allowlist, output = web_assets.paths(config, client)
@@ -587,9 +612,12 @@ def session(config, client):
     previous, assets = _read_managed(config, profile["name"])
     if assets and assets[0].client != profile["name"]:
         raise ConfigurationError("The saved inventory belongs to a different client. No sync changes were made.")
-    state = _read_state(state_path(config, client), client)
+    state_file = state_path(config, client)
+    state, legacy_path = _load_state(state_file, client)
     before = _encoded(state)
-    observation = _observation(output, client, revision, len(document["assets"]))
+    observation = None
+    if finishing or not state["detecting"]:
+        observation = _observation(output, client, revision, len(document["assets"]))
     now = _now()
     proposals = {}
     web_rows = _web_rows(assets)
@@ -601,10 +629,15 @@ def session(config, client):
         if settings.mode in {"review", "auto"}:
             proposals = _product_changes(observation, state["entries"], profile, assets, web_rows, snapshots_on)
     proposals.update(_missing_products(observation, state, web_rows, config.web.removal_grace_days, client))
-    return Session(config, settings, path, profile, previous, assets, state, observation, proposals, before, now)
+    return Session(config, settings, client, path, state_file, legacy_path, profile, previous, assets,
+                   state, observation, proposals, before, now)
 
 
 def inspect(config, client):
+    if not pending_exists(config.inventory_directory):
+        current = session(config, client)
+        if current is None or not current.needs_write():
+            return current
     lock = inventory_lock(config)
     try:
         current = session(config, client)
@@ -618,34 +651,30 @@ def inspect(config, client):
         lock.release()
 
 
-def detection_started(config, client, allowlist, output, revision, asset_count):
+def detection_started(config, client, output, revision, asset_count):
     """Prevent an interrupted detection from making an older review actionable."""
     try:
-        if not config.managed_inventory:
-            return
-        mode(config, allowlist)
         recover(config.inventory_directory, config.watch.users_database)
         path = state_path(config, client)
-        state = _read_state(path, client)
+        state, legacy_path = _load_state(path, client)
         latest = _observation(output, client, revision, asset_count)
-        if state["blocked"]:
+        if state["detecting"] or state["blocked"]:
             for entry in state["entries"].values():
                 entry["misses"] = 0
-        state["blocked"] = latest.id if latest is not None else state["run"]
-        if state["blocked"]:
-            private_directory(path.parent, owner_only=True)
-            web_assets.replace_bytes(path, _encoded(state))
+        state.update(detecting=True, blocked=latest.id if latest is not None else state["run"])
+        private_directory(path.parent, owner_only=True)
+        web_assets.replace_bytes(path, _encoded(state))
+        if legacy_path is not None:
+            remove_file(legacy_path)
     except (CVEBeaconError, OSError, ValueError):
-        LOG.warning(WRITE_WARNING)
+        raise ConfigurationError(WRITE_WARNING) from None
 
 
 def detection_finished(config, client):
     """The detection command already holds the shared inventory operation lock."""
     try:
-        if not config.managed_inventory:
-            return
         recover(config.inventory_directory, config.watch.users_database)
-        current = session(config, client)
+        current = session(config, client, finishing=True)
         if current is not None:
             if current.settings.mode == "auto":
                 current.apply_auto()

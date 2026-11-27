@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import re
+import subprocess
 
 import pytest
 
@@ -559,3 +560,97 @@ def test_unrepresentable_flag_deadline_warns_without_changing_inventory(blank):
     web_assets.replace_bytes(sync.state_path(config, "Acme"), sync._encoded(current.state))
     assert sync.STATE_WARNING in page(client)
     assert managed_rows(config) == [old]
+
+
+@pytest.mark.parametrize("write_fails", [True, False])
+def test_detection_requires_start_marker_and_blocks_unchanged_review_on_timeout(blank, monkeypatch, write_fails):
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    old = row("missing", "1")
+    write_managed(config, [old])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    started = []
+
+    class Child:
+        def wait(self, *, timeout):
+            if timeout != web_assets.CHILD_STOP_GRACE:
+                raise subprocess.TimeoutExpired("web detection", timeout)
+            return -15
+
+        def terminate(self):
+            pass
+
+    def launch(*args, **kwargs):
+        started.append(True)
+        return Child()
+
+    def refuse(*args, **kwargs):
+        raise OSError("test marker write failure")
+
+    monkeypatch.setattr(web_assets.subprocess, "Popen", launch)
+    lock = OperationLock(config, "web-detect")
+    assert lock.acquire()
+    try:
+        if write_fails:
+            with monkeypatch.context() as patch:
+                patch.setattr(web_assets, "replace_bytes", refuse)
+                with pytest.raises(ConfigurationError, match="could not finish"):
+                    web_assets.run_detection(config, "Acme")
+            assert not started
+        else:
+            with pytest.raises(ConfigurationError, match=re.escape(web_assets.RUN_TIMEOUT_REASON)):
+                web_assets.run_detection(config, "Acme")
+            assert started == [True]
+    finally:
+        lock.release()
+    if not write_fails:
+        clock[0] += timedelta(days=30)
+        assert "Not detected since" in card(page(client))
+        assert managed_rows(config) == [old]
+
+
+def test_idle_get_displays_flags_while_scan_holds_lock(blank):
+    config, _, client = setup(blank, "off")
+    old = row("missing", "1")
+    write_managed(config, [old])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    lock = OperationLock(config, "web-detect")
+    assert lock.acquire()
+    try:
+        text = page(client)
+        assert "Not detected since" in card(text)
+        assert "A scan or inventory change is in progress" not in text
+    finally:
+        lock.release()
+
+
+def test_legacy_allowlists_have_independent_state_and_migrate_to_the_embedded_owner(blank):
+    config, _, client = setup(blank, "off")
+    legacy_label = "Ａcme"
+    assert client_key(legacy_label) == client_key("Acme")
+    assert web_assets.client_key(legacy_label) != web_assets.client_key("Acme")
+    allowlist, _ = web_assets.paths(config, "Acme")
+    document, _ = web_assets.read_allowlist(allowlist, "Acme")
+    legacy_allowlist, _ = web_assets.paths(config, legacy_label)
+    web_assets.save_allowlist(legacy_allowlist, {**document, "client": legacy_label})
+    run(config, 1, client=legacy_label)
+    state = sync._empty_state(legacy_label)
+    state["run"] = f"{1:032x}"
+    old_path = config.inventory_directory / f"{client_key(legacy_label)}.web-sync"
+    old_path.parent.mkdir(mode=0o700, exist_ok=True)
+    web_assets.replace_bytes(old_path, sync._encoded(state))
+    for number, label in [(1, "Acme"), (2, legacy_label), (2, "Acme"), (3, legacy_label)]:
+        run(config, number, client=label)
+        response = client.get("/web-assets", query_string={"client": label})
+        assert response.status_code == 200 and sync.STATE_WARNING not in response.text
+    assert sync.state_path(config, "Acme") != sync.state_path(config, legacy_label)
+    assert not old_path.exists()
+    for label, number in [("Acme", 2), (legacy_label, 3)]:
+        stored = json.loads(read_bytes(sync.state_path(config, label)))
+        assert stored["client"] == web_assets.client_key(label)
+        assert stored["run"] == f"{number:032x}"

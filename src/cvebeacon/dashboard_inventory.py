@@ -126,7 +126,7 @@ def _notes():
     return value
 
 
-def _commit_change(config, event, key, detail, changes, *, system=False):
+def _commit_change(config, event, key, detail, changes, *, system=False, sync_client=None):
     users = UserStore(config.watch.users_database) if system else _users()
     if system and not users.path.is_file():
         raise StateError("The account database is required to audit inventory sync.")
@@ -134,12 +134,15 @@ def _commit_change(config, event, key, detail, changes, *, system=False):
     try:
         with users.transaction() as db:
             actor = "system (inventory sync)" if system else _require_writer(db)
-            stage_change(config.inventory_directory, db, users, actor, event, key, detail, changes)
+            sync_target = {"sync_client": sync_client} if sync_client is not None else {}
+            stage_change(config.inventory_directory, db, users, actor, event, key, detail, changes,
+                         **sync_target)
     finally:
         recover(config.inventory_directory, users.path)
 
 
-def _publish(config, path, profile, previous, assets, mode, *, sync=None, detail=None, system=False):
+def _publish(config, path, profile, previous, assets, mode, *, sync=None, sync_client=None,
+             detail=None, system=False):
     """Validate the candidate and commit a recoverable inventory change."""
     label = profile["name"]
     data = encode_records(assets) if assets else None
@@ -172,7 +175,7 @@ def _publish(config, path, profile, previous, assets, mode, *, sync=None, detail
             changes["archive"] = (archive_path(path), previous)
     _commit_change(config, "inventory_saved" if data is not None else "inventory_removed", path.stem,
                    {"client": label, "row_count": len(assets), "mode": mode, **(detail or {})},
-                   changes, system=system)
+                   changes, system=system, sync_client=sync_client)
 
 
 def inventory_lock(config):
