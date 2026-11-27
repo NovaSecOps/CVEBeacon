@@ -9,13 +9,13 @@ import unicodedata
 
 from flask import Blueprint, abort, render_template, request, send_file
 
-from .dashboard import _text, requires
+from .dashboard import requires
 from .dashboard_web import _canonical_client
 from .errors import CVEBeaconError
 from .reporting import write_xlsx_tables
 from .tech_report import (
     CONFIDENCE_CHOICES, EXPLOITATION, FIELDS, PAGE_CVES_PER_ROW, PAGE_ROWS, PRESETS, SEVERITIES,
-    build_report,
+    InvalidReportFilters, _arg, build_report,
 )
 from .web_assets import client_label
 from .web_inventory_actions import STATUS_BADGES, STATUS_LABELS
@@ -45,6 +45,7 @@ MIMETYPES = {
     "json": "application/json",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
+MAX_QUERY_BYTES = 8 * 1024
 
 
 def _cells(record, columns):
@@ -132,21 +133,40 @@ def _export_args(report):
             args[key] = filters[key]
     if window["kind"] == "range":
         args.update({"from": window["from"], "to": window["to"]})
-    elif window["kind"] == "days":
-        args["days"] = (date.fromisoformat(window["to"]) - date.fromisoformat(window["from"])).days + 1
+    elif window["kind"] != "all":
+        args["end"] = window["to"]
+        if window["kind"] == "days":
+            args["days"] = (date.fromisoformat(window["to"]) - date.fromisoformat(window["from"])).days + 1
     return args
 
 
 def create_blueprint(config):
     blueprint = Blueprint("tech_report", __name__, url_prefix="/web-assets/report")
 
+    @blueprint.before_request
+    def check_query_size():
+        if len(request.query_string) > MAX_QUERY_BYTES:
+            return "Report query string exceeds 8 KiB.", 414
+
+    def required_option(name, limit):
+        try:
+            value = _arg(request.args, name, limit=limit).strip()
+        except ValueError:
+            abort(400)
+        if not value:
+            abort(400)
+        return value
+
     def report(*, export=False):
-        label = _text(request.args, "client", required=True, limit=256)
+        label = required_option("client", 256)
         try:
             client = _canonical_client(config, client_label(label))
         except (CVEBeaconError, OSError, ValueError):
             abort(400)
-        return build_report(config, client, request.args, export=export)
+        try:
+            return build_report(config, client, request.args, export=export)
+        except InvalidReportFilters:
+            abort(400)
 
     @blueprint.get("")
     @requires("view")
@@ -167,7 +187,7 @@ def create_blueprint(config):
     @blueprint.get("/export")
     @requires("view")
     def export():
-        kind = _text(request.args, "format", required=True, limit=4)
+        kind = required_option("format", 4)
         if kind not in MIMETYPES:
             abort(400)
         result = report(export=True)
@@ -176,8 +196,10 @@ def create_blueprint(config):
                              mimetype=MIMETYPES[kind])
         if result["cves_capped"] or result["findings_capped"]:
             response.headers["X-CVEBeacon-Report-Truncated"] = "true"
-        if kind == "csv" and result["notices"]:
-            response.headers["X-CVEBeacon-Report-Notices"] = " ".join(result["notices"])
+        if kind == "csv":
+            response.headers["X-CVEBeacon-Report-Window"] = json.dumps(result["window"])
+            if result["notices"]:
+                response.headers["X-CVEBeacon-Report-Notices"] = " ".join(result["notices"])
         return response
 
     return blueprint

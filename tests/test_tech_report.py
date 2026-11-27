@@ -187,6 +187,84 @@ def test_invalid_window_resets_safely(seeded, query):
     assert cve_ids(export(seeded, **query)) == {id_for(i) for i in (1, 2, 3)}
 
 
+@pytest.mark.parametrize(("query", "kind", "field", "span"), [
+    ({}, "30", "published", 30),
+    ({"window": "7"}, "7", "published", 7),
+    ({"window": "days", "days": "11", "field": "first_seen"}, "days", "first_seen", 11),
+])
+def test_relative_exports_keep_the_page_window_across_utc_midnight(seeded, monkeypatch, query, kind, field, span):
+    current = datetime.combine(TODAY, datetime.max.time(), tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz):
+            return current.astimezone(tz)
+
+    monkeypatch.setattr(tech_report, "datetime", Clock)
+    rendered = page(seeded, **query).text
+    assert f"{day(span - 1)} to {day()} UTC" in rendered
+    current += timedelta(microseconds=1)
+    window = {"kind": kind, "field": field, "from": day(span - 1), "to": day()}
+    for fmt in ("json", "xlsx", "csv"):
+        href = re.search(r'href="([^"]+/export\?[^"]+)"[^>]*>Export ' + fmt.upper(), rendered)[1]
+        response = seeded[1].get(unescape(href))
+        assert response.status_code == 200
+        if fmt == "json":
+            assert response.json["window"] == window
+        elif fmt == "csv":
+            assert json.loads(response.headers["X-CVEBeacon-Report-Window"]) == window
+        else:
+            book = load_workbook(BytesIO(response.data))
+            try:
+                sheet = book["Technologies"]
+                assert sheet["B2"].value == f"{day(span - 1)} to {day()} UTC · {tech_report.FIELDS[field]}"
+                assert sheet["B3"].value == kind
+            finally:
+                book.close()
+        assert f"-{day(span - 1)}-{day()}.{fmt}" in response.headers["Content-Disposition"]
+
+
+def test_relative_window_anchor_validation():
+    today = date(2026, 1, 1)
+    valid_end = today - timedelta(days=3650)
+    window, invalid = tech_report.read_window(MultiDict({"window": "7", "end": valid_end.isoformat()}), today)
+    assert not invalid and window.end == valid_end and (window.end - window.start).days == 6
+    for value in ([(valid_end - timedelta(days=1)).isoformat()], ["2026-01-02"], ["2025-02-30"],
+                  ["2026-01-01 "], ["2026-01-01", "2026-01-01"]):
+        args = MultiDict({"window": "7", "end": value})
+        assert tech_report.read_window(args, today)[1]
+
+
+@pytest.mark.parametrize("route", [PAGE, EXPORT])
+@pytest.mark.parametrize("query", [
+    {"conf": ["high"] * 4},
+    {"conf": "h" * 1024},
+    {"conf": ["high", " LOW "]},
+    {"filters": ["1", "1"]},
+    {"filters": ["1", "0"]},
+    {"filters": "0"},
+    {"filters": "1 "},
+    {"filters": "1" * 1024},
+    {"client": CLIENT + " " * 256},
+])
+def test_malformed_report_filters_are_rejected(seeded, route, query):
+    response = seeded[1].get(route, query_string={"client": CLIENT, "format": "json", **query})
+    assert response.status_code == 400
+
+
+def test_report_query_size_and_raw_format_length(seeded):
+    for route in (PAGE, EXPORT):
+        response = seeded[1].get(route, query_string={"client": CLIENT, "format": "json", "extra": "x" * 8192})
+        assert response.status_code == 414
+        assert "Report query string exceeds 8 KiB." in response.text
+    assert seeded[1].get(EXPORT, query_string={"client": CLIENT, "format": "json "}).status_code == 400
+
+
+def test_confidence_filters_deduplicate_valid_choices(seeded):
+    result = export(seeded, conf=["medium", "high", "medium"]).json
+    assert result["filters"]["conf"] == ["high", "medium"]
+
+
 def test_correlation_and_status(seeded):
     report = export(seeded).json
     row = technology(report)

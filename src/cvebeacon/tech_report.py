@@ -35,6 +35,10 @@ EXPORT_CVES = 50_000
 FINDINGS_CAP = 200_000
 
 
+class InvalidReportFilters(ValueError):
+    """The report query contains an invalid filter selection."""
+
+
 @dataclass(frozen=True)
 class Window:
     kind: str
@@ -94,8 +98,11 @@ def read_window(args, today):
             raise ValueError("invalid report window")
         else:
             value = kind
-        start = today - timedelta(days=int(value) - 1)
-        return Window(kind, field, start, today), False
+        end = _date_arg(args, "end") if "end" in args else today
+        if not 0 <= (today - end).days <= 3650:
+            raise ValueError("invalid report end date")
+        start = end - timedelta(days=int(value) - 1)
+        return Window(kind, field, start, end), False
     except (ValueError, OverflowError):
         return default, True
 
@@ -110,7 +117,12 @@ def _choice(args, key, choices, default="", limit=32):
 
 def read_filters(args, sites, categories):
     # A hidden field distinguishes an unchecked checkbox from the initial GET.
+    marker = args.getlist("filters")
+    if marker and marker != ["1"]:
+        raise InvalidReportFilters
     confidence = args.getlist("conf")
+    if len(confidence) > len(CONFIDENCE_CHOICES) or any(value not in CONFIDENCE_CHOICES for value in confidence):
+        raise InvalidReportFilters
     chosen = [value for value in CONFIDENCE_CHOICES if value in confidence]
     return {
         "site": _choice(args, "site", sites, limit=256),
@@ -121,7 +133,7 @@ def read_filters(args, sites, categories):
         "kev": _choice(args, "kev", ("cisa", "eu", "either"), "any"),
         "exploited": _choice(args, "exploited", ("active", "poc"), "any"),
         "show_empty": _choice(args, "show_empty", ("0", "1"),
-                              "0" if args.get("filters") == "1" else "1") == "1",
+                              "0" if marker else "1") == "1",
     }
 
 
