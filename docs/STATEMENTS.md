@@ -91,6 +91,9 @@ Unknown-name diagnostics list every unique unknown name up to 128 names and
 | `kev_due_date` | CISA KEV remediation due date, for example `2026-11-20`. |
 | `kev_required_action` | CISA KEV required action, for example `Apply the vendor update.` |
 | `eu_kev` | `yes` when the EU KEV catalog lists the CVE, otherwise `no`. |
+| `vulncheck_kev` | `yes` when the VulnCheck KEV catalog lists the CVE, otherwise `no`. |
+| `vulncheck_kev_date_added` | VulnCheck KEV date added, for example `2026-11-01`. |
+| `vulncheck_kev_ransomware` | VulnCheck ransomware indicator, for example `Known` or `Unknown`. |
 | `ssvc_exploitation` | Stored CISA-ADP SSVC exploitation value: `none`, `poc`, or `active`. |
 | `cwes` | Comma-separated CWE identifiers, for example `CWE-79, CWE-89`. |
 | `affected_products` | One line per product. When the stored view has exactly one vendor, each line is prefixed with that vendor, for example `acme widget`. With several vendors only product names are listed; with no products the vendor names are listed. |

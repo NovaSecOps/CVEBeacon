@@ -61,7 +61,7 @@ destination.
 ## Views and investigation
 
 - **Overview:** last successful full scan, most recent attempted scan, current inventory count, latest known affected/review findings, coverage gaps, KEV counts, recent material changes, notification acceptance/failure, and source observations.
-- **Findings:** filter by asset, vendor, product, version, CVE, applicability, severity or minimum CVSS, and CISA/EU KEV. Expand evidence to see the assessment reason, provenance, conflicts, CVSS and EPSS. Unknown KEV membership is distinct from a healthy negative result.
+- **Findings:** filter by asset, vendor, product, version, CVE, applicability, severity or minimum CVSS, and CISA/EU/VulnCheck KEV. Expand evidence to see the assessment reason, provenance, conflicts, CVSS and EPSS. Unknown KEV membership is distinct from a healthy negative result.
 - **Assets:** search the current inventory, including dashboard uploads, and inspect an asset's stored findings. A changed version or removed asset leaves its older observations explicitly labelled as historical.
 - **History:** browse material events, filter exact asset/CVE identifiers, and open the evidence saved with an event. Older-event links provide access beyond the first page.
 - **Manual query:** query a vendor/product/version using the same core operation as the CLI. Results show uncertainty and degraded source status. Queries can take several minutes and do not change scheduled alert state.
@@ -429,7 +429,7 @@ change scan or delivery state.
   `review` badge marks findings stored as needs-review; advisory identifiers
   without a CVE are shown without a CVE link. Client names are internal and
   never sent to public sources.
-- **CVE detail:** the stored view with all versioned CVSS scores, EPSS, CISA and EU KEV
+- **CVE detail:** the stored view with all versioned CVSS scores, EPSS, CISA, EU and VulnCheck KEV
   dates and required action, exploitation and its sources, CWEs, products, references,
   publication and first-seen dates, the clients affected in the latest
   successful inventory scan, the CVE's events with per-channel delivery
@@ -749,6 +749,17 @@ container layout.
 | HTTP client | `edit_http` |
 | State database and report output paths | `edit_system` (view; changes administrator-only) |
 | Backup directory and retention | `edit_system` (view; path changes administrator-only) |
+
+The **Sources** section shows each optional source's effective state before the
+fields: VulnCheck KEV is `on`, `off: no token` or `off: disabled`, and Shodan
+CVEDB is `on` or `off: disabled`. VulnCheck needs a free community token from
+[vulncheck.com](https://vulncheck.com/), supplied through an environment
+variable or an owner-only file; without it the source stays off and scans
+continue. Shodan CVEDB is keyless but off by default. When enabled it sends only
+product CPE identifiers and CVE IDs to `cvedb.shodan.io`; no client names,
+hostnames or IP addresses are sent. The page also notes that operators must
+check Shodan's and VulnCheck's terms of use for their use case. Tokens are never
+rendered in the editor or confirmation diff.
 
 Blank fields omit a setting and use the configuration loader's default. String
 fields accept plain text. Enumerated settings use selectors, boolean settings use

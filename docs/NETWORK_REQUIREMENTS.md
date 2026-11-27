@@ -31,6 +31,21 @@ coverage with retained progress. No GitHub token is required or sent.
 
 Asset IDs, system IDs, categories, owners, comments, hostnames and local paths are never serialized into public vulnerability queries. Only provide public software names in identity fields. Component terms can reveal technologies being investigated. This is agentless monitoring, isolated from monitored assets; live public lookups are not air-gapped operation. Qualified PURLs and subpaths remain local and unsupported for exact lookup.
 
+## Optional additional vulnerability sources
+
+| Purpose | Destination | Sent data |
+| --- | --- | --- |
+| VulnCheck KEV bulk index | `api.vulncheck.com` | A bearer token in the request header; the response is a public catalog. |
+| Shodan CVEDB CVE and CPE lookup | `cvedb.shodan.io` | A CVE identifier or a CPE 2.3 name. |
+
+VulnCheck is enabled by default but stays off without a token; a missing token
+sends nothing and is not a failure. Shodan CVEDB needs no key but is disabled
+by default and contacts its endpoint only after an explicit
+`shodan_cvedb_enabled = true`. Neither request includes client names, hostnames,
+IP addresses, asset IDs, system IDs, categories or local paths. See
+[source limits](SOURCES.md) and check Shodan's and VulnCheck's terms of use for
+your use case.
+
 ## Optional update checks
 
 `cvebeacon update check` makes one anonymous HTTPS request to `api.github.com`;

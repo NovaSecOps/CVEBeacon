@@ -45,6 +45,9 @@ prints `Configuration saved: <path>`, shows the next steps, and exits 0.
    bandwidth. The first `watch sync` still asks before downloading full history.
 5. **NVD API key.** Optional. Use an environment variable or a protected secret
    file; a key raises the request limit and speeds up syncs.
+   VulnCheck KEV is also optional: it stays off until a VulnCheck token is set
+   in `VULNCHECK_API_TOKEN` or an owner-only file. Shodan CVEDB is keyless but
+   disabled by default; enable it only after reviewing what it sends.
 6. **Rules.** Choose one or more presets, edit their thresholds, name them, add
    an optional vendor filter, and choose how old CVEs are handled (`digest` by
    default). The presets are critical CVSS, likely-exploited EPSS, any KEV,

@@ -2,7 +2,9 @@
 
 CVEBeacon uses primary public sources with distinct roles. Source coverage is not universal, and a missing record is not proof that a product is unaffected.
 
-All vulnerability sources below support anonymous core access. The optional NVD key improves pacing; no GitHub token is used to fetch public CVE records.
+Most vulnerability sources below support anonymous core access. The optional
+NVD and VulnCheck keys improve access or enable a source; no GitHub token is used
+to fetch public CVE records. Shodan CVEDB is keyless but opt-in.
 
 ## Open Source Vulnerabilities (OSV)
 
@@ -159,6 +161,59 @@ its failure is degraded coverage and cannot hold NVD/EUVD initialization open.
 - Interface: [CISA KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog).
 - Data used: CVE ID, date added, vendor/product, required action, due date, ransomware-use indicator, and notes.
 - Limitations: absence from KEV does not mean a vulnerability is not exploited or not important.
+
+## VulnCheck Known Exploited Vulnerabilities
+
+- Purpose: an independent known-exploitation list and enrichment for CVEs found by other sources.
+- Interface: the VulnCheck v3 bulk KEV index at
+  `https://api.vulncheck.com/v3/index/vulncheck-kev`, authenticated with
+  `Authorization: Bearer <token>`.
+- Data used: CVE identifiers, date added, known ransomware use, reported
+  exploitation, and exploit references. References are stored as evidence;
+  they do not create findings on their own.
+- Setup: get a free community token at
+  [vulncheck.com](https://vulncheck.com/) and set `VULNCHECK_API_TOKEN`, another
+  environment variable named by `vulncheck_api_key_env`, or an owner-only file
+  named by `vulncheck_api_key_file`. The token is a secret and is never
+  displayed, logged, exported, written to reports or included in backups.
+- State: the source is enabled by default but stays off until a token is
+  configured. A missing token is reported as `off: no token`; it never fails a
+  scan or configuration load. Disabling it explicitly reports
+  `off: disabled`. Settings and the sources health view show the effective
+  state.
+- Limits: one bounded catalog download per run, up to 64 MiB and 250,000
+  entries, using the shared HTTP timeouts, retries and backoff. An oversized or
+  failed download degrades only this source's health.
+- Limitations: the response envelope is parsed defensively. Confirm field names
+  and plan limits against your VulnCheck API documentation. Absence from this
+  list is not evidence that a flaw is not exploited.
+
+Check VulnCheck's terms of use for your use case.
+
+## Shodan Common Vulnerabilities and Exposures database (CVEDB)
+
+- Purpose: a free, keyless CVE database used to corroborate findings and to
+  discover CVEs for an exact product CPE.
+- Interfaces: `https://cvedb.shodan.io/cve/{cve_id}` for one CVE and
+  `https://cvedb.shodan.io/cves?cpe23=...&skip=...&limit=...` for discovery.
+- Data used: CVE identifiers, descriptions, CVSS, EPSS and its percentile,
+  KEV membership, ransomware use, publish dates and references.
+- Privacy: a request carries a CVE identifier or a CPE 2.3 name. No client
+  names, hostnames, IP addresses, asset IDs or local paths are sent.
+- State and limits: disabled by default and enabled only by an explicit
+  `shodan_cvedb_enabled = true`. Per-CVE enrichment stops after 500 lookups per
+  run; discovery reads at most five pages and 500 results per CPE. A reached cap
+  or truncated page set is shown as degraded health. Results are cached within
+  a run.
+- Applicability: CVEDB's `cpe23` matching is not documented as reliably
+  version-aware. CVEBeacon therefore passes an exact-version CPE but treats a
+  CVEDB-only CVE as `needs_review` with the reason
+  `reported by Shodan CVEDB only; confirm applicability`. It never changes an
+  existing NVD or OSV applicability decision; it only adds evidence and
+  needs-review findings.
+- Limitations: a missing CVEDB record is not proof that a product is unaffected.
+
+Check Shodan's and VulnCheck's terms of use for your use case.
 
 ## FIRST Exploit Prediction Scoring System
 
