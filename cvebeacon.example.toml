@@ -16,6 +16,11 @@ version = "version"
 # Optional: map the client label when the source has one.
 # client = "client"
 
+[web]
+inventory_sync = "off"
+inventory_auto_remove = false
+removal_grace_days = 30
+
 [state]
 database = ".cvebeacon/state.db"
 
