@@ -282,7 +282,7 @@ def test_results_render_only_metadata(web):
                   "duration: 1.0", "Conflicting versions", "version-conflict"):
         assert value in response.text
     assert secret not in response.text
-    assert "turn on web snapshots in the" in response.text
+    assert "Include saved web snapshots in scans" in response.text
     assert "Inventory settings" in response.text
 
 
@@ -362,7 +362,7 @@ def test_reason_labels_and_hidden_version_hint(web):
         assert label in page.text
     for reason in reasons:
         assert f'<span class="muted">{reason}</span>' in page.text
-    assert "Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory." in page.text
+    assert "Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory." in page.text
 
 
 def test_redirect_detail_prefills_add_site_form_without_saving(web):
@@ -745,12 +745,12 @@ def test_detected_product_table_groups_sorts_and_uses_product_tags(web):
     )
     assert table.index("a.example") < table.index("b.example")
     assert table.index("Angular") < table.index("React") < table.index("lodash")
-    assert '<span class="badge badge-high">High</span>' in table
-    assert '<span class="badge badge-medium">Medium</span>' in table
-    assert '<span class="badge badge-low">Low</span>' in table
+    assert '<span class="badge badge-conf-high">High</span>' in table
+    assert '<span class="badge badge-conf-medium">Medium</span>' in table
+    assert '<span class="badge badge-conf-low">Low</span>' in table
     assert '<span class="badge badge-info web-version-badge">4.17.21</span>' in table
     assert '<span class="muted">Version not disclosed</span>' in table
-    assert "In inventory" in table and "Review only" in table
+    assert "Ready to add" in table and "Needs review" in table
     assert '<summary>Evidence (1)</summary>' in table
     assert '<summary>Evidence (0)</summary>' in table
     assert re.search(r'<details class="web-evidence"(?![^>]*\bopen)', table)
@@ -764,7 +764,7 @@ def test_detected_product_table_groups_sorts_and_uses_product_tags(web):
                   "/*! @license React v18.2.0 */", "SHA-256", "512 bytes"):
         assert label in table
     assert "Read 4 script and style files from the sites (2 skipped)." in page.text
-    assert "Many sites hide version numbers. Products without a version are listed under Entries to review and are not added to the inventory." in page.text
+    assert "Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory." in page.text
 
 
 def test_detected_product_with_cpe_is_marked_in_inventory(web, monkeypatch):
@@ -790,8 +790,9 @@ def test_detected_product_with_cpe_is_marked_in_inventory(web, monkeypatch):
     table = (
         page.text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
     )
-    assert "Widget" in table and "In inventory" in table
-    assert "Review only" not in table
+    # Web snapshots are off, so no scan covers the product yet; it has no version to add as it is.
+    assert "Widget" in table and "Needs review" in table
+    assert "badge-success" not in table
 
 
 def test_web_assets_page_renders_without_inline_styles_or_scripts(web):
