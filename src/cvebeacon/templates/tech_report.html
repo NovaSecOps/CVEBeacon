@@ -39,16 +39,23 @@
 {% set summary = report.summary %}
 {% set web_url = url_for('web.index', client=report.client) ~ '#detected-products' %}
 {% call page_header(title) %}
+  {% if printable %}
+  {{ link_button('Back to the report', url_for('tech_report.index', filters=1, **export_args), kind='secondary') }}
+  {% else %}
   {{ link_button('Web assets', web_url, kind='secondary') }}
   {% for kind in formats %}
   {{ link_button('Export ' ~ (kind | upper), url_for('tech_report.export', format=kind, **export_args), kind='secondary') }}
   {% endfor %}
+  {{ link_button('Printable view', url_for('tech_report.index', print=1, filters=1, **export_args), kind='secondary') }}
+  {% endif %}
 {% endcall %}
+{% if printable %}<p class="muted tech-report-print-hint">Every CVE list is expanded. Use your browser's Print command and choose Save as PDF to keep a copy for the client.</p>{% endif %}
 
 {% for notice in report.notices %}
 {% call callout('warning') %}<p>{{ notice }}</p>{% endcall %}
 {% endfor %}
 
+{% if not printable %}
 <section class="card">
   <form class="filters tech-report-filters" method="get" action="{{ url_for('tech_report.index') }}">
     <input type="hidden" name="client" value="{{ report.client }}">
@@ -99,6 +106,7 @@
     </div>
   </form>
 </section>
+{% endif %}
 
 {% if window.kind == 'all' %}
 <p>All time · {{ fields[window.field] }}</p>
@@ -160,7 +168,7 @@
         {% if row.coverage == 'unavailable' %}
         Unavailable
         {% elif row.window_count %}
-        <details class="tech-report-cves">
+        <details class="tech-report-cves"{% if printable %} open{% endif %}>
           <summary>CVEs ({{ row.window_count }})</summary>
           <ul>
             {% for cve in row.cves %}

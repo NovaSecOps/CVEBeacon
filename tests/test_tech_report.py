@@ -599,3 +599,17 @@ def test_requests_respect_login_and_view_permission(tmp_path):
                     assert response.location == "/login"
     finally:
         app.extensions["dashboard_jobs"].shutdown()
+
+
+def test_printable_view_expands_cve_lists_and_drops_controls(seeded):
+    normal = page(seeded)
+    assert normal.status_code == 200
+    link = re.search(r'href="([^"]*print=1[^"]*)">Printable view', normal.text)
+    assert link is not None
+    assert 'class="tech-report-cves">' in normal.text and "tech-report-filters" in normal.text
+    printable = page(seeded, print="1", filters="1")
+    assert printable.status_code == 200
+    assert 'class="tech-report-cves" open>' in printable.text
+    assert "tech-report-filters" not in printable.text and "Printable view" not in printable.text
+    assert "Save as PDF" in printable.text and "Back to the report" in printable.text
+    assert not re.search(r"<style\b|\sstyle=|<script(?![^>]*\ssrc=)", printable.text)

@@ -325,6 +325,10 @@ CVEs. JSON nests CVEs under each technology and includes the window and filters.
 The page shows up to 1,000 technologies and 200 CVEs per technology. Exports
 include up to 50,000 CVE entries across all technologies.
 
+**Printable view** shows the same report with every CVE list expanded and the
+controls hidden. Use the browser's Print command and choose **Save as PDF** to
+keep a copy for the client.
+
 ## Native schedule
 
 The **Schedule** page requires `manage_schedule`. The Linux dashboard checks

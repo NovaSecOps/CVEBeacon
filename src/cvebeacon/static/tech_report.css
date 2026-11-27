@@ -51,3 +51,11 @@ form.tech-report-filters {
 .tech-report-cves li { border-top: 1px solid var(--border); padding-block: var(--space-2); }
 .tech-report-cves dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 var(--space-2); }
 .tech-report-cves dd { margin: 0; }
+
+/* Printing: drop controls and let the tables use the page width. */
+@media print {
+  .tech-report-filters, .page-header .btn, .tech-report-print-hint { display: none; }
+  .table-wrap { overflow: visible; box-shadow: none; }
+  .tech-report-table { min-width: 0; }
+  .tech-report-cves > summary { list-style: none; }
+}

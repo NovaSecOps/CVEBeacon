@@ -176,8 +176,12 @@ def create_blueprint(config):
         windows = [(days, f"Last {days} days") for days in PRESETS] + [
             ("all", "All time"), ("days", "Custom last N days"), ("range", "Custom date range"),
         ]
+        # The printable view opens every CVE list and drops the controls, so the browser's
+        # "Save as PDF" produces a client-ready document without a PDF dependency.
+        printable = request.args.get("print") == "1"
         return render_template(
             "tech_report.html", report=result, export_args=args, windows=windows, fields=FIELDS,
+            printable=printable,
             severities=[("any", "Any severity"), *((level, level.title()) for level in SEVERITIES[2:])],
             confidence_choices=CONFIDENCE_CHOICES,
             status_labels=STATUS_LABELS, status_badges=STATUS_BADGES, exploitation=EXPLOITATION,
