@@ -19,6 +19,13 @@ COORDINATE = re.compile(r"([A-Z]{1,3})([1-9][0-9]{0,6})")
 XML_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 
+def neutralize_formula(value):
+    """Keep text literal when a spreadsheet interprets a leading formula character."""
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + value
+    return value
+
+
 def _reject(message):
     raise InventoryValidationError([ValidationIssue(message)])
 
