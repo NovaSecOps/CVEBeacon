@@ -51,16 +51,15 @@ def _implied_only(item):
 
 
 def ready_version(item):
-    """The version a ready product is added with, or None when the product needs review."""
-    versions = detected_versions(item)
-    if _implied_only(item):
+    """The version a ready product is added with, or None when the product needs review.
+
+    Only a product whose detection produced an inventory row is ready. Labels such as
+    "GA4", conflicting versions and low-confidence generic results need a person to
+    confirm the version first.
+    """
+    if _implied_only(item) or not item.get("in_inventory"):
         return None
-    if item.get("in_inventory"):
-        # A saved row exists, so the detection already named this version.
-        return preferred_version(versions) or None
-    if item.get("vendor") in GENERIC_VENDORS or len(set(versions)) != 1:
-        return None
-    return versions[0]
+    return preferred_version(detected_versions(item)) or None
 
 
 def _package_purl(item, version):
@@ -155,7 +154,9 @@ def build_row(item, client, version):
         cpe = item.get("cpe") if isinstance(item.get("cpe"), str) and not purl else ""
         asset = normalize_asset(Asset(
             asset_id=str(item["asset_id"]) + MANUAL_SUFFIX,
-            vendor=str(item.get("vendor", "")),
+            # A generic banner or file-name result names no vendor; the product stands in.
+            vendor=str(item.get("product", "") if item.get("vendor") in GENERIC_VENDORS
+                       else item.get("vendor", "")),
             product=item.get("package") if purl else str(item.get("product", "")),
             version=version,
             category=str(item.get("category", "")),

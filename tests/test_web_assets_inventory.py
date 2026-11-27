@@ -293,6 +293,28 @@ def test_review_rows_need_a_typed_version_and_use_it(blank):
     assert "badge-success\">Monitored" in row(products_card(page_text), "WordPress")
 
 
+
+def test_label_and_generic_versions_need_review_and_generic_rows_name_no_vendor(blank):
+    config = blank[0]
+    labelled = dict(asset_id="w-ga", hostname="a.example", vendor="google", product="google-analytics",
+                    name="Google Analytics", category="hosted-platform", categories=["hosted-platform"],
+                    confidence="high", versions=["GA4"], evidence_types=["script"], inventory=False)
+    generic = dict(asset_id="w-swiper", hostname="a.example", vendor="banner", product="swiper",
+                   name="Swiper", category="js-library", categories=["js-library"], confidence="low",
+                   versions=["8.4.5"], evidence_types=["script"], inventory=False)
+    client = seed(blank, [labelled, generic])
+    card = products_card(page(client))
+    for name, version in (("Google Analytics", "GA4"), ("Swiper", "8.4.5")):
+        assert "Needs review" in row(card, name)
+        assert f'value="{version}" placeholder="Enter version"' in row(card, name)
+    assert "Not covered by CVE scans yet" not in page(client)
+    everything = preview(client, action="all")
+    assert "/web-assets/inventory/save" not in everything.text
+    typed = preview(client, ["w-swiper"], {"w-swiper": "8.4.5"})
+    assert save_inventory(client, typed).status_code == 303
+    (row_added,) = managed_rows(config)
+    assert (row_added.vendor, row_added.product, row_added.version) == ("swiper", "swiper", "8.4.5")
+
 def test_npm_purl_and_version_agree_for_a_typed_version(blank):
     config = blank[0]
     products = [dict(PRODUCTS[1], asset_id="w-npm-none", versions=[], inventory=False)]

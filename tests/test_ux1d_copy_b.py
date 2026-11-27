@@ -432,7 +432,7 @@ def test_web_assets_points_to_the_inventory_settings(tmp_path, monkeypatch):
     assert response.status_code == 200
     with app.test_request_context():
         expected_destination = url_for("config_editor.inventory")
-    print(response.text[response.text.find("Latest detection"):][:3000]);     link = re.search(r'<a href="([^"]+)">Inventory settings</a>', response.text)
+    link = re.search(r'<a href="([^"]+)">Inventory settings</a>', response.text)
     assert link is not None
     assert link.group(1) == expected_destination
     assert "web_snapshots = true" not in response.text
