@@ -677,16 +677,6 @@ def fetch_kev(
     return cisa_fields(source.cisa())
 
 
-def fetch_vulncheck_kev(http: HttpClient, token: str | None) -> dict[str, KEVFields]:
-    """Download the VulnCheck KEV index once and normalize its watch fields."""
-    from ..sources.vulncheck import fetch_kev as fetch_vulncheck, kev_fields
-
-    return {
-        identifier: KEVFields(added, None, None, ransomware)
-        for identifier, (added, ransomware) in kev_fields(fetch_vulncheck(http, token)).items()
-    }
-
-
 def epss_file_url(day: date) -> str:
     return EPSS_FILE_URL.format(day=day.isoformat())
 

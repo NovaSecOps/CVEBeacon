@@ -628,14 +628,14 @@ def test_watch_status_reports_cursors_rows_and_signals(tmp_path, capsys):
     assert cli.main(["--config", str(config.config_path), "watch", "status"]) == 0
     output = capsys.readouterr().out
     assert f"database: {config.watch.database}" in output
-    assert "schema version: 11" in output
+    assert "schema version: 10" in output
     assert f"nvd cursor: {NOW.isoformat()}" in output
     assert "euvd cursor: 2026-11-03" in output
     assert "epss score date: 2026-11-03" in output
     assert "rows: 1" in output
     assert "euvd items: 0" in output
-    assert "KEV catalog entries: CISA 2, EU 0, VulnCheck 0" in output
-    assert "watched CVEs in KEV: 1 (CISA 1, EU 0, VulnCheck 0)" in output
+    assert "KEV catalog entries: CISA 2, EU 0" in output
+    assert "watched CVEs in KEV: 1 (CISA 1, EU 0)" in output
     assert "with active SSVC: 1" in output
     assert "with EPSS: 1" in output
     assert "lookups pending/backing off: 0" in output

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -25,7 +24,6 @@ from cvebeacon.http import HttpClient
 from cvebeacon.models import (
     Applicability,
     Asset,
-    Evidence,
     Finding,
     HealthStatus,
     QueryResult,
@@ -35,9 +33,6 @@ from cvebeacon.sources import shodan_cvedb, vulncheck
 from cvebeacon.sources.shodan_cvedb import CVEDBRecord
 from cvebeacon.sources.vulncheck import VulnCheckSource
 from cvebeacon.state import StateStore
-from cvebeacon.watch.records import WatchRecord, WatchView
-from cvebeacon.watch.rules import AlertSnapshot, AlertState, evaluate, parse_rules
-from cvebeacon.watch.store import WatchStore
 
 from test_dashboard import setup
 from test_dashboard_accounts import accounts, login
@@ -558,43 +553,6 @@ def test_exports_include_vulncheck_fields(tmp_path):
     row = rows[1]
     assert row[headers.index("VulnCheck KEV")] is True
     assert row[headers.index("VulnCheck Date Added")] == "2026-01-02"
-
-
-def test_watch_vulncheck_addition_is_a_material_event():
-    rule = parse_rules([{
-        "name": "kev",
-        "condition": {"kev": "any"},
-        "channels": ["email"],
-        "events": ["kev_added"],
-    }])[0]
-    previous = AlertState("2026-01-01T00:00:00+00:00", AlertSnapshot(
-        cisa_kev=False, eu_kev=False, exploitation="none", severity_band="none",
-        epss_band="none", nvd_score=False, status="published",
-        vulncheck_kev=False,
-    ))
-    view = WatchView(
-        "CVE-2026-0001",
-        "published",
-        vulncheck_kev_added="2026-02-01",
-        vulncheck_kev_ransomware="Known",
-    )
-    _, events = evaluate(view, previous, rule, datetime(2026, 2, 2, tzinfo=timezone.utc))
-    assert [event.kind for event in events] == ["kev_added"]
-    assert events[0].reasons == ("kev vulncheck false -> true",)
-    assert "vulncheck:2026-02-01" == events[0].occurrence
-
-
-def test_watch_store_keeps_vulncheck_catalog_rows(tmp_path):
-    store = WatchStore(tmp_path / "watch.db")
-    store.upsert_nvd([WatchRecord("CVE-2026-0001", "published")])
-    counts = store.replace_vulncheck_kev(
-        {"CVE-2026-0001": ("2026-02-01", "Known")},
-        catalogs=("nvd", "vulncheck"),
-    )
-    assert counts.new == 1
-    view = store.view("CVE-2026-0001", catalogs=("nvd", "vulncheck"))
-    assert view.vulncheck_kev_added == "2026-02-01"
-    assert view.vulncheck_kev_ransomware == "Known"
 
 
 def test_cvedb_record_parser_and_identity_mismatch():

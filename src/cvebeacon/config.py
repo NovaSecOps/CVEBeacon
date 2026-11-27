@@ -19,9 +19,7 @@ from .watch.rules import Rule, parse_rules, validate_rule_sources
 
 CANONICAL_FIELDS = ("asset_id", "vendor", "product", "version")
 OPTIONAL_FIELDS = ("category", "system_id", "ecosystem", "purl", "cpe", "repository", "commit", "client")
-WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list", "vulncheck")
-# VulnCheck watch is opt-in; its scan source is enabled by default but needs a token.
-DEFAULT_WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list")
+WATCH_SOURCES = ("nvd", "euvd", "cisa_kev", "eu_kev", "epss", "cve_list")
 INVENTORY_FORMATS = ("auto", "xlsx", "csv", "json", "yaml")
 WATCH_INITIAL_MODES = ("baseline", "backfill", "full")
 WATCH_SETTINGS = {
@@ -150,7 +148,7 @@ class DashboardConfig:
 class WatchConfig:
     enabled: bool = False
     database: Path = Path("cvebeacon-watch.db")
-    sources: tuple[str, ...] = DEFAULT_WATCH_SOURCES
+    sources: tuple[str, ...] = WATCH_SOURCES
     initial: str = "baseline"
     backfill_days: int = 7
     overlap_minutes: int = 15
@@ -331,7 +329,7 @@ def load_config(
     if unknown_watch:
         raise ConfigurationError("unknown watch setting: " + ", ".join(unknown_watch))
     watch_enabled = _boolean(watch_data, "enabled", False)
-    raw_watch_sources = watch_data.get("sources", list(DEFAULT_WATCH_SOURCES))
+    raw_watch_sources = watch_data.get("sources", list(WATCH_SOURCES))
     if not isinstance(raw_watch_sources, list) or not all(
         isinstance(value, str) and value.strip() for value in raw_watch_sources
     ):

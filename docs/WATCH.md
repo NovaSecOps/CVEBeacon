@@ -59,10 +59,8 @@ language = "en"
   Configurations from earlier builds that omitted this setting should pin
   `database = "cvebeacon-watch.db"` before upgrading, or the old file is
   ignored and a new baseline starts.
-- `sources`: any subset of `nvd`, `euvd`, `cisa_kev`, `eu_kev`, `vulncheck`, `epss`, and `cve_list`.
-  `nvd` is required. Unknown names are rejected. `vulncheck` needs the
-  VulnCheck token described in [vulnerability data sources](SOURCES.md); without
-  a token it is skipped with `skipped: no token` and does not fail the sync.
+- `sources`: any subset of `nvd`, `euvd`, `cisa_kev`, `eu_kev`, `epss`, and `cve_list`.
+  `nvd` is required. Unknown names are rejected.
 - `initial`: what the first sync does; see [initial modes](#initial-modes).
 - `backfill_days`: 1 to 120, used only when `initial = "backfill"`.
 - `overlap_minutes`: 0 to 1440. Later runs re-read this much before the stored
@@ -557,7 +555,7 @@ that stronger claim. `watch reported --verify` reports the first broken row and
 exits 2; when it succeeds it prints how many rows are chained and how many are
 legacy and unchained. The user audit table uses the same construction.
 
-The watch database schema is version 11. Rows written before the identity upgrade
+The watch database schema is version 10. Rows written before the identity upgrade
 have `chain_version = 0`, a null chain, and are reported as legacy unchained;
 the chain starts with the first report written after the upgrade. Migration
 records the highest legacy row id in `watch_meta` once. A legacy row must be at
@@ -1003,7 +1001,7 @@ The event records which leaves were true, for example `cvss 9.8 v3.1 (cna)`,
 `epss 0.62`, and `kev cisa`. Later evaluations of that rule and CVE only produce
 escalations, even when the condition is no longer true:
 
-- `kev_added`: the CVE enters the CISA, EU or VulnCheck KEV catalog.
+- `kev_added`: the CVE enters the CISA or EU KEV catalog.
 - `exploitation_active`: SSVC or EUVD first reports active exploitation.
 - `severity_increase`: the highest selected CVSS moves above its previous
   maximum band.
@@ -1129,7 +1127,7 @@ still matches a CVE whose product list is empty.
 
 Each source keeps its own raw table; a CVE's combined view is derived when it
 is needed. Watch databases created by earlier watch builds are migrated in
-place to schema version 11. An unknown version still fails closed. The version 1
+place to schema version 10. An unknown version still fails closed. The version 1
 upgrade deletes the old `watch_touched` queue, because P1a had no rules and
 therefore no evaluation obligation, and sets `initial_evaluated_at` whenever
 `initial_mode` is already stored. It also rewinds `euvd_cursor` to
@@ -1181,9 +1179,6 @@ delete them and run `watch sync` again. They are not migrated.
   successful catalog download replaces that catalog's rows in one transaction,
   including removals. When a catalog is configured it is the source for that
   part of the view; otherwise NVD's CISA KEV fields are used.
-- `watch_vulncheck_kev` holds the VulnCheck KEV date added and ransomware
-  indicator per CVE. It is replaced by one bounded catalog download when the
-  `vulncheck` watch source is configured and a token is available.
 - `watch_epss` holds the current EPSS score, percentile, and score date for each
   CVE. It is replaced from FIRST's official dated file, at most once per file
   day.
@@ -1359,9 +1354,9 @@ failed EUVD source for that asset instead.
 
 ## KEV and early lookups
 
-The CISA, EU and VulnCheck KEV catalogs are downloaded once per run and replace
-their previous rows. VulnCheck is skipped without a token. For a CVE that NVD
-has not created yet, the sync tracks a bounded lookup in `watch_lookup`:
+The CISA and EU KEV catalogs are downloaded once per run and replace their
+previous rows. For a CVE that NVD has not created yet, the sync tracks a
+bounded lookup in `watch_lookup`:
 
 - KEV entries in a configured catalog whose `dateAdded` is on or after the
   start of the database's initial window (never for full mode);
@@ -1546,7 +1541,7 @@ See [sources](SOURCES.md) for the full source roles and limitations.
 `cve_list` is enabled in new setup files and in the default source selection.
 Existing explicit `sources` lists keep their selection; add `"cve_list"` to opt
 in. Existing files with no source list receive the new default. The watch
-schema migrates transactionally to version 11, retaining CVEs, events, deliveries,
+schema migrates transactionally to version 10, retaining CVEs, events, deliveries,
 reports and EUVD resume progress. The new provider has its own initial mode,
 window and archive cursors; adding it does not reset an initial EUVD import.
 

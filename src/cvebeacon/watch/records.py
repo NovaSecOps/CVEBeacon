@@ -267,8 +267,6 @@ class WatchView:
     cisa_required_action: str | None = None
     cisa_ransomware: str | None = None
     eu_kev_added: str | None = None
-    vulncheck_kev_added: str | None = None
-    vulncheck_kev_ransomware: str | None = None
     euvd_id: str | None = None
     euvd_exploited_since: str | None = None
     epss: float | None = None
@@ -318,8 +316,6 @@ class WatchView:
             "cisa_required_action": self.cisa_required_action,
             "cisa_ransomware": self.cisa_ransomware,
             "eu_kev_added": self.eu_kev_added,
-            "vulncheck_kev_added": self.vulncheck_kev_added,
-            "vulncheck_kev_ransomware": self.vulncheck_kev_ransomware,
             "euvd_exploited_since": self.euvd_exploited_since,
         }
         if self.additional_cvss:
@@ -385,10 +381,8 @@ def build_view(
     euvd: EUVDUpdate | None = None,
     cisa_kev: KEVFields | None = None,
     eu_kev: KEVFields | None = None,
-    vulncheck_kev: KEVFields | None = None,
     cisa_catalog: bool = False,
     eu_catalog: bool = False,
-    vulncheck_catalog: bool = False,
     epss: tuple[float, float, str] | None = None,
     first_seen: str | None = None,
     additional_cvss: tuple[CVSSEntry, ...] = (),
@@ -413,7 +407,6 @@ def build_view(
             record.cisa_ransomware,
         )
     eu = eu_kev if eu_catalog else None
-    vulncheck = vulncheck_kev if vulncheck_catalog else None
     vendors = [item.vendor for item in record.products if item.vendor]
     products = [item.product for item in record.products if item.product]
     if euvd is not None:
@@ -438,8 +431,6 @@ def build_view(
         cisa_required_action=cisa.required_action,
         cisa_ransomware=cisa.ransomware,
         eu_kev_added=eu.added if eu is not None else None,
-        vulncheck_kev_added=vulncheck.added if vulncheck is not None else None,
-        vulncheck_kev_ransomware=vulncheck.ransomware if vulncheck is not None else None,
         euvd_id=euvd.euvd_id if euvd is not None else None,
         euvd_exploited_since=euvd.exploited_since if euvd is not None else None,
         epss=epss[0] if epss is not None else None,

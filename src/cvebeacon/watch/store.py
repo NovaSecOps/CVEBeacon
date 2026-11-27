@@ -66,12 +66,12 @@ from .rules import (
 )
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 10
 _CVE_LIST_SSVC = "CISA Vulnrichment (CVE List SSVC)"
 EUVD_MAX_AGE_DAYS = 30
 EPSS_WRITE_BATCH = 5000
 KEV_CATALOGS = ("cisa", "eu")
-VIEW_POLICY_SOURCES = ("cisa_kev", "eu_kev", "vulncheck", "euvd", "epss", "cve_list")
+VIEW_POLICY_SOURCES = ("cisa_kev", "eu_kev", "euvd", "epss", "cve_list")
 VIEW_POLICY_BATCH = 5000
 EVALUATION_BATCH = 5000
 DELIVERY_RETRY_BASE_SECONDS = 300
@@ -315,15 +315,7 @@ _SCHEMA_10 = (
         cve_id TEXT PRIMARY KEY, status TEXT NOT NULL CHECK(status IN ('poc','active'))
     )""",
 ) + explorer_index.SCHEMA
-_SCHEMA_11 = (
-    """CREATE TABLE IF NOT EXISTS watch_vulncheck_kev (
-        cve_id TEXT PRIMARY KEY,
-        date_added TEXT,
-        ransomware TEXT
-    )""",
-    "CREATE INDEX IF NOT EXISTS watch_vulncheck_kev_date ON watch_vulncheck_kev(date_added)",
-)
-_SCHEMA = _SCHEMA_THROUGH_8 + _SCHEMA_9 + _SCHEMA_10 + _SCHEMA_11
+_SCHEMA = _SCHEMA_THROUGH_8 + _SCHEMA_9 + _SCHEMA_10
 
 
 _TEAMS_BOT_COLUMNS = {
@@ -613,11 +605,6 @@ class WatchStore:
                             name = statement.split()[5]
                             if name in overlays and name not in existing:
                                 db.execute(statement.replace("CREATE TABLE", "CREATE TEMP TABLE", 1))
-                if 'watch_vulncheck_kev' not in existing:
-                    db.execute(
-                        "CREATE TEMP TABLE watch_vulncheck_kev ("
-                        "cve_id TEXT PRIMARY KEY, date_added TEXT, ransomware TEXT)"
-                    )
             yield db
         except sqlite3.Error as exc:
             raise StateError(f"watch read failed: {exc}") from exc
@@ -674,7 +661,7 @@ class WatchStore:
             cls._set_meta(db, {"provider_storage": "sparse-v1"})
             return
         version = rows[0]["value"]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
             raise StateError(f"unsupported watch schema version {version}")
         if version != "1" and not _alert_columns_current(db):
             # Pre-release builds wrote schema 2 without these columns. They are
@@ -781,8 +768,6 @@ class WatchStore:
             db.execute(statement)
         cls._ensure_teams_bot_schema(db)
         for statement in _SCHEMA_10:
-            db.execute(statement)
-        for statement in _SCHEMA_11:
             db.execute(statement)
         if version_number < 10:
             cls._backfill_vulnrichment(db, now)
@@ -1160,18 +1145,6 @@ class WatchStore:
         )
 
     @staticmethod
-    def _vulncheck_kev_row(
-        db: sqlite3.Connection, identifier: str
-    ) -> KEVFields | None:
-        row = db.execute(
-            "SELECT date_added,ransomware FROM watch_vulncheck_kev WHERE cve_id=?",
-            (identifier,),
-        ).fetchone()
-        if row is None:
-            return None
-        return KEVFields(row["date_added"], None, None, row["ransomware"])
-
-    @staticmethod
     def _epss_row(
         db: sqlite3.Connection, identifier: str
     ) -> tuple[float, float, str] | None:
@@ -1199,10 +1172,8 @@ class WatchStore:
             euvd=euvd,
             cisa_kev=self._kev_row(db, "cisa", identifier),
             eu_kev=self._kev_row(db, "eu", identifier),
-            vulncheck_kev=self._vulncheck_kev_row(db, identifier),
             cisa_catalog="cisa_kev" in catalogs,
             eu_catalog="eu_kev" in catalogs,
-            vulncheck_catalog="vulncheck" in catalogs,
             epss=self._epss_row(db, identifier) if "epss" in catalogs else None,
             first_seen=row["first_seen"],
             additional_cvss=normalized_cvss((*additional_cvss, *extra_euvd)),
@@ -1354,7 +1325,7 @@ class WatchStore:
                      if item["source"] in allowed}
         official = providers.get("cve_list")
         if origin is not None:
-            record = next((providers[name] for name in ("cve_list", "euvd", "cisa_kev", "eu_kev", "vulncheck") if name in providers), WatchRecord(identifier, "reserved"))
+            record = next((providers[name] for name in ("cve_list", "euvd", "cisa_kev", "eu_kev") if name in providers), WatchRecord(identifier, "reserved"))
             return record, (), _CVE_LIST_SSVC if official and official.ssvc_exploitation else None
         primary = self._record(row)
         nvd_ssvc = "NVD SSVC" if primary.ssvc_exploitation else None
@@ -1407,7 +1378,7 @@ class WatchStore:
         EUVD scores and products continue to come from its normal enrichment
         table, so a later lookup cannot pin an obsolete severity in this row.
         """
-        if source not in {"euvd", "cisa_kev", "eu_kev", "vulncheck"}:
+        if source not in {"euvd", "cisa_kev", "eu_kev"}:
             raise StateError("unsupported discovery provider")
         return self._upsert_provider(source, [(record, payload)], catalogs=catalogs)
 
@@ -1652,42 +1623,6 @@ class WatchStore:
             new=len(added),
             changed=views.changed,
             unchanged=len(common - touched),
-            new_ids=tuple(sorted(added)),
-            changed_ids=tuple(sorted(touched)),
-            touched_ids=queued,
-        )
-
-    def replace_vulncheck_kev(
-        self,
-        fields: Mapping[str, tuple[str | None, str | None]],
-        *,
-        catalogs: Sequence[str] = (),
-    ) -> StepCounts:
-        """Replace the VulnCheck KEV catalog and refresh affected views."""
-        self.initialize()
-        now = _timestamp(self._clock)
-        with self.transaction() as db:
-            old = {
-                row["cve_id"]: (row["date_added"], row["ransomware"])
-                for row in db.execute("SELECT cve_id,date_added,ransomware FROM watch_vulncheck_kev")
-            }
-            touched = {
-                identifier
-                for identifier in set(old) | set(fields)
-                if old.get(identifier) != fields.get(identifier)
-            }
-            db.execute("DELETE FROM watch_vulncheck_kev")
-            db.executemany(
-                "INSERT INTO watch_vulncheck_kev(cve_id,date_added,ransomware) VALUES (?,?,?)",
-                ((identifier, *fields[identifier]) for identifier in sorted(fields)),
-            )
-            views = self._refresh_views(db, sorted(touched), catalogs, now)
-            queued = self._mark_touched(db, touched, now)
-        added = set(fields) - set(old)
-        return StepCounts(
-            new=len(added),
-            changed=views.changed,
-            unchanged=len(set(old) & set(fields) - touched),
             new_ids=tuple(sorted(added)),
             changed_ids=tuple(sorted(touched)),
             touched_ids=queued,
@@ -3044,11 +2979,6 @@ class WatchStore:
                 "EXISTS (SELECT 1 FROM watch_kev k "
                 "WHERE k.catalog='eu' AND k.cve_id=e.cve_id)"
             )
-        if "vulncheck" in catalogs:
-            kev.append(
-                "EXISTS (SELECT 1 FROM watch_vulncheck_kev k "
-                "WHERE k.cve_id=e.cve_id)"
-            )
         exploitation = ["c.ssvc_exploitation='active'"]
         if "euvd" in catalogs:
             exploitation.append(
@@ -3785,19 +3715,6 @@ class WatchStore:
             candidates: set[str] = set()
             if initial_window_start is not None:
                 for source_name in catalogs:
-                    if source_name == "vulncheck":
-                        candidates.update(
-                            row["cve_id"]
-                            for row in db.execute(
-                                "SELECT k.cve_id FROM watch_vulncheck_kev k "
-                                "WHERE k.date_added IS NOT NULL "
-                                "AND substr(k.date_added,1,10) >= ? "
-                                "AND NOT EXISTS ("
-                                "SELECT 1 FROM watch_cve c WHERE c.cve_id=k.cve_id)",
-                                (initial_window_start[:10],),
-                            )
-                        )
-                        continue
                     catalog = catalog_names.get(source_name, source_name)
                     if catalog not in KEV_CATALOGS:
                         continue
@@ -3894,11 +3811,7 @@ class WatchStore:
                     "SELECT COUNT(*) FROM watch_kev WHERE catalog='eu'"
                 ).fetchone()[0]
                 any_kev = db.execute(
-                    "SELECT COUNT(*) FROM (SELECT cve_id FROM watch_kev "
-                    "UNION SELECT cve_id FROM watch_vulncheck_kev)"
-                ).fetchone()[0]
-                vulncheck_kev = db.execute(
-                    "SELECT COUNT(*) FROM watch_vulncheck_kev"
+                    "SELECT COUNT(DISTINCT cve_id) FROM watch_kev"
                 ).fetchone()[0]
                 if "cisa_kev" in catalogs:
                     cisa_watched = {
@@ -3931,16 +3844,6 @@ class WatchStore:
                     }
                 else:
                     eu_watched = set()
-                if "vulncheck" in catalogs:
-                    vulncheck_watched = {
-                        row["cve_id"]
-                        for row in db.execute(
-                            "SELECT DISTINCT k.cve_id FROM watch_vulncheck_kev k "
-                            "JOIN watch_cve c ON c.cve_id=k.cve_id"
-                        )
-                    }
-                else:
-                    vulncheck_watched = set()
                 active_query = "SELECT cve_id FROM watch_cve WHERE ssvc_exploitation='active'"
                 if "cve_list" in catalogs:
                     active_query += (
@@ -3965,12 +3868,10 @@ class WatchStore:
             "euvd_items": euvd_items,
             "cisa_kev": cisa_kev,
             "eu_kev": eu_kev,
-            "vulncheck_kev": vulncheck_kev,
             "any_kev": any_kev,
             "cisa_watched": len(cisa_watched),
             "eu_watched": len(eu_watched),
-            "vulncheck_watched": len(vulncheck_watched),
-            "any_watched": len(cisa_watched | eu_watched | vulncheck_watched),
+            "any_watched": len(cisa_watched | eu_watched),
             "active_ssvc": active_ssvc,
             "epss_rows": epss_rows,
             "epss_date": epss_date,

@@ -35,9 +35,6 @@ class _LookupHTTP:
         except (ValueError, UnicodeError) as exc:
             raise SourceError(source, "source returned invalid JSON") from exc
 
-    def stream_bytes(self, *args, **kwargs):
-        return self.http.stream_bytes(*args, **kwargs)
-
 
 @source_payload("euvd")
 def _euvd_updates(payload, identifier):
@@ -66,7 +63,6 @@ def refresh_watch(config, http, identifier):
         before = http.requests
         records = new = changed = 0
         error = None
-        note = None
         try:
             if source == "nvd":
                 result = feeds.fetch_nvd_cve(http, identifier, api_key=config.nvd_api_key(), interval=config.sources.minimum_request_interval)
@@ -120,30 +116,10 @@ def refresh_watch(config, http, identifier):
                                  "required_action": entry.required_action, "ransomware": entry.ransomware},
                         catalogs=catalogs)
                     new, changed = counts.new, counts.changed
-            elif source == "vulncheck":
-                accessor = getattr(config, "vulncheck_api_key", None)
-                token = accessor() if callable(accessor) else None
-                if not token:
-                    note = "skipped: no token"
-                else:
-                    fields = feeds.fetch_vulncheck_kev(http, token)
-                    entry = fields.get(identifier)
-                    with store.transaction() as db:
-                        db.execute("DELETE FROM watch_vulncheck_kev WHERE cve_id=?", (identifier,))
-                        if entry is not None:
-                            db.execute("INSERT INTO watch_vulncheck_kev VALUES (?,?,?)",
-                                       (identifier, entry.added, entry.ransomware))
-                            records = 1
-                    if entry is not None:
-                        record = WatchRecord(identifier, "published", last_modified=entry.added)
-                        counts = store.upsert_discovered(source, record,
-                            payload={"added": entry.added, "ransomware": entry.ransomware},
-                            catalogs=catalogs)
-                        new, changed = counts.new, counts.changed
         except SourceError as exc:
             if exc.status_code != 404 or source not in {"nvd", "cve_list"}:
                 error = str(exc)
-        summary = SourceSummary(source, http.requests - before, records, new, changed, error=error, note=note)
+        summary = SourceSummary(source, http.requests - before, records, new, changed, error=error)
         summaries.append(summary)
         # A targeted lookup does not advance any complete-feed cursor.
         with store.transaction() as db:

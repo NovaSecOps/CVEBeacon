@@ -35,7 +35,7 @@ def test_released_schema_upgrade_creates_teams_storage_and_preserves_data(tmp_pa
     store.initialize()
     store.initialize()
     metadata = store.metadata()
-    assert metadata["schema_version"] == "11"
+    assert metadata["schema_version"] == "10"
     assert metadata["provider_storage"] == "sparse-v1"
     assert metadata["teams_bot_storage"] == "durable-v1"
     with sqlite3.connect(path) as db:
@@ -83,7 +83,7 @@ def test_fresh_install_admits_its_own_status_constraint(tmp_path):
     with sqlite3.connect(path) as db:
         ddl = db.execute("SELECT sql FROM sqlite_master WHERE name='watch_cve'").fetchone()[0]
         assert "reserved" in ddl
-        assert dict(db.execute("SELECT key,value FROM watch_meta"))["schema_version"] == "11"
+        assert dict(db.execute("SELECT key,value FROM watch_meta"))["schema_version"] == "10"
 
 
 @pytest.mark.parametrize("version", [7, 8, 9])
@@ -144,7 +144,7 @@ def test_schema_ten_chain_preserves_history_and_initial_exploitation(tmp_path, v
     store.initialize()
     store.initialize()
     meta = store.metadata()
-    assert meta["schema_version"] == "11"
+    assert meta["schema_version"] == "10"
     assert meta["provider_storage"] == "sparse-v1"
     assert meta["teams_bot_storage"] == "durable-v1"
     assert meta["explorer_storage"] == "indexed-v1"

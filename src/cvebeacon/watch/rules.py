@@ -115,7 +115,6 @@ class AlertSnapshot:
     max_epss_band: str = "none"
     epss: float | None = None
     severity: float | None = None
-    vulncheck_kev: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -130,7 +129,6 @@ class AlertSnapshot:
             "max_epss_band": self.max_epss_band,
             "epss": self.epss,
             "severity": self.severity,
-            "vulncheck_kev": self.vulncheck_kev,
         }
 
     @classmethod
@@ -150,13 +148,12 @@ class AlertSnapshot:
                 max_epss_band=str(value.get("max_epss_band", value["epss_band"])),
                 epss=value.get("epss"),
                 severity=value.get("severity"),
-                vulncheck_kev=value.get("vulncheck_kev", False),
             )
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ValueError("invalid alert snapshot") from exc
         if not isinstance(snapshot.cisa_kev, bool) or not isinstance(snapshot.nvd_score, bool):
             raise ValueError("invalid alert snapshot")
-        if not isinstance(snapshot.eu_kev, bool) or not isinstance(snapshot.vulncheck_kev, bool):
+        if not isinstance(snapshot.eu_kev, bool):
             raise ValueError("invalid alert snapshot")
         if snapshot.exploitation not in {"none", "poc", "active"}:
             raise ValueError("invalid alert snapshot")
@@ -672,7 +669,6 @@ def snapshot_for(view: WatchView, rule: Rule) -> AlertSnapshot:
         max_epss_band=epss_band,
         epss=view.epss,
         severity=severity,
-        vulncheck_kev=view.vulncheck_kev_added is not None,
     )
 
 
@@ -691,7 +687,7 @@ def _is_backlog(view: WatchView, backlog_before: date | None) -> bool:
     published = _date_prefix(view.published)
     if published is None or published >= backlog_before:
         return False
-    for added in (view.cisa_kev_added, view.eu_kev_added, view.vulncheck_kev_added):
+    for added in (view.cisa_kev_added, view.eu_kev_added):
         value = _date_prefix(added)
         if value is not None and value >= backlog_before:
             return False
@@ -791,8 +787,6 @@ def _matches_leaf(view: WatchView, key: str, value: Any, rule: Rule) -> tuple[bo
             present.append(("cisa", "kev cisa"))
         if view.eu_kev_added is not None:
             present.append(("eu", "kev eu"))
-        if view.vulncheck_kev_added is not None:
-            present.append(("vulncheck", "kev vulncheck"))
         selected = [reason for catalog, reason in present if value in ("any", catalog)]
         return bool(selected), selected[0] if selected else None
     if key == "exploitation":
@@ -971,17 +965,6 @@ def evaluate(
                     "kev_added",
                     ("kev eu false -> true",),
                     f"eu:{added.isoformat() if added else ''}",
-                )
-            )
-        if not old.vulncheck_kev and snapshot.vulncheck_kev:
-            added = _date_prefix(view.vulncheck_kev_added)
-            events.append(
-                _event(
-                    view,
-                    rule,
-                    "kev_added",
-                    ("kev vulncheck false -> true",),
-                    f"vulncheck:{added.isoformat() if added else ''}",
                 )
             )
     if (

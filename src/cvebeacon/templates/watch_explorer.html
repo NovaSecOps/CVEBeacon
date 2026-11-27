@@ -5,9 +5,9 @@
 
 {% macro option_label(name, value) -%}
 {%- set labels = {
-  'kev': {'cisa': 'CISA', 'eu': 'EU', 'vulncheck': 'VulnCheck', 'either': 'Any catalog', 'neither': 'Neither catalog'},
+  'kev': {'cisa': 'CISA', 'eu': 'EU', 'either': 'Either catalog', 'neither': 'Neither catalog'},
   'exploitation': {'none': 'None reported', 'poc': 'Proof of concept', 'active': 'Active', 'unknown': 'Unknown'},
-  'source': {'nvd': 'NVD', 'euvd': 'EUVD', 'cve_list': 'CVE List', 'cisa_kev': 'CISA KEV', 'eu_kev': 'EU KEV', 'vulncheck': 'VulnCheck', 'epss': 'EPSS'},
+  'source': {'nvd': 'NVD', 'euvd': 'EUVD', 'cve_list': 'CVE List', 'cisa_kev': 'CISA KEV', 'eu_kev': 'EU KEV', 'epss': 'EPSS'},
   'cvss_provider': {'nvd': 'NVD', 'cna': 'CNA', 'cisa-adp': 'CISA ADP', 'euvd': 'EUVD', 'other': 'Other'},
 } -%}
 {%- if name == 'cvss_version' -%}v{{ value }}{%- else -%}{{ labels.get(name, {}).get(value, value | capitalize) }}{%- endif -%}
@@ -132,7 +132,7 @@
   <td>{{ day(item.last_modified) if item.last_modified else 'Not available' }}</td>
   <td class="num">{% set highest = item.highest_score %}{% if highest %}<details><summary>{{ '%g'|format(highest.score) }} v{{ highest.version }}</summary>{{ cvss_scores(item.cvss_scores) }}{% if item.cvss_severity_differs %}<p class="help">Severity differs between CVSS versions</p>{% endif %}</details>{% else %}Not available{% endif %}</td>
   <td class="num">{{ item.epss if item.epss is not none else 'Not available' }}</td>
-  <td>{% if item.cisa_kev_added %}{{ kev_badge('CISA') }}{% endif %}{% if item.eu_kev_added %}{{ kev_badge('EU') }}{% endif %}{% if item.vulncheck_kev_added %}{{ kev_badge('VulnCheck') }}{% endif %}{% if not item.cisa_kev_added and not item.eu_kev_added and not item.vulncheck_kev_added %}No{% endif %}</td>
+  <td>{% if item.cisa_kev_added %}{{ kev_badge('CISA') }}{% endif %}{% if item.eu_kev_added %}{{ kev_badge('EU') }}{% endif %}{% if not item.cisa_kev_added and not item.eu_kev_added %}No{% endif %}</td>
   <td>{{ exploitation(item) }}</td>
 </tr>
 {% endfor %}
