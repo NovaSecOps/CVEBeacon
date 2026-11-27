@@ -182,6 +182,7 @@ WEB_SYNC_MODES = ("off", "review", "auto")
 class WebConfig:
     inventory_sync: str = "off"
     removal_grace_days: int = 30
+    inventory_auto_remove: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,7 +308,7 @@ def load_config(
     state = _table(data, "state")
     state_database = _resolve(base, state.get("database", ".cvebeacon/state.db"))
     web = _table(data, "web")
-    if set(web) - {"inventory_sync", "removal_grace_days"}:
+    if set(web) - {"inventory_sync", "removal_grace_days", "inventory_auto_remove"}:
         raise ConfigurationError("unknown web setting")
     sync_mode = web.get("inventory_sync", "off")
     if sync_mode not in WEB_SYNC_MODES:
@@ -517,7 +518,8 @@ def load_config(
         database_path=state_database,
         output_dir=_resolve(base, output.get("directory", "reports")),
         web=WebConfig(sync_mode, _bounded_int(web.get("removal_grace_days", 30),
-                                              "web.removal_grace_days", 0, 365)),
+                                              "web.removal_grace_days", 0, 365),
+                      _boolean(web, "inventory_auto_remove", False)),
         http=HttpConfig(
             connect_timeout=_positive_number(
                 http_data.get("connect_timeout", 10), "http.connect_timeout"

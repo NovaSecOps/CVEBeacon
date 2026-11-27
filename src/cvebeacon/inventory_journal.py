@@ -17,11 +17,12 @@ from .web_inventory import decode_json, read_bytes
 LOG = logging.getLogger("cvebeacon")
 
 MARKER = ".inventory-pending"
-PARTS = {kind: f"{MARKER}-{kind}" for kind in ("current", "profile", "archive")}
+PARTS = {kind: f"{MARKER}-{kind}" for kind in ("current", "profile", "archive", "sync")}
 TARGETS = {
     "current": re.compile(r"[a-f0-9]{64}\.json"),
     "profile": re.compile(r"[a-f0-9]{64}\.client"),
     "archive": re.compile(r"[a-f0-9]{64}\.[0-9]{8}T[0-9]{12}Z\.json"),
+    "sync": re.compile(r"[a-f0-9]{64}\.web-sync"),
 }
 
 
@@ -45,8 +46,9 @@ def stage_change(directory, db, users, actor, event, key, detail, changes):
     if pending_exists(directory):
         raise StateError("A client inventory change is awaiting recovery.")
     action = event + ":" + json.dumps(detail, ensure_ascii=True, separators=(",", ":"))
+    username = actor if isinstance(actor, str) else actor.username
     row_id = users._append_audit(
-        db, action, actor.username, datetime.now(timezone.utc).isoformat(), actor=actor.username,
+        db, action, username, datetime.now(timezone.utc).isoformat(), actor=username,
     )
     targets = {}
     for kind, (path, data) in changes.items():
@@ -108,7 +110,7 @@ def recover(directory: Path, users_path: Path | None):
         committed = db.execute("SELECT 1 FROM cb_user_audit WHERE id=? AND chain=?", (row, chain)).fetchone()
         if committed:
             # Publish the current file last. Replaying any prefix is harmless.
-            for kind in ("profile", "archive", "current"):
+            for kind in ("profile", "archive", "sync", "current"):
                 if kind in targets:
                     name, publish = targets[kind]
                     path = directory / name

@@ -151,7 +151,7 @@ def replace_bytes(path, data):
 
 def run_detection(config, client, *, plan=False):
     assets, output = paths(config, client)
-    document, _ = read_allowlist(assets, client)
+    document, revision = read_allowlist(assets, client)
     if not document["assets"]:
         raise ConfigurationError("Save an attested web asset before running detection")
     # The parent CLI holds the shared scan lock throughout the child process.
@@ -164,6 +164,10 @@ def run_detection(config, client, *, plan=False):
         if not stat.S_ISDIR(details.st_mode) or getattr(details, "st_file_attributes", 0) & 0x400:
             fingerprints = None
     command = companion_command(document["client"], assets, output, plan=plan, fingerprints=fingerprints)
+    if not plan:
+        from . import web_inventory_sync
+        web_inventory_sync.detection_started(config, document["client"], assets, output,
+                                             revision, len(document["assets"]))
     # Popen's context manager waits without a timeout on exit.
     child = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=child_environment(config))
     try:
@@ -179,6 +183,11 @@ def run_detection(config, client, *, plan=False):
             except subprocess.TimeoutExpired:
                 pass
         raise ConfigurationError(RUN_TIMEOUT_REASON) from exc
-    if not plan and code == 0:
-        output.with_name(output.name + ".removed").unlink(missing_ok=True)
+    if not plan:
+        if code == 0:
+            output.with_name(output.name + ".removed").unlink(missing_ok=True)
+            web_inventory_sync.detection_finished(config, document["client"])
+        else:
+            web_inventory_sync.detection_started(config, document["client"], assets, output,
+                                                 revision, len(document["assets"]))
     return code

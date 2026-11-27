@@ -97,6 +97,7 @@
 {% endcall %}
 
 {% if document %}
+{% include 'web_inventory_sync.html' %}
 {% call card('Filter results', 'Narrow the detected products below. Filters apply to both views.') %}
 <form class="web-filters" method="get" action="{{ url_for('web.index') }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="view" value="{{ flt.view }}">
 <fieldset class="web-filter-confidence"><legend>Confidence</legend>{% for level in confidence_choices %}<span class="field field-check"><input id="f-conf-{{ level }}" type="checkbox" name="conf" value="{{ level }}" {% if level in flt.conf %}checked{% endif %}><label for="f-conf-{{ level }}">{{ level | title }}</label></span>{% endfor %}</fieldset>

@@ -224,7 +224,8 @@ SECTIONS = {
 }
 RULE_FIELDS = defaults(Rule)
 MAPPING_FIELDS = dict.fromkeys(("vendor", "product", "cpe"))
-BOOLEAN_FIELDS = {"managed", "web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported", "compress"}
+BOOLEAN_FIELDS = {"managed", "web_snapshots", "enabled", "secure_cookie", "allow_insecure", "notify_reported",
+                  "compress", "inventory_auto_remove"}
 NUMBER_FIELDS = {"port", "max_items", "priority", "min_interval_seconds", "timeout_seconds",
                  "connect_timeout", "read_timeout", "retries", "backoff_seconds", "header_row",
                  "minimum_request_interval", "backfill_days", "overlap_minutes",
@@ -241,7 +242,7 @@ _SESSION_SAFE_TABLES = {
     "sources": {"osv_enabled", "nvd_enabled", "cve_enabled", "euvd_enabled", "cisa_kev_enabled",
                 "eu_kev_enabled", "epss_enabled", "nvd_api_key_env", "nvd_api_key_file", "minimum_request_interval"},
     "inventory": {"path", "format", "worksheet", "header_row", "records_path", "delimiter", "encoding", "web_snapshots", "managed"},
-    "web": {"inventory_sync", "removal_grace_days"},
+    "web": {"inventory_sync", "removal_grace_days", "inventory_auto_remove"},
     "http": {"connect_timeout", "read_timeout", "retries", "backoff_seconds", "user_agent"},
     "state": {"database"}, "output": {"directory"},
     "backup": {"directory", "retention_days", "keep_min", "compress"},
@@ -1424,6 +1425,10 @@ class Editor:
             if env_changed and "manage_secrets" not in early_permissions:
                 abort(403)
             updated, content = self.validate(pending.document)
+            if updated.web != checks_config.web or updated.web != self.config.web:
+                if "manage_inventory" not in early_permissions:
+                    abort(403)
+                permission = {*permission, "manage_inventory"}
             if ((path_authority_changed(updated, checks_config, self.config)
                     or dashboard_authority_changed(updated, checks_config, self.config))
                     and not probe.is_admin):

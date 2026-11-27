@@ -1,11 +1,94 @@
 """Inventory sync uses saved observations and publishes reversible client changes."""
 
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import json
+import re
+
 import pytest
 
-from cvebeacon.config import load_config
+from cvebeacon import web_assets, web_inventory_sync as sync
+from cvebeacon.config import WebConfig, load_config
 from cvebeacon.errors import ConfigurationError
+from cvebeacon.locking import OperationLock
+from cvebeacon.managed_inventory import client_key, versions
+from cvebeacon.models import Asset
+from cvebeacon.web_inventory import read_bytes, web_asset_id
 
-from test_web_assets_inventory import blank
+from test_dashboard_accounts import PASSWORD, csrf, login
+from test_dashboard_config import confirm, preview
+from test_dashboard_inventory import change
+from test_dashboard_web import save
+from test_web_assets_inventory import blank, managed_rows, page, save_inventory, write_managed
+
+HOST = "example.invalid"
+BASE_SITE = ("https", HOST, 443, "/")
+PATH_SITE = ("https", HOST, 443, "/about")
+NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def product(name, version, *, npm=False, site=BASE_SITE):
+    item = dict(asset_id=web_asset_id("Acme", *site, name, name),
+                site_id=web_asset_id("Acme", *site), hostname=site[1], vendor=name,
+                product=name, versions=[version], inventory=True)
+    if npm:
+        item.update(ecosystem="npm", package=name)
+    return item
+
+
+def row(name, version, *, client="Acme", site=BASE_SITE, npm=False, manual=True):
+    identity = web_asset_id(client, *site, name, name)
+    return Asset(identity + ("-m" if manual else ""), name, name, version, system_id=site[1],
+                 ecosystem="npm" if npm else "", purl=f"pkg:npm/{name}@{version}" if npm else "",
+                 client=client)
+
+
+def run(config, number, products=(), *, sites=None, status="success", started=True, stopped=0):
+    allowlist, output = web_assets.paths(config, "Acme")
+    _, revision = web_assets.read_allowlist(allowlist, "Acme")
+    sites = {BASE_SITE: True} if sites is None else sites
+    date = (NOW + timedelta(hours=number)).isoformat()
+    metadata = dict(started_at=date, ended_at=date, status=status, asset_count=len(sites),
+                    fetched_count=sum(sites.values()) + stopped, products_recognized=len(products),
+                    products_with_version=len(products), analysis_stopped=stopped,
+                    review_truncated=False)
+    if started:
+        metadata["inventory_sync"] = {"id": f"{number:032x}",
+                                      "previous": f"{number - 1:032x}" if number > 1 else "",
+                                      "allowlist": revision,
+                                      "sites": {web_asset_id("Acme", *site): [*site, complete]
+                                                for site, complete in sites.items()}}
+    detail = {"client": "Acme", "products": list(products), "reviews": [], "run": metadata}
+    web_assets.replace_bytes(output.with_name(output.name + ".review.json"), json.dumps(detail).encode("utf-8"))
+
+
+def card(text):
+    return text.split("Changes since the last scan", 1)[1].split("Filter results", 1)[0]
+
+
+def post(client, action, **fields):
+    return client.post("/web-assets/inventory/sync", data={
+        "csrf": csrf(client), "client": "Acme", "action": action, **fields,
+    })
+
+
+def setup(env, mode="review", *, auto_remove="default"):
+    config, users, _, client = env
+    assert save(client).status_code == 303
+    assert post(client, "mode", mode=mode, auto_remove=auto_remove).status_code == 303
+    return config, users, client
+
+
+def selection(text, item):
+    identity = item["asset_id"]
+    found = re.search(fr'name="asset_id" value="{identity}"><input type="hidden" '
+                      r'name="sync_token" value="([a-f0-9]{64})"', card(text))
+    assert found, text
+    return {"asset_id": identity, "sync_token": found[1]}
+
+
+def audit(users, action, *, actor="admin"):
+    assert any(entry.actor == actor and action in entry.action for entry in users.audit_entries())
 
 
 def test_global_settings_are_validated(tmp_path):
@@ -14,6 +97,7 @@ def test_global_settings_are_validated(tmp_path):
     path.write_text(base, encoding="utf-8", newline="\n")
     assert load_config(path).web.inventory_sync == "off"
     assert load_config(path).web.removal_grace_days == 30
+    assert load_config(path).web.inventory_auto_remove is False
     for mode in ("off", "review", "auto"):
         path.write_text(base + f'[web]\ninventory_sync = "{mode}"\nremoval_grace_days = 0\n',
                         encoding="utf-8", newline="\n")
@@ -25,6 +109,9 @@ def test_global_settings_are_validated(tmp_path):
         path.write_text(base + "[web]\n" + field + "\n", encoding="utf-8", newline="\n")
         with pytest.raises(ConfigurationError, match=r"web\."):
             load_config(path)
+    path.write_text(base + '[web]\ninventory_auto_remove = "true"\n', encoding="utf-8", newline="\n")
+    with pytest.raises(ConfigurationError, match="inventory_auto_remove must be true or false"):
+        load_config(path)
 
 
 def test_inventory_settings_form_shows_sync_options(blank):
@@ -32,4 +119,274 @@ def test_inventory_settings_form_shows_sync_options(blank):
     assert response.status_code == 200
     assert 'name="g1_inventory_sync"' in response.text
     assert 'name="g1_removal_grace_days"' in response.text
+    assert 'name="g1_inventory_auto_remove"' in response.text
     assert 'min="0"' in response.text and 'max="365"' in response.text
+    reviewed = preview(blank[3], "inventory", g1_inventory_sync="review", g1_removal_grace_days="365",
+                       g1_inventory_auto_remove="true")
+    assert reviewed.status_code == 200, reviewed.text
+    assert confirm(blank[3], reviewed, "inventory").status_code == 303
+    assert load_config(blank[0].config_path).web == WebConfig("review", 365, True)
+
+
+def test_global_sync_changes_require_inventory_management(blank):
+    config, users, app, _ = blank
+    proof = users.authenticate("admin", PASSWORD)
+    users.save_role("settings-only", {"view", "edit_inventory"}, authorization=proof)
+    users.add("settingsonly", password=PASSWORD, role="settings-only")
+    client = app.test_client()
+    login(client, "settingsonly")
+    reviewed = preview(client, "inventory", g1_inventory_sync="auto", g1_inventory_auto_remove="true")
+    assert reviewed.status_code == 200
+    assert confirm(client, reviewed, "inventory").status_code == 403
+    assert load_config(config.config_path).web == WebConfig()
+
+
+def test_off_preserves_inventory_and_override_is_validated(blank):
+    config, users, client = setup(blank, "off")
+    old = row("older", "1")
+    write_managed(config, [old])
+    run(config, 1, [product("fresh", "2")])
+    run(config, 2, [product("fresh", "2")])
+    text = page(client)
+    assert "Rescans flag missing products. Additions and version updates are manual." in text
+    assert "New ·" not in card(text)
+    assert managed_rows(config) == [old]
+    assert post(client, "mode", mode="invalid").status_code == 409
+    assert post(client, "mode", mode="auto", auto_remove="bad").status_code == 409
+    assert post(client, "mode", mode="default").status_code == 303
+    assert "(global default)" in page(client)
+    assert not sync.mode_path(web_assets.paths(config, "Acme")[0]).exists()
+    audit(users, "web_inventory_sync_mode:")
+
+
+def test_review_add_update_remove_ignore_and_keep(blank):
+    config, users, client = setup(blank)
+    missing = product("missing", "1")
+    newest, ignored = product("fresh", "3"), product("ignored", "4")
+    changed, kept = product("changed", "2", npm=True), product("kept", "8")
+    old = [row("missing", "1"), row("changed", "1", npm=True), row("kept", "7")]
+    write_managed(config, old)
+    observations = [newest, ignored, changed, kept]
+    run(config, 1, observations)
+    assert "Not detected since" not in card(page(client))
+    run(config, 2, observations)
+    text = page(client)
+    assert "New · 3" in card(text) and "Version changed · 1 → 2" in card(text)
+    assert "Not detected since" in card(text) and managed_rows(config) == old
+
+    pick = selection(text, newest)
+    proposed = client.post("/web-assets/inventory/preview", data={
+        **pick, "pick": pick["asset_id"], "action": "sync-add", "client": "Acme", "csrf": csrf(client),
+    })
+    assert proposed.status_code == 200 and "To add (1)" in proposed.text
+    assert save_inventory(client, proposed).status_code == 303
+    for action, item in [("ignore", ignored), ("keep-version", kept), ("update", changed),
+                         ("keep-removal", missing)]:
+        assert post(client, action, **selection(page(client), item)).status_code == 303
+    audit(users, '"mode":"web-sync-add"')
+    audit(users, '"mode":"web-sync-update"')
+    for action in ("ignore", "keep_version", "keep_removal"):
+        audit(users, f"web_inventory_sync_{action}:")
+    assert {asset.product: (asset.version, asset.purl) for asset in managed_rows(config)} == {
+        "missing": ("1", ""), "changed": ("2", "pkg:npm/changed@2"),
+        "kept": ("7", ""), "fresh": ("3", ""),
+    }
+
+    run(config, 3, observations)
+    text = page(client)
+    assert "Kept in inventory." in card(text) and "Undo keep" in card(text)
+    assert ">ignored</th>" not in card(text) and ">kept</th>" not in card(text)
+    assert post(client, "reconsider", **selection(text, missing)).status_code == 303
+    assert post(client, "remove", **selection(page(client), missing)).status_code == 303
+    assert "missing" not in {asset.product for asset in managed_rows(config)}
+    audit(users, "web_inventory_sync_reconsider:")
+    audit(users, '"mode":"web-sync-remove"')
+    assert not users.verify_audit()
+
+    run(config, 4, [newest, product("ignored", "5"), changed, product("kept", "9")])
+    text = card(page(client))
+    assert "New · 5" in text and "Version changed · 7 → 9" in text
+
+
+def test_auto_applies_additions_and_versions_and_respects_grace_and_keep(blank, monkeypatch):
+    config, users, client = setup(blank, "auto", auto_remove="on")
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    missing, kept = product("missing", "1"), product("kept", "1")
+    write_managed(config, [row("missing", "1"), row("kept", "1"), row("changed", "1", npm=True)])
+    detected = [product("fresh", "3"), product("changed", "2", npm=True)]
+    run(config, 1, detected)
+    first = card(page(client))
+    assert "1 added · 1 updated · 0 removed." in first
+    assert next(asset for asset in managed_rows(config) if asset.product == "changed").purl == "pkg:npm/changed@2"
+    run(config, 2, detected)
+    text = page(client)
+    assert card(text).count("Pending removal from") == 2
+    assert post(client, "keep-removal", **selection(text, kept)).status_code == 303
+    clock[0] += timedelta(days=29)
+    assert "Pending removal from" in card(page(client))
+    assert {asset.product for asset in managed_rows(config)} >= {"missing", "kept"}
+    clock[0] += timedelta(days=1)
+    text = page(client)
+    assert "0 added · 0 updated · 1 removed." in card(text)
+    assert "Kept in inventory." in card(text)
+    assert {asset.product for asset in managed_rows(config)} == {"kept", "fresh", "changed"}
+    audit(users, '"mode":"web-sync-auto"', actor="system (inventory sync)")
+    assert post(client, "reconsider", **selection(text, kept)).status_code == 303
+    page(client)
+    assert {asset.product for asset in managed_rows(config)} == {"fresh", "changed"}
+    assert not users.verify_audit()
+
+
+def test_version_update_keeps_an_exact_cpe_consistent(blank):
+    config, _, client = setup(blank, "auto")
+    cpe = "cpe:2.3:a:example:sample:1:*:*:*:*:*:*:*"
+    write_managed(config, [replace(row("sample", "1"), cpe=cpe)])
+    run(config, 1, [product("sample", "2")])
+    page(client)
+    (updated,) = managed_rows(config)
+    assert updated.version == "2"
+    assert updated.cpe == "cpe:2.3:a:example:sample:2:*:*:*:*:*:*:*"
+
+
+def test_partial_failed_duplicate_and_returned_runs_break_the_miss_streak(blank):
+    config, _, client = setup(blank)
+    write_managed(config, [row("missing", "1", site=PATH_SITE)])
+    assert save(client, path="/about").status_code == 303
+    partial = {BASE_SITE: True, PATH_SITE: False}
+    complete = {BASE_SITE: True, PATH_SITE: True}
+    for number, flags in enumerate([complete, partial, complete, complete, complete, complete,
+                                    {BASE_SITE: False, PATH_SITE: False}, complete], 1):
+        items = [product("missing", "1", site=PATH_SITE)] if number == 5 else []
+        run(config, number, items, sites=flags, status="failed" if number == 7 else "success",
+            stopped=1 if number == 2 else 0)
+        for _ in range(2):
+            text = card(page(client))
+            assert ("Not detected since" in text) == (number == 4)
+
+
+def test_unfinished_result_keeps_a_flag_visible_but_cannot_remove(blank, monkeypatch):
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    old = row("missing", "1")
+    write_managed(config, [old])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    clock[0] += timedelta(days=31)
+    run(config, 3, started=False)
+    text = page(client)
+    assert "Not detected since 2026-01-01" in card(text)
+    assert managed_rows(config) == [old]
+    missing = selection(text, product("missing", "1"))
+    assert post(client, "remove", **missing).status_code == 409
+
+
+def test_auto_zero_grace_publishes_on_detection_completion_and_restores(blank, monkeypatch):
+    config, users, client = setup(blank, "auto")
+    config = replace(config, web=WebConfig(removal_grace_days=0, inventory_auto_remove=True))
+    gone = row("gone", "1")
+    other = row("other", "1", client="Other")
+    unsuffixed = row("unsuffixed", "1", manual=False)
+    unrelated = Asset("custom-m", "example", "unrelated", "1", client="Acme")
+    wrong_client = replace(row("foreign", "1", client="Other"), client="Acme")
+    write_managed(config, [gone, unsuffixed, unrelated, wrong_client])
+    write_managed(config, [other], "Other")
+    run(config, 1)
+    sync.inspect(config, "Acme")
+
+    class Child:
+        def wait(self, *, timeout):
+            run(config, 2)
+            return 0
+
+    lock = OperationLock(config, "web-detect")
+    assert lock.acquire()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(web_assets.subprocess, "Popen", lambda *args, **kwargs: Child())
+            assert web_assets.run_detection(config, "Acme") == 0
+    finally:
+        lock.release()
+    assert managed_rows(config) == [unsuffixed, unrelated, wrong_client]
+    assert managed_rows(config, "Other") == [other]
+    audit(users, '"removed":1', actor="system (inventory sync)")
+
+    path = config.inventory_directory / f"{client_key('Acme')}.json"
+    (archive,) = versions(path)
+    url = f"/watch/clients/{path.stem}?name=Acme"
+    response = change(client, url, "restore", version=archive.name.split(".")[1])
+    assert response.status_code == 303, response.text
+    page(client)
+    assert gone in managed_rows(config)
+
+
+def test_requests_fail_closed_on_csrf_permission_stale_or_corrupt_state(blank):
+    config, _, client = setup(blank)
+    item = product("fresh", "2")
+    run(config, 1, [item])
+    selected = selection(page(client), item)
+    denied = client.post("/web-assets/inventory/sync", data={**selected, "client": "Acme", "action": "ignore"})
+    assert denied.status_code == 400
+    other = blank[2].test_client()
+    login(other, "webonly")
+    assert post(other, "ignore", **selected).status_code == 403
+    assert post(other, "mode", mode="auto").status_code == 403
+    run(config, 2, [item])
+    assert post(client, "ignore", **selected).status_code == 409
+    assert post(client, "mode", mode="auto").status_code == 303
+    saved = sync.state_path(config, "Acme")
+    web_assets.replace_bytes(saved, b"{")
+    assert "No sync changes were made." in page(client)
+    assert not (config.inventory_directory / f"{client_key('Acme')}.json").exists()
+    assert read_bytes(saved) == b"{"
+
+
+def test_auto_leaves_unreadable_inventory_untouched(blank):
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    write_managed(config, [row("missing", "1")])
+    path = config.inventory_directory / f"{client_key('Acme')}.json"
+    web_assets.replace_bytes(path, b"{")
+    run(config, 1, [product("fresh", "2")])
+    assert "The saved inventory for this client could not be read." in page(client)
+    assert read_bytes(path) == b"{"
+    assert not versions(path)
+
+
+@pytest.mark.parametrize("mode", ["off", "review", "auto"])
+def test_missing_products_stay_scanned_by_default_and_manual_remove_works(blank, monkeypatch, mode):
+    config, users, client = setup(blank, mode)
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    missing = row("missing", "1")
+    returned = row("returned", "1")
+    write_managed(config, [missing, returned])
+    run(config, 1)
+    assert "Not detected since" not in card(page(client))
+    run(config, 2)
+    assert card(page(client)).count("Not detected since 2026-01-01") == 2
+    clock[0] += timedelta(days=365)
+    text = page(client)
+    assert "Automatic removal is off." in text
+    assert "Pending removal from" not in card(text)
+    assert managed_rows(config) == [missing, returned]
+    assert post(client, "remove", **selection(text, product("missing", "1"))).status_code == 303
+    audit(users, '"mode":"web-sync-remove"')
+    run(config, 3, [product("returned", "1")])
+    assert "Not detected since" not in card(page(client))
+    assert managed_rows(config) == [returned]
+
+
+@pytest.mark.parametrize("mode", ["off", "review"])
+def test_automatic_removal_requires_auto_mode(blank, mode):
+    config, _, client = setup(blank, mode, auto_remove="on")
+    config = replace(config, web=WebConfig(removal_grace_days=0, inventory_auto_remove=True))
+    old = row("missing", "1")
+    write_managed(config, [old])
+    run(config, 1)
+    sync.inspect(config, "Acme")
+    run(config, 2)
+    sync.inspect(config, "Acme")
+    assert managed_rows(config) == [old]
+    assert "Not detected since" in card(page(client))

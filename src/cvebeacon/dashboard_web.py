@@ -28,6 +28,7 @@ from .publication import PublicationTimeout
 from .state import StateStore
 from . import web_assets
 from . import web_inventory_actions as actions
+from . import web_inventory_sync as sync
 from . import web_reported
 from .web_assets import (COMPANION_NOTICE, client_label, directories,
                          paths, read_allowlist, save_allowlist, validate_allowlist)
@@ -74,6 +75,15 @@ _INVENTORY_UNREADABLE = ("The saved inventory for this client could not be read.
 _STATUS_CHOICES = ("monitored", "ready", "review", "service")
 _REP_CHOICES = ("any", "reported", "not", "changed")
 _CONFIDENCE_NAMES = {"high": "High", "medium": "Medium", "low": "Low"}
+_SYNC_MESSAGES = {
+    "mode": "Inventory sync setting saved.",
+    "ignore": "Product ignored until it changes.",
+    "keep-version": "Kept the inventory version.",
+    "update": "Updated the inventory version.",
+    "remove": "Removed the product from the inventory.",
+    "keep-removal": "Kept the product in the inventory.",
+    "reconsider": "The product is eligible for removal again after complete detection.",
+}
 
 
 def _site_label(item):
@@ -512,7 +522,8 @@ def create_web_blueprint(config):
         """The client's report marks; a missing file is FileNotFoundError, a bad one ValueError."""
         return web_reported.parse(read_bytes(web_reported.marks_path(output)), web_assets.client_key, client)
 
-    def render(client="", *, error=None, status=200, prefill_url="", added=0, marked=None, withdrawn=None):
+    def render(client="", *, error=None, status=200, prefill_url="", added=0, marked=None, withdrawn=None,
+               sync_notice=None):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot, snapshot_rows = [], [], None, None, []
         last_job, truncated, removed = None, False, False
@@ -520,6 +531,7 @@ def create_web_blueprint(config):
         prefill_entry = _prefill_entry(prefill_url) if prefill_url else {}
         versions_hidden = False
         available = web_assets.companion_available()
+        sync_settings, sync_view, sync_warning = None, None, None
         try:
             assets_dir, _ = directories(config)
             for path in sorted(assets_dir.glob("*.json"))[:1000]:
@@ -534,6 +546,14 @@ def create_web_blueprint(config):
                 path, output = paths(config, client)
                 document, version = read_allowlist(path, client)
                 client = document["client"]
+                try:
+                    sync_settings = sync.mode(config, path)
+                    if status == 200 and config.managed_inventory:
+                        sync_view = sync.inspect(config, client)
+                except ConfigurationError as exc:
+                    sync_warning = str(exc)
+                except (CVEBeaconError, OSError, ValueError):
+                    sync_warning = sync.WRITE_WARNING
                 document = {**document, "assets": [_editable_entry(row) for row in document["assets"]]}
                 ca = document.get("ca_bundle", "")
                 if not isinstance(ca, str) or any(0xD800 <= ord(char) <= 0xDFFF for char in ca):
@@ -688,6 +708,10 @@ def create_web_blueprint(config):
                                quick_actions=quick, reported_warning=reported_warning,
                                marked=marked, withdrawn=withdrawn, managed_enabled=config.managed_inventory,
                                ready_total=ready_total, managed_warning=managed_warning,
+                               sync_settings=sync_settings, sync_view=sync_view,
+                               sync_warning=sync_warning, sync_choices=sync.MODE_CHOICES,
+                               sync_removal_choices=sync.REMOVAL_CHOICES,
+                               sync_notice=sync_notice, sync_waiting=sync.WAITING,
                                added=added, client_key=inventory_client_key(client) if client else "",
                                status_labels=actions.STATUS_LABELS, status_badges=actions.STATUS_BADGES), status
 
@@ -702,7 +726,8 @@ def create_web_blueprint(config):
         try:
             return render(_canonical_client(config, client_label(label)) if label else "",
                           prefill_url=prefill_url, added=count("added") or 0,
-                          marked=count("marked"), withdrawn=count("withdrawn"))
+                          marked=count("marked"), withdrawn=count("withdrawn"),
+                          sync_notice=_SYNC_MESSAGES.get(_text(request.args, "sync_result", limit=20)))
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -943,20 +968,77 @@ def create_web_blueprint(config):
         except ConfigurationError:
             abort(400)
 
+    def sync_add_plan(client):
+        current = sync.session(config, client)
+        picks = request.form.getlist("pick")
+        token = _text(request.form, "sync_token", required=True, limit=64)
+        if current is None or current.settings.mode != "review" or len(picks) != 1:
+            raise ConfigurationError(sync.STALE)
+        identity = picks[0]
+        proposal = current.require(identity, token)
+        if proposal.kind != "add":
+            raise ConfigurationError(sync.STALE)
+        return current, identity, proposal, token
+
+    @blueprint.post("/inventory/sync")
+    @requires(MANAGE)
+    def inventory_sync():
+        client = form_client()
+        action = _text(request.form, "action", required=True, limit=20)
+        if action not in {"mode", "ignore", "keep-version", "update", "remove", "keep-removal", "reconsider"}:
+            abort(400)
+        lock = None
+        try:
+            lock = inventory_lock(config)
+            if action == "mode":
+                path, _ = paths(config, client)
+                document, _ = read_allowlist(path, client)
+                sync.save_mode(config, path, document["client"],
+                               _text(request.form, "mode", required=True, limit=12),
+                               _text(request.form, "auto_remove", limit=12) or "default",
+                               current_app.extensions["dashboard_users"], g.entry.proof)
+            else:
+                current = sync.session(config, client)
+                if current is None:
+                    raise ConfigurationError(sync.STALE)
+                current.decide(_text(request.form, "asset_id", required=True, limit=64),
+                               _text(request.form, "sync_token", required=True, limit=64), action)
+        except PermissionError:
+            abort(403)
+        except ConfigurationError as exc:
+            return render(client, error=str(exc), status=409)
+        except (CVEBeaconError, OSError, ValueError):
+            return render(client, error=sync.WRITE_WARNING, status=503)
+        finally:
+            if lock is not None:
+                lock.release()
+        return redirect(url_for("web.index", client=client, sync_result=action), code=303)
+
     @blueprint.post("/inventory/preview")
     @requires(MANAGE)
     def inventory_preview():
         client = form_client()
+        token, lock = "", None
         try:
-            profile, data, _, rows, skipped, unknown, description = plan(client)
+            if request.form.get("action") == "sync-add":
+                lock = inventory_lock(config)
+                current, identity, proposal, token = sync_add_plan(client)
+                profile, data = current.profile, current.previous
+                rows = [(current.evidence.products[identity], proposal.new)]
+                skipped, unknown, description = [], 0, ""
+            else:
+                profile, data, _, rows, skipped, unknown, description = plan(client)
         except (ConfigurationError, ValueError, OSError, StateError, InventoryValidationError) as exc:
             return render(client, error=str(exc) if isinstance(exc, ConfigurationError)
                           else "The products could not be checked. Check storage and retry.", status=400)
+        finally:
+            if lock is not None:
+                lock.release()
         new_assets = [asset for _, asset in rows]
         return render_template(
             "web_inventory_preview.html", client=client, rows=rows, skipped=skipped, unknown=unknown,
             revision=_revision(data), digest=actions.digest(new_assets),
-            new_inventory=data is None, label=profile["name"], description=description), 200
+            new_inventory=data is None, label=profile["name"], description=description, sync_token=token), 200
 
     @blueprint.post("/inventory/save")
     @requires(MANAGE)
@@ -969,6 +1051,12 @@ def create_web_blueprint(config):
         except ConfigurationError as exc:
             return render(client, error=str(exc), status=409)
         try:
+            if request.form.get("action") == "sync-add":
+                current, identity, proposal, _ = sync_add_plan(client)
+                if _revision(current.previous) != revision or actions.digest([proposal.new]) != digest:
+                    raise ConfigurationError(sync.STALE)
+                current.commit({identity: proposal}, "web-sync-add")
+                return redirect(url_for("web.index", client=client, added=1), code=303)
             profile, data, assets, rows, _, _, _ = plan(client)
             new_assets = [asset for _, asset in rows]
             if _revision(data) != revision or actions.digest(new_assets) != digest or not new_assets:

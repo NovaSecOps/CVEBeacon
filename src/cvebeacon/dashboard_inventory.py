@@ -32,6 +32,7 @@ from .managed_inventory import (
 )
 from .private_storage import private_directory
 from .web_inventory import MAX_BYTES, read_bytes
+from .watch.users import UserStore
 
 UPLOAD_REQUEST_BYTES = MAX_BYTES + 64 * 1024
 MAX_PASTE_BYTES = 100_000
@@ -125,18 +126,20 @@ def _notes():
     return value
 
 
-def _commit_change(config, event, key, detail, changes):
-    users = _users()
+def _commit_change(config, event, key, detail, changes, *, system=False):
+    users = UserStore(config.watch.users_database) if system else _users()
+    if system and not users.path.is_file():
+        raise StateError("The account database is required to audit inventory sync.")
     sync_directory(config.inventory_directory.parent)
     try:
         with users.transaction() as db:
-            actor = _require_writer(db)
+            actor = "system (inventory sync)" if system else _require_writer(db)
             stage_change(config.inventory_directory, db, users, actor, event, key, detail, changes)
     finally:
         recover(config.inventory_directory, users.path)
 
 
-def _publish(config, path, profile, previous, assets, mode):
+def _publish(config, path, profile, previous, assets, mode, *, sync=None, detail=None, system=False):
     """Validate the candidate and commit a recoverable inventory change."""
     label = profile["name"]
     data = encode_records(assets) if assets else None
@@ -155,6 +158,8 @@ def _publish(config, path, profile, previous, assets, mode):
             ) from exc
 
     changes = {"current": (path, data)}
+    if sync is not None:
+        changes["sync"] = sync
     profile_path = path.with_suffix(".client")
     if not profile_path.exists() and not profile_path.is_symlink():
         changes["profile"] = (profile_path, _profile_bytes(profile))
@@ -166,7 +171,8 @@ def _publish(config, path, profile, previous, assets, mode):
         else:
             changes["archive"] = (archive_path(path), previous)
     _commit_change(config, "inventory_saved" if data is not None else "inventory_removed", path.stem,
-                   {"client": label, "row_count": len(assets), "mode": mode}, changes)
+                   {"client": label, "row_count": len(assets), "mode": mode, **(detail or {})},
+                   changes, system=system)
 
 
 def inventory_lock(config):
