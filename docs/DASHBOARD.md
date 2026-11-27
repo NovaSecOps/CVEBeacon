@@ -162,28 +162,24 @@ and remain out of inventory rows when they have no direct evidence.
 Each product shows a status. **Monitored** means CVE scans cover it, either
 through the client's inventory or through saved web snapshots when
 `[inventory] web_snapshots = true`. **Ready to add** means detection found a
-usable version, or found no version at all, and no scan covers it yet. A
-product without a version is marked **No version** and is still scannable.
-**Needs review** means a person should confirm the details first: several
-versions conflict, or the result is a low-confidence banner or file name.
-**Third-party service** marks hosted services, analytics tags and CDNs
+usable version but no scan covers it yet. **Needs review** means a person must
+confirm the version first: none was disclosed, several conflict, the version is
+only a label such as `GA4`, or the result is a low-confidence banner or file
+name. **Third-party service** marks hosted services, analytics tags and CDNs
 with no package or CPE identity: they run elsewhere, so there is no installed
 version to add or scan. Confidence badges read the other way round from
 severity: High is green and Low is amber.
 
 Users with `manage_inventory` can tick products in the **By site** view and
-choose **Add selected to inventory**, typing a version for products that need
-review, or choose **Add all ready products**. A version can be left blank to
-add a product without one; that row is marked **No version** and scanned
-against every version of the product. A confirmation page lists the rows before
-anything is saved, including which rows have no version. Rows are rebuilt from
-the saved detection results, so only the selection and typed versions come from
-the form. Saving adds the rows to the client's managed inventory through the
-same validated, journaled and audited path as the Inventory page, and creates
-the client and its inventory when none exists yet. Added rows use their own
-asset IDs, so turning on web snapshots later cannot cause an asset ID collision.
-Added rows do not follow later detections; update or remove them on the client's
-Inventory page.
+choose **Add selected to inventory**, typing the version for products that need
+review, or choose **Add all ready products**. A confirmation page lists the rows
+before anything is saved. Rows are rebuilt from the saved detection results, so
+only the selection and typed versions come from the form. Saving adds the rows
+to the client's managed inventory through the same validated, journaled and
+audited path as the Inventory page, and creates the client and its inventory
+when none exists yet. Added rows use their own asset IDs, so turning on web
+snapshots later cannot cause an asset ID collision. Added rows do not follow
+later detections; update or remove them on the client's Inventory page.
 
 ### Add by filters and confidence
 
@@ -251,10 +247,9 @@ message gives the failed-site count and reason codes without naming a host.
 When versions are hidden, the page explains where to review those products.
 When resource counts are present, it also says how many script and style files
 were read from the sites and how many were skipped. Products without a version
-get a **No version** tag and a version-less snapshot row, so saved snapshots
-monitor them for every version of the product. Generic banner or file-name
-results and third-party services stay out of inventory rows. Entries to review
-translate reason codes into plain wording and retain the raw code in muted text. Redirect details explain why the hop was blocked. For an
+are listed for review and are not added to the inventory automatically.
+Entries to review translate reason codes into plain wording and retain the raw
+code in muted text. Redirect details explain why the hop was blocked. For an
 unlisted host and port, the page offers to pre-fill the add-site form; saving
 still requires a fresh authorisation attestation. Reaching the redirect limit
 points to the Maximum redirects field. Request counts include connection
@@ -280,9 +275,7 @@ uses **Configuration → Inventory**. The global default is **Off**.
 In every mode, a web-added product missing from two consecutive complete
 detections of its site gets a **Not detected since YYYY-MM-DD** badge in
 **Changes since the last scan**. It stays in the inventory and is still included
-in CVE scans. A version-less row added from Web assets is proposed for update
-when a single detected version appears; **Auto** applies it after a complete
-detection. With automatic removal off, someone must click **Remove** to
+in CVE scans. With automatic removal off, someone must click **Remove** to
 remove it. **Keep** leaves it flagged in inventory and prevents automatic
 removal. **Undo keep** clears that decision.
 The flag clears when the product is detected again. Failed, incomplete or
@@ -363,11 +356,6 @@ or an EUVD exploited-since date means **Active**. SSVC proof of concept means
 **PoC** when neither active signal is present. **None** means the catalog view
 has no active or PoC indicator. **Unknown** means the catalog view is unavailable
 for that CVE. KEV flags are displayed separately from exploitation.
-
-The **No version** column marks a technology observed without a version and is
-included in every export. Its CVEs still appear in the report: a version-less
-row is scanned against every version of the product, so the list is
-deliberately broad. No version: may be affected; confirm the version to be sure.
 
 The same filters apply to XLSX, CSV and JSON downloads. XLSX includes a window
 and filter header and separate **Technologies** and **CVEs** sheets. CSV includes
