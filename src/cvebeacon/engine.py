@@ -19,6 +19,8 @@ from .sources.epss import EPSS_URL
 from .sources.osv import OSVSource, OSVResult
 from .sources.shodan_cvedb import CVE_URL as CVEDB_CVE_URL
 
+CVEDB_ONLY_REASON = "reported by Shodan CVEDB only; confirm applicability"
+
 
 class QueryEngine:
     def __init__(self, config: AppConfig, http: HttpClient | None = None) -> None:
@@ -224,7 +226,38 @@ class QueryEngine:
         else:
             health.append(now_health("euvd", HealthStatus.DISABLED, "disabled by configuration"))
 
-        identifiers = sorted(claims)
+        # Freeze the authoritative candidate set and its decisions before any
+        # CVEDB-only row is added. CVEDB may not change these rows.
+        authoritative = sorted(claims)
+        authoritative_set = set(authoritative)
+        if self.config.sources.cve_enabled:
+            failures = 0
+            for identifier in authoritative:
+                try:
+                    for item in self._official_evidence(identifier):
+                        evidence[identifier].append(item)
+                        metrics = item.details.get("metrics", [])
+                        for metric in metrics if isinstance(metrics, list) else []:
+                            if not isinstance(metric, dict):
+                                continue
+                            for key in ("cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2_0"):
+                                data = metric.get(key)
+                                if isinstance(data, dict):
+                                    claims[identifier].append(Vulnerability(identifier, cvss_score=as_float(data.get("baseScore")), cvss_vector=data.get("vectorString"), cvss_version=data.get("version")))
+                        references = item.details.get("references", [])
+                        claims[identifier].append(Vulnerability(identifier, references=tuple(ref["url"] for ref in references if isinstance(ref, dict) and isinstance(ref.get("url"), str))))
+                        decisions[identifier].append(evaluate_cve_evidence(asset, item))
+                        if item.details.get("state") == "REJECTED":
+                            claims[identifier] = [replace(vuln, rejected=True) for vuln in claims[identifier]]
+                except (SourceError, ValueError):
+                    failures += 1
+                    decisions[identifier].append(Decision(Applicability.NEEDS_REVIEW, "official CVE applicability record could not be retrieved or parsed"))
+            status = HealthStatus.OK if failures == 0 else HealthStatus.DEGRADED
+            health.append(now_health("cve_list", status, f"{len(authoritative) - failures}/{len(authoritative)} records retrieved"))
+        else:
+            health.append(now_health("cve_list", HealthStatus.DISABLED, "disabled by configuration"))
+
+        identifiers = authoritative
         cvedb_enabled = bool(getattr(self.config.sources, "shodan_cvedb_enabled", False))
         cvedb_records: dict[str, object] = {}
         cvedb_only: set[str] = set()
@@ -241,7 +274,9 @@ class QueryEngine:
                     cpe = None
             if cpe:
                 try:
-                    discovered, cvedb_truncated = self.cvedb.discover(cpe)
+                    discovery = self.cvedb.discover(cpe)
+                    discovered = discovery.records
+                    cvedb_truncated = discovery.degraded
                     cvedb_records.update(discovered)
                     for record in discovered.values():
                         self.cvedb.remember(record)
@@ -250,15 +285,15 @@ class QueryEngine:
                             claims[record.cve_id].append(self._cvedb_vulnerability(record))
                             decisions[record.cve_id].append(Decision(
                                 Applicability.NEEDS_REVIEW,
-                                "reported by Shodan CVEDB only; confirm applicability",
+                                CVEDB_ONLY_REASON,
                             ))
                         else:
                             claims[record.cve_id].append(
                                 self._cvedb_vulnerability(record, metadata_only=True)
                             )
                     cvedb_messages.append(f"{len(discovered)} CVE results for the exact CPE")
-                    if cvedb_truncated:
-                        cvedb_messages.append("results truncated")
+                    if discovery.message:
+                        cvedb_messages.append(discovery.message)
                 except SourceError as exc:
                     cvedb_failed = True
                     cvedb_messages.append(str(exc))
@@ -289,33 +324,31 @@ class QueryEngine:
             if self.cvedb.cap_reached:
                 cvedb_messages.append("lookup cap reached")
                 cvedb_failed = True
-
-        if self.config.sources.cve_enabled:
-            failures = 0
-            for identifier in identifiers:
-                try:
-                    for item in self._official_evidence(identifier):
-                        evidence[identifier].append(item)
-                        metrics = item.details.get("metrics", [])
-                        for metric in metrics if isinstance(metrics, list) else []:
-                            if not isinstance(metric, dict):
-                                continue
-                            for key in ("cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2_0"):
-                                data = metric.get(key)
-                                if isinstance(data, dict):
-                                    claims[identifier].append(Vulnerability(identifier, cvss_score=as_float(data.get("baseScore")), cvss_vector=data.get("vectorString"), cvss_version=data.get("version")))
-                        references = item.details.get("references", [])
-                        claims[identifier].append(Vulnerability(identifier, references=tuple(ref["url"] for ref in references if isinstance(ref, dict) and isinstance(ref.get("url"), str))))
-                        decisions[identifier].append(evaluate_cve_evidence(asset, item))
-                        if item.details.get("state") == "REJECTED":
-                            claims[identifier] = [replace(vuln, rejected=True) for vuln in claims[identifier]]
-                except (SourceError, ValueError):
-                    failures += 1
-                    decisions[identifier].append(Decision(Applicability.NEEDS_REVIEW, "official CVE applicability record could not be retrieved or parsed"))
-            status = HealthStatus.OK if failures == 0 else HealthStatus.DEGRADED
-            health.append(now_health("cve_list", status, f"{len(identifiers) - failures}/{len(identifiers)} records retrieved"))
-        else:
-            health.append(now_health("cve_list", HealthStatus.DISABLED, "disabled by configuration"))
+            # A CVEDB-only row may get official metadata, but its failures stay
+            # inside CVEDB health and its decision remains needs_review.
+            official_failures = 0
+            if self.config.sources.cve_enabled:
+                for identifier in sorted(cvedb_only):
+                    try:
+                        for item in self._official_evidence(identifier):
+                            evidence[identifier].append(item)
+                            metrics = item.details.get("metrics", [])
+                            for metric in metrics if isinstance(metrics, list) else []:
+                                if not isinstance(metric, dict):
+                                    continue
+                                for key in ("cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2_0"):
+                                    data = metric.get(key)
+                                    if isinstance(data, dict):
+                                        claims[identifier].append(Vulnerability(identifier, cvss_score=as_float(data.get("baseScore")), cvss_vector=data.get("vectorString"), cvss_version=data.get("version")))
+                            references = item.details.get("references", [])
+                            claims[identifier].append(Vulnerability(identifier, references=tuple(ref["url"] for ref in references if isinstance(ref, dict) and isinstance(ref.get("url"), str))))
+                    except (SourceError, ValueError):
+                        official_failures += 1
+            if official_failures:
+                cvedb_messages.append(
+                    f"{official_failures}/{len(cvedb_only)} official CVE lookups for CVEDB-only rows failed"
+                )
+                cvedb_failed = True
 
         cisa: dict[str, Evidence] = {}
         eu: dict[str, Evidence] = {}
@@ -414,7 +447,7 @@ class QueryEngine:
                 evidence[identifier].append(self._cvedb_evidence(
                     record, cisa=identifier in cisa, eu=identifier in eu, epss_score=score
                 ))
-            if any(item.source in {"nvd", "cve_list", "euvd"} and item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for item in health):
+            if identifier in authoritative_set and any(item.source in {"nvd", "cve_list", "euvd"} and item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for item in health):
                 decisions[identifier].append(Decision(Applicability.NEEDS_REVIEW, "core applicability sources are incomplete"))
             finding = reconcile(asset, vuln, evidence[identifier], decisions[identifier])
             if identifier in cvedb_only:
@@ -422,7 +455,7 @@ class QueryEngine:
                     finding,
                     applicability=Applicability.NEEDS_REVIEW,
                     confidence="limited",
-                    reason="reported by Shodan CVEDB only; confirm applicability",
+                    reason=CVEDB_ONLY_REASON,
                 )
             severities = {(value.cvss_score, value.cvss_vector, value.cvss_version) for value in claims[identifier] if value.cvss_score is not None}
             if len(severities) > 1:
@@ -451,6 +484,12 @@ class QueryEngine:
         self._known_package_ids = defaultdict(set)
         self._known_package_aliases = defaultdict(list)
         for item in known_findings:
+            # A prior CVEDB-only finding is corroboration, not an authoritative
+            # discovery. Re-adding it from state would let it become authoritative
+            # without a core source.
+            if (item.get("reason") == CVEDB_ONLY_REASON
+                    and item.get("applicability") == Applicability.NEEDS_REVIEW.value):
+                continue
             previous_asset = Asset(**item["asset"])
             if previous_asset.identity_path in {"purl", "ecosystem", "commit"}:
                 self._known_package_ids[previous_asset.target_key].update(item["vulnerability"].get("source_ids", ()))

@@ -258,6 +258,7 @@ class HttpClient:
         """
         last_error: Exception | None = None
         retry_count = self.config.retries
+        request_headers = {**dict(headers or {}), "Accept-Encoding": "identity"}
         for attempt in range(retry_count + 1):
             self.requests += 1
             self._pace(source, minimum_interval)
@@ -269,7 +270,7 @@ class HttpClient:
                     "GET",
                     url,
                     params=params,
-                    headers=headers,
+                    headers=request_headers,
                     follow_redirects=False,
                 ) as response:
                     if response_headers is not None:
@@ -292,6 +293,11 @@ class HttpClient:
                                                      redirect_hosts=redirect_hosts, redirect_limit=redirect_limit - 1)
                         return
                     if response.status_code == 200:
+                        encoding = response.headers.get("content-encoding", "identity").strip().casefold()
+                        if encoding not in {"", "identity"}:
+                            raise SourceError(
+                                source, "source returned an unsupported content encoding"
+                            )
                         total = 0
                         for chunk in response.iter_bytes(chunk_size=65536):
                             total += len(chunk)

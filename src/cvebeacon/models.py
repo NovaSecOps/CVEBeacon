@@ -119,6 +119,15 @@ class Finding:
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
+        # Optional source fields are omitted when the source produced no value,
+        # so an off or absent source leaves the same keys as before it existed.
+        for key in (
+            "vulncheck_kev", "vulncheck_date_added", "vulncheck_ransomware",
+            "vulncheck_reported_exploits", "vulncheck_exploit_references",
+            "shodan_cvedb_kev", "shodan_cvedb_ransomware",
+        ):
+            if value["vulnerability"].get(key) is None:
+                value["vulnerability"].pop(key, None)
         value["vulnerability"]["advisory_id"] = self.vulnerability.primary_id
         value["applicability"] = self.applicability.value
         if self.vulnerability.epss_date:

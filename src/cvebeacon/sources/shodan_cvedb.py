@@ -1,14 +1,19 @@
 """Shodan CVEDB adapter for CVE enrichment and corroborating discovery.
 
 CVEDB is a keyless CVE database. Queries carry only a CVE identifier or a CPE
-2.3 name. The public API documentation could not be verified offline; the
-adapter accepts the documented field names and common aliases defensively.
+2.3 name. Every response is read through a bounded identity-encoded stream so a
+page cannot allocate more than its declared byte budget. Discovery requests a
+count first, then reads at most five 100-row pages and marks any inconsistent
+or truncated result as degraded.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..errors import SourceError
 from ..http import HttpClient
@@ -21,7 +26,12 @@ PAGE_SIZE = 100
 MAX_PAGES = 5
 MAX_RESULTS = 500
 LOOKUP_CAP = 500
+DISCOVERY_REQUEST_CAP = 250
 MAX_REFERENCES = 100
+MAX_REFERENCE_BYTES = 2048
+MAX_DETAIL_BYTES = 1 * 1024 * 1024
+MAX_PAGE_BYTES = 4 * 1024 * 1024
+MAX_COUNT_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +47,13 @@ class CVEDBRecord:
     epss: float | None = None
     epss_percentile: float | None = None
     references: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CVEDBDiscovery:
+    records: dict[str, CVEDBRecord]
+    degraded: bool = False
+    message: str | None = None
 
 
 def _text(value: Any) -> str | None:
@@ -59,6 +76,13 @@ def _flag(value: Any) -> bool | None:
     return None
 
 
+def _score(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    number = as_float(value)
+    return number if number is not None and 0 <= number <= 10 else None
+
+
 def _probability(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -66,17 +90,59 @@ def _probability(value: Any) -> float | None:
     return number if number is not None and 0 <= number <= 1 else None
 
 
+def _version(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text or len(text) > 16:
+        return None
+    try:
+        float(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return text
+
+
+def _published(value: Any) -> str | None:
+    text = _text(value)
+    if text is None:
+        return None
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (ValueError, OverflowError):
+        return None
+    return text
+
+
+def _reference_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > MAX_REFERENCE_BYTES:
+        return None
+    parsed = urlsplit(text)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username or parsed.password or port == -1):
+        return None
+    return text
+
+
 def _references(value: Any) -> tuple[str, ...]:
-    raw = value if isinstance(value, list) else [value] if value else []
+    if not isinstance(value, list):
+        return ()
     output: list[str] = []
-    for item in raw:
+    for item in value:
         if isinstance(item, str):
-            text = item.strip()
+            text = _reference_url(item)
         elif isinstance(item, dict):
-            text = str(item.get("url") or item.get("link") or "").strip()
+            text = _reference_url(item.get("url") or item.get("link"))
         else:
-            text = ""
-        if text and len(text) <= 2048 and text not in output:
+            text = None
+        if text is not None and text not in output:
             output.append(text)
         if len(output) >= MAX_REFERENCES:
             break
@@ -84,7 +150,7 @@ def _references(value: Any) -> tuple[str, ...]:
 
 
 def _identifier(item: dict[str, Any]) -> str | None:
-    return cve_id(item.get("cve_id") or item.get("cve") or item.get("id"))
+    return cve_id(item.get("cve_id"))
 
 
 def parse_record(item: Any, *, expected: str | None = None) -> CVEDBRecord:
@@ -95,29 +161,63 @@ def parse_record(item: Any, *, expected: str | None = None) -> CVEDBRecord:
         raise SourceError("shodan_cvedb", "source returned an entry without a valid CVE identifier")
     if expected is not None and identifier != expected:
         raise SourceError("shodan_cvedb", "CVE lookup identity mismatch")
+    score = _score(item.get("cvss"))
+    if score is None:
+        score = next((candidate for key in ("cvss_v4", "cvss_v3", "cvss_v2")
+                      if (candidate := _score(item.get(key))) is not None), None)
     return CVEDBRecord(
         identifier,
-        _text(item.get("summary") or item.get("description")),
-        _text(item.get("published_time") or item.get("published")),
-        as_float(item.get("cvss")),
-        _text(item.get("cvss_vector") or item.get("vector")),
-        _text(item.get("cvss_version")),
+        _text(item.get("summary")),
+        _published(item.get("published_time")),
+        score,
+        None,
+        _version(item.get("cvss_version")),
         _flag(item.get("kev")),
-        _flag(item.get("ransomware")),
+        _campaign(item.get("ransomware_campaign")),
         _probability(item.get("epss")),
-        _probability(item.get("epss_percentile") or item.get("ranking_epss")),
+        _percentile(item),
         _references(item.get("references")),
     )
 
 
+def _campaign(value: Any) -> bool | None:
+    """Preserve the documented campaign string without inventing a negative."""
+    if not isinstance(value, str):
+        return None
+    return True if value.strip().casefold() == "known" else None
+
+
+def _percentile(item: dict[str, Any]) -> float | None:
+    """Use the documented 0-1 ranking, preserving zero and unknown values."""
+    if "ranking_epss" in item:
+        return _probability(item["ranking_epss"])
+    return _probability(item.get("epss_percentile"))
+
+
+def _json(http: HttpClient, url: str, *, byte_cap: int, params: Any = None) -> Any:
+    raw = b"".join(http.stream_bytes(
+        url, source="shodan_cvedb", byte_cap=byte_cap, params=params
+    ))
+    if not raw:
+        raise SourceError("shodan_cvedb", "source returned an empty response")
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeError):
+        raise SourceError("shodan_cvedb", "source returned invalid JSON") from None
+
+
 class ShodanCVEDBSource:
-    def __init__(self, http: HttpClient, *, lookup_cap: int = LOOKUP_CAP) -> None:
+    def __init__(self, http: HttpClient, *, lookup_cap: int = LOOKUP_CAP,
+                 discovery_request_cap: int = DISCOVERY_REQUEST_CAP) -> None:
         self.http = http
         self.lookup_cap = lookup_cap
+        self.discovery_request_cap = discovery_request_cap
         self.lookups = 0
         self.cap_reached = False
+        self.discovery_requests = 0
+        self.discovery_cap_reached = False
         self._cves: dict[str, CVEDBRecord | None] = {}
-        self._cpes: dict[str, tuple[dict[str, CVEDBRecord], bool]] = {}
+        self._cpes: dict[str, CVEDBDiscovery] = {}
 
     def remember(self, record: CVEDBRecord) -> None:
         """Seed the run cache from a discovery response."""
@@ -135,8 +235,8 @@ class ShodanCVEDBSource:
             return None
         self.lookups += 1
         try:
-            payload = self.http.get_json(
-                CVE_URL.format(identifier=identifier), source="shodan_cvedb"
+            payload = _json(
+                self.http, CVE_URL.format(identifier=identifier), byte_cap=MAX_DETAIL_BYTES
             )
         except SourceError as exc:
             if exc.status_code == 404:
@@ -147,54 +247,83 @@ class ShodanCVEDBSource:
         self._cves[identifier] = record
         return record
 
+    def _discovery_request(self) -> bool:
+        if self.discovery_requests >= self.discovery_request_cap:
+            self.discovery_cap_reached = True
+            return False
+        self.discovery_requests += 1
+        return True
+
     @source_payload("shodan_cvedb")
-    def discover(self, cpe23: str) -> tuple[dict[str, CVEDBRecord], bool]:
-        """Return CVEs reported for one exact CPE and whether results were truncated."""
+    def discover(self, cpe23: str) -> CVEDBDiscovery:
+        """Return CVEs reported for one exact CPE and the coverage state."""
         if cpe23 in self._cpes:
             return self._cpes[cpe23]
         found: dict[str, CVEDBRecord] = {}
-        truncated = False
+        degraded = False
+        messages: list[str] = []
         total: int | None = None
-        for page in range(MAX_PAGES):
-            skip = page * PAGE_SIZE
-            try:
-                payload = self.http.get_json(
-                    CPE_URL,
-                    source="shodan_cvedb",
+        if not self._discovery_request():
+            result = CVEDBDiscovery({}, True, "discovery request cap reached")
+            self._cpes[cpe23] = result
+            return result
+        payload = _json(
+            self.http, CPE_URL, byte_cap=MAX_COUNT_BYTES,
+            params={"cpe23": cpe23, "count": "true"},
+        )
+        if not isinstance(payload, dict) or type(payload.get("total")) is not int or payload["total"] < 0:
+            degraded = True
+            messages.append("invalid discovery total")
+        else:
+            total = payload["total"]
+            wanted = min(total, MAX_RESULTS)
+            if total > MAX_RESULTS:
+                degraded = True
+                messages.append(f"total {total} exceeds the {MAX_RESULTS} result limit")
+            skip = 0
+            pages = 0
+            while skip < wanted and pages < MAX_PAGES:
+                if not self._discovery_request():
+                    degraded = True
+                    messages.append("discovery request cap reached")
+                    break
+                expected = min(PAGE_SIZE, wanted - skip)
+                page = _json(
+                    self.http, CPE_URL, byte_cap=MAX_PAGE_BYTES,
                     params={"cpe23": cpe23, "skip": skip, "limit": PAGE_SIZE},
                 )
-            except SourceError as exc:
-                if exc.status_code == 404:
-                    payload = {"cves": [], "total": 0}
-                else:
-                    raise
-            if not isinstance(payload, dict) or not isinstance(payload.get("cves"), list):
-                raise SourceError("shodan_cvedb", "CPE search returned an invalid response envelope")
-            items = payload["cves"]
-            for item in items:
-                record = parse_record(item)
-                if record.cve_id not in found and len(found) < MAX_RESULTS:
-                    found[record.cve_id] = record
-            total = payload.get("total")
-            if total is not None and (type(total) is not int or total < 0):
-                raise SourceError("shodan_cvedb", "CPE search returned an invalid total count")
-            expected = None if total is None else min(PAGE_SIZE, max(total - skip, 0))
-            if expected is not None and len(items) != expected:
-                raise SourceError("shodan_cvedb", "CPE search returned an incomplete page")
-            if len(found) >= MAX_RESULTS or (total is not None and skip + len(items) >= total):
-                break
-            if total is None and len(items) < PAGE_SIZE:
-                break
-        else:
-            truncated = True
-        if total is not None and total > MAX_RESULTS:
-            truncated = True
-        if len(found) >= MAX_RESULTS and (total is None or total > MAX_RESULTS):
-            truncated = True
-        self._cpes[cpe23] = (found, truncated)
-        return found, truncated
+                if not isinstance(page, dict) or not isinstance(page.get("cves"), list):
+                    raise SourceError(
+                        "shodan_cvedb", "CPE search returned an invalid response envelope"
+                    )
+                items = page["cves"]
+                if len(items) > PAGE_SIZE:
+                    raise SourceError("shodan_cvedb", "CPE search returned an oversized page")
+                if len(items) != expected:
+                    degraded = True
+                    messages.append("discovery page count is inconsistent")
+                for item in items[:expected]:
+                    record = parse_record(item)
+                    if record.cve_id in found:
+                        degraded = True
+                    else:
+                        found[record.cve_id] = record
+                pages += 1
+                skip += min(len(items), expected)
+                if len(items) < expected:
+                    break
+            if total is not None and len(found) != min(total, MAX_RESULTS):
+                degraded = True
+                messages.append("discovery CVE identifiers are incomplete or duplicated")
+        result = CVEDBDiscovery(
+            found, degraded, "; ".join(dict.fromkeys(messages)) or None
+        )
+        self._cpes[cpe23] = result
+        return result
 
 
 def fetch_cve(http: HttpClient, identifier: str) -> CVEDBRecord:
-    payload = http.get_json(CVE_URL.format(identifier=identifier), source="shodan_cvedb")
+    payload = _json(
+        http, CVE_URL.format(identifier=identifier), byte_cap=MAX_DETAIL_BYTES
+    )
     return parse_record(payload, expected=identifier)

@@ -37,8 +37,7 @@ def _payload_fingerprint(finding: dict) -> str:
         "applicability": finding["applicability"],
         "rejected": vulnerability["rejected"],
         "cvss": [vulnerability[key] for key in ("cvss_score", "cvss_vector", "cvss_version")],
-        "kev": [vulnerability.get(key) for key in ("cisa_kev", "eu_kev")]
-              + ([True] if vulnerability.get("vulncheck_kev") else []),
+        "kev": [vulnerability.get(key) for key in ("cisa_kev", "eu_kev")],
         "evidence": sorted(set(
             (
                 item["source"],
@@ -56,16 +55,6 @@ def _payload_fingerprint(finding: dict) -> str:
         )),
         "conflicts": sorted(finding["conflicts"]),
     }
-    if vulnerability.get("vulncheck_kev"):
-        value["vulncheck"] = [
-            vulnerability.get(key)
-            for key in (
-                "vulncheck_date_added",
-                "vulncheck_ransomware",
-                "vulncheck_reported_exploits",
-                "vulncheck_exploit_references",
-            )
-        ]
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

@@ -122,6 +122,7 @@ def query_package(engine, asset, data):
         except SourceError as exc:
             health.append(now_health(source, H.FAILED, str(exc)))
     vulncheck = {}
+    vulncheck_loaded = False
     vulncheck_enabled = bool(getattr(engine.config.sources, "vulncheck_enabled", False))
     if not vulncheck_enabled:
         health.append(now_health("vulncheck", H.DISABLED, "off: disabled"))
@@ -131,6 +132,7 @@ def query_package(engine, asset, data):
         try:
             if active_ids:
                 vulncheck = engine._catalog("vulncheck")
+                vulncheck_loaded = True
                 health.append(now_health("vulncheck", H.OK, f"on; catalog loaded; {len(vulncheck)} CVEs"))
             else:
                 health.append(now_health("vulncheck", H.OK, "on; not requested; no actionable CVE aliases"))
@@ -176,7 +178,7 @@ def query_package(engine, asset, data):
             if cves and finding.applicability != A.NOT_AFFECTED:
                 vuln = replace(vuln, **{source: any(identifier in catalog for identifier in cves)})
                 evidence.extend(catalog[identifier] for identifier in cves if identifier in catalog)
-        if vulncheck and cves and finding.applicability != A.NOT_AFFECTED:
+        if vulncheck_loaded and cves and finding.applicability != A.NOT_AFFECTED:
             matched = next((identifier for identifier in cves if identifier in vulncheck), None)
             vuln = replace(vuln, vulncheck_kev=matched is not None)
             if matched is not None:
