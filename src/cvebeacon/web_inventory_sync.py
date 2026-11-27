@@ -343,6 +343,17 @@ def _version_update(item, old):
         return None
 
 
+def _addition(observation, identity, item, client, managed, snapshots_on):
+    if actions.classify(item, snapshots_on=snapshots_on, managed=managed)[0] != "ready":
+        return None
+    try:
+        new = actions.build_row(item, client, actions.ready_version(item))
+    except actions.RowRefused:
+        return None
+    return _proposal(observation.id, "add", identity, item["site_id"],
+                     item.get("name") or item["product"], item["hostname"], new=new)
+
+
 def _product_changes(observation, entries, profile, assets, web_rows, snapshots_on):
     if observation.failed:
         return {}
@@ -363,19 +374,14 @@ def _product_changes(observation, entries, profile, assets, web_rows, snapshots_
             proposal = _proposal(observation.id, "update", identity, item["site_id"],
                                  name, item["hostname"], row, updated)
             decision = "keep-version"
-        elif actions.classify(item, snapshots_on=snapshots_on, managed=managed)[0] == "ready":
-            try:
-                new = actions.build_row(item, profile["name"], actions.ready_version(item))
-            except actions.RowRefused:
-                continue
-            proposal = _proposal(observation.id, "add", identity, item["site_id"],
-                                 name, item["hostname"], new=new)
-            decision = "ignore"
         else:
-            entry = entries.get(identity)
-            if entry is not None and entry["decision"] == "ignore" and observation.sites[item["site_id"]][-1]:
-                entry.update(decision="", signature="")
-            continue
+            proposal = _addition(observation, identity, item, profile["name"], managed, snapshots_on)
+            if proposal is None:
+                entry = entries.get(identity)
+                if entry is not None and entry["decision"] == "ignore" and observation.sites[item["site_id"]][-1]:
+                    entry.update(decision="", signature="")
+                continue
+            decision = "ignore"
         entry = entries.get(identity)
         if entry is not None and (entry["decision"], entry["signature"]) != (decision, proposal.signature):
             entry.update(decision="", signature="")
@@ -455,22 +461,46 @@ class Session:
         _publish(self.config, self.path, self.profile, self.previous, list(current.values()), operation,
                  sync=(self.state_file, _encoded(self.state)), detail=detail, system=automatic)
 
+    def removal_due(self, change):
+        return (self.settings.auto_remove and change.kind == "remove" and change.can_remove
+                and not change.kept and change.due <= self.now)
+
+
     def apply_auto(self):
         if self.evidence is None or not self.evidence.complete:
             self.save_observations()
             return
-        selected = {
-            identity: change for identity, change in self.proposals.items()
-            if (self.settings.auto_remove and change.can_remove and not change.kept and change.due <= self.now
-                if change.kind == "remove" else not self.state["applied"])
-        }
+        selected = {identity: change for identity, change in self.proposals.items()
+                    if self.removal_due(change) or (change.kind == "update" and not self.state["applied"])}
+        if selected or not self.state["applied"]:
+            self.select_additions(selected)
         self.state["applied"] = True
         if selected:
             self.commit(selected, "web-sync-auto", automatic=True)
             for identity in selected:
-                self.proposals.pop(identity)
+                self.proposals.pop(identity, None)
         else:
             self.save_observations()
+
+
+    def select_additions(self, selected):
+        projected = {asset.asset_id: asset for asset in self.assets}
+        for change in selected.values():
+            if change.kind == "remove":
+                projected.pop(change.old.asset_id)
+            else:
+                projected[change.new.asset_id] = change.new
+        managed = actions.ManagedIndex(projected.values())
+        previous = actions.ManagedIndex(self.assets) if self.state["applied"] else None
+        snapshots_on = self.config.inventory is not None and self.config.inventory.web_snapshots
+        for identity, item in self.evidence.products.items():
+            if previous is not None and not previous.covering(item):
+                continue  # This run already applied additions unrelated to the due removals.
+            proposal = _addition(self.evidence, identity, item, self.profile["name"], managed, snapshots_on)
+            entry = self.state["entries"].get(identity)
+            if proposal and (entry is None or (entry["decision"], entry["signature"])
+                             != ("ignore", proposal.signature)):
+                selected[identity] = proposal
 
     def decide(self, identity, token, action):
         proposal = self.require(identity, token)

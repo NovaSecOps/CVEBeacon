@@ -408,3 +408,36 @@ def test_keep_on_second_proposal_page_survives_deadline(blank, monkeypatch):
     clock[0] += timedelta(days=30)
     page(client)
     assert managed_rows(config) == [rows[-1]]
+
+
+@pytest.mark.parametrize("update,grace", [(False, 0), (False, 30), (True, 0)])
+def test_auto_covers_detected_versions_after_selected_inventory_changes(blank, monkeypatch, update, grace):
+    config, users, client = setup(blank, "auto", auto_remove="off" if update else "on")
+    config = replace(config, web=WebConfig(removal_grace_days=grace))
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    assert save(client, path="/about").status_code == 303
+    original = row("sample", "1")
+    replacement = row("sample", "1", site=PATH_SITE)
+    write_managed(config, [original])
+    detected = [product("sample", "1", site=PATH_SITE)]
+    if update:
+        detected.insert(0, product("sample", "2"))
+    for number in range(1, 2 if update else 3):
+        run(config, number, detected if update or number == 2 else [],
+            sites={BASE_SITE: True, PATH_SITE: True})
+        sync.inspect(config, "Acme")
+    if grace:
+        assert managed_rows(config) == [original]
+        clock[0] += timedelta(days=grace)
+        page(client)
+    expected = {replacement.asset_id: "1"}
+    if update:
+        expected[original.asset_id] = "2"
+    assert {asset.asset_id: asset.version for asset in managed_rows(config)} == expected
+    audit(users, '"added":1', actor="system (inventory sync)")
+    journal_count = len(users.audit_entries())
+    page(client)
+    page(client)
+    assert {asset.asset_id: asset.version for asset in managed_rows(config)} == expected
+    assert len(users.audit_entries()) == journal_count
