@@ -169,6 +169,19 @@ def _publish(config, path, profile, previous, assets, mode):
                    {"client": label, "row_count": len(assets), "mode": mode}, changes)
 
 
+def inventory_lock(config):
+    """Take the inventory lock and finish any interrupted change; the caller releases it."""
+    lock = OperationLock(config, "client-inventory")
+    if not lock.acquire():
+        raise ConfigurationError("A scan or inventory change is in progress. Try again when it finishes.")
+    try:
+        recover(config.inventory_directory, config.watch.users_database)
+    except BaseException:
+        lock.release()
+        raise
+    return lock
+
+
 def _profile_bytes(profile):
     return (json.dumps(profile, ensure_ascii=True) + "\n").encode("ascii")
 
@@ -216,15 +229,7 @@ def create_blueprint(config):
         abort(404)
 
     def locked():
-        lock = OperationLock(config, "client-inventory")
-        if not lock.acquire():
-            raise ConfigurationError("A scan or inventory change is in progress. Try again when it finishes.")
-        try:
-            recover(directory, config.watch.users_database)
-        except BaseException:
-            lock.release()
-            raise
-        return lock
+        return inventory_lock(config)
 
     def detail_url(key, profile, **kwargs):
         return url_for(".detail", key=key, name=profile["name"], **kwargs)
