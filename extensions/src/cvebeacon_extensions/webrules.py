@@ -27,6 +27,7 @@ CATEGORIES = {
     "framework",
     "cms",
     "js-library",
+    "css-library",
     "edge",
     "ops-tool",
     "hosted-platform",
@@ -575,6 +576,18 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           r"__core-js_shared__[\s\S]{0,160}?\.push\(\{\s*version\s*:\s*[\"']\d+(?:\.\d+){0,3}[^}]{0,256}?copyright\s*:\s*[\"']",
           version=r"__core-js_shared__[\s\S]{0,160}?\.push\(\{\s*version\s*:\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)[^}]{0,256}?copyright\s*:\s*[\"']",
           name="core-js", ecosystem="npm", package="core-js", confidence="high", hint="core-js"),
+    _rule("expanded-core-js-shared-record", "core-js", "core-js", "js-library", "script",
+          r"\.push\(\s*\{\s*version\s*:\s*[\"']\d+\.\d+\.\d+[\"']\s*,\s*mode\s*:[^}]{0,200}?"
+          r"copyright\s*:\s*[\"'][^\"'\n]{0,120}?(?:Pushkarev|zloirock)",
+          version=r"\.push\(\s*\{\s*version\s*:\s*[\"'](\d+\.\d+\.\d+)[\"']\s*,\s*mode\s*:[^}]{0,200}?"
+          r"copyright\s*:\s*[\"'][^\"'\n]{0,120}?(?:Pushkarev|zloirock)",
+          name="core-js", ecosystem="npm", package="core-js", confidence="high"),
+    _rule("expanded-core-js-2-core", "core-js", "core-js", "js-library", "script",
+          r"\{\s*version\s*:\s*[\"']2\.\d+\.\d+[\"']\s*\}\s*;\s*(?:[\"']number[\"']\s*==\s*typeof\s+__e\b"
+          r"|if\s*\(\s*typeof\s+__e\s*==\s*[\"']number[\"'])",
+          version=r"\{\s*version\s*:\s*[\"'](2\.\d+\.\d+)[\"']\s*\}\s*;\s*(?:[\"']number[\"']\s*==\s*typeof\s+__e\b"
+          r"|if\s*\(\s*typeof\s+__e\s*==\s*[\"']number[\"'])",
+          name="core-js", ecosystem="npm", package="core-js", confidence="high", hint="__e"),
     _rule("expanded-core-js-shared-store", "core-js", "core-js", "js-library", "script",
           r"\.push\(\{\s*version\s*:\s*[\"']\d+(?:\.\d+){0,3}(?!\d|\.\d)[^}]{0,256}?copyright\s*:\s*[\"'][\s\S]{0,4096}?__core-js_shared__",
           version=r"\.push\(\{\s*version\s*:\s*[\"'](\d+(?:\.\d+){0,3})(?!\d|\.\d)[^}]{0,256}?copyright\s*:\s*[\"'][\s\S]{0,4096}?__core-js_shared__",
@@ -658,6 +671,13 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           r"(?:animate\.css\s+-\s+Version\s+|animate\.css\s+-\s+https://animate\.style/[\s\S]{0,120}?Version\s+-\s+)(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           version=r"(?:animate\.css\s+-\s+Version\s+|animate\.css\s+-\s+https://animate\.style/[\s\S]{0,120}?Version\s+-\s+)(\d+(?:\.\d+){0,3})(?!\d|\.\d)",
           name="Animate.css", ecosystem="npm", package="animate.css", confidence="high", hint="animate.css"),
+    _rule("expanded-leaflet-script", "leafletjs", "leaflet", "js-library", "script",
+          r"\bLeaflet\s+\d+\.\d+\.\d+(?:\+[^,\n]{0,80})?\s*,\s*a JS library for interactive maps",
+          version=r"\bLeaflet\s+(\d+\.\d+\.\d+)(?:\+[^,\n]{0,80})?\s*,\s*a JS library for interactive maps",
+          name="Leaflet", ecosystem="npm", package="leaflet", confidence="high", hint="leaflet"),
+    _rule("expanded-leaflet-style", "leafletjs", "leaflet", "js-library", "style",
+          r"\.leaflet-container\b", name="Leaflet", ecosystem="npm", package="leaflet",
+          confidence="medium", hint="leaflet-container"),
     # Third-party services are recognised from link text alone; none is fetched.
     _rule("expanded-google-maps", "google", "google-maps", "hosted-platform", "url",
           r"(?:maps\.googleapis\.com/maps/api/|maps\.google\.com/maps/api/|google\.com/maps/embed)",
@@ -669,9 +689,12 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           r"(?:fonts\.googleapis\.com/|fonts\.gstatic\.com/)", name="Google Font API", confidence="high"),
     _rule("expanded-google-analytics", "google", "google-analytics", "hosted-platform", "url",
           r"google-analytics\.com/(?:analytics\.js|ga\.js)", name="Google Analytics", confidence="high"),
-    _rule("expanded-google-analytics-script", "google", "google-analytics", "hosted-platform", "script",
+    _rule("expanded-google-analytics-script", "google", "google-analytics-ga4", "hosted-platform", "script",
           r"\bgtag\s*\(\s*[\"']config[\"']\s*,\s*[\"']G-[A-Z0-9]{6,}[\"']",
-          name="Google Analytics", confidence="high", hint="gtag"),
+          name="Google Analytics (GA4)", confidence="high", hint="gtag"),
+    _rule("expanded-google-analytics-ga4-url", "google", "google-analytics-ga4", "hosted-platform", "url",
+          r"googletagmanager\.com/gtag/js\?(?:[^\"'\s]*&)?id=G-[A-Z0-9]{6,}",
+          name="Google Analytics (GA4)", confidence="high"),
     _rule("expanded-google-tag-manager", "google", "tag-manager", "hosted-platform", "url",
           r"googletagmanager\.com/gtm\.js", name="Google Tag Manager", confidence="high"),
     _rule("expanded-google-tag-manager-script", "google", "tag-manager", "hosted-platform", "script",
@@ -687,7 +710,8 @@ EXPANDED_RULES: tuple[Rule, ...] = (
           r"\bproperty\s*=\s*[\"']og:[a-z][a-z0-9:_-]*[\"']",
           name="Open Graph", confidence="high"),
     _rule("expanded-priority-hints", "web-platform", "priority-hints", "application", "html",
-          r"(?<![\w:-])fetchpriority\s*=\s*[\"']?(?:high|low|auto)\b",
+          r"(?:(?<![\w:-])fetchpriority\s*=\s*[\"']?(?:high|low|auto)\b"
+          r"|setAttribute\(\s*[\"']fetchpriority[\"']\s*,\s*[\"'](?:high|low|auto)[\"'])",
           name="Priority Hints", confidence="high"),
     _rule("expanded-google-recaptcha", "google", "recaptcha", "hosted-platform", "url",
           r"google\.com/recaptcha/api\.js", name="Google reCAPTCHA", confidence="high"),
@@ -847,7 +871,7 @@ _CDNJS_PACKAGES = {
     "font-awesome": "@fortawesome/fontawesome-free", "tailwindcss": "tailwindcss",
     "bulma": "bulma", "foundation-sites": "foundation-sites", "animate.css": "animate.css",
     "gatsby": "gatsby", "next.js": "next", "nuxt": "nuxt", "typescript": "typescript",
-    "tslib": "tslib", "svelte": "svelte",
+    "tslib": "tslib", "svelte": "svelte", "leaflet": "leaflet",
 }
 
 
@@ -1575,6 +1599,62 @@ _SERVICE_WORKER_REGISTER = re.compile(
 )
 
 
+_NG_VERSION_BODY = r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]{1,20})?)"
+_NG_LINKED = re.compile(r"[\"']ng-version[\"']\s*,\s*([A-Za-z_$][\w$]{0,40})\.full\b")
+_NG_INLINE = re.compile(
+    r"[\"']ng-version[\"']\s*,\s*new\s+[\w$]{1,40}\s*\(\s*[\"']" + _NG_VERSION_BODY
+    + r"[\"']\s*\)\s*\.full"
+)
+_NG_LITERAL = re.compile(
+    r"[\"']ng-version[\"']\s*,\s*[\"']" + _NG_VERSION_BODY + r"[\"']\s*\]"
+)
+
+
+_ANGULAR_VARIABLE_LIMIT = 8
+
+
+def _angular_assignment(text: str, variable: str, *, deadline, clock):
+    """The first ``variable=new X("version")`` not preceded by an identifier character."""
+    # A literal-first pattern lets the regex engine skip quickly to each candidate.
+    lookup = re.compile(re.escape(variable) + r"\s*=\s*new\s+[\w$]{1,40}\s*\(\s*[\"']"
+                        + _NG_VERSION_BODY + r"[\"']\s*\)")
+    for count, candidate in enumerate(lookup.finditer(text)):
+        if count % 1024 == 0 and _deadline_passed(deadline, clock):
+            return None
+        start = candidate.start()
+        if start == 0 or not (text[start - 1].isalnum() or text[start - 1] in "_$."):
+            return candidate
+    return None
+
+
+def _angular_unbannered_versions(text: str, *, deadline, clock) -> list[tuple[str, str]]:
+    """Versions from ng-version records in builds that strip the licence banner."""
+    found = []
+    assignments: dict[str, re.Match | None] = {}
+    for pattern in (_NG_LINKED, _NG_INLINE, _NG_LITERAL):
+        for index, match in enumerate(pattern.finditer(text)):
+            if index >= _ANGULAR_MARKER_LIMIT or _deadline_passed(deadline, clock):
+                break
+            if pattern is _NG_LINKED:
+                variable = match.group(1)
+                if variable not in assignments:
+                    if len(assignments) >= _ANGULAR_VARIABLE_LIMIT:
+                        continue
+                    assignments[variable] = _angular_assignment(text, variable, deadline=deadline, clock=clock)
+                assignment = assignments[variable]
+                if not assignment:
+                    continue
+                version, excerpt = assignment.group(1), (
+                    match.group(0) + " \u2026 " + assignment.group(0))
+            else:
+                version, excerpt = match.group(1), match.group(0)
+            normalized = normalize_version(version)
+            major = normalized.split(".", 1)[0]
+            if normalized and major.isdigit() and 2 <= int(major) <= 99:
+                found.append((normalized, excerpt[:MAX_EVIDENCE_EXCERPT_LENGTH]))
+    return found
+
+
 def _record_angular_bundle_versions(grouped: dict, page: Page, inline_script: str,
                                     *, deadline, clock) -> None:
     sources = [("page", inline_script)] if inline_script else []
@@ -1619,6 +1699,59 @@ def _record_angular_bundle_versions(grouped: dict, page: Page, inline_script: st
                     )
             position = marker + len(_ANGULAR_VERSION_MARKER)
             checks += 1
+        if _deadline_passed(deadline, clock):
+            return
+        if "ng-version" not in folded:
+            continue
+        for version, excerpt in _angular_unbannered_versions(text, deadline=deadline, clock=clock):
+            _record(
+                grouped, vendor="angular", product="angular", category="js-library",
+                confidence="high", evidence="script", versions=(version,), name="Angular",
+                ecosystem="npm", package="@angular/core",
+                evidence_items=(Evidence("script", source, excerpt),),
+                rule_key="angular-version-marker",
+            )
+
+
+_LEAFLET_VERSION = re.compile(
+    r"\b(?:L\.version|var\s+version)\s*=\s*[\"'](\d+\.\d+\.\d+)[\"']"
+)
+_LEAFLET_WINDOW = 2000
+_LEAFLET_LIMIT = 32
+
+
+def _record_leaflet_versions(grouped: dict, page: Page, inline_script: str,
+                            *, deadline, clock) -> None:
+    """A version assignment close to a Leaflet marker, for builds without the banner."""
+    sources = [("page", inline_script)] if inline_script else []
+    sources.extend(
+        (resource.url, resource.text[:MAX_RESOURCE_TEXT])
+        for resource in page.resources[:MAX_PAGE_RESOURCES]
+        if resource.kind == "script" and resource.text
+    )
+    for source, text in sources:
+        if _deadline_passed(deadline, clock):
+            return
+        if "leaflet" not in text.casefold():
+            continue
+        for index, match in enumerate(_LEAFLET_VERSION.finditer(text)):
+            if index >= _LEAFLET_LIMIT or _deadline_passed(deadline, clock):
+                break
+            window = text[max(0, match.start() - _LEAFLET_WINDOW):match.end() + _LEAFLET_WINDOW]
+            if "leaflet" not in window.casefold():
+                continue
+            version = normalize_version(match.group(1))
+            if not version:
+                continue
+            _record(
+                grouped, vendor="leafletjs", product="leaflet", category="js-library",
+                confidence="medium" if match.group(0).startswith("L.") else "low",
+                evidence="script", versions=(version,), name="Leaflet", ecosystem="npm",
+                package="leaflet",
+                evidence_items=(Evidence("script", source, match.group(0)),),
+                rule_key="leaflet-version-assignment",
+            )
+            break
 
 
 def _has_linked_manifest(html: str) -> bool:
@@ -1657,6 +1790,183 @@ def _record_pwa(grouped: dict, page: Page, inline_script: str, *, deadline, cloc
             rule_key="pwa-service-worker",
         )
         return
+
+
+
+# Vendors of generic observations. They are reported as products and never
+# become inventory rows.
+REVIEW_ONLY_VENDORS = frozenset({"banner", "file-name"})
+
+# Generic, low-confidence observations. They name a library from a preserved
+# banner or a versioned file name, never create an inventory row unless the
+# name is a reviewed npm package, and never repeat another detection.
+_BANNER_LIMIT = 50
+_BANNER_HEAD = 300
+_GENERIC_LIMIT = 64
+_BANNER_REJECTED = frozenset({
+    "copyright", "license", "licensed", "version", "build", "author", "date",
+    "generated", "core", "main", "app", "bundle",
+})
+_FILE_REJECTED = frozenset({
+    "main", "app", "vendor", "vendors", "runtime", "polyfills", "chunk", "bundle", "index",
+    "styles", "style", "scripts", "script", "common", "commons", "framework", "webpack",
+})
+_BANNER_LICENSE_MARK = re.compile(r"@(?:license|preserve)", re.IGNORECASE)
+_BANNER_LEAD = re.compile(r"[!*\s]*(?:@(?:license|preserve)\b[:\s*]*)?", re.IGNORECASE)
+_BANNER_NAME_VERSION = re.compile(
+    r"([A-Za-z][A-Za-z0-9 ._+-]{1,39}?)\s*[-|:,]?\s*v?(\d+(?:\.\d+){1,3})(?!\d|\.\d)"
+)
+_FILE_VERSIONED = re.compile(
+    r"([a-z][a-z0-9_]*(?:[.-][a-z][a-z0-9_]*){0,4})[-.@_]v?(\d+\.\d+(?:\.\d+){0,2})"
+    r"(?:[.-]min)?\.(?:js|mjs|css)",
+    re.IGNORECASE,
+)
+_DIR_VERSION = re.compile(r"v?(\d+\.\d+(?:\.\d+){0,2})", re.IGNORECASE)
+_HASH_NAME = re.compile(r"[a-f0-9]{8,}", re.IGNORECASE)
+
+
+def _generic_key(value: str) -> str:
+    return re.sub(r"[\s_.-]+", "", value).casefold()
+
+
+def _banner_candidates(text: str):
+    starts = set()
+    position = 0
+    while len(starts) < _BANNER_LIMIT:
+        position = text.find("/*!", position)
+        if position < 0:
+            break
+        starts.add(position)
+        position += 3
+    for index, mark in enumerate(_BANNER_LICENSE_MARK.finditer(text)):
+        if index >= _BANNER_LIMIT:
+            break
+        opener = text.rfind("/*", max(0, mark.start() - _BANNER_HEAD), mark.start())
+        if opener >= 0 and "*/" not in text[opener + 2:mark.start()]:
+            starts.add(opener)
+    return sorted(starts)[:_BANNER_LIMIT]
+
+
+def _banner_observation(text: str, start: int):
+    inner = text[start + 2:start + 2 + _BANNER_HEAD + 100]
+    end = inner.find("*/")
+    if end >= 0:
+        inner = inner[:end]
+    inner = inner[:_BANNER_HEAD]
+    lead = _BANNER_LEAD.match(inner)
+    head = inner[lead.end():] if lead else inner
+    match = _BANNER_NAME_VERSION.match(head)
+    if not match:
+        return None
+    name = match.group(1).strip(" \t\r\n-|:,")
+    words = name.split()
+    if (not 2 <= len(name) <= 40 or not name[0].isalpha() or not words
+            or name.casefold() in _BANNER_REJECTED or words[0].casefold() in _BANNER_REJECTED
+            or any(word.casefold() in {"license", "licence", "licensed"} for word in words)):
+        return None
+    version = normalize_version(match.group(2))
+    if not version:
+        return None
+    return name, version, " ".join(text[start:start + 120].split())[:MAX_EVIDENCE_EXCERPT_LENGTH]
+
+
+def _file_observation(url: str):
+    path = url.split("#", 1)[0].split("?", 1)[0]
+    segments = path.rstrip("/").rsplit("/", 3)
+    filename = segments[-1]
+    if not 4 <= len(filename) <= 100:
+        return None
+    match = _FILE_VERSIONED.fullmatch(filename)
+    if match:
+        return match.group(1), match.group(2), filename
+    if len(segments) >= 3:
+        name, version, last = segments[-3], segments[-2], filename
+        if (len(name) <= 40 and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,39}", name)
+                and _DIR_VERSION.fullmatch(version)
+                and re.fullmatch(re.escape(name) + r"(?:\.min)?\.(?:js|css)", last, re.IGNORECASE)):
+            return name, _DIR_VERSION.fullmatch(version).group(1), "/".join(segments[-3:])
+    return None
+
+
+def _record_generic(grouped: dict, page: Page, *, deadline, clock) -> None:
+    known_names = set()
+    known_packages = set()
+    for entry in grouped.values():
+        for value in (entry["name"], entry["product"], entry["package"]):
+            if value:
+                known_names.add(_generic_key(value))
+        if entry["package"]:
+            known_packages.add(entry["package"])
+    observations = []
+    for resource in page.resources[:MAX_PAGE_RESOURCES]:
+        if resource.kind not in {"script", "style"} or not resource.text:
+            continue
+        if _deadline_passed(deadline, clock):
+            return
+        text = resource.text[:MAX_ANALYSIS_TEXT]
+        for start in _banner_candidates(text):
+            found = _banner_observation(text, start)
+            if found:
+                observations.append((resource.kind, resource.url, "banner", *found))
+    urls = [(url, "") for url in page.urls[:MAX_URLS]]
+    urls.extend((resource.url, resource.kind) for resource in page.resources[:MAX_PAGE_RESOURCES]
+                if resource.kind in {"script", "style"})
+    for url, kind in urls:
+        if _deadline_passed(deadline, clock):
+            return
+        if not isinstance(url, str) or len(url) > MAX_DETECTION_TEXT:
+            continue
+        found = _file_observation(url)
+        if found:
+            observations.append((kind, url, "file", *found))
+    recorded = 0
+    generic_vendors: dict[str, str] = {}
+    for kind, source, origin, name, version, excerpt in observations:
+        if recorded >= _GENERIC_LIMIT or _deadline_passed(deadline, clock):
+            break
+        key = _generic_key(name)
+        lowered = name.casefold()
+        tokens = [token for token in re.split(r"[\s_.-]+", name) if token]
+        # A banner such as "Font Awesome Free" repeats a known "Font Awesome".
+        if (any(_generic_key("".join(tokens[:count])) in known_names
+                for count in range(1, len(tokens) + 1))
+                or not key or _HASH_NAME.fullmatch(name)
+                or not valid_detection_name(name)):
+            continue
+        if origin == "file" and lowered in _FILE_REJECTED:
+            continue
+        package = lowered if origin == "banner" and lowered in REVIEWED_PACKAGES else ""
+        if package:
+            if package in known_packages:
+                continue
+            details = _PACKAGE_PRODUCTS.get(package)
+            vendor, product, display, category = details or ("npm", package, package, "js-library")
+            _record(grouped, vendor=vendor, product=product, category=category,
+                    confidence="low", evidence=kind, versions=(version,), name=display,
+                    ecosystem="npm", package=package,
+                    evidence_items=(Evidence(kind, source, excerpt),),
+                    rule_key="generic-banner")
+            known_packages.add(package)
+        else:
+            category = "css-library" if kind == "style" else "js-library"
+            evidence = kind or "url"
+            if origin == "file":
+                evidence = "url"
+                category = "css-library" if source.split("?", 1)[0].casefold().endswith(".css") else "js-library"
+            vendor = "banner" if origin == "banner" else "file-name"
+            # Other versions of the same generic library merge into one detection.
+            if generic_vendors.setdefault(key, vendor) != vendor:
+                continue
+            _record(grouped, vendor=vendor,
+                    product=re.sub(r"[^a-z0-9]+", "-", lowered).strip("-"),
+                    category=category, confidence="low", evidence=evidence,
+                    versions=(version,), name=name,
+                    evidence_items=(Evidence(evidence, source, excerpt),),
+                    rule_key="generic-" + origin)
+            recorded += 1
+            continue
+        known_names.add(key)
+        recorded += 1
 
 
 def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detection, ...]:
@@ -1720,6 +2030,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
         _record_angular_bundle_versions(grouped, page, inline_script,
                                        deadline=deadline, clock=clock)
         _record_pwa(grouped, page, inline_script, deadline=deadline, clock=clock)
+        _record_leaflet_versions(grouped, page, inline_script, deadline=deadline, clock=clock)
 
     if not _deadline_passed(deadline, clock):
         seen_cdn = set()
@@ -1772,6 +2083,8 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
             grouped[key]["evidence_types"].update(retired.evidence_types)
 
     _apply_implications(grouped)
+    if not _deadline_passed(deadline, clock):
+        _record_generic(grouped, page, deadline=deadline, clock=clock)
     detections = tuple(
         Detection(entry["vendor"], entry["product"], entry["category"], entry["cpe"],
                   entry["confidence"], tuple(sorted(entry["versions"])),

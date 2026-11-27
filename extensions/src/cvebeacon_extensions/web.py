@@ -46,7 +46,7 @@ from . import __version__, webrules
 from .contract import (ExtensionError, MAX_BYTES, MAX_RECORDS, MAX_TEXT, _atomic, _regular,
                        canonical_records, decode_json, json_bytes, label, output_lock,
                        read_bytes, read_snapshot, timestamp, utc_now, write_snapshot)
-from .webrules import Resource, detect, package_url, page_from
+from .webrules import REVIEW_ONLY_VENDORS, Resource, detect, package_url, page_from
 
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
@@ -2068,6 +2068,15 @@ def _resource_content_type(headers: Mapping[str, tuple[str, ...]], kind: str) ->
     return media_type, media_type in allowed, False
 
 
+def _is_json_object(body: bytes) -> bool:
+    if len(body) > RESOURCE_FILE_LIMIT:
+        return False
+    try:
+        return isinstance(json.loads(body.decode("utf-8-sig")), dict)
+    except (ValueError, RecursionError):
+        return False
+
+
 def _looks_like_html(body: bytes) -> bool:
     sample = body[:512].lstrip(b"\xef\xbb\xbf\t\r\n\f ").lower()
     return sample.startswith((b"<!doctype html", b"<html", b"<head", b"<body"))
@@ -2212,6 +2221,8 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             if is_html or _looks_like_html(body):
                 skip("html-response", candidate, response_type, len(body))
                 continue
+            if not accepted_type and candidate.kind == "manifest" and _is_json_object(body):
+                accepted_type = True
             if not accepted_type:
                 skip("wrong-content-type", candidate, response_type, len(body))
                 continue
@@ -2802,7 +2813,10 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         detail = dict(base, asset_id=row_id)
         preferred = _preferred_version(detection.versions)
         implied = _implied_only(detection)
-        if not implied and preferred is not None and (preferred or detection.cpe):
+        review_only = detection.vendor in REVIEW_ONLY_VENDORS
+        row_created = False
+        if (not implied and not review_only and preferred is not None
+                and (preferred or detection.cpe)):
             try:
                 purl = package_url(detection.ecosystem, detection.package, preferred)
                 row = {
@@ -2822,6 +2836,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                 }
                 normalize_asset(Asset(**row))
                 rows.extend(canonical_records([row]))
+                row_created = True
             except (InventoryValidationError, ValueError):
                 _quarantine(reviews, omissions, base)
                 continue
@@ -2830,7 +2845,8 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                        product=detection.product, versions=list(detection.versions),
                        category=detection.category, evidence_types=list(detection.evidence_types),
                        categories=list(detection.categories or (detection.category,)),
-                       confidence=detection.confidence, evidence=_public_evidence(detection, file_metadata))
+                       confidence=detection.confidence, evidence=_public_evidence(detection, file_metadata),
+                       inventory=row_created)
         if detection.name:
             product["name"] = detection.name
         if detection.ecosystem and detection.package:
@@ -2838,7 +2854,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         if detection.implied_by:
             product["implied_by"] = list(detection.implied_by)
         products.append(product)
-        if implied:
+        if implied or review_only:
             continue
         if preferred is None:
             reviews.append(dict(detail, reason="version-conflict", product=display,
