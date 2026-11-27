@@ -25,12 +25,14 @@ HOST = "example.invalid"
 BASE_SITE = ("https", HOST, 443, "/")
 PATH_SITE = ("https", HOST, 443, "/about")
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+SCOPED_IDENTITY = ["\0".join(("product", "sample", "sample", "o", *("*",) * 7)), ""]
 
 
-def product(name, version, *, npm=False, site=BASE_SITE):
-    item = dict(asset_id=web_asset_id("Acme", *site, name, name),
-                site_id=web_asset_id("Acme", *site), hostname=site[1], vendor=name,
-                product=name, versions=[version], inventory=True)
+def product(name, version, *, npm=False, site=BASE_SITE, client="Acme", identity=None):
+    identity = identity or [name, name]
+    item = dict(asset_id=web_asset_id(client, *site, *identity),
+                site_id=web_asset_id(client, *site), hostname=site[1], vendor=name,
+                product=name, versions=[version], inventory=True, sync_identity=identity)
     if npm:
         item.update(ecosystem="npm", package=name)
     return item
@@ -43,9 +45,10 @@ def row(name, version, *, client="Acme", site=BASE_SITE, npm=False, manual=True)
                  client=client)
 
 
-def run(config, number, products=(), *, sites=None, status="success", started=True, stopped=0):
-    allowlist, output = web_assets.paths(config, "Acme")
-    _, revision = web_assets.read_allowlist(allowlist, "Acme")
+def run(config, number, products=(), *, sites=None, status="success", started=True, stopped=0,
+        client="Acme", sync_schema=True):
+    allowlist, output = web_assets.paths(config, client)
+    _, revision = web_assets.read_allowlist(allowlist, client)
     sites = {BASE_SITE: True} if sites is None else sites
     date = (NOW + timedelta(hours=number)).isoformat()
     metadata = dict(started_at=date, ended_at=date, status=status, asset_count=len(sites),
@@ -56,9 +59,11 @@ def run(config, number, products=(), *, sites=None, status="success", started=Tr
         metadata["inventory_sync"] = {"id": f"{number:032x}",
                                       "previous": f"{number - 1:032x}" if number > 1 else "",
                                       "allowlist": revision,
-                                      "sites": {web_asset_id("Acme", *site): [*site, complete]
+                                      "sites": {web_asset_id(client, *site): [*site, complete]
                                                 for site, complete in sites.items()}}
-    detail = {"client": "Acme", "products": list(products), "reviews": [], "run": metadata}
+        if sync_schema:
+            metadata["inventory_sync"]["schema"] = 1
+    detail = {"client": client, "products": list(products), "reviews": [], "run": metadata}
     web_assets.replace_bytes(output.with_name(output.name + ".review.json"), json.dumps(detail).encode("utf-8"))
 
 
@@ -441,3 +446,116 @@ def test_auto_covers_detected_versions_after_selected_inventory_changes(blank, m
     page(client)
     assert {asset.asset_id: asset.version for asset in managed_rows(config)} == expected
     assert len(users.audit_entries()) == journal_count
+
+
+@pytest.mark.parametrize("status,headers,padding,body_complete", [
+    (206, {}, b"<html>", True),
+    (200, {"content-range": ("bytes 0-5/100",)}, b"<html>", True),
+    (200, {"content-type": ("multipart/byteranges; boundary=range",)}, b"<html>", True),
+    (200, {}, b"<html>", False),
+    (200, {}, b'<meta name="generator" content="other">' * 4096, True),
+])
+def test_incomplete_producer_observations_do_not_count_as_misses(blank, status, headers, padding,
+                                                               body_complete):
+    from cvebeacon_extensions.web import _Response, detect_web
+
+    config, _, _ = setup(blank, "auto", auto_remove="on")
+    config = replace(config, web=WebConfig(removal_grace_days=0))
+    allowlist, output = web_assets.paths(config, "Acme")
+    document, _ = web_assets.read_allowlist(allowlist, "Acme")
+    document["assets"][0].update(hostname="example.com", authorized_at="2026-01-01T00:00:00Z",
+                                 expires_at="2027-01-01T00:00:00Z")
+    web_assets.save_allowlist(allowlist, document)
+    responses = {
+        "/robots.txt": _Response(404, {}, b""),
+        "/favicon.ico": _Response(404, {}, b""),
+    }
+
+    class Transport:
+        def fetch(self, endpoint, address, **kwargs):
+            return responses[endpoint.path]
+
+    class Resolver:
+        def resolve(self, hostname, port):
+            return ("93.184.216.34",)
+
+    def observe(body, code=200, fields=None, *, complete=True):
+        responses["/"] = _Response(code, fields or {}, body, body_complete=complete)
+        detect_web(allowlist, output, client="Acme", source_id="test-web",
+                   resolver=Resolver(), transport=Transport(),
+                   host_interval=0, max_workers=1, now=lambda: NOW + timedelta(days=1))
+        return json.loads(read_bytes(output.with_name(output.name + ".review.json")))
+
+    generator = b'<meta name="generator" content="WordPress 6.2">'
+    first = observe(generator)
+    (item,) = [item for item in first["products"] if item["product"] == "wordpress"]
+    assert all(site[-1] for site in first["run"]["inventory_sync"]["sites"].values())
+    old = Asset(item["asset_id"] + "-m", item["vendor"], item["product"], "6.2",
+                system_id="example.com", client="Acme")
+    write_managed(config, [old])
+    sync.inspect(config, "Acme")
+    for _ in range(2):
+        detail = observe(padding + (generator if len(padding) > 6 else b""), status,
+                         {"server": ("nginx/1.25.3",), **headers}, complete=body_complete)
+        assert any(item["product"] == "nginx" for item in detail["products"])
+        current = sync.inspect(config, "Acme")
+        assert old in managed_rows(config)
+        assert current.state["entries"][old.asset_id[:-2]]["misses"] == 0
+        assert not any(site[-1] for site in detail["run"]["inventory_sync"]["sites"].values())
+
+
+@pytest.mark.parametrize("inputs", [["sample", "sample"], SCOPED_IDENTITY])
+def test_foreign_product_ids_cannot_drive_sync(blank, inputs):
+    config, _, client = setup(blank)
+    item = product("sample", "2", identity=inputs)
+    foreign = web_asset_id("Other", *BASE_SITE, *inputs)
+    imported = replace(row("sample", "1"), asset_id=foreign + "-m")
+    write_managed(config, [imported])
+    run(config, 1, [item])
+    assert "New · 2" in card(page(client))
+    run(config, 2, [{**item, "asset_id": foreign}])
+    text = page(client)
+    assert sync.RESULTS_WARNING in text
+    assert "Version changed ·" not in text
+    assert managed_rows(config) == [imported]
+
+
+def test_scoped_product_association_cannot_move_to_another_endpoint(blank):
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    config = replace(config, web=WebConfig(removal_grace_days=0))
+    assert save(client, path="/about").status_code == 303
+    item = product("sample", "1", identity=SCOPED_IDENTITY)
+    sites = {BASE_SITE: True, PATH_SITE: True}
+    old = replace(row("sample", "1"), asset_id=item["asset_id"] + "-m")
+    write_managed(config, [old])
+    run(config, 1, [item], sites=sites)
+    current = sync.inspect(config, "Acme")
+    current.state["entries"][item["asset_id"]]["site"] = web_asset_id("Acme", *PATH_SITE)
+    web_assets.replace_bytes(sync.state_path(config, "Acme"), sync._encoded(current.state))
+    for number in (2, 3):
+        run(config, number, sites=sites)
+        current = sync.inspect(config, "Acme")
+        assert current.state["entries"][item["asset_id"]]["misses"] == 0
+        assert old in managed_rows(config)
+
+
+def test_previous_producer_schema_cannot_authorize_absence(blank):
+    config, _, client = setup(blank)
+    old = row("missing", "1")
+    write_managed(config, [old])
+    for number in (1, 2):
+        run(config, number, sync_schema=False)
+        assert "Not detected since" not in card(page(client))
+    assert managed_rows(config) == [old]
+
+
+def test_unrepresentable_flag_deadline_warns_without_changing_inventory(blank):
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    old = row("missing", "1")
+    write_managed(config, [old])
+    run(config, 1)
+    current = sync.inspect(config, "Acme")
+    current.state["entries"][old.asset_id[:-2]]["since"] = "9999-12-31T00:00:00Z"
+    web_assets.replace_bytes(sync.state_path(config, "Acme"), sync._encoded(current.state))
+    assert sync.STATE_WARNING in page(client)
+    assert managed_rows(config) == [old]

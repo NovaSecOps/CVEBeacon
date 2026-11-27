@@ -22,12 +22,33 @@ MAX_BYTES = 32 * 1024 * 1024
 MANIFEST_KEYS = {"contract", "collector", "collector_version", "source_id", "generated_at",
                  "observed_at", "sha256", "record_count", "status", "omissions"}
 WEB_ASSET_ID = re.compile(r"web-[0-9a-f]{32}")
+WEB_SYNC_SCHEMA = 1
+UNSAFE_ID_TEXT = re.compile(r"[\x00-\x1f\x7f\ud800-\udfff]")
 
 
 def web_asset_id(client, scheme, hostname, port, path, vendor="", product=""):
     """Derive the stable ID of a web observation or one of its products."""
     value = "\0".join((client, scheme, hostname, str(port), path, vendor, product)).encode("utf-8")
     return "web-" + hashlib.sha256(value).hexdigest()[:32]
+
+
+def valid_sync_identity(inputs):
+    """Validate the two bounded hash inputs serialized by the web detector."""
+    if (not isinstance(inputs, list) or len(inputs) != 2
+            or any(not isinstance(part, str) or len(part) > 8192 for part in inputs)):
+        return False
+    vendor, product = inputs
+    if product:
+        return bool(vendor and not any(UNSAFE_ID_TEXT.search(part) for part in inputs))
+    # Scoped CPEs and disambiguated products use the detector's NUL-delimited
+    # identity key as the first input and an empty second input.
+    parts = vendor.split("\0")
+    length = len(parts)
+    if length not in (2, 3, 11) or any(not part or UNSAFE_ID_TEXT.search(part) for part in parts):
+        return False
+    if length == 2:
+        return parts[0] in {"npm", "name"}
+    return parts[0] == "product" and (length == 3 or parts[3] in {"a", "o", "h"})
 
 
 def read_bytes(path: Path, limit: int = MAX_BYTES) -> bytes:

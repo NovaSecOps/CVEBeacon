@@ -21,7 +21,8 @@ from .managed_inventory import client_key
 from .models import Asset
 from .private_storage import private_directory
 from .sources.nvd import split_cpe23
-from .web_inventory import MAX_BYTES, WEB_ASSET_ID, _timestamp, decode_json, read_bytes, web_asset_id
+from .web_inventory import (MAX_BYTES, UNSAFE_ID_TEXT, WEB_ASSET_ID, WEB_SYNC_SCHEMA, _timestamp,
+                            decode_json, read_bytes, valid_sync_identity, web_asset_id)
 
 LOG = logging.getLogger("cvebeacon")
 MISSES_REQUIRED = 2
@@ -123,14 +124,15 @@ def _empty_state(client):
             "applied": False, "entries": {}, "summary": None}
 
 
-def _empty_entry(site):
-    return {"site": site, "misses": 0, "since": None, "decision": "", "signature": ""}
+def _empty_entry(site, identity=None):
+    return {"site": site, "identity": identity, "misses": 0, "since": None,
+            "decision": "", "signature": ""}
 
 
 def _read_state(path, client):
     initial = _empty_state(client)
     try:
-        state = decode_json(read_bytes(path), max_items=MAX_CONTRACT_ROWS * 7 + 32)
+        state = decode_json(read_bytes(path), max_items=MAX_CONTRACT_ROWS * 10 + 32)
         if (not isinstance(state, dict) or set(state) != set(initial)
                 or state["client"] != initial["client"] or type(state["applied"]) is not bool
                 or any(state[key] != "" and not _matches(_RUN_ID, state[key])
@@ -138,9 +140,13 @@ def _read_state(path, client):
                 or not isinstance(state["entries"], dict) or len(state["entries"]) > MAX_CONTRACT_ROWS):
             raise ValueError
         for identity, entry in state["entries"].items():
+            older_entry = isinstance(entry, dict) and set(entry) == set(_empty_entry("")) - {"identity"}
+            if older_entry:
+                entry["identity"] = None
             if (not _matches(WEB_ASSET_ID, identity) or not isinstance(entry, dict)
                     or set(entry) != set(_empty_entry(""))
                     or not _matches(WEB_ASSET_ID, entry["site"])
+                    or (entry["identity"] is not None and not valid_sync_identity(entry["identity"]))
                     or type(entry["misses"]) is not int or not 0 <= entry["misses"] <= MISSES_REQUIRED
                     or entry["decision"] not in ("", "ignore", "keep-version", "keep-removal")
                     or (entry["decision"] in ("ignore", "keep-version")
@@ -151,6 +157,9 @@ def _read_state(path, client):
                 raise ValueError
             if entry["since"] is not None:
                 _timestamp(entry["since"])
+            if older_entry:
+                # Retain the flag and decision while establishing a fresh streak.
+                entry["misses"] = 0
         summary = state["summary"]
         if summary is not None:
             if (not isinstance(summary, dict) or set(summary) != {"at", "added", "updated", "removed"}
@@ -195,7 +204,11 @@ def _observation(output, client, allowlist_revision, asset_count):
         metadata = run and run.get("inventory_sync")
         if metadata is None or (run and run.get("review_truncated")):
             return None
-        if (not isinstance(metadata, dict) or set(metadata) != {"id", "previous", "allowlist", "sites"}
+        if isinstance(metadata, dict) and "schema" not in metadata:
+            return None  # Earlier producers could mark incomplete pages complete.
+        if (not isinstance(metadata, dict)
+                or set(metadata) != {"schema", "id", "previous", "allowlist", "sites"}
+                or type(metadata["schema"]) is not int or metadata["schema"] != WEB_SYNC_SCHEMA
                 or not _matches(_RUN_ID, metadata["id"])
                 or (metadata["previous"] != "" and not _matches(_RUN_ID, metadata["previous"]))
                 or metadata["previous"] == metadata["id"] or not _matches(_DIGEST, metadata["allowlist"])
@@ -211,9 +224,11 @@ def _observation(output, client, allowlist_revision, asset_count):
             if (not isinstance(endpoint, list) or len(endpoint) != 5
                     or endpoint[0] not in ("http", "https")
                     or not isinstance(endpoint[1], str) or not 0 < len(endpoint[1]) <= 253
+                    or UNSAFE_ID_TEXT.search(endpoint[1])
                     or type(endpoint[2]) is not int or not 1 <= endpoint[2] <= 65535
                     or not isinstance(endpoint[3], str) or not endpoint[3].startswith("/")
-                    or len(endpoint[3]) > 2048 or type(endpoint[4]) is not bool
+                    or len(endpoint[3]) > 2048 or UNSAFE_ID_TEXT.search(endpoint[3])
+                    or type(endpoint[4]) is not bool
                     or identity != web_asset_id(client, *endpoint[:4])):
                 raise ValueError
         failed = run["status"] == "failed"
@@ -226,9 +241,15 @@ def _observation(output, client, allowlist_revision, asset_count):
         by_id = {}
         for item in products:
             identity, site = item.get("asset_id"), item.get("site_id")
+            inputs = item.get("sync_identity")
             if (not _matches(WEB_ASSET_ID, identity) or not _matches(WEB_ASSET_ID, site)
                     or identity == site or identity in by_id or site not in sites
-                    or item.get("hostname") != sites[site][1] or type(item.get("inventory")) is not bool):
+                    or item.get("hostname") != sites[site][1] or type(item.get("inventory")) is not bool
+                    or not valid_sync_identity(inputs)
+                    or any(not isinstance(item.get(field), str) or not item[field]
+                           for field in ("vendor", "product"))
+                    or (inputs[1] and inputs != [item.get("vendor"), item.get("product")])
+                    or identity != web_asset_id(client, *sites[site][:4], *inputs)):
                 raise ValueError
             item["in_inventory"] = item["inventory"]
             by_id[identity] = item
@@ -239,16 +260,24 @@ def _observation(output, client, allowlist_revision, asset_count):
         raise ConfigurationError(RESULTS_WARNING) from None
 
 
-def _legacy_site(client, identity, row, endpoints):
+def _legacy_association(client, identity, row, endpoints):
     # Old managed rows saved the hostname only. Recompute the full product ID
     # before treating any of those rows as belonging to a particular endpoint.
     vendors = {row.vendor}
     if row.vendor == row.product:
         vendors.update(actions.GENERIC_VENDORS)
     for site, endpoint in endpoints.get(row.system_id, ()):
-        if any(identity == web_asset_id(client, *endpoint[:4], vendor, row.product) for vendor in vendors):
-            return site
+        for vendor in vendors:
+            inputs = [vendor, row.product]
+            if valid_sync_identity(inputs) and identity == web_asset_id(client, *endpoint[:4], *inputs):
+                return site, inputs
     return None
+
+
+def _verified_association(client, identity, row, entry, endpoint):
+    inputs = entry["identity"]
+    return (endpoint is not None and endpoint[1] == row.system_id and inputs is not None
+            and identity == web_asset_id(client, *endpoint[:4], *inputs))
 
 
 def _web_rows(assets):
@@ -263,7 +292,7 @@ def _advance(state, observation, client, web_rows, applied_at):
         for identity in (web_rows.keys() & observation.products.keys()) - state["entries"].keys():
             item = observation.products[identity]
             if item["hostname"] == web_rows[identity].system_id:
-                state["entries"][identity] = _empty_entry(item["site_id"])
+                state["entries"][identity] = _empty_entry(item["site_id"], item["sync_identity"])
         return
     endpoints = {}
     for site, endpoint in observation.sites.items():
@@ -276,21 +305,27 @@ def _advance(state, observation, client, web_rows, applied_at):
         row = web_rows.get(identity)
         if item is not None:
             site = item["site_id"]
+            if row is not None and item["hostname"] != row.system_id:
+                continue
             if entry is None or entry["site"] != site or entry["since"] is not None:
-                entries[identity] = _empty_entry(site)
+                entries[identity] = _empty_entry(site, item["sync_identity"])
             else:
-                entry["misses"] = 0
+                entry.update(identity=item["sync_identity"], misses=0)
             continue
         if row is None:
             if entry["site"] in observation.sites and observation.sites[entry["site"]][-1]:
                 entries.pop(identity)  # Forget an Ignore after a complete absence.
             continue
-        site = entry["site"] if entry else _legacy_site(client, identity, row, endpoints)
-        if site is None:
-            continue
-        if entry is None:
-            entry = entries[identity] = _empty_entry(site)
-        if not observation.failed and site in observation.sites and observation.sites[site][-1]:
+        if entry is None or entry["identity"] is None:
+            association = _legacy_association(client, identity, row, endpoints)
+            if association is None or (entry is not None and entry["site"] != association[0]):
+                continue
+            site, inputs = association
+            entry = entries.setdefault(identity, _empty_entry(site))
+            entry.update(identity=inputs, misses=0)
+        endpoint = observation.sites.get(entry["site"])
+        if (not observation.failed and _verified_association(client, identity, row, entry, endpoint)
+                and endpoint[-1]):
             misses = entry["misses"] if continuity else 0
             entry["misses"] = min(MISSES_REQUIRED, misses + 1)
             if entry["misses"] == MISSES_REQUIRED and entry["since"] is None:
@@ -390,7 +425,7 @@ def _product_changes(observation, entries, profile, assets, web_rows, snapshots_
     return proposals
 
 
-def _missing_products(observation, state, web_rows, grace):
+def _missing_products(observation, state, web_rows, grace, client):
     proposals = {}
     for identity, row in web_rows.items():
         entry = state["entries"].get(identity)
@@ -399,12 +434,16 @@ def _missing_products(observation, state, web_rows, grace):
         site = entry["site"]
         endpoint = observation.sites.get(site) if observation else None
         kept = entry["decision"] == "keep-removal"
-        can_remove = bool(endpoint and endpoint[1] == row.system_id and observation.complete
+        can_remove = bool(_verified_association(client, identity, row, entry, endpoint) and observation.complete
                           and entry["misses"] == MISSES_REQUIRED)
         since = _timestamp(entry["since"])
+        try:
+            due = since + timedelta(days=grace)
+        except OverflowError:
+            raise ConfigurationError(STATE_WARNING) from None
         proposals[identity] = _proposal(
             state["run"], "remove", identity, site, row.product, row.system_id, old=row,
-            since=since, due=since + timedelta(days=grace),
+            since=since, due=due,
             kept=kept, can_remove=can_remove)
     return proposals
 
@@ -450,7 +489,8 @@ class Session:
                 counts["removed"] += 1
             else:
                 current[change.new.asset_id] = change.new
-                self.state["entries"][identity] = _empty_entry(change.site_id)
+                item = self.evidence.products[identity]
+                self.state["entries"][identity] = _empty_entry(change.site_id, item["sync_identity"])
                 counts["added" if change.kind == "add" else "updated"] += 1
         if len(current) > MAX_CONTRACT_ROWS:
             raise ConfigurationError("This inventory would exceed 100,000 rows. Select fewer products.")
@@ -519,7 +559,9 @@ class Session:
         if action in {"update", "remove"}:
             self.commit({identity: proposal}, "web-sync-" + action)
             return
-        entry = self.state["entries"].setdefault(identity, _empty_entry(proposal.site_id))
+        item = self.evidence.products.get(identity) if self.evidence is not None else None
+        entry = self.state["entries"].setdefault(
+            identity, _empty_entry(proposal.site_id, item["sync_identity"] if item else None))
         entry.update(decision="" if action == "reconsider" else action,
                      signature=proposal.signature if action in {"ignore", "keep-version"} else "")
         private_directory(self.path.parent, owner_only=True)
@@ -558,7 +600,7 @@ def session(config, client):
         snapshots_on = config.inventory is not None and config.inventory.web_snapshots
         if settings.mode in {"review", "auto"}:
             proposals = _product_changes(observation, state["entries"], profile, assets, web_rows, snapshots_on)
-    proposals.update(_missing_products(observation, state, web_rows, config.web.removal_grace_days))
+    proposals.update(_missing_products(observation, state, web_rows, config.web.removal_grace_days, client))
     return Session(config, settings, path, profile, previous, assets, state, observation, proposals, before, now)
 
 

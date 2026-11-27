@@ -42,7 +42,7 @@ from cvebeacon.errors import InventoryValidationError
 from cvebeacon.identity import normalize_asset, validate_client_name
 from cvebeacon.models import Asset
 from cvebeacon.web_assets import RUN_TIMEOUT, RUN_TIMEOUT_REASON
-from cvebeacon.web_inventory import web_asset_id
+from cvebeacon.web_inventory import WEB_SYNC_SCHEMA, valid_sync_identity, web_asset_id
 
 from . import __version__, webrules
 from .contract import (ExtensionError, MAX_BYTES, MAX_RECORDS, MAX_TEXT, _atomic, _regular,
@@ -239,6 +239,13 @@ class _Response:
     status: int
     headers: Mapping[str, tuple[str, ...]]
     body: bytes
+    body_complete: bool = True
+
+    @property
+    def complete(self):
+        return (self.body_complete and self.status == 200 and "content-range" not in self.headers
+                and not any(value.split(";", 1)[0].strip().casefold() == "multipart/byteranges"
+                            for value in self.headers.get("content-type", ())))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1040,7 +1047,7 @@ class StdlibTransport:
                              clock=self._clock, limit=body_limit, wire_limit=wire_limit,
                              before_read=lambda: self._timeout(connection.sock, deadline),
                              on_decoded=on_decoded)
-            return _Response(response.status, headers, body)
+            return _Response(response.status, headers, body, response.length in (None, 0))
         except ssl.SSLError as exc:
             if self._clock() >= deadline:
                 raise _TimeoutFailure("asset exceeded the total time limit") from exc
@@ -1885,6 +1892,7 @@ class _CachedResource:
     redirected: bool
     fingerprint_stopped: bool = False
     fingerprint_error: bool = False
+    analysis_truncated: bool = False
     dependencies: dict[tuple[str, str, bool], tuple[_ResourceReference, ...]] = field(default_factory=dict)
 
     def matches(self, candidate: _ResourceCandidate, referrer: Endpoint,
@@ -2219,7 +2227,7 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             if clock() >= fetch_deadline:
                 skip(time_reason, candidate, response_type, len(body))
                 continue
-            if success.response.status != 200:
+            if not success.response.complete:
                 skip("http-status", candidate, response_type, len(body))
                 continue
             _, accepted_type, is_html = _resource_content_type(success.response.headers, candidate.kind)
@@ -2237,10 +2245,11 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             text = "" if candidate.kind == "icon" else _decode_resource(body, success.response.headers)
             resource = Resource(endpoint.url, candidate.kind, text)
             detections = ()
+            truncated = False
             if clock() < deadline:
                 try:
-                    detections = tuple(_detect_builtin(page_from({}, "", resources=[resource]),
-                                                       clock=clock, deadline=deadline))
+                    detections, truncated = _detect_builtin(page_from({}, "", resources=[resource]),
+                                                           clock=clock, deadline=deadline)
                 except Exception:
                     skip("analysis-error", candidate, response_type, len(body))
             legacy_stopped = legacy_error = False
@@ -2250,7 +2259,7 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             cached = _CachedResource(
                 resource, (digest, len(body)), detections, success.referrer_policy, success.vary,
                 page_endpoint, candidate.referrer_policy, (candidate.authorization, *page_authorizations),
-                bool(success.redirects), legacy_stopped, legacy_error,
+                bool(success.redirects), legacy_stopped, legacy_error, truncated,
             )
             resources_fetched += 1
             if clock() < deadline and not legacy_stopped and not legacy_error:
@@ -2267,6 +2276,8 @@ def _fetch_resources(html: str, page_endpoint: Endpoint, page_asset: WebAsset,
             elif resource.url not in conflicting_metadata:
                 metadata[resource.url] = cached.metadata
             on_detections(cached.detections)
+            if cached.analysis_truncated:
+                skip("analysis-limit", candidate)
             fingerprints.stopped |= cached.fingerprint_stopped
             fingerprints.error |= cached.fingerprint_error
             fingerprints.add_resource(resource)
@@ -2619,6 +2630,7 @@ class _AssetResult:
     fingerprint_error: bool = False
     run_stopped: bool = False
     analysis_stopped: bool = False
+    response_complete: bool = False
 
 
 def _stopped_observation(asset: WebAsset, client: str) -> _AssetResult:
@@ -2629,15 +2641,24 @@ def _stopped_observation(asset: WebAsset, client: str) -> _AssetResult:
 
 def _detect_builtin(page, *, clock, deadline: float):
     if clock() >= deadline:
-        return ()
+        return (), True
     detector = getattr(webrules, "detect", detect)
     parameters = inspect.signature(detector).parameters
+    truncated = page.truncated
+
+    def mark_truncated():
+        nonlocal truncated
+        truncated = True
+
+    kwargs = {}
     if "deadline" in parameters:
-        kwargs = {"deadline": deadline}
+        kwargs["deadline"] = deadline
         if "clock" in parameters:
             kwargs["clock"] = clock
-        return detector(page, **kwargs)
-    return detector(page)
+    if "on_truncated" in parameters:
+        kwargs["on_truncated"] = mark_truncated
+    detections = tuple(detector(page, **kwargs))
+    return detections, truncated
 
 
 class _ExternalObservation:
@@ -2788,6 +2809,7 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
 
     html = _decode_html(success.response.body, success.response.headers)
     page = None
+    truncated = False
     if clock() < deadline:
         page = page_from(success.response.headers, html)
         if {"cookie", "set-cookie"}.intersection(page.headers):
@@ -2795,7 +2817,8 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             # raw fields from matching before those readers are upgraded.
             page = replace(page, headers={name: values for name, values in page.headers.items()
                                           if name not in {"cookie", "set-cookie"}})
-        merge(_detect_builtin(page, clock=clock, deadline=deadline), completed=True)
+        detections, truncated = _detect_builtin(page, clock=clock, deadline=deadline)
+        merge(detections, completed=True)
     if on_page is not None:
         observed_at = success.observed_at
         page_detections = merged.copy()
@@ -2842,7 +2865,8 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
             state.final_budget = None
             final_budget.lock.release()
     merge(fingerprints.finish(), completed=True)
-    analysis_stopped = clock() >= deadline or bool(_ANALYSIS_STOP_REASONS.intersection(resources_skipped))
+    analysis_stopped = (truncated or clock() >= deadline or bool(resources_skipped["analysis-limit"])
+                        or bool(_ANALYSIS_STOP_REASONS.intersection(resources_skipped)))
     if analysis_stopped or fingerprints.stopped or fingerprints.error or resources_skipped["analysis-error"]:
         omissions.add("analysis-incomplete")
     return _observation_result(
@@ -2851,6 +2875,7 @@ def _observe(asset: WebAsset, allowlist: Allowlist, fetcher: Fetcher, *,
         file_metadata=file_metadata, skip_details=skip_details,
         fingerprint_stopped=fingerprints.stopped,
         fingerprint_error=fingerprints.error, analysis_stopped=analysis_stopped,
+        response_complete=success.response.complete,
     )
 
 
@@ -2866,7 +2891,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                         file_metadata: Mapping[str, tuple[str, int]] | None = None,
                         skip_details: _SkipDetails | None = None,
                         fingerprint_stopped: bool = False, fingerprint_error: bool = False,
-                        analysis_stopped: bool = False) -> _AssetResult:
+                        analysis_stopped: bool = False, response_complete: bool = False) -> _AssetResult:
     base = _observation_ids(client, asset.endpoint)
     rows: list[dict] = []
     if resources_skipped is None:
@@ -2893,10 +2918,14 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         # its row keeps the same ID across scans whatever else is found beside it. The
         # legacy vendor/product ID stays with the plain application identity.
         scoped = isinstance(key, tuple) and len(key) > 3 and key[0] == "product"
-        row_id = (_asset_id(client, asset.endpoint, "\0".join(key), "") if scoped
-                  else _asset_id(client, asset.endpoint, detection.vendor, detection.product))
+        identity = ["\0".join(key), ""] if scoped else [detection.vendor, detection.product]
+        row_id = _asset_id(client, asset.endpoint, *identity)
         if row_id in used_ids:
-            row_id = _asset_id(client, asset.endpoint, "\0".join(key), "")
+            identity = ["\0".join(key), ""]
+            row_id = _asset_id(client, asset.endpoint, *identity)
+        if not valid_sync_identity(identity):
+            _quarantine(reviews, omissions, base)
+            continue
         used_ids.add(row_id)
         detail = dict(base, asset_id=row_id)
         # A rule-defined label such as "GA4" is shown but is never an inventory version.
@@ -2931,7 +2960,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
                 _quarantine(reviews, omissions, base)
                 continue
 
-        product = dict(asset_id=row_id, site_id=base["asset_id"],
+        product = dict(asset_id=row_id, site_id=base["asset_id"], sync_identity=identity,
                        hostname=asset.endpoint.hostname, vendor=detection.vendor,
                        product=detection.product, versions=list(detection.versions),
                        category=detection.category, evidence_types=list(detection.evidence_types),
@@ -2965,7 +2994,7 @@ def _observation_result(asset: WebAsset, client: str, observed_at: datetime,
         resources_skipped_by_reason=dict(resources_skipped),
         skip_details=skip_details if skip_details is not None else _SkipDetails(),
         fingerprint_stopped=fingerprint_stopped, fingerprint_error=fingerprint_error,
-        analysis_stopped=analysis_stopped,
+        analysis_stopped=analysis_stopped, response_complete=response_complete,
     )
 
 
@@ -3088,7 +3117,7 @@ def _sync_site_complete(result):
     # and standard probes that explicitly returned that the file was absent.
     skipped = result.resources_skipped_by_reason
     harmless = {"duplicate", "external-origin", "source-map", "unsupported-scheme"}
-    return (result.observed_at is not None and not result.run_stopped
+    return (result.observed_at is not None and result.response_complete and not result.run_stopped
             and not result.analysis_stopped and not result.fingerprint_stopped
             and not result.fingerprint_error
             and result.omissions <= {"no-technologies", "version-unknown", "version-conflict"}
@@ -3219,7 +3248,7 @@ def detect_web(path: Path, output: Path, *, client: str, source_id: str,
                 endpoint.scheme, endpoint.hostname, endpoint.port, endpoint.path,
                 status != "failed" and not (run_stopped or fingerprint_error) and _sync_site_complete(result),
             ]
-        sync = {"id": uuid.uuid4().hex, "previous": _previous_sync_run(output),
+        sync = {"schema": WEB_SYNC_SCHEMA, "id": uuid.uuid4().hex, "previous": _previous_sync_run(output),
                 "allowlist": allowlist.revision, "sites": sites}
         saved_snapshot_generated_at = _saved_snapshot_time(output, now())
         run = dict(started_at=started_at, ended_at=now().isoformat(), status=status,

@@ -280,7 +280,8 @@ inventory and prevents automatic removal. **Undo keep** clears that decision.
 The flag clears when the product is detected again. Failed, incomplete or
 stopped observations cannot count as misses for the affected site. Removals
 wait for a complete scan. If an older row cannot be tied to an exact endpoint,
-sync waits until it observes that product again.
+sync waits until it observes that product again. Run detection again after
+upgrading from a detector that did not record verifiable sync evidence.
 
 Automatic removal is **off by default**. Enable **Automatic removal in Auto
 mode** for a client or set the global `inventory_auto_remove` option, and use

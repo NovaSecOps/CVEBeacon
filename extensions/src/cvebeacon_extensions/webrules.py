@@ -950,6 +950,7 @@ class Page:
     urls: tuple[str, ...]
     html: str
     resources: tuple[Resource, ...] = ()
+    truncated: bool = False
     _bounded: bool = field(default=False, init=False, compare=False, repr=False)
 
 
@@ -1100,7 +1101,7 @@ _JAVASCRIPT_TYPES = frozenset({
 })
 
 
-def _inline_script_text(html: str, deadline=None, clock=None) -> str:
+def _inline_script_text(html: str, deadline=None, clock=None, on_truncated=lambda: None) -> str:
     scripts = []
     remaining = MAX_ANALYSIS_TEXT
     position = 0
@@ -1125,40 +1126,51 @@ def _inline_script_text(html: str, deadline=None, clock=None) -> str:
         if script_type and script_type not in _JAVASCRIPT_TYPES:
             continue
         text = _scalar_text(html[tag_end:closing.start()], remaining)
+        if len(text) < closing.start() - tag_end:
+            on_truncated()
         if text:
             scripts.append(text)
             remaining -= len(text)
+    if (index == MAX_PAGE_RESOURCES or remaining == 0) and _SCRIPT_OPEN.search(html, position):
+        on_truncated()
     return "\n".join(scripts)
 
 
 def page_from(headers: Mapping[str, Iterable[str]], html: str,
               resources: Iterable[Resource] = ()) -> Page:
     bounded_html = _scalar_text(html, MAX_ANALYSIS_TEXT)
+    truncated = bounded_html != html
     normalized = {}
     cookies: dict[str, None] = {}
     if isinstance(headers, Mapping):
         for index, (raw_name, raw_values) in enumerate(headers.items()):
             if index >= 256:
+                truncated = True
                 break
             name = _scalar_text(str(raw_name).strip().casefold(), 256)
             if not name:
                 continue
             values = (raw_values,) if isinstance(raw_values, str) else raw_values
             try:
+                values = tuple(islice(values, 65))
+                truncated |= len(values) > 64
                 if name in {"set-cookie", "cookie"}:
-                    for value in islice(values, 64):
+                    for value in values[:64]:
                         if len(cookies) >= _MAX_COOKIE_NAMES:
+                            truncated = True
                             break
                         if isinstance(value, str):
+                            truncated |= len(value) > MAX_ANALYSIS_TEXT
                             for cookie_name in _cookie_names(value, multiple=name == "cookie"):
-                                cookies.setdefault(cookie_name, None)
                                 if len(cookies) >= _MAX_COOKIE_NAMES:
+                                    truncated = True
                                     break
+                                cookies.setdefault(cookie_name, None)
                     continue
-                safe_values = tuple(
-                    value for value in (_scalar_text(str(item), MAX_ANALYSIS_TEXT)
-                                        for item in islice(values, 64)) if value
-                )
+                raw_text = tuple(str(item) for item in values[:64])
+                bounded_values = tuple(_scalar_text(item, MAX_ANALYSIS_TEXT) for item in raw_text)
+                truncated |= raw_text != bounded_values
+                safe_values = tuple(value for value in bounded_values if value)
             except TypeError:
                 continue
             if safe_values:
@@ -1166,23 +1178,31 @@ def page_from(headers: Mapping[str, Iterable[str]], html: str,
     generators = []
     urls = []
     for tag, attributes in _html_tags(bounded_html):
-        if tag == "meta" and len(generators) < MAX_GENERATORS:
-            if attributes.get("name", "").strip().casefold() == "generator":
-                content = _scalar_text(attributes.get("content", ""), MAX_DETECTION_TEXT)
-                if content:
-                    generators.append(content)
-        elif tag in {"script", "link"} and len(urls) < MAX_URLS:
-            attribute_name = "src" if tag == "script" else "href"
-            value = _scalar_text(attributes.get(attribute_name, ""), MAX_DETECTION_TEXT)
-            if value:
-                urls.append(value)
+        if tag == "meta" and attributes.get("name", "").strip().casefold() == "generator":
+            raw, values, limit = attributes.get("content", ""), generators, MAX_GENERATORS
+        elif tag in {"script", "link"}:
+            raw = attributes.get("src" if tag == "script" else "href", "")
+            values, limit = urls, MAX_URLS
+        else:
+            continue
+        value = _scalar_text(raw, MAX_DETECTION_TEXT)
+        truncated |= value != raw
+        if value:
+            if len(values) < limit:
+                values.append(value)
+            else:
+                truncated = True
         if len(generators) >= MAX_GENERATORS and len(urls) >= MAX_URLS:
+            truncated = True
             break
 
     clean_resources = []
     remaining = MAX_TOTAL_RESOURCE_TEXT
     try:
-        for resource in islice(resources, MAX_PAGE_RESOURCES):
+        for index, resource in enumerate(resources):
+            if index == MAX_PAGE_RESOURCES:
+                truncated = True
+                break
             if not isinstance(resource, Resource) or resource.kind not in {
                     "script", "style", "manifest", "robots", "icon"}:
                 continue
@@ -1191,12 +1211,13 @@ def page_from(headers: Mapping[str, Iterable[str]], html: str,
                 continue
             text_limit = min(MAX_RESOURCE_TEXT, remaining)
             text = _scalar_text(resource.text, text_limit) if text_limit else ""
+            truncated |= text != resource.text or len(text) > MAX_ANALYSIS_TEXT
             remaining -= len(text)
             clean_resources.append(Resource(url, resource.kind, text))
     except TypeError:
         pass
     page = Page(normalized, tuple(cookies), tuple(generators), tuple(urls), bounded_html,
-                tuple(clean_resources))
+                tuple(clean_resources), truncated)
     object.__setattr__(page, "_bounded", True)
     return page
 
@@ -1226,6 +1247,7 @@ def _bounded_page(page: Page) -> Page | None:
         tuple(dict.fromkeys((*bounded.urls, *urls)))[:MAX_URLS],
         bounded.html,
         bounded.resources,
+        page.truncated or bounded.truncated,
     )
     object.__setattr__(bounded_page, "_bounded", True)
     return bounded_page
@@ -1556,7 +1578,7 @@ def _deadline_passed(deadline, clock) -> bool:
     return deadline is not None and clock() >= deadline
 
 
-def _artifact_matches(resource: Resource, deadline, clock):
+def _artifact_matches(resource: Resource, deadline, clock, on_truncated):
     encoded = resource.text.encode("utf-8")
     whole_digest = hashlib.sha256(encoded).hexdigest()
     for digest, entry in BUILT_ARTIFACT_HASHES.items():
@@ -1584,6 +1606,9 @@ def _artifact_matches(resource: Resource, deadline, clock):
                 yield entry, marker.decode("ascii")
                 break
             position += 1
+        else:
+            if encoded.find(marker, position, len(encoded) - length + offset + len(marker)) != -1:
+                on_truncated()
 
 
 def _valid_detection(detection: Detection) -> bool:
@@ -1649,18 +1674,22 @@ def _angular_assignment(text: str, variable: str, *, deadline, clock):
     return None
 
 
-def _angular_unbannered_versions(text: str, *, deadline, clock) -> list[tuple[str, str]]:
+def _angular_unbannered_versions(text: str, *, deadline, clock, on_truncated) -> list[tuple[str, str]]:
     """Versions from ng-version records in builds that strip the licence banner."""
     found = []
     assignments: dict[str, re.Match | None] = {}
     for pattern in (_NG_LINKED, _NG_INLINE, _NG_LITERAL):
         for index, match in enumerate(pattern.finditer(text)):
-            if index >= _ANGULAR_MARKER_LIMIT or _deadline_passed(deadline, clock):
+            if index >= _ANGULAR_MARKER_LIMIT:
+                on_truncated()
+                break
+            if _deadline_passed(deadline, clock):
                 break
             if pattern is _NG_LINKED:
                 variable = match.group(1)
                 if variable not in assignments:
                     if len(assignments) >= _ANGULAR_VARIABLE_LIMIT:
+                        on_truncated()
                         continue
                     assignments[variable] = _angular_assignment(text, variable, deadline=deadline, clock=clock)
                 assignment = assignments[variable]
@@ -1678,7 +1707,7 @@ def _angular_unbannered_versions(text: str, *, deadline, clock) -> list[tuple[st
 
 
 def _record_angular_bundle_versions(grouped: dict, page: Page, inline_script: str,
-                                    *, deadline, clock) -> None:
+                                    *, deadline, clock, on_truncated) -> None:
     sources = [("page", inline_script)] if inline_script else []
     sources.extend(
         (resource.url, resource.text[:MAX_RESOURCE_TEXT])
@@ -1692,6 +1721,7 @@ def _record_angular_bundle_versions(grouped: dict, page: Page, inline_script: st
         constructor_versions = set()
         for index, constructor in enumerate(_ANGULAR_VERSION_CONSTRUCTOR.finditer(text)):
             if index >= _ANGULAR_MARKER_LIMIT:
+                on_truncated()
                 break
             version = normalize_version(constructor.group(1))
             if version:
@@ -1721,11 +1751,15 @@ def _record_angular_bundle_versions(grouped: dict, page: Page, inline_script: st
                     )
             position = marker + len(_ANGULAR_VERSION_MARKER)
             checks += 1
+        else:
+            if folded.find(_ANGULAR_VERSION_MARKER, position) >= 0:
+                on_truncated()
         if _deadline_passed(deadline, clock):
             return
         if "ng-version" not in folded:
             continue
-        for version, excerpt in _angular_unbannered_versions(text, deadline=deadline, clock=clock):
+        for version, excerpt in _angular_unbannered_versions(
+                text, deadline=deadline, clock=clock, on_truncated=on_truncated):
             _record(
                 grouped, vendor="angular", product="angular", category="js-library",
                 confidence="high", evidence="script", versions=(version,), name="Angular",
@@ -1743,7 +1777,7 @@ _LEAFLET_LIMIT = 32
 
 
 def _record_leaflet_versions(grouped: dict, page: Page, inline_script: str,
-                            *, deadline, clock) -> None:
+                            *, deadline, clock, on_truncated) -> None:
     """A version assignment close to a Leaflet marker, for builds without the banner."""
     sources = [("page", inline_script)] if inline_script else []
     sources.extend(
@@ -1757,7 +1791,10 @@ def _record_leaflet_versions(grouped: dict, page: Page, inline_script: str,
         if "leaflet" not in text.casefold():
             continue
         for index, match in enumerate(_LEAFLET_VERSION.finditer(text)):
-            if index >= _LEAFLET_LIMIT or _deadline_passed(deadline, clock):
+            if index >= _LEAFLET_LIMIT:
+                on_truncated()
+                break
+            if _deadline_passed(deadline, clock):
                 break
             window = text[max(0, match.start() - _LEAFLET_WINDOW):match.end() + _LEAFLET_WINDOW]
             if "leaflet" not in window.casefold():
@@ -1851,7 +1888,7 @@ def _generic_key(value: str) -> str:
     return re.sub(r"[\s_.-]+", "", value).casefold()
 
 
-def _banner_candidates(text: str):
+def _banner_candidates(text: str, on_truncated):
     starts = set()
     position = 0
     while len(starts) < _BANNER_LIMIT:
@@ -1860,12 +1897,18 @@ def _banner_candidates(text: str):
             break
         starts.add(position)
         position += 3
+    else:
+        if text.find("/*!", position) >= 0:
+            on_truncated()
     for index, mark in enumerate(_BANNER_LICENSE_MARK.finditer(text)):
         if index >= _BANNER_LIMIT:
+            on_truncated()
             break
         opener = text.rfind("/*", max(0, mark.start() - _BANNER_HEAD), mark.start())
         if opener >= 0 and "*/" not in text[opener + 2:mark.start()]:
             starts.add(opener)
+    if len(starts) > _BANNER_LIMIT:
+        on_truncated()
     return sorted(starts)[:_BANNER_LIMIT]
 
 
@@ -1910,7 +1953,7 @@ def _file_observation(url: str):
     return None
 
 
-def _record_generic(grouped: dict, page: Page, *, deadline, clock) -> None:
+def _record_generic(grouped: dict, page: Page, *, deadline, clock, on_truncated) -> None:
     known_names = set()
     known_packages = set()
     for entry in grouped.values():
@@ -1926,7 +1969,7 @@ def _record_generic(grouped: dict, page: Page, *, deadline, clock) -> None:
         if _deadline_passed(deadline, clock):
             return
         text = resource.text[:MAX_ANALYSIS_TEXT]
-        for start in _banner_candidates(text):
+        for start in _banner_candidates(text, on_truncated):
             found = _banner_observation(text, start)
             if found:
                 observations.append((resource.kind, resource.url, "banner", *found))
@@ -1944,7 +1987,10 @@ def _record_generic(grouped: dict, page: Page, *, deadline, clock) -> None:
     recorded = 0
     generic_vendors: dict[str, str] = {}
     for kind, source, origin, name, version, excerpt in observations:
-        if recorded >= _GENERIC_LIMIT or _deadline_passed(deadline, clock):
+        if recorded >= _GENERIC_LIMIT:
+            on_truncated()
+            break
+        if _deadline_passed(deadline, clock):
             break
         key = _generic_key(name)
         lowered = name.casefold()
@@ -1991,7 +2037,8 @@ def _record_generic(grouped: dict, page: Page, *, deadline, clock) -> None:
         recorded += 1
 
 
-def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detection, ...]:
+def detect(page: Page, *, deadline=None, clock=time.monotonic,
+           on_truncated=lambda: None) -> tuple[Detection, ...]:
     """Return bounded passive detections completed before the absolute deadline."""
     if _deadline_passed(deadline, clock):
         return ()
@@ -2004,7 +2051,9 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
         for resource in page.resources
         if resource.kind in {"script", "style"} and resource.text
     }
-    inline_script = _inline_script_text(page.html, deadline, clock)
+    if page.truncated:
+        on_truncated()
+    inline_script = _inline_script_text(page.html, deadline, clock, on_truncated)
     folded_inline = inline_script.casefold()
     for compiled in _rule_index():
         if _deadline_passed(deadline, clock):
@@ -2052,9 +2101,10 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
 
     if not _deadline_passed(deadline, clock):
         _record_angular_bundle_versions(grouped, page, inline_script,
-                                       deadline=deadline, clock=clock)
+                                       deadline=deadline, clock=clock, on_truncated=on_truncated)
         _record_pwa(grouped, page, inline_script, deadline=deadline, clock=clock)
-        _record_leaflet_versions(grouped, page, inline_script, deadline=deadline, clock=clock)
+        _record_leaflet_versions(grouped, page, inline_script, deadline=deadline, clock=clock,
+                                 on_truncated=on_truncated)
 
     if not _deadline_passed(deadline, clock):
         seen_cdn = set()
@@ -2069,6 +2119,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
             if unique in seen_cdn:
                 continue
             if len(seen_cdn) >= MAX_CDN_DETECTIONS:
+                on_truncated()
                 break
             seen_cdn.add(unique)
             _record(grouped, vendor=vendor, product=product, name=name, category=category,
@@ -2081,7 +2132,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
         for resource in page.resources:
             if _deadline_passed(deadline, clock):
                 break
-            for exact, excerpt in _artifact_matches(resource, deadline, clock):
+            for exact, excerpt in _artifact_matches(resource, deadline, clock, on_truncated):
                 vendor, product, name, category, ecosystem, package, version, _kind = exact
                 _record(grouped, vendor=vendor, product=product, name=name, category=category,
                         confidence="high", evidence=resource.kind, versions=(version,),
@@ -2108,7 +2159,7 @@ def detect(page: Page, *, deadline=None, clock=time.monotonic) -> tuple[Detectio
 
     _apply_implications(grouped)
     if not _deadline_passed(deadline, clock):
-        _record_generic(grouped, page, deadline=deadline, clock=clock)
+        _record_generic(grouped, page, deadline=deadline, clock=clock, on_truncated=on_truncated)
     detections = tuple(
         Detection(entry["vendor"], entry["product"], entry["category"], entry["cpe"],
                   entry["confidence"], tuple(sorted(entry["versions"])),
