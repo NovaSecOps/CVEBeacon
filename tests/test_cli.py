@@ -69,8 +69,11 @@ def test_live_doctor_failure_exits_nonzero(local_config, monkeypatch):
 
 
 @pytest.mark.parametrize("args,path", [(["--ecosystem", "PyPI", "--product", "requests", "--version", "2.31.0"], "ecosystem"),
+    (["--ecosystem", "PyPI", "--product", "requests"], "ecosystem"),
     (["--purl", "pkg:npm/%40scope/MixedCase@1.2.3"], "purl"),
-    (["--cpe", "cpe:2.3:a:acme:widget:1:*:*:*:*:*:*:*"], "cpe")])
+    (["--purl", "pkg:npm/%40scope/MixedCase"], "purl"),
+    (["--cpe", "cpe:2.3:a:acme:widget:1:*:*:*:*:*:*:*"], "cpe"),
+    (["--cpe", "cpe:2.3:a:acme:widget:*:*:*:*:*:*:*:*"], "cpe")])
 def test_explicit_queries_are_normalized_without_state(local_config, monkeypatch, capsys, args, path):
     def query(config, assets):
         assert assets[0].identity_path == path
@@ -81,7 +84,7 @@ def test_explicit_queries_are_normalized_without_state(local_config, monkeypatch
 
 
 @pytest.mark.parametrize("args", [["--purl", "not-a-purl"], ["--purl", "pkg:pypi/requests@1", "--version", "2"],
-    ["--ecosystem", "PyPI", "--product", "requests"], ["--vendor", " ", "--product", "a", "--version", "1"]])
+    ["--vendor", " ", "--product", "a", "--version", "1"]])
 def test_invalid_queries_fail_before_network(local_config, args):
     assert cli.main(["--config", str(local_config), "query", *args]) == 2
 
