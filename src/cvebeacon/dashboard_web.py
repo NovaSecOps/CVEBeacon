@@ -6,6 +6,7 @@ import json
 import math
 import re
 import stat
+import unicodedata
 from urllib.parse import urlsplit
 
 from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
@@ -27,6 +28,7 @@ from .publication import PublicationTimeout
 from .state import StateStore
 from . import web_assets
 from . import web_inventory_actions as actions
+from . import web_reported
 from .web_assets import (COMPANION_NOTICE, client_label, directories,
                          paths, read_allowlist, save_allowlist, validate_allowlist)
 from .web_inventory import decode_json, read_bytes, read_web_snapshot
@@ -69,6 +71,8 @@ _NO_SITE = "Site not recorded"
 _INVENTORY_UNREADABLE = ("The saved inventory for this client could not be read. "
                          "Open the client's Inventory page to check it.")
 _STATUS_CHOICES = ("monitored", "ready", "review", "service")
+_REP_CHOICES = ("any", "reported", "not", "changed")
+_CONFIDENCE_NAMES = {"high": "High", "medium": "Medium", "low": "Low"}
 
 
 def _site_label(item):
@@ -89,6 +93,7 @@ def _filter_args(args, categories, sites):
     inventory = single("inv", 16)
     category = single("category")
     site = single("site", 256)
+    reported = single("rep", 16)
     return {
         "conf": conf,
         "version": version if version in {"with", "without"} else "any",
@@ -96,8 +101,71 @@ def _filter_args(args, categories, sites):
         "category": category if category in categories else "",
         "site": site if site in sites else "",
         "tech": single("tech"),
+        "rep": reported if reported in _REP_CHOICES else "any",
         "view": "tech" if single("view", 8) == "tech" else "site",
     }
+
+
+def _filters_active(flt):
+    return (flt["conf"] != set(_CONFIDENCE_CHOICES) or flt["version"] != "any" or flt["inv"] != "any"
+            or flt["rep"] != "any" or bool(flt["category"] or flt["site"] or flt["tech"]))
+
+
+def _matches(item, flt):
+    """Whether a decorated product passes the filters. The page and the add actions share this."""
+    needle = flt["tech"].casefold()
+    return bool(
+        (item["confidence_class"] in flt["conf"] or (
+            item["confidence_class"] == "neutral" and flt["conf"] == set(_CONFIDENCE_CHOICES)))
+        and (flt["version"] == "any" or item["has_version"] == (flt["version"] == "with"))
+        and (flt["inv"] == "any" or item["status"] == flt["inv"])
+        and (flt["rep"] == "any" or item["rep"] == flt["rep"])
+        and (not flt["category"] or flt["category"] in item["category_labels"])
+        and (not flt["site"] or _site_label(item) == flt["site"])
+        and (not needle or needle in item["display_name"].casefold()))
+
+
+def _filter_text(flt):
+    """Plain words for the confirmation page: which filter produced the list."""
+    parts = []
+    if flt["conf"] != set(_CONFIDENCE_CHOICES):
+        names = [_CONFIDENCE_NAMES[level] for level in _CONFIDENCE_CHOICES if level in flt["conf"]]
+        parts.append(" or ".join(names) + " confidence")
+    if flt["version"] != "any":
+        parts.append("a detected version" if flt["version"] == "with" else "no detected version")
+    if flt["category"]:
+        parts.append("category " + flt["category"])
+    if flt["site"]:
+        parts.append("site " + flt["site"])
+    if flt["tech"]:
+        parts.append("a name containing \u201c" + flt["tech"] + "\u201d")
+    if flt["rep"] != "any":
+        parts.append({"reported": "a report mark", "not": "no report mark",
+                      "changed": "a version changed since it was reported"}[flt["rep"]])
+    if flt["inv"] != "any":
+        parts.append("status " + actions.STATUS_LABELS[flt["inv"]])
+    return "Ready products with " + ", ".join(parts) if parts else "All ready products"
+
+
+def _decorate_product(item):
+    """Display fields derived from one saved product; shared by the page and the add actions."""
+    item["display_name"] = item.get("name") or f"{item.get('vendor', '')}/{item.get('product', '')}"
+    versions = [version for version in item.get("versions", []) if version.strip()]
+    item["has_version"] = bool(versions)
+    item["display_version"] = ", ".join(versions) or "Version not disclosed"
+    confidence = item.get("confidence", "").casefold()
+    item["confidence_label"] = confidence.title() if confidence in _CONFIDENCE_NAMES else "Unknown"
+    item["confidence_class"] = confidence if confidence in _CONFIDENCE_NAMES else "neutral"
+    item["category_labels"] = item.get("categories", [item.get("category") or "Category not recorded"])
+
+
+def _report_state(item, marks):
+    """not, reported, or changed (the version shown now differs from the marked one)."""
+    mark = marks.get(item.get("asset_id"))
+    item["mark"] = mark
+    if mark is None:
+        return "not"
+    return "reported" if mark["version"] == web_reported.shown_version(item) else "changed"
 
 
 def _technology_rows(rows):
@@ -125,6 +193,10 @@ def _technology_rows(rows):
         group["status"] = actions.best_status(entry["status"] for entry in group["items"])
         group["cve"] = _merge_cve(entry["cve"] for entry in group["items"])
         group["site_count"] = len(group["sites"])
+        marked = [entry for entry in group["items"] if entry["mark"] is not None]
+        group["reported_sites"] = len({_site_label(entry) for entry in marked})
+        group["reported_changed"] = any(entry["rep"] == "changed" for entry in marked)
+        group["reported_at"] = max((entry["mark"]["reported_at"] for entry in marked), default="")
         group["version_counts"] = sorted(
             ((v, n) for v, n in group["versions"].items() if v), key=lambda pair: (-pair[1], pair[0]))
         group["undisclosed"] = group["versions"].get("", 0)
@@ -435,7 +507,11 @@ def create_web_blueprint(config):
     def manager():
         return current_app.extensions["dashboard_jobs"]
 
-    def render(client="", *, error=None, status=200, prefill_url="", added=0):
+    def read_marks(output, client):
+        """The client's report marks; a missing file is FileNotFoundError, a bad one ValueError."""
+        return web_reported.parse(read_bytes(web_reported.marks_path(output)), web_assets.client_key, client)
+
+    def render(client="", *, error=None, status=200, prefill_url="", added=0, marked=None, withdrawn=None):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot, snapshot_rows = [], [], None, None, []
         last_job, truncated, removed = None, False, False
@@ -502,23 +578,9 @@ def create_web_blueprint(config):
             "html": "markup", "url": "link", "script": "script",
             "style": "stylesheet", "manifest": "manifest", "robots": "robots.txt",
         }
-        confidence_classes = {"high": "high", "medium": "medium", "low": "low"}
         snapshot_inventory_ids = _snapshot_ids(snapshot_rows)
         for item in products:
-            item["display_name"] = item.get("name") or (
-                f"{item.get('vendor', '')}/{item.get('product', '')}"
-            )
-            versions = [version for version in item.get("versions", []) if version.strip()]
-            item["has_version"] = bool(versions)
-            item["display_version"] = ", ".join(versions) or "Version not disclosed"
-            confidence = item.get("confidence", "").casefold()
-            item["confidence_label"] = (
-                confidence.title() if confidence in confidence_classes else "Unknown"
-            )
-            item["confidence_class"] = confidence_classes.get(confidence, "neutral")
-            item["category_labels"] = item.get(
-                "categories", [item.get("category") or "Category not recorded"]
-            )
+            _decorate_product(item)
             # Newer review files record whether a row was created; older ones are guessed.
             item["in_inventory"] = _in_snapshot(item, snapshot_inventory_ids)
             labels = [evidence_words[kind] for kind in item.get("evidence_types", [])
@@ -527,6 +589,14 @@ def create_web_blueprint(config):
             if not labels and "implied" in item.get("evidence_types", []):
                 labels.append("Inferred")
             item["evidence_labels"] = list(dict.fromkeys(labels))
+        marks, reported_warning = {}, None
+        if client and products:
+            try:
+                marks = read_marks(paths(config, client)[1], client)
+            except FileNotFoundError:
+                pass
+            except (CVEBeaconError, ValueError, OSError):
+                reported_warning = web_reported.INVALID
         snapshots_on = config.inventory is not None and config.inventory.web_snapshots
         managed_warning = None
         managed_assets = []
@@ -554,6 +624,7 @@ def create_web_blueprint(config):
                 findings_unavailable = True
         for item in products:
             item["cve"] = _cve_cell(item, findings, findings_unavailable)
+            item["rep"] = _report_state(item, marks)
         products.sort(key=lambda item: (
             item.get("hostname", "").casefold(), item.get("category", "").casefold(),
             item["display_name"].casefold(),
@@ -561,9 +632,8 @@ def create_web_blueprint(config):
         categories = sorted({c for item in products for c in item["category_labels"]}, key=str.casefold)
         site_names = sorted({_site_label(item) for item in products}, key=str.casefold)
         flt = _filter_args(request.args, set(categories), set(site_names))
-        needle = flt["tech"].casefold()
         chips = dict(high=0, medium=0, low=0, with_version=0, without_version=0,
-                     monitored=0, ready=0, review=0, service=0)
+                     monitored=0, ready=0, review=0, service=0, reported=0, changed=0, **{"not": 0})
         matched, technologies, chip_sites = [], set(), set()
         for item in products:
             chip_sites.add(_site_label(item))
@@ -572,19 +642,25 @@ def create_web_blueprint(config):
                 chips[item["confidence_class"]] += 1
             chips["with_version" if item["has_version"] else "without_version"] += 1
             chips[item["status"]] += 1
-            if ((item["confidence_class"] in flt["conf"] or (
-                    item["confidence_class"] == "neutral" and flt["conf"] == set(_CONFIDENCE_CHOICES)))
-                    and (flt["version"] == "any" or item["has_version"] == (flt["version"] == "with"))
-                    and (flt["inv"] == "any" or item["status"] == flt["inv"])
-                    and (not flt["category"] or flt["category"] in item["category_labels"])
-                    and (not flt["site"] or _site_label(item) == flt["site"])
-                    and (not needle or needle in item["display_name"].casefold())):
+            chips[item["rep"]] += 1
+            if _matches(item, flt):
                 matched.append(item)
         chips.update(technologies=len(technologies), sites=len(chip_sites))
-        flt["active"] = (flt["conf"] != set(_CONFIDENCE_CHOICES) or flt["version"] != "any"
-                         or flt["inv"] != "any" or bool(flt["category"] or flt["site"] or flt["tech"]))
+        flt["active"] = _filters_active(flt)
         can_add = bool(g.accounts and config.managed_inventory and {"view", "manage_inventory"} <= g.permissions)
+        can_report = bool(g.accounts and "report" in g.permissions)
         ready_total = chips["ready"]
+        ready_shown = len({item["asset_id"] for item in matched
+                           if item["status"] == "ready" and item.get("asset_id")})
+        quick = []
+        for key, levels, label in (
+                ("high", ("high",), "Add all High confidence ready products"),
+                ("not-low", ("high", "medium"), "Add all except Low confidence")):
+            count = len({item["asset_id"] for item in products
+                         if item["status"] == "ready" and item.get("asset_id")
+                         and item["confidence_class"] in levels})
+            if count:
+                quick.append({"key": key, "levels": levels, "label": label, "count": count})
         tech_rows, site_groups = [], []
         if flt["view"] == "tech":
             tech_rows = _technology_rows(matched)
@@ -607,7 +683,9 @@ def create_web_blueprint(config):
                                categories=categories, site_names=site_names, matched_count=len(matched),
                                total_products=len(products), tech_rows=tech_rows, site_groups=site_groups,
                                row_limit=_ROW_LIMIT, list_total=list_total, confidence_choices=_CONFIDENCE_CHOICES,
-                               can_add=can_add, managed_enabled=config.managed_inventory,
+                               can_add=can_add, can_report=can_report, ready_shown=ready_shown,
+                               quick_actions=quick, reported_warning=reported_warning,
+                               marked=marked, withdrawn=withdrawn, managed_enabled=config.managed_inventory,
                                ready_total=ready_total, managed_warning=managed_warning,
                                added=added, client_key=inventory_client_key(client) if client else "",
                                status_labels=actions.STATUS_LABELS, status_badges=actions.STATUS_BADGES), status
@@ -617,10 +695,13 @@ def create_web_blueprint(config):
     def index():
         label = _text(request.args, "client", limit=256)
         prefill_url = _text(request.args, "prefill_url", limit=2048)
-        added = _text(request.args, "added", limit=6)
+        def count(name):
+            value = _text(request.args, name, limit=6)
+            return int(value) if value.isascii() and value.isdecimal() else None
         try:
             return render(_canonical_client(config, client_label(label)) if label else "",
-                          prefill_url=prefill_url, added=int(added) if added.isascii() and added.isdecimal() else 0)
+                          prefill_url=prefill_url, added=count("added") or 0,
+                          marked=count("marked"), withdrawn=count("withdrawn"))
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -709,7 +790,8 @@ def create_web_blueprint(config):
             marker = output.with_name(output.name + ".removed")
             if action == "remove-all":
                 targets += [output, output.with_name(output.name + ".manifest.json"),
-                            output.with_name(output.name + ".review.json"), marker]
+                            output.with_name(output.name + ".review.json"),
+                            web_reported.marks_path(output), marker]
             elif action == "remove":
                 targets.append(marker)
             if action == "remove-all":
@@ -805,10 +887,31 @@ def create_web_blueprint(config):
             item["in_inventory"] = _in_snapshot(item, snapshot_ids)
         return products
 
+    def filtered_picks(client, products, managed, snapshots_on):
+        """Asset IDs of the ready products that pass the posted filters, from saved data only."""
+        for item in products:
+            _decorate_product(item)
+            item["status"] = actions.classify(item, snapshots_on=snapshots_on, managed=managed)[0]
+        try:
+            marks = read_marks(paths(config, client)[1], client)
+        except FileNotFoundError:
+            marks = {}
+        except (CVEBeaconError, ValueError, OSError):
+            marks = {}  # The page shows no marks for an unreadable file; the action agrees.
+        for item in products:
+            item["rep"] = _report_state(item, marks)
+        categories = {c for item in products for c in item["category_labels"]}
+        sites = {_site_label(item) for item in products}
+        flt = _filter_args(request.form, categories, sites)
+        picks = list(dict.fromkeys(
+            item["asset_id"] for item in products
+            if item.get("asset_id") and item["status"] == "ready" and _matches(item, flt)))
+        return picks, _filter_text(flt)
+
     def plan(client):
         """Rebuild everything to add from saved data plus the asset IDs and versions typed."""
         mode = _text(request.form, "action", required=True)
-        if mode not in {"selected", "all"}:
+        if mode not in {"selected", "all", "filtered"}:
             abort(400)
         picks = request.form.getlist("pick")
         if len(picks) > actions.MAX_PICKS:
@@ -821,10 +924,16 @@ def create_web_blueprint(config):
         profile = _client_profile(config, client)
         data, assets = _read_managed(config, profile["name"])
         snapshots_on = config.inventory is not None and config.inventory.web_snapshots
+        managed = actions.ManagedIndex(assets)
+        description = ""
+        if mode == "filtered":
+            picks, description = filtered_picks(client, products, managed, snapshots_on)
+            if not picks:
+                raise ConfigurationError("No ready products match those filters.")
         rows, skipped, unknown = actions.plan_rows(
             products, picks, versions, profile["name"], snapshots_on=snapshots_on,
-            managed=actions.ManagedIndex(assets), everything=mode == "all")
-        return profile, data, assets, rows, skipped, unknown
+            managed=managed, everything=mode == "all")
+        return profile, data, assets, rows, skipped, unknown, description
 
     def form_client():
         _changes_allowed(config)
@@ -838,7 +947,7 @@ def create_web_blueprint(config):
     def inventory_preview():
         client = form_client()
         try:
-            profile, data, _, rows, skipped, unknown = plan(client)
+            profile, data, _, rows, skipped, unknown, description = plan(client)
         except (ConfigurationError, ValueError, OSError, StateError, InventoryValidationError) as exc:
             return render(client, error=str(exc) if isinstance(exc, ConfigurationError)
                           else "The products could not be checked. Check storage and retry.", status=400)
@@ -846,7 +955,7 @@ def create_web_blueprint(config):
         return render_template(
             "web_inventory_preview.html", client=client, rows=rows, skipped=skipped, unknown=unknown,
             revision=_revision(data), digest=actions.digest(new_assets),
-            new_inventory=data is None, label=profile["name"]), 200
+            new_inventory=data is None, label=profile["name"], description=description), 200
 
     @blueprint.post("/inventory/save")
     @requires(MANAGE)
@@ -859,7 +968,7 @@ def create_web_blueprint(config):
         except ConfigurationError as exc:
             return render(client, error=str(exc), status=409)
         try:
-            profile, data, assets, rows, _, _ = plan(client)
+            profile, data, assets, rows, _, _, _ = plan(client)
             new_assets = [asset for _, asset in rows]
             if _revision(data) != revision or actions.digest(new_assets) != digest or not new_assets:
                 raise ConfigurationError(
@@ -880,6 +989,77 @@ def create_web_blueprint(config):
         finally:
             lock.release()
         return redirect(url_for("web.index", client=client, added=len(added)), code=303)
+
+    @blueprint.post("/reported")
+    @requires("report")
+    def reported():
+        require_accounts()
+        try:
+            client = client_label(_canonical_client(
+                config, _text(request.form, "client", required=True)))
+        except ConfigurationError:
+            abort(400)
+        action = _text(request.form, "action", required=True)
+        if action not in {"mark", "withdraw"}:
+            abort(400)
+        note = _text(request.form, "note", limit=web_reported.MAX_NOTE) if action == "mark" else ""
+        if any(unicodedata.category(char) in {"Cf", "Cs", "Zl", "Zp"} for char in note):
+            abort(400)
+        picks = request.form.getlist("pick")
+        if len(picks) > web_reported.MAX_PICKS:
+            return render(client, error="Too many products were selected at once. Select at most 2,000.",
+                          status=400)
+        if not picks:
+            return render(client, error="Select at least one product first.", status=400)
+        lock = OperationLock(config, "web-assets")
+        if not lock.acquire():
+            return render(client, error=str(RunInProgress(lock.holder)), status=409)
+        try:
+            products = saved_products(client)
+            known = {item["asset_id"]: item for item in products
+                     if web_reported.ASSET_ID.fullmatch(item.get("asset_id") or "")}
+            chosen = [asset_id for asset_id in dict.fromkeys(picks) if asset_id in known]
+            path, output = paths(config, client)
+            client = read_allowlist(path, client)[0]["client"]
+            target = web_reported.marks_path(output)
+            try:
+                marks = read_marks(output, client)
+            except FileNotFoundError:
+                marks = {}
+            if action == "mark":
+                stamp = datetime.now(timezone.utc).isoformat()
+                for asset_id in chosen:
+                    marks[asset_id] = {"version": web_reported.shown_version(known[asset_id]),
+                                       "reported_at": stamp, "by": g.user.username[:web_reported.MAX_BY],
+                                       "note": note}
+                count = len(chosen)
+            else:
+                count = sum(marks.pop(asset_id, None) is not None for asset_id in chosen)
+            if not chosen:
+                raise ConfigurationError("None of the selected products are in the saved detection results.")
+            if len(marks) > web_reported.MAX_MARKS:
+                raise ConfigurationError("Too many report marks are saved for this client.")
+            detail = json.dumps({"client": client, "action": action, "count": count,
+                                 "user": g.user.username}, ensure_ascii=False)
+            users = current_app.extensions["dashboard_users"]
+            with users.transaction() as db:
+                actor = users.require_permission_in(db, g.entry.proof, "report")
+                users._append_audit(db, "web_report_" + action + ":" + detail, actor.username,
+                                    datetime.now(timezone.utc).isoformat(), actor=actor.username)
+                web_assets.replace_bytes(target, web_reported.encode(client, marks))
+        except (CVEBeaconError, ValueError, OSError) as exc:
+            if isinstance(exc, ConfigurationError):
+                message = str(exc)
+            elif isinstance(exc, FileNotFoundError):
+                message = "The saved detection results could not be read."
+            else:
+                message = web_reported.INVALID if isinstance(exc, ValueError) else (
+                    "The report marks could not be saved. Check storage and retry.")
+            return render(client, error=message, status=400)
+        finally:
+            lock.release()
+        return redirect(url_for("web.index", client=client,
+                                **{"marked" if action == "mark" else "withdrawn": count}), code=303)
 
     @blueprint.post("/run")
     @requires("run")

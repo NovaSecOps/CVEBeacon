@@ -310,7 +310,7 @@ def test_label_and_generic_versions_need_review_and_generic_rows_name_no_vendor(
         assert "Needs review" in row(card, name)
         assert f'value="{version}" placeholder="Enter version"' in row(card, name)
     service = row(card, "Google Analytics")
-    assert "Third-party service" in service and 'name="pick"' not in service and "Enter version" not in service
+    assert "Third-party service" in service and 'name="v-w-ga"' not in service and "Enter version" not in service
     assert "Not covered by CVE scans yet" not in page(client)
     assert "Google Analytics" in products_card(page(client, inv="service"))
     assert "Swiper" not in products_card(page(client, inv="service"))
@@ -405,7 +405,8 @@ def test_managed_inventories_turned_off_hides_and_refuses(tmp_path):
         browser = off.test_client()
         login(browser, "admin")
         text = browser.get("/web-assets?client=Acme").text
-        assert "Managed inventories are turned off" in text and 'name="pick"' not in text
+        assert "Managed inventories are turned off" in text
+        assert "Add selected to inventory" not in text and 'name="action" value="all"' not in text
         assert browser.post("/web-assets/inventory/preview", data={
             "csrf": csrf(browser), "client": "Acme", "action": "all"}).status_code == 403
         off.extensions["dashboard_jobs"].shutdown()
@@ -574,6 +575,6 @@ def test_table_columns_take_widths_from_header_classes_not_positions(blank):
         text = page(client, view=view)
         head = text.split(f'class="{table}"', 1)[1].split("</thead>", 1)[0]
         for name in ("web-product-cell", "web-version-cell", "web-confidence-cell", "web-cve-cell",
-                     "web-evidence-cell"):
+                     "web-reported-cell", "web-evidence-cell"):
             assert f'<th class="{name}"' in head, (view, name)
             assert f".{table} thead th.{name} {{ width:" in css, (table, name)

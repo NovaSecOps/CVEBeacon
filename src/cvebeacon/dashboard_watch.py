@@ -111,7 +111,7 @@ def register_watch(app, config: AppConfig) -> None:
             request.max_content_length = UPLOAD_REQUEST_BYTES
             request.max_form_memory_size = 128 * 1024
             request.max_form_parts = 8
-        elif request.endpoint in {"web.inventory_preview", "web.inventory_save"}:
+        elif request.endpoint in {"web.inventory_preview", "web.inventory_save", "web.reported"}:
             # Up to 2,000 picked products and their typed versions travel as plain form fields.
             request.max_content_length = WEB_INVENTORY_REQUEST_BYTES
             request.max_form_memory_size = WEB_INVENTORY_REQUEST_BYTES
