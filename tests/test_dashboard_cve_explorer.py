@@ -174,7 +174,7 @@ def test_explorer_preserves_repeated_filters_across_pagination(tmp_path):
     assert "CVE-2026-010000" in following.text
     for query in ("cvss_provider=nvd%27%29%20OR%201%3D1--", "epss_min=nan",
                   "cvss_min=9&cvss_max=8", "since=2026-11-02&until=2026-11-01",
-                  "client=x%0Ay", "source=nvd&" * 7, "ignored=" + "x" * 8200):
+                  "client=x%0Ay", "source=nvd&" * 8, "ignored=" + "x" * 8200):
         assert client.get("/watch/cves?" + query).status_code == 400
     for field, value in (
         ("vendor_names", "\n".join(["php"] * 21)),
