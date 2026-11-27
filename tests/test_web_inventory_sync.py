@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from cvebeacon import web_assets, web_inventory_sync as sync
+from cvebeacon import update_state, web_assets, web_inventory_sync as sync
 from cvebeacon.config import WebConfig, load_config
 from cvebeacon.errors import ConfigurationError
 from cvebeacon.locking import OperationLock
@@ -654,3 +654,52 @@ def test_legacy_allowlists_have_independent_state_and_migrate_to_the_embedded_ow
         stored = json.loads(read_bytes(sync.state_path(config, label)))
         assert stored["client"] == web_assets.client_key(label)
         assert stored["run"] == f"{number:032x}"
+
+
+def test_upgrade_rollback_restores_keep_decisions(blank, monkeypatch, tmp_path_factory):
+    config, _, client = setup(blank, "auto", auto_remove="on")
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    old = row("missing", "1")
+    write_managed(config, [old])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    item = product("missing", "1")
+    assert post(client, "keep-removal", **selection(page(client), item)).status_code == 303
+    clock[0] += timedelta(days=31)
+    data = config.config_path.parent
+    snapshot = tmp_path_factory.mktemp("sync-upgrade-snapshot")
+    update_state.backup(config, data, snapshot)
+    assert post(client, "reconsider", **selection(page(client), item)).status_code == 303
+    page(client)
+    assert not (config.inventory_directory / f"{client_key('Acme')}.json").exists()
+    update_state.restore(config, data, snapshot)
+    update_state.verify_restore(config, data, snapshot)
+    assert managed_rows(config) == [old]
+    for number in (3, 4):
+        run(config, number)
+        assert "Kept in inventory." in card(page(client))
+        assert managed_rows(config) == [old]
+
+
+def test_older_upgrade_manifest_preserves_live_sync_state(blank, tmp_path_factory):
+    config, _, client = setup(blank)
+    write_managed(config, [row("missing", "1")])
+    data = config.config_path.parent
+    snapshot = tmp_path_factory.mktemp("old-upgrade-snapshot")
+    update_state.backup(config, data, snapshot)
+    manifest_path = snapshot / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest.pop("managed_web_sync") is True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    item = product("missing", "1")
+    assert post(client, "keep-removal", **selection(page(client), item)).status_code == 303
+    saved = sync.state_path(config, "Acme")
+    decision = read_bytes(saved)
+    update_state.restore(config, data, snapshot)
+    update_state.verify_restore(config, data, snapshot)
+    assert read_bytes(saved) == decision
