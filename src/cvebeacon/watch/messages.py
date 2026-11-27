@@ -352,8 +352,10 @@ def _kind_label(
     if kind == "kev_added":
         catalog_name = "CISA"
         for reason in event.reasons:
-            if "kev eu" in reason:
-                catalog_name = "EU"
+            if "kev vulncheck" in reason:
+                catalog_name = catalog["kev_catalog_vulncheck"]
+            elif "kev eu" in reason:
+                catalog_name = catalog["kev_catalog_eu"]
             elif "kev cisa" in reason:
                 catalog_name = "CISA"
         if catalog_name == "EU":
@@ -424,7 +426,8 @@ def _link_pairs(
         values.append(
             (EUVD_URL.format(euvd_id=euvd_id), catalog["link_euvd"])
         )
-    if view.cisa_kev_added is not None or view.eu_kev_added is not None:
+    if (view.cisa_kev_added is not None or view.eu_kev_added is not None
+            or view.vulncheck_kev_added is not None):
         values.append((KEV_URL, catalog["link_kev"]))
     return tuple(values)
 
@@ -506,6 +509,7 @@ def _event_facts(
             cisa="✓" if view.cisa_kev_added is not None else "–",
             eu_name=catalog["kev_catalog_eu"],
             eu="✓" if view.eu_kev_added is not None else "–",
+            vulncheck="✓" if view.vulncheck_kev_added is not None else "–",
         ),
         exploitation=_exploitation_value(view, catalog),
         published=published,
@@ -583,6 +587,7 @@ def sort_events(events: Iterable[DeliveryEvent]) -> tuple[DeliveryEvent, ...]:
         urgent = (
             view.cisa_kev_added is not None
             or view.eu_kev_added is not None
+            or view.vulncheck_kev_added is not None
             or view.ssvc_exploitation == "active"
             or view.euvd_exploited_since is not None
         )
@@ -1561,6 +1566,14 @@ def webhook_payload(
                         "eu": (
                             {"added": view.eu_kev_added}
                             if view.eu_kev_added is not None
+                            else None
+                        ),
+                        "vulncheck": (
+                            {
+                                "added": view.vulncheck_kev_added,
+                                "ransomware": view.vulncheck_kev_ransomware,
+                            }
+                            if view.vulncheck_kev_added is not None
                             else None
                         ),
                     },

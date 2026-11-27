@@ -99,7 +99,7 @@
   <dt>CVE List cursor</dt><dd>{{ value(meta.get('cve_list_cursor'), 'not set') }}</dd>
   <dt>CVE List initial mode</dt><dd>{{ value(meta.get('cve_list_initial_mode'), 'not set') }} · start {{ value(meta.get('cve_list_start'), 'not set') }}{% if meta.get('cve_list_initial_pending') == '1' %} · pending{% endif %}</dd>
   <dt>EPSS score date</dt><dd>{{ value(status.epss_date, 'not set') }} ({{ status.epss_rows }} stored score{{ '' if status.epss_rows == 1 else 's' }})</dd>
-  <dt>KEV catalog entries</dt><dd>CISA {{ status.cisa_kev }}, EU {{ status.eu_kev }} ({{ status.any_kev }} distinct CVE{{ '' if status.any_kev == 1 else 's' }})</dd>
+  <dt>KEV catalog entries</dt><dd>CISA {{ status.cisa_kev }}, EU {{ status.eu_kev }}, VulnCheck {{ status.get('vulncheck_kev', 0) }} ({{ status.any_kev }} distinct CVE{{ '' if status.any_kev == 1 else 's' }})</dd>
   <dt>EUVD items</dt><dd>{{ status.euvd_items }}</dd>
   <dt>Lookups pending or backing off</dt><dd>{{ status.lookups }}</dd>
 </dl>

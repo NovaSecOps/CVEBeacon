@@ -94,7 +94,7 @@ def test_schema_seven_upgrade_preserves_records_events_and_resume(tmp_path):
         db.execute("INSERT INTO watch_meta VALUES ('euvd_page_cursor','unchanged cursor')")
     store = WatchStore(path)
     store.initialize()
-    assert store.metadata()['schema_version'] == '10'
+    assert store.metadata()['schema_version'] == '11'
     assert store.metadata()['euvd_page_cursor'] == 'unchanged cursor'
     assert store.search(query='Stored').total == 1
     assert store.view('CVE-2026-10001').first_seen == '2026-11-01'
@@ -153,7 +153,7 @@ def test_schema_eight_upgrade_backfills_vulnrichment_and_queues_only_changed_row
         db.execute("INSERT INTO watch_meta VALUES ('euvd_page_cursor',?)", (canonical_json(["cursor"]),))
     for _ in range(2):
         store.initialize()
-    assert store.metadata()["schema_version"] == "10"
+    assert store.metadata()["schema_version"] == "11"
     assert store.metadata()["euvd_page_cursor"] == '["cursor"]'
     assert store.view("CVE-2026-10001").exploitation == ("active", ("CISA Vulnrichment (CVE List SSVC)",))
     with store.read() as db:

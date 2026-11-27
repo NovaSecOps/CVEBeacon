@@ -17,9 +17,9 @@ from . import explorer_index
 from .records import CVSS_PROVIDERS, CVSS_VERSIONS, EUVDUpdate, SSVC_EXPLOITATION, _names
 from .rules import _first_match
 
-SOURCES = ("nvd", "euvd", "cve_list", "cisa_kev", "eu_kev", "epss")
+SOURCES = ("nvd", "euvd", "cve_list", "cisa_kev", "eu_kev", "vulncheck", "epss")
 MAX_QUERY = 256
-KEV_FILTERS = ("cisa", "eu", "either", "neither")
+KEV_FILTERS = ("cisa", "eu", "vulncheck", "either", "neither")
 EXPLOITATION_FILTERS = (*SSVC_EXPLOITATION, "unknown")
 SEVERITY_MINIMA = {"critical": 9, "high": 7, "medium": 4, "low": 0.1, "none": 0}
 SEVERITY_BANDS = (*SEVERITY_MINIMA, "unknown")
@@ -195,7 +195,7 @@ def _name_filter_gate(names, catalogs):
 
 def _effective_products_json(catalogs):
     allowed = (set(catalogs) if catalogs else
-               {"nvd", "cve_list", "euvd", "cisa_kev", "eu_kev"})
+               {"nvd", "cve_list", "euvd", "cisa_kev", "eu_kev", "vulncheck"})
 
     def provider(source):
         return (
@@ -331,19 +331,23 @@ def search(store, *, query="", source="", kev="", severity="", since=None, until
             "epss": "EXISTS(SELECT 1 FROM watch_epss e WHERE e.cve_id=c.cve_id)",
             "cisa_kev": "EXISTS(SELECT 1 FROM watch_kev k WHERE k.cve_id=c.cve_id AND k.catalog='cisa')",
             "eu_kev": "EXISTS(SELECT 1 FROM watch_kev k WHERE k.cve_id=c.cve_id AND k.catalog='eu')",
+            "vulncheck": "EXISTS(SELECT 1 FROM watch_vulncheck_kev k WHERE k.cve_id=c.cve_id)",
         }
         if source:
             where.append("(" + " OR ".join(presence[name] if name in active else "0" for name in source) + ")")
         cisa = presence["cisa_kev"] if "cisa_kev" in active else "c.cisa_kev_added IS NOT NULL"
         eu = presence["eu_kev"] if "eu_kev" in active else "0"
-        kev_sql = f"({cisa} OR {eu})"
-        kev_clauses = {"cisa": cisa, "eu": eu, "either": kev_sql, "neither": f"NOT {kev_sql}",
+        vulncheck = presence["vulncheck"] if "vulncheck" in active else "0"
+        kev_sql = f"({cisa} OR {eu} OR {vulncheck})"
+        kev_clauses = {"cisa": cisa, "eu": eu, "vulncheck": vulncheck,
+                       "either": kev_sql, "neither": f"NOT {kev_sql}",
                        "yes": kev_sql, "no": f"NOT {kev_sql}"}
         positive_kev = bool(kev and not {"neither", "no"}.intersection(kev))
         if kev:
             either = bool({"either", "yes"}.intersection(kev))
             requested = tuple(name for name in ("cisa", "eu") if either or name in kev)
-            if positive_kev and all(f"{name}_kev" in active for name in requested):
+            if (positive_kev and requested and all(f"{name}_kev" in active for name in requested)
+                    and (not either or "vulncheck" not in active)):
                 where.append(f"c.cve_id IN (SELECT cve_id FROM watch_kev WHERE catalog IN {_in(requested)})")
                 values.extend(requested)
             else:
@@ -513,6 +517,14 @@ def source_presence(store, identifier):
         for source in SOURCES:
             updated = None
             checked = meta.get(f"sync_{source}_at") or meta.get(f"sync_{source}_success_at")
+            if source == "vulncheck" and not (
+                checked or meta.get(f"sync_{source}_note") or checks.get(source)
+                or db.execute(
+                    "SELECT 1 FROM watch_vulncheck_kev WHERE cve_id=?", (identifier,)
+                ).fetchone()
+            ):
+                # VulnCheck is optional and absent from older configurations.
+                continue
             if source == "nvd":
                 row = db.execute("SELECT c.last_modified,c.updated_at FROM watch_cve c WHERE c.cve_id=? AND NOT EXISTS(SELECT 1 FROM watch_origin o WHERE o.cve_id=c.cve_id)", (identifier,)).fetchone()
                 present = row is not None
@@ -536,6 +548,10 @@ def source_presence(store, identifier):
                     updated = max((item.get("date_updated") or "" for item in items), default=None)
             elif source == "epss":
                 row = db.execute("SELECT score_date FROM watch_epss WHERE cve_id=?", (identifier,)).fetchone()
+                present = row is not None
+                updated = row[0] if row else None
+            elif source == "vulncheck":
+                row = db.execute("SELECT date_added FROM watch_vulncheck_kev WHERE cve_id=?", (identifier,)).fetchone()
                 present = row is not None
                 updated = row[0] if row else None
             else:

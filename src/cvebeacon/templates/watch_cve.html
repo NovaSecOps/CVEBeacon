@@ -19,6 +19,7 @@
   {% if highest %}{{ severity_badge(highest.severity_band) }} <span class="num">{{ '%g'|format(highest.score) }}</span> <span class="muted">v{{ highest.version }} · {{ highest.provider }}</span>{% else %}{{ badge('No CVSS score', 'neutral') }}{% endif %}
   {% if view.cisa_kev_added %}{{ kev_badge('CISA KEV') }}{% endif %}
   {% if view.eu_kev_added %}{{ kev_badge('EU KEV') }}{% endif %}
+  {% if view.vulncheck_kev_added %}{{ kev_badge('VulnCheck KEV') }}{% endif %}
   {% if view.exploitation[0] == 'active' %}{{ exploited_badge() }}{% endif %}
 </p>
 <dl>
@@ -84,6 +85,8 @@
   <dt>CISA required action</dt><dd>{{ value(view.cisa_required_action, 'Not applicable') }}</dd>
   <dt>CISA ransomware use</dt><dd>{{ value(view.cisa_ransomware, 'Not applicable') }}</dd>
   <dt>EU KEV</dt><dd>{% if view.eu_kev_added %}{{ kev_badge('Yes') }} · added {{ view.eu_kev_added }}{% else %}No{% endif %}</dd>
+  <dt>VulnCheck KEV</dt><dd>{% if view.vulncheck_kev_added %}{{ kev_badge('Yes') }} · added {{ view.vulncheck_kev_added }}{% else %}No{% endif %}</dd>
+  <dt>VulnCheck ransomware use</dt><dd>{{ value(view.vulncheck_kev_ransomware, 'Not applicable') }}</dd>
   <dt>EUVD</dt><dd>{% if view.euvd_id %}{{ view.euvd_id }}{% if view.euvd_exploited_since %} · exploited since {{ view.euvd_exploited_since }}{% endif %}{% else %}Not linked{% endif %}</dd>
 </dl>
 {% endcall %}

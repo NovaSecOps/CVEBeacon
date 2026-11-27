@@ -41,6 +41,7 @@ class SourceSummary:
     error: str | None = None
     throttled: int = 0
     throttle_wait: float = 0.0
+    note: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,7 @@ def _record_sync_status(
         if not summary.error and summary.requests:
             values[f"{prefix}_success_at"] = at.isoformat()
         values[f"{prefix}_error"] = str(summary.error)[:500] if summary.error else ""
+        values[f"{prefix}_note"] = str(summary.note)[:500] if summary.note else ""
     store.set_metadata(values)
 
 
@@ -510,6 +512,36 @@ def sync_watch(
                 )
             )
 
+    if "vulncheck" in watch.sources:
+        vulncheck_before = http.requests
+        try:
+            token = config.vulncheck_api_key()
+        except (AttributeError, TypeError):
+            token = None
+        if not token:
+            summaries.append(
+                SourceSummary("vulncheck", 0, note="skipped: no token")
+            )
+        else:
+            try:
+                fields = feeds.fetch_vulncheck_kev(http, token)
+            except SourceError as exc:
+                summaries.append(
+                    SourceSummary("vulncheck", http.requests - vulncheck_before, error=str(exc))
+                )
+            else:
+                counts = store.replace_vulncheck_kev(fields, catalogs=catalogs)
+                touched.update(counts.touched_ids)
+                summaries.append(
+                    SourceSummary(
+                        "vulncheck",
+                        http.requests - vulncheck_before,
+                        len(fields),
+                        counts.new,
+                        counts.changed,
+                    )
+                )
+
     if "euvd" in watch.sources:
         euvd_before = http.requests
         euvd_throttled_before = throttle.count
@@ -863,7 +895,7 @@ def sync_watch(
             )
 
     store.sync_lookups(
-        [source for source in watch.sources if source in ("cisa_kev", "eu_kev")],
+        [source for source in watch.sources if source in ("cisa_kev", "eu_kev", "vulncheck")],
         initial_window_start=lookup_since,
         now=now,
         include_euvd="euvd" in watch.sources,
@@ -1007,14 +1039,16 @@ def watch_status(watch: WatchConfig) -> str:
         f"epss score date: {status['epss_date'] or 'not set'}",
         f"rows: {status['rows']}",
         f"euvd items: {status['euvd_items']}",
-        f"KEV catalog entries: CISA {status['cisa_kev']}, EU {status['eu_kev']}",
+        f"KEV catalog entries: CISA {status['cisa_kev']}, EU {status['eu_kev']}, VulnCheck {status.get('vulncheck_kev', 0)}",
         f"watched CVEs in KEV: {status['any_watched']} "
-        f"(CISA {status['cisa_watched']}, EU {status['eu_watched']})",
+        f"(CISA {status['cisa_watched']}, EU {status['eu_watched']}, VulnCheck {status.get('vulncheck_watched', 0)})",
         f"with active SSVC: {status['active_ssvc']}",
         f"with EPSS: {status['epss_rows']}",
         f"lookups pending/backing off: {status['lookups']}",
         f"reported to clients: {status['reported']}",
     ]
+    if meta.get("sync_vulncheck_note"):
+        lines.append(f"VulnCheck: {meta['sync_vulncheck_note']}")
     for row in store.delivery_status(channel.name for channel in watch.channels):
         lines.append(
             f"channel {row.channel}: pending {row.pending}, "
