@@ -482,20 +482,20 @@ main > table { background: var(--surface); border: 1px solid var(--border); }
 .web-products-table td { min-width: 0; }
 /* Widths follow the header classes, so the optional select column cannot shift them. */
 .web-products-table thead th.web-select-cell { width: 2.75rem; }
-.web-products-table thead th.web-product-cell { width: 25%; }
-.web-products-table thead th.web-version-cell { width: 14%; }
-.web-products-table thead th.web-confidence-cell { width: 10%; }
+.web-products-table thead th.web-product-cell { width: 24%; }
+.web-products-table thead th.web-version-cell { width: 15%; }
+.web-products-table thead th.web-confidence-cell { width: 12%; }
 .web-products-table thead th.web-cve-cell { width: 14%; }
 .web-products-table thead th.web-reported-cell { width: 15%; }
-.web-products-table thead th.web-evidence-cell { width: 22%; }
+.web-products-table thead th.web-evidence-cell { width: 20%; }
 .web-tech-table { min-width: 56rem; table-layout: fixed; }
 .web-tech-table thead th.web-product-cell { width: 22%; }
 .web-tech-table thead th.web-sites-cell { width: 6%; }
 .web-tech-table thead th.web-version-cell { width: 16%; }
-.web-tech-table thead th.web-confidence-cell { width: 10%; }
+.web-tech-table thead th.web-confidence-cell { width: 12%; }
 .web-tech-table thead th.web-cve-cell { width: 13%; }
 .web-tech-table thead th.web-reported-cell { width: 15%; }
-.web-tech-table thead th.web-evidence-cell { width: 18%; }
+.web-tech-table thead th.web-evidence-cell { width: 16%; }
 .web-products-table .web-site-group {
   text-transform: none; letter-spacing: normal; color: var(--text); font-size: .9rem;
 }
