@@ -705,7 +705,7 @@ EXPANDED_RULES: tuple[Rule, ...] = (
     _rule("expanded-google-tag-manager", "google", "tag-manager", "analytics", "url",
           r"googletagmanager\.com/gtm\.js", name="Google Tag Manager", confidence="high"),
     _rule("expanded-google-tag-manager-script", "google", "tag-manager", "analytics", "script",
-          r"(?:googletagmanager\.com/gtm\.js|\bGTM-[A-Z0-9]{6,}\b)",
+          r"(?:googletagmanager\.com/gtm\.js|(?-i:\bGTM-[A-Z0-9]{6,}\b))",
           name="Google Tag Manager", confidence="high", hint="gtm"),
     # The Google tag runs on Tag Manager, so loading it is medium evidence of Tag Manager.
     _rule("expanded-google-tag-manager-gtag-url", "google", "tag-manager", "analytics", "url",
@@ -719,8 +719,9 @@ EXPANDED_RULES: tuple[Rule, ...] = (
     _rule("expanded-google-tag-manager-comment", "google", "tag-manager", "analytics", "html",
           r"<!--\s{0,8}(?:End )?Google Tag Manager\s{0,8}-->", name="Google Tag Manager",
           confidence="high", hint="google tag manager"),
+    # Container ids are upper case; class names such as "gtm-link" must not match.
     _rule("expanded-google-tag-manager-id", "google", "tag-manager", "analytics", "html",
-          r"\bGTM-[A-Z0-9]{4,}\b", name="Google Tag Manager", confidence="high", hint="gtm-"),
+          r"(?-i:\bGTM-[A-Z0-9]{4,}\b)", name="Google Tag Manager", confidence="high", hint="gtm-"),
     _rule("expanded-cdn-jsdelivr", "jsdelivr", "cdn", "edge", "url",
           r"cdn\.jsdelivr\.net/", name="jsDelivr", confidence="high"),
     _rule("expanded-cdn-unpkg", "unpkg", "cdn", "edge", "url",

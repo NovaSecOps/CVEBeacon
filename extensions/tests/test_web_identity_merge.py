@@ -161,6 +161,12 @@ def test_tag_manager_from_the_google_tag_is_medium_and_other_markers_are_high():
             ].count("Google Tag Manager") == 1
 
 
+
+def test_tag_manager_ids_are_upper_case_only():
+    for html in ('<a class="gtm-link" data-gtm-click="menu">x</a>', "<script>var x='gtm-abcdef'</script>"):
+        assert "Google Tag Manager" not in _google(html), html
+    assert _google('<div id="x" data-id="GTM-5HJK7Q"></div>')["Google Tag Manager"].confidence == "high"
+
 def _path(url, **fields):
     detection = web._detection_summary(Detection(
         "twbs", "bootstrap", "js-library", "", "medium", (), ("url",), name="Bootstrap",
