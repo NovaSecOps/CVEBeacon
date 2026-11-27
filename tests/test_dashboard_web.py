@@ -286,6 +286,28 @@ def test_results_render_only_metadata(web):
     assert "Inventory settings" in response.text
 
 
+def test_review_file_accepts_the_analytics_category(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    _, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem, partial=True)
+    save_allowlist(Path(str(output) + ".review.json"), {
+        "client": "Acme",
+        "run": dict(started_at="2026-11-05T12:00:00Z", ended_at="2026-11-05T12:00:01Z",
+                    status="partial", request_count=1, duration_seconds=1.0,
+                    asset_count=1, fetched_count=1, products_recognized=1,
+                    products_with_version=0, saved_snapshot_generated_at="2026-11-05T12:00:00+00:00",
+                    snapshot_updated=False),
+        "products": [dict(hostname="example.invalid", vendor="google", product="google-analytics",
+                          name="Google Analytics", versions=["GA4"], evidence_types=["url"],
+                          category="analytics", categories=["analytics"], confidence="high")],
+        "reviews": [],
+    })
+    response = client.get("/web-assets?client=Acme")
+    assert response.status_code == 200, response.text
+    assert "Google Analytics" in response.text and "GA4" in response.text
+
+
 @pytest.mark.parametrize(("run_status", "asset_count", "fetched_count", "recognized", "versioned",
                           "saved_time", "outcome", "saved_word"), [
     ("failed", 1, 0, 0, 0, "2026-11-05T12:00:00+00:00", "Could not fetch any of 1 authorised site", "earlier run"),

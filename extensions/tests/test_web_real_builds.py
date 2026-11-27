@@ -106,16 +106,17 @@ def test_corejs_record_without_copyright_is_not_reported():
     assert _find(_script_page(_wrap(text)), "core-js") is None
 
 
-def test_ga4_inline_and_url_have_no_version():
+def test_ga4_inline_and_url_are_one_product_with_a_fixed_version():
     inline = page_from({}, "<script>gtag('config','G-ABC1234567');</script>")
     url = page_from({}, '<script src="https://www.googletagmanager.com/gtag/js?id=G-ABC1234567"></script>')
     url2 = page_from({}, '<script src="https://www.googletagmanager.com/gtag/js?l=dl&id=G-ABC1234567"></script>')
     for page in (inline, url, url2):
-        ga4 = _find(page, "Google Analytics (GA4)")
-        assert ga4 is not None and ga4.versions == ()
-        assert _find(page, "Google Analytics") is None
+        ga4 = _find(page, "Google Analytics")
+        assert ga4 is not None and ga4.versions == ("GA4",)
+        assert ga4.category == "analytics"
+        assert _find(page, "Google Analytics (GA4)") is None
     classic = page_from({}, '<script src="https://www.google-analytics.com/analytics.js"></script>')
-    assert _find(classic, "Google Analytics").versions == ()
+    assert _find(classic, "Google Analytics").versions == ("UA",)
     assert _find(classic, "Google Analytics (GA4)") is None
 
 

@@ -32,6 +32,7 @@ _EVIDENCE_KINDS = frozenset({
 _WEB_PRODUCT_CATEGORIES = frozenset({
     "web-server", "application-server", "language", "framework", "cms", "js-library",
     "css-library", "edge", "ops-tool", "hosted-platform", "application", "reverse-proxy",
+    "analytics",
 })
 _NPM_NAME_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
 _NPM_SCOPE_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
