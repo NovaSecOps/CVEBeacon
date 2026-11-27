@@ -107,6 +107,11 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
             try:
                 if raw is not None and not isinstance(raw, str):
                     raise ValueError("must be text; numeric, date, boolean and compound values cannot preserve inventory spelling")
+                # A version may be blank because it is optional, so check its raw
+                # text before stripping removes control-only values.
+                if canonical == "version" and isinstance(raw, str) and any(
+                        unicodedata.category(char) in {"Cc", "Cs"} for char in raw):
+                    raise ValueError("contains a control character")
                 # Exact package identifiers must not undergo compatibility
                 # Unicode normalization (which can change registry identity).
                 values[canonical] = _normalized(raw) if canonical in {"asset_id", "category", "system_id", "client"} or (not advanced and canonical in {"vendor", "product"}) else (raw or "").strip()

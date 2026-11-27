@@ -376,7 +376,7 @@ def test_review_rows_accept_a_typed_version_or_no_version(blank):
     assert save_inventory(client, typed).status_code == 303
     rows = {asset.asset_id: asset for asset in managed_rows(config)}
     assert rows["w-wp-m"].version == "" and rows["w-multi-m"].version == "2.0"
-    for bad in ("x" * 101, "1.0\x07"):
+    for bad in ("x" * 101, "1.0\x07", "\t"):
         refused = preview(client, ["w-multi"], {"w-multi": bad})
         assert "/web-assets/inventory/save" not in refused.text and refused.status_code == 200
     page_text = page(client)
@@ -481,6 +481,13 @@ def test_npm_purl_and_version_agree_for_a_typed_version(blank):
     assert save_inventory(client, preview(client, ["w-npm-none"], {"w-npm-none": "3.1.0"})).status_code == 303
     asset = managed_rows(config)[0]
     assert (asset.version, asset.purl) == ("3.1.0", "pkg:npm/lodash@3.1.0")
+
+
+def test_typed_version_rejects_controls_before_stripping():
+    assert actions.typed_version("") == "" and actions.typed_version("   ") == ""
+    for value in ("\t", "\n", "\x7f"):
+        with pytest.raises(actions.RowRefused, match="unsupported character"):
+            actions.typed_version(value)
 
 
 def test_rows_are_rebuilt_from_the_saved_review_not_the_form(blank):

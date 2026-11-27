@@ -233,13 +233,16 @@ def best_status(statuses):
 
 
 def typed_version(text):
+    # An absent version is valid, so reject control characters before stripping
+    # can turn a control-only value into an empty one.
+    if isinstance(text, str) and any(
+            unicodedata.category(char) in {"Cc", "Cs"} for char in text):
+        raise RowRefused("The version contains an unsupported character.")
     value = text.strip() if isinstance(text, str) else ""
     if not value:
         return ""
     if len(value) > MAX_VERSION:
         raise RowRefused("Enter a version of at most 100 characters.")
-    if any(unicodedata.category(char) in {"Cc", "Cs"} for char in value):
-        raise RowRefused("The version contains an unsupported character.")
     return value
 
 
