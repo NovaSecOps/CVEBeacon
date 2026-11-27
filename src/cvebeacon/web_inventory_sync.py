@@ -23,7 +23,7 @@ from .private_storage import private_directory
 from .sources.nvd import split_cpe23
 from .web_endpoints import canonical_endpoint
 from .web_inventory import (MAX_BYTES, UNSAFE_ID_TEXT, WEB_ASSET_ID, WEB_SYNC_SCHEMA, _timestamp,
-                            decode_json, read_bytes, sync_identity_matches,
+                            decode_json, read_bytes, read_web_snapshot, sync_identity_matches,
                             valid_sync_identity, web_asset_id)
 
 LOG = logging.getLogger("cvebeacon")
@@ -32,6 +32,7 @@ MODE_CHOICES = ("default", *WEB_SYNC_MODES)
 REMOVAL_CHOICES = ("default", "off", "on")
 STATE_WARNING = "Web inventory sync state could not be read. No sync changes were made."
 SETTINGS_WARNING = "The client’s web inventory sync setting could not be read. No sync changes were made."
+COVERAGE_WARNING = "Automatic removal is waiting for confirmed coverage of detected products."
 RESULTS_WARNING = "Web inventory sync could not read the latest detection. No sync changes were made."
 WRITE_WARNING = "Web inventory sync could not finish. Check storage and try again."
 WAITING = "Run detection to check for inventory changes using the current web assets."
@@ -487,6 +488,7 @@ class Session:
     proposals: dict
     before: bytes
     now: datetime
+    removal_deferred: bool = False
 
     def save_observations(self):
         data = _encoded(self.state)
@@ -573,6 +575,34 @@ class Session:
             if proposal and (entry is None or (entry["decision"], entry["signature"])
                              != ("ignore", proposal.signature)):
                 selected[identity] = proposal
+        if snapshots_on and any(change.kind == "remove" for change in selected.values()):
+            self.defer_uncovered_removals(selected, projected)
+
+    def defer_uncovered_removals(self, selected, projected):
+        for change in selected.values():
+            if change.kind == "add":
+                projected[change.new.asset_id] = change.new
+        after = actions.ManagedIndex(projected.values())
+        _, output = web_assets.paths(self.config, self.client)
+        try:
+            rows, _ = read_web_snapshot(output)
+        except (CVEBeaconError, OSError, ValueError):
+            rows = []
+        snapshot = {asset.asset_id: asset for asset in rows if asset.client == self.client}
+        for identity, item in self.evidence.products.items():
+            version = actions.ready_version(item)
+            if (version is None
+                    or any(projected[row_id].version == version for row_id in after.covering(item))):
+                continue
+            asset = snapshot.get(identity)
+            if (asset is not None and asset.version == version
+                    and actions._row_keys(asset) & actions._identity_keys(item)):
+                continue
+            # Keep the old rows when a detected replacement would lose coverage.
+            for removal in [key for key, change in selected.items() if change.kind == "remove"]:
+                selected.pop(removal)
+            self.removal_deferred = True
+            return
 
     def decide(self, identity, token, action):
         proposal = self.require(identity, token)

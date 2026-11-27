@@ -275,8 +275,9 @@ uses **Configuration → Inventory**. The global default is **Off**.
 In every mode, a web-added product missing from two consecutive complete
 detections of its site gets a **Not detected since YYYY-MM-DD** badge in
 **Changes since the last scan**. It stays in the inventory and is still included
-in CVE scans. **Remove** explicitly removes it. **Keep** leaves it flagged in
-inventory and prevents automatic removal. **Undo keep** clears that decision.
+in CVE scans. With automatic removal off, someone must click **Remove** to
+remove it. **Keep** leaves it flagged in inventory and prevents automatic
+removal. **Undo keep** clears that decision.
 The flag clears when the product is detected again. Failed, incomplete or
 stopped observations cannot count as misses for the affected site. Removals
 wait for a complete scan. If an older row cannot be tied to an exact endpoint,
@@ -289,7 +290,10 @@ mode** for a client or set the global `inventory_auto_remove` option, and use
 grace date. The grace period starts when the product is first flagged and
 defaults to 30 days. A delay of zero allows removal as soon as the flag is set.
 Due removals are checked when a detection finishes and when the Web assets page
-opens. Inventory sync touches only rows added from Web assets for this client.
+opens. When a detected product relies on a saved web snapshot for monitoring,
+automatic removal waits until the snapshot can be read and confirms coverage
+of the detected version. Inventory sync touches only rows added from Web assets
+for this client.
 Use **Previous** and **Next** when the changes span several pages.
 It records inventory changes in the audit log and saves the previous inventory
 for restore. Changing sync settings or acting on a proposal requires

@@ -21,7 +21,7 @@ from test_dashboard_accounts import PASSWORD, csrf, login
 from test_dashboard_config import confirm, preview
 from test_dashboard_inventory import change
 from test_dashboard_web import save
-from test_web_assets_inventory import blank, managed_rows, page, save_inventory, write_managed
+from test_web_assets_inventory import blank, managed_rows, page, save_inventory, snapshots_on, write_managed
 
 HOST = "example.invalid"
 BASE_SITE = ("https", HOST, 443, "/")
@@ -385,6 +385,8 @@ def test_missing_products_stay_scanned_by_default_and_manual_remove_works(blank,
     clock[0] += timedelta(days=365)
     text = page(client)
     assert "Automatic removal is off." in text
+    assert "until someone clicks <strong>Remove</strong>" in text
+    assert 'name="action" value="remove">Remove</button>' in card(text)
     assert "Pending removal from" not in card(text)
     assert managed_rows(config) == [missing, returned]
     assert post(client, "remove", **selection(text, product("missing", "1"))).status_code == 303
@@ -852,6 +854,50 @@ def test_omitted_producer_evidence_cannot_count_as_absence(blank, monkeypatch, l
         assert all(asset in managed_rows(config) for asset in old)
         assert all(current.state["entries"][asset.asset_id[:-2]]["misses"] == 0 for asset in old)
         assert not any(site[-1] for site in sites.values())
+
+
+@pytest.mark.parametrize("snapshot", ["missing", "invalid", "wrong-version", "valid"])
+@pytest.mark.parametrize("detected_version", ["1", "2"])
+def test_due_removal_rechecks_projected_snapshot_coverage(snapshots_on, monkeypatch, snapshot,
+                                                          detected_version):
+    from cvebeacon_extensions.contract import write_snapshot
+
+    config, users, client = setup(snapshots_on, "auto", auto_remove="on")
+    clock = [NOW]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
+    assert save(client, path="/about").status_code == 303
+    old = row("sample", "1")
+    other = product("sample", detected_version, site=PATH_SITE)
+    write_managed(config, [old])
+    _, output = web_assets.paths(config, "Acme")
+
+    def publish(version):
+        write_snapshot(output, [{"asset_id": other["asset_id"], "vendor": "sample", "product": "sample",
+                                 "version": version, "system_id": HOST, "client": "Acme"}],
+                       source_id="test-web", collector="web-detect", observed_at=NOW.isoformat())
+
+    publish(detected_version)
+    for number in (1, 2):
+        run(config, number, [other], sites={BASE_SITE: True, PATH_SITE: True})
+        page(client)
+    assert managed_rows(config) == [old]
+    if snapshot == "missing":
+        output.unlink()
+    elif snapshot == "invalid":
+        web_assets.replace_bytes(output, b"{}")
+    elif snapshot == "wrong-version":
+        publish("9")
+    clock[0] += timedelta(days=30)
+    count = len(users.audit_entries())
+    for _ in range(2):
+        text = page(client)
+        assert (sync.COVERAGE_WARNING in text) == (snapshot != "valid")
+        if snapshot == "valid":
+            assert not (config.inventory_directory / f"{client_key('Acme')}.json").exists()
+            assert len(users.audit_entries()) == count + 1
+        else:
+            assert managed_rows(config) == [old]
+            assert len(users.audit_entries()) == count
 
 
 def test_conflicting_scoped_product_identity_cannot_update_same_site_row(blank):

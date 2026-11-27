@@ -729,6 +729,7 @@ def create_web_blueprint(config):
                                sync_changes=sync_changes[sync_start:sync_start + _ROW_LIMIT],
                                sync_page=sync_page, sync_pages=sync_pages,
                                sync_warning=sync_warning, sync_choices=sync.MODE_CHOICES,
+                               sync_coverage_warning=sync.COVERAGE_WARNING,
                                sync_removal_choices=sync.REMOVAL_CHOICES,
                                sync_notice=sync_notice, sync_waiting=sync.WAITING,
                                added=added, client_key=inventory_client_key(client) if client else "",

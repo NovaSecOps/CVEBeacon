@@ -21,7 +21,7 @@
 {% endif %}
 {% if managed_enabled %}
 {% if sync_settings.auto_remove %}<p>Automatic removal is on. Missing products can be removed after the grace period.</p>
-{% else %}<p>Automatic removal is off. Missing products stay in the inventory until someone removes them.</p>{% endif %}
+{% else %}<p>Automatic removal is off. Missing products stay in the inventory until someone clicks <strong>Remove</strong>.</p>{% endif %}
 {% if sync_settings.mode == 'off' %}<p>Rescans flag missing products. Additions and version updates are manual.</p>{% endif %}
 {% endif %}
 {% endif %}
@@ -35,6 +35,9 @@
 {% call callout('info', 'Last automatic inventory changes') %}
 <p>{{ watch_stamp(summary.at) }} · {{ summary.added }} added · {{ summary.updated }} updated · {{ summary.removed }} removed.</p>
 {% endcall %}
+{% endif %}
+{% if sync_view.removal_deferred %}
+{% call callout('warning') %}<p>{{ sync_coverage_warning }}</p>{% endcall %}
 {% endif %}
 {% if not sync_view.evidence %}
 <p>{{ sync_waiting }}</p>
