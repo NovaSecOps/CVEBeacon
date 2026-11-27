@@ -13,6 +13,9 @@ from .common import as_float, cve_id, source_payload
 
 CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 CPE_URL = "https://services.nvd.nist.gov/rest/json/cpes/2.0"
+# A product-wide (wildcard-version) lookup can match thousands of CVEs. Keep
+# one bounded page so a version-less asset cannot drive an unbounded sync.
+MAX_WILDCARD_RESULTS = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,7 @@ class NVDSource:
         self.http = http
         self.headers = {"apiKey": api_key} if api_key else None
         self.interval = interval
+        self.truncated = False
 
     def _pages(self, url: str, params: dict[str, Any], page_size: int) -> Iterator[dict[str, Any]]:
         start = 0
@@ -104,9 +108,12 @@ class NVDSource:
         return result
 
     @source_payload("nvd")
-    def vulnerabilities(self, *, cpe_name: str) -> list[tuple[Vulnerability, Evidence]]:
+    def vulnerabilities(self, *, cpe_name: str, limit: int | None = None) -> list[tuple[Vulnerability, Evidence]]:
         found: list[tuple[Vulnerability, Evidence]] = []
+        self.truncated = False
+        total = 0
         for page in self._pages(CVE_URL, {"cpeName": cpe_name, "isVulnerable": ""}, 2000):
+            total = page["totalResults"]
             for wrapped in page.get("vulnerabilities", []):
                 raw = wrapped.get("cve", {}) if isinstance(wrapped, dict) else {}
                 parsed = self.parse_cve(raw)
@@ -114,6 +121,10 @@ class NVDSource:
                     found.append(parsed)
                 else:
                     raise SourceError("nvd", "source returned a vulnerability without a valid identifier")
+            if limit is not None and len(found) >= limit:
+                found = found[:limit]
+                self.truncated = total > len(found)
+                break
         return found
 
     @staticmethod

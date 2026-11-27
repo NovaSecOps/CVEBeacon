@@ -138,6 +138,20 @@ def test_nvd_pagination_uses_reported_offsets():
     assert http.starts == [0, 1]
 
 
+def test_nvd_product_wide_lookup_stops_at_the_result_limit():
+    class FakeHttp:
+        def __init__(self): self.calls = 0
+        def get_json(self, url, **kwargs):
+            self.calls += 1
+            return {"startIndex": 0, "resultsPerPage": 2, "totalResults": 5, "vulnerabilities": [
+                {"cve": {"id": "CVE-2026-0001"}}, {"cve": {"id": "CVE-2026-0002"}}]}
+
+    http = FakeHttp()
+    source = NVDSource(http, interval=0)
+    found = source.vulnerabilities(cpe_name="cpe:2.3:a:a:b:*:*:*:*:*:*:*:*", limit=2)
+    assert len(found) == 2 and source.truncated is True and http.calls == 1
+
+
 def test_malformed_success_response_is_a_source_failure():
     class FakeHttp:
         def get_json(self, url, **kwargs): return {"unexpected": []}

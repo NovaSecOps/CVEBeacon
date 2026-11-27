@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from .applicability import Decision
+from .applicability import Decision, VERSION_UNKNOWN_REASON, known_version
 from .errors import SourceError
 from .models import Applicability as A, Evidence, HealthStatus as H, QueryResult, Vulnerability
 from .osv_applicability import evaluate_osv
@@ -129,6 +129,7 @@ def query_package(engine, asset, data):
     except SourceError as exc:
         health.append(now_health("epss", H.FAILED, str(exc)))
     enriched = []
+    version_known = known_version(asset.version)
     for finding in findings:
         original = finding.vulnerability
         cves = [identifier for identifier in original.identifiers if cve_id(identifier)]
@@ -145,10 +146,17 @@ def query_package(engine, asset, data):
             vuln = replace(vuln, epss_score=score, epss_percentile=percentile, epss_date=date)
             evidence.append(Evidence("epss", "predictive_enrichment", "Highest FIRST EPSS among authoritative CVE aliases",
                 details={"cve_id": identifier, "score": score, "percentile": percentile, "score_date": date.isoformat()}))
-        enriched.append(replace(finding, vulnerability=vuln, evidence=tuple(evidence),
+        updated = replace(finding, vulnerability=vuln, evidence=tuple(evidence),
             applicability=A.NEEDS_REVIEW if vuln.rejected else finding.applicability,
-            reason="An authoritative advisory or CVE alias was withdrawn/rejected" if vuln.rejected else finding.reason))
+            reason="An authoritative advisory or CVE alias was withdrawn/rejected" if vuln.rejected else finding.reason)
+        if not version_known:
+            updated = replace(updated, applicability=A.NEEDS_REVIEW, confidence="limited",
+                              reason=VERSION_UNKNOWN_REASON)
+        enriched.append(updated)
     uncertain = any(f.applicability in {A.COVERAGE_UNKNOWN, A.NEEDS_REVIEW} for f in enriched)
     coverage = A.COVERAGE_UNKNOWN if data.error or not enriched or any(f.applicability == A.COVERAGE_UNKNOWN for f in enriched) else A.NEEDS_REVIEW if uncertain else None
-    reason = "required package source is incomplete" if data.error else "no results is not proof of complete vulnerability coverage" if not enriched else "one or more package assessments require review" if uncertain else None
+    reason = ("required package source is incomplete" if data.error else
+              VERSION_UNKNOWN_REASON if not version_known and enriched else
+              "no results is not proof of complete vulnerability coverage" if not enriched else
+              "one or more package assessments require review" if uncertain else None)
     return QueryResult(asset, tuple(sorted(enriched, key=lambda f: f.vulnerability.primary_id)), tuple(health), coverage, reason)
