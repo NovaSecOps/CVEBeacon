@@ -382,6 +382,19 @@ def test_a_cpe_product_is_added_without_a_version_and_keeps_its_cpe(blank):
     (row_added,) = managed_rows(config)
     assert row_added.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" and row_added.version == ""
 
+def test_a_typed_version_is_preferred_for_a_ready_product_without_one(blank):
+    config = blank[0]
+    server = dict(asset_id="w-srv", hostname="a.example", vendor="f5", product="nginx", name="Nginx",
+                  category="web-server", categories=["web-server"], confidence="high", versions=[],
+                  evidence_types=["header"], inventory=True, cpe="cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*")
+    client = seed(blank, [server])
+    typed = preview(client, ["w-srv"], {"w-srv": " 1.25.3 "})
+    assert confirmation(typed)["v-w-srv"] == ["1.25.3"]
+    assert save_inventory(client, typed).status_code == 303
+    (row_added,) = managed_rows(config)
+    assert row_added.version == "1.25.3" and row_added.cpe == "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"
+
+
 def test_npm_purl_and_version_agree_for_a_typed_version(blank):
     config = blank[0]
     products = [dict(PRODUCTS[1], asset_id="w-npm-none", versions=[], inventory=False)]
