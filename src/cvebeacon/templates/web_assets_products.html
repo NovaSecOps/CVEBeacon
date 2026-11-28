@@ -94,7 +94,7 @@
 {% if can_add and ready_total %}
 {% if quick_actions %}<details class="bulk-more"><summary>More ways to add</summary><div class="form-actions web-quick-actions">{{ quick_forms(quick_actions, client) }}</div></details>{% endif %}
 <form method="post" class="stack web-add-form web-add-form-compact" action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">{{ filter_fields(flt) }}
-<div class="bulk-bar" id="bulk-actions" role="region" aria-label="Bulk actions"><p class="bulk-summary">Add every ready product, or add only the ready products that match the current filters.</p><div class="form-actions">{% if flt['active'] and ready_shown %}<button class="btn" type="submit" name="action" value="filtered">Add all {{ ready_shown }} ready products shown</button>{% endif %}<button class="btn {{ 'btn-secondary' if flt['active'] and ready_shown }}" type="submit" name="action" value="all">Add all {{ ready_total }} ready products</button></div></div></form>
+<div class="bulk-bar bulk-anchor" id="bulk-actions" role="region" aria-label="Bulk actions"><p class="bulk-summary">Add every ready product, or add only the ready products that match the current filters.</p><div class="form-actions">{% if flt['active'] and ready_shown %}<button class="btn" type="submit" name="action" value="filtered">Add all {{ ready_shown }} ready products shown</button>{% endif %}<button class="btn {{ 'btn-secondary' if flt['active'] and ready_shown }}" type="submit" name="action" value="all">Add all {{ ready_total }} ready products</button></div></div></form>
 {% endif %}
 <div class="table-wrap" role="region" aria-label="Detected products by technology" tabindex="0">
 <table class="web-tech-table"><thead><tr><th class="web-product-cell" scope="col">Technology</th><th class="web-sites-cell" scope="col">Sites</th><th class="web-version-cell" scope="col">Versions seen</th><th class="web-confidence-cell" scope="col">Confidence</th><th class="web-cve-cell" scope="col">Known CVEs</th><th class="web-reported-cell" scope="col">Reported</th><th class="web-evidence-cell" scope="col">Where</th></tr></thead><tbody>
@@ -108,7 +108,7 @@
 {% if selectable %}
 <form method="post" class="stack web-add-form" data-bulk-form action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">{{ filter_fields(flt) }}
 {% for group in product_groups %}{{ product_group(group, selectable, can_add, can_report, flt['view']) }}{% endfor %}
-<div class="bulk-bar" id="bulk-actions" role="region" aria-label="Bulk actions">
+<div class="bulk-bar bulk-anchor" id="bulk-actions" role="region" aria-label="Bulk actions">
 <div class="bulk-bar-main"><p class="bulk-summary">Tick products above. Add selected uses the ticked rows; Add all uses every ready product.</p>{{ bulk_select_controls() }}</div>
 <div class="form-actions">
 {% if can_add %}<button class="btn" type="submit" name="action" value="selected">Add selected to inventory</button>{% if flt['active'] and ready_shown %}<button class="btn btn-secondary" type="submit" name="action" value="filtered">Add all {{ ready_shown }} ready products shown</button>{% endif %}{% if ready_total %}<button class="btn btn-secondary" type="submit" name="action" value="all">Add all {{ ready_total }} ready products</button>{% endif %}{% endif %}

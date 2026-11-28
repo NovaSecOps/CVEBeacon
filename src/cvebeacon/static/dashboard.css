@@ -775,7 +775,7 @@ a.filter-chip:hover { border-color: var(--link); }
 }
 .bulk-more[open] > summary { color: var(--link); border-color: var(--border-strong); }
 .bulk-more .form-actions { margin-top: var(--space-2); }
-#bulk-actions { scroll-margin-top: calc(var(--topbar-height) + var(--space-4)); }
+.bulk-anchor { scroll-margin-top: calc(var(--topbar-height) + var(--space-4)); }
 .bulk-select-controls { display: none; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .bulk-select-controls[data-bulk-ready] { display: flex; }
 /* A category or site group owns one border; its table sits flush inside. */
