@@ -26,7 +26,7 @@ from .clients import affected_clients, format_affected_clients
 from .engine import QueryEngine
 from .errors import CVEBeaconError, InventoryValidationError, SchedulingError, SourceError
 from .http import HttpClient
-from .inventory import inspect_inventory, load_inventory
+from .inventory import inspect_inventory, load_inventory, normalize_version
 from .identity import normalize_asset, identity_conflict
 from .locking import OperationLock, RunInProgress, DASHBOARD_LOCK_CONFLICT_EXIT, dashboard_job_id
 from .models import Asset, HealthStatus
@@ -1584,8 +1584,10 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         print(json.dumps(result[0].to_dict(), indent=2)); return 0
     if args.command == "query":
         try:
-            asset = normalize_asset(Asset(args.asset_id.strip(), **{field: getattr(args, field).strip() for field in
-                ("vendor", "product", "version", "ecosystem", "purl", "cpe", "repository", "commit")}))
+            values = {field: getattr(args, field).strip() for field in
+                ("vendor", "product", "ecosystem", "purl", "cpe", "repository", "commit")}
+            values["version"] = normalize_version(args.version)
+            asset = normalize_asset(Asset(args.asset_id.strip(), **values))
         except ValueError as exc:
             raise CVEBeaconError(str(exc)) from exc
         result = _run_query(config, [asset])

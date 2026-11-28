@@ -315,7 +315,7 @@ def test_remove_all_assets_removes_the_marks_file(web):
     client = seed(web, PRODUCTS)
     mark(client, [wid(1)])
     assert marks_file(config).exists()
-    version = re.search(r'name="version" value="([^"]+)"', client.get("/web-assets?client=Acme").text)[1]
+    version = re.search(r'name="version" value="([^"]+)"', client.get("/web-assets/sites?client=Acme").text)[1]
     response = client.post("/web-assets/save", data={
         "csrf": csrf(client), "client": "Acme", "action": "remove-all", "version": version,
         "confirm": "yes"})

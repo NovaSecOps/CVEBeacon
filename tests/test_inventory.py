@@ -38,10 +38,68 @@ def test_all_formats_produce_same_model(tmp_path, kind):
 
 def test_validation_reports_duplicate_and_blank(tmp_path):
     path = tmp_path / "bad.json"
-    path.write_text(json.dumps(ROWS + [{**ROWS[0], "Release": ""}]), encoding="utf-8")
+    path.write_text(json.dumps(ROWS + [{**ROWS[0], "Asset": "srv-2", "Name": ""}]), encoding="utf-8")
     with pytest.raises(InventoryValidationError) as error:
         load_inventory(_config(path))
-    assert "blank required field: version" in str(error.value)
+    assert "blank required field: product" in str(error.value)
+
+
+@pytest.mark.parametrize("kind", ["json", "csv"])
+def test_control_only_versions_are_rejected_before_stripping(tmp_path, kind):
+    path = tmp_path / f"inventory.{kind}"
+    if kind == "json":
+        path.write_text(json.dumps([{
+            "asset_id": "a", "vendor": "v", "product": "p", "version": "\t"}]), encoding="utf-8")
+    else:
+        path.write_text('asset_id,vendor,product,version\na,v,p,"\t"\n',
+                        encoding="utf-8", newline="\n")
+    with pytest.raises(InventoryValidationError,
+                       match="version cannot be normalized: contains a control character"):
+        load_inventory(InventoryConfig(path=path))
+
+
+@pytest.mark.parametrize("kind", ["json", "csv"])
+def test_padded_versions_load_without_the_padding(tmp_path, kind):
+    path = tmp_path / f"inventory.{kind}"
+    if kind == "json":
+        path.write_text(json.dumps([{
+            "asset_id": "a", "vendor": "v", "product": "p", "version": "\t2.1\n"}]), encoding="utf-8")
+    else:
+        path.write_text('asset_id,vendor,product,version\na,v,p,"\t2.1\n"\n',
+                        encoding="utf-8", newline="\n")
+    asset = load_inventory(InventoryConfig(path=path))[0]
+    assert asset.version == "2.1"
+
+
+def test_managed_and_snapshot_contract_reads_accept_a_padded_version():
+    from cvebeacon.managed_inventory import read_inventory
+    from cvebeacon.web_inventory import read_contract
+
+    data = json.dumps([{"asset_id": "a", "vendor": "v", "product": "p",
+                        "version": "\t2.1\n", "client": "Acme"}]).encode("utf-8")
+    for reader in (read_contract, read_inventory):
+        assert [asset.version for asset in reader(data)] == ["2.1"]
+
+
+def test_empty_and_space_only_versions_remain_valid(tmp_path):
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps([
+        {"asset_id": "a", "vendor": "v", "product": "p"},
+        {"asset_id": "b", "vendor": "v", "product": "p", "version": "   "},
+    ]), encoding="utf-8")
+    assert [asset.version for asset in load_inventory(InventoryConfig(path=path))] == ["", ""]
+
+
+def test_managed_and_snapshot_contract_reads_reject_a_control_only_version():
+    from cvebeacon.managed_inventory import read_inventory
+    from cvebeacon.web_inventory import read_contract
+
+    data = json.dumps([{"asset_id": "a", "vendor": "v", "product": "p",
+                        "version": "\t", "client": "Acme"}]).encode("utf-8")
+    for reader in (read_contract, read_inventory):
+        with pytest.raises(InventoryValidationError,
+                           match="version cannot be normalized: contains a control character"):
+            reader(data)
 
 
 def test_duplicate_ids_are_case_insensitive(tmp_path):

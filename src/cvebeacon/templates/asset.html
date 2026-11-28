@@ -1,9 +1,10 @@
 {% extends 'base.html' %}{% from 'macros.html' import status, findings_table %}
 {% set nav_active = 'assets' %}
-{% from 'ui.html' import page_header, card, empty_state, badge, applicability_badge, term, link_button %}
+{% from 'ui.html' import page_header, card, empty_state, badge, applicability_badge, term, link_button, no_version_badge %}
 {% block title %}Asset {{ asset.asset_id }} · CVEBeacon{% endblock %}
 {% block content %}
-{% set subtitle = (asset.vendor ~ ' · ' if asset.vendor else '') ~ (asset.product ~ ' · ' if asset.product else '') ~ 'Version ' ~ (asset.version or 'unknown') ~ '. What is recorded for this asset, with coverage from the latest scan.' %}
+{% set commit_only = is_commit_only(asset) %}
+{% set subtitle = (asset.vendor ~ ' · ' if asset.vendor else '') ~ (asset.product ~ ' · ' if asset.product else '') ~ ('Version ' ~ asset.version if asset.version else 'Version unknown' if commit_only else 'No version') ~ '. What is recorded for this asset, with coverage from the latest scan.' %}
 {% call page_header('Asset ' ~ asset.asset_id, subtitle) %}{{ link_button('Back to assets', url_for('assets'), kind='secondary') }}{% endcall %}
 {{ status(data) }}
 <div class="card-grid">
@@ -11,7 +12,7 @@
 <dl>
 <dt>Vendor</dt><dd>{{ asset.vendor or 'Unknown' }}</dd>
 <dt>Product</dt><dd>{{ asset.product or 'Unknown' }}</dd>
-<dt>Version</dt><dd>{{ asset.version or 'Unknown' }}</dd>
+<dt>Version</dt><dd>{% if asset.version %}{{ asset.version }}{% elif commit_only %}Unknown{% else %}{{ no_version_badge() }} <span class="muted">may be affected; confirm the version to be sure.</span>{% endif %}</dd>
 {% if asset.category %}<dt>Category</dt><dd>{{ asset.category }}</dd>{% endif %}
 {% if asset.system_id %}<dt>System</dt><dd>{{ asset.system_id }}</dd>{% endif %}
 {% if asset.ecosystem %}<dt>Ecosystem</dt><dd>{{ asset.ecosystem }}</dd>{% endif %}

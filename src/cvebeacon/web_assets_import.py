@@ -566,7 +566,7 @@ def register(blueprint, config, render):
                 return render(client, error=_message(exc, "The sites could not be imported"), status=400)
         finally:
             lock.release()
-        return redirect(url_for("web.index", client=client, imported=len(to_add)), code=303)
+        return redirect(url_for("web.sites", client=client, imported=len(to_add)), code=303)
 
 
 def _message(exc, fallback):

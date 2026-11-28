@@ -183,6 +183,9 @@ def test_review_add_update_remove_ignore_and_keep(blank):
     text = page(client)
     assert "New · 3" in card(text) and "Version changed · 1 → 2" in card(text)
     assert "Not detected since" in card(text) and managed_rows(config) == old
+    assert "Open changes" in text
+    assert "2 new, 2 updated, 1 missing" in text
+    assert "built-in method" not in text
 
     pick = selection(text, newest)
     proposed = client.post("/web-assets/inventory/preview", data={

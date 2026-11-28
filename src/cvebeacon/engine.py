@@ -7,7 +7,8 @@ from dataclasses import replace
 from typing import Iterable
 
 from . import optional_sources
-from .applicability import Decision, evaluate_cve_evidence, evaluate_nvd_evidence, exact_cpe_version, identity_text
+from .applicability import (Decision, VERSION_UNKNOWN_REASON, evaluate_cve_evidence, evaluate_nvd_evidence,
+                            exact_cpe_version, identity_text, known_version, wildcard_cpe_version)
 from .config import AppConfig
 from .errors import SourceError
 from .http import HttpClient
@@ -17,6 +18,7 @@ from .reconcile import merge_vulnerabilities, reconcile
 from .sources import CVEListSource, EPSSSource, EUVDSource, KEVSource, NVDSource
 from .sources.common import now_health, as_float
 from .sources.epss import EPSS_URL
+from .sources.nvd import MAX_WILDCARD_RESULTS
 from .sources.osv import OSVSource, OSVResult
 
 
@@ -57,7 +59,9 @@ class QueryEngine:
         configured = self._configured_cpe(asset)
         if configured:
             try:
-                return exact_cpe_version(configured, asset.version), "configured product mapping"
+                if known_version(asset.version):
+                    return exact_cpe_version(configured, asset.version), "configured product mapping"
+                return wildcard_cpe_version(configured), "configured product mapping; version unknown"
             except ValueError as exc:
                 return None, str(exc)
         candidates = self.nvd.resolve_cpes(asset)
@@ -76,7 +80,9 @@ class QueryEngine:
             fields = split_cpe23(exact[0].name)
             if any(field != "*" for field in fields[4:]):
                 return None, "CPE edition or platform requires an explicit product mapping"
-            return exact_cpe_version(exact[0].name, asset.version), "unique exact NVD CPE identity"
+            if known_version(asset.version):
+                return exact_cpe_version(exact[0].name, asset.version), "unique exact NVD CPE identity"
+            return wildcard_cpe_version(exact[0].name), "unique NVD product identity; version unknown"
         except ValueError as exc:
             return None, str(exc)
 
@@ -131,18 +137,29 @@ class QueryEngine:
         decisions: dict[str, list[Decision]] = defaultdict(list)
         nvd_ids: set[str] = set()
         cpe: str | None = None
+        version_known = known_version(asset.version)
         for identifier in getattr(self, "_known_targets", {}).get(asset.target_key, ()):
             claims[identifier].append(Vulnerability(identifier))
         if self.config.sources.nvd_enabled:
             try:
                 cpe, resolution = self._resolve_cpe(asset)
                 if cpe:
-                    for vuln, item in self.nvd.vulnerabilities(cpe_name=cpe):
+                    data = (self.nvd.vulnerabilities(cpe_name=cpe) if version_known
+                            else self.nvd.vulnerabilities(virtual_match=cpe, limit=MAX_WILDCARD_RESULTS))
+                    for vuln, item in data.records:
                         claims[vuln.cve_id].append(vuln)
                         evidence[vuln.cve_id].append(item)
-                        decisions[vuln.cve_id].append(evaluate_nvd_evidence(cpe, item))
+                        decisions[vuln.cve_id].append(
+                            evaluate_nvd_evidence(cpe, item) if version_known
+                            else Decision(Applicability.NEEDS_REVIEW, VERSION_UNKNOWN_REASON))
                         nvd_ids.add(vuln.cve_id)
-                    health.append(now_health("nvd", HealthStatus.OK, f"{resolution}; {len(nvd_ids)} exact-version matches"))
+                    if data.truncated:
+                        health.append(now_health(
+                            "nvd", HealthStatus.DEGRADED,
+                            f"{resolution}; result limit reached after {len(nvd_ids)} CVEs"))
+                    else:
+                        matches = f"{len(nvd_ids)} exact-version matches" if version_known else f"{len(nvd_ids)} CVEs for all versions"
+                        health.append(now_health("nvd", HealthStatus.OK, f"{resolution}; {matches}"))
                 else:
                     health.append(now_health("nvd", HealthStatus.DEGRADED, resolution))
             except SourceError as exc:
@@ -246,6 +263,9 @@ class QueryEngine:
             if any(item.source in {"nvd", "cve_list", "euvd"} and item.status in {HealthStatus.FAILED, HealthStatus.DEGRADED} for item in health):
                 decisions[identifier].append(Decision(Applicability.NEEDS_REVIEW, "core applicability sources are incomplete"))
             finding = reconcile(asset, vuln, evidence[identifier], decisions[identifier])
+            if not version_known:
+                finding = replace(finding, applicability=Applicability.NEEDS_REVIEW,
+                                  confidence="limited", reason=VERSION_UNKNOWN_REASON)
             severities = {(value.cvss_score, value.cvss_vector, value.cvss_version) for value in claims[identifier] if value.cvss_score is not None}
             if len(severities) > 1:
                 finding = replace(finding, conflicts=finding.conflicts + ("CVSS claims differ; the highest reported base score is displayed; see source evidence",))
@@ -258,6 +278,8 @@ class QueryEngine:
             coverage, reason = Applicability.COVERAGE_UNKNOWN, "one or more authoritative sources were unavailable or incomplete"
         elif not findings:
             coverage, reason = Applicability.COVERAGE_UNKNOWN, "no results is not proof of complete vulnerability coverage"
+        elif not version_known:
+            coverage, reason = Applicability.NEEDS_REVIEW, VERSION_UNKNOWN_REASON
         else:
             coverage, reason = None, None
         return QueryResult(asset, tuple(findings), tuple(health), coverage, reason)
