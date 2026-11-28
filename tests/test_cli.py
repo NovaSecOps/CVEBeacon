@@ -89,6 +89,37 @@ def test_invalid_queries_fail_before_network(local_config, args):
     assert cli.main(["--config", str(local_config), "query", *args]) == 2
 
 
+@pytest.mark.parametrize("identity", [
+    ["--vendor", "Acme", "--product", "Widget"],
+    ["--ecosystem", "npm", "--product", "widget"],
+])
+def test_control_only_query_version_never_reaches_the_query(local_config, monkeypatch, identity):
+    def forbidden(*args):
+        raise AssertionError("a control-only version reached the query")
+    monkeypatch.setattr(cli, "_run_query", forbidden)
+    assert cli.main(["--config", str(local_config), "query", *identity, "--version", "\t"]) == 2
+
+
+@pytest.mark.parametrize("identity", [
+    ["--vendor", "Acme", "--product", "Widget"],
+    ["--ecosystem", "npm", "--product", "widget"],
+])
+@pytest.mark.parametrize("version,expected", [(None, ""), ("   ", ""), ("\t2.1\n", "2.1")])
+def test_query_version_stays_optional_and_is_stripped(local_config, monkeypatch, identity, version, expected):
+    seen = []
+
+    def query(config, assets):
+        seen.append(assets[0].version)
+        return [QueryResult(assets[0], (), (), Applicability.COVERAGE_UNKNOWN)]
+
+    monkeypatch.setattr(cli, "_run_query", query)
+    arguments = ["--config", str(local_config), "query", *identity]
+    if version is not None:
+        arguments.extend(["--version", version])
+    assert cli.main(arguments) == 0
+    assert seen == [expected]
+
+
 def test_validate_explains_identity(local_config, capsys):
     assert cli.main(["--config", str(local_config), "inventory", "validate", "--identities"]) == 0
     assert "a: product" in capsys.readouterr().out
