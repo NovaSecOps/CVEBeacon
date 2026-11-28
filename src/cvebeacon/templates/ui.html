@@ -112,3 +112,26 @@
 
 {#- Closed-by-default explanation. -#}
 {% macro explain(summary='What does this mean?') %}<details class="disclosure explain"><summary>{{ summary }}</summary><div class="explain-body">{{ caller() }}</div></details>{% endmacro %}
+
+{#- Bulk selection controls for forms with name="pick" checkboxes. The external
+    web-assets.js script hides and wires them until it marks the form ready with
+    data-bulk-ready; the server-side bulk actions work without it. Place inside
+    the single form that owns the checkboxes. -#}
+{% macro bulk_select_controls(count_label='0 selected') %}
+<div class="bulk-select-controls"><button type="button" class="btn btn-secondary btn-small" data-bulk-select-all>Select all</button><button type="button" class="btn btn-secondary btn-small" data-bulk-clear>Clear</button><span class="muted" data-bulk-count aria-live="polite">{{ count_label }}</span></div>
+{% endmacro %}
+
+{#- Section navigation. items: list of dicts {label,url,current,count,tone}.
+    These are page links, not ARIA tabs; the current page is aria-current="page".
+    A zero or missing count is omitted. -#}
+{% macro section_tabs(items, label='Section') %}
+<nav class="section-tabs" aria-label="{{ label }}">{% for item in items %}<a href="{{ item.url }}"{% if item.current %} aria-current="page"{% endif %}>{{ item.label }}{% if item.count is defined and item.count and item.count > 0 %} <span class="badge badge-{{ item.tone | default('neutral') }}">{{ item.count }}</span>{% endif %}</a>{% endfor %}</nav>
+{% endmacro %}
+
+{#- Prioritised task list for the next actions on a page.
+    items: list of dicts {state,title,detail,url,action_label}.
+    state: todo, attention or done. Colours reinforce the text badge. -#}
+{% macro task_list(items) %}
+{% set states = {'todo': ('To do', 'neutral'), 'attention': ('Needs review', 'warning'), 'done': ('Done', 'success')} %}
+<ol class="task-list">{% for task in items %}{% set state = states.get(task.state, states['todo']) %}<li class="task-item task-{{ task.state | default('todo') }}"><span class="task-state">{{ badge(state[0], state[1]) }}</span><div class="task-body"><p class="task-title">{{ task.title }}</p>{% if task.detail %}<p class="task-detail">{{ task.detail }}</p>{% endif %}</div>{% if task.url %}<a class="btn btn-secondary btn-small" href="{{ task.url }}">{{ task.action_label | default('Open') }}</a>{% endif %}</li>{% endfor %}</ol>
+{% endmacro %}

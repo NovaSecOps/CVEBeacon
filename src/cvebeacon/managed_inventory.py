@@ -138,6 +138,11 @@ def read_profile(directory: Path, key: str):
 
 def profiles(directory, users_path=None):
     recover(directory, users_path)
+    return read_profiles(directory)
+
+
+def read_profiles(directory):
+    """Client profiles without replaying or cleaning up the inventory journal."""
     paths = [path for path in _names(directory) if path.suffix == ".client" and KEY.fullmatch(path.stem)]
     if not paths:
         return ()

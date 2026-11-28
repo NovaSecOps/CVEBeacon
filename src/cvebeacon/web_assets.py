@@ -57,8 +57,24 @@ def directories(config):
     return assets, inventory
 
 
+def read_directories(config):
+    """The existing web storage directories, checked but never created."""
+    data = config.database_path.parent
+    assets, inventory = data / "web-assets", data / "web-inventory"
+    for directory in (assets, inventory):
+        if directory.exists() or directory.is_symlink():
+            private_directory(directory, owner_only=True)
+    return assets, inventory
+
+
 def paths(config, client):
     assets, inventory = directories(config)
+    key = client_key(client)
+    return assets / f"{key}.json", inventory / f"{key}.json"
+
+
+def read_paths(config, client):
+    assets, inventory = read_directories(config)
     key = client_key(client)
     return assets / f"{key}.json", inventory / f"{key}.json"
 

@@ -167,7 +167,7 @@ def test_shell_groups_main_and_account_navigation(watch_only_client):
         assert f">{heading}<" in sidebar
     for label in (
         "Home", "Alerts", "Watch overview", "Reported to clients", "Clients",
-        "Web assets", "Findings", "Assets", "History", "Reports", "Manual query",
+        "Overview", "Sites", "Findings", "Assets", "History", "Reports", "Manual query",
         "Operations", "Schedule", "Sources", "Updates", "Users", "Roles", "Audit",
         "Configuration", "My account",
     ):

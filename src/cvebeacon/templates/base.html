@@ -19,7 +19,8 @@
 {% set nav_groups = [
   ('', [('overview', 'Home', 'view', 'home')]),
   ('Monitoring', [('watch.events', 'Alerts', 'view', 'bell'), ('watch.explorer', 'CVE explorer', 'view', 'search'), ('watch.overview', 'Watch overview', 'view', 'eye'), ('watch.reported', 'Reported to clients', 'view', 'flag')]),
-  ('Clients', [('watch.clients', 'Clients', 'view', 'users'), ('web.index', 'Web assets', 'view', 'globe')]),
+  ('Clients', [('watch.clients', 'Clients', 'view', 'users')]),
+  ('Web assets', [('web.index', 'Overview', 'view', 'globe'), ('web.sites', 'Sites', 'view', 'list')]),
   ('Scans', [('findings', 'Findings', 'view', 'shield'), ('assets', 'Assets', 'view', 'box'), ('history', 'History', 'view', 'clock'), ('reports', 'Reports', 'run', 'file'), ('query', 'Manual query', 'run', 'terminal')]),
   ('Activity', [('operations.index', 'Operations', 'view', 'activity')]),
   ('Settings', [('operations.schedule', 'Schedule', 'schedule', 'calendar'), ('sources', 'Sources', 'view', 'database'), ('backups.index', 'Backups', 'view', 'archive'), ('updates.index', 'Updates', 'view', 'refresh'), ('user_list', 'Users', 'users', 'key'), ('roles', 'Roles', 'roles', 'lock'), ('audit', 'Audit', 'audit', 'list'), ('config_editor.index', 'Configuration', 'config', 'sliders'), ('account', 'My account', 'account', 'user')]),

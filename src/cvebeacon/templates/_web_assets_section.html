@@ -1,0 +1,67 @@
+{#- Shared Web assets section shell: breadcrumb, header, client switcher, tabs
+    and the notice area. Import with context, or include it after setting
+    `section` to a dict with page, endpoint, description and optional primary
+    action fields. It never contains inline style or script. -#}
+{% from 'ui.html' import page_header, section_tabs, callout %}
+{% from 'web_assets_import_card.html' import notice as import_notice with context %}
+{% set counts = tab_counts | default({}) %}
+
+{% if client %}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+<a href="{{ url_for('watch.clients') }}">Clients</a>
+<span aria-hidden="true">/</span>
+{% if has_client_inventory %}<a href="{{ url_for('client_inventory.detail', key=client_key, name=client) }}">{{ client }}</a>{% else %}<span>{{ client }}</span>{% endif %}
+<span aria-hidden="true">/</span>
+<span aria-current="page">Web assets</span>
+</nav>
+{% endif %}
+
+{% call page_header('Web assets', section.description, eyebrow=client or none) %}
+{% if client %}
+<details class="client-switcher">
+<summary><span>Client: <strong>{{ client }}</strong></span><svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+<div class="client-switcher-panel">
+<form method="get" action="{{ url_for(section.endpoint) }}">
+<div class="field"><label for="web-client-switch">Client name</label><input id="web-client-switch" name="client" value="{{ client }}" list="inventory-client-names" required maxlength="256"><datalist id="inventory-client-names">{% for name in inventory_clients %}<option value="{{ name }}">{% endfor %}</datalist></div>
+<div class="form-actions"><button class="btn btn-small" type="submit">Open</button></div>
+</form>
+{% if clients %}
+<p class="help">Saved clients</p>
+<ul>{% for name in clients[:8] %}<li><a href="{{ url_for(section.endpoint, client=name) }}"{% if name == client %} aria-current="true"{% endif %}>{{ name }}</a></li>{% endfor %}</ul>
+{% if clients | length > 8 %}<p class="help"><a href="{{ url_for('watch.clients') }}">All clients</a></p>{% endif %}
+{% endif %}
+</div>
+</details>
+{% if section.primary_action == 'run' %}
+<form class="page-action-form" method="post" action="{{ url_for('web.run_job') }}">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="web-detect">
+<button class="btn" type="submit">Run detection</button>
+</form>
+{% elif section.primary_url and section.primary_label %}
+<a class="btn" href="{{ section.primary_url }}">{{ section.primary_label }}</a>
+{% endif %}
+{% endif %}
+{% endcall %}
+
+{% if client %}
+{% set tabs = [
+  {'label': 'Overview', 'url': url_for('web.index', client=client), 'current': section.page == 'overview'},
+  {'label': 'Sites', 'url': url_for('web.sites', client=client), 'current': section.page == 'sites', 'count': counts.get('sites', 0), 'tone': 'neutral'},
+  {'label': 'Detection', 'url': url_for('web.index', client=client, _anchor='detection'), 'count': counts.get('detection', 0), 'tone': 'warning'},
+  {'label': 'Products', 'url': url_for('web.index', client=client, _anchor='detected-products'), 'count': counts.get('products', 0), 'tone': 'info'}
+] %}
+{% if show_changes %}{% set tabs = tabs + [
+  {'label': 'Changes', 'url': url_for('web.index', client=client, _anchor='inventory-sync'), 'count': counts.get('changes', 0), 'tone': 'neutral'}
+] %}{% endif %}
+{% set tabs = tabs + [
+  {'label': 'Report', 'url': url_for('tech_report.index', client=client)}
+] %}
+{{ section_tabs(tabs, 'Web assets') }}
+{% endif %}
+
+{% if error %}{% call callout('danger', 'The change was not saved') %}<p>{{ error }}</p>{% endcall %}{% endif %}
+{% if added and client %}{% call callout('success', 'Products added') %}<p>Added {{ added }} product{{ '' if added == 1 else 's' }} to {{ client }}'s inventory. The next scan checks {{ 'it' if added == 1 else 'them' }} for CVEs. <a href="{{ url_for('client_inventory.detail', key=client_key, name=client) }}">Open the client's inventory</a>.</p>{% endcall %}{% endif %}
+{% if marked is not none and client %}{% call callout('success', 'Report marks saved') %}<p>Marked {{ marked }} technolog{{ 'y' if marked == 1 else 'ies' }} as reported.</p>{% endcall %}{% endif %}
+{% if withdrawn is not none and client %}{% call callout('success', 'Report marks withdrawn') %}<p>Withdrew {{ withdrawn }} report mark{{ '' if withdrawn == 1 else 's' }}.</p>{% endcall %}{% endif %}
+{% if client %}{{ import_notice() }}{% endif %}
+{% if not available %}{% call callout('warning', 'Web detection is not available') %}<p>{{ notice }} The saved list can still be viewed, but detection actions stay disabled until the optional Extensions package is installed.</p>{% endcall %}{% endif %}

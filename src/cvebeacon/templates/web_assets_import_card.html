@@ -1,14 +1,16 @@
-{% from 'ui.html' import card, callout, button, link_button %}
+{% from 'ui.html' import callout, button, link_button %}
 {% macro notice() %}{% set count = request.args.get('imported', '') %}{% if count.isascii() and count.isdecimal() and count|int > 0 and count|length <= 6 %}{% call callout('success', 'Sites imported') %}<p>Imported {{ count|int }} site{{ '' if count|int == 1 else 's' }}. Run detection when you're ready.</p>{% endcall %}{% endif %}{% endmacro %}
-{% macro import_card() %}
-{% call card('Import sites from a file', 'Add many authorised sites at once from a CSV file or a list of URLs. You review everything before it is saved.', id='import-sites') %}
+{% macro import_card(open=false) %}
+<details class="disclosure import-sites" id="import-sites"{% if open %} open{% endif %}>
+<summary>Import sites from a file</summary>
+<p class="help">Add many authorised sites at once from a CSV file or a list of URLs. You review everything before it is saved.</p>
 <form method="post" class="stack" enctype="multipart/form-data" action="{{ url_for('web.import_preview') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">
 <div class="field"><label for="import-file">Sites file</label><input type="file" id="import-file" name="csv_file" accept=".csv,.txt" aria-describedby="import-help"></div>
 <div class="field"><label for="import-text">Or paste sites</label><textarea id="import-text" name="csv_text" rows="6" aria-describedby="import-help"></textarea></div>
-<p class="help" id="import-help">Choose one source, up to 256 KiB and 1,000 rows. Columns: hostname, scheme, port, path, allow_redirects, max_redirects, expires_at, allow_private_address. Only hostname is required, or use a single url column, or paste one URL per line such as https://shop.example.com:8443/app. Defaults: https, 443, /, redirects allowed (2), no expiry, private addresses not allowed.</p>
+<details class="disclosure explain"><summary>Columns and defaults</summary><p class="help" id="import-help">Choose one source, up to 256 KiB and 1,000 rows. Columns: hostname, scheme, port, path, allow_redirects, max_redirects, expires_at, allow_private_address. Only hostname is required, or use a single url column, or paste one URL per line such as https://shop.example.com:8443/app. Defaults: https, 443, /, redirects allowed (2), no expiry, private addresses not allowed.</p></details>
 {{ link_button('Download a CSV template', url_for('web.import_template'), kind='secondary') }}
 <div class="form-actions">{{ button('Preview import', kind='secondary') }}</div>
 </form>
-{% endcall %}
+</details>
 {% endmacro %}

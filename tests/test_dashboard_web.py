@@ -39,7 +39,7 @@ def web(accounts):
 
 
 def save(client, *, action="add", **values):
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/sites?client=Acme")
     assert page.status_code == 200, page.text
     version = re.search(r'name="version" value="([^"]+)"', page.text)
     return client.post("/web-assets/save", data={
@@ -170,7 +170,7 @@ def test_validator_parity_with_td1_and_plan_only(web, monkeypatch):
 def test_form_offers_ten_redirects_with_updated_help(web):
     config, _, _, client = web
     assert save(client, max_redirects="10").status_code == 303
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/sites?client=Acme")
     assert 'name="max_redirects" type="number" min="0" max="10"' in page.text
     assert "0 to 10. Each redirect must stay on a listed host and port." in page.text
 
@@ -403,7 +403,7 @@ def test_inventory_client_picker_canonicalizes_case_variant_and_links_web_assets
     config, _, _, client = web
     StateStore(config.database_path).record_scan([QueryResult(
         Asset("inventory-asset", vendor="Example", product="Widget", version="1", client="Acme Corp"), (), ())])
-    page = client.get("/web-assets?client=acme%20corp")
+    page = client.get("/web-assets/sites?client=acme%20corp")
     assert page.status_code == 200
     assert '<option value="Acme Corp">' in page.text
     version = re.search(r'name="version" value="([^"]+)"', page.text)[1]
@@ -484,7 +484,7 @@ def test_missing_companion_disables_per_site_remove(accounts, monkeypatch):
     login(client, "admin")
     path, _ = paths(config, "Acme")
     save_allowlist(path, {"client": "Acme", "assets": [{"hostname": "example.invalid"}]})
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/sites?client=Acme")
     assert page.status_code == 200
     remove = re.search(r"<button[^>]*>Remove this site</button>", page.text)
     assert remove is not None and "disabled" in remove.group(0)
@@ -550,7 +550,7 @@ def test_save_rechecks_account_after_validation(web, monkeypatch, revocation):
 def test_shared_state_parent_keeps_web_subdirectories_private(web):
     config, _, _, client = web
     config.database_path.parent.chmod(0o755)
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/sites?client=Acme")
     assert 'name="hostname"' in page.text
     assert save(client).status_code == 303
     assert config.database_path.parent.stat().st_mode & 0o777 == 0o755
@@ -572,8 +572,8 @@ def test_url_entries_display_and_save_equivalent_target(web, url, scheme, port, 
         entry.pop(key)
     entry["url"] = url
     save_allowlist(path, document)
-    page = client.get("/web-assets?client=Acme")
-    assert f'example.invalid · {scheme}:{port}{path_value}' in page.text
+    page = client.get("/web-assets/sites?client=Acme")
+    assert f'{scheme}://example.invalid:{port}{path_value}' in page.text
     form = page.text.split('<summary>Change this site</summary>', 1)[1].split('</form>', 1)[0]
     # Submit the actual rendered controls, so a wrong default cannot pass unnoticed.
     fields = dict(re.findall(r'name="([^"]+)"[^>]*value="([^"]*)"', form))
@@ -904,7 +904,7 @@ def test_last_single_removal_keeps_bulk_result_removal_available(web):
     _, output = paths(config, "Acme")
     snapshot(output.parent, name=output.stem)
     assert save(client, action="remove", index="0").status_code == 303
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/sites?client=Acme")
     assert "Remove all assets" in page.text
     assert save(client, action="remove-all", confirm="yes").status_code == 303
     assert not output.exists()
@@ -918,7 +918,7 @@ def test_surrogate_allowlist_entries_keep_bulk_recovery_available(web, entry):
     document, _ = read_allowlist(path, "Acme")
     document["assets"].append(entry)
     web_assets.replace_bytes(path, json.dumps(document).encode("utf-8"))
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/sites?client=Acme")
     assert page.status_code == 200 and "Remove all assets" in page.text
     assert save(client, action="remove-all", confirm="yes").status_code == 303
     assert read_allowlist(path, "Acme")[0]["assets"] == []
@@ -1037,7 +1037,7 @@ def test_surrogate_ca_bundle_keeps_bulk_recovery_available(web):
     document["ca_bundle"] = "\ud800"
     web_assets.replace_bytes(path, json.dumps(document).encode("utf-8"))
     before = path.read_bytes()
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/sites?client=Acme")
     assert page.status_code == 200 and "Remove all assets" in page.text
     assert path.read_bytes() == before
     assert save(client, action="remove-all", confirm="yes").status_code == 303
@@ -1114,7 +1114,7 @@ def test_legacy_allowlist_label_stays_reachable_without_a_new_file(web):
     assert legacy != saved
     save_allowlist(legacy, {**document, "client": legacy_label})
     saved.unlink()
-    page = client.get("/web-assets", query_string={"client": legacy_label})
+    page = client.get("/web-assets/sites", query_string={"client": legacy_label})
     assert page.status_code == 200
     assert "example.invalid" in page.text
     assert not saved.exists()

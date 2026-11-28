@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+{% set nav_active = 'web.sites' %}
+{% block title %}Sites · Web assets · CVEBeacon{% endblock %}
+{% from 'ui.html' import card, callout, button, definition_list, empty_state %}
+{% from 'web_assets_import_card.html' import import_card with context %}
+{% from '_web_assets_chooser.html' import client_chooser with context %}
+{% set section = {'page': 'sites', 'endpoint': 'web.sites', 'description': section_description,
+                  'primary_action': section_primary_action, 'primary_url': section_primary_url,
+                  'primary_label': section_primary_label} %}
+{% macro asset_fields(entry, document, prefix) %}
+<div class="field-grid">
+<div class="field field-grid-wide"><label for="{{ prefix }}-hostname">Hostname</label><input id="{{ prefix }}-hostname" name="hostname" value="{{ entry.get('hostname', '') }}" required maxlength="256"><p class="help">The site address without https://, for example shop.example.com.</p></div>
+<div class="field"><label for="{{ prefix }}-scheme">Scheme</label><select name="scheme" id="{{ prefix }}-scheme">{% for scheme in ['https','http'] %}<option {% if entry.get('scheme', 'https') == scheme %}selected{% endif %}>{{ scheme }}</option>{% endfor %}</select><p class="help">Use https unless the site only offers http.</p></div>
+<div class="field"><label for="{{ prefix }}-port">Port</label><input id="{{ prefix }}-port" name="port" type="number" min="1" max="65535" value="{{ entry.get('port', 443) }}" required><p class="help">Usually 443 for https and 80 for http.</p></div>
+<div class="field"><label for="{{ prefix }}-path">Starting path</label><input id="{{ prefix }}-path" name="path" value="{{ entry.get('path', '/') }}" maxlength="2048" required><p class="help">Start from / unless the site lives in a subfolder.</p></div>
+<div class="field"><label for="{{ prefix }}-expires">Expiry <span class="optional">(optional)</span></label><input id="{{ prefix }}-expires" name="expires_at" value="{{ entry.get('expires_at', '') }}" placeholder="2027-11-01T00:00:00Z"><p class="help">Use ISO 8601 UTC, for example 2027-11-01T00:00:00Z. Leave blank for no expiry. The date must be in the future.</p></div>
+<div class="field field-check"><input id="{{ prefix }}-redirects" name="allow_redirects" type="checkbox" value="yes" {% if entry.get('allow_redirects', true) %}checked{% endif %}><label for="{{ prefix }}-redirects">Allow redirects to listed hosts and ports</label></div>
+<div class="field"><label for="{{ prefix }}-max-redirects">Maximum redirects</label><input id="{{ prefix }}-max-redirects" name="max_redirects" type="number" min="0" max="10" value="{{ entry.get('max_redirects', 2) }}" required><p class="help">0 to 10. Each redirect must stay on a listed host and port.</p></div>
+<div class="field field-check field-grid-wide"><input id="{{ prefix }}-private" name="allow_private_address" type="checkbox" value="yes" {% if entry.get('allow_private_address') %}checked{% endif %}><label for="{{ prefix }}-private">I authorise access to private addresses for this asset (including loopback)</label><p class="help">Only tick this if the client has approved checking an internal address.</p></div>
+{% if current_user.is_admin %}<div class="field field-grid-wide"><label for="{{ prefix }}-ca">Client CA bundle path <span class="optional">(optional)</span></label><input id="{{ prefix }}-ca" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}"><p class="help">Changing the client CA bundle renews authorisation on every saved entry.</p></div>{% else %}<input type="hidden" name="ca_bundle" value="{{ document.get('ca_bundle', '') }}">{% endif %}
+</div>
+<div class="attestation">
+<p class="attestation-title">Authorisation</p>
+<p class="help">Saving records your signed-in name and the current UTC time. The client must have authorised this site in writing.</p>
+<div class="field field-check"><input id="{{ prefix }}-attest" name="attest" type="checkbox" value="yes" required><label for="{{ prefix }}-attest">I attest that this client authorises observation of this asset and the selected redirect and address policy.</label></div>
+</div>
+{% endmacro %}
+{% block content %}
+{% include '_web_assets_section.html' %}
+
+{% if not client %}
+{{ client_chooser() }}
+{% elif document %}
+{% set plural = '' if site_count == 1 else 's' %}
+{% set expiry_text = (site_summary.expired ~ ' expired') if site_summary.expired else ((site_summary.soon ~ (' expires' if site_summary.soon == 1 else ' expire') ~ ' within 30 days') if site_summary.soon else 'no expiries') %}
+<p class="summary-line">{{ site_count }} site{{ plural }} · {{ site_summary.redirects }} redirect{{ '' if site_summary.redirects == 1 else 's' }} allowed · {{ site_summary.private }} private address{{ '' if site_summary.private == 1 else 'es' }} · {{ expiry_text }}</p>
+
+{% if document.assets %}
+<div class="site-list">
+{% for row in site_rows %}{% set entry = row.entry %}
+<details class="site-item"{% if document.assets | length == 1 and loop.first and not prefill_entry %} open{% endif %}>
+<summary>
+<span class="site-identity"><strong class="site-name">{{ entry.get('hostname') or entry.get('url') or 'Invalid saved asset' }}</strong><span class="site-url">{{ row.url }}</span></span>
+<span class="site-badges">{% if row.expiry == 'soon' %}<span class="badge badge-warning">Expires soon</span>{% elif row.expiry == 'expired' %}<span class="badge badge-danger">Expired</span>{% elif row.expiry == 'active' %}<span class="badge badge-neutral">Expires {{ watch_stamp(entry.get('expires_at')) }}</span>{% elif row.expiry == 'invalid' %}<span class="muted">{{ entry.get('expires_at') }}</span>{% endif %}{% if entry.get('allow_private_address') %}<span class="badge badge-warning">Private address</span>{% endif %}{% if entry.get('allow_redirects', true) %}<span class="badge badge-neutral">Redirects {{ entry.get('max_redirects', 2) }}</span>{% endif %}</span>
+<svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg>
+<span class="site-meta">Authorised by {{ entry.get('authorized_by') or 'Not recorded' }} · {{ watch_stamp(entry.get('authorized_at')) or 'Not recorded' }}</span>
+</summary>
+<div class="site-panel">
+{{ definition_list([
+  ('Authorised by', entry.get('authorized_by') or 'Not recorded'),
+  ('Authorised at', watch_stamp(entry.get('authorized_at')) or 'Not recorded'),
+  ('Expires', watch_stamp(entry.get('expires_at')) if entry.get('expires_at') else 'No expiry'),
+  ('Redirects', ('Allowed' if entry.get('allow_redirects', true) else 'Not allowed') ~ ' (maximum ' ~ entry.get('max_redirects', 2) ~ ')'),
+  ('Private addresses', 'Allowed' if entry.get('allow_private_address', false) else 'Not allowed'),
+] + ([('Client CA bundle', document.get('ca_bundle', ''))] if current_user.is_admin and document.get('ca_bundle') else [])) }}
+{% if accounts and 'manage_web_assets' in permissions %}
+<details class="disclosure"><summary>Change this site</summary><form method="post" class="stack" action="{{ url_for('web.save') }}">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="change"><input type="hidden" name="index" value="{{ row.index }}">
+{{ asset_fields(entry, document, 'change-' ~ row.index) }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form></details>
+<form method="post" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="index" value="{{ row.index }}"><div class="form-actions">{{ button('Remove this site', kind='danger', confirm='Remove this site from the authorised list?', name='action', value='remove', disabled=not available) }}</div></form>
+{% endif %}
+</div>
+</details>
+{% endfor %}
+</div>
+{% else %}
+{% call card('No authorised sites yet', 'Add a site the client has authorised you to check, or import a list.') %}
+<p>Only saved sites can be checked. Unsaved entries are never checked, and results are hints for review rather than proof of what is installed.</p>
+<div class="form-actions">{% if accounts and 'manage_web_assets' in permissions %}<a class="btn" href="#add-asset">Add a site</a><a class="btn btn-secondary" href="#import-sites">Import a list</a>{% endif %}</div>
+{% endcall %}
+{% endif %}
+
+{% if accounts and 'manage_web_assets' in permissions %}
+<details class="disclosure site-add" id="add-asset"{% if prefill_entry or not document.assets %} open{% endif %}>
+<summary>Add an authorised site</summary>
+<p class="help">Record a site the client has authorised. The attestation box must be ticked before the site can be saved.</p>
+<form method="post" class="stack" action="{{ url_for('web.save') }}">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="add">
+{{ asset_fields(prefill_entry, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form>
+</details>
+{{ import_card(open=not document.assets) }}
+{% if document.assets or removed or saved_results %}
+<details class="disclosure danger-zone">
+<summary>Remove all sites and results</summary>
+<div class="card card-danger">
+<p>Delete every saved site and all saved detection results for this client. This cannot be undone.</p>
+<form method="post" class="stack" action="{{ url_for('web.save') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="client" value="{{ client }}"><div class="field field-check"><input id="remove-all-confirm" type="checkbox" name="confirm" value="yes" required><label for="remove-all-confirm">I want to remove every saved asset and all saved detection results for this client.</label></div><div class="form-actions"><button class="btn btn-danger" type="submit" name="action" value="remove-all" {% if not available %}disabled{% endif %}>Remove all assets</button></div></form>
+</div>
+</details>
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}
