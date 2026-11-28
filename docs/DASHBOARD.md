@@ -105,15 +105,19 @@ Operations observes existing lock files without creating storage. Missing locks 
 
 **Web assets** is its own section in the sidebar. **Overview** summarises the
 client's sites, detected products, latest detection and next actions. **Sites**
-holds the saved list, add and change forms and bulk import. **Detection**,
-**Products** and **Changes** link to the current content on Overview until those
-pages are split out, and **Report** opens the technology report. The client
-switcher in the section header changes clients without returning to the landing
-page. `/web-assets/overview?client=...` redirects to `/web-assets?client=...`,
-and an old product or filter query keeps working while the Products page is
-still on Overview. Where product checkboxes are shown, **Select all** and
-**Clear** act on the visible rows; the server-side **Add all** actions remain
-the fallback when scripts are disabled.
+holds the saved list, add and change forms and bulk import. **Detection** holds
+the plan and run controls, the latest run summary with its notes, the entries to
+review and the last detection job. **Products** and **Changes** link to the
+current content on Overview until those pages are split out, and **Report** opens
+the technology report. The client switcher in the section header changes clients
+without returning to the landing page. `/web-assets/detection?client=...` is the
+Detection page. `/web-assets/overview?client=...` redirects to
+`/web-assets?client=...`, and an old product or filter query keeps working while
+the Products page is still on Overview. The old `#detection` anchor on Overview
+still opens the compact latest-detection summary, which links to the Detection
+page. Where product checkboxes are shown, **Select all** and **Clear** act on
+the visible rows; the server-side **Add all** actions remain the fallback when
+scripts are disabled.
 
 Open **Web assets**, choose an inventory client or enter a new client label,
 and save each authorised hostname, scheme, port and starting path. A typed name
@@ -232,9 +236,9 @@ findings for monitored products after a scan has checked them, with a link to
 those findings.
 
 The optional Extensions package must be installed in the dashboard's Python
-environment. Without it the page explains the requirement and disables the
-companion actions. **Show planned requests** validates the saved document and
-shows the request budget without resolving names or sending anything. **Detect
+environment. Without it the Detection page explains the requirement and
+disables the companion actions. **Show planned requests** validates the saved
+document and shows the request budget without resolving names or sending anything. **Detect
 web technologies** needs `run` and launches `web-detect <client>` through the job
 manager with a fixed companion argument list, including `--allow-partial`.
 Both actions appear in job history. Detection, plans, edits and normal scans
@@ -250,9 +254,10 @@ parents are supported. Adds, changes and removals enter the chained audit
 with the actor, client and hostname. Stale forms are refused. Snapshots,
 manifests and review metadata live in `<data>/web-inventory/`.
 
-The **Latest detection** card says how many authorised sites were fetched, how
-many products were recognised, how many disclosed a version, and whether saved
-results came from that run or an earlier run, with the snapshot time. A run that
+The **Latest run** card on **Detection** says how many authorised sites were
+fetched, how many products were recognised, how many disclosed a version, and
+whether saved results came from that run or an earlier run, with the snapshot
+time. A run that
 fetched sites but found no usable inventory versions succeeds and keeps the
 previous snapshot. A run where every site failed to fetch remains failed; its
 message gives the failed-site count and reason codes without naming a host.
