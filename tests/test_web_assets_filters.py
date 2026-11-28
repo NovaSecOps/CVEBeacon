@@ -29,9 +29,9 @@ def seed(web, products):
 
 
 def results(client, **query):
-    page = client.get("/web-assets", query_string={"client": "Acme", **query})
+    page = client.get("/web-assets/products", query_string={"client": "Acme", **query})
     assert page.status_code == 200, page.text
-    return page.text.split("Filter results", 1)[1].split("</main>", 1)[0]
+    return page.text.split('id="detected-products"', 1)[1].split("</main>", 1)[0]
 
 
 SAMPLE = [
@@ -63,7 +63,7 @@ def test_each_filter_alone_and_combined(web):
     assert sorted(names(results(client, tech="ALP"))) == ["Alpha"] * 3
     assert names(results(client, conf="low", version="with", site="b.example", tech="del")) == ["Delta"]
     assert "Showing 1 of 6 products." in client.get(
-        "/web-assets", query_string={"client": "Acme", "category": "server"}).text
+        "/web-assets/products", query_string={"client": "Acme", "category": "server"}).text
 
 
 def test_unknown_and_oversized_parameters_are_ignored_and_escaped(web):
@@ -71,13 +71,13 @@ def test_unknown_and_oversized_parameters_are_ignored_and_escaped(web):
     assert len(names(results(client, conf="bogus", version="x", inv="y", category="nope", site="nope", view="zzz"))) == 6
     assert len(names(results(client, tech="x" * 81))) == 6
     assert len(names(results(client, tech="a\x01b"))) == 6
-    page = client.get("/web-assets", query_string={"client": "Acme", "tech": "<script>alert(1)</script>"})
+    page = client.get("/web-assets/products", query_string={"client": "Acme", "tech": "<script>alert(1)</script>"})
     assert page.status_code == 200
     assert "<script>alert(1)" not in page.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
     assert names(results(client, tech="<script>")) == []
-    assert "No products match these filters." in client.get(
-        "/web-assets", query_string={"client": "Acme", "tech": "zzz"}).text
+    assert "No products match these filters" in client.get(
+        "/web-assets/products", query_string={"client": "Acme", "tech": "zzz"}).text
 
 
 def test_by_technology_view(web):
@@ -85,7 +85,7 @@ def test_by_technology_view(web):
     table = results(client, view="tech")
     assert names(table) == ["Alpha", "Beta", "Delta", "Gamma"]
     alpha = table.split("<tr>")[2]
-    assert '<td class="num">3</td>' in alpha
+    assert '<td class="num" data-label="Sites">3</td>' in alpha
     assert 'web-version-badge">1.0</span> <span class="muted">x2</span>' in alpha
     assert 'web-version-badge">2.0</span> <span class="muted">x1</span>' in alpha
     assert 'badge-conf-high">High</span>' in alpha
@@ -96,16 +96,23 @@ def test_by_technology_view(web):
     assert len(names(results(client, view="tech", conf="low"))) == 3
 
 
-def test_chips_limits_and_clear_filters(web):
+def test_summary_tiles_active_filters_and_clear(web):
     client = seed(web, SAMPLE)
-    page = client.get("/web-assets", query_string={"client": "Acme", "conf": "high"})
+    page = client.get("/web-assets/products", query_string={"client": "Acme", "conf": "high"})
     text = page.text
     assert "Showing 1 of 6 products." in text
-    assert "High confidence: 1" in text and "Medium confidence: 2" in text and "Low confidence: 3" in text
-    assert "With version: 4" in text and "Without version: 2" in text
-    assert "Technologies: 4" in text and "Sites: 3" in text
-    assert re.search(r'href="/web-assets\?client=Acme&amp;view=site&amp;conf=low"', text)
-    assert re.search(r'href="/web-assets\?client=Acme&amp;view=site&amp;version=without"', text)
+    tiles = dict((label, value) for value, label in re.findall(
+        r'<span class="stat-value">([^<]*)</span><span class="stat-label">([^<]*)</span>', text))
+    assert tiles == {"Detected products": "6", "Monitored": "0", "Ready to add": "4",
+                     "Needs review": "2", "Third-party services": "0"}
+    assert "High confidence" in text and "(1 active)" in text
+    combined = client.get("/web-assets/products", query_string={
+        "client": "Acme", "conf": ["high", "medium"]}).text
+    chip = re.search(r'<a class="filter-chip" href="([^"]+)">High confidence', combined)[1]
+    assert "conf=medium" in chip and "conf=high" not in chip
+    assert re.search(r'href="/web-assets/products\?client=Acme&amp;view=tech&amp;conf=high"', text)
+    assert re.search(r'href="/web-assets/products\?client=Acme&amp;view=category&amp;conf=high"', text)
+    assert "Clear all" in text and "1 site group, all collapsed." in text
     clear = re.search(r'<a href="([^"]+)">Clear filters</a>', text)[1].replace("&amp;", "&")
     cleared = client.get(clear)
     assert "Showing 6 of 6 products." in cleared.text
@@ -117,21 +124,22 @@ def test_row_cap_and_note(web):
     many = [product(f"h{i % 40}.example", f"Tech{i}", versions=["1"]) for i in range(700)]
     client = seed(web, many)
     for view in ("site", "tech"):
-        text = client.get("/web-assets", query_string={"client": "Acme", "view": view}).text
+        text = client.get("/web-assets/products", query_string={"client": "Acme", "view": view}).text
         assert "Showing the first 500; refine the filters." in text
         assert text.count("<strong>Tech") == 500
     assert "Showing the first 500" not in client.get(
-        "/web-assets", query_string={"client": "Acme", "tech": "Tech69"}).text
+        "/web-assets/products", query_string={"client": "Acme", "tech": "Tech69"}).text
 
 
 def test_markup_has_no_inline_code_and_disclosures_are_closed(web):
     client = seed(web, SAMPLE)
     for view in ("site", "tech"):
-        text = client.get("/web-assets", query_string={"client": "Acme", "view": view}).text
+        text = client.get("/web-assets/products", query_string={"client": "Acme", "view": view}).text
         assert not re.search(r"(?i)\sstyle\s*=", text)
         assert not re.search(r"(?is)<style\b", text)
         assert not re.search(r"(?is)<script\b(?![^>]*\bsrc=)[^>]*>", text)
-        assert not re.search(r"<details[^>]*\bopen", text.split("Filter results", 1)[1].split("</main>", 1)[0])
+        assert not re.search(r'<details class="product-group"[^>]*\bopen', text)
+        assert not re.search(r'<details class="web-evidence"[^>]*\bopen', text)
 
 
 def test_explicit_inventory_status_and_older_files(web):
@@ -160,4 +168,4 @@ def test_versions_of_one_technology_group_into_a_single_row(web):
     table = results(client, view="tech")
     assert names(table) == ["Swiper"]
     assert 'web-version-badge">8.4.5</span>' in table and 'web-version-badge">8.4.6</span>' in table
-    assert '<td class="num">2</td>' in table
+    assert '<td class="num" data-label="Sites">2</td>' in table

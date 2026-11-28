@@ -104,6 +104,7 @@ def test_permissions(web, permissions, can_view, can_edit, can_run, monkeypatch)
     login(client)
     assert client.get("/web-assets?client=Acme").status_code == (200 if can_view else 403)
     assert client.get("/web-assets/detection?client=Acme").status_code == (200 if can_view else 403)
+    assert client.get("/web-assets/products?client=Acme").status_code == (200 if can_view else 403)
     token = csrf(client)
     response = client.post("/web-assets/save", data={"csrf": token, "client": "Acme", "action": "add"})
     assert response.status_code == (400 if can_edit else 403)
@@ -280,7 +281,7 @@ def test_results_render_only_metadata(web):
         "reviews": [dict(asset_id="web-acme", reason=reason, detail="fixed safe detail", body=secret) for reason in
                     ("unreachable", "blocked", "version-unknown", "version-conflict")],
     })
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/products?client=Acme")
     assert page.status_code == 200, page.text
     for value in ("1.26.2", "nginx", "header"):
         assert value in page.text
@@ -312,7 +313,7 @@ def test_review_file_accepts_the_analytics_category(web):
                           category="analytics", categories=["analytics"], confidence="high")],
         "reviews": [],
     })
-    response = client.get("/web-assets?client=Acme")
+    response = client.get("/web-assets/products?client=Acme")
     assert response.status_code == 200, response.text
     assert "Google Analytics" in response.text and "GA4" in response.text
 
@@ -747,10 +748,10 @@ def test_detected_product_table_groups_sorts_and_uses_product_tags(web):
         "run": {"status": "success", "resources_fetched": 4, "resources_skipped": 2},
     }
     web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/products?client=Acme")
     assert page.status_code == 200
     table = (
-        page.text.split("Detected products", 1)[1].split("</main>", 1)[0]
+        page.text.split('id="detected-products"', 1)[1].split("</main>", 1)[0]
     )
     assert table.index("a.example") < table.index("b.example")
     assert table.index("Angular") < table.index("React") < table.index("lodash")
@@ -761,7 +762,8 @@ def test_detected_product_table_groups_sorts_and_uses_product_tags(web):
     assert '<span class="muted">Version not disclosed</span>' in table
     assert "Ready to add" in table and "Needs review" in table
     assert '<summary>Evidence (1)</summary>' in table
-    assert '<summary>Evidence (0)</summary>' in table
+    assert "No excerpt was recorded." in table
+    assert '<summary>Evidence (0)</summary>' not in table
     assert re.search(r'<details class="web-evidence"(?![^>]*\bopen)', table)
     assert 'class="badge badge-neutral">framework</span>' in table
     for category in ("js-library", "web-server", "reverse-proxy"):
@@ -797,9 +799,9 @@ def test_detected_product_with_cpe_is_marked_in_inventory(web, monkeypatch):
                       cpe="cpe:2.3:a:example:widget:*:*:*:*:*:*:*:*")
     monkeypatch.setattr(dashboard_web, "read_web_snapshot", lambda path, *, preserve_client: (
         [cpe_asset], {"generated_at": "2026-11-25T00:00:00Z", "record_count": 1}))
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/products?client=Acme")
     table = (
-        page.text.split("Detected products", 1)[1].split("</main>", 1)[0]
+        page.text.split('id="detected-products"', 1)[1].split("</main>", 1)[0]
     )
     # Web snapshots are off, so no scan covers the product yet; it has no version to add as it is.
     assert "Widget" in table and "Needs review" in table
@@ -832,7 +834,7 @@ def test_product_and_evidence_markup_sentinel_is_rendered_as_text(web):
         "reviews": [],
     }
     web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
-    response = client.get("/web-assets?client=Acme")
+    response = client.get("/web-assets/products?client=Acme")
     assert response.status_code == 200
     assert sentinel not in response.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text

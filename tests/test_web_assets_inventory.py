@@ -87,13 +87,13 @@ def save_snapshot(config, *asset_ids, client="Acme"):
 
 
 def page(client, **query):
-    response = client.get("/web-assets", query_string={"client": "Acme", **query})
+    response = client.get("/web-assets/products", query_string={"client": "Acme", **query})
     assert response.status_code == 200, response.text
     return response.text
 
 
 def products_card(text):
-    return text.split("Detected products", 1)[1].split("</main>", 1)[0]
+    return text.split('id="detected-products"', 1)[1].split("</main>", 1)[0]
 
 
 def row(text, name):
@@ -256,6 +256,7 @@ def test_first_add_on_a_blank_install_creates_inventory_profile_and_file(blank):
 
     followed = client.get(saved.location)
     assert "Added 2 products to Acme's inventory. The next scan checks them for CVEs." in followed.text
+    assert saved.location.startswith("/web-assets/products?")
     card = products_card(followed.text)
     assert "badge-success\">Monitored" in row(card, "nginx")
     assert "badge-success\">Monitored" in row(card, "Lodash")
@@ -392,7 +393,7 @@ def test_permission_and_csrf_are_enforced(blank, tmp_path):
         "csrf": "0" * 64, "client": "Acme", "action": "selected", "revision": "empty", "digest": "x"}).status_code == 400
     limited = app.test_client()
     login(limited, "webonly")
-    text = limited.get("/web-assets?client=Acme").text
+    text = limited.get("/web-assets/products?client=Acme").text
     assert 'name="pick"' not in text and "Add selected to inventory" not in text
     assert "You need permission to manage inventories" in text
     for endpoint in ("preview", "save"):
@@ -413,7 +414,7 @@ def test_managed_inventories_turned_off_hides_and_refuses(tmp_path):
         off = create_app(load_config(config.config_path))
         browser = off.test_client()
         login(browser, "admin")
-        text = browser.get("/web-assets?client=Acme").text
+        text = browser.get("/web-assets/products?client=Acme").text
         assert "Managed inventories are turned off" in text
         assert "Add selected to inventory" not in text and 'name="action" value="all"' not in text
         assert browser.post("/web-assets/inventory/preview", data={
