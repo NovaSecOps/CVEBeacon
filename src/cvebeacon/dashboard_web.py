@@ -105,6 +105,39 @@ def _passthrough_query(values):
     return result
 
 
+_PRODUCT_QUERY_KEYS = frozenset(("view", "conf", "version", "inv", "rep", "category", "site", "tech"))
+_NOTICE_QUERY_KEYS = ("added", "marked", "withdrawn")
+
+
+def _first_query_value(values, name, limit):
+    """The first bounded scalar value for a filter, matching the Products parser."""
+    entries = values.getlist(name)
+    if not entries:
+        return ""
+    value = entries[0].strip()
+    if len(value) > limit or any(ord(char) < 32 for char in value):
+        return ""
+    return value
+
+
+def _legacy_product_params(values):
+    """Map the old product query values to Products parameters; invalid values are left out."""
+    params = {}
+    for name, allowed in (("view", _PRODUCT_VIEWS), ("version", {"with", "without"}),
+                          ("inv", _STATUS_CHOICES), ("rep", _REP_CHOICES)):
+        value = _first_query_value(values, name, _LEGACY_QUERY_LIMITS[name])
+        if value in allowed:
+            params[name] = value
+    for name in ("category", "site", "tech"):
+        value = _first_query_value(values, name, _LEGACY_QUERY_LIMITS[name])
+        if value:
+            params[name] = value
+    confidence = [value for value in values.getlist("conf")[:8] if value in _CONFIDENCE_CHOICES]
+    if confidence:
+        params["conf"] = confidence
+    return params
+
+
 def _site_url(entry):
     """The saved target as a display URL; malformed entries show what was stored."""
     try:
@@ -312,6 +345,7 @@ def _filter_text(flt):
 def _decorate_product(item):
     """Display fields derived from one saved product; shared by the page and the add actions."""
     item["display_name"] = item.get("name") or f"{item.get('vendor', '')}/{item.get('product', '')}"
+    item["site_label"] = _site_label(item)
     versions = [version for version in item.get("versions", []) if version.strip()]
     item["has_version"] = bool(versions)
     item["display_version"] = ", ".join(versions) or "Version not disclosed"
@@ -1142,17 +1176,13 @@ def create_web_blueprint(config):
                                     _anchor="add-asset"), code=302)
         params = _passthrough_query(request.args)
         if client and not ({"sync_page", "sync_result"} & set(params)):
-            product_params = {name: params[name] for name in
-                              ("view", "conf", "version", "inv", "rep", "category", "site", "tech")
-                              if name in params}
-            notice_params = {}
-            for name in ("added", "marked", "withdrawn"):
-                value = count(name)
-                if value is not None:
-                    notice_params[name] = value
-            if product_params or notice_params:
-                return redirect(url_for("web.products", client=client,
-                                        **{**product_params, **notice_params}), code=302)
+            if set(request.args) & (_PRODUCT_QUERY_KEYS | set(_NOTICE_QUERY_KEYS)):
+                product_params = _legacy_product_params(request.args)
+                for name in _NOTICE_QUERY_KEYS:
+                    value = _text(request.args, name, limit=_LEGACY_QUERY_LIMITS[name])
+                    if value.isascii() and value.isdecimal():
+                        product_params[name] = value
+                return redirect(url_for("web.products", client=client, **product_params), code=302)
         return render(client, prefill_url=prefill_url, added=count("added") or 0,
                       marked=count("marked"), withdrawn=count("withdrawn"),
                       sync_notice=_SYNC_MESSAGES.get(_text(request.args, "sync_result", limit=20)))

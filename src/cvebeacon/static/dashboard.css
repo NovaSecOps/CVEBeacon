@@ -783,6 +783,9 @@ a.filter-chip:hover { border-color: var(--link); }
   margin: 0; border: 0; border-radius: 0; box-shadow: none;
 }
 .product-group .group-body { min-width: 0; }
+.web-product-site { margin-top: 2px; font-size: .88rem; }
+.web-tech-groups { display: none; }
+.web-products-table tbody tr[id] { scroll-margin-top: calc(var(--topbar-height) + var(--space-4)); }
 
 /* Dense list tables: one border per row, no vertical rules or striping. */
 .table-dense { font-size: .9rem; }
@@ -830,7 +833,7 @@ a.filter-chip:hover { border-color: var(--link); }
 .attestation-title { margin: 0 0 var(--space-2); font-weight: 650; }
 
 @media (min-width: 901px) {
-  .filter-bar { position: sticky; top: var(--topbar-height); z-index: 20; }
+  .filter-panel { position: sticky; top: var(--topbar-height); z-index: 20; }
   form.web-add-form { padding-bottom: 5rem; }
   form.web-add-form-compact { padding-bottom: 0; }
   .bulk-bar { position: sticky; bottom: var(--space-4); z-index: 15; }
@@ -936,6 +939,21 @@ a.filter-chip:hover { border-color: var(--link); }
   }
   .web-products-table td.web-select-cell { padding-top: 0; }
   .web-products-table td.web-select-cell::before { content: none; }
+  /* By technology collapses each technology to its summary line, like By site,
+     so a long list does not render every detail as one page-height card. */
+  .web-tech-table { display: none; }
+  .web-tech-table-wrap { display: none; }
+  .web-tech-groups { display: grid; gap: var(--space-3); }
+  .web-tech-detail {
+    display: grid; gap: var(--space-3); margin: 0;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+  }
+  .web-tech-detail > div { min-width: 0; }
+  .web-tech-detail dt {
+    font-size: .72rem; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--text-muted);
+  }
+  .web-tech-detail dd { margin: var(--space-1) 0 0; }
 }
 
 @media (max-width: 40rem) {
