@@ -2,6 +2,7 @@
 {% from 'ui.html' import page_header, card, callout, table_wrap, button %}
 {% block title %}Add to inventory · CVEBeacon{% endblock %}
 {% block content %}
+{% set back_url = url_for('web.changes', client=client, sync_page=sync_page if sync_page > 1 else none) if sync_token else url_for('web.products', client=client) %}
 {{ page_header('Add to inventory', 'Check what will be added to ' ~ label ~ '. Nothing is saved until you choose Save to inventory.') }}
 {% if description %}{% call callout('info', 'Selected by filter') %}<p>{{ description }}.</p>{% endcall %}{% endif %}
 {% if new_inventory %}{% call callout('info') %}<p>{{ label }} has no inventory yet. Saving creates it, and the next scan will check these products for CVEs.</p>{% endcall %}{% endif %}
@@ -13,14 +14,14 @@
 {% for item, asset in rows %}<tr><td>{{ item.get('name') or asset.vendor ~ '/' ~ asset.product }}</td><td>{{ asset.version or 'Not set' }}</td><td>{{ asset.category }}</td><td>{{ asset.system_id or 'Site not recorded' }}</td><td class="break">{{ asset.purl or asset.cpe or (asset.vendor ~ ' / ' ~ asset.product) }}</td></tr>{% endfor %}
 </tbody></table>
 {% endcall %}
-<form method="post" class="stack" action="{{ url_for('web.inventory_save') }}">
+<form method="post" class="stack" action="{{ url_for('web.inventory_save', sync_page=sync_page if sync_page > 1 else none) }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="{{ 'sync-add' if sync_token else 'selected' }}"><input type="hidden" name="revision" value="{{ revision }}"><input type="hidden" name="digest" value="{{ digest }}">
 {% if sync_token %}<input type="hidden" name="sync_token" value="{{ sync_token }}">{% endif %}
 {% for item, asset in rows %}<input type="hidden" name="pick" value="{{ item.asset_id }}"><input type="hidden" name="v-{{ item.asset_id }}" value="{{ asset.version }}">{% endfor %}
-<div class="form-actions">{{ button('Save to inventory') }}<a class="btn btn-secondary" href="{{ url_for('web.products', client=client) }}">Back</a></div></form>
+<div class="form-actions">{{ button('Save to inventory') }}<a class="btn btn-secondary" href="{{ back_url }}">Back</a></div></form>
 {% else %}
 <p class="muted">Nothing can be added from this selection.</p>
-<div class="form-actions"><a class="btn btn-secondary" href="{{ url_for('web.index', client=client) }}">Back</a></div>
+<div class="form-actions"><a class="btn btn-secondary" href="{{ back_url if sync_token else url_for('web.index', client=client) }}">Back</a></div>
 {% endif %}
 {% endcall %}
 {% if skipped %}

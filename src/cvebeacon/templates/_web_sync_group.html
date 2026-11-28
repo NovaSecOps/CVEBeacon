@@ -1,0 +1,46 @@
+<details class="product-group web-sync-group"{% if group['open'] %} open{% endif %}>
+<summary><span class="group-title">{{ group['title'] }}</span><span class="group-meta">{{ group['count'] }} change{{ '' if group['count'] == 1 else 's' }}{% if group['page_count'] != group['count'] %} · {{ group['page_count'] }} on this page{% endif %}</span><svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+<div class="group-body">
+{% if group['items'] %}
+<div class="table-wrap" role="region" aria-label="{{ group['title'] }} changes" tabindex="0">
+<table class="table-dense web-sync-table" role="table"><thead role="rowgroup"><tr role="row"><th id="sync-{{ group['kind'] }}-product" class="web-sync-product-cell" scope="col" role="columnheader">Product</th><th id="sync-{{ group['kind'] }}-site" class="web-sync-site-cell" scope="col" role="columnheader">Site</th><th id="sync-{{ group['kind'] }}-change" class="web-sync-change-cell" scope="col" role="columnheader">Change</th>{% if can_add %}<th id="sync-{{ group['kind'] }}-actions" class="web-sync-actions-cell" scope="col" role="columnheader">Actions</th>{% endif %}</tr></thead>
+<tbody role="rowgroup">
+{% for identity, change in group['items'] %}
+<tr role="row">
+<th scope="row" role="rowheader" headers="sync-{{ group['kind'] }}-product" data-label="Product">{{ change.product }}</th>
+<td role="cell" headers="sync-{{ group['kind'] }}-site" data-label="Site">{{ change.site }}</td>
+<td role="cell" headers="sync-{{ group['kind'] }}-change" data-label="Change">{% if change.kind == 'add' %}New · {{ change.new.version }}
+{% elif change.kind == 'update' %}Version changed · {{ change.old.version }} → {{ change.new.version }}
+{% else %}<span class="badge badge-warning">Not detected since {{ change.since.date().isoformat() }}</span> · {{ change.old.version }}
+{% if change.kept %}<div>Kept in inventory.</div>
+{% elif not change.can_remove %}<div>Waiting for two consecutive complete misses and a complete scan.</div>
+{% elif sync_settings.auto_remove %}<div>Pending removal from {{ watch_stamp(change.due.isoformat()) }}.</div>{% endif %}
+{% endif %}</td>
+{% if can_add %}
+<td role="cell" headers="sync-{{ group['kind'] }}-actions" data-label="Actions"><form method="post" action="{{ url_for('web.inventory_sync') }}" class="form-actions">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">
+<input type="hidden" name="sync_page" value="{{ sync_page }}">
+<input type="hidden" name="asset_id" value="{{ identity }}"><input type="hidden" name="sync_token" value="{{ change.token }}">
+{% if change.kind == 'add' %}
+<input type="hidden" name="pick" value="{{ identity }}">
+<button type="submit" class="btn btn-secondary btn-small" formaction="{{ url_for('web.inventory_preview') }}" name="action" value="sync-add">Add</button>
+<button type="submit" class="btn btn-secondary btn-small" name="action" value="ignore">Ignore</button>
+{% elif change.kind == 'update' %}
+<button type="submit" class="btn btn-secondary btn-small" name="action" value="update">Update</button>
+<button type="submit" class="btn btn-secondary btn-small" name="action" value="keep-version">Keep</button>
+{% else %}
+{% if change.can_remove %}<button type="submit" class="btn btn-danger btn-small" name="action" value="remove">Remove</button>{% endif %}
+{% if change.kept %}<button type="submit" class="btn btn-secondary btn-small" name="action" value="reconsider">Undo keep</button>
+{% else %}<button type="submit" class="btn btn-secondary btn-small" name="action" value="keep-removal">Keep</button>{% endif %}
+{% endif %}
+</form></td>
+{% endif %}
+</tr>
+{% endfor %}
+</tbody></table>
+</div>
+{% else %}
+<p class="help">No {{ group['title'] | lower }} on this page.</p>
+{% endif %}
+</div>
+</details>

@@ -1,7 +1,8 @@
 {% extends 'base.html' %}
 {% set nav_active = 'web.index' %}
 {% block title %}Web assets · CVEBeacon{% endblock %}
-{% from 'ui.html' import card, stat_grid, stat, task_list %}
+{% block head %}<script src="{{ url_for('static', filename='web-assets.js') }}" defer></script>{% endblock %}
+{% from 'ui.html' import callout, card, stat_grid, stat, task_list %}
 {% from '_web_assets_chooser.html' import client_chooser with context %}
 {% set section = {'page': 'overview', 'endpoint': 'web.index', 'description': section_description,
                   'primary_action': section_primary_action, 'primary_url': section_primary_url,
@@ -12,14 +13,37 @@
 {% if not client %}
 {{ client_chooser() }}
 {% elif document %}
+{% if sync_notice %}{% call callout('success') %}<p>{{ sync_notice }}</p>{% endcall %}{% endif %}
 {% set site_help = (site_summary.soon ~ ' expires within 30 days') if site_summary.soon == 1 else ((site_summary.soon ~ ' expire within 30 days') if site_summary.soon else ((site_summary.expired ~ ' expired') if site_summary.expired == 1 else ((site_summary.expired ~ ' expired') if site_summary.expired else 'No expiries within 30 days'))) %}
+<div class="section-block" id="inventory-sync">
+<a class="visually-hidden" href="{{ url_for('web.changes', client=client) }}" data-inventory-sync-link>Open inventory changes</a>
 {% call stat_grid() %}
 {{ stat(site_count, 'Sites', site_help, href=url_for('web.sites', client=client)) }}
 {{ stat(total_products, 'Products', chips['with_version'] ~ ' with a version', href=url_for('web.products', client=client)) }}
 {{ stat(chips['monitored'], 'Covered by scans', chips['ready'] ~ ' ready to add, ' ~ chips['review'] ~ ' need review', href=url_for('web.products', client=client, inv='monitored')) }}
 {{ stat(last_run_short or 'Not run yet', 'Last detection', last_run_help, tone=run_tone or none, href=url_for('web.detection', client=client)) }}
-{% if show_changes %}{{ stat(tab_counts.changes, 'Open changes', change_counts['add'] ~ ' new, ' ~ change_counts['update'] ~ ' updated, ' ~ change_counts['remove'] ~ ' missing', href=url_for('web.index', client=client, _anchor='inventory-sync')) }}{% endif %}
+{% if show_changes %}{{ stat(tab_counts.changes, 'Open changes', change_counts['add'] ~ ' new, ' ~ change_counts['update'] ~ ' updated, ' ~ change_counts['remove'] ~ ' missing', href=url_for('web.changes', client=client)) }}{% endif %}
 {% endcall %}
+{% if not show_changes and managed_enabled %}
+<p class="summary-line"><a href="{{ url_for('web.changes', client=client, _anchor='sync-settings') }}">Turn on inventory sync</a> to review inventory changes after each detection.</p>
+{% endif %}
+</div>
+
+{% if sync_settings and sync_settings.mode == 'off' and managed_enabled and sync_changes %}
+{% call card('Missing products', 'Detection has not seen these products in two complete scans. They stay in the inventory and are still checked for CVEs.') %}
+{% if not sync_view.evidence %}
+<p>{{ sync_waiting }} <a href="{{ url_for('web.detection', client=client) }}">Open Detection</a>.</p>
+{% elif not sync_view.evidence.complete %}
+{% call callout('warning') %}<p>Detection was incomplete. Automatic updates and removals wait for a complete scan.</p>{% endcall %}
+{% endif %}
+{% for group in sync_groups %}{% if group['kind'] == 'remove' and group['items'] %}{% include '_web_sync_group.html' %}{% endif %}{% endfor %}
+<nav class="pagination" aria-label="Missing product pages">
+{% if sync_page > 1 %}<a class="btn btn-secondary btn-small" href="{{ url_for('web.index', client=client, sync_page=sync_page - 1) }}">Previous</a>{% endif %}
+<span>Page {{ sync_page }} of {{ sync_pages }} · {{ row_limit }} missing products per page · {{ sync_total }} missing product{{ '' if sync_total == 1 else 's' }} flagged</span>
+{% if sync_page < sync_pages %}<a class="btn btn-secondary btn-small" href="{{ url_for('web.index', client=client, sync_page=sync_page + 1) }}">Next</a>{% endif %}
+</nav>
+{% endcall %}
+{% endif %}
 
 {% call card('Next steps', 'Per-client work, in the order it matters most.') %}
 {{ task_list(next_steps) }}
@@ -50,6 +74,5 @@
 <a class="btn btn-secondary" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>
 {% endcall %}
 
-<div class="section-block" id="inventory-sync">{% include 'web_inventory_sync.html' %}</div>
 {% endif %}
 {% endblock %}

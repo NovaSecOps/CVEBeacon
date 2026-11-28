@@ -51,7 +51,7 @@
   {'label': 'Products', 'url': url_for('web.products', client=client), 'current': section.page == 'products', 'count': counts.get('products', 0), 'tone': 'info'}
 ] %}
 {% if show_changes %}{% set tabs = tabs + [
-  {'label': 'Changes', 'url': url_for('web.index', client=client, _anchor='inventory-sync'), 'count': counts.get('changes', 0), 'tone': 'neutral'}
+  {'label': 'Changes', 'url': url_for('web.changes', client=client), 'current': section.page == 'changes', 'count': counts.get('changes', 0), 'tone': 'neutral'}
 ] %}{% endif %}
 {% set tabs = tabs + [
   {'label': 'Report', 'url': url_for('tech_report.index', client=client)}

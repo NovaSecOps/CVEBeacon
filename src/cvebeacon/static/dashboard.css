@@ -802,6 +802,14 @@ form[data-bulk-ready] .bulk-select-controls { display: flex; }
 .review-table thead th.review-status-cell { width: 8%; }
 .review-table thead th.review-retry-cell { width: 8%; }
 
+/* Inventory sync proposals use one table per group and the same stacked pattern. */
+.web-sync-table { table-layout: fixed; }
+.web-sync-table thead th { white-space: normal; }
+.web-sync-table thead th.web-sync-product-cell { width: 22%; }
+.web-sync-table thead th.web-sync-site-cell { width: 20%; }
+.web-sync-table thead th.web-sync-change-cell { width: 36%; }
+.web-sync-table thead th.web-sync-actions-cell { width: 22%; }
+
 /* Review entries stack as labelled rows on narrow screens, so the table never
    needs horizontal scrolling. Every cell stays visible, and explicit ARIA roles
    in the markup keep the table structure when the display rules change. */
@@ -815,6 +823,22 @@ form[data-bulk-ready] .bulk-select-controls { display: flex; }
   .review-table tr:last-child { border-bottom: 0; }
   .review-table td { min-width: 0; padding: var(--space-1) 0; border: 0; }
   .review-table td::before {
+    content: attr(data-label); display: block; text-align: left;
+    font-size: .72rem; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--text-muted);
+  }
+  .web-sync-table thead {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .web-sync-table, .web-sync-table tbody, .web-sync-table tr,
+  .web-sync-table th, .web-sync-table td { display: block; width: 100%; }
+  .web-sync-table tr { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
+  .web-sync-table tr:last-child { border-bottom: 0; }
+  .web-sync-table th, .web-sync-table td {
+    min-width: 0; padding: var(--space-1) 0; border: 0; text-align: left;
+  }
+  .web-sync-table th::before, .web-sync-table td::before {
     content: attr(data-label); display: block; text-align: left;
     font-size: .72rem; font-weight: 700; letter-spacing: .04em;
     text-transform: uppercase; color: var(--text-muted);

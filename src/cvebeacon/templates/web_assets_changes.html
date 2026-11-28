@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% set nav_active = 'web.changes' %}
+{% block title %}Changes · Web assets · CVEBeacon{% endblock %}
+{% from 'ui.html' import card, callout, empty_state, stat_grid, stat %}
+{% from '_web_assets_chooser.html' import client_chooser with context %}
+{% set section = {'page': 'changes', 'endpoint': 'web.changes', 'description': section_description,
+                  'primary_action': '', 'primary_url': '', 'primary_label': ''} %}
+{% block content %}
+{% include '_web_assets_section.html' %}
+
+{% if not client %}
+{{ client_chooser('web.changes') }}
+{% elif document %}
+<div class="section-block">{% include 'web_inventory_sync.html' %}</div>
+
+{% if sync_settings and sync_settings.mode == 'off' and managed_enabled %}
+{% call callout('info', 'Inventory sync is off') %}<p>Missing products are still flagged on the Overview. Additions and version changes stay manual until Review or Auto is turned on above.</p>{% endcall %}
+{% else %}
+{% call card('Changes since the last scan', 'Detection compares the saved products with this client\'s inventory. These are proposals; Auto mode can apply some without asking.') %}
+{% if sync_settings and sync_settings.mode == 'auto' and sync_view and sync_view.state.summary %}
+{% set summary = sync_view.state.summary %}
+{% call callout('info', 'Last automatic inventory changes') %}
+<p>{{ watch_stamp(summary.at) }} · {{ summary.added }} added · {{ summary.updated }} updated · {{ summary.removed }} removed.</p>
+{% endcall %}
+{% endif %}
+{% if sync_view and sync_view.removal_deferred %}
+{% call callout('warning') %}<p>{{ sync_coverage_warning }}</p>{% endcall %}
+{% endif %}
+{% if sync_view and sync_view.evidence and not sync_view.evidence.complete %}
+{% call callout('warning') %}<p>Detection was incomplete. Automatic updates and removals wait for a complete scan.</p>{% endcall %}
+{% endif %}
+
+{% if not managed_enabled %}
+{{ empty_state('Inventory sync is unavailable', 'Managed inventories are turned off, so detection cannot propose inventory changes.', url_for('config_editor.inventory'), 'Inventory settings') }}
+{% elif sync_warning %}
+{{ empty_state('Inventory changes could not be read', sync_warning, url_for('web.detection', client=client), 'Open Detection') }}
+{% elif not sync_changes %}
+{% if not sync_view or not sync_view.evidence %}
+{{ empty_state('No inventory changes yet', sync_waiting, url_for('web.detection', client=client), 'Open Detection') }}
+{% elif not sync_view.evidence.complete %}
+{{ empty_state('No inventory changes in the checked sites', 'Detection was incomplete, so this is not a full check. It found no additions, version changes or missing products in the sites it could check.', url_for('web.detection', client=client), 'Open Detection') }}
+{% else %}
+{{ empty_state('No inventory changes to review', 'Detection found no additions, version changes or missing products for this client. A complete scan is not proof of what is installed.', url_for('web.detection', client=client), 'Open Detection') }}
+{% endif %}
+{% else %}
+{% call stat_grid() %}
+{{ stat(change_counts['add'], 'New products', 'Proposed additions') }}
+{{ stat(change_counts['update'], 'Version changes', 'Proposed inventory updates') }}
+{{ stat(change_counts['remove'], 'Not detected', 'Proposed removals or keeps') }}
+{% endcall %}
+{% if not sync_view.evidence %}
+<p>{{ sync_waiting }} <a href="{{ url_for('web.detection', client=client) }}">Open Detection</a>.</p>
+{% endif %}
+
+{% for group in sync_groups %}{% include '_web_sync_group.html' %}{% endfor %}
+
+<nav class="pagination" aria-label="Inventory changes pages">
+{% if sync_page > 1 %}<a class="btn btn-secondary btn-small" href="{{ url_for('web.changes', client=client, sync_page=sync_page - 1) }}">Previous</a>{% endif %}
+<span>Page {{ sync_page }} of {{ sync_pages }} · {{ row_limit }} changes per page · {{ sync_total }} change{{ '' if sync_total == 1 else 's' }} waiting</span>
+{% if sync_page < sync_pages %}<a class="btn btn-secondary btn-small" href="{{ url_for('web.changes', client=client, sync_page=sync_page + 1) }}">Next</a>{% endif %}
+</nav>
+{% endif %}
+{% endcall %}
+{% endif %}
+{% endif %}
+{% endblock %}
