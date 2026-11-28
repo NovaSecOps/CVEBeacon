@@ -135,7 +135,7 @@ def _row_result(row, mapping, client, seen, number):
             return None, "Error", f"{FIELD_LABELS[field]} must be stored as text."
         if value and (len(value) > MAX_CONTRACT_TEXT or any(0xD800 <= ord(char) <= 0xDFFF for char in value)):
             return None, "Error", f"{FIELD_LABELS[field]} contains unsupported text or is too long."
-    required = ("asset_id",) if any(selected.get(key) for key in EXACT_IDENTITY_FIELDS) else CANONICAL_FIELDS
+    required = ("asset_id",) if any(selected.get(key) for key in EXACT_IDENTITY_FIELDS) else ("asset_id", "vendor", "product")
     for field in required:
         if not (selected.get(field) or "").strip():
             return None, "Error", f"{FIELD_LABELS[field]} is missing. Check the column mapping and this row."
@@ -159,7 +159,7 @@ def _row_result(row, mapping, client, seen, number):
         return None, "Error", f"Asset ID is already used in row {seen[key]}. Give each asset a unique ID."
     seen[key] = number
     if not asset.version and not asset.commit:
-        return asset, "Warning", "Version is missing. Some findings may require review."
+        return asset, "Warning", "No version: may be affected; confirm the version to be sure."
     return asset, "OK", "Ready to import."
 
 

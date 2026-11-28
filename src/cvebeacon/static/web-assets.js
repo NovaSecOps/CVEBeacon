@@ -64,8 +64,9 @@
         form.addEventListener("change", function (event) {
             if (event.target && event.target.name === "pick") update();
         });
-        update();
         if (controls) controls.setAttribute("data-bulk-ready", "true");
+        update();
+        form.dataset.bulkReady = "true";
     }
 
     // Open the product group that contains a #product-<asset_id> target, then

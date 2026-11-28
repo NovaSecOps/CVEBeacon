@@ -4,11 +4,13 @@ Legacy `asset_id`, `vendor`, `product`, `version` inventories continue to work i
 
 | Path | Supplied fields | Evidence |
 | --- | --- | --- |
-| Product | vendor, product, version | Existing CPE/NVD/CVE/EUVD assessment |
+| Product | vendor, product, optional version | Existing CPE/NVD/CVE/EUVD assessment |
 | PURL | purl, optionally separate version | Exact package identity and OSV |
 | CPE | complete cpe, optionally separate version | Explicit CPE outranks discovery; qualifiers retained |
-| Package | ecosystem, product (package name), version | OSV ecosystem identity |
+| Package | ecosystem, product (package name), optional version | OSV ecosystem identity |
 | Commit | HTTPS repository and full commit hash | OSV exact commit membership with matching repository evidence |
+
+A missing version is accepted on every path. A product, package or PURL without a version is scanned for every version of that identity; its findings require review and report the reason "version unknown: may be affected depending on the version". A CPE may use `*` in its version field for the same product-wide lookup. The NVD result for a version-less asset is capped at 2,000 CVEs and a reached cap leaves coverage unknown.
 
 Precedence is PURL, CPE, ecosystem, commit, then product. Contradictory versions or package names fail validation. Supplying CPE with PURL/ecosystem, or commit with another strong identity, requires review: similar names do not establish equivalence. Categories never resolve a conflict. Repository names alone are not commit identities.
 
@@ -23,7 +25,7 @@ cvebeacon query --ecosystem Maven --product org.apache.logging.log4j:log4j-core 
 cvebeacon query --cpe "cpe:2.3:a:apache:guacamole:1.3.0:*:*:*:*:*:*:*"
 ```
 
-See `examples/general-inventory.csv` and `examples/general.toml`. The default column names automatically recognize optional fields. A PURL can supply its version; a versionless PURL without a separate version requires review. PURL qualifiers and subpaths are parsed and preserved locally, but currently cannot establish exact OSV lookup identity and return `coverage_unknown` without transmitting the PURL. Supported lookup PURL types are pypi, npm, maven, golang, cargo, nuget, gem, and composer. Other valid types remain unknown. Unknown ecosystems or unsupported version schemes also remain explicit uncertainty.
+See `examples/general-inventory.csv` and `examples/general.toml`. The default column names automatically recognize optional fields. A PURL can supply its version; a versionless PURL is scanned for every version of the package and its findings require review. PURL qualifiers and subpaths are parsed and preserved locally, but currently cannot establish exact OSV lookup identity and return `coverage_unknown` without transmitting the PURL. Supported lookup PURL types are pypi, npm, maven, golang, cargo, nuget, gem, and composer. Other valid types remain unknown. Unknown ecosystems or unsupported version schemes also remain explicit uncertainty.
 
 OSV package queries retrieve package-wide advisories, then evaluate version evidence locally. This avoids treating OSV's fuzzy version matching as proof. SEMVER is used only when declared by the source; ECOSYSTEM ranges use supported ecosystem rules (PyPI, npm, Go, crates.io, NuGet, Debian and selected RPM distributions). Maven automatic range comparison is limited to numeric dotted releases; qualifiers, snapshots and other spellings require review because the comparison dependency disagrees with current Maven ordering. Ecosystem versions retain significant spelling: leading `v` is allowed for Go, retains its meaning for RPM, and is not silently removed for Debian or NuGet. Epochs/revisions use distro ordering. Unsupported schemes, incomplete/malformed events, and Git graph comparisons without exact source membership require review. Version lists can affirm inclusion; absence from an incomplete list cannot prove exclusion. `fixed`, `last_affected`, and `limit` boundaries retain their distinct meanings. Fixed boundaries in reports are source evidence, not a universal safe-upgrade recommendation.
 

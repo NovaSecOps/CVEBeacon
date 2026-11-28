@@ -77,6 +77,12 @@ def _inventory_match(item: dict, assets: dict[str, Asset]) -> bool:
     return current is not None and current.target_key == asset.target_key
 
 
+def _commit_only_identity(asset) -> bool:
+    """An exact repository commit is identified without a release version."""
+    fields = asdict(asset) if isinstance(asset, Asset) else asset
+    return bool(fields.get("commit")) and not any(
+        fields.get(name) for name in ("purl", "cpe", "ecosystem"))
+
 
 def _report_inventory_stamp(inventory, snapshot_directory):
     """Identify inventory inputs without reading their contents."""
@@ -121,6 +127,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     app = Flask(__name__)
     # Lets templates link to features that are not always registered.
     app.jinja_env.globals["has_endpoint"] = lambda name: name in app.view_functions
+    # Exact repository commits are assessed without a release version.
+    app.jinja_env.globals["is_commit_only"] = _commit_only_identity
     # True only in account mode and with the named permission.
     app.jinja_env.globals["can"] = lambda permission: bool(
         getattr(g, "accounts", False)) and permission in (
@@ -227,7 +235,11 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
 
     @app.context_processor
     def inventory_state():
-        return {"inventory_configured": config.effective_inventory is not None}
+        if getattr(g, "read_only_storage", False):
+            configured = config.inventory is not None or config.has_managed_dashboard
+        else:
+            configured = config.effective_inventory is not None
+        return {"inventory_configured": configured}
 
     @app.get("/healthz")
     @requires("public")

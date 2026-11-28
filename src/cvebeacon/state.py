@@ -479,12 +479,20 @@ class StateStore:
         if not event_ids:
             return
         state = "accepted" if accepted else "failed"
-        placeholders = ",".join("?" for _ in event_ids)
+        # A repeated ID would be counted once per chunk while a failed row stays
+        # eligible for the next update.
+        ids = list(dict.fromkeys(event_ids))
+        changed = _timestamp()
         with self.transaction() as db:
-            db.execute(
-                f"UPDATE deliveries SET state=?, attempts=attempts+1, updated_at=?, error=? WHERE channel=? AND event_id IN ({placeholders}) AND state!='accepted'",
-                (state, _timestamp(), error, channel, *event_ids),
-            )
+            # SQLite limits host parameters per statement. Chunk the backlog so a
+            # large first scan can still be acknowledged in one transaction.
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                db.execute(
+                    f"UPDATE deliveries SET state=?, attempts=attempts+1, updated_at=?, error=? WHERE channel=? AND event_id IN ({placeholders}) AND state!='accepted'",
+                    (state, changed, error, channel, *chunk),
+                )
 
     def history(self, *, asset_id: str | None = None, cve_id: str | None = None, limit: int = 100, before_event_id: int | None = None) -> list[dict[str, object]]:
         self.initialize()

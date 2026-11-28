@@ -9,6 +9,7 @@ import pytest
 from openpyxl import load_workbook
 
 from cvebeacon import cli, dashboard
+from cvebeacon.applicability import VERSION_UNKNOWN_REASON
 from cvebeacon.config import load_config
 from cvebeacon.errors import CVEBeaconError, SourceError
 from cvebeacon.models import Applicability as A, Asset, Evidence, Finding, HealthStatus as H, QueryResult, SourceHealth, Vulnerability, utc_now
@@ -194,6 +195,48 @@ def test_assets_explains_coverage_and_asset_detail_marks_active_nav(setup):
     assert "Unknown coverage is not the same as no vulnerabilities." in assets
     asset = client.get("/asset?asset_id=a").text
     assert '<a href="/assets" aria-current="page">' in asset
+
+
+def rows_for(text, asset_id):
+    marker = f"/asset?asset_id={asset_id}"
+    return [row.split("</tr>", 1)[0] for row in text.split("<tr>") if marker in row]
+
+
+def test_commit_only_asset_keeps_applicability_without_the_no_version_warning(setup):
+    config, store, client = setup
+    repository = "https://example.invalid/repo"
+    commit = Asset("commit", repository=repository, commit="a" * 40)
+    product = Asset("php", vendor="php", product="php")
+    config.inventory.path.write_text(
+        "asset_id,vendor,product,version,repository,commit\n"
+        f"commit,,,,{repository},{'a' * 40}\n"
+        "php,php,php,,,\n", encoding="utf-8")
+    commit_finding = Finding(commit, Vulnerability("CVE-2026-0001", summary="test"),
+                             A.AFFECTED, "high", "exact commit evidence")
+    product_finding = Finding(product, Vulnerability("CVE-2026-0002"),
+                              A.NEEDS_REVIEW, "limited", VERSION_UNKNOWN_REASON)
+    store.record_scan([
+        QueryResult(commit, (commit_finding,), ()),
+        QueryResult(product, (product_finding,), (), A.NEEDS_REVIEW, VERSION_UNKNOWN_REASON),
+    ])
+
+    detail = client.get("/asset?asset_id=commit").text
+    assert "Affected" in detail
+    assert "Version unknown" in detail
+    assert "No version" not in detail
+
+    assets = client.get("/assets").text
+    commit_rows = rows_for(assets, "commit")
+    assert commit_rows and all("No version" not in row for row in commit_rows)
+    product_rows = rows_for(assets, "php")
+    assert product_rows and all("No version" in row for row in product_rows)
+
+    findings = client.get("/findings").text
+    commit_rows = rows_for(findings, "commit")
+    assert commit_rows and all("No version" not in row and "Affected" in row
+                               for row in commit_rows)
+    product_rows = rows_for(findings, "php")
+    assert product_rows and all("No version" in row for row in product_rows)
 
 
 def test_finding_without_evidence_keeps_warning_copy(setup):

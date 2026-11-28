@@ -1,17 +1,20 @@
 """Web assets section shell, page placement and legacy URL behaviour."""
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from cvebeacon import web_assets
 from cvebeacon.models import Asset, QueryResult
+from cvebeacon.private_storage import private_directory, private_file
 from cvebeacon.state import StateStore
 from cvebeacon.web_assets import paths
 
 from test_dashboard import setup  # noqa: F401
 from test_dashboard_accounts import PASSWORD, accounts, csrf, login  # noqa: F401
 from test_dashboard_web import grant, save, web  # noqa: F401
+from test_web_inventory import snapshot
 
 
 def seed_products(config, products):
@@ -209,6 +212,20 @@ def test_sites_without_a_client_shows_the_chooser_not_an_error(web):
     assert page.status_code == 200
     assert "Choose a client" in page.text and 'id="add-asset"' not in page.text
     assert client.get("/web-assets/sites", query_string={"client": ""}).status_code == 200
+
+
+def test_client_chooser_opens_the_page_it_is_on(web):
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    for page, destination in (("/web-assets", "/web-assets"),
+                              ("/web-assets/sites", "/web-assets/sites"),
+                              ("/web-assets/detection", "/web-assets/detection"),
+                              ("/web-assets/products", "/web-assets/products")):
+        response = client.get(page)
+        assert response.status_code == 200
+        chooser = response.text.split("Choose a client", 1)[1].split("</section>", 1)[0]
+        assert f'action="{destination}"' in chooser
+        assert f'<a href="{destination}?client=Acme">Acme</a>' in chooser
 
 
 def test_web_assets_pages_have_no_inline_script_or_style_and_load_bulk_script(web):
@@ -505,6 +522,23 @@ def test_products_without_a_client_or_with_a_bad_client(web):
     assert client.get("/web-assets/products", query_string={"client": "x" * 200}).status_code == 400
 
 
+def test_sites_page_does_not_read_job_history_or_findings(web, monkeypatch):
+    config, _, app, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [{
+        "asset_id": "web-1", "hostname": "example.invalid", "vendor": "nginx", "product": "nginx",
+        "name": "nginx", "category": "web-server", "categories": ["web-server"], "confidence": "high",
+        "versions": ["1.25.3"], "evidence_types": ["header"]}])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a Sites GET must not read job history or findings")
+
+    monkeypatch.setattr(app.extensions["dashboard_jobs"].store, "recent", unexpected)
+    monkeypatch.setattr(StateStore, "finding_summary", unexpected)
+    page = client.get("/web-assets/sites?client=Acme")
+    assert page.status_code == 200, page.text
+
+
 def test_clients_list_links_to_each_clients_web_assets(web):
     config, _, _, client = web
     StateStore(config.database_path).record_scan([QueryResult(
@@ -524,6 +558,7 @@ def test_shared_section_components_are_styled():
     assert not re.search(r"\.filters label\s*\{", css)
     assert re.search(r"\.section-tabs\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;", css, re.S)
     assert ".section-tabs a:focus-visible" in css
+    assert ".review-table td:empty" not in css
     assert re.search(r"details\.danger-zone\s*\{[^}]*border-color:\s*var\(--danger-border\)", css, re.S)
     assert re.search(r"details\.danger-zone > summary\s*\{[^}]*color:\s*var\(--danger-text\)", css, re.S)
     assert re.search(r"details\.site-item > summary\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto", css, re.S)
@@ -591,6 +626,12 @@ def seed_detection(config, *, run=None, reviews=()):
                              json.dumps(detail).encode("utf-8"))
 
 
+def review_table(page):
+    start = '<table class="table-dense review-table" role="table">'
+    assert start in page
+    return page.split(start, 1)[1].split("</table>", 1)[0]
+
+
 RUN = {
     "status": "success", "started_at": "2026-11-27T09:15:00Z",
     "ended_at": "2026-11-27T09:16:39Z", "duration_seconds": 99.0,
@@ -609,9 +650,8 @@ def test_detection_page_owns_run_controls_summary_and_reviews(web):
     overview = client.get("/web-assets?client=Acme").text
     assert overview.count('value="web-detect"') == 1
     assert 'value="web-plan"' not in overview and "Check the saved sites" not in overview
-    assert 'id="detection"' not in overview
     assert "Entries to review" not in overview and "Run details" not in overview
-    assert "Detection details" not in overview and "Latest detection" not in overview
+    assert 'id="detection"' in overview
     assert 'href="/web-assets/detection?client=Acme"' in overview
     assert "Review 1 detection entry" in overview
 
@@ -650,6 +690,69 @@ def test_detection_controls_follow_run_permission(web):
     assert page.count('value="web-detect"') == 2 and page.count('value="web-plan"') == 1
 
 
+def test_review_table_keeps_seven_cells_and_header_associations(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_detection(config, run=RUN, reviews=[
+        {"asset_id": "web-example", "reason": "blocked", "detail": "fixed safe detail",
+         "status": 429, "retry_after": 120},
+        {"asset_id": "web-other", "reason": "version-unknown", "detail": ""},
+    ])
+    page = client.get("/web-assets/detection?client=Acme").text
+    table = review_table(page)
+    assert table.count('role="columnheader"') == 7
+    assert table.count('role="rowgroup"') == 2
+    assert table.count('role="row"') == 3
+    assert table.count('role="cell"') == 14
+    assert table.count("<td") == 14
+    headers = re.findall(
+        r'<th id="([^"]+)"[^>]*scope="col" role="columnheader">([^<]+)</th>', table)
+    assert [label for _, label in headers] == [
+        "Asset", "Reason", "Detail", "Product", "Conflicting versions",
+        "HTTP status", "Retry after (seconds)"]
+    for row in re.findall(r'<tr role="row">(.*?)</tr>', table, re.S)[1:]:
+        assert re.findall(r'headers="([^"]+)"', row) == [item[0] for item in headers]
+    assert ('<td role="cell" headers="review-status" data-label="HTTP status">429</td>'
+            in table)
+    assert ('<td role="cell" headers="review-retry" data-label="Retry after (seconds)"'
+            ' class="num">120</td>' in table)
+    assert '<td role="cell" headers="review-product" data-label="Product">—</td>' in table
+    assert ('<td role="cell" headers="review-versions"'
+            ' data-label="Conflicting versions">—</td>' in table)
+    assert '<td role="cell" headers="review-detail" data-label="Detail">—</td>' in table
+
+
+def test_failed_run_callout_counts_fetch_failure_reasons_before_the_display_cap(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    reviews = [{"asset_id": f"web-{index}", "reason": "no-technologies",
+                "detail": "ordinary detail"} for index in range(1000)]
+    reviews += [
+        {"asset_id": "web-blocked-a", "reason": "blocked", "detail": "private raw detail"},
+        {"asset_id": "web-blocked-b", "reason": "blocked"},
+        {"asset_id": "web-timeout", "reason": "timeout"},
+    ]
+    seed_detection(config, run={**RUN, "status": "failed", "fetched_count": 0},
+                   reviews=reviews)
+    page = client.get("/web-assets/detection?client=Acme").text
+    assert '<span class="badge badge-danger">Failed</span>' in page
+    callout = page.split('class="callout callout-danger"', 1)[1].split("</div></div>", 1)[0]
+    assert "Request blocked: 2" in callout
+    assert "Request timed out: 1" in callout
+    assert "private raw detail" not in callout
+    assert "example.invalid" not in callout
+
+
+def test_failed_run_without_saved_reasons_says_counts_are_unavailable(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_detection(config, run={**RUN, "status": "failed"}, reviews=[
+        {"asset_id": "web-example", "reason": "version-unknown"}])
+    page = client.get("/web-assets/detection?client=Acme").text
+    callout = page.split('class="callout callout-danger"', 1)[1].split("</div></div>", 1)[0]
+    assert "Reason counts are unavailable." in callout
+
+
 def test_detection_page_without_sites_offers_the_sites_page(web):
     _, _, _, client = web
     assert save(client).status_code == 303
@@ -671,6 +774,100 @@ def test_legacy_detection_anchor_is_gone_and_the_summary_links_to_detection(web)
     _, _, _, client = web
     assert save(client).status_code == 303
     page = client.get("/web-assets?client=Acme").text
-    assert 'id="detection"' not in page
-    assert "Last detection" in page
-    assert 'href="/web-assets/detection?client=Acme"' in page
+    assert 'id="detection"' in page
+    summary = page.split('id="detection"', 1)[1].split("</section>", 1)[0]
+    assert 'href="/web-assets/detection?client=Acme"' in summary
+    assert "Detection details" in summary or "Open Detection" in summary
+
+
+def test_sites_get_does_not_create_web_storage(web):
+    config, _, _, client = web
+    data = config.database_path.parent
+    assert not (data / "web-assets").exists()
+    assert not (data / "web-inventory").exists()
+    page = client.get("/web-assets/sites?client=Acme")
+    assert page.status_code == 200, page.text
+    assert not (data / "web-assets").exists()
+    assert not (data / "web-inventory").exists()
+
+
+def test_sites_get_does_not_recover_the_inventory_journal(web):
+    config, _, _, client = web
+    directory = config.inventory_directory
+    private_directory(directory, owner_only=True)
+    staging = directory / ".inventory-pending-current"
+    descriptor = private_file(staging, create=True, exclusive=True)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(b'[{"asset_id":"orphan"}]\n')
+    page = client.get("/web-assets/sites?client=Acme")
+    assert page.status_code == 200, page.text
+    assert staging.read_bytes() == b'[{"asset_id":"orphan"}]\n'
+
+
+def test_sites_get_leaves_the_saved_allowlist_unchanged(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    path, output = paths(config, "Acme")
+    before = path.read_bytes()
+    page = client.get("/web-assets/sites?client=Acme")
+    assert page.status_code == 200, page.text
+    assert path.read_bytes() == before
+    assert not output.exists()
+
+
+def test_snapshot_and_manifest_keep_danger_zone_and_provenance(web):
+    config, _, _, client = web
+    _, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    review = Path(str(output) + ".review.json")
+    review.unlink()
+    assert not paths(config, "Acme")[0].exists()
+    assert not Path(str(output) + ".removed").exists()
+
+    sites = client.get("/web-assets/sites?client=Acme")
+    assert sites.status_code == 200, sites.text
+    assert "Remove all assets" in sites.text
+
+    overview = client.get("/web-assets?client=Acme")
+    assert overview.status_code == 200, overview.text
+    manifest = json.loads(Path(str(output) + ".manifest.json").read_text(encoding="utf-8"))
+    assert f"{manifest['record_count']} saved inventory record" in overview.text
+    assert manifest["generated_at"][:10] in overview.text
+
+
+def test_malformed_prefill_is_rejected_before_any_redirect(web):
+    _, _, _, client = web
+    assert client.get("/web-assets", query_string={
+        "prefill_url": "not a URL"}).status_code == 400
+    assert client.get("/web-assets", query_string={
+        "client": "Acme", "prefill_url": "not a URL"}).status_code == 400
+    valid = client.get("/web-assets", query_string={
+        "client": "Acme", "prefill_url": "https://www.example.invalid:443/"})
+    assert valid.status_code == 302
+
+
+def test_bulk_controls_are_revealed_only_by_the_bulk_script(web):
+    from cvebeacon import dashboard_web
+
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [{
+        "asset_id": "web-1", "hostname": "example.invalid", "vendor": "nginx", "product": "nginx",
+        "name": "nginx", "category": "web-server", "categories": ["web-server"], "confidence": "high",
+        "versions": ["1.25.3"], "evidence_types": ["header"]}])
+    form = client.get("/web-assets/products?client=Acme").text.split(
+        "data-bulk-form", 1)[1].split("</form>", 1)[0]
+    assert "data-bulk-select-all" in form and "data-bulk-clear" in form
+    assert "data-bulk-ready" not in form
+    pick = re.search(r'<input type="checkbox" name="pick" value="web-1"[^>]*>', form)
+    assert pick and "disabled" not in pick.group(0)
+    assert "Add selected to inventory" in form
+
+    static = Path(dashboard_web.__file__).parent / "static"
+    css = (static / "dashboard.css").read_text(encoding="utf-8")
+    assert re.search(r"\.bulk-select-controls\s*\{[^}]*display:\s*none;", css, re.S)
+    assert re.search(r"form\[data-bulk-ready\]\s+\.bulk-select-controls\s*\{[^}]*display:\s*flex;",
+                     css, re.S)
+    assert ".js .bulk-select-controls" not in css
+    script = (static / "web-assets.js").read_text(encoding="utf-8")
+    assert re.search(r'update\(\);\s*\n\s*form\.dataset\.bulkReady\s*=\s*"true";\s*\n\s*\}', script)

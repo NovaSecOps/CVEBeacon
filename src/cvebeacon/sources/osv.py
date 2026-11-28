@@ -10,6 +10,8 @@ from .common import source_payload
 
 BASE_URL = "https://api.osv.dev/v1"
 ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{1,199}")
+ADVISORY_LIMIT = 5000
+ADVISORY_LIMIT_ERROR = "OSV query reached the advisory limit; results are incomplete"
 
 
 def advisory_id(value):
@@ -96,9 +98,22 @@ class OSVSource:
                         vulns = value.get("vulns", [])
                         if not isinstance(vulns, list):
                             raise ValueError("invalid vulnerability list")
-                        ids[i].update(advisory_id(v["id"]) for v in vulns)
-                        if len(ids[i]) > 5000:
-                            raise ValueError("query exceeds advisory limit")
+                        page_ids = set()
+                        for vuln in vulns:
+                            if not isinstance(vuln, dict):
+                                raise ValueError("invalid vulnerability reference")
+                            page_ids.add(advisory_id(vuln["id"]))
+                        merged = ids[i] | page_ids
+                        if len(merged) > ADVISORY_LIMIT:
+                            retained = set(ids[i])
+                            for identifier in sorted(page_ids):
+                                if len(retained) >= ADVISORY_LIMIT:
+                                    break
+                                retained.add(identifier)
+                            ids[i] = retained
+                            errors[i] = ADVISORY_LIMIT_ERROR
+                            continue
+                        ids[i] = merged
                         token = value.get("next_page_token")
                         if token is not None and not isinstance(token, str):
                             raise ValueError("invalid page token")

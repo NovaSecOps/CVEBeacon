@@ -778,6 +778,7 @@ a.filter-chip:hover { border-color: var(--link); }
 .bulk-anchor { scroll-margin-top: calc(var(--topbar-height) + var(--space-4)); }
 .bulk-select-controls { display: none; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .bulk-select-controls[data-bulk-ready] { display: flex; }
+form[data-bulk-ready] .bulk-select-controls { display: flex; }
 /* A category or site group owns one border; its table sits flush inside. */
 .product-group .table-wrap {
   margin: 0; border: 0; border-radius: 0; box-shadow: none;
@@ -802,7 +803,8 @@ a.filter-chip:hover { border-color: var(--link); }
 .review-table thead th.review-retry-cell { width: 8%; }
 
 /* Review entries stack as labelled rows on narrow screens, so the table never
-   needs horizontal scrolling. The table markup and header semantics remain. */
+   needs horizontal scrolling. Every cell stays visible, and explicit ARIA roles
+   in the markup keep the table structure when the display rules change. */
 @media (max-width: 640px) {
   .review-table thead {
     position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
@@ -813,11 +815,10 @@ a.filter-chip:hover { border-color: var(--link); }
   .review-table tr:last-child { border-bottom: 0; }
   .review-table td { min-width: 0; padding: var(--space-1) 0; border: 0; }
   .review-table td::before {
-    content: attr(data-label); display: block;
+    content: attr(data-label); display: block; text-align: left;
     font-size: .72rem; font-weight: 700; letter-spacing: .04em;
     text-transform: uppercase; color: var(--text-muted);
   }
-  .review-table td:empty { display: none; }
 }
 
 /* Field grid for site forms. One column on narrow screens. */

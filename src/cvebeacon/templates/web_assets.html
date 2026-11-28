@@ -25,6 +25,31 @@
 {{ task_list(next_steps) }}
 {% endcall %}
 
+<div class="section-block" id="detection">
+{% call card('Latest detection', 'The last run at a glance. Full run notes and entries to review are on the Detection page.') %}
+{% if run %}
+{% set run_site_count = run.get('asset_count', site_count) %}
+{% set fetched_count = run.get('fetched_count', 0) %}
+<p><span class="badge badge-{{ run_badge }}">{{ run_label }}</span> · Last checked {{ watch_stamp(run.get('started_at', '')) }}{% set seconds = run.get('duration_seconds') %}{% if seconds is number %} · {{ '%.1f' | format(seconds) }} seconds{% endif %}</p>
+{% call stat_grid() %}
+{{ stat(fetched_count ~ '/' ~ run_site_count, 'Sites fetched') }}
+{{ stat(run.get('products_recognized', 0), 'Products') }}
+{{ stat(run.get('products_with_version', 0), 'With a version') }}
+{{ stat(run.get('request_count', 0), 'Requests') }}
+{% endcall %}
+<a class="btn btn-secondary btn-small" href="{{ url_for('web.detection', client=client) }}">Detection details</a>
+{% else %}
+<p>No detection has run yet. Detection is manual and has not run for this client.</p>
+<a class="btn btn-secondary btn-small" href="{{ url_for('web.detection', client=client) }}">Open Detection</a>
+{% endif %}
+{% endcall %}
+</div>
+
+{% call card('Report', 'The technology report uses the latest saved snapshot.') %}
+<p>{% if snapshot %}{{ snapshot.record_count }} saved inventory record{{ '' if snapshot.record_count == 1 else 's' }} in the saved snapshot from {{ watch_stamp(snapshot.generated_at) }}.{% else %}No saved snapshot is available yet.{% endif %}</p>
+<a class="btn btn-secondary" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>
+{% endcall %}
+
 <div class="section-block" id="inventory-sync">{% include 'web_inventory_sync.html' %}</div>
 {% endif %}
 {% endblock %}

@@ -29,7 +29,7 @@
 {% include '_web_assets_section.html' %}
 
 {% if not client %}
-{{ client_chooser() }}
+{{ client_chooser('web.sites') }}
 {% elif document %}
 {% set plural = '' if site_count == 1 else 's' %}
 {% set expiry_text = (site_summary.expired ~ ' expired') if site_summary.expired else ((site_summary.soon ~ (' expires' if site_summary.soon == 1 else ' expire') ~ ' within 30 days') if site_summary.soon else 'no expiries') %}
@@ -79,7 +79,7 @@
 {{ asset_fields(prefill_entry, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form>
 </details>
 {{ import_card(open=not document.assets) }}
-{% if document.assets or removed %}
+{% if document.assets or removed or saved_results %}
 <details class="disclosure danger-zone">
 <summary>Remove all sites and results</summary>
 <div class="card card-danger">

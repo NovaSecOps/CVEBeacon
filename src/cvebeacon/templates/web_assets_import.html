@@ -26,11 +26,11 @@
 <input type="hidden" name="preview_token" value="{{ preview_token }}">
 <div class="field field-check"><input id="import-attest" name="attest" type="checkbox" value="yes" required><label for="import-attest">I attest that {{ client }} authorises observation of all {{ add_count }} site{{ '' if add_count == 1 else 's' }} listed above, with the redirect, expiry and address settings shown.</label></div>
 {% if private_count %}<div class="field field-check"><input id="import-private" name="attest_private" type="checkbox" value="yes" required><label for="import-private">I confirm that {{ private_count }} of these site{{ '' if private_count == 1 else 's' }} may be reached on private or internal addresses, and that {{ client }} authorises this.</label></div>{% endif %}
-<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save {{ add_count }} site{{ '' if add_count == 1 else 's' }}</button><a class="btn btn-secondary" href="{{ url_for('web.index', client=client) }}">Back</a></div>
+<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save {{ add_count }} site{{ '' if add_count == 1 else 's' }}</button><a class="btn btn-secondary" href="{{ url_for('web.sites', client=client) }}">Back</a></div>
 </form>
 {% endcall %}
 {% else %}
 {% call card('Nothing to add') %}<p class="muted">No row can be added. Check the statuses above, fix your file and try again.</p>
-<div class="form-actions"><a class="btn btn-secondary" href="{{ url_for('web.index', client=client) }}">Back</a></div>{% endcall %}
+<div class="form-actions"><a class="btn btn-secondary" href="{{ url_for('web.sites', client=client) }}">Back</a></div>{% endcall %}
 {% endif %}
 {% endblock %}

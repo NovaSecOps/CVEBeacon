@@ -33,6 +33,9 @@ def known_version(value: str) -> bool:
     return bool(value.strip()) and not any(char in value for char in "*?<>=") and value.strip().casefold() not in {"-", "unknown", "n/a", "na", "latest", "all"}
 
 
+VERSION_UNKNOWN_REASON = "version unknown: may be affected depending on the version"
+
+
 def _semver(value: str):
     match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", value)
     if not match:
@@ -131,7 +134,7 @@ def _entry_status(asset_version: str, entry: dict[str, Any]) -> str | None:
 
 def evaluate_cve_evidence(asset: Asset, evidence: Evidence) -> Decision:
     if not known_version(asset.version):
-        return Decision(Applicability.NEEDS_REVIEW, "inventory version is missing or unknown")
+        return Decision(Applicability.NEEDS_REVIEW, VERSION_UNKNOWN_REASON)
     affected = evidence.details.get("affected")
     if not isinstance(affected, list):
         return Decision(Applicability.NEEDS_REVIEW, "source has no structured affected-product evidence")
@@ -186,10 +189,7 @@ def evaluate_cve_evidence(asset: Asset, evidence: Evidence) -> Decision:
     return Decision(Applicability.COVERAGE_UNKNOWN, "official record does not identify this exact product")
 
 
-def exact_cpe_version(cpe: str, version: str) -> str:
-    """Return a 2.3 CPE with its version field replaced and conservatively escaped."""
-    if not known_version(version) or any(ord(char) < 32 for char in version):
-        raise ValueError("an exact known version is required for CPE lookup")
+def _cpe_parts(cpe: str) -> list[str]:
     if not cpe.startswith("cpe:2.3:"):
         raise ValueError("configured CPE must be a complete CPE 2.3 name")
     parts: list[str] = []
@@ -209,8 +209,23 @@ def exact_cpe_version(cpe: str, version: str) -> str:
     parts.append("".join(current))
     if escaped_field or len(parts) != 11 or any(not part for part in parts) or parts[0] not in {"a", "h", "o"} or parts[1] in {"*", "-"} or parts[2] in {"*", "-"}:
         raise ValueError("configured CPE must be a complete CPE 2.3 name")
+    return parts
+
+
+def exact_cpe_version(cpe: str, version: str) -> str:
+    """Return a 2.3 CPE with its version field replaced and conservatively escaped."""
+    if not known_version(version) or any(ord(char) < 32 for char in version):
+        raise ValueError("an exact known version is required for CPE lookup")
+    parts = _cpe_parts(cpe)
     escaped = re.sub(r"([^A-Za-z0-9._-])", r"\\\1", version.strip())
     parts[3] = escaped
+    return "cpe:2.3:" + ":".join(parts)
+
+
+def wildcard_cpe_version(cpe: str) -> str:
+    """Return a 2.3 CPE that matches every version of the product."""
+    parts = _cpe_parts(cpe)
+    parts[3] = "*"
     return "cpe:2.3:" + ":".join(parts)
 
 

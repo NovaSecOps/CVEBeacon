@@ -54,7 +54,7 @@
 {% include '_web_assets_section.html' %}
 
 {% if not client %}
-{{ client_chooser() }}
+{{ client_chooser('web.products') }}
 {% elif document %}
 {% call stat_grid() %}
 {{ stat(total_products, 'Detected products', chips['with_version'] ~ ' with a version') }}

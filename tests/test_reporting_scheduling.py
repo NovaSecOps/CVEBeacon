@@ -30,6 +30,22 @@ def test_xlsx_neutralizes_formula_like_inventory_values(tmp_path):
     assert all(workbook["Summary"].cell(2, column).data_type != "f" for column in range(1, 5))
 
 
+def test_xlsx_reports_a_finding_for_an_asset_without_a_version(tmp_path):
+    asset = Asset("php", vendor="php", product="php")
+    finding = Finding(asset, Vulnerability("CVE-2025-0001"), Applicability.NEEDS_REVIEW,
+                      "limited", "version unknown: may be affected depending on the version",
+                      (Evidence("nvd", "applicability", "test"),))
+    path = write_xlsx([QueryResult(asset, (finding,), (), Applicability.NEEDS_REVIEW,
+                                   "version unknown: may be affected depending on the version")],
+                      tmp_path / "report.xlsx")
+    workbook = load_workbook(path)
+    assert workbook["Summary"]["D2"].value in (None, "")
+    assert workbook["Findings"]["D2"].value in (None, "")
+    assert workbook["Findings"]["E2"].value == "CVE-2025-0001"
+    assert workbook["Findings"]["F2"].value == "needs_review"
+    assert workbook["Uncertainty"]["D2"].value == "version unknown: may be affected depending on the version"
+
+
 def test_advisory_report_preserves_identity_and_formula_safety(tmp_path):
     asset = Asset("a", product="requests", version="1", purl="pkg:pypi/requests@1", category="=1+1", system_id="@group")
     vuln = Vulnerability(advisory_id="GHSA-test-only", aliases=("PYSEC-2099-1",), fixed_versions=("+1",))
