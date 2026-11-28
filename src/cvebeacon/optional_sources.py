@@ -47,7 +47,9 @@ OPTIONAL_SOURCES = frozenset({"vulncheck", "shodan_cvedb"})
 
 
 @dataclass(slots=True)
-class _OptionalState:
+class OptionalContext:
+    """Optional-source caches and request counters for one scan call."""
+
     vulncheck: VulnCheckSource
     cvedb: ShodanCVEDBSource
     vulncheck_catalog: dict[str, Evidence] | SourceError | None = None
@@ -63,18 +65,15 @@ def cvedb_active(config: Any) -> bool:
     return bool(accessor()) if callable(accessor) else False
 
 
-def _state(engine: "QueryEngine") -> _OptionalState:
-    state = getattr(engine, "_optional_sources_state", None)
-    if state is None:
-        state = _OptionalState(
-            VulnCheckSource(engine.http),
-            ShodanCVEDBSource(engine.http),
-        )
-        setattr(engine, "_optional_sources_state", state)
-    return state
+def new_context(engine: "QueryEngine") -> OptionalContext:
+    """Create empty optional-source state for one scan call."""
+    return OptionalContext(
+        VulnCheckSource(engine.http),
+        ShodanCVEDBSource(engine.http),
+    )
 
 
-def _catalog(engine: "QueryEngine", state: _OptionalState) -> dict[str, Evidence]:
+def _catalog(engine: "QueryEngine", state: OptionalContext) -> dict[str, Evidence]:
     if state.vulncheck_catalog is None:
         token = engine.config.vulncheck_api_key()
         try:
@@ -165,7 +164,7 @@ def _merged_flag(records: Iterable[Any], field: str) -> bool | None:
 
 def _vulncheck(
     engine: "QueryEngine",
-    state: _OptionalState,
+    state: OptionalContext,
     findings: list[Finding],
     health: list[SourceHealth],
 ) -> tuple[list[Finding], list[SourceHealth]]:
@@ -203,7 +202,7 @@ def _vulncheck(
 
 def _cvedb(
     engine: "QueryEngine",
-    state: _OptionalState,
+    state: OptionalContext,
     asset: Asset,
     findings: list[Finding],
     health: list[SourceHealth],
@@ -330,6 +329,7 @@ def apply(
     engine: "QueryEngine",
     asset: Asset,
     result: QueryResult,
+    state: OptionalContext | None = None,
 ) -> QueryResult:
     """Enrich one completed core result with the optional sources that are on."""
     config = getattr(engine, "config", None)
@@ -339,7 +339,8 @@ def apply(
     cvedb = cvedb_active(config)
     if not vulncheck and not cvedb:
         return result
-    state = _state(engine)
+    if state is None:
+        state = new_context(engine)
     findings = list(result.findings)
     health = list(result.source_health)
     if vulncheck:

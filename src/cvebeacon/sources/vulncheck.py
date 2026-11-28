@@ -240,7 +240,6 @@ class VulnCheckSource:
                 params=params,
                 headers=headers,
                 identity_only=True,
-                quiet=True,
             ))
             used += len(raw)
             try:

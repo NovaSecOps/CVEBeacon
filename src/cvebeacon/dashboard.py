@@ -321,28 +321,18 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
         return render_template("error.html", code=code), code
 
     def snapshot():
-        data = store.dashboard_snapshot()
         vulncheck_on = config.vulncheck_active()
         cvedb_on = config.cvedb_active()
-        hidden_events: set[tuple[str, str]] = set()
+        data = store.dashboard_snapshot(include_cvedb_only=cvedb_on)
         findings = []
         for row in data["findings"]:
             row["finding"] = filter_payload(
                 row["finding"], vulncheck=vulncheck_on, cvedb=cvedb_on
             )
             if not cvedb_on and is_cvedb_only(row["finding"]):
-                asset_id = row["finding"]["asset"]["asset_id"]
-                for key in ("cve_id", "advisory_id"):
-                    identifier = row["finding"]["vulnerability"].get(key)
-                    if identifier:
-                        hidden_events.add((asset_id, identifier))
                 continue
             findings.append(row)
         data["findings"] = findings
-        data["events"] = [
-            row for row in data["events"]
-            if (row["asset_id"], row["cve_id"]) not in hidden_events
-        ]
         data["health"] = filter_health(
             data["health"], vulncheck=vulncheck_on, cvedb=cvedb_on
         )

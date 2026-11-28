@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -36,6 +35,7 @@ from cvebeacon.models import (
     Vulnerability,
     utc_now,
 )
+from cvebeacon.notifications import TeamsNotifier
 from cvebeacon.optional_sources import CVEDB_ONLY_REASON
 from cvebeacon.sources import shodan_cvedb, vulncheck
 from cvebeacon.sources.osv import OSVResult
@@ -542,19 +542,19 @@ def test_reflected_success_response_retains_no_token(tmp_path, monkeypatch, capl
             )
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(
-        nvd_enabled=True, vulncheck_enabled=True,
-    ))
     logging.getLogger("httpx").setLevel(logging.INFO)
     logging.getLogger("httpcore").setLevel(logging.INFO)
     caplog.set_level(logging.INFO)
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
     result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     health = next(item for item in result.source_health if item.source == "vulncheck")
     assert health.status == HealthStatus.FAILED
     assert TOKEN not in health.message
     assert TOKEN not in caplog.text
-    assert logging.getLogger("httpx").level == logging.INFO
-    assert logging.getLogger("httpcore").level == logging.INFO
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
     assert TOKEN not in json.dumps([result.to_dict()])
     store = StateStore(engine.config.database_path)
     store.record_scan([result])
@@ -1345,7 +1345,9 @@ def test_inactive_optional_sources_return_the_completed_result_unchanged(tmp_pat
     asset = Asset("a", "Acme", "Widget", "1.0")
     result = QueryResult(asset, (), ())
     try:
-        assert optional_sources.apply(engine, asset, result) is result
+        assert optional_sources.apply(
+            engine, asset, result, optional_sources.new_context(engine)
+        ) is result
     finally:
         engine.close()
 
@@ -2050,97 +2052,249 @@ def test_reflected_failure_response_keeps_token_out_of_health_and_logs(tmp_path,
             )
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(
-        nvd_enabled=True, vulncheck_enabled=True,
-    ))
     logging.getLogger("httpx").setLevel(logging.INFO)
     logging.getLogger("httpcore").setLevel(logging.INFO)
     caplog.set_level(logging.INFO)
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
     result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     health = next(item for item in result.source_health if item.source == "vulncheck")
     assert health.status == HealthStatus.FAILED
     assert health.message == "on; vulncheck: HTTP 401"
     assert TOKEN not in caplog.text
     assert TOKEN not in json.dumps([result.to_dict()])
-    assert logging.getLogger("httpx").level == logging.INFO
-    assert logging.getLogger("httpcore").level == logging.INFO
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
 
 
-def test_overlapping_quiet_requests_keep_logger_levels_and_other_logs(
-    monkeypatch, caplog
-):
-    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
-    first_started = threading.Event()
-    second_started = threading.Event()
-    release_first = threading.Event()
-    release_second = threading.Event()
+def test_http_client_keeps_request_urls_out_of_logs(caplog):
+    webhook = "https://example.test/webhooks/TEST/TEST"
 
-    def first_handler(request):
-        first_started.set()
-        release_first.wait(10)
-        return httpx.Response(
-            401, extensions={"reason_phrase": b"Unauthorized"}
-        )
-
-    def second_handler(request):
-        second_started.set()
-        release_second.wait(10)
-        return httpx.Response(
-            401,
-            extensions={
-                "reason_phrase": f"Unauthorized for {TOKEN}".encode("ascii")
-            },
-        )
-
-    first = VulnCheckSource(make_http(first_handler))
-    second = VulnCheckSource(make_http(second_handler))
-    ordinary = make_http(lambda request: httpx.Response(200, json={"ok": True}))
+    def handler(request):
+        if "api.vulncheck.com" in str(request.url):
+            return httpx.Response(200, json=vulncheck_page(
+                [vulncheck_entry("CVE-2026-0001")], total=1,
+            ))
+        return httpx.Response(200)
 
     logging.getLogger("httpx").setLevel(logging.INFO)
     logging.getLogger("httpcore").setLevel(logging.INFO)
     caplog.set_level(logging.INFO)
-
-    failures: dict[str, str] = {}
-
-    def run(name, source):
-        try:
-            source.kev(TOKEN)
-        except BaseException as exc:
-            failures[name] = str(exc)
-
-    first_thread = threading.Thread(target=run, args=("first", first), daemon=True)
-    second_thread = None
-    first_thread.start()
+    http = make_http(handler)
     try:
-        assert first_started.wait(10)
-        # A quiet request must not change the level other threads rely on.
-        assert logging.getLogger("httpx").level == logging.INFO
-        assert logging.getLogger("httpcore").level == logging.INFO
-
-        ordinary.get_json("https://example.test/ordinary", source="test")
-        assert any(
-            "https://example.test/ordinary" in record.getMessage()
-            for record in caplog.records
-        )
-
-        second_thread = threading.Thread(
-            target=run, args=("second", second), daemon=True
-        )
-        second_thread.start()
-        assert second_started.wait(10)
+        TeamsNotifier(http, webhook).send([])
+        assert VulnCheckSource(http).kev(TOKEN)
     finally:
-        release_first.set()
-        release_second.set()
-        first_thread.join(10)
-        if second_thread is not None:
-            second_thread.join(10)
+        http.close()
 
-    assert not first_thread.is_alive()
-    assert second_thread is not None and not second_thread.is_alive()
-    assert failures == {
-        "first": "vulncheck: HTTP 401",
-        "second": "vulncheck: HTTP 401",
-    }
-    assert TOKEN not in caplog.text
-    assert logging.getLogger("httpx").level == logging.INFO
-    assert logging.getLogger("httpcore").level == logging.INFO
+    assert webhook not in caplog.text
+    assert "api.vulncheck.com" not in caplog.text
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+def test_each_scan_starts_with_fresh_optional_source_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
+    asset = Asset("a", "Acme", "Widget", "1.0", cpe=CPE)
+    counts = {"vulncheck": 0, "cvedb": 0}
+    failing = False
+
+    def handler(request):
+        url = str(request.url)
+        if "api.vulncheck.com" in url:
+            counts["vulncheck"] += 1
+            if failing:
+                return httpx.Response(
+                    401, extensions={"reason_phrase": b"Unauthorized"}
+                )
+            return httpx.Response(200, json=vulncheck_page(
+                [vulncheck_entry("CVE-2026-0001")], total=1,
+            ))
+        if "cvedb.shodan.io/cves" in url:
+            counts["cvedb"] += 1
+            if failing:
+                return httpx.Response(503)
+            return httpx.Response(200, json={"total": 0})
+        if "cvedb.shodan.io/cve/" in url:
+            counts["cvedb"] += 1
+            if failing:
+                return httpx.Response(503)
+            return httpx.Response(200, json={
+                "cve_id": "CVE-2026-0001",
+                "kev": True,
+                "ransomware_campaign": "Known",
+            })
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    engine = make_engine(
+        tmp_path, handler,
+        sources=source_config(
+            nvd_enabled=True, vulncheck_enabled=True, shodan_cvedb_enabled=True,
+        ),
+    )
+    try:
+        first = engine.scan([asset])[0]
+        first_finding = next(
+            item for item in first.findings
+            if item.vulnerability.cve_id == "CVE-2026-0001"
+        )
+        assert first_finding.vulnerability.vulncheck_kev is True
+        assert first_finding.vulnerability.shodan_cvedb_kev is True
+        assert any(item.source == "vulncheck" for item in first_finding.evidence)
+        assert any(item.source == "shodan_cvedb" for item in first_finding.evidence)
+        assert counts["vulncheck"] > 0 and counts["cvedb"] > 0
+
+        failing = True
+        counts.update(vulncheck=0, cvedb=0)
+        second = engine.scan([asset])[0]
+        second_finding = next(
+            item for item in second.findings
+            if item.vulnerability.cve_id == "CVE-2026-0001"
+        )
+        health = {item.source: item.status for item in second.source_health}
+        assert counts["vulncheck"] > 0
+        assert counts["cvedb"] > 0
+        assert health["vulncheck"] == HealthStatus.FAILED
+        assert health["shodan_cvedb"] == HealthStatus.FAILED
+        assert second_finding.vulnerability.vulncheck_kev is None
+        assert second_finding.vulnerability.shodan_cvedb_kev is None
+        assert not any(
+            item.source in {"vulncheck", "shodan_cvedb"}
+            for item in second_finding.evidence
+        )
+    finally:
+        engine.close()
+
+
+def test_core_failure_clears_optional_fields_in_the_retained_row(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
+    asset = Asset("a", "Acme", "Widget", "1.0", cpe=CPE)
+    store = StateStore(tmp_path / "state.db")
+
+    def healthy(request):
+        url = str(request.url)
+        if "api.vulncheck.com" in url:
+            return httpx.Response(200, json=vulncheck_page(
+                [vulncheck_entry("CVE-2026-0001")], total=1,
+            ))
+        if "cvedb.shodan.io/cves" in url:
+            return httpx.Response(200, json={"total": 0})
+        if "cvedb.shodan.io/cve/" in url:
+            return httpx.Response(200, json={
+                "cve_id": "CVE-2026-0001",
+                "kev": True,
+                "ransomware_campaign": "Known",
+            })
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    sources = source_config(
+        nvd_enabled=True, vulncheck_enabled=True, shodan_cvedb_enabled=True,
+    )
+    store.record_scan([
+        scan(make_engine(tmp_path, healthy, sources=sources), asset)
+    ])
+    saved = store.latest_findings()[0]
+    assert saved["vulnerability"]["vulncheck_kev"] is True
+    assert saved["vulnerability"]["shodan_cvedb_kev"] is True
+    assert any(item["source"] == "vulncheck" for item in saved["evidence"])
+    assert any(item["source"] == "shodan_cvedb" for item in saved["evidence"])
+    events_before = store.history()
+
+    def failed(request):
+        url = str(request.url)
+        if "api.vulncheck.com" in url:
+            return httpx.Response(
+                401, extensions={"reason_phrase": b"Unauthorized"}
+            )
+        return httpx.Response(503)
+
+    result = scan(
+        make_engine(tmp_path, failed, sources=sources),
+        asset,
+        known_findings=store.latest_findings(),
+    )
+    current = next(
+        item for item in result.findings
+        if item.vulnerability.cve_id == "CVE-2026-0001"
+    )
+    health = {item.source: item.status for item in result.source_health}
+    assert health["nvd"] == HealthStatus.FAILED
+    assert health["vulncheck"] == HealthStatus.FAILED
+    assert health["shodan_cvedb"] == HealthStatus.FAILED
+    assert current.vulnerability.vulncheck_kev is None
+    assert current.vulnerability.shodan_cvedb_kev is None
+    assert not any(
+        item.source in {"vulncheck", "shodan_cvedb"} for item in current.evidence
+    )
+
+    store.record_scan([result])
+    retained = store.latest_findings()[0]
+    assert retained["vulnerability"]["cve_id"] == "CVE-2026-0001"
+    assert not any(
+        key.startswith("vulncheck") for key in retained["vulnerability"]
+    )
+    assert "shodan_cvedb_kev" not in retained["vulnerability"]
+    assert "shodan_cvedb_ransomware" not in retained["vulnerability"]
+    assert not any(
+        item["source"] in {"vulncheck", "shodan_cvedb"}
+        for item in retained["evidence"]
+    )
+    assert store.history() == events_before
+
+
+def test_home_filters_cvedb_only_events_before_the_recent_limit(setup):
+    _, store, client = setup
+    asset = Asset("a", "Acme", "Widget", "1")
+    health = (SourceHealth("nvd", HealthStatus.OK, utc_now(), "ok"),)
+    core = Finding(
+        asset, Vulnerability("CVE-2026-0001"), Applicability.AFFECTED,
+        "high", "core finding",
+    )
+    _, core_events = store.record_scan([QueryResult(asset, (core,), health)])
+    core_event = core_events[0]
+
+    cvedb_findings = []
+    cvedb_ids = []
+    for index in range(20):
+        identifier = f"CVE-2026-{index + 2:04d}"
+        cvedb_ids.append(identifier)
+        cvedb_findings.append(Finding(
+            asset,
+            Vulnerability(identifier),
+            Applicability.NEEDS_REVIEW,
+            "limited",
+            CVEDB_ONLY_REASON,
+            (Evidence("shodan_cvedb", "independent_enrichment", "CVEDB statement"),),
+        ))
+    _, cvedb_events = store.record_scan([
+        QueryResult(asset, tuple(cvedb_findings), health)
+    ])
+    assert len(cvedb_events) == 20
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert f'href="/event/{core_event}"' in home.text
+    assert "CVE-2026-0001" in home.text
+    for event_id in cvedb_events:
+        assert f'href="/event/{event_id}"' not in home.text
+
+    newest = cvedb_ids[-1]
+    core = Finding(
+        asset, Vulnerability(newest), Applicability.AFFECTED,
+        "high", "core finding",
+    )
+    _, new_events = store.record_scan([QueryResult(asset, (core,), health)])
+    new_event = new_events[0]
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert f'href="/event/{core_event}"' in home.text
+    assert f'href="/event/{new_event}"' in home.text
+    assert newest in home.text
+    # Historical provenance comes from the event payload, not the current row.
+    assert f'href="/event/{cvedb_events[-1]}"' not in home.text
+    for event_id in cvedb_events[:-1]:
+        assert f'href="/event/{event_id}"' not in home.text

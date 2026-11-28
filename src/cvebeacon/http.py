@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import contextvars
 import email.utils
 import logging
 import math
-import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -21,54 +18,6 @@ from .errors import SourceError
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 THROTTLE_STATUS = {403, 429}
-
-_QUIET_HTTP_LOGS: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "cvebeacon_quiet_http_logs", default=False
-)
-
-
-class _QuietHttpLogFilter(logging.Filter):
-    """Drop HTTP client records emitted while the current context is quiet."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return not _QUIET_HTTP_LOGS.get()
-
-
-_QUIET_HTTP_LOG_FILTER = _QuietHttpLogFilter()
-_QUIET_HTTP_LOG_FILTER_LOCK = threading.Lock()
-
-
-def _install_quiet_http_log_filter() -> None:
-    """Attach the context filter to every HTTP client logger that exists now."""
-    with _QUIET_HTTP_LOG_FILTER_LOCK:
-        logging.getLogger("httpx")
-        logging.getLogger("httpcore")
-        for name, logger in list(logging.root.manager.loggerDict.items()):
-            if not isinstance(logger, logging.Logger):
-                continue
-            if (
-                name != "httpx"
-                and not name.startswith("httpx.")
-                and name != "httpcore"
-                and not name.startswith("httpcore.")
-            ):
-                continue
-            if _QUIET_HTTP_LOG_FILTER not in logger.filters:
-                logger.addFilter(_QUIET_HTTP_LOG_FILTER)
-
-
-_install_quiet_http_log_filter()
-
-
-@contextmanager
-def _quiet_http_logs():
-    """Suppress HTTP client logs for one authenticated request operation."""
-    _install_quiet_http_log_filter()
-    marker = _QUIET_HTTP_LOGS.set(True)
-    try:
-        yield
-    finally:
-        _QUIET_HTTP_LOGS.reset(marker)
 
 
 @dataclass(slots=True)
@@ -128,6 +77,9 @@ class HttpClient:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        # httpx INFO records include full URLs; some configured URLs are credentials.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
         self.config = config
         self._sleep = sleep
         self._monotonic = monotonic
@@ -299,7 +251,6 @@ class HttpClient:
         redirect_hosts: tuple[str, ...] = (),
         redirect_limit: int = 3,
         identity_only: bool = False,
-        quiet: bool = False,
         before_attempt: Callable[[], None] | None = None,
     ) -> Iterator[bytes]:
         """Stream a bounded response body without holding it in memory.
@@ -308,9 +259,7 @@ class HttpClient:
         while reading, so an oversized file cannot be buffered first. With
         ``identity_only`` the request requires an uncompressed reply so the
         cap applies to the bytes before any decoding; other callers keep the
-        client's normal content-encoding negotiation. ``quiet`` suppresses
-        HTTP client log records for a request whose URL or response text may
-        carry a credential.
+        client's normal content-encoding negotiation.
         """
         last_error: Exception | None = None
         retry_count = self.config.retries
@@ -328,63 +277,62 @@ class HttpClient:
                 counter[0] += 1
             yielded = False
             try:
-                with (_quiet_http_logs() if quiet else nullcontext()):
-                    with self._client.stream(
-                        "GET",
-                        url,
-                        params=params,
-                        headers=request_headers,
-                        follow_redirects=False,
-                    ) as response:
-                        if response_headers is not None:
-                            response_headers.update(dict(response.headers))
-                        if response.status_code == 304 and allow_not_modified:
-                            return
-                        if response.status_code in (301, 302, 303, 307, 308) and redirect_hosts and redirect_limit > 0:
-                            from urllib.parse import urljoin, urlsplit
-                            target = urljoin(url, response.headers.get("location", ""))
-                            parsed = urlsplit(target)
-                            try:
-                                port_ok = parsed.port in (None, 443)
-                            except ValueError:
-                                port_ok = False
-                            if parsed.scheme != "https" or parsed.hostname not in redirect_hosts or parsed.username or parsed.password or not port_ok:
-                                raise SourceError(source, "source returned an unsafe redirect")
-                            yield from self.stream_bytes(target, source=source, byte_cap=byte_cap,
-                                                         headers=headers, counter=counter,
-                                                         response_headers=response_headers,
-                                                         redirect_hosts=redirect_hosts, redirect_limit=redirect_limit - 1,
-                                                         identity_only=identity_only, quiet=quiet,
-                                                         before_attempt=before_attempt)
-                            return
-                        if response.status_code == 200:
-                            if identity_only:
-                                encoding = response.headers.get("content-encoding", "identity").strip().casefold()
-                                if encoding not in {"", "identity"}:
-                                    raise SourceError(
-                                        source, "source returned an unsupported content encoding"
-                                    )
-                            total = 0
-                            for chunk in response.iter_bytes(chunk_size=65536):
-                                total += len(chunk)
-                                if total > byte_cap:
-                                    raise SourceError(
-                                        source, "source response exceeded the size limit"
-                                    )
-                                yielded = True
-                                yield chunk
-                            return
-                        if (
-                            response.status_code not in RETRYABLE_STATUS
-                            or attempt >= retry_count
-                        ):
-                            raise SourceError(
-                                source,
-                                f"HTTP {response.status_code}",
-                                status_code=response.status_code,
-                                requests=counter[0] if counter is not None else 0,
-                            )
-                        retry_after = response.headers.get("Retry-After")
+                with self._client.stream(
+                    "GET",
+                    url,
+                    params=params,
+                    headers=request_headers,
+                    follow_redirects=False,
+                ) as response:
+                    if response_headers is not None:
+                        response_headers.update(dict(response.headers))
+                    if response.status_code == 304 and allow_not_modified:
+                        return
+                    if response.status_code in (301, 302, 303, 307, 308) and redirect_hosts and redirect_limit > 0:
+                        from urllib.parse import urljoin, urlsplit
+                        target = urljoin(url, response.headers.get("location", ""))
+                        parsed = urlsplit(target)
+                        try:
+                            port_ok = parsed.port in (None, 443)
+                        except ValueError:
+                            port_ok = False
+                        if parsed.scheme != "https" or parsed.hostname not in redirect_hosts or parsed.username or parsed.password or not port_ok:
+                            raise SourceError(source, "source returned an unsafe redirect")
+                        yield from self.stream_bytes(target, source=source, byte_cap=byte_cap,
+                                                     headers=headers, counter=counter,
+                                                     response_headers=response_headers,
+                                                     redirect_hosts=redirect_hosts, redirect_limit=redirect_limit - 1,
+                                                     identity_only=identity_only,
+                                                     before_attempt=before_attempt)
+                        return
+                    if response.status_code == 200:
+                        if identity_only:
+                            encoding = response.headers.get("content-encoding", "identity").strip().casefold()
+                            if encoding not in {"", "identity"}:
+                                raise SourceError(
+                                    source, "source returned an unsupported content encoding"
+                                )
+                        total = 0
+                        for chunk in response.iter_bytes(chunk_size=65536):
+                            total += len(chunk)
+                            if total > byte_cap:
+                                raise SourceError(
+                                    source, "source response exceeded the size limit"
+                                )
+                            yielded = True
+                            yield chunk
+                        return
+                    if (
+                        response.status_code not in RETRYABLE_STATUS
+                        or attempt >= retry_count
+                    ):
+                        raise SourceError(
+                            source,
+                            f"HTTP {response.status_code}",
+                            status_code=response.status_code,
+                            requests=counter[0] if counter is not None else 0,
+                        )
+                    retry_after = response.headers.get("Retry-After")
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
                 if yielded:

@@ -195,8 +195,10 @@ its failure is degraded coverage and cannot hold NVD/EUVD initialization open.
   references per set. Every page is read as an identity-encoded bounded stream
   before decoding. A truncated or inconsistent page, a repeated cursor,
   malformed or inconsistent `_meta` metadata, a failed page or an exhausted
-  budget is a sanitized source error and keeps membership unknown. Request
-  logs for the authenticated operation are suppressed.
+  budget is a sanitized source error and keeps membership unknown. HTTP request
+  logging stays at WARNING: the HTTP client sets the `httpx` and `httpcore`
+  loggers when it starts, and enabling INFO for `httpx` after start-up can log
+  request URLs.
 - Evidence only: VulnCheck membership and reference counts are not part of the
   scan material fingerprint, so enabling the source never creates a material
   change by itself. CISA KEV remains the alerting known-exploitation source.

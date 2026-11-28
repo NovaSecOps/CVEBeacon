@@ -281,12 +281,19 @@ class QueryEngine:
                 self._known_targets[previous_asset.target_key].add(item["vulnerability"]["cve_id"])
         package_assets = {asset.target_key: asset for asset in assets if asset.identity_path in {"purl", "ecosystem", "commit"} and not identity_conflict(asset)}
         self._osv_results = self.osv.query_many(list(package_assets.values())) if package_assets and self.config.sources.osv_enabled else {}
+        config = getattr(self, "config", None)
+        optional_context = None
+        if config is not None and (
+            optional_sources.vulncheck_active(config)
+            or optional_sources.cvedb_active(config)
+        ):
+            optional_context = optional_sources.new_context(self)
         cached: dict[tuple[str, str, str], QueryResult] = {}
         output: list[QueryResult] = []
         for asset in assets:
             if asset.target_key not in cached:
                 cached[asset.target_key] = optional_sources.apply(
-                    self, asset, self.query_asset(asset)
+                    self, asset, self.query_asset(asset), optional_context
                 )
             shared = cached[asset.target_key]
             output.append(QueryResult(
