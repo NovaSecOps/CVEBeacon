@@ -27,6 +27,7 @@ from .inventory import load_inventory
 from .identity import normalize_asset
 from .managed_inventory import ManagedInventoryCollision, inventory_files
 from .models import Applicability, Asset
+from .optional_sources import filter_health, filter_payload, off_health_rows
 from .reporting import write_json, write_xlsx
 from .state import StateStore
 from .watch.users import BOOTSTRAP, UserStore
@@ -316,6 +317,15 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
 
     def snapshot():
         data = store.dashboard_snapshot()
+        vulncheck_on = config.vulncheck_active()
+        cvedb_on = config.cvedb_active()
+        for row in data["findings"]:
+            row["finding"] = filter_payload(
+                row["finding"], vulncheck=vulncheck_on, cvedb=cvedb_on
+            )
+        data["health"] = filter_health(
+            data["health"], vulncheck=vulncheck_on, cvedb=cvedb_on
+        )
         now = datetime.now(timezone.utc)
         inventory = config.effective_inventory
         data["inventory_warnings"] = []
@@ -350,8 +360,8 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
             row["freshness"] = "stale" if _old(row["checked_at"], now) else "cached observation"
         current = [row["finding"] for row in data["findings"] if row["current_inventory"]]
         counts = Counter(row["applicability"] for row in current)
-        data["vulncheck_on"] = config.vulncheck_active()
-        data["cvedb_on"] = config.cvedb_active()
+        data["vulncheck_on"] = vulncheck_on
+        data["cvedb_on"] = cvedb_on
         data["counts"] = {"Assets": len(assets), "Affected findings": counts["affected"], "Needs review": counts["needs_review"],
             "Coverage unknown assets": sum(row["coverage"] == "coverage_unknown" for row in data["coverage"]),
             "Assets needing coverage review": sum(row["coverage"] == "needs_review" for row in data["coverage"]),
@@ -451,6 +461,11 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
         value = store.history_event(event_id)
         if value is None:
             abort(404)
+        value["finding"] = filter_payload(
+            value["finding"],
+            vulncheck=config.vulncheck_active(),
+            cvedb=config.cvedb_active(),
+        )
         return render_template("event.html", event=value,
                                vulncheck_on=config.vulncheck_active())
 
@@ -562,7 +577,9 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
     @app.get("/sources")
     @requires("view")
     def sources():
-        return render_template("sources.html", data=snapshot())
+        data = snapshot()
+        data["health"] = list(data["health"]) + off_health_rows(config)
+        return render_template("sources.html", data=data)
 
     @app.route("/bootstrap", methods=["GET", "POST"])
     @requires("public")

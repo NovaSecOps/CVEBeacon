@@ -187,18 +187,22 @@ its failure is degraded coverage and cannot hold NVD/EUVD initialization open.
   configured. A missing token is reported as `off: no token`; it never fails a
   scan or configuration load. Disabling it explicitly reports
   `off: disabled`. Settings and the sources health view show the effective
-  state.
+  state. An inactive source adds no scan health row, metadata or evidence, and
+  optional metadata and evidence saved while it was on are hidden from the
+  dashboard, exports and reports until the source is on again.
 - Limits: at most 300 pages, a cumulative 64 MiB, 250,000 records and 250,000
   unique CVE identifiers per run, with 100 identifiers per entry and 100
   references per set. Every page is read as an identity-encoded bounded stream
   before decoding. A truncated or inconsistent page, a repeated cursor,
-  malformed metadata, a failed page or an exhausted budget is a sanitized
-  source error.
+  malformed or inconsistent `_meta` metadata, a failed page or an exhausted
+  budget is a sanitized source error and keeps membership unknown. Request
+  logs for the authenticated operation are suppressed.
 - Evidence only: VulnCheck membership and reference counts are not part of the
   scan material fingerprint, so enabling the source never creates a material
   change by itself. CISA KEV remains the alerting known-exploitation source.
   Absence from this list is not evidence that a flaw is not exploited; only a
-  complete successful load can mark a CVE as not in VulnCheck KEV.
+  complete successful load can mark a CVE as not in VulnCheck KEV. A failed or
+  degraded refresh keeps the previously saved evidence.
 - Limitations: response fields are validated against the documented shapes.
   Confirm plan limits against your VulnCheck API documentation.
 
@@ -231,11 +235,15 @@ Check VulnCheck's terms of use for your use case.
 - Applicability: CVEDB's `cpe23` matching is not documented as reliably
   version-aware. CVEBeacon therefore passes an exact-version CPE but treats a
   CVEDB-only CVE as `needs_review` with the reason
-  `reported by Shodan CVEDB only; confirm applicability`. Authoritative
-  decisions are reconciled and frozen before CVEDB rows are added. CVEDB-only
-  official lookups and their failures affect only those rows and CVEDB health,
-  never the authoritative rows or the core source health. A prior CVEDB-only
-  finding is not carried into the next scan as an authoritative discovery.
+  `reported by Shodan CVEDB only; confirm applicability`. Core findings are
+  reconciled and frozen before CVEDB enrichment is applied, so CVEDB cannot
+  change applicability, confidence, reason or coverage. CVEDB-only rows are
+  built from CVEDB data alone: no official CVE List, NVD, EUVD, FIRST EPSS or
+  catalog lookup is made for them, and their failures affect only CVEDB health.
+  A prior CVEDB-only finding is not carried into the next scan as an
+  authoritative discovery. A failed or degraded refresh keeps previously saved
+  evidence; an inactive source adds no metadata or evidence and its optional
+  fields are hidden from rendered output.
 - Limitations: a missing CVEDB record is not proof that a product is
   unaffected. Shodan describes keyless CVEDB access as free for non-commercial
   use; check both providers' terms of use for your use case.

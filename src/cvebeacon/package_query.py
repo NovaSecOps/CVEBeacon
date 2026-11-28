@@ -121,45 +121,6 @@ def query_package(engine, asset, data):
             health.append(now_health(source, H.OK if enabled else H.DISABLED, "catalog loaded" if source in catalogs else "not requested; no actionable CVE aliases" if enabled else "disabled by configuration"))
         except SourceError as exc:
             health.append(now_health(source, H.FAILED, str(exc)))
-    vulncheck = {}
-    vulncheck_loaded = False
-    vulncheck_enabled = bool(getattr(engine.config.sources, "vulncheck_enabled", False))
-    if not vulncheck_enabled:
-        health.append(now_health("vulncheck", H.DISABLED, "off: disabled"))
-    elif not engine._vulncheck_token():
-        health.append(now_health("vulncheck", H.DISABLED, "off: no token (skipped: no token)"))
-    else:
-        try:
-            if active_ids:
-                vulncheck = engine._catalog("vulncheck")
-                vulncheck_loaded = True
-                health.append(now_health("vulncheck", H.OK, f"on; catalog loaded; {len(vulncheck)} CVEs"))
-            else:
-                health.append(now_health("vulncheck", H.OK, "on; not requested; no actionable CVE aliases"))
-        except SourceError as exc:
-            health.append(now_health("vulncheck", H.FAILED, f"on; {exc}"))
-    cvedb_records = {}
-    cvedb_enabled = bool(getattr(engine.config.sources, "shodan_cvedb_enabled", False))
-    if not cvedb_enabled:
-        health.append(now_health("shodan_cvedb", H.DISABLED, "off: disabled"))
-    elif active_ids:
-        failures = 0
-        for identifier in active_ids:
-            try:
-                record = engine.cvedb.lookup(identifier)
-            except SourceError:
-                failures += 1
-                continue
-            if record is not None:
-                cvedb_records[identifier] = record
-        message = f"on; {len(cvedb_records)}/{len(active_ids)} CVE lookups completed"
-        if failures:
-            message += f"; {failures} CVE lookups failed"
-        if engine.cvedb.cap_reached:
-            message += "; lookup cap reached"
-        health.append(now_health("shodan_cvedb", H.DEGRADED if failures or engine.cvedb.cap_reached else H.OK, message))
-    else:
-        health.append(now_health("shodan_cvedb", H.OK, "on; not requested; no actionable CVE aliases"))
     scores = {}
     try:
         if engine.config.sources.epss_enabled and active_ids:
@@ -178,28 +139,6 @@ def query_package(engine, asset, data):
             if cves and finding.applicability != A.NOT_AFFECTED:
                 vuln = replace(vuln, **{source: any(identifier in catalog for identifier in cves)})
                 evidence.extend(catalog[identifier] for identifier in cves if identifier in catalog)
-        if vulncheck_loaded and cves and finding.applicability != A.NOT_AFFECTED:
-            matched = next((identifier for identifier in cves if identifier in vulncheck), None)
-            vuln = replace(vuln, vulncheck_kev=matched is not None)
-            if matched is not None:
-                details = vulncheck[matched].details
-                vuln = replace(
-                    vuln,
-                    vulncheck_kev=True,
-                    vulncheck_date_added=details.get("date_added"),
-                    vulncheck_ransomware=details.get("ransomware"),
-                    vulncheck_reported_exploits=details.get("reported_exploited"),
-                    vulncheck_exploit_references=len(details.get("exploit_references") or ()),
-                )
-                evidence.append(vulncheck[matched])
-        for identifier in cves:
-            if identifier in cvedb_records:
-                evidence.append(engine._cvedb_evidence(
-                    cvedb_records[identifier],
-                    cisa=identifier in catalogs.get("cisa_kev", {}),
-                    eu=identifier in catalogs.get("eu_kev", {}),
-                    epss_score=scores.get(identifier, (None, None, None))[0],
-                ))
         matching_scores = [(identifier, scores[identifier]) for identifier in cves if identifier in scores]
         if matching_scores:
             identifier, (score, percentile, date) = max(matching_scores, key=lambda item: item[1][0])

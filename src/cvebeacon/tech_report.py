@@ -237,7 +237,7 @@ def _finding_list(value):
     return []
 
 
-def _finding(record):
+def _finding(record, *, vulncheck=False):
     vuln = json.loads(record["vulnerability"])
     if not isinstance(vuln, dict):
         raise ValueError("invalid saved vulnerability")
@@ -246,7 +246,7 @@ def _finding(record):
     except ConfigurationError:
         return None
     cvss = _number(vuln.get("cvss_score"), 10)
-    return {
+    value = {
         "cve_id": identifier, "advisory_id": _finding_text(vuln.get("advisory_id")) or record["cve_id"],
         "summary": _finding_text(vuln.get("summary")), "applicability": record["applicability"],
         "published": _timestamp(vuln.get("published")), "modified": _timestamp(vuln.get("modified")),
@@ -255,10 +255,12 @@ def _finding(record):
         "epss_score": _number(vuln.get("epss_score"), 1),
         "epss_percentile": _number(vuln.get("epss_percentile"), 1),
         "cisa_kev": vuln.get("cisa_kev"), "eu_kev": vuln.get("eu_kev"),
-        "vulncheck_kev": vuln.get("vulncheck_kev"),
-        "vulncheck_date_added": _timestamp(vuln.get("vulncheck_date_added")),
         "fixed_versions": _finding_list(vuln.get("fixed_versions")), "references": _finding_list(vuln.get("references")),
     }
+    if vulncheck:
+        value["vulncheck_kev"] = vuln.get("vulncheck_kev")
+        value["vulncheck_date_added"] = _timestamp(vuln.get("vulncheck_date_added"))
+    return value
 
 
 def _is_client(value, expected_key):
@@ -268,7 +270,7 @@ def _is_client(value, expected_key):
         return False
 
 
-def _read_findings(path, client, asset_ids):
+def _read_findings(path, client, asset_ids, *, vulncheck=False):
     """Read bounded, client-scoped findings in one read-only transaction."""
     by_asset = defaultdict(list)
     if not asset_ids or not path.exists():
@@ -295,7 +297,9 @@ def _read_findings(path, client, asset_ids):
                 "AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY f.asset_id, f.cve_id LIMIT ?",
                 (*chunk, remaining),
             ):
-                finding = _finding(record)
+                finding = (
+                    _finding(record, vulncheck=True) if vulncheck else _finding(record)
+                )
                 if finding is not None:
                     by_asset[record["asset_id"]].append(finding)
                 remaining -= 1
@@ -315,9 +319,11 @@ def _merge_finding(left, right):
             left[key] = right[key]
     for key in ("published", "first_seen"):
         left[key] = _ignore_missing((left[key], right[key]), min)
-    for key in ("modified", "last_seen", "epss_score", "epss_percentile", "cisa_kev", "eu_kev",
-                "vulncheck_kev", "vulncheck_date_added"):
+    for key in ("modified", "last_seen", "epss_score", "epss_percentile", "cisa_kev", "eu_kev"):
         left[key] = _ignore_missing((left[key], right[key]))
+    for key in ("vulncheck_kev", "vulncheck_date_added"):
+        if key in left or key in right:
+            left[key] = _ignore_missing((left.get(key), right.get(key)))
     for key in ("fixed_versions", "references"):
         left[key] = list(dict.fromkeys((*left[key], *right[key])))
     if right["applicability"] == "affected" or not left["applicability"]:
@@ -380,7 +386,7 @@ def _cve_matches(cve, window, filters):
         and (minimum == "any" or SEVERITIES.index(cve["severity"]) >= SEVERITIES.index(minimum))
         and (kev == "any" or kev in ("cisa", "either") and cve["cisa_kev"]
              or kev in ("eu", "either") and cve["eu_kev"]
-             or kev in ("vulncheck", "either") and cve["vulncheck_kev"])
+             or kev in ("vulncheck", "either") and cve.get("vulncheck_kev"))
     )
 
 
@@ -402,7 +408,7 @@ def _row_summary(cves, current_count, coverage):
         "severity": _severity_level(max_cvss), "max_cvss": max_cvss,
         "cisa_kev": any(cve["cisa_kev"] for cve in cves),
         "eu_kev": any(cve["eu_kev"] for cve in cves),
-        "vulncheck_kev": any(cve["vulncheck_kev"] for cve in cves),
+        "vulncheck_kev": any(cve.get("vulncheck_kev") for cve in cves),
         "exploitation": next((level for level in EXPLOITATION
                               if any(cve["exploitation"] == level for cve in cves)), "unknown"),
         "max_epss": _ignore_missing(cve["epss_score"] for cve in cves),
@@ -434,7 +440,9 @@ def build_report(config, client, args, *, export=False, now=None):
     asset_ids = sorted({asset_id for row in selected for asset_id in row["covered_ids"]})
     findings_unavailable = findings_capped = False
     try:
-        by_asset, findings_capped = _read_findings(config.database_path, client, asset_ids)
+        by_asset, findings_capped = _read_findings(
+            config.database_path, client, asset_ids, vulncheck=vulncheck_on
+        )
     except (CVEBeaconError, sqlite3.Error, OSError, ValueError, TypeError, KeyError):
         by_asset = {}
         findings_unavailable = True
@@ -464,7 +472,10 @@ def build_report(config, client, args, *, export=False, now=None):
                 identifier = cve["cve_id"]
                 rank = SEVERITIES.index(cve["severity"])
                 severities[identifier] = max(rank, severities.get(identifier, 0))
-                for key in ("cisa_kev", "eu_kev", "vulncheck_kev", "active"):
+                keys = ("cisa_kev", "eu_kev", "active")
+                if vulncheck_on:
+                    keys = ("cisa_kev", "eu_kev", "vulncheck_kev", "active")
+                for key in keys:
                     if cve.get(key) or cve["exploitation"] == key:
                         chip_sets[key].add(identifier)
             if export or len(rows) < PAGE_ROWS:

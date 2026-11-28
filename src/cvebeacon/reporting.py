@@ -16,6 +16,7 @@ from openpyxl.utils import get_column_letter
 
 from .models import Applicability, QueryResult
 from .errors import ReportingError
+from .optional_sources import filter_result_payload, source_visible
 from .xlsx_safety import neutralize_formula
 
 
@@ -45,22 +46,8 @@ def _excel_datetime(value):
     return value
 
 
-VULNCHECK_FIELDS = (
-    "vulncheck_kev", "vulncheck_date_added", "vulncheck_ransomware",
-    "vulncheck_reported_exploits", "vulncheck_exploit_references",
-)
-CVEDB_FIELDS = ("shodan_cvedb_kev", "shodan_cvedb_ransomware")
-
-
 def _visible(result: dict, *, vulncheck: bool, cvedb: bool) -> dict:
-    for finding in result.get("findings", ()):
-        if not vulncheck:
-            for key in VULNCHECK_FIELDS:
-                finding["vulnerability"].pop(key, None)
-        if not cvedb:
-            for key in CVEDB_FIELDS:
-                finding["vulnerability"].pop(key, None)
-    return result
+    return filter_result_payload(result, vulncheck=vulncheck, cvedb=cvedb)
 
 
 def write_json(results: Iterable[QueryResult], path: str | Path, *,
@@ -178,7 +165,11 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path, *,
                 row += [vuln.shodan_cvedb_kev, vuln.shodan_cvedb_ransomware]
             row += [
                 vuln.rejected, vuln.published, vuln.modified,
-                vuln.summary, ", ".join(sorted({x.source for x in item.evidence})),
+                vuln.summary,
+                ", ".join(sorted({
+                    x.source for x in item.evidence
+                    if source_visible(x.source, vulncheck=vulncheck, cvedb=cvedb)
+                })),
                 "; ".join(item.conflicts),
             ]
             findings.append([_safe(_one_line(value)) for value in row])
@@ -195,6 +186,8 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path, *,
     for result in values:
         for item in result.findings:
             for evidence in item.evidence:
+                if not source_visible(evidence.source, vulncheck=vulncheck, cvedb=cvedb):
+                    continue
                 evidence_sheet.append([_safe(_one_line(value)) for value in [
                     item.asset.asset_id, item.vulnerability.primary_id, evidence.source, evidence.role,
                     evidence.statement, evidence.source_timestamp, _excel_datetime(evidence.retrieved_at),
@@ -209,6 +202,8 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path, *,
     health_sheet.append(["Asset ID", "Source", "Status", "Checked At", "Freshness At", "Message"])
     for result in values:
         for health in result.source_health:
+            if not source_visible(health.source, vulncheck=vulncheck, cvedb=cvedb):
+                continue
             health_sheet.append([_safe(_one_line(value)) for value in [
                 result.asset.asset_id, health.source, health.status.value, _excel_datetime(health.checked_at),
                 _excel_datetime(health.freshness_at), health.message,

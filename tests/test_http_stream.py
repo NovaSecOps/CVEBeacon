@@ -45,7 +45,8 @@ def test_default_stream_keeps_caller_headers_and_accepts_encoded_reply():
     assert seen["headers"]["accept-encoding"] == "gzip"
 
 
-def test_identity_only_forces_identity_and_rejects_encoded_reply():
+@pytest.mark.parametrize("header", ["Accept-Encoding", "accept-encoding", "AcCePt-EnCoDiNg"])
+def test_identity_only_forces_identity_and_rejects_encoded_reply(header):
     seen = {}
 
     def handler(request):
@@ -62,7 +63,7 @@ def test_identity_only_forces_identity_and_rejects_encoded_reply():
             "https://example.test/data",
             source="test",
             byte_cap=1024,
-            headers={"Accept-Encoding": "gzip"},
+            headers={header: "gzip"},
             identity_only=True,
         ))
     assert seen["headers"]["accept-encoding"] == "identity"
@@ -85,7 +86,7 @@ def test_optional_sources_request_identity_encoding():
             "date_added": "2026-01-02",
             "knownRansomwareCampaignUse": "Known",
         }],
-        "_meta": {"total_documents": 1},
+        "_meta": {"limit": 100, "total_documents": 1},
     }])
     VulnCheckSource(vulncheck).kev("SYNTHETIC-TOKEN")
     assert vulncheck.calls[0][1]["identity_only"] is True

@@ -29,15 +29,18 @@ from cvebeacon.models import (
     Finding,
     HealthStatus,
     QueryResult,
+    SourceHealth,
     Vulnerability,
+    utc_now,
 )
+from cvebeacon.optional_sources import CVEDB_ONLY_REASON
 from cvebeacon.sources import shodan_cvedb, vulncheck
-from cvebeacon.sources.shodan_cvedb import CVEDBRecord, ShodanCVEDBSource
 from cvebeacon.sources.osv import OSVResult
+from cvebeacon.sources.shodan_cvedb import CVEDBRecord, ShodanCVEDBSource
 from cvebeacon.sources.vulncheck import VulnCheckSource
 from cvebeacon.state import StateStore, material_fingerprint
 
-from test_dashboard import setup
+from test_dashboard import post, setup
 from test_dashboard_accounts import accounts, login
 from test_osv import record as osv_record
 
@@ -75,20 +78,20 @@ def source_config(**overrides) -> SourceConfig:
         cisa_kev_enabled=False,
         eu_kev_enabled=False,
         epss_enabled=False,
-        vulncheck_enabled=True,
+        vulncheck_enabled=False,
         shodan_cvedb_enabled=False,
     )
     values.update(overrides)
     return SourceConfig(**values)
 
 
-def make_engine(tmp_path: Path, handler, *, sources: SourceConfig) -> QueryEngine:
+def make_engine(tmp_path: Path, handler, *, sources: SourceConfig, retries: int = 0) -> QueryEngine:
     config = AppConfig(
         config_path=tmp_path / "config.toml",
         inventory=InventoryConfig(tmp_path / "inventory.csv"),
         database_path=tmp_path / "state.db",
         output_dir=tmp_path / "reports",
-        http=HttpConfig(retries=0),
+        http=HttpConfig(retries=retries),
         sources=sources,
     )
     http = HttpClient(
@@ -97,6 +100,21 @@ def make_engine(tmp_path: Path, handler, *, sources: SourceConfig) -> QueryEngin
         sleep=lambda _: None,
     )
     return QueryEngine(config, http=http)
+
+
+def make_http(handler, *, retries: int = 0) -> HttpClient:
+    return HttpClient(
+        HttpConfig(retries=retries),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+    )
+
+
+def scan(engine: QueryEngine, asset: Asset, *, known_findings=()):
+    try:
+        return engine.scan([asset], known_findings=known_findings)[0]
+    finally:
+        engine.close()
 
 
 def nvd_payload(*entries):
@@ -136,6 +154,89 @@ def nvd_cve(identifier: str, *, vulnerable: bool = True):
             }
         ],
     }
+
+
+def vulncheck_entry(identifier: str, **overrides):
+    entry = {
+        "cve": [identifier],
+        "date_added": "2026-01-02T00:00:00Z",
+        "knownRansomwareCampaignUse": "Known",
+        "vulncheck_xdb": [],
+        "vulncheck_reported_exploitation": [],
+    }
+    entry.update(overrides)
+    return entry
+
+
+def vulncheck_page(entries, *, total=None, next_cursor=None, truncated=None, limit=100):
+    meta = {"limit": limit}
+    if total is not None:
+        meta["total_documents"] = total
+    if next_cursor is not None:
+        meta["next_cursor"] = next_cursor
+    if truncated is not None:
+        meta["truncated"] = truncated
+    return {"data": entries, "_meta": meta}
+
+
+def cve_list_record(identifier: str, *, status: str = "unaffected", version: str = "1.0"):
+    return {
+        "dataVersion": "5.1",
+        "cveMetadata": {"cveId": identifier, "state": "PUBLISHED"},
+        "containers": {"cna": {"affected": [{
+            "vendor": "Acme", "product": "Widget",
+            "versions": [{"version": version, "status": status}],
+        }]}},
+    }
+
+
+def cvedb_rows(start: int, count: int):
+    return [
+        {"cve_id": f"CVE-2026-{index:04d}", "summary": f"CVEDB row {index}"}
+        for index in range(start, start + count)
+    ]
+
+
+def authoritative_prior(identifier: str = "CVE-2026-0001") -> dict:
+    return {
+        "asset": {
+            "asset_id": "a", "vendor": "Acme", "product": "Widget", "version": "1.0",
+            "category": "", "system_id": "", "ecosystem": "", "purl": "", "cpe": CPE,
+            "repository": "", "commit": "", "client": "",
+        },
+        "vulnerability": {"cve_id": identifier, "advisory_id": identifier},
+        "applicability": "needs_review",
+        "reason": "prior authoritative finding",
+    }
+
+
+CORE_SOURCES = {"nvd", "cve_list", "euvd", "cisa_kev", "eu_kev", "epss", "osv"}
+OPTIONAL_SOURCES = {"vulncheck", "shodan_cvedb"}
+
+
+def core_view(result: dict) -> dict:
+    """Strip optional-source rows, metadata and evidence from a result dict."""
+    value = json.loads(json.dumps(result))
+    value["source_health"] = [
+        row for row in value["source_health"] if row["source"] not in OPTIONAL_SOURCES
+    ]
+    for row in value["source_health"]:
+        row["checked_at"] = None
+        row["freshness_at"] = None
+    findings = []
+    for finding in value["findings"]:
+        for item in finding["evidence"]:
+            item["retrieved_at"] = None
+        vulnerability = finding["vulnerability"]
+        for key in list(vulnerability):
+            if key.startswith(("vulncheck", "shodan_cvedb")):
+                vulnerability.pop(key)
+        finding["evidence"] = [
+            item for item in finding["evidence"] if item["source"] not in OPTIONAL_SOURCES
+        ]
+        findings.append(finding)
+    value["findings"] = findings
+    return value
 
 
 def test_source_config_defaults_and_vulncheck_token_accessors(tmp_path, monkeypatch):
@@ -240,55 +341,6 @@ def test_settings_page_shows_source_states_and_never_the_token(settings_accounts
     assert TOKEN not in page.text
 
 
-def make_http(handler) -> HttpClient:
-    return HttpClient(
-        HttpConfig(retries=0),
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
-        sleep=lambda _: None,
-    )
-
-
-def vulncheck_entry(identifier: str, **overrides):
-    entry = {
-        "cve": [identifier],
-        "date_added": "2026-01-02T00:00:00Z",
-        "knownRansomwareCampaignUse": "Known",
-        "vulncheck_xdb": [],
-        "vulncheck_reported_exploitation": [],
-    }
-    entry.update(overrides)
-    return entry
-
-
-def vulncheck_page(entries, *, total=None, next_cursor=None, truncated=None):
-    meta = {"limit": 100}
-    if total is not None:
-        meta["total_documents"] = total
-    if next_cursor is not None:
-        meta["next_cursor"] = next_cursor
-    if truncated is not None:
-        meta["truncated"] = truncated
-    return {"data": entries, "_meta": meta}
-
-
-def cve_list_record(identifier: str, *, status: str = "unaffected", version: str = "1.0"):
-    return {
-        "dataVersion": "5.1",
-        "cveMetadata": {"cveId": identifier, "state": "PUBLISHED"},
-        "containers": {"cna": {"affected": [{
-            "vendor": "Acme", "product": "Widget",
-            "versions": [{"version": version, "status": status}],
-        }]}},
-    }
-
-
-def cvedb_rows(start: int, count: int):
-    return [
-        {"cve_id": f"CVE-2026-{index:04d}", "summary": f"CVEDB row {index}"}
-        for index in range(start, start + count)
-    ]
-
-
 def test_vulncheck_paginates_with_cursors_and_parses_documented_fields():
     calls = []
     first = vulncheck_page(
@@ -311,8 +363,6 @@ def test_vulncheck_paginates_with_cursors_and_parses_documented_fields():
     )
 
     def handler(request):
-        if "api.vulncheck.com" not in str(request.url):
-            return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
         assert request.headers.get("Authorization") == f"Bearer {TOKEN}"
         calls.append(dict(request.url.params))
         return httpx.Response(200, json=first if len(calls) == 1 else second)
@@ -335,6 +385,31 @@ def test_vulncheck_paginates_with_cursors_and_parses_documented_fields():
     assert items["CVE-2026-0002"].details["ransomware"] is False
 
 
+@pytest.mark.parametrize("payload", [
+    {"data": [], "_meta": {"limit": "100", "total_documents": 0}},
+    {"data": [], "_meta": {"limit": 50, "total_documents": 0}},
+    {"data": [], "_meta": {"limit": 100}},
+    {"data": [], "_meta": {"limit": 100, "total_documents": "0"}},
+    {"data": [], "_meta": {"limit": 100, "total_documents": 0, "truncated": "yes"}},
+    {"data": [vulncheck_entry("CVE-2026-0001"), vulncheck_entry("CVE-2026-0002")],
+     "_meta": {"limit": 100, "total_documents": 1}},
+])
+def test_vulncheck_malformed_metadata_is_a_source_error(payload):
+    handler = lambda request: httpx.Response(200, json=payload)
+    with pytest.raises(SourceError, match="malformed data"):
+        VulnCheckSource(make_http(handler)).kev(TOKEN)
+
+
+def test_vulncheck_empty_catalog_requires_valid_terminal_metadata():
+    valid = lambda request: httpx.Response(200, json=vulncheck_page([], total=0))
+    assert VulnCheckSource(make_http(valid)).kev(TOKEN) == {}
+    missing_total = lambda request: httpx.Response(
+        200, json={"data": [], "_meta": {"limit": 100}}
+    )
+    with pytest.raises(SourceError, match="malformed data"):
+        VulnCheckSource(make_http(missing_total)).kev(TOKEN)
+
+
 def test_vulncheck_incomplete_page_is_a_source_error_and_keeps_membership_unknown(tmp_path, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
 
@@ -345,11 +420,10 @@ def test_vulncheck_incomplete_page_is_a_source_error_and_keeps_membership_unknow
             ))
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(nvd_enabled=True))
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     health = next(item for item in result.source_health if item.source == "vulncheck")
     assert health.status == HealthStatus.FAILED
     assert "complete catalog" in health.message
@@ -377,7 +451,9 @@ def test_vulncheck_rejects_repeated_cursor_and_budgets(monkeypatch):
         VulnCheckSource(make_http(oversized_page)).kev(TOKEN)
 
     monkeypatch.setattr(vulncheck, "MAX_PAGES", 1)
-    endless = lambda request: httpx.Response(200, json=vulncheck_page([], next_cursor="next"))
+    endless = lambda request: httpx.Response(200, json=vulncheck_page(
+        [], next_cursor="next", total=2,
+    ))
     with pytest.raises(SourceError, match="complete catalog"):
         VulnCheckSource(make_http(endless)).kev(TOKEN)
     monkeypatch.undo()
@@ -404,6 +480,27 @@ def test_vulncheck_rejects_repeated_cursor_and_budgets(monkeypatch):
         VulnCheckSource(make_http(mismatch)).kev(TOKEN)
 
 
+def test_vulncheck_rejects_token_in_cursor_before_using_it(caplog):
+    calls = []
+
+    def handler(request):
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json=vulncheck_page(
+            [vulncheck_entry("CVE-2026-0001")],
+            total=2,
+            next_cursor=f"cursor-{TOKEN}",
+        ))
+
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    caplog.set_level(logging.INFO)
+    with pytest.raises(SourceError) as caught:
+        VulnCheckSource(make_http(handler)).kev(TOKEN)
+    assert str(caught.value) == "vulncheck: KEV index reflected a credential in retained data"
+    assert len(calls) == 1
+    assert TOKEN not in str(caught.value)
+    assert TOKEN not in caplog.text
+
+
 def test_vulncheck_rejects_reflected_token_without_echoing_it():
     def handler(request):
         return httpx.Response(200, json=vulncheck_page([
@@ -421,7 +518,6 @@ def test_vulncheck_rejects_reflected_token_without_echoing_it():
 
 def test_reflected_success_response_retains_no_token(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
-    caplog.set_level(logging.DEBUG)
 
     def handler(request):
         if "api.vulncheck.com" in str(request.url):
@@ -435,11 +531,13 @@ def test_reflected_success_response_retains_no_token(tmp_path, monkeypatch, capl
             ], total=1))
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(nvd_enabled=True))
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    logging.getLogger("httpcore").setLevel(logging.INFO)
+    caplog.set_level(logging.INFO)
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     health = next(item for item in result.source_health if item.source == "vulncheck")
     assert health.status == HealthStatus.FAILED
     assert TOKEN not in health.message
@@ -462,11 +560,10 @@ def test_vulncheck_complete_empty_catalog_sets_false_membership(tmp_path, monkey
             return httpx.Response(200, json=vulncheck_page([], total=0))
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(nvd_enabled=True))
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
     assert finding.vulnerability.vulncheck_kev is False
     health = next(item for item in result.source_health if item.source == "vulncheck")
@@ -493,11 +590,10 @@ def test_vulncheck_enrichment_and_badge_evidence(tmp_path, monkeypatch):
             ], total=1))
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(nvd_enabled=True))
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
     assert finding.vulnerability.vulncheck_kev is True
     assert finding.vulnerability.vulncheck_date_added == "2026-01-02T00:00:00Z"
@@ -522,16 +618,12 @@ def test_vulncheck_without_token_sends_no_request(tmp_path, monkeypatch):
             return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
         raise AssertionError(f"unexpected request {request.url}")
 
-    engine = make_engine(tmp_path, handler, sources=source_config(nvd_enabled=True))
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     assert not any("vulncheck" in url for url in calls)
-    health = next(item for item in result.source_health if item.source == "vulncheck")
-    assert health.status == HealthStatus.DISABLED
-    assert health.message.startswith("off: no token")
-    assert "skipped: no token" in health.message
+    assert not any(item.source == "vulncheck" for item in result.source_health)
     assert not any(key.startswith("vulncheck") for key in result.findings[0].to_dict()["vulnerability"])
     store = StateStore(engine.config.database_path)
     store.record_scan([result])
@@ -547,15 +639,108 @@ def test_vulncheck_failure_degrades_only_its_health(tmp_path, monkeypatch):
             return httpx.Response(500)
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(nvd_enabled=True))
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     health = next(item for item in result.source_health if item.source == "vulncheck")
     assert health.status == HealthStatus.FAILED and health.message.startswith("on;")
     assert next(item for item in result.source_health if item.source == "nvd").status == HealthStatus.OK
     assert any(item.applicability == Applicability.AFFECTED for item in result.findings)
+
+
+def test_vulncheck_recursion_error_keeps_core_finding(tmp_path, monkeypatch):
+    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
+
+    def handler(request):
+        if "api.vulncheck.com" in str(request.url):
+            return httpx.Response(200, content=b"[" * 2000)
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
+    health = next(item for item in result.source_health if item.source == "vulncheck")
+    assert health.status == HealthStatus.FAILED
+    assert "malformed data" in health.message
+    finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
+    assert finding.applicability == Applicability.AFFECTED
+    assert finding.vulnerability.vulncheck_kev is None
+
+
+def test_vulncheck_fields_do_not_change_legacy_material_fingerprint():
+    asset = Asset("a", "Acme", "Widget", "1.0")
+    common = dict(
+        summary="Synthetic summary", cvss_score=9.8,
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        cvss_version="3.1", cisa_kev=True, eu_kev=False,
+    )
+    evidence = (
+        Evidence("cve_list", "cna", "statement", details={
+            "state": "PUBLISHED", "affected": [{"vendor": "Acme", "product": "Widget"}],
+        }),
+        Evidence("vulncheck", "known_exploitation", "statement", details={
+            "date_added": "2026-01-02", "ransomware": True,
+            "reported_exploited": 2,
+            "exploit_references": ["https://example.test/xdb"],
+        }),
+    )
+    before = Finding(
+        asset, Vulnerability("CVE-2026-0001", **common), Applicability.AFFECTED,
+        "high", "reason", evidence,
+    )
+    after = Finding(
+        asset, Vulnerability(
+            "CVE-2026-0001", **common, vulncheck_kev=True,
+            vulncheck_date_added="2026-01-02", vulncheck_ransomware=True,
+            vulncheck_reported_exploits=2, vulncheck_exploit_references=1,
+            shodan_cvedb_kev=True,
+        ), Applicability.AFFECTED, "high", "reason", evidence,
+    )
+    assert material_fingerprint(before) == material_fingerprint(after)
+    assert material_fingerprint(after) == "adcc90934ef62903d0d94768fd8a3ed9f7c1e97d6b98325c4b781bcb287f5640"
+
+
+def test_vulncheck_enriches_package_findings_as_evidence_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
+
+    def run(entries):
+        def handler(request):
+            if "api.vulncheck.com" in str(request.url):
+                return httpx.Response(200, json=vulncheck_page(entries, total=len(entries)))
+            raise AssertionError(f"unexpected request {request.url}")
+
+        engine = make_engine(tmp_path, handler, sources=source_config(
+            osv_enabled=True, vulncheck_enabled=True,
+        ))
+        record_data = osv_record()
+        engine.osv.query_many = lambda assets: {
+            asset.target_key: OSVResult(
+                (record_data,), None, frozenset({record_data["id"]})
+            )
+            for asset in assets
+        }
+        return scan(engine, Asset("a", purl="pkg:pypi/example@1.0.0"))
+
+    matched = run([vulncheck_entry(
+        "CVE-2026-1234",
+        vulncheck_xdb=[{"xdb_url": "https://example.test/package-xdb"}],
+        vulncheck_reported_exploitation=[
+            {"url": "https://example.test/package-report", "date_added": "2026-01-03"},
+        ],
+    )])
+    finding = matched.findings[0]
+    assert finding.applicability == Applicability.AFFECTED
+    assert finding.vulnerability.vulncheck_kev is True
+    assert finding.vulnerability.vulncheck_reported_exploits == 1
+    evidence = next(item for item in finding.evidence if item.source == "vulncheck")
+    assert evidence.details["exploit_references"] == ["https://example.test/package-xdb"]
+
+    absent = run([])
+    finding = absent.findings[0]
+    assert finding.applicability == Applicability.AFFECTED
+    assert finding.vulnerability.vulncheck_kev is False
 
 
 def test_cvedb_disabled_sends_no_request(tmp_path):
@@ -569,13 +754,9 @@ def test_cvedb_disabled_sends_no_request(tmp_path):
         tmp_path, handler,
         sources=source_config(nvd_enabled=True, shodan_cvedb_enabled=False),
     )
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     assert not any("cvedb" in url for url in calls)
-    health = next(item for item in result.source_health if item.source == "shodan_cvedb")
-    assert health.status == HealthStatus.DISABLED and health.message == "off: disabled"
+    assert not any(item.source == "shodan_cvedb" for item in result.source_health)
 
 
 def test_cvedb_discovery_requests_count_then_pages(tmp_path):
@@ -598,16 +779,13 @@ def test_cvedb_discovery_requests_count_then_pages(tmp_path):
         tmp_path, handler,
         sources=source_config(nvd_enabled=True, shodan_cvedb_enabled=True),
     )
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     assert calls[0].get("count") == "true"
     assert calls[1]["skip"] == "0" and calls[1]["limit"] == "100"
     assert calls[2]["skip"] == "100" and calls[2]["limit"] == "100"
     assert len(result.findings) == 125
     assert all(item.applicability == Applicability.NEEDS_REVIEW for item in result.findings)
-    assert all(item.reason == "reported by Shodan CVEDB only; confirm applicability" for item in result.findings)
+    assert all(item.reason == CVEDB_ONLY_REASON for item in result.findings)
     health = next(item for item in result.source_health if item.source == "shodan_cvedb")
     assert health.status == HealthStatus.OK
     assert "125 CVE results for the exact CPE" in health.message
@@ -666,24 +844,78 @@ def test_cvedb_discovery_request_cap_and_search_404():
     assert caught.value.status_code == 404
 
 
+def test_cvedb_discovery_retries_are_charged_to_the_budget():
+    attempts = []
+
+    def handler(request):
+        params = request.url.params
+        if params.get("count") == "true":
+            attempts.append("count")
+            return httpx.Response(200, json={"total": 1})
+        attempts.append("page")
+        if len(attempts) == 2:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"cves": cvedb_rows(1, 1)})
+
+    limited = ShodanCVEDBSource(
+        make_http(handler, retries=1), discovery_request_cap=2
+    )
+    result = limited.discover(CPE)
+    assert result.degraded is True
+    assert "discovery request cap reached" in (result.message or "")
+    assert limited.discovery_requests == 2
+    assert attempts == ["count", "page"]
+
+    attempts.clear()
+
+    def retrying(request):
+        params = request.url.params
+        if params.get("count") == "true":
+            attempts.append("count")
+            return httpx.Response(200, json={"total": 1})
+        attempts.append("page")
+        if len(attempts) == 2:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"cves": cvedb_rows(1, 1)})
+
+    allowed = ShodanCVEDBSource(
+        make_http(retrying, retries=1), discovery_request_cap=3
+    )
+    result = allowed.discover(CPE)
+    assert result.degraded is False
+    assert len(result.records) == 1
+    assert allowed.discovery_requests == 3
+    assert attempts == ["count", "page", "page"]
+
+
 def test_cvedb_discovery_failure_degrades_health(tmp_path):
     def handler(request):
         if "cvedb.shodan.io/cves" in str(request.url):
             return httpx.Response(404)
-        return httpx.Response(200, json=nvd_payload())
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
     engine = make_engine(
         tmp_path, handler,
         sources=source_config(nvd_enabled=True, shodan_cvedb_enabled=True),
     )
-    engine.cvedb.lookup_cap = 0
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     health = next(item for item in result.source_health if item.source == "shodan_cvedb")
     assert health.status == HealthStatus.FAILED
     assert "HTTP 404" in health.message
+    finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
+    assert finding.applicability == Applicability.AFFECTED
+
+
+def test_cvedb_lookup_cap_is_reported():
+    source = ShodanCVEDBSource(
+        make_http(lambda request: httpx.Response(200, json={
+            "cve_id": str(request.url).rsplit("/", 1)[-1],
+        })),
+        lookup_cap=1,
+    )
+    assert source.lookup("CVE-2026-0001") is not None
+    assert source.lookup("CVE-2026-0002") is None
+    assert source.cap_reached is True
 
 
 def test_cvedb_per_cve_404_is_no_record(tmp_path):
@@ -699,10 +931,7 @@ def test_cvedb_per_cve_404_is_no_record(tmp_path):
         tmp_path, handler,
         sources=source_config(nvd_enabled=True, shodan_cvedb_enabled=True),
     )
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     health = next(item for item in result.source_health if item.source == "shodan_cvedb")
     assert health.status == HealthStatus.OK
     finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
@@ -738,7 +967,44 @@ def test_cvedb_record_parser_uses_documented_fields():
         shodan_cvedb.parse_record({"cve_id": "CVE-2026-0002"}, expected="CVE-2026-0001")
 
 
-def test_cvedb_bounded_responses():
+def test_cvedb_malformed_references_are_fixed_source_errors(tmp_path):
+    payload = {
+        "cve_id": "CVE-2026-0001",
+        "references": [{"url": "https://[malformed"}],
+    }
+    with pytest.raises(SourceError) as caught:
+        shodan_cvedb.parse_record(payload)
+    assert str(caught.value) == "shodan_cvedb: source returned a malformed reference"
+    with pytest.raises(SourceError) as caught:
+        shodan_cvedb.fetch_cve(
+            make_http(lambda request: httpx.Response(200, json=payload)),
+            "CVE-2026-0001",
+        )
+    assert str(caught.value) == "shodan_cvedb: source returned a malformed reference"
+
+    def handler(request):
+        url = str(request.url)
+        if "cvedb.shodan.io/cves" in url:
+            if request.url.params.get("count") == "true":
+                return httpx.Response(200, json={"total": 1})
+            return httpx.Response(200, json={"cves": [payload]})
+        if "cvedb.shodan.io/cve/" in url:
+            return httpx.Response(404)
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    engine = make_engine(
+        tmp_path, handler,
+        sources=source_config(nvd_enabled=True, shodan_cvedb_enabled=True),
+    )
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
+    health = next(item for item in result.source_health if item.source == "shodan_cvedb")
+    assert health.status == HealthStatus.FAILED
+    assert health.message.startswith("on; shodan_cvedb: source returned a malformed reference")
+    finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
+    assert finding.applicability == Applicability.AFFECTED
+
+
+def test_cvedb_bounded_responses_and_recursion_errors(tmp_path):
     monkeypatch_cap = shodan_cvedb.MAX_DETAIL_BYTES
     shodan_cvedb.MAX_DETAIL_BYTES = 8
     try:
@@ -772,18 +1038,73 @@ def test_cvedb_bounded_responses():
         malformed.lookup("CVE-2026-0001")
     assert str(caught.value) == "shodan_cvedb: source returned invalid JSON"
 
+    nested_source = ShodanCVEDBSource(make_http(
+        lambda request: httpx.Response(200, content=b"[" * 2000)
+    ))
+    with pytest.raises(SourceError) as caught:
+        nested_source.lookup("CVE-2026-0001")
+    assert str(caught.value) == "shodan_cvedb: source returned invalid JSON"
 
-def authoritative_prior(identifier: str = "CVE-2026-0001") -> dict:
-    return {
-        "asset": {
-            "asset_id": "a", "vendor": "Acme", "product": "Widget", "version": "1.0",
-            "category": "", "system_id": "", "ecosystem": "", "purl": "", "cpe": CPE,
-            "repository": "", "commit": "", "client": "",
-        },
-        "vulnerability": {"cve_id": identifier, "advisory_id": identifier},
-        "applicability": "needs_review",
-        "reason": "prior authoritative finding",
-    }
+    def nested(request):
+        if "cvedb.shodan.io/cves" in str(request.url):
+            return httpx.Response(200, json={"total": 0})
+        if "cvedb.shodan.io/cve/" in str(request.url):
+            return httpx.Response(200, content=b"[" * 2000)
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    engine = make_engine(
+        tmp_path, nested,
+        sources=source_config(nvd_enabled=True, shodan_cvedb_enabled=True),
+    )
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
+    health = next(item for item in result.source_health if item.source == "shodan_cvedb")
+    assert health.status == HealthStatus.FAILED
+    assert "1 CVE lookups failed" in health.message
+    assert next(item for item in result.source_health if item.source == "nvd").status == HealthStatus.OK
+    finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
+    assert finding.applicability == Applicability.AFFECTED
+
+
+def test_cvedb_only_rows_use_cvedb_data_and_skip_core_lookups(tmp_path):
+    def handler(request):
+        url = str(request.url)
+        if "cvedb.shodan.io/cves" in url:
+            if request.url.params.get("count") == "true":
+                return httpx.Response(200, json={"total": 1})
+            return httpx.Response(200, json={"cves": [{
+                "cve_id": "CVE-2026-0009",
+                "summary": "CVEDB-only summary",
+                "published_time": "2026-01-02T00:00:00Z",
+                "cvss": 7.5,
+                "cvss_version": 3.1,
+                "kev": True,
+                "ransomware_campaign": "Known",
+                "epss": 0.4,
+                "ranking_epss": 0.3,
+                "references": [{"url": "https://example.test/cvedb"}],
+            }]})
+        if "cvedb.shodan.io/cve/" in url:
+            return httpx.Response(404)
+        if "CVE-2026-0009" in url or "CVE-2026-0009" in str(request.url.params):
+            raise AssertionError(f"CVEDB-only row used a core lookup: {url}")
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    engine = make_engine(
+        tmp_path, handler,
+        sources=source_config(nvd_enabled=True, shodan_cvedb_enabled=True),
+    )
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
+    finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0009")
+    assert finding.applicability == Applicability.NEEDS_REVIEW
+    assert finding.reason == CVEDB_ONLY_REASON
+    assert finding.vulnerability.summary == "CVEDB-only summary"
+    assert finding.vulnerability.cvss_score == 7.5
+    assert finding.vulnerability.cvss_version == "3.1"
+    assert finding.vulnerability.epss_score == 0.4
+    assert finding.vulnerability.epss_percentile == 0.3
+    assert finding.vulnerability.shodan_cvedb_kev is True
+    assert finding.vulnerability.shodan_cvedb_ransomware is True
+    assert [item.source for item in finding.evidence] == ["shodan_cvedb"]
 
 
 def test_cvedb_cannot_change_authoritative_positive_or_negative_decisions(tmp_path):
@@ -800,7 +1121,7 @@ def test_cvedb_cannot_change_authoritative_positive_or_negative_decisions(tmp_pa
                 return httpx.Response(404)
             if "raw.githubusercontent.com" in url:
                 if "CVE-2026-0009" in url:
-                    return httpx.Response(503)
+                    raise AssertionError("CVEDB-only row used an official lookup")
                 return httpx.Response(200, json=cve_list_record(
                     "CVE-2026-0001", status=official_status
                 ))
@@ -809,18 +1130,14 @@ def test_cvedb_cannot_change_authoritative_positive_or_negative_decisions(tmp_pa
         engine = make_engine(
             tmp_path, handler,
             sources=source_config(
-                nvd_enabled=False, cve_enabled=True,
-                shodan_cvedb_enabled=cvedb_enabled,
+                cve_enabled=True, shodan_cvedb_enabled=cvedb_enabled,
             ),
         )
-        try:
-            result = engine.scan(
-                [Asset("a", "Acme", "Widget", "1.0", cpe=CPE)],
-                known_findings=[authoritative_prior()],
-            )[0]
-        finally:
-            engine.close()
-        return result
+        return scan(
+            engine,
+            Asset("a", "Acme", "Widget", "1.0", cpe=CPE),
+            known_findings=[authoritative_prior()],
+        )
 
     for official_status in ("affected", "unaffected"):
         off = run(False, official_status)
@@ -830,14 +1147,14 @@ def test_cvedb_cannot_change_authoritative_positive_or_negative_decisions(tmp_pa
         expected = Applicability.AFFECTED if official_status == "affected" else Applicability.NOT_AFFECTED
         assert off_finding.applicability == on_finding.applicability == expected
         assert off_finding.reason == on_finding.reason
+        assert material_fingerprint(off_finding) == material_fingerprint(on_finding)
         assert next(item for item in off.source_health if item.source == "cve_list").status == HealthStatus.OK
         assert next(item for item in on.source_health if item.source == "cve_list").status == HealthStatus.OK
         cvedb_health = next(item for item in on.source_health if item.source == "shodan_cvedb")
-        assert cvedb_health.status in {HealthStatus.DEGRADED, HealthStatus.FAILED}
-        assert "official CVE lookups for CVEDB-only rows failed" in cvedb_health.message
+        assert cvedb_health.status == HealthStatus.OK
         cvedb_only = next(item for item in on.findings if item.vulnerability.cve_id == "CVE-2026-0009")
         assert cvedb_only.applicability == Applicability.NEEDS_REVIEW
-        assert cvedb_only.reason == "reported by Shodan CVEDB only; confirm applicability"
+        assert cvedb_only.reason == CVEDB_ONLY_REASON
 
 
 def test_prior_cvedb_only_finding_is_not_carried_over_as_authoritative(tmp_path):
@@ -850,7 +1167,7 @@ def test_prior_cvedb_only_finding_is_not_carried_over_as_authoritative(tmp_path)
         },
         "vulnerability": {"cve_id": "CVE-2026-0009", "advisory_id": "CVE-2026-0009"},
         "applicability": "needs_review",
-        "reason": "reported by Shodan CVEDB only; confirm applicability",
+        "reason": CVEDB_ONLY_REASON,
     }
 
     def excluded(request):
@@ -859,11 +1176,8 @@ def test_prior_cvedb_only_finding_is_not_carried_over_as_authoritative(tmp_path)
     engine = make_engine(tmp_path, excluded, sources=source_config(
         nvd_enabled=True, cve_enabled=True,
     ))
-    try:
-        results = engine.scan([asset], known_findings=[prior])
-    finally:
-        engine.close()
-    assert results[0].findings == ()
+    result = scan(engine, asset, known_findings=[prior])
+    assert result.findings == ()
 
     def genuine(request):
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0009")))
@@ -871,48 +1185,277 @@ def test_prior_cvedb_only_finding_is_not_carried_over_as_authoritative(tmp_path)
     engine = make_engine(tmp_path, genuine, sources=source_config(
         nvd_enabled=True, cve_enabled=True,
     ))
-    try:
-        results = engine.scan([asset], known_findings=[prior])
-    finally:
-        engine.close()
-    finding = next(item for item in results[0].findings if item.vulnerability.cve_id == "CVE-2026-0009")
+    result = scan(engine, asset, known_findings=[prior])
+    finding = next(item for item in result.findings if item.vulnerability.cve_id == "CVE-2026-0009")
     assert finding.applicability == Applicability.AFFECTED
 
 
-def test_findings_visibility_off_and_on(setup, monkeypatch):
-    _, store, client = setup
-    asset = Asset("a", "Acme", "Widget", "1")
-    vuln = Vulnerability(
-        "CVE-2026-1234",
-        vulncheck_kev=True,
-        vulncheck_date_added="<script>alert(1)</script>",
-        vulncheck_ransomware=True,
-        vulncheck_reported_exploits=2,
-    )
-    store.record_scan([QueryResult(
-        asset,
-        (Finding(asset, vuln, Applicability.NEEDS_REVIEW, "limited", "test"),),
-        (),
-    )])
-    monkeypatch.delenv("VULNCHECK_API_TOKEN", raising=False)
-    page = client.get("/findings")
-    assert page.status_code == 200
-    assert "VulnCheck" not in page.text
-    assert 'name="vulncheck"' not in page.text
-    ignored = client.get("/findings?vulncheck=yes")
-    assert ignored.status_code == 200 and "CVE-2026-1234" in ignored.text
-
+@pytest.mark.parametrize("optional", ["vulncheck", "cvedb"])
+def test_optional_activation_does_not_change_a_carried_authoritative_row(tmp_path, monkeypatch, optional):
     monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
-    page = client.get("/findings")
-    assert page.status_code == 200
-    assert "VulnCheck KEV" in page.text
-    assert 'name="vulncheck"' in page.text
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
-    assert "<script>alert(1)</script>" not in page.text
-    filtered = client.get("/findings?vulncheck=yes")
-    assert filtered.status_code == 200 and "CVE-2026-1234" in filtered.text
-    missing = client.get("/findings?vulncheck=no")
-    assert "CVE-2026-1234" not in missing.text
+
+    def handler(request):
+        url = str(request.url)
+        if "api.vulncheck.com" in url:
+            return httpx.Response(200, json=vulncheck_page(
+                [vulncheck_entry("CVE-2026-0001")], total=1,
+            ))
+        if "cvedb.shodan.io/cves" in url:
+            return httpx.Response(200, json={"total": 0})
+        if "cvedb.shodan.io/cve/CVE-2026-0001" in url:
+            return httpx.Response(200, json={
+                "cve_id": "CVE-2026-0001", "kev": True, "epss": 0.9,
+            })
+        if "cvedb.shodan.io/cve/" in url:
+            return httpx.Response(404)
+        # NVD and EUVD return a different CVE; CVE List is disabled.
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0002")))
+
+    sources = source_config(
+        nvd_enabled=True,
+        vulncheck_enabled=optional == "vulncheck",
+        shodan_cvedb_enabled=optional == "cvedb",
+    )
+    asset = Asset("a", "Acme", "Widget", "1.0", cpe=CPE)
+    off_sources = source_config(nvd_enabled=True)
+
+    off_engine = make_engine(tmp_path, handler, sources=off_sources)
+    off_result = scan(off_engine, asset, known_findings=[authoritative_prior()])
+    off_finding = next(item for item in off_result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
+
+    on_engine = make_engine(tmp_path, handler, sources=sources)
+    on_result = scan(on_engine, asset, known_findings=[authoritative_prior()])
+    on_finding = next(item for item in on_result.findings if item.vulnerability.cve_id == "CVE-2026-0001")
+
+    assert off_finding.applicability == on_finding.applicability == Applicability.COVERAGE_UNKNOWN
+    assert off_finding.reason == on_finding.reason
+    assert material_fingerprint(off_finding) == material_fingerprint(on_finding)
+    assert off_result.coverage == on_result.coverage
+
+    store = StateStore(tmp_path / "activation.db")
+    store.record_scan([off_result])
+    before = store.history(asset_id="a", cve_id="CVE-2026-0001")
+    store.record_scan([on_result])
+    after = store.history(asset_id="a", cve_id="CVE-2026-0001")
+    assert [row["event_type"] for row in after] == [row["event_type"] for row in before]
+
+
+def test_cvedb_supplemental_epss_failure_does_not_change_core_health_or_coverage(tmp_path):
+    epss_requests = []
+
+    def handler(request):
+        url = str(request.url)
+        if "cvedb.shodan.io/cves" in url:
+            if request.url.params.get("count") == "true":
+                return httpx.Response(200, json={"total": 1})
+            return httpx.Response(200, json={"cves": [
+                {"cve_id": "CVE-2026-0009", "summary": "CVEDB only"},
+            ]})
+        if "cvedb.shodan.io/cve/" in url:
+            return httpx.Response(404)
+        if "api.first.org" in url:
+            value = str(request.url.params.get("cve", ""))
+            epss_requests.append(value)
+            if "CVE-2026-0009" in value:
+                return httpx.Response(500)
+            return httpx.Response(200, json={
+                "status": "OK", "total": 1,
+                "data": [{
+                    "cve": "CVE-2026-0001", "epss": "0.25",
+                    "percentile": "0.5", "date": "2026-01-02",
+                }],
+            })
+        if "euvdservices" in url:
+            return httpx.Response(200, json={
+                "items": [{
+                    "id": "EUVD-2026-0001",
+                    "aliases": ["CVE-2026-0001"],
+                    "description": "Synthetic EUVD record",
+                }],
+                "total": 1,
+            })
+        if "raw.githubusercontent.com" in url:
+            return httpx.Response(200, json=cve_list_record(
+                "CVE-2026-0001", status="affected"
+            ))
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    def run(cvedb_enabled):
+        engine = make_engine(
+            tmp_path, handler,
+            sources=source_config(
+                nvd_enabled=True, euvd_enabled=True, cve_enabled=True,
+                epss_enabled=True, shodan_cvedb_enabled=cvedb_enabled,
+            ),
+        )
+        return scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
+
+    off = run(False)
+    on = run(True)
+    off_finding = next(item for item in off.findings if item.vulnerability.cve_id == "CVE-2026-0001")
+    on_finding = next(item for item in on.findings if item.vulnerability.cve_id == "CVE-2026-0001")
+    assert off_finding.vulnerability.epss_score == on_finding.vulnerability.epss_score == 0.25
+    assert next(item for item in off.source_health if item.source == "epss").status == HealthStatus.OK
+    assert next(item for item in on.source_health if item.source == "epss").status == HealthStatus.OK
+    assert off.coverage == on.coverage is None
+    assert all("CVE-2026-0009" not in value for value in epss_requests)
+    assert material_fingerprint(off_finding) == material_fingerprint(on_finding)
+
+
+def test_inactive_optional_sources_return_the_completed_result_unchanged(tmp_path):
+    from cvebeacon import optional_sources
+
+    engine = make_engine(
+        tmp_path, lambda request: httpx.Response(500),
+        sources=source_config(),
+    )
+    asset = Asset("a", "Acme", "Widget", "1.0")
+    result = QueryResult(asset, (), ())
+    try:
+        assert optional_sources.apply(engine, asset, result) is result
+    finally:
+        engine.close()
+
+
+def test_default_results_match_the_core_shape(tmp_path):
+    def handler(request):
+        if "api.first.org" in str(request.url):
+            return httpx.Response(200, json={
+                "status": "OK", "total": 1,
+                "data": [{
+                    "cve": "CVE-2026-0001", "epss": "0.5",
+                    "percentile": "0.7", "date": "2026-01-02",
+                }],
+            })
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    engine = make_engine(
+        tmp_path, handler,
+        sources=source_config(nvd_enabled=True, epss_enabled=True),
+    )
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
+    value = result.to_dict()
+    assert {row["source"] for row in value["source_health"]} == {
+        "nvd", "euvd", "cve_list", "cisa_kev", "eu_kev", "epss",
+    }
+    vulnerability = value["findings"][0]["vulnerability"]
+    assert set(vulnerability) == {
+        "cve_id", "summary", "published", "modified", "rejected", "cvss_score",
+        "cvss_vector", "cvss_version", "epss_score", "epss_percentile",
+        "epss_date", "cisa_kev", "eu_kev", "references", "advisory_id",
+        "aliases", "source_ids", "fixed_versions",
+    }
+    assert {item["source"] for item in value["findings"][0]["evidence"]} == {"nvd", "epss"}
+
+
+def test_off_and_on_results_add_only_optional_fields_and_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
+
+    def handler(request):
+        url = str(request.url)
+        if "api.vulncheck.com" in url:
+            return httpx.Response(200, json=vulncheck_page(
+                [vulncheck_entry("CVE-2026-0001")], total=1,
+            ))
+        if "cvedb.shodan.io/cves" in url:
+            return httpx.Response(200, json={"total": 0})
+        if "cvedb.shodan.io/cve/" in url:
+            return httpx.Response(200, json={"cve_id": "CVE-2026-0001", "kev": False})
+        return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
+
+    asset = Asset("a", "Acme", "Widget", "1.0", cpe=CPE)
+
+    def run(**overrides):
+        engine = make_engine(
+            tmp_path, handler,
+            sources=source_config(nvd_enabled=True, **overrides),
+        )
+        return scan(engine, asset).to_dict()
+
+    off = run()
+    vulncheck_on = run(vulncheck_enabled=True)
+    cvedb_on = run(shodan_cvedb_enabled=True)
+    assert core_view(off) == core_view(vulncheck_on) == core_view(cvedb_on)
+    assert {row["source"] for row in vulncheck_on["source_health"]} - CORE_SOURCES == {"vulncheck"}
+    assert {row["source"] for row in cvedb_on["source_health"]} - CORE_SOURCES == {"shodan_cvedb"}
+    assert "vulncheck_kev" in vulncheck_on["findings"][0]["vulnerability"]
+    assert "shodan_cvedb_kev" in cvedb_on["findings"][0]["vulnerability"]
+    assert "vulncheck" not in {item["source"] for item in off["findings"][0]["evidence"]}
+
+
+def test_package_optional_sources_add_only_optional_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
+
+    def handler(request):
+        url = str(request.url)
+        if "api.vulncheck.com" in url:
+            return httpx.Response(200, json=vulncheck_page(
+                [vulncheck_entry("CVE-2026-1234")], total=1,
+            ))
+        if "cvedb.shodan.io/cve/" in url:
+            return httpx.Response(200, json={
+                "cve_id": "CVE-2026-1234", "kev": True, "ransomware_campaign": "Known",
+            })
+        raise AssertionError(f"unexpected request {url}")
+
+    record_data = osv_record()
+
+    def run(**overrides):
+        engine = make_engine(
+            tmp_path, handler,
+            sources=source_config(osv_enabled=True, **overrides),
+        )
+        engine.osv.query_many = lambda assets: {
+            asset.target_key: OSVResult(
+                (record_data,), None, frozenset({record_data["id"]})
+            )
+            for asset in assets
+        }
+        return scan(engine, Asset("a", purl="pkg:pypi/example@1.0.0")).to_dict()
+
+    off = run()
+    on = run(vulncheck_enabled=True, shodan_cvedb_enabled=True)
+    assert core_view(off) == core_view(on)
+    vulnerability = on["findings"][0]["vulnerability"]
+    assert vulnerability["vulncheck_kev"] is True
+    assert vulnerability["shodan_cvedb_kev"] is True
+    assert {row["source"] for row in on["source_health"]} - CORE_SOURCES == {
+        "vulncheck", "shodan_cvedb",
+    }
+
+
+def test_off_exports_match_the_core_headers_and_keys(tmp_path):
+    asset = Asset("a", "Acme", "Widget", "1")
+    vuln = Vulnerability("CVE-2026-0001", cisa_kev=False, eu_kev=None)
+    result = QueryResult(
+        asset,
+        (Finding(asset, vuln, Applicability.NEEDS_REVIEW, "limited", "test", (
+            Evidence("cve_list", "cna", "statement"),
+        )),),
+        (SourceHealth("cve_list", HealthStatus.OK, utc_now(), "ok"),),
+    )
+    payload = json.loads(reporting.write_json(
+        [result], tmp_path / "off.json", vulncheck=False, cvedb=False,
+    ).read_text(encoding="utf-8"))
+    assert set(payload[0]["findings"][0]["vulnerability"]) == {
+        "cve_id", "summary", "published", "modified", "rejected", "cvss_score",
+        "cvss_vector", "cvss_version", "epss_score", "epss_percentile",
+        "epss_date", "cisa_kev", "eu_kev", "references", "advisory_id",
+        "aliases", "source_ids", "fixed_versions",
+    }
+    workbook = load_workbook(
+        reporting.write_xlsx([result], tmp_path / "off.xlsx", vulncheck=False, cvedb=False),
+        read_only=True,
+    )
+    headers = list(list(workbook["Findings"].iter_rows(values_only=True))[0])
+    assert headers == [
+        "Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability",
+        "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile",
+        "EPSS Date", "CISA KEV", "EU KEV", "Rejected", "Published", "Modified",
+        "Summary", "Sources", "Conflicts",
+    ]
+    assert list(workbook["Source Health"].iter_rows(values_only=True))[1][1] == "cve_list"
+    assert list(workbook["Evidence"].iter_rows(values_only=True))[1][2] == "cve_list"
 
 
 def test_reporting_visibility_off_and_on(tmp_path):
@@ -928,14 +1471,23 @@ def test_reporting_visibility_off_and_on(tmp_path):
     )
     result = QueryResult(
         asset,
-        (Finding(asset, vuln, Applicability.AFFECTED, "high", "test"),),
-        (),
+        (Finding(asset, vuln, Applicability.AFFECTED, "high", "test", (
+            Evidence("vulncheck", "known_exploitation", "statement"),
+            Evidence("shodan_cvedb", "independent_enrichment", "statement"),
+        )),),
+        (
+            SourceHealth("vulncheck", HealthStatus.OK, utc_now(), "on"),
+            SourceHealth("shodan_cvedb", HealthStatus.OK, utc_now(), "on"),
+        ),
     )
     off_json = json.loads(reporting.write_json(
         [result], tmp_path / "off.json", vulncheck=False, cvedb=False,
     ).read_text(encoding="utf-8"))
-    off_vuln = off_json[0]["findings"][0]["vulnerability"]
+    off_finding = off_json[0]["findings"][0]
+    off_vuln = off_finding["vulnerability"]
     assert not any(key.startswith(("vulncheck", "shodan_cvedb")) for key in off_vuln)
+    assert off_finding["evidence"] == []
+    assert off_json[0]["source_health"] == []
 
     on_json = json.loads(reporting.write_json(
         [result], tmp_path / "on.json", vulncheck=True, cvedb=True,
@@ -946,19 +1498,104 @@ def test_reporting_visibility_off_and_on(tmp_path):
     assert on_vuln["vulncheck_reported_exploits"] == 2
     assert on_vuln["vulncheck_exploit_references"] == 3
     assert on_vuln["shodan_cvedb_kev"] is True
+    assert {item["source"] for item in on_json[0]["findings"][0]["evidence"]} == {
+        "vulncheck", "shodan_cvedb",
+    }
 
-    off_headers = list(load_workbook(
+    off_book = load_workbook(
         reporting.write_xlsx([result], tmp_path / "off.xlsx", vulncheck=False, cvedb=False),
         read_only=True,
-    )["Findings"].iter_rows(values_only=True))[0]
+    )
+    off_headers = list(off_book["Findings"].iter_rows(values_only=True))[0]
     assert "VulnCheck KEV" not in off_headers
     assert "Shodan CVEDB KEV" not in off_headers
-    on_headers = list(load_workbook(
+    assert len(list(off_book["Evidence"].iter_rows(values_only=True))) == 1
+    assert len(list(off_book["Source Health"].iter_rows(values_only=True))) == 1
+
+    on_book = load_workbook(
         reporting.write_xlsx([result], tmp_path / "on.xlsx", vulncheck=True, cvedb=True),
         read_only=True,
-    )["Findings"].iter_rows(values_only=True))[0]
+    )
+    on_headers = list(on_book["Findings"].iter_rows(values_only=True))[0]
     assert "VulnCheck KEV" in on_headers
     assert "Shodan CVEDB KEV" in on_headers
+    assert len(list(on_book["Evidence"].iter_rows(values_only=True))) == 3
+    assert len(list(on_book["Source Health"].iter_rows(values_only=True))) == 3
+
+
+def test_findings_and_event_pages_hide_disabled_vulncheck_evidence(setup, monkeypatch):
+    _, store, client = setup
+    monkeypatch.delenv("VULNCHECK_API_TOKEN", raising=False)
+    asset = Asset("a", "Acme", "Widget", "1")
+    vuln = Vulnerability(
+        "CVE-2026-1234",
+        vulncheck_kev=True,
+        vulncheck_ransomware=True,
+    )
+    finding = Finding(
+        asset, vuln, Applicability.NEEDS_REVIEW, "limited", "test",
+        (Evidence("vulncheck", "known_exploitation", "VulnCheck statement"),),
+    )
+    run_id, events = store.record_scan([QueryResult(asset, (finding,), ())])
+    page = client.get("/findings")
+    assert page.status_code == 200
+    assert "VulnCheck" not in page.text
+    assert "VulnCheck statement" not in page.text
+    assert 'name="vulncheck"' not in page.text
+    ignored = client.get("/findings?vulncheck=yes")
+    assert ignored.status_code == 200 and "CVE-2026-1234" in ignored.text
+    event = client.get(f"/event/{events[0]}")
+    assert event.status_code == 200
+    assert "VulnCheck" not in event.text
+    assert "VulnCheck statement" not in event.text
+
+    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
+    page = client.get("/findings")
+    assert "VulnCheck KEV" in page.text
+    assert "VulnCheck statement" in page.text
+    assert 'name="vulncheck"' in page.text
+    filtered = client.get("/findings?vulncheck=yes")
+    assert filtered.status_code == 200 and "CVE-2026-1234" in filtered.text
+    missing = client.get("/findings?vulncheck=no")
+    assert "CVE-2026-1234" not in missing.text
+    event = client.get(f"/event/{events[0]}")
+    assert "VulnCheck statement" in event.text
+
+
+def test_home_and_sources_hide_inactive_optional_health(setup, monkeypatch):
+    _, store, client = setup
+    monkeypatch.delenv("VULNCHECK_API_TOKEN", raising=False)
+    asset = Asset("a", "Acme", "Widget", "1")
+    store.record_scan([QueryResult(
+        asset, (),
+        (
+            SourceHealth("cve_list", HealthStatus.OK, utc_now(), "ok"),
+            SourceHealth("vulncheck", HealthStatus.OK, utc_now(), "on"),
+            SourceHealth("shodan_cvedb", HealthStatus.OK, utc_now(), "on"),
+        ),
+    )])
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "vulncheck" not in home.text
+    assert "shodan_cvedb" not in home.text
+    sources = client.get("/sources")
+    assert sources.status_code == 200
+    assert "off: no token" in sources.text
+    assert "off: disabled" in sources.text
+
+
+def test_manual_query_off_matches_the_core_page(setup, monkeypatch):
+    _, store, client = setup
+    monkeypatch.delenv("VULNCHECK_API_TOKEN", raising=False)
+    page = client.get("/query")
+    assert page.status_code == 200
+    assert "VulnCheck" not in page.text
+    response = post(
+        client, "/query", mode="product", vendor="Acme", product="Widget", version="1.0"
+    )
+    assert response.status_code == 200
+    assert "VulnCheck" not in response.text
+    assert "shodan_cvedb" not in response.text
 
 
 def test_scan_notification_text_hides_vulncheck_when_off():
@@ -977,18 +1614,56 @@ def test_scan_notification_text_hides_vulncheck_when_off():
     assert "VulnCheck KEV" in render_text(alert_items(rows, vulncheck=True))
 
 
-def test_tech_report_visibility_off_and_on(tmp_path, monkeypatch):
+def test_tech_report_off_restores_the_core_kev_behavior(tmp_path, monkeypatch):
     from werkzeug.datastructures import MultiDict
-    from cvebeacon.tech_report import build_report, read_filters
+    from cvebeacon import tech_report
 
-    assert read_filters(MultiDict({"kev": "vulncheck"}), [], [], vulncheck=False)["kev"] == "any"
-    assert read_filters(MultiDict({"kev": "vulncheck"}), [], [], vulncheck=True)["kev"] == "vulncheck"
+    assert tech_report.read_filters(
+        MultiDict({"kev": "vulncheck"}), [], [], vulncheck=False
+    )["kev"] == "any"
+    assert tech_report.read_filters(
+        MultiDict({"kev": "vulncheck"}), [], [], vulncheck=True
+    )["kev"] == "vulncheck"
+
+    class Window:
+        field = "last_seen"
+
+        @staticmethod
+        def includes(_value):
+            return True
+
+    cve = {
+        "cve_id": "CVE-2026-1234", "last_seen": "2026-01-02",
+        "severity": "high", "cisa_kev": False, "eu_kev": False,
+        "vulncheck_kev": True,
+    }
+    off_filters = tech_report.read_filters(
+        MultiDict({"kev": "either"}), [], [], vulncheck=False
+    )
+    on_filters = tech_report.read_filters(
+        MultiDict({"kev": "either"}), [], [], vulncheck=True
+    )
+    off_cve = {key: value for key, value in cve.items() if key != "vulncheck_kev"}
+    assert not tech_report._cve_matches(off_cve, Window(), off_filters)
+    assert tech_report._cve_matches(cve, Window(), on_filters)
+
+    record = {
+        "cve_id": "CVE-2026-1234", "applicability": "needs_review",
+        "first_seen": "2026-01-01", "last_seen": "2026-01-02",
+        "vulnerability": json.dumps({
+            "cve_id": "CVE-2026-1234", "vulncheck_kev": True,
+            "vulncheck_date_added": "2026-01-02",
+        }),
+    }
+    assert "vulncheck_kev" not in tech_report._finding(record, vulncheck=False)
+    assert tech_report._finding(record, vulncheck=True)["vulncheck_kev"] is True
+
     config = load_config(write_config(tmp_path))
     monkeypatch.delenv("VULNCHECK_API_TOKEN", raising=False)
-    off = build_report(config, "acme", MultiDict())
+    off = tech_report.build_report(config, "acme", MultiDict())
     assert "vulncheck_kev" not in off["summary"]
     monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
-    on = build_report(config, "acme", MultiDict())
+    on = tech_report.build_report(config, "acme", MultiDict())
     assert on["summary"]["vulncheck_kev"] == 0
 
     from cvebeacon import dashboard_tech_report
@@ -1002,11 +1677,73 @@ def test_tech_report_visibility_off_and_on(tmp_path, monkeypatch):
     assert any("VulnCheck KEV" in row for row in on_rows)
 
 
+def test_tech_report_template_off_uses_either_catalog(setup, monkeypatch):
+    monkeypatch.delenv("VULNCHECK_API_TOKEN", raising=False)
+    _, store, client = setup
+    page = client.get("/web-assets/report?client=acme")
+    assert page.status_code == 200
+    assert "Either catalog" in page.text
+    assert "Any catalog" not in page.text
+    assert "VulnCheck" not in page.text
+
+
+def test_successful_refresh_with_vulncheck_off_stores_no_evidence(setup, monkeypatch):
+    _, store, client = setup
+    monkeypatch.delenv("VULNCHECK_API_TOKEN", raising=False)
+    asset = Asset("a", "Acme", "Widget", "1")
+    on_vuln = Vulnerability("CVE-2026-1234", vulncheck_kev=True)
+    on_finding = Finding(
+        asset, on_vuln, Applicability.NEEDS_REVIEW, "limited", "test",
+        (Evidence("vulncheck", "known_exploitation", "statement"),),
+    )
+    store.record_scan([QueryResult(
+        asset, (on_finding,),
+        (SourceHealth("vulncheck", HealthStatus.OK, utc_now(), "on"),),
+    )])
+    off_finding = Finding(asset, Vulnerability("CVE-2026-1234"), Applicability.NEEDS_REVIEW, "limited", "test")
+    store.record_scan([QueryResult(
+        asset, (off_finding,),
+        (SourceHealth("nvd", HealthStatus.OK, utc_now(), "ok"),),
+    )])
+    stored = store.latest_findings()[0]
+    assert not any(item["source"] == "vulncheck" for item in stored["evidence"])
+    assert "vulncheck_kev" not in stored["vulnerability"]
+
+
+@pytest.mark.parametrize("status", [HealthStatus.FAILED, HealthStatus.DEGRADED])
+def test_failed_optional_refresh_retains_saved_evidence(setup, monkeypatch, status):
+    _, store, client = setup
+    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
+    asset = Asset("a", "Acme", "Widget", "1")
+    on_vuln = Vulnerability("CVE-2026-1234", vulncheck_kev=True)
+    on_finding = Finding(
+        asset, on_vuln, Applicability.NEEDS_REVIEW, "limited", "test",
+        (Evidence("vulncheck", "known_exploitation", "statement"),),
+    )
+    store.record_scan([QueryResult(
+        asset, (on_finding,),
+        (SourceHealth("vulncheck", HealthStatus.OK, utc_now(), "on"),),
+    )])
+    failed_finding = Finding(asset, Vulnerability("CVE-2026-1234"), Applicability.NEEDS_REVIEW, "limited", "test")
+    store.record_scan([QueryResult(
+        asset, (failed_finding,),
+        (
+            SourceHealth("nvd", HealthStatus.OK, utc_now(), "ok"),
+            SourceHealth("vulncheck", status, utc_now(), "on; temporary failure"),
+        ),
+    )])
+    stored = store.latest_findings()[0]
+    assert stored["vulnerability"].get("vulncheck_kev") is True
+    assert any(item["source"] == "vulncheck" for item in stored["evidence"])
+    assert store.dashboard_snapshot()["latest"]["status"] == "completed"
+    history = store.history(asset_id="a", cve_id="CVE-2026-1234")
+    assert [row["event_type"] for row in history] == ["new"]
+
+
 def test_secret_never_reaches_logs_exports_state_or_backup(tmp_path, monkeypatch, caplog):
     import tarfile
 
     monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
-    caplog.set_level(logging.DEBUG)
 
     def handler(request):
         if "api.vulncheck.com" in str(request.url):
@@ -1015,11 +1752,13 @@ def test_secret_never_reaches_logs_exports_state_or_backup(tmp_path, monkeypatch
             ], total=1))
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(nvd_enabled=True))
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    logging.getLogger("httpcore").setLevel(logging.INFO)
+    caplog.set_level(logging.INFO)
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     assert TOKEN not in caplog.text
     assert TOKEN not in json.dumps([result.to_dict()])
 
@@ -1104,7 +1843,6 @@ def test_vulncheck_token_file_matches_nvd_backup_flow(tmp_path):
 
 def test_reflected_failure_response_keeps_token_out_of_health_and_logs(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
-    caplog.set_level(logging.DEBUG)
 
     def handler(request):
         if "api.vulncheck.com" in str(request.url):
@@ -1115,88 +1853,15 @@ def test_reflected_failure_response_keeps_token_out_of_health_and_logs(tmp_path,
             )
         return httpx.Response(200, json=nvd_payload(nvd_cve("CVE-2026-0001")))
 
-    engine = make_engine(tmp_path, handler, sources=source_config(nvd_enabled=True))
-    try:
-        result = engine.query_asset(Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
-    finally:
-        engine.close()
+    engine = make_engine(tmp_path, handler, sources=source_config(
+        nvd_enabled=True, vulncheck_enabled=True,
+    ))
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    logging.getLogger("httpcore").setLevel(logging.INFO)
+    caplog.set_level(logging.INFO)
+    result = scan(engine, Asset("a", "Acme", "Widget", "1.0", cpe=CPE))
     health = next(item for item in result.source_health if item.source == "vulncheck")
     assert health.status == HealthStatus.FAILED
     assert health.message == "on; vulncheck: HTTP 401"
     assert TOKEN not in caplog.text
     assert TOKEN not in json.dumps([result.to_dict()])
-
-
-def test_vulncheck_fields_do_not_change_legacy_material_fingerprint():
-    asset = Asset("a", "Acme", "Widget", "1.0")
-    common = dict(
-        summary="Synthetic summary", cvss_score=9.8,
-        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-        cvss_version="3.1", cisa_kev=True, eu_kev=False,
-    )
-    evidence = (
-        Evidence("cve_list", "cna", "statement", details={
-            "state": "PUBLISHED", "affected": [{"vendor": "Acme", "product": "Widget"}],
-        }),
-        Evidence("vulncheck", "known_exploitation", "statement", details={
-            "date_added": "2026-01-02", "ransomware": True,
-            "reported_exploited": 2,
-            "exploit_references": ["https://example.test/xdb"],
-        }),
-    )
-    before = Finding(
-        asset, Vulnerability("CVE-2026-0001", **common), Applicability.AFFECTED,
-        "high", "reason", evidence,
-    )
-    after = Finding(
-        asset, Vulnerability(
-            "CVE-2026-0001", **common, vulncheck_kev=True,
-            vulncheck_date_added="2026-01-02", vulncheck_ransomware=True,
-            vulncheck_reported_exploits=2, vulncheck_exploit_references=1,
-            shodan_cvedb_kev=True,
-        ), Applicability.AFFECTED, "high", "reason", evidence,
-    )
-    assert material_fingerprint(before) == material_fingerprint(after)
-    assert material_fingerprint(after) == "adcc90934ef62903d0d94768fd8a3ed9f7c1e97d6b98325c4b781bcb287f5640"
-
-
-def test_vulncheck_enriches_package_findings_as_evidence_only(tmp_path, monkeypatch):
-    monkeypatch.setenv("VULNCHECK_API_TOKEN", TOKEN)
-
-    def run(entries):
-        def handler(request):
-            if "api.vulncheck.com" in str(request.url):
-                return httpx.Response(200, json=vulncheck_page(entries, total=len(entries)))
-            raise AssertionError(f"unexpected request {request.url}")
-
-        engine = make_engine(tmp_path, handler, sources=source_config(osv_enabled=True))
-        record_data = osv_record()
-        engine.osv.query_many = lambda assets: {
-            asset.target_key: OSVResult(
-                (record_data,), None, frozenset({record_data["id"]})
-            )
-            for asset in assets
-        }
-        try:
-            return engine.scan([Asset("a", purl="pkg:pypi/example@1.0.0")])[0]
-        finally:
-            engine.close()
-
-    matched = run([vulncheck_entry(
-        "CVE-2026-1234",
-        vulncheck_xdb=[{"xdb_url": "https://example.test/package-xdb"}],
-        vulncheck_reported_exploitation=[
-            {"url": "https://example.test/package-report", "date_added": "2026-01-03"},
-        ],
-    )])
-    finding = matched.findings[0]
-    assert finding.applicability == Applicability.AFFECTED
-    assert finding.vulnerability.vulncheck_kev is True
-    assert finding.vulnerability.vulncheck_reported_exploits == 1
-    evidence = next(item for item in finding.evidence if item.source == "vulncheck")
-    assert evidence.details["exploit_references"] == ["https://example.test/package-xdb"]
-
-    absent = run([])
-    finding = absent.findings[0]
-    assert finding.applicability == Applicability.AFFECTED
-    assert finding.vulnerability.vulncheck_kev is False

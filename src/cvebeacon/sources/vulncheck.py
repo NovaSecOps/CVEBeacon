@@ -129,13 +129,39 @@ def _reference_entries(value: Any, field: str, token: str) -> list[dict[str, str
     return output
 
 
-def _meta(payload: Any) -> tuple[list[Any], dict[str, Any]]:
+def _meta(
+    payload: Any,
+    *,
+    expected_limit: int,
+    token: str,
+) -> tuple[list[Any], int | None, str | None]:
     if not isinstance(payload, dict):
         raise _malformed()
     data, meta = payload.get("data"), payload.get("_meta")
     if not isinstance(data, list) or not isinstance(meta, dict):
         raise _malformed()
-    return data, meta
+    limit = meta.get("limit")
+    if type(limit) is not int or limit != expected_limit or limit <= 0:
+        raise _malformed()
+    if len(data) > limit:
+        raise _malformed()
+    total = meta.get("total_documents")
+    if total is not None:
+        if type(total) is not int or total < 0 or len(data) > total:
+            raise _malformed()
+    truncated = meta.get("truncated")
+    if truncated is not None and type(truncated) is not bool:
+        raise _malformed()
+    if truncated:
+        raise _incomplete()
+    next_cursor = meta.get("next_cursor")
+    if next_cursor is not None:
+        if not isinstance(next_cursor, str) or not next_cursor.strip():
+            raise _malformed()
+        next_cursor = next_cursor.strip()
+        if token and token in next_cursor:
+            raise SourceError("vulncheck", REFLECTED)
+    return data, total, next_cursor
 
 
 def _record(item: Any, token: str) -> tuple[list[str], Evidence]:
@@ -214,41 +240,33 @@ class VulnCheckSource:
                 params=params,
                 headers=headers,
                 identity_only=True,
+                quiet=True,
             ))
             used += len(raw)
             try:
                 payload = json.loads(raw)
-            except (ValueError, UnicodeError):
+            except (ValueError, UnicodeError, RecursionError):
                 raise _malformed() from None
-            data, meta = _meta(payload)
-            if len(data) > PAGE_SIZE:
-                raise _malformed()
-            total = meta.get("total_documents")
+            data, total, next_cursor = _meta(
+                payload, expected_limit=PAGE_SIZE, token=token
+            )
             if total is not None:
-                if type(total) is not int or total < 0:
-                    raise _malformed()
                 if reported_total is None:
                     reported_total = total
                 elif reported_total != total:
                     raise _incomplete()
-            truncated = meta.get("truncated")
-            if truncated is not None and not isinstance(truncated, bool):
-                raise _malformed()
-            if truncated:
-                raise _incomplete()
-            next_cursor = meta.get("next_cursor")
-            if next_cursor is not None:
-                if not isinstance(next_cursor, str) or not next_cursor.strip():
-                    raise _malformed()
-                next_cursor = next_cursor.strip()
             _add_records(data, output, token, remaining=MAX_ENTRIES - entries)
             entries += len(data)
             if next_cursor:
+                if total == 0:
+                    raise _incomplete()
                 if next_cursor in seen_cursors:
                     raise _incomplete()
                 seen_cursors.add(next_cursor)
                 cursor = next_cursor
                 continue
+            if not data and reported_total != 0:
+                raise _incomplete() if reported_total is not None else _malformed()
             if reported_total is not None and entries != reported_total:
                 raise _incomplete()
             return output
@@ -257,14 +275,17 @@ class VulnCheckSource:
     @staticmethod
     def parse(payload: Any, token: str = "") -> dict[str, Evidence]:
         """Parse one complete terminal response for callers and tests."""
-        data, meta = _meta(payload)
+        data, total, next_cursor = _meta(
+            payload, expected_limit=PAGE_SIZE, token=token
+        )
         if len(data) > MAX_ENTRIES:
             raise _incomplete()
-        if meta.get("truncated") or meta.get("next_cursor"):
+        if next_cursor:
             raise _incomplete()
-        total = meta.get("total_documents")
-        if total is not None and (type(total) is not int or total < 0 or total != len(data)):
+        if total is not None and total != len(data):
             raise _incomplete()
+        if not data and total != 0:
+            raise _malformed()
         output: dict[str, Evidence] = {}
         _add_records(data, output, token, remaining=MAX_ENTRIES)
         return output

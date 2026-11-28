@@ -118,16 +118,18 @@ def _reference_url(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     text = value.strip()
-    if not text or len(text) > MAX_REFERENCE_BYTES:
+    if not text:
         return None
-    parsed = urlsplit(text)
+    if len(text) > MAX_REFERENCE_BYTES:
+        raise SourceError("shodan_cvedb", "source returned a malformed reference")
     try:
+        parsed = urlsplit(text)
         port = parsed.port
-    except ValueError:
-        return None
+    except (ValueError, TypeError):
+        raise SourceError("shodan_cvedb", "source returned a malformed reference") from None
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username or parsed.password or port == -1):
-        return None
+        raise SourceError("shodan_cvedb", "source returned a malformed reference")
     return text
 
 
@@ -194,17 +196,28 @@ def _percentile(item: dict[str, Any]) -> float | None:
     return _probability(item.get("epss_percentile"))
 
 
-def _json(http: HttpClient, url: str, *, byte_cap: int, params: Any = None) -> Any:
+def _json(
+    http: HttpClient,
+    url: str,
+    *,
+    byte_cap: int,
+    params: Any = None,
+    before_attempt=None,
+) -> Any:
     raw = b"".join(http.stream_bytes(
         url, source="shodan_cvedb", byte_cap=byte_cap, params=params,
-        identity_only=True,
+        identity_only=True, before_attempt=before_attempt,
     ))
     if not raw:
         raise SourceError("shodan_cvedb", "source returned an empty response")
     try:
         return json.loads(raw)
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         raise SourceError("shodan_cvedb", "source returned invalid JSON") from None
+
+
+class _BudgetExhausted(Exception):
+    """The per-run discovery request budget cannot send another attempt."""
 
 
 class ShodanCVEDBSource:
@@ -248,12 +261,12 @@ class ShodanCVEDBSource:
         self._cves[identifier] = record
         return record
 
-    def _discovery_request(self) -> bool:
+    def _charge_discovery(self) -> None:
+        """Charge one HTTP attempt, including a retry, before it is sent."""
         if self.discovery_requests >= self.discovery_request_cap:
             self.discovery_cap_reached = True
-            return False
+            raise _BudgetExhausted()
         self.discovery_requests += 1
-        return True
 
     @source_payload("shodan_cvedb")
     def discover(self, cpe23: str) -> CVEDBDiscovery:
@@ -264,14 +277,16 @@ class ShodanCVEDBSource:
         degraded = False
         messages: list[str] = []
         total: int | None = None
-        if not self._discovery_request():
+        try:
+            payload = _json(
+                self.http, CPE_URL, byte_cap=MAX_COUNT_BYTES,
+                params={"cpe23": cpe23, "count": "true"},
+                before_attempt=self._charge_discovery,
+            )
+        except _BudgetExhausted:
             result = CVEDBDiscovery({}, True, "discovery request cap reached")
             self._cpes[cpe23] = result
             return result
-        payload = _json(
-            self.http, CPE_URL, byte_cap=MAX_COUNT_BYTES,
-            params={"cpe23": cpe23, "count": "true"},
-        )
         if not isinstance(payload, dict) or type(payload.get("total")) is not int or payload["total"] < 0:
             degraded = True
             messages.append("invalid discovery total")
@@ -284,15 +299,17 @@ class ShodanCVEDBSource:
             skip = 0
             pages = 0
             while skip < wanted and pages < MAX_PAGES:
-                if not self._discovery_request():
+                expected = min(PAGE_SIZE, wanted - skip)
+                try:
+                    page = _json(
+                        self.http, CPE_URL, byte_cap=MAX_PAGE_BYTES,
+                        params={"cpe23": cpe23, "skip": skip, "limit": PAGE_SIZE},
+                        before_attempt=self._charge_discovery,
+                    )
+                except _BudgetExhausted:
                     degraded = True
                     messages.append("discovery request cap reached")
                     break
-                expected = min(PAGE_SIZE, wanted - skip)
-                page = _json(
-                    self.http, CPE_URL, byte_cap=MAX_PAGE_BYTES,
-                    params={"cpe23": cpe23, "skip": skip, "limit": PAGE_SIZE},
-                )
                 if not isinstance(page, dict) or not isinstance(page.get("cves"), list):
                     raise SourceError(
                         "shodan_cvedb", "CPE search returned an invalid response envelope"
