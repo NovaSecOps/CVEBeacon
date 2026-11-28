@@ -21,7 +21,7 @@ from .inventory import MAX_CONTRACT_ROWS
 from .locking import OperationLock, RunInProgress
 from .managed_inventory import (
     ManagedInventoryCollision, client_key as inventory_client_key, normalized_client, profiles,
-    read_inventory, read_profile,
+    read_inventory, read_profile, read_profiles,
 )
 from .private_storage import private_directory
 from .publication import PublicationTimeout
@@ -31,7 +31,7 @@ from . import web_inventory_actions as actions
 from . import web_inventory_sync as sync
 from . import web_reported
 from .web_assets import (COMPANION_NOTICE, client_label, directories,
-                         paths, read_allowlist, save_allowlist, validate_allowlist)
+                         paths, read_allowlist, read_paths, save_allowlist, validate_allowlist)
 from .web_assets_import import register as register_import
 from .web_inventory import decode_json, read_bytes, read_web_snapshot
 
@@ -534,12 +534,14 @@ def _review_metadata(detail, client):
     return products, reviews, run
 
 
-def _inventory_clients(config):
+def _inventory_clients(config, *, replay=True):
     """Use the names shown on Clients, including dashboard-managed profiles."""
     names = {}
     if config.managed_inventory:
         try:
-            for profile in profiles(config.inventory_directory, config.watch.users_database):
+            found = (profiles(config.inventory_directory, config.watch.users_database)
+                     if replay else read_profiles(config.inventory_directory))
+            for profile in found:
                 name = normalized_client(profile["name"])
                 names.setdefault(inventory_client_key(name), name)
         except (CVEBeaconError, OSError, ValueError):
@@ -558,7 +560,7 @@ def _canonical_client(config, value, candidates=None):
     # An allowlist saved before names were matched to inventory clients stays
     # reachable under the label it was saved with; never fork it into a new file.
     try:
-        existing, _ = paths(config, value)
+        existing, _ = read_paths(config, value)
         if existing.exists() or existing.is_symlink():
             return value
     except (CVEBeaconError, OSError, ValueError):
@@ -612,7 +614,7 @@ def create_web_blueprint(config):
         """The client's report marks; a missing file is FileNotFoundError, a bad one ValueError."""
         return web_reported.parse(read_bytes(web_reported.marks_path(output)), web_assets.client_key, client)
 
-    def render(client="", *, page="overview", error=None, status=200, prefill_url="", added=0, marked=None,
+    def render(client="", *, error=None, status=200, prefill_url="", added=0, marked=None,
                withdrawn=None, sync_notice=None):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot, snapshot_rows = [], [], None, None, []
@@ -640,7 +642,7 @@ def create_web_blueprint(config):
                 client = document["client"]
                 try:
                     sync_settings = sync.mode(config, path)
-                    if page == "overview" and status == 200 and config.managed_inventory:
+                    if status == 200 and config.managed_inventory:
                         sync_view = sync.inspect(config, client)
                 except ConfigurationError as exc:
                     sync_warning = str(exc)
@@ -825,16 +827,13 @@ def create_web_blueprint(config):
                 run_tone = "warning"
         can_manage = bool(g.accounts and "manage_web_assets" in g.permissions)
         section_primary_action = (
-            "run" if page == "overview" and client and document and document["assets"] and g.accounts
+            "run" if client and document and document["assets"] and g.accounts
             and "run" in g.permissions and available else "")
         section_primary_url, section_primary_label = "", ""
         if client and can_manage:
             section_primary_url = url_for("web.sites", client=client, _anchor="add-asset")
             section_primary_label = "Add site"
-        if page == "sites":
-            section_description = ("Add, change and remove the sites this client has authorised you to check."
-                                   if client else "Record the websites a client has authorised you to check.")
-        elif client:
+        if client:
             section_description = (
                 f"{site_count} authorised site{'' if site_count == 1 else 's'}, "
                 f"{len(products)} detected product{'' if len(products) == 1 else 's'}, "
@@ -893,7 +892,7 @@ def create_web_blueprint(config):
         has_client_inventory = bool(
             client and config.managed_inventory
             and (config.inventory_directory / f"{inventory_client_key(client)}.client").is_file())
-        template = "web_assets_sites.html" if page == "sites" else "web_assets.html"
+        template = "web_assets.html"
         return render_template(template, clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
@@ -917,7 +916,7 @@ def create_web_blueprint(config):
                                sync_notice=sync_notice, sync_waiting=sync.WAITING,
                                added=added, client_key=inventory_client_key(client) if client else "",
                                status_labels=actions.STATUS_LABELS, status_badges=actions.STATUS_BADGES,
-                               page=page, section_page=page, site_rows=site_rows, site_count=site_count,
+                               site_rows=site_rows, site_count=site_count,
                                site_summary=site_summary, tab_counts=tab_counts, show_changes=show_changes,
                                next_steps=next_steps, run_label=run_label, run_badge=run_badge,
                                run_tone=run_tone, last_run_short=last_run_short,
@@ -927,6 +926,82 @@ def create_web_blueprint(config):
                                section_primary_action=section_primary_action,
                                section_primary_url=section_primary_url,
                                section_primary_label=section_primary_label), status
+
+    def render_sites(client="", *, error=None, status=200, prefill_url=""):
+        """Render Sites from reads only: allowlist, sync mode and result-file presence."""
+        g.read_only_storage = True
+        clients, document, version = [], None, "new"
+        site_rows, site_summary = [], {}
+        removed = saved_results = False
+        sync_settings = None
+        inventory_clients = _inventory_clients(config, replay=False)
+        prefill_entry = _prefill_entry(prefill_url) if prefill_url else {}
+        available = web_assets.companion_available()
+        now = datetime.now(timezone.utc)
+        try:
+            assets_dir, _ = web_assets.read_directories(config)
+            for path in sorted(assets_dir.glob("*.json"))[:1000]:
+                try:
+                    item = decode_json(read_bytes(path))
+                    name = client_label(item["client"])
+                    if read_paths(config, name)[0] == path:
+                        clients.append(name)
+                except (CVEBeaconError, ValueError, OSError, KeyError, TypeError):
+                    error = error or "A saved allowlist could not be read; review the local file"
+            if client:
+                path, output = read_paths(config, client)
+                document, version = read_allowlist(path, client)
+                client = document["client"]
+                try:
+                    sync_settings = sync.mode(config, path)
+                except (CVEBeaconError, OSError, ValueError):
+                    pass
+                document = {**document, "assets": [_editable_entry(row) for row in document["assets"]]}
+                ca = document.get("ca_bundle", "")
+                if not isinstance(ca, str) or any(0xD800 <= ord(char) <= 0xDFFF for char in ca):
+                    document["ca_bundle"] = ""
+                site_rows = [
+                    {"entry": entry, "index": index, "url": _site_url(entry),
+                     "expiry": _expiry_state(entry.get("expires_at"), now)}
+                    for index, entry in enumerate(document["assets"])
+                ]
+                site_summary = {
+                    "redirects": sum(1 for entry in document["assets"]
+                                     if entry.get("allow_redirects", True)),
+                    "private": sum(1 for entry in document["assets"]
+                                   if entry.get("allow_private_address", False)),
+                    "soon": sum(1 for row in site_rows if row["expiry"] == "soon"),
+                    "expired": sum(1 for row in site_rows if row["expiry"] == "expired"),
+                }
+                removed = output.with_name(output.name + ".removed").exists()
+                review_path = output.with_name(output.name + ".review.json")
+                saved_results = (output.exists() or output.is_symlink()
+                                 or review_path.exists() or review_path.is_symlink())
+        except (CVEBeaconError, ValueError, OSError, TypeError, KeyError):
+            error = error or "Web asset storage could not be read; review the local files"
+        site_count = len(document["assets"]) if document else 0
+        show_changes = bool(document and config.managed_inventory and sync_settings
+                            and sync_settings.mode in {"review", "auto"})
+        can_manage = bool(g.accounts and "manage_web_assets" in g.permissions)
+        section_description = ("Add, change and remove the sites this client has authorised you to check."
+                               if client else "Record the websites a client has authorised you to check.")
+        section_primary_url, section_primary_label = "", ""
+        if client and can_manage:
+            section_primary_url = url_for("web.sites", client=client, _anchor="add-asset")
+            section_primary_label = "Add site"
+        return render_template(
+            "web_assets_sites.html", clients=sorted(clients, key=str.casefold),
+            inventory_clients=inventory_clients, client=client, document=document, version=version,
+            prefill_entry=prefill_entry, prefill_url=prefill_url, site_rows=site_rows,
+            site_count=site_count, site_summary=site_summary, removed=removed,
+            saved_results=saved_results, available=available, notice=COMPANION_NOTICE, error=error,
+            tab_counts={"sites": site_count, "detection": 0, "products": 0, "changes": 0},
+            show_changes=show_changes, has_client_inventory=bool(
+                client and config.managed_inventory
+                and (config.inventory_directory / f"{inventory_client_key(client)}.client").is_file()),
+            client_key=inventory_client_key(client) if client else "",
+            section_description=section_description, section_primary_url=section_primary_url,
+            section_primary_label=section_primary_label, added=0, marked=None, withdrawn=None), status
 
     @blueprint.get("")
     @requires("view")
@@ -938,6 +1013,7 @@ def create_web_blueprint(config):
             return int(value) if value.isascii() and value.isdecimal() else None
         try:
             client = _canonical_client(config, client_label(label)) if label else ""
+            _prefill_entry(prefill_url)
         except (ConfigurationError, ValueError):
             abort(400)
         imported = count("imported")
@@ -969,8 +1045,10 @@ def create_web_blueprint(config):
         label = _text(request.args, "client", limit=256)
         prefill_url = _text(request.args, "prefill_url", limit=2048)
         try:
-            return render(_canonical_client(config, client_label(label)) if label else "",
-                          page="sites", prefill_url=prefill_url)
+            return render_sites(
+                _canonical_client(config, client_label(label),
+                                  candidates=_inventory_clients(config, replay=False)) if label else "",
+                prefill_url=prefill_url)
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -988,7 +1066,7 @@ def create_web_blueprint(config):
             abort(400)
         lock = OperationLock(config, "web-assets")
         if not lock.acquire():
-            return render(client, page="sites", error=str(RunInProgress(lock.holder)), status=409)
+            return render_sites(client, error=str(RunInProgress(lock.holder)), status=409)
         try:
             extra_changes = []
             path, output = paths(config, client)
@@ -1129,7 +1207,7 @@ def create_web_blueprint(config):
         except (CVEBeaconError, ValueError, OSError) as exc:
             message = (str(exc) if isinstance(exc, (ConfigurationError, PublicationTimeout))
                        else "The web allowlist could not be saved")
-            return render(client, page="sites", error=message, status=400)
+            return render_sites(client, error=message, status=400)
         finally:
             lock.release()
         return redirect(url_for("web.sites", client=client), code=303)
@@ -1422,5 +1500,5 @@ def create_web_blueprint(config):
                           else "The web detection job could not be started", status=400)
         return redirect(url_for("operations.job_detail", job_id=job.id), code=303)
 
-    register_import(blueprint, config, lambda client, **kwargs: render(client, page="sites", **kwargs))
+    register_import(blueprint, config, lambda client, **kwargs: render_sites(client, **kwargs))
     return blueprint

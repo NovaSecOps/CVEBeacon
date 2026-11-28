@@ -1,17 +1,20 @@
 """Web assets section shell, page placement and legacy URL behaviour."""
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from cvebeacon import web_assets
 from cvebeacon.models import Asset, QueryResult
+from cvebeacon.private_storage import private_directory, private_file
 from cvebeacon.state import StateStore
 from cvebeacon.web_assets import paths
 
 from test_dashboard import setup  # noqa: F401
 from test_dashboard_accounts import PASSWORD, accounts, csrf, login  # noqa: F401
 from test_dashboard_web import grant, save, web  # noqa: F401
+from test_web_inventory import snapshot
 
 
 def seed_products(config, products):
@@ -200,6 +203,23 @@ def test_sites_page_does_not_inspect_inventory_sync(web, monkeypatch):
     assert client.get("/web-assets/sites?client=Acme").status_code == 200
 
 
+def test_sites_page_does_not_read_job_history_or_findings(web, monkeypatch):
+    config, _, app, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [{
+        "asset_id": "web-1", "hostname": "example.invalid", "vendor": "nginx", "product": "nginx",
+        "name": "nginx", "category": "web-server", "categories": ["web-server"], "confidence": "high",
+        "versions": ["1.25.3"], "evidence_types": ["header"]}])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a Sites GET must not read job history or findings")
+
+    monkeypatch.setattr(app.extensions["dashboard_jobs"].store, "recent", unexpected)
+    monkeypatch.setattr(StateStore, "finding_summary", unexpected)
+    page = client.get("/web-assets/sites?client=Acme")
+    assert page.status_code == 200, page.text
+
+
 def test_clients_list_links_to_each_clients_web_assets(web):
     config, _, _, client = web
     StateStore(config.database_path).record_scan([QueryResult(
@@ -247,3 +267,96 @@ def test_overview_alias_and_sites_reject_invalid_clients(web):
     assert client.get("/web-assets/sites", query_string={"client": "x" * 200}).status_code == 400
     assert client.get("/web-assets/sites", query_string={
         "client": "Acme", "prefill_url": "not a URL"}).status_code == 400
+
+
+def test_sites_get_does_not_create_web_storage(web):
+    config, _, _, client = web
+    data = config.database_path.parent
+    assert not (data / "web-assets").exists()
+    assert not (data / "web-inventory").exists()
+    page = client.get("/web-assets/sites?client=Acme")
+    assert page.status_code == 200, page.text
+    assert not (data / "web-assets").exists()
+    assert not (data / "web-inventory").exists()
+
+
+def test_sites_get_does_not_recover_the_inventory_journal(web):
+    config, _, _, client = web
+    directory = config.inventory_directory
+    private_directory(directory, owner_only=True)
+    staging = directory / ".inventory-pending-current"
+    descriptor = private_file(staging, create=True, exclusive=True)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(b'[{"asset_id":"orphan"}]\n')
+    page = client.get("/web-assets/sites?client=Acme")
+    assert page.status_code == 200, page.text
+    assert staging.read_bytes() == b'[{"asset_id":"orphan"}]\n'
+
+
+def test_sites_get_leaves_the_saved_allowlist_unchanged(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    path, output = paths(config, "Acme")
+    before = path.read_bytes()
+    page = client.get("/web-assets/sites?client=Acme")
+    assert page.status_code == 200, page.text
+    assert path.read_bytes() == before
+    assert not output.exists()
+
+
+def test_snapshot_and_manifest_keep_danger_zone_and_provenance(web):
+    config, _, _, client = web
+    _, output = paths(config, "Acme")
+    snapshot(output.parent, name=output.stem)
+    review = Path(str(output) + ".review.json")
+    review.unlink()
+    assert not paths(config, "Acme")[0].exists()
+    assert not Path(str(output) + ".removed").exists()
+
+    sites = client.get("/web-assets/sites?client=Acme")
+    assert sites.status_code == 200, sites.text
+    assert "Remove all assets" in sites.text
+
+    overview = client.get("/web-assets?client=Acme")
+    assert overview.status_code == 200, overview.text
+    manifest = json.loads(Path(str(output) + ".manifest.json").read_text(encoding="utf-8"))
+    assert f"{manifest['record_count']} saved inventory record" in overview.text
+    assert manifest["generated_at"][:10] in overview.text
+
+
+def test_malformed_prefill_is_rejected_before_any_redirect(web):
+    _, _, _, client = web
+    assert client.get("/web-assets", query_string={
+        "prefill_url": "not a URL"}).status_code == 400
+    assert client.get("/web-assets", query_string={
+        "client": "Acme", "prefill_url": "not a URL"}).status_code == 400
+    valid = client.get("/web-assets", query_string={
+        "client": "Acme", "prefill_url": "https://www.example.invalid:443/"})
+    assert valid.status_code == 302
+
+
+def test_bulk_controls_are_revealed_only_by_the_bulk_script(web):
+    from cvebeacon import dashboard_web
+
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [{
+        "asset_id": "web-1", "hostname": "example.invalid", "vendor": "nginx", "product": "nginx",
+        "name": "nginx", "category": "web-server", "categories": ["web-server"], "confidence": "high",
+        "versions": ["1.25.3"], "evidence_types": ["header"]}])
+    form = client.get("/web-assets?client=Acme").text.split(
+        "data-bulk-form", 1)[1].split("</form>", 1)[0]
+    assert "data-bulk-select-all" in form and "data-bulk-clear" in form
+    assert "data-bulk-ready" not in form
+    pick = re.search(r'<input type="checkbox" name="pick" value="web-1"[^>]*>', form)
+    assert pick and "disabled" not in pick.group(0)
+    assert "Add selected to inventory" in form
+
+    static = Path(dashboard_web.__file__).parent / "static"
+    css = (static / "dashboard.css").read_text(encoding="utf-8")
+    assert re.search(r"\.bulk-select-controls\s*\{[^}]*display:\s*none;", css, re.S)
+    assert re.search(r"form\[data-bulk-ready\]\s+\.bulk-select-controls\s*\{[^}]*display:\s*flex;",
+                     css, re.S)
+    assert ".js .bulk-select-controls" not in css
+    script = (static / "web-assets.js").read_text(encoding="utf-8")
+    assert re.search(r'update\(\);\s*\n\s*form\.dataset\.bulkReady\s*=\s*"true";\s*\n\s*\}', script)

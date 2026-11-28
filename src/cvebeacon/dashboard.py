@@ -227,7 +227,11 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
 
     @app.context_processor
     def inventory_state():
-        return {"inventory_configured": config.effective_inventory is not None}
+        if getattr(g, "read_only_storage", False):
+            configured = config.inventory is not None or config.has_managed_dashboard
+        else:
+            configured = config.effective_inventory is not None
+        return {"inventory_configured": configured}
 
     @app.get("/healthz")
     @requires("public")

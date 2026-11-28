@@ -31,7 +31,7 @@
 {% endcall %}
 
 {% call card('Report', 'The technology report uses the latest saved snapshot.') %}
-<p>{% if snapshot %}{{ chips.technologies }} technolog{{ 'y' if chips.technologies == 1 else 'ies' }} in the saved snapshot from {{ watch_stamp(snapshot.generated_at) }}.{% else %}No saved snapshot is available yet.{% endif %}</p>
+<p>{% if snapshot %}{{ snapshot.record_count }} saved inventory record{{ '' if snapshot.record_count == 1 else 's' }} in the saved snapshot from {{ watch_stamp(snapshot.generated_at) }}.{% else %}No saved snapshot is available yet.{% endif %}</p>
 <a class="btn btn-secondary" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>
 {% endcall %}
 
@@ -60,7 +60,7 @@
 <p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · requests: {{ run.get('request_count', '') }} · duration: {{ '%.1f' | format(seconds) if seconds is number else '' }} seconds.</p>
 <p>{% if fetched_count == 0 %}Could not fetch any of {{ run_site_count }} authorised site{{ '' if run_site_count == 1 else 's' }}.{% elif fetched_count < run_site_count %}Fetched {{ fetched_count }} of {{ run_site_count }} authorised sites.{% else %}Fetched all {{ run_site_count }} authorised site{{ '' if run_site_count == 1 else 's' }}.{% endif %} {{ product_count }} product{{ '' if product_count == 1 else 's' }} recognised; {{ version_count }} product{{ '' if version_count == 1 else 's' }} had a disclosed version.</p>
 {% if 'resources_fetched' in run %}<p>Read {{ run.get('resources_fetched', 0) }} script and style files from the sites ({{ run.get('resources_skipped', 0) }} skipped).</p>{% endif %}
-{% if snapshot %}<p>Saved results are from {% if run.get('snapshot_updated', false) %}this run{% else %}an earlier run{% endif %} ({{ watch_stamp(snapshot.generated_at) }}): {{ snapshot.record_count }} products.</p>{% else %}<p>No saved inventory snapshot is available.</p>{% endif %}
+{% if snapshot %}<p>Saved results are from {% if run.get('snapshot_updated', false) %}this run{% else %}an earlier run{% endif %} ({{ watch_stamp(snapshot.generated_at) }}): {{ snapshot.record_count }} saved inventory record{{ '' if snapshot.record_count == 1 else 's' }}.</p>{% else %}<p>No saved inventory snapshot is available.</p>{% endif %}
 {% if run.get('review_truncated') %}<p class="muted">The saved review reached its size limit. Some entries were omitted.</p>{% endif %}
 {% if run.get('analysis_stopped') %}{% set count = run['analysis_stopped'] %}<p class="muted">Web analysis reached its time limit on {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
 {% if run.get('fingerprint_stopped') %}{% set count = run['fingerprint_stopped'] %}<p class="muted">Fingerprint analysis stopped early for {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
