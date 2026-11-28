@@ -103,6 +103,7 @@ def test_permissions(web, permissions, can_view, can_edit, can_run, monkeypatch)
     grant(users, permissions)
     login(client)
     assert client.get("/web-assets?client=Acme").status_code == (200 if can_view else 403)
+    assert client.get("/web-assets/detection?client=Acme").status_code == (200 if can_view else 403)
     token = csrf(client)
     response = client.post("/web-assets/save", data={"csrf": token, "client": "Acme", "action": "add"})
     assert response.status_code == (400 if can_edit else 403)
@@ -189,7 +190,7 @@ def test_fixed_jobs_and_missing_companion(web, monkeypatch):
         job = manager.store.recent(1)[0]
         assert list(job.argv) == command and job.operation == action
     monkeypatch.setattr(web_assets, "companion_available", lambda: False)
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/detection?client=Acme")
     assert "optional Extensions package" in page.text and "disabled" in page.text
     assert client.post("/web-assets/run", data={"csrf": csrf(client), "client": "Acme", "action": "web-detect"}).status_code == 400
     assert save(client).status_code == 400
@@ -279,15 +280,19 @@ def test_results_render_only_metadata(web):
         "reviews": [dict(asset_id="web-acme", reason=reason, detail="fixed safe detail", body=secret) for reason in
                     ("unreachable", "blocked", "version-unknown", "version-conflict")],
     })
-    response = client.get("/web-assets?client=Acme")
-    assert response.status_code == 200, response.text
-    for value in ("1.26.2", "nginx", "header", "Fetched 1 of 2 authorised sites",
+    page = client.get("/web-assets?client=Acme")
+    assert page.status_code == 200, page.text
+    for value in ("1.26.2", "nginx", "header"):
+        assert value in page.text
+    detection = client.get("/web-assets/detection?client=Acme")
+    assert detection.status_code == 200, detection.text
+    for value in ("Fetched 1 of 2 authorised sites",
                   "1 product recognised", "1 product had a disclosed version", "requests: 2",
                   "duration: 1.0", "Conflicting versions", "version-conflict"):
-        assert value in response.text
-    assert secret not in response.text
-    assert "Include saved web snapshots in scans" in response.text
-    assert "Inventory settings" in response.text
+        assert value in detection.text
+    assert secret not in page.text and secret not in detection.text
+    assert "Include saved web snapshots in scans" in page.text
+    assert "Inventory settings" in page.text
 
 
 def test_review_file_accepts_the_analytics_category(web):
@@ -338,7 +343,7 @@ def test_latest_detection_card_describes_fetch_products_and_saved_snapshot(
                     saved_snapshot_generated_at=saved_time,
                     snapshot_updated=(saved_word == "this run")),
     })
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/detection?client=Acme")
     assert page.status_code == 200
     assert outcome in page.text
     assert f"{recognized} product{'s' if recognized != 1 else ''} recognised" in page.text
@@ -358,7 +363,7 @@ def test_reason_labels_and_hidden_version_hint(web):
         "reviews": [dict(asset_id=f"web-{index}", reason=reason, detail="fixed safe detail")
                     for index, reason in enumerate(reasons)],
     })
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/detection?client=Acme")
     for label in ("Version not disclosed", "Too many redirects or redirect not allowed",
                   "Could not reach site", "TLS certificate or handshake problem", "Request blocked",
                   "Request timed out", "Page too large", "Unsupported response encoding",
@@ -380,7 +385,7 @@ def test_redirect_detail_prefills_add_site_form_without_saving(web):
             asset_id="web-example", reason="redirect-blocked", detail=detail,
             redirect_target=target)],
     })
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/detection?client=Acme")
     assert detail in page.text
     assert "This site redirects to https://www.example.invalid:443, which is not on the authorised list. If the client authorises it, add it as a site." in page.text
     match = re.search(r'<a[^>]+href="([^"]+)"[^>]*>Add this redirect target as an authorised site</a>', page.text)
@@ -470,7 +475,7 @@ def test_missing_companion_notice_and_refusal_without_extensions(accounts, monke
     login(client, "admin")
     path, _ = paths(config, "Acme")
     save_allowlist(path, {"client": "Acme", "assets": [{"hostname": "example.invalid"}]})
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/detection?client=Acme")
     assert page.status_code == 200 and "optional Extensions package" in page.text and "disabled" in page.text
     for action in ("web-plan", "web-detect"):
         response = client.post("/web-assets/run", data={"csrf": csrf(client), "client": "Acme", "action": action})
@@ -621,19 +626,19 @@ def test_single_removal_warns_until_next_detection(web, monkeypatch):
     snapshot(output.parent, name=output.stem)
     assert save(client, action="remove", index="0").status_code == 303
     warning = "Results include assets removed since the last run"
-    assert warning in client.get("/web-assets?client=Acme").text
+    assert warning in client.get("/web-assets/detection?client=Acme").text
     child = MagicMock()
     wait = child.wait
     wait.side_effect = [0, 2, 0]
     monkeypatch.setattr(web_assets.subprocess, "Popen", lambda *a, **k: child)
     assert web_assets.run_detection(config, "Acme", plan=True) == 0
-    assert warning in client.get("/web-assets?client=Acme").text
+    assert warning in client.get("/web-assets/detection?client=Acme").text
     before = output.read_bytes()
     assert web_assets.run_detection(config, "Acme") == 2
     assert output.read_bytes() == before
-    assert warning in client.get("/web-assets?client=Acme").text
+    assert warning in client.get("/web-assets/detection?client=Acme").text
     assert web_assets.run_detection(config, "Acme") == 0
-    assert warning not in client.get("/web-assets?client=Acme").text
+    assert warning not in client.get("/web-assets/detection?client=Acme").text
 
 
 @pytest.mark.parametrize("section,field,value", [
@@ -745,7 +750,7 @@ def test_detected_product_table_groups_sorts_and_uses_product_tags(web):
     page = client.get("/web-assets?client=Acme")
     assert page.status_code == 200
     table = (
-        page.text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
+        page.text.split("Detected products", 1)[1].split("</main>", 1)[0]
     )
     assert table.index("a.example") < table.index("b.example")
     assert table.index("Angular") < table.index("React") < table.index("lodash")
@@ -767,8 +772,10 @@ def test_detected_product_table_groups_sorts_and_uses_product_tags(web):
     for label in ("https://assets.example.invalid/react.js",
                   "/*! @license React v18.2.0 */", "SHA-256", "512 bytes"):
         assert label in table
-    assert "Read 4 script and style files from the sites (2 skipped)." in page.text
-    assert "Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory." in page.text
+    assert "Read 4 script and style files from the sites (2 skipped)." in client.get(
+        "/web-assets/detection?client=Acme").text
+    assert "Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory." in client.get(
+        "/web-assets/detection?client=Acme").text
 
 
 def test_detected_product_with_cpe_is_marked_in_inventory(web, monkeypatch):
@@ -792,7 +799,7 @@ def test_detected_product_with_cpe_is_marked_in_inventory(web, monkeypatch):
         [cpe_asset], {"generated_at": "2026-11-25T00:00:00Z", "record_count": 1}))
     page = client.get("/web-assets?client=Acme")
     table = (
-        page.text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
+        page.text.split("Detected products", 1)[1].split("</main>", 1)[0]
     )
     # Web snapshots are off, so no scan covers the product yet; it has no version to add as it is.
     assert "Widget" in table and "Needs review" in table
@@ -1133,7 +1140,7 @@ def test_redirect_prefill_action_needs_manage_web_assets(web):
     grant(users, ["view"])
     client.post("/logout", data={"csrf": csrf(client)})
     login(client, "reader")
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/detection?client=Acme")
     assert page.status_code == 200
     assert "This site redirects to https://www.example.invalid:443" in page.text
     assert "Add this redirect target as an authorised site" not in page.text
@@ -1161,7 +1168,7 @@ def test_dashboard_distinguishes_collection_truncation_from_display_limit(setup,
         "fingerprint_stopped": 2, "analysis_stopped": 1,
     }}
     web_assets.replace_bytes(Path(str(output) + ".review.json"), json.dumps(detail).encode("utf-8"))
-    page = client.get("/web-assets?client=Acme")
+    page = client.get("/web-assets/detection?client=Acme")
     assert page.status_code == 200
     assert "The saved review reached its size limit" in page.text
     assert "Fingerprint analysis stopped early for 2 sites" in page.text

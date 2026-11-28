@@ -93,7 +93,7 @@ def page(client, **query):
 
 
 def products_card(text):
-    return text.split("Detected products", 1)[1].split("Entries to review", 1)[0]
+    return text.split("Detected products", 1)[1].split("</main>", 1)[0]
 
 
 def row(text, name):
