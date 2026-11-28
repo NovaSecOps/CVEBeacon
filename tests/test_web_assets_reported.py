@@ -2,6 +2,7 @@
 import html
 import json
 import re
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -169,6 +170,7 @@ def test_mark_and_withdraw_round_trip(web):
     seed(web, PRODUCTS)
     response = mark(client, [wid(1), wid(3)], note="Nov 2026 monthly report")
     assert response.status_code == 303 and "marked=2" in response.headers["Location"]
+    assert urlsplit(response.headers["Location"]).path == "/web-assets/products"
     notice = client.get(response.headers["Location"]).text
     assert "Marked 2 technologies as reported" in notice
     marks = stored(config)
@@ -208,7 +210,7 @@ def test_reported_needs_the_report_permission_and_csrf(web):
         "csrf": "0" * 64, "client": "Acme", "action": "mark", "pick": [wid(1)]}).status_code == 400
     limited = app.test_client()
     login(limited, "webonly")
-    text = limited.get("/web-assets?client=Acme").text
+    text = limited.get("/web-assets/products?client=Acme").text
     assert "Reported</th>" in text and "Not reported" in text
     assert "Mark selected as reported" not in text and "Withdraw report mark" not in text
     assert limited.post("/web-assets/reported", data={

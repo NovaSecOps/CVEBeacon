@@ -107,17 +107,23 @@ Operations observes existing lock files without creating storage. Missing locks 
 client's sites, detected products, latest detection and next actions. **Sites**
 holds the saved list, add and change forms and bulk import. **Detection** holds
 the plan and run controls, the latest run summary with its notes, the entries to
-review and the last detection job. **Products** and **Changes** link to the
-current content on Overview until those pages are split out, and **Report** opens
-the technology report. The client switcher in the section header changes clients
-without returning to the landing page. `/web-assets/detection?client=...` is the
-Detection page. `/web-assets/overview?client=...` redirects to
-`/web-assets?client=...`, and an old product or filter query keeps working while
-the Products page is still on Overview. The old `#detection` anchor on Overview
-still opens the compact latest-detection summary, which links to the Detection
-page. Where product checkboxes are shown, **Select all** and **Clear** act on
-the visible rows; the server-side **Add all** actions remain the fallback when
-scripts are disabled.
+review and the last detection job. **Products** holds the product summary,
+filters with active chips, the By site, By technology and By category views,
+the inventory and report-mark actions and the review hints. **Changes** links to
+the current content on Overview until that page is split out, and **Report**
+opens the technology report. The client switcher in the section header changes
+clients without returning to the landing page.
+`/web-assets/detection?client=...` is the Detection page and
+`/web-assets/products?client=...` is the Products page.
+`/web-assets/overview?client=...` redirects to `/web-assets?client=...`, and an
+old product, view or filter query redirects to Products with the same values.
+Products opens **By site** with every site group collapsed by default; each
+summary shows the product count and the ready and needs-review badges. **By
+technology** aggregates one row per technology, and **By category** groups by
+the primary category in the detector's category order. Where product checkboxes
+are shown, **Select all** and **Clear** act on the visible rows and the controls
+appear only after the external script is ready; the server-side **Add all**
+actions remain the fallback when scripts are disabled.
 
 Open **Web assets**, choose an inventory client or enter a new client label,
 and save each authorised hostname, scheme, port and starting path. A typed name
@@ -167,13 +173,16 @@ It records the signed-in username and the current UTC time for every site,
 writes one `web_asset_add` audit entry per site, plus a `web_asset_import`
 summary entry, in the same transaction that rechecks your permission.
 
-The Detected products table groups results by site and sorts each site by
-category and display name. It shows the version when one was observed, or
-**Version not disclosed**, plus plain evidence labels such as response header,
-page markup, linked file, script file and stylesheet. An **Evidence** disclosure
-shows the source and a short matched excerpt as text; file evidence may also show
-its SHA-256 and byte count. Inferred products name the technology they follow
-and remain out of inventory rows when they have no direct evidence.
+The Detected products list on **Products** groups results by site by default and
+sorts each site by category and display name. The By category view groups a
+product once under its primary category, and By technology aggregates the same
+filtered rows into one row per technology. It shows the version when one was
+observed, or **Version not disclosed**, plus plain evidence labels such as
+response header, page markup, linked file, script file and stylesheet. An
+**Evidence** disclosure shows the source and a short matched excerpt as text;
+file evidence may also show its SHA-256 and byte count. Inferred products name
+the technology they follow and remain out of inventory rows when they have no
+direct evidence.
 
 Each product shows a status. **Monitored** means CVE scans cover it, either
 through the client's inventory or through saved web snapshots when
@@ -349,8 +358,8 @@ in **Affected clients** alert lines.
 
 ### Technology report
 
-Open **Technology report** from **Detected products** on **Web assets** or from
-the client's inventory page. Viewing and exporting require `view`. The report
+Open **Technology report** from the **Report** tab in Web assets or from the
+client's inventory page. Viewing and exporting require `view`. The report
 uses saved detections and current local scan findings. A technology can appear
 at multiple sites. Its status shows whether CVE scans cover it, and its expanded
 CVE list shows applicability, severity, dates and fixed versions when available.

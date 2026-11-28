@@ -52,11 +52,12 @@ _EVIDENCE_KINDS = frozenset({
     "robots", "icon", "implied", "dom", "text",
 })
 # Mirror the optional detector's category vocabulary without importing Extensions into Core.
-_WEB_PRODUCT_CATEGORIES = frozenset({
+_CATEGORY_ORDER = (
     "web-server", "application-server", "language", "framework", "cms", "js-library",
     "css-library", "edge", "ops-tool", "hosted-platform", "application", "reverse-proxy",
     "analytics",
-})
+)
+_WEB_PRODUCT_CATEGORIES = frozenset(_CATEGORY_ORDER)
 _NPM_NAME_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
 _NPM_SCOPE_PART = re.compile(r"[a-z0-9][a-z0-9._~-]{0,213}\Z")
 _FETCH_FAILURE_REASONS = {
@@ -102,6 +103,39 @@ def _passthrough_query(values):
     if confidence:
         result["conf"] = confidence
     return result
+
+
+_PRODUCT_QUERY_KEYS = frozenset(("view", "conf", "version", "inv", "rep", "category", "site", "tech"))
+_NOTICE_QUERY_KEYS = ("added", "marked", "withdrawn")
+
+
+def _first_query_value(values, name, limit):
+    """The first bounded scalar value for a filter, matching the Products parser."""
+    entries = values.getlist(name)
+    if not entries:
+        return ""
+    value = entries[0].strip()
+    if len(value) > limit or any(ord(char) < 32 for char in value):
+        return ""
+    return value
+
+
+def _legacy_product_params(values):
+    """Map the old product query values to Products parameters; invalid values are left out."""
+    params = {}
+    for name, allowed in (("view", _PRODUCT_VIEWS), ("version", {"with", "without"}),
+                          ("inv", _STATUS_CHOICES), ("rep", _REP_CHOICES)):
+        value = _first_query_value(values, name, _LEGACY_QUERY_LIMITS[name])
+        if value in allowed:
+            params[name] = value
+    for name in ("category", "site", "tech"):
+        value = _first_query_value(values, name, _LEGACY_QUERY_LIMITS[name])
+        if value:
+            params[name] = value
+    confidence = [value for value in values.getlist("conf")[:8] if value in _CONFIDENCE_CHOICES]
+    if confidence:
+        params["conf"] = confidence
+    return params
 
 
 def _site_url(entry):
@@ -161,6 +195,9 @@ _INVENTORY_UNREADABLE = ("The saved inventory for this client could not be read.
                          "Open the client's Inventory page to check it.")
 _STATUS_CHOICES = ("monitored", "ready", "review", "service")
 _REP_CHOICES = ("any", "reported", "not", "changed")
+_PRODUCT_VIEWS = ("site", "category", "tech")
+_CATEGORY_NOT_RECORDED = "Category not recorded"
+_REPORTED_LABELS = {"reported": "Reported", "not": "Not reported", "changed": "Changed since reported"}
 _CONFIDENCE_NAMES = {"high": "High", "medium": "Medium", "low": "Low"}
 _SYNC_MESSAGES = {
     "mode": "Inventory sync setting saved.",
@@ -192,6 +229,7 @@ def _filter_args(args, categories, sites):
     category = single("category")
     site = single("site", 256)
     reported = single("rep", 16)
+    view = single("view", 8)
     return {
         "conf": conf,
         "version": version if version in {"with", "without"} else "any",
@@ -200,13 +238,72 @@ def _filter_args(args, categories, sites):
         "site": site if site in sites else "",
         "tech": single("tech"),
         "rep": reported if reported in _REP_CHOICES else "any",
-        "view": "tech" if single("view", 8) == "tech" else "site",
+        "view": view if view in _PRODUCT_VIEWS else "site",
     }
 
 
 def _filters_active(flt):
     return (flt["conf"] != set(_CONFIDENCE_CHOICES) or flt["version"] != "any" or flt["inv"] != "any"
             or flt["rep"] != "any" or bool(flt["category"] or flt["site"] or flt["tech"]))
+
+
+def _filter_params(flt):
+    """The active product filters as GET parameters; defaults are omitted."""
+    params = {}
+    if flt["conf"] != set(_CONFIDENCE_CHOICES):
+        params["conf"] = [level for level in _CONFIDENCE_CHOICES if level in flt["conf"]]
+    if flt["version"] != "any":
+        params["version"] = flt["version"]
+    if flt["inv"] != "any":
+        params["inv"] = flt["inv"]
+    if flt["rep"] != "any":
+        params["rep"] = flt["rep"]
+    if flt["category"]:
+        params["category"] = flt["category"]
+    if flt["site"]:
+        params["site"] = flt["site"]
+    if flt["tech"]:
+        params["tech"] = flt["tech"]
+    return params
+
+
+def _product_url(client, flt, view=None, **changes):
+    """A Products URL that keeps the active filters and changes or removes one value."""
+    params = {"view": view or flt["view"]}
+    params.update(_filter_params(flt))
+    for name, value in changes.items():
+        if value is None or value == "" or value == []:
+            params.pop(name, None)
+        else:
+            params[name] = value
+    return url_for("web.products", client=client, **params)
+
+
+def _primary_category(item):
+    category = item.get("category")
+    labels = item["category_labels"]
+    if category and category in labels:
+        return category
+    return labels[0] if labels else _CATEGORY_NOT_RECORDED
+
+
+def _category_sort_key(name):
+    if name in _CATEGORY_ORDER:
+        return (0, _CATEGORY_ORDER.index(name), "")
+    if name == _CATEGORY_NOT_RECORDED:
+        return (1, 0, "")
+    return (2, 0, name.casefold())
+
+
+def _status_badges(items):
+    ready = sum(1 for item in items if item["status"] == "ready")
+    review = sum(1 for item in items if item["status"] == "review")
+    badges = []
+    if ready:
+        badges.append({"label": f"{ready} ready", "tone": "info"})
+    if review:
+        badges.append({"label": f"{review} needs review", "tone": "warning"})
+    return badges
 
 
 def _matches(item, flt):
@@ -248,6 +345,7 @@ def _filter_text(flt):
 def _decorate_product(item):
     """Display fields derived from one saved product; shared by the page and the add actions."""
     item["display_name"] = item.get("name") or f"{item.get('vendor', '')}/{item.get('product', '')}"
+    item["site_label"] = _site_label(item)
     versions = [version for version in item.get("versions", []) if version.strip()]
     item["has_version"] = bool(versions)
     item["display_version"] = ", ".join(versions) or "Version not disclosed"
@@ -798,7 +896,9 @@ def create_web_blueprint(config):
                          and item["confidence_class"] in levels})
             if count:
                 quick.append({"key": key, "levels": levels, "label": label, "count": count})
-        tech_rows, site_groups = [], []
+        tech_rows, site_groups, product_groups = [], [], []
+        group_count = 0
+        groups_collapsed = False
         if flt["view"] == "tech":
             tech_rows = _technology_rows(matched)
             list_total = len(tech_rows)
@@ -810,6 +910,106 @@ def create_web_blueprint(config):
                 if not site_groups or site_groups[-1][0] != _site_label(item):
                     site_groups.append((_site_label(item), []))
                 site_groups[-1][1].append(item)
+            if flt["view"] == "category":
+                buckets = {}
+                for item in matched[:_ROW_LIMIT]:
+                    buckets.setdefault(_primary_category(item), []).append(item)
+                ordered = sorted(buckets.items(), key=lambda pair: _category_sort_key(pair[0]))
+                open_category = ""
+                if flt["category"] and flt["category"] in buckets:
+                    open_category = flt["category"]
+                else:
+                    for name, items in ordered:
+                        if any(item["status"] == "review" for item in items):
+                            open_category = name
+                            break
+                    if not open_category:
+                        for name, items in ordered:
+                            if any(item["status"] == "ready" for item in items):
+                                open_category = name
+                                break
+                    if not open_category and ordered:
+                        open_category = ordered[0][0]
+                for name, items in ordered:
+                    items.sort(key=lambda item: (item["display_name"].casefold(),
+                                                 _site_label(item).casefold()))
+                    product_groups.append({
+                        "title": name, "primary": name, "items": items, "count": len(items),
+                        "badges": _status_badges(items), "open": name == open_category,
+                    })
+            else:
+                for hostname, items in site_groups:
+                    product_groups.append({
+                        "title": hostname, "primary": "", "items": items, "count": len(items),
+                        "badges": _status_badges(items),
+                        "open": bool(flt["site"]) and hostname == flt["site"],
+                    })
+            group_count = len(product_groups)
+            groups_collapsed = bool(product_groups) and not any(group["open"] for group in product_groups)
+        filter_chips = []
+        if flt["conf"] != set(_CONFIDENCE_CHOICES):
+            for level in _CONFIDENCE_CHOICES:
+                if level in flt["conf"]:
+                    remaining = [item for item in _CONFIDENCE_CHOICES
+                                 if item in flt["conf"] and item != level]
+                    filter_chips.append({
+                        "label": f"{_CONFIDENCE_NAMES[level]} confidence",
+                        "url": _product_url(client, flt, conf=remaining),
+                    })
+        if flt["version"] != "any":
+            filter_chips.append({
+                "label": "With version" if flt["version"] == "with" else "Without version",
+                "url": _product_url(client, flt, version=None),
+            })
+        if flt["inv"] != "any":
+            filter_chips.append({
+                "label": f"Status: {actions.STATUS_LABELS[flt['inv']]}",
+                "url": _product_url(client, flt, inv=None),
+            })
+        if flt["rep"] != "any":
+            filter_chips.append({
+                "label": _REPORTED_LABELS[flt["rep"]],
+                "url": _product_url(client, flt, rep=None),
+            })
+        if flt["category"]:
+            filter_chips.append({
+                "label": f"Category: {flt['category']}",
+                "url": _product_url(client, flt, category=None),
+            })
+        if flt["site"]:
+            filter_chips.append({
+                "label": f"Site: {flt['site']}",
+                "url": _product_url(client, flt, site=None),
+            })
+        if flt["tech"]:
+            filter_chips.append({
+                "label": f"Technology: {flt['tech']}",
+                "url": _product_url(client, flt, tech=None),
+            })
+        active_filter_count = (0 if flt["conf"] == set(_CONFIDENCE_CHOICES) else 1)
+        active_filter_count += sum(bool(flt[name]) for name in ("version", "inv", "rep", "category", "site", "tech")
+                                   if flt[name] != "any" and flt[name])
+        product_urls = {
+            "site": _product_url(client, flt, view="site"),
+            "category": _product_url(client, flt, view="category"),
+            "tech": _product_url(client, flt, view="tech"),
+        }
+        clear_filters_url = url_for("web.products", client=client, view=flt["view"])
+        reported_counts = [
+            {"label": "Reported", "count": chips["reported"],
+             "url": _product_url(client, flt, rep="reported")},
+            {"label": "Not reported", "count": chips["not"],
+             "url": _product_url(client, flt, rep="not")},
+        ]
+        if chips["changed"]:
+            reported_counts.append({
+                "label": "Changed since reported", "count": chips["changed"],
+                "url": _product_url(client, flt, rep="changed")})
+        selectable_products = [
+            item for item in matched
+            if (can_add and item["pickable"]) or (can_report and item.get("asset_id"))
+        ]
+        selectable_any = bool(selectable_products)
         sync_changes = [] if sync_view is None else sorted(
             ((identity, change) for identity, change in sync_view.proposals.items()
              if sync_settings.mode == "review" or change.kind == "remove"),
@@ -835,15 +1035,26 @@ def create_web_blueprint(config):
             if _run_is_stale(run.get("started_at"), now):
                 run_tone = "warning"
         can_manage = bool(g.accounts and "manage_web_assets" in g.permissions)
-        section_primary_action = (
-            "run" if page in {"overview", "detection"} and client and document and document["assets"]
-            and g.accounts and "run" in g.permissions and available else "")
-        section_primary_url, section_primary_label = "", ""
-        if client and can_manage:
-            section_primary_url = url_for("web.sites", client=client, _anchor="add-asset")
-            section_primary_label = "Add site"
-        if section_primary_action:
-            section_primary_label = ("Detect web technologies" if page == "detection" else "Run detection")
+        section_primary_action, section_primary_url, section_primary_label = "", "", ""
+        if page == "products":
+            if client and can_add and flt["view"] != "tech" and selectable_any:
+                section_primary_url = "#bulk-actions"
+                section_primary_label = "Add selected to inventory"
+            elif client and can_add and flt["view"] == "tech" and ready_total and matched:
+                section_primary_url = "#bulk-actions"
+                section_primary_label = f"Add all {ready_total} ready products"
+            elif client and not products and site_count and g.accounts and "run" in g.permissions and available:
+                section_primary_action = "run"
+                section_primary_label = "Run detection"
+        else:
+            if (page in {"overview", "detection"} and client and document and document["assets"]
+                    and g.accounts and "run" in g.permissions and available):
+                section_primary_action = "run"
+            if client and can_manage:
+                section_primary_url = url_for("web.sites", client=client, _anchor="add-asset")
+                section_primary_label = "Add site"
+            if section_primary_action:
+                section_primary_label = ("Detect web technologies" if page == "detection" else "Run detection")
         if page == "sites":
             section_description = ("Add, change and remove the sites this client has authorised you to check."
                                    if client else "Record the websites a client has authorised you to check.")
@@ -851,6 +1062,10 @@ def create_web_blueprint(config):
             section_description = (
                 "Run detection, check what the last run saved and review entries that need a person."
                 if client else "Run detection for a client and review saved detection entries.")
+        elif page == "products":
+            section_description = (
+                "Filter detected products, add them to inventory and record report marks."
+                if client else "Inspect detected products for a client.")
         elif client:
             section_description = (
                 f"{site_count} authorised site{'' if site_count == 1 else 's'}, "
@@ -885,7 +1100,7 @@ def create_web_blueprint(config):
                         "state": "todo",
                         "title": f"Add {chips['ready']} product{'' if chips['ready'] == 1 else 's'} to inventory",
                         "detail": "Ready products can be added to this client's inventory for CVE checks.",
-                        "url": url_for("web.index", client=client, _anchor="detected-products"),
+                        "url": url_for("web.products", client=client),
                         "action_label": "Open"})
                 if show_changes and sync_changes:
                     next_steps.append({
@@ -910,8 +1125,8 @@ def create_web_blueprint(config):
         has_client_inventory = bool(
             client and config.managed_inventory
             and (config.inventory_directory / f"{inventory_client_key(client)}.client").is_file())
-        template = {"sites": "web_assets_sites.html", "detection": "web_assets_detection.html"}.get(
-            page, "web_assets.html")
+        template = {"sites": "web_assets_sites.html", "detection": "web_assets_detection.html",
+                    "products": "web_assets_products.html"}.get(page, "web_assets.html")
         return render_template(template, clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
@@ -925,6 +1140,12 @@ def create_web_blueprint(config):
                                row_limit=_ROW_LIMIT, list_total=list_total, confidence_choices=_CONFIDENCE_CHOICES,
                                can_add=can_add, can_report=can_report, ready_shown=ready_shown,
                                quick_actions=quick, reported_warning=reported_warning,
+                               product_groups=product_groups, group_count=group_count,
+                               groups_label="site" if flt["view"] == "site" else "category",
+                               groups_collapsed=groups_collapsed, product_urls=product_urls,
+                               filter_chips=filter_chips, active_filter_count=active_filter_count,
+                               clear_filters_url=clear_filters_url, reported_counts=reported_counts,
+                               selectable_any=selectable_any,
                                marked=marked, withdrawn=withdrawn, managed_enabled=config.managed_inventory,
                                ready_total=ready_total, managed_warning=managed_warning,
                                sync_settings=sync_settings, sync_view=sync_view,
@@ -1042,6 +1263,15 @@ def create_web_blueprint(config):
         if client and prefill_url:
             return redirect(url_for("web.sites", client=client, prefill_url=prefill_url,
                                     _anchor="add-asset"), code=302)
+        params = _passthrough_query(request.args)
+        if client and not ({"sync_page", "sync_result"} & set(params)):
+            if set(request.args) & (_PRODUCT_QUERY_KEYS | set(_NOTICE_QUERY_KEYS)):
+                product_params = _legacy_product_params(request.args)
+                for name in _NOTICE_QUERY_KEYS:
+                    value = _text(request.args, name, limit=_LEGACY_QUERY_LIMITS[name])
+                    if value.isascii() and value.isdecimal():
+                        product_params[name] = value
+                return redirect(url_for("web.products", client=client, **product_params), code=302)
         return render(client, prefill_url=prefill_url, added=count("added") or 0,
                       marked=count("marked"), withdrawn=count("withdrawn"),
                       sync_notice=_SYNC_MESSAGES.get(_text(request.args, "sync_result", limit=20)))
@@ -1079,6 +1309,22 @@ def create_web_blueprint(config):
         try:
             return render(_canonical_client(config, client_label(label)) if label else "",
                           page="detection")
+        except (ConfigurationError, ValueError):
+            abort(400)
+
+    @blueprint.get("/products")
+    @requires("view")
+    def products():
+        label = _text(request.args, "client", limit=256)
+
+        def count(name):
+            value = _text(request.args, name, limit=6)
+            return int(value) if value.isascii() and value.isdecimal() else None
+
+        try:
+            return render(_canonical_client(config, client_label(label)) if label else "",
+                          page="products", added=count("added") or 0,
+                          marked=count("marked"), withdrawn=count("withdrawn"))
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -1410,7 +1656,7 @@ def create_web_blueprint(config):
                 if _revision(current.previous) != revision or actions.digest([proposal.new]) != digest:
                     raise ConfigurationError(sync.STALE)
                 current.commit({identity: proposal}, "web-sync-add")
-                return redirect(url_for("web.index", client=client, added=1), code=303)
+                return redirect(url_for("web.products", client=client, added=1), code=303)
             profile, data, assets, rows, _, _, _ = plan(client)
             new_assets = [asset for _, asset in rows]
             if _revision(data) != revision or actions.digest(new_assets) != digest or not new_assets:
@@ -1431,7 +1677,7 @@ def create_web_blueprint(config):
             return render(client, error="The inventory could not be saved. Check storage and retry.", status=503)
         finally:
             lock.release()
-        return redirect(url_for("web.index", client=client, added=len(added)), code=303)
+        return redirect(url_for("web.products", client=client, added=len(added)), code=303)
 
     @blueprint.post("/reported")
     @requires("report")
@@ -1501,7 +1747,7 @@ def create_web_blueprint(config):
             return render(client, error=message, status=400)
         finally:
             lock.release()
-        return redirect(url_for("web.index", client=client,
+        return redirect(url_for("web.products", client=client,
                                 **{"marked" if action == "mark" else "withdrawn": count}), code=303)
 
     @blueprint.post("/run")

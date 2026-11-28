@@ -430,7 +430,7 @@ def test_web_assets_points_to_the_inventory_settings(tmp_path, monkeypatch):
         "category": "web-server", "confidence": "high", "versions": ["1.25.3"],
         "evidence_types": ["header"]}]}), encoding="utf-8")
     monkeypatch.setattr(dashboard_web, "read_bytes", lambda path: path.read_bytes())
-    response = client.get("/web-assets?client=Acme")
+    response = client.get("/web-assets/products?client=Acme")
     assert response.status_code == 200
     with app.test_request_context():
         expected_destination = url_for("config_editor.inventory")

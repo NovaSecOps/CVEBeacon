@@ -1,0 +1,141 @@
+{% extends 'base.html' %}
+{% set nav_active = 'web.products' %}
+{% block head %}<script src="{{ url_for('static', filename='web-assets.js') }}" defer></script>{% endblock %}
+{% block title %}Products · Web assets · CVEBeacon{% endblock %}
+{% from 'ui.html' import card, callout, empty_state, stat_grid, stat, bulk_select_controls, severity_badge %}
+{% from '_web_assets_chooser.html' import client_chooser with context %}
+{% set section = {'page': 'products', 'endpoint': 'web.products', 'description': section_description,
+                  'primary_action': section_primary_action, 'primary_url': section_primary_url,
+                  'primary_label': section_primary_label} %}
+{% macro conf_badge(klass, label) %}<span class="badge badge-{{ 'conf-' ~ klass if klass in ['high', 'medium', 'low'] else 'neutral' }}">{{ label }}</span>{% endmacro %}
+{% macro cve_cell(cve) %}{% if cve['state'] == 'found' %}{{ severity_badge(cve['level']) }} <a href="{{ url_for('findings', asset=cve['asset']) }}">{{ cve['count'] }} CVE{{ '' if cve['count'] == 1 else 's' }}</a>{% elif cve['state'] == 'clear' %}<span class="muted">No CVEs found yet</span>{% elif cve['state'] == 'unavailable' %}<span class="muted">Unavailable</span>{% else %}<span class="muted">Not monitored</span>{% endif %}{% endmacro %}
+{% macro filter_fields(flt) %}{% for level in flt['conf'] | sort %}<input type="hidden" name="conf" value="{{ level }}">{% endfor %}<input type="hidden" name="version" value="{{ flt['version'] }}"><input type="hidden" name="inv" value="{{ flt['inv'] }}"><input type="hidden" name="rep" value="{{ flt['rep'] }}"><input type="hidden" name="category" value="{{ flt['category'] }}"><input type="hidden" name="site" value="{{ flt['site'] }}"><input type="hidden" name="tech" value="{{ flt['tech'] }}">{% endmacro %}
+{% macro reported_cell(item) %}{% if item['mark'] %}<div>{{ watch_stamp(item['mark']['reported_at']) }}</div><div class="muted">by {{ item['mark']['by'] }}</div>{% if item['mark']['note'] %}<div class="muted">{{ item['mark']['note'] }}</div>{% endif %}{% if item['rep'] == 'changed' %}<div><span class="badge badge-warning">Changed since reported</span></div><div class="muted">Reported with {{ item['mark']['version'] or 'no version' }}</div>{% endif %}{% else %}<span class="muted">Not reported</span>{% endif %}{% endmacro %}
+{% macro quick_forms(actions_list, client) %}{% for quick in actions_list %}<form method="post" class="web-quick-form" action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="filtered">{% for level in quick['levels'] %}<input type="hidden" name="conf" value="{{ level }}">{% endfor %}<button class="btn btn-secondary" type="submit">{{ quick['label'] }} ({{ quick['count'] }})</button></form>{% endfor %}{% endmacro %}
+{% macro ready_actions(client, flt, csrf, quick_actions, ready_total, ready_shown) %}
+{% if quick_actions %}<details class="bulk-more"><summary>More ways to add</summary><div class="form-actions web-quick-actions">{{ quick_forms(quick_actions, client) }}</div></details>{% endif %}
+<form method="post" class="stack web-add-form web-add-form-compact" action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">{{ filter_fields(flt) }}
+<div class="bulk-bar bulk-anchor" id="bulk-actions" role="region" aria-label="Bulk actions"><p class="bulk-summary">Add every ready product, or add only the ready products that match the current filters.</p><div class="form-actions">{% if flt['active'] and ready_shown %}<button class="btn" type="submit" name="action" value="filtered">Add all {{ ready_shown }} ready products shown</button>{% endif %}<button class="btn {{ 'btn-secondary' if flt['active'] and ready_shown }}" type="submit" name="action" value="all">Add all {{ ready_total }} ready products</button></div></div></form>
+{% endmacro %}
+
+{% macro evidence_cell(item) %}
+{% if item.get('evidence') %}
+<details class="web-evidence"><summary>Evidence ({{ item.get('evidence', []) | length }})</summary><div class="web-evidence-panel"><ul>{% for evidence in item.get('evidence', []) %}<li><p><strong>{{ evidence.get('kind', '') }}</strong> · {{ evidence.get('source', '') }}</p><pre>{{ evidence.get('excerpt', '') }}</pre>{% if evidence.get('sha256') %}<p class="muted">SHA-256 {{ evidence.get('sha256') }}{% if 'bytes' in evidence %} · {{ evidence.get('bytes') }} bytes{% endif %}</p>{% elif 'bytes' in evidence %}<p class="muted">{{ evidence.get('bytes') }} bytes</p>{% endif %}</li>{% endfor %}</ul></div></details>
+{% else %}
+<span class="muted">No excerpt was recorded.{% if item.get('implied_by') %} Inferred from {{ item.get('implied_by') | join(', ') }}.{% endif %}</span>
+{% endif %}
+{% endmacro %}
+
+{% macro tech_versions(group) %}{% for version, count in group['version_counts'] %}<span class="badge badge-info web-version-badge">{{ version }}</span> <span class="muted">x{{ count }}</span> {% endfor %}{% if group['undisclosed'] %}<span class="muted">version not disclosed x{{ group['undisclosed'] }}</span>{% endif %}{% endmacro %}
+{% macro tech_reported(group) %}{{ group['reported_sites'] }} of {{ group['site_count'] }} site{{ '' if group['site_count'] == 1 else 's' }}{% if group['reported_sites'] %}<div class="muted">Latest {{ watch_stamp(group['reported_at']) }}</div>{% if group['reported_changed'] %}<div><span class="badge badge-warning">Changed since reported</span></div>{% endif %}{% else %}<div class="muted">Not reported</div>{% endif %}{% endmacro %}
+{% macro tech_where(group) %}<details class="web-evidence"><summary>Sites ({{ group['site_count'] }})</summary><div class="web-evidence-panel"><ul>{% for site, version, label, klass in group['site_rows'] %}<li>{{ site }} · {% if version %}<span class="badge badge-info web-version-badge">{{ version }}</span>{% else %}<span class="muted">version not disclosed</span>{% endif %} {{ conf_badge(klass, label) }}</li>{% endfor %}</ul></div></details>{% endmacro %}
+{% macro tech_group(group) %}
+<details class="product-group web-tech-group">
+<summary><span class="group-title">{{ group['name'] }}</span><span class="group-meta">{{ group['site_count'] }} site{{ '' if group['site_count'] == 1 else 's' }}</span><span class="badge badge-{{ status_badges[group['status']] }}">{{ status_labels[group['status']] }}</span><svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+<div class="group-body"><dl class="web-tech-detail"><div><dt>Versions seen</dt><dd>{{ tech_versions(group) }}</dd></div><div><dt>Confidence</dt><dd>{{ conf_badge(group['class'], group['label']) }}</dd></div><div><dt>Known CVEs</dt><dd>{{ cve_cell(group['cve']) }}</dd></div><div><dt>Reported</dt><dd>{{ tech_reported(group) }}</dd></div><div><dt>Where</dt><dd>{{ tech_where(group) }}</dd></div></dl></div>
+</details>
+{% endmacro %}
+
+{% macro product_table(group, selectable, can_add, can_report, view) %}
+<div class="table-wrap" role="region" aria-label="{{ group['title'] }} products" tabindex="0">
+<table class="web-products-table"><thead><tr>{% if selectable %}<th class="web-select-cell" scope="col"><span class="visually-hidden">Select</span></th>{% endif %}<th class="web-product-cell" scope="col">Product</th><th class="web-version-cell" scope="col">Version</th><th class="web-confidence-cell" scope="col">Confidence</th><th class="web-cve-cell" scope="col">Known CVEs</th><th class="web-reported-cell" scope="col">Reported</th><th class="web-evidence-cell" scope="col">Evidence</th></tr></thead><tbody>
+{% for item in group['items'] %}<tr{% if item.get('asset_id') %} id="product-{{ item['asset_id'] }}"{% endif %}>{% if selectable %}<td class="web-select-cell" data-label="Select">{% if (can_report and item.get('asset_id')) or (can_add and item['pickable']) %}<input type="checkbox" name="pick" value="{{ item['asset_id'] }}" id="pick-{{ item['row_no'] }}" aria-label="Select {{ item['display_name'] }} on {{ item['site_label'] }}">{% endif %}</td>{% endif %}<td class="web-product-cell" data-label="Product"><strong>{{ item['display_name'] }}</strong>{% if view == 'category' %}<div class="muted web-product-site">{{ item['site_label'] }}</div>{% endif %}<div class="web-product-tags">{% for category in item.get('category_labels', []) %}{% if view != 'category' or category != group['primary'] %}<span class="badge badge-neutral">{{ category }}</span>{% endif %}{% endfor %}{% for label in item.get('evidence_labels', []) %}<span class="badge badge-neutral">{{ label }}</span>{% endfor %}<span class="badge badge-{{ item['status_badge'] }}">{{ item['status_label'] }}</span></div></td><td class="web-version-cell" data-label="Version">{% if item['has_version'] %}<span class="badge badge-info web-version-badge">{{ item['display_version'] }}</span>{% else %}<span class="muted">Version not disclosed</span>{% endif %}{% if can_add and item['pickable'] and item['status'] == 'review' %}<div><label class="visually-hidden" for="ver-{{ item['row_no'] }}">Version of {{ item['display_name'] }} on {{ item['site_label'] }}</label><input class="web-version-input" id="ver-{{ item['row_no'] }}" name="v-{{ item['asset_id'] }}" maxlength="100" value="{{ item['prefill'] }}" placeholder="Enter version"></div>{% endif %}</td><td class="web-confidence-cell" data-label="Confidence">{{ conf_badge(item.get('confidence_class', 'neutral'), item.get('confidence_label', 'Unknown')) }}</td><td class="web-cve-cell" data-label="Known CVEs">{{ cve_cell(item['cve']) }}</td><td class="web-reported-cell" data-label="Reported">{{ reported_cell(item) }}</td><td class="web-evidence-cell" data-label="Evidence">{{ evidence_cell(item) }}</td></tr>{% endfor %}</tbody></table>
+</div>
+{% endmacro %}
+
+{% macro product_group(group, selectable, can_add, can_report, view) %}
+<details class="product-group"{% if group['open'] %} open{% endif %}>
+<summary><span class="group-title">{{ group['title'] }}</span><span class="group-meta">{{ group['count'] }} product{{ '' if group['count'] == 1 else 's' }}</span>{% for badge in group['badges'] %}<span class="badge badge-{{ badge['tone'] }}">{{ badge['label'] }}</span>{% endfor %}<svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+<div class="group-body">{{ product_table(group, selectable, can_add, can_report, view) }}</div>
+</details>
+{% endmacro %}
+
+{% block content %}
+{% include '_web_assets_section.html' %}
+
+{% if not client %}
+{{ client_chooser('web.products') }}
+{% elif document %}
+{% call stat_grid() %}
+{{ stat(total_products, 'Detected products', chips['with_version'] ~ ' with a version') }}
+{{ stat(chips['monitored'], 'Monitored', chips['monitored'] ~ ' of ' ~ total_products ~ ' products', href=url_for('web.products', client=client, view=flt['view'], inv='monitored')) }}
+{{ stat(chips['ready'], 'Ready to add', 'Can be added to the inventory', href=url_for('web.products', client=client, view=flt['view'], inv='ready')) }}
+{{ stat(chips['review'], 'Needs review', 'A person must check these', href=url_for('web.products', client=client, view=flt['view'], inv='review')) }}
+{{ stat(chips['service'], 'Third-party services', 'Not added to the inventory', href=url_for('web.products', client=client, view=flt['view'], inv='service')) }}
+{% endcall %}
+
+{% if managed_warning %}{% call callout('warning') %}<p>{{ managed_warning }}</p>{% endcall %}{% endif %}
+{% if reported_warning %}{% call callout('warning', 'Report marks unavailable') %}<p>{{ reported_warning }}</p>{% endcall %}{% endif %}
+{% if ready_total and not chips['monitored'] %}{% call callout('info', 'Not covered by CVE scans yet') %}<p>{{ ready_total }} detected product{{ ' is' if ready_total == 1 else 's are' }} not covered by CVE scans yet. {% if can_add %}{% if flt['view'] == 'tech' %}Choose <em>Add all {{ ready_total }} ready products</em> below, or switch to By site to pick individual products.{% else %}Tick the products below and choose <em>Add selected to inventory</em>, or add every ready product.{% endif %}{% else %}Ask someone who can manage inventories to add {{ 'it' if ready_total == 1 else 'them' }}.{% endif %} To monitor every detection with a version automatically after each web scan, turn on 'Include saved web snapshots in scans' in the <a href="{{ url_for('config_editor.inventory') }}">Inventory settings</a>.</p>{% endcall %}{% endif %}
+{% if versions_hidden %}{% call callout('info', 'Version numbers are hidden') %}<p>Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory.</p>{% endcall %}{% endif %}
+{% if not can_add and (ready_total or chips['review']) %}<p class="muted">{% if not managed_enabled %}Managed inventories are turned off, so products cannot be added here.{% else %}You need permission to manage inventories to add products here.{% endif %}</p>{% endif %}
+
+<details class="filter-panel" open data-filter-panel{% if active_filter_count %} data-active-filters{% endif %}>
+<summary>Filters{% if active_filter_count %} ({{ active_filter_count }} active){% endif %}<svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+<form class="filter-bar" method="get" action="{{ url_for('web.products') }}">
+<input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="view" value="{{ flt['view'] }}">
+<div class="filter-fields">
+<fieldset class="filter-confidence"><legend>Confidence</legend>{% for level in confidence_choices %}<span class="field field-check"><input id="f-conf-{{ level }}" type="checkbox" name="conf" value="{{ level }}" {% if level in flt['conf'] %}checked{% endif %}><label for="f-conf-{{ level }}">{{ level | title }}</label></span>{% endfor %}</fieldset>
+<div class="field"><label for="f-version">Version</label><select id="f-version" name="version">{% for value, label in [('any', 'Any'), ('with', 'With version'), ('without', 'Without version')] %}<option value="{{ value }}" {% if flt['version'] == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-inv">Inventory status</label><select id="f-inv" name="inv">{% for value, label in [('any', 'Any'), ('monitored', 'Monitored'), ('ready', 'Ready to add'), ('review', 'Needs review'), ('service', 'Third-party service')] %}<option value="{{ value }}" {% if flt['inv'] == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-rep">Reported</label><select id="f-rep" name="rep">{% for value, label in [('any', 'Any'), ('reported', 'Reported'), ('not', 'Not reported'), ('changed', 'Changed since reported')] %}<option value="{{ value }}" {% if flt['rep'] == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-category">Category</label><select id="f-category" name="category"><option value="">All categories</option>{% for name in categories %}<option value="{{ name }}" {% if flt['category'] == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-site">Site</label><select id="f-site" name="site"><option value="">All sites</option>{% for name in site_names %}<option value="{{ name }}" {% if flt['site'] == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-tech">Technology</label><input id="f-tech" name="tech" value="{{ flt['tech'] }}" maxlength="80"><p class="help">Part of a product name.</p></div>
+</div>
+<div class="filter-actions"><button class="btn" type="submit">Apply filters</button><a class="btn btn-secondary" href="{{ clear_filters_url }}">Clear filters</a></div>
+</form>
+</details>
+
+<p class="summary-line">Showing {{ matched_count }} of {{ total_products }} products.{% if product_groups %} {{ group_count }} {{ groups_label }} group{{ '' if group_count == 1 else 's' }}{% if groups_collapsed %}, all collapsed{% endif %}.{% endif %}{% if list_total > row_limit %} Showing the first {{ row_limit }}; refine the filters.{% endif %}{% if flt['active'] %} <a href="{{ clear_filters_url }}">Clear filters</a>{% endif %}</p>
+<p class="summary-line">{% for item in reported_counts %}{% if not loop.first %} · {% endif %}<a href="{{ item['url'] }}">{{ item['label'] }}: {{ item['count'] }}</a>{% endfor %}</p>
+
+{% if filter_chips %}
+<ul class="filter-chips" aria-label="Active filters">{% for chip in filter_chips %}<li><a class="filter-chip" href="{{ chip['url'] }}">{{ chip['label'] }} <span aria-hidden="true">×</span><span class="visually-hidden">Remove this filter</span></a></li>{% endfor %}<li><a class="filter-chip" href="{{ clear_filters_url }}">Clear all</a></li></ul>
+{% endif %}
+
+<p class="web-view-switch" aria-label="View">View:
+<a class="btn btn-secondary btn-small" href="{{ product_urls['site'] }}" {% if flt['view'] == 'site' %}aria-current="page"{% endif %}>By site</a>
+<a class="btn btn-secondary btn-small" href="{{ product_urls['tech'] }}" {% if flt['view'] == 'tech' %}aria-current="page"{% endif %}>By technology</a>
+<a class="btn btn-secondary btn-small" href="{{ product_urls['category'] }}" {% if flt['view'] == 'category' %}aria-current="page"{% endif %}>By category</a></p>
+
+{% call card('Detected products', 'Software found on the saved sites. Each result is a hint that a person should review, not proof of what is installed.', id='detected-products') %}
+{% if not products %}
+{{ empty_state('No products detected yet', 'Run detection after saving an authorised site. Detection results are hints for review, not proof of what is installed.', url_for('web.detection', client=client), 'Open Detection') }}
+<p><a href="{{ url_for('web.sites', client=client, _anchor='add-asset') }}">Add a site</a></p>
+{% elif not matched_count %}
+{{ empty_state('No products match these filters', 'Clear the filters or choose a wider view. The counts above describe all detected products.', clear_filters_url, 'Clear filters') }}
+{% if can_add and ready_total %}{{ ready_actions(client, flt, csrf, quick_actions, ready_total, ready_shown) }}{% endif %}
+{% elif flt['view'] == 'tech' %}
+{% if can_add and ready_total %}{{ ready_actions(client, flt, csrf, quick_actions, ready_total, ready_shown) }}{% endif %}
+<div class="table-wrap web-tech-table-wrap" role="region" aria-label="Detected products by technology" tabindex="0">
+<table class="web-tech-table"><thead><tr><th class="web-product-cell" scope="col">Technology</th><th class="web-sites-cell" scope="col">Sites</th><th class="web-version-cell" scope="col">Versions seen</th><th class="web-confidence-cell" scope="col">Confidence</th><th class="web-cve-cell" scope="col">Known CVEs</th><th class="web-reported-cell" scope="col">Reported</th><th class="web-evidence-cell" scope="col">Where</th></tr></thead><tbody>
+{% for group in tech_rows %}<tr><td class="web-product-cell" data-label="Technology"><strong>{{ group['name'] }}</strong><div class="web-product-tags">{% for category in group['categories'] %}<span class="badge badge-neutral">{{ category }}</span>{% endfor %}<span class="badge badge-{{ status_badges[group['status']] }}">{{ status_labels[group['status']] }}</span></div></td><td class="num" data-label="Sites">{{ group['site_count'] }}</td><td class="web-version-cell" data-label="Versions seen">{{ tech_versions(group) }}</td><td class="web-confidence-cell" data-label="Confidence">{{ conf_badge(group['class'], group['label']) }}</td><td class="web-cve-cell" data-label="Known CVEs">{{ cve_cell(group['cve']) }}</td><td class="web-reported-cell" data-label="Reported">{{ tech_reported(group) }}</td><td class="web-evidence-cell" data-label="Where">{{ tech_where(group) }}</td></tr>
+{% endfor %}</tbody></table>
+</div>
+<div class="web-tech-groups">
+{% for group in tech_rows %}{{ tech_group(group) }}{% endfor %}
+</div>
+<p class="help">To choose individual products or enter a missing version, switch to <a href="{{ product_urls['site'] }}">By site</a>.</p>
+{% else %}
+{% set selectable = can_add or can_report %}
+{% if can_add and ready_total and quick_actions %}<details class="bulk-more"><summary>More ways to add</summary><div class="form-actions web-quick-actions">{{ quick_forms(quick_actions, client) }}</div></details>{% endif %}
+{% if selectable %}
+<form method="post" class="stack web-add-form" data-bulk-form action="{{ url_for('web.inventory_preview') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">{{ filter_fields(flt) }}
+{% for group in product_groups %}{{ product_group(group, selectable, can_add, can_report, flt['view']) }}{% endfor %}
+<div class="bulk-bar bulk-anchor" id="bulk-actions" role="region" aria-label="Bulk actions">
+<div class="bulk-bar-main"><p class="bulk-summary">Tick products above. Add selected uses the ticked rows; Add all uses every ready product.</p>{{ bulk_select_controls() }}</div>
+<div class="form-actions">
+{% if can_add %}<button class="btn" type="submit" name="action" value="selected">Add selected to inventory</button>{% if flt['active'] and ready_shown %}<button class="btn btn-secondary" type="submit" name="action" value="filtered">Add all {{ ready_shown }} ready products shown</button>{% endif %}{% if ready_total %}<button class="btn btn-secondary" type="submit" name="action" value="all">Add all {{ ready_total }} ready products</button>{% endif %}{% endif %}
+{% if can_report %}<details class="bulk-more"><summary>Report marks</summary><div class="field web-report-note"><label for="report-note">Report note <span class="optional">(optional)</span></label><input id="report-note" name="note" maxlength="200"><p class="help">Saved with the report mark, for example the month of the report.</p></div><div class="form-actions"><button class="btn btn-secondary" type="submit" formaction="{{ url_for('web.reported') }}" name="action" value="mark">Mark selected as reported</button><button class="btn btn-secondary" type="submit" formaction="{{ url_for('web.reported') }}" name="action" value="withdraw">Withdraw report mark</button></div></details>{% endif %}
+</div>
+</div>
+</form>
+{% if not selectable_any %}<p class="muted">No product shown here can be selected. They are already monitored, are third-party services, or your account cannot add or mark them.</p>{% endif %}
+{% else %}
+{% for group in product_groups %}{{ product_group(group, false, can_add, can_report, flt['view']) }}{% endfor %}
+{% endif %}
+{% endif %}
+{% endcall %}
+{% endif %}
+{% endblock %}

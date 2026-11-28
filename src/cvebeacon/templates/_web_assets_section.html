@@ -48,7 +48,7 @@
   {'label': 'Overview', 'url': url_for('web.index', client=client), 'current': section.page == 'overview'},
   {'label': 'Sites', 'url': url_for('web.sites', client=client), 'current': section.page == 'sites', 'count': counts.get('sites', 0), 'tone': 'neutral'},
   {'label': 'Detection', 'url': url_for('web.detection', client=client), 'current': section.page == 'detection', 'count': counts.get('detection', 0), 'tone': 'warning'},
-  {'label': 'Products', 'url': url_for('web.index', client=client, _anchor='detected-products'), 'count': counts.get('products', 0), 'tone': 'info'}
+  {'label': 'Products', 'url': url_for('web.products', client=client), 'current': section.page == 'products', 'count': counts.get('products', 0), 'tone': 'info'}
 ] %}
 {% if show_changes %}{% set tabs = tabs + [
   {'label': 'Changes', 'url': url_for('web.index', client=client, _anchor='inventory-sync'), 'count': counts.get('changes', 0), 'tone': 'neutral'}
@@ -60,8 +60,8 @@
 {% endif %}
 
 {% if error %}{% call callout('danger', 'The change was not saved') %}<p>{{ error }}</p>{% endcall %}{% endif %}
-{% if added and client %}{% call callout('success', 'Products added') %}<p>Added {{ added }} product{{ '' if added == 1 else 's' }} to {{ client }}'s inventory. The next scan checks {{ 'it' if added == 1 else 'them' }} for CVEs. <a href="{{ url_for('client_inventory.detail', key=client_key, name=client) }}">Open the client's inventory</a>.</p>{% endcall %}{% endif %}
-{% if marked is not none and client %}{% call callout('success', 'Report marks saved') %}<p>Marked {{ marked }} technolog{{ 'y' if marked == 1 else 'ies' }} as reported.</p>{% endcall %}{% endif %}
-{% if withdrawn is not none and client %}{% call callout('success', 'Report marks withdrawn') %}<p>Withdrew {{ withdrawn }} report mark{{ '' if withdrawn == 1 else 's' }}.</p>{% endcall %}{% endif %}
+{% if added and client %}{% call callout('success', 'Products added') %}<p>Added {{ added }} product{{ '' if added == 1 else 's' }} to {{ client }}'s inventory. The next scan checks {{ 'it' if added == 1 else 'them' }} for CVEs. <a href="{{ url_for('client_inventory.detail', key=client_key, name=client) }}">Open the client's inventory</a>.</p>{% endcall %}
+{% elif marked is not none and client %}{% call callout('success', 'Report marks saved') %}<p>Marked {{ marked }} technolog{{ 'y' if marked == 1 else 'ies' }} as reported.</p>{% endcall %}
+{% elif withdrawn is not none and client %}{% call callout('success', 'Report marks withdrawn') %}<p>Withdrew {{ withdrawn }} report mark{{ '' if withdrawn == 1 else 's' }}.</p>{% endcall %}{% endif %}
 {% if client %}{{ import_notice() }}{% endif %}
 {% if not available %}{% call callout('warning', 'Web detection is not available') %}<p>{{ notice }} The saved list can still be viewed, but detection actions stay disabled until the optional Extensions package is installed.</p>{% endcall %}{% endif %}

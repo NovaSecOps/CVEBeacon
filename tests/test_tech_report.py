@@ -574,7 +574,7 @@ def test_links_csp_and_table_header_widths(seeded):
     assert all(re.search(rf"th\.{name}\s*{{\s*width:", css) for name in classes)
     assert '<div class="table-wrap" role="region" aria-label="Technology exposure"' in response.text
     web = seeded[1].get("/web-assets", query_string={"client": CLIENT})
-    assert re.search(r'href="/web-assets/report\?client=[^"]+">Technology report', web.text)
+    assert re.search(r'href="/web-assets/report\?client=[^"]+">Report', web.text)
 
 
 def test_requests_respect_login_and_view_permission(tmp_path):

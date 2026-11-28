@@ -21,7 +21,7 @@ from test_dashboard_accounts import PASSWORD, csrf, login
 from test_dashboard_config import confirm, preview
 from test_dashboard_inventory import change
 from test_dashboard_web import save
-from test_web_assets_inventory import blank, managed_rows, page, save_inventory, snapshots_on, write_managed
+from test_web_assets_inventory import blank, managed_rows, save_inventory, snapshots_on, write_managed
 
 HOST = "example.invalid"
 BASE_SITE = ("https", HOST, 443, "/")
@@ -73,7 +73,14 @@ def run(config, number, products=(), *, sites=None, status="success", started=Tr
 
 
 def card(text):
-    return text.split("Changes since the last scan", 1)[1].split("Filter results", 1)[0]
+    return text.split("Changes since the last scan", 1)[1].split("</main>", 1)[0]
+
+
+def page(client, **query):
+    """The Overview page owns the inventory sync card until the Changes page."""
+    response = client.get("/web-assets", query_string={"client": "Acme", **query})
+    assert response.status_code == 200, response.text
+    return response.text
 
 
 def post(client, action, **fields):
@@ -540,7 +547,8 @@ def test_review_only_product_keeps_its_identity_without_becoming_a_row(blank):
     review_only.update(product="", name="CDN library", versions=[], inventory=False)
     run(config, 1, [review_only, product("sample", "1")])
     text = page(client)
-    assert "CDN library" in text and sync.RESULTS_WARNING not in text
+    products = client.get("/web-assets/products", query_string={"client": "Acme"}).text
+    assert "CDN library" in products and sync.RESULTS_WARNING not in text
     assert managed_rows(config) == [row("sample", "1")]
 
 

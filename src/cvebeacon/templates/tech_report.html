@@ -46,7 +46,7 @@
 {% set filters = report.filters %}
 {% set window = report.window %}
 {% set summary = report.summary %}
-{% set web_url = url_for('web.index', client=report.client) ~ '#detected-products' %}
+{% set web_url = url_for('web.products', client=report.client) %}
 {% call page_header(title) %}
   {% if printable %}
   {{ link_button('Back to the report', url_for('tech_report.index', filters=1, **export_args), kind='secondary') }}
