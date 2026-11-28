@@ -15,7 +15,7 @@ from typing import Iterator, Sequence
 from .errors import StateError
 from .identity import validate_client_name
 from .models import Finding, QueryResult, HealthStatus
-from .optional_sources import CVEDB_FIELDS, OPTIONAL_SOURCES, VULNCHECK_FIELDS
+from .optional_sources import OPTIONAL_SOURCES
 from .watch.directories import ensure_private_directory
 
 SCHEMA_VERSION = 3
@@ -356,22 +356,18 @@ class StateStore:
                             # Retain the last observation rather than turn a failed
                             # applicability refresh into a resolution or new baseline.
                             continue
-                        retained_sources = {"cisa_kev", "eu_kev"} | OPTIONAL_SOURCES
-                        if previous and failed_sources.intersection(retained_sources | {"epss"}):
+                        if previous and failed_sources.intersection({"cisa_kev", "eu_kev", "epss"}):
                             old = json.loads(previous["payload_json"])
                             old_vuln = old["vulnerability"]
                             updates = {}
                             for source, fields in (("cisa_kev", ("cisa_kev",)), ("eu_kev", ("eu_kev",))):
                                 if source in failed_sources:
                                     updates.update({field: old_vuln[field] for field in fields})
-                            for source, fields in (("vulncheck", VULNCHECK_FIELDS), ("shodan_cvedb", CVEDB_FIELDS)):
-                                if source in failed_sources:
-                                    updates.update({field: old_vuln.get(field) for field in fields})
                             # Historical KEV claims keep their original retrieval
                             # time; source_health describes the failed refresh.
                             from .models import Evidence
-                            old_evidence = tuple(Evidence(**{**item, "retrieved_at": datetime.fromisoformat(item["retrieved_at"])}) for item in old["evidence"] if item["source"] in failed_sources.intersection(retained_sources))
-                            finding = replace(finding, vulnerability=replace(finding.vulnerability, **updates), evidence=tuple(item for item in finding.evidence if item.source not in failed_sources.intersection(retained_sources)) + old_evidence)
+                            old_evidence = tuple(Evidence(**{**item, "retrieved_at": datetime.fromisoformat(item["retrieved_at"])}) for item in old["evidence"] if item["source"] in failed_sources.intersection({"cisa_kev", "eu_kev"}))
+                            finding = replace(finding, vulnerability=replace(finding.vulnerability, **updates), evidence=tuple(item for item in finding.evidence if item.source not in failed_sources.intersection({"cisa_kev", "eu_kev"})) + old_evidence)
                             payload = json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=False)
                             fingerprint = material_fingerprint(finding)
                         # Recompute existing enrichment-bearing observations

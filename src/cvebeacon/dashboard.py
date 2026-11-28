@@ -27,7 +27,12 @@ from .inventory import load_inventory
 from .identity import normalize_asset
 from .managed_inventory import ManagedInventoryCollision, inventory_files
 from .models import Applicability, Asset
-from .optional_sources import filter_health, filter_payload, off_health_rows
+from .optional_sources import (
+    filter_health,
+    filter_payload,
+    is_cvedb_only,
+    off_health_rows,
+)
 from .reporting import write_json, write_xlsx
 from .state import StateStore
 from .watch.users import BOOTSTRAP, UserStore
@@ -319,10 +324,25 @@ def create_app(config: AppConfig, *, host: str = "127.0.0.1", jobs=None, session
         data = store.dashboard_snapshot()
         vulncheck_on = config.vulncheck_active()
         cvedb_on = config.cvedb_active()
+        hidden_events: set[tuple[str, str]] = set()
+        findings = []
         for row in data["findings"]:
             row["finding"] = filter_payload(
                 row["finding"], vulncheck=vulncheck_on, cvedb=cvedb_on
             )
+            if not cvedb_on and is_cvedb_only(row["finding"]):
+                asset_id = row["finding"]["asset"]["asset_id"]
+                for key in ("cve_id", "advisory_id"):
+                    identifier = row["finding"]["vulnerability"].get(key)
+                    if identifier:
+                        hidden_events.add((asset_id, identifier))
+                continue
+            findings.append(row)
+        data["findings"] = findings
+        data["events"] = [
+            row for row in data["events"]
+            if (row["asset_id"], row["cve_id"]) not in hidden_events
+        ]
         data["health"] = filter_health(
             data["health"], vulncheck=vulncheck_on, cvedb=cvedb_on
         )

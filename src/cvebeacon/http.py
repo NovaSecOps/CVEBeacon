@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextvars
 import email.utils
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
@@ -20,29 +22,53 @@ from .errors import SourceError
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 THROTTLE_STATUS = {403, 429}
 
+_QUIET_HTTP_LOGS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "cvebeacon_quiet_http_logs", default=False
+)
+
+
+class _QuietHttpLogFilter(logging.Filter):
+    """Drop HTTP client records emitted while the current context is quiet."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _QUIET_HTTP_LOGS.get()
+
+
+_QUIET_HTTP_LOG_FILTER = _QuietHttpLogFilter()
+_QUIET_HTTP_LOG_FILTER_LOCK = threading.Lock()
+
+
+def _install_quiet_http_log_filter() -> None:
+    """Attach the context filter to every HTTP client logger that exists now."""
+    with _QUIET_HTTP_LOG_FILTER_LOCK:
+        logging.getLogger("httpx")
+        logging.getLogger("httpcore")
+        for name, logger in list(logging.root.manager.loggerDict.items()):
+            if not isinstance(logger, logging.Logger):
+                continue
+            if (
+                name != "httpx"
+                and not name.startswith("httpx.")
+                and name != "httpcore"
+                and not name.startswith("httpcore.")
+            ):
+                continue
+            if _QUIET_HTTP_LOG_FILTER not in logger.filters:
+                logger.addFilter(_QUIET_HTTP_LOG_FILTER)
+
+
+_install_quiet_http_log_filter()
+
 
 @contextmanager
 def _quiet_http_logs():
     """Suppress HTTP client logs for one authenticated request operation."""
-    previous: list[tuple[logging.Logger, int]] = []
-    for name, logger in list(logging.root.manager.loggerDict.items()):
-        if not isinstance(logger, logging.Logger):
-            continue
-        if (
-            name != "httpx"
-            and not name.startswith("httpx.")
-            and name != "httpcore"
-            and not name.startswith("httpcore.")
-        ):
-            continue
-        previous.append((logger, logger.level))
-        if logger.getEffectiveLevel() < logging.WARNING:
-            logger.setLevel(logging.WARNING)
+    _install_quiet_http_log_filter()
+    marker = _QUIET_HTTP_LOGS.set(True)
     try:
         yield
     finally:
-        for logger, level in previous:
-            logger.setLevel(level)
+        _QUIET_HTTP_LOGS.reset(marker)
 
 
 @dataclass(slots=True)
@@ -102,9 +128,6 @@ class HttpClient:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        # httpx INFO records include full URLs; some configured URLs are credentials.
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
         self.config = config
         self._sleep = sleep
         self._monotonic = monotonic

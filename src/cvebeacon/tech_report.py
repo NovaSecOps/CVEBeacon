@@ -15,6 +15,8 @@ from .dashboard_web import (
     _severity_level, _site_label, _snapshot_ids,
 )
 from .errors import CVEBeaconError, ConfigurationError, StateError
+from .models import Applicability
+from .optional_sources import CVEDB_ONLY_REASON
 from .watch.reported import normalize_cve_id
 from .watch.rules import _exploitation_level, _exploitation_sources
 from .watch.store import WatchStore
@@ -270,7 +272,7 @@ def _is_client(value, expected_key):
         return False
 
 
-def _read_findings(path, client, asset_ids, *, vulncheck=False):
+def _read_findings(path, client, asset_ids, *, vulncheck=False, cvedb=True):
     """Read bounded, client-scoped findings in one read-only transaction."""
     by_asset = defaultdict(list)
     if not asset_ids or not path.exists():
@@ -282,20 +284,33 @@ def _read_findings(path, client, asset_ids, *, vulncheck=False):
             return by_asset, False
         expected_key = client_key(client)
         db.create_function("report_client_matches", 1, lambda value: _is_client(value, expected_key))
+        # A disabled optional source contributes no visible current finding, so
+        # exclude its provenance before the result cap is charged.
+        cvedb_clause = ""
+        cvedb_values: tuple[str, ...] = ()
+        if not cvedb:
+            cvedb_clause = (
+                "AND NOT (json_extract(f.payload_json, '$.reason') = ? "
+                "AND json_extract(f.payload_json, '$.applicability') = ?) "
+            )
+            cvedb_values = (CVEDB_ONLY_REASON, Applicability.NEEDS_REVIEW.value)
         remaining = FINDINGS_CAP
         for start in range(0, len(asset_ids), 500):
             chunk = asset_ids[start:start + 500]
             placeholders = ",".join("?" for _ in chunk)
-            for record in db.execute(
+            statement = (
                 "SELECT f.asset_id, f.cve_id, f.first_seen, f.last_seen, "
                 "json_extract(f.payload_json, '$.applicability') AS applicability, "
                 "json_extract(f.payload_json, '$.vulnerability') AS vulnerability "
                 f"FROM current_findings f WHERE f.asset_id IN ({placeholders}) "
                 "AND report_client_matches(json_extract(f.payload_json, '$.asset.client')) "
                 "AND COALESCE(json_extract(f.payload_json, '$.applicability'), '') != 'not_affected' "
+                f"{cvedb_clause}"
                 "AND NOT EXISTS (SELECT 1 FROM advisory_aliases a WHERE a.asset_id=f.asset_id "
-                "AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY f.asset_id, f.cve_id LIMIT ?",
-                (*chunk, remaining),
+                "AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY f.asset_id, f.cve_id LIMIT ?"
+            )
+            for record in db.execute(
+                statement, (*chunk, *cvedb_values, remaining),
             ):
                 finding = (
                     _finding(record, vulncheck=True) if vulncheck else _finding(record)
@@ -434,6 +449,7 @@ def build_report(config, client, args, *, export=False, now=None):
     sites = sorted({row["site"] for row in technologies}, key=str.casefold)
     categories = sorted({category for row in technologies for category in row["categories"]}, key=str.casefold)
     vulncheck_on = bool(getattr(config, "vulncheck_active", lambda: False)())
+    cvedb_on = bool(getattr(config, "cvedb_active", lambda: False)())
     filters = read_filters(args, sites, categories, vulncheck=vulncheck_on)
     selected = [row for row in technologies if _technology_matches(row, filters)]
     unmonitored = sum(row["status"] != "monitored" for row in selected)
@@ -441,7 +457,8 @@ def build_report(config, client, args, *, export=False, now=None):
     findings_unavailable = findings_capped = False
     try:
         by_asset, findings_capped = _read_findings(
-            config.database_path, client, asset_ids, vulncheck=vulncheck_on
+            config.database_path, client, asset_ids, vulncheck=vulncheck_on,
+            cvedb=cvedb_on,
         )
     except (CVEBeaconError, sqlite3.Error, OSError, ValueError, TypeError, KeyError):
         by_asset = {}
