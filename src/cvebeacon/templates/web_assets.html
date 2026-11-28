@@ -22,7 +22,7 @@
 {{ stat(site_count, 'Sites', site_help, href=url_for('web.sites', client=client)) }}
 {{ stat(total_products, 'Products', chips.with_version ~ ' with a version', href=url_for('web.index', client=client, _anchor='detected-products')) }}
 {{ stat(chips.monitored, 'Covered by scans', chips.ready ~ ' ready to add, ' ~ chips.review ~ ' need review', href=url_for('web.index', client=client, inv='monitored', _anchor='detected-products')) }}
-{{ stat(last_run_short or 'Not run yet', 'Last detection', last_run_help, tone=run_tone or none, href=url_for('web.index', client=client, _anchor='detection')) }}
+{{ stat(last_run_short or 'Not run yet', 'Last detection', last_run_help, tone=run_tone or none, href=url_for('web.detection', client=client)) }}
 {% if show_changes %}{{ stat(tab_counts.changes, 'Open changes', change_counts['add'] ~ ' new, ' ~ change_counts['update'] ~ ' updated, ' ~ change_counts['remove'] ~ ' missing', href=url_for('web.index', client=client, _anchor='inventory-sync')) }}{% endif %}
 {% endcall %}
 
@@ -30,49 +30,30 @@
 {{ task_list(next_steps) }}
 {% endcall %}
 
+<div class="section-block" id="detection">
+{% call card('Latest detection', 'The last run at a glance. Full run notes and entries to review are on the Detection page.') %}
+{% if run %}
+{% set run_site_count = run.get('asset_count', site_count) %}
+{% set fetched_count = run.get('fetched_count', 0) %}
+<p><span class="badge badge-{{ run_badge }}">{{ run_label }}</span> · Last checked {{ watch_stamp(run.get('started_at', '')) }}{% set seconds = run.get('duration_seconds') %}{% if seconds is number %} · {{ '%.1f' | format(seconds) }} seconds{% endif %}</p>
+{% call stat_grid() %}
+{{ stat(fetched_count ~ '/' ~ run_site_count, 'Sites fetched') }}
+{{ stat(run.get('products_recognized', 0), 'Products') }}
+{{ stat(run.get('products_with_version', 0), 'With a version') }}
+{{ stat(run.get('request_count', 0), 'Requests') }}
+{% endcall %}
+<a class="btn btn-secondary btn-small" href="{{ url_for('web.detection', client=client) }}">Detection details</a>
+{% else %}
+<p>No detection has run yet. Detection is manual and has not run for this client.</p>
+<a class="btn btn-secondary btn-small" href="{{ url_for('web.detection', client=client) }}">Open Detection</a>
+{% endif %}
+{% endcall %}
+</div>
+
 {% call card('Report', 'The technology report uses the latest saved snapshot.') %}
 <p>{% if snapshot %}{{ chips.technologies }} technolog{{ 'y' if chips.technologies == 1 else 'ies' }} in the saved snapshot from {{ watch_stamp(snapshot.generated_at) }}.{% else %}No saved snapshot is available yet.{% endif %}</p>
 <a class="btn btn-secondary" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>
 {% endcall %}
-
-<div class="section-block" id="detection">
-{% if accounts and 'run' in permissions %}
-{% call card('Check the saved sites', 'Preview the requests first, or run detection now. Detection contacts only the saved sites and a plan sends nothing.') %}
-<form method="post" class="stack" action="{{ url_for('web.run_job') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><div class="form-actions"><button class="btn btn-secondary" type="submit" name="action" value="web-plan" {% if not available or not document.assets %}disabled{% endif %}>Show planned requests (sends nothing)</button><button class="btn" type="submit" name="action" value="web-detect" {% if not available or not document.assets %}disabled{% endif %}>Detect web technologies</button></div></form>
-{% endcall %}
-{% endif %}
-
-{% call card('Latest detection', 'When detection last ran and what it saved.') %}
-{% if removed %}{% call callout('warning') %}<p>Results include assets removed since the last run. Run detection again to refresh retained results.</p>{% endcall %}{% endif %}
-{% if run %}
-{% set run_site_count = run.get('asset_count', site_count) %}
-{% set fetched_count = run.get('fetched_count', 0) %}
-{% set product_count = run.get('products_recognized', 0) %}
-{% set version_count = run.get('products_with_version', 0) %}
-<p><span class="badge badge-{{ run_badge }}">{{ run_label }}</span> · Last checked {{ watch_stamp(run.get('started_at', '')) }}{% set seconds = run.get('duration_seconds') %}{% if seconds is number %} · {{ '%.1f' | format(seconds) }} seconds{% endif %}</p>
-{% call stat_grid() %}
-{{ stat(fetched_count ~ '/' ~ run_site_count, 'Sites fetched') }}
-{{ stat(product_count, 'Products') }}
-{{ stat(version_count, 'With a version') }}
-{{ stat(run.get('request_count', 0), 'Requests') }}
-{% endcall %}
-<details class="disclosure"><summary>Run details</summary>
-<p>Last observation: {{ watch_stamp(run.get('started_at', '')) }} → {{ watch_stamp(run.get('ended_at', '')) }} · requests: {{ run.get('request_count', '') }} · duration: {{ '%.1f' | format(seconds) if seconds is number else '' }} seconds.</p>
-<p>{% if fetched_count == 0 %}Could not fetch any of {{ run_site_count }} authorised site{{ '' if run_site_count == 1 else 's' }}.{% elif fetched_count < run_site_count %}Fetched {{ fetched_count }} of {{ run_site_count }} authorised sites.{% else %}Fetched all {{ run_site_count }} authorised site{{ '' if run_site_count == 1 else 's' }}.{% endif %} {{ product_count }} product{{ '' if product_count == 1 else 's' }} recognised; {{ version_count }} product{{ '' if version_count == 1 else 's' }} had a disclosed version.</p>
-{% if 'resources_fetched' in run %}<p>Read {{ run.get('resources_fetched', 0) }} script and style files from the sites ({{ run.get('resources_skipped', 0) }} skipped).</p>{% endif %}
-{% if snapshot %}<p>Saved results are from {% if run.get('snapshot_updated', false) %}this run{% else %}an earlier run{% endif %} ({{ watch_stamp(snapshot.generated_at) }}): {{ snapshot.record_count }} products.</p>{% else %}<p>No saved inventory snapshot is available.</p>{% endif %}
-{% if run.get('review_truncated') %}<p class="muted">The saved review reached its size limit. Some entries were omitted.</p>{% endif %}
-{% if run.get('analysis_stopped') %}{% set count = run['analysis_stopped'] %}<p class="muted">Web analysis reached its time limit on {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
-{% if run.get('fingerprint_stopped') %}{% set count = run['fingerprint_stopped'] %}<p class="muted">Fingerprint analysis stopped early for {{ count }} site{{ 's' if count != 1 else '' }}.</p>{% endif %}
-{% if run.get('fingerprint_error') %}<p class="muted">Fingerprint analysis encountered an error. Saved results include the evidence collected successfully.</p>{% endif %}
-<p class="muted">Response bodies and cookies are never stored or displayed.</p>
-</details>
-{% else %}<p>No observation metadata yet. Run detection after saving a site.</p>{% endif %}
-{% if versions_hidden %}<p class="help">Many sites hide version numbers. Products without a version are marked Needs review. Enter the version yourself to add one to the inventory.</p>{% endif %}
-{% if truncated %}<p class="muted">Showing the first 1,000 saved entries per table. Additional saved entries are in the private data directory.</p>{% endif %}
-{% if last_job %}<p><a href="{{ url_for('operations.job_detail', job_id=last_job.id) }}">{{ last_job.label }}</a>: {{ last_job.status }} · {{ watch_stamp(last_job.created_at) }} · {{ last_job.exit_meaning }}</p>{% endif %}
-{% endcall %}
-</div>
 
 <div class="section-block" id="inventory-sync">{% include 'web_inventory_sync.html' %}</div>
 
@@ -130,13 +111,6 @@
 {% endcall %}
 {% if selectable and products %}</form>{% endif %}
 {% endif %}
-{% endcall %}
-
-{% call card('Entries to review', 'Detection results that need a person to decide. Compare each one with the site before relying on it.') %}
-{% call table_wrap('Web detection entries to review') %}
-<table><thead><tr><th scope="col">Asset</th><th scope="col">Reason</th><th scope="col">Detail</th><th scope="col">Product</th><th scope="col">Conflicting versions</th><th scope="col">HTTP status</th><th scope="col">Retry after (seconds)</th></tr></thead><tbody>
-{% for item in reviews %}<tr><td>{{ item.get('asset_id', '') }}</td><td>{{ reason_labels.get(item.get('reason', ''), 'Needs review') }}{% if item.get('reason') %}<br><span class="muted">{{ item.get('reason') }}</span>{% endif %}</td><td>{{ item.get('detail', '') }}{% if item.get('redirect_display') %}<p>This site redirects to {{ item.get('redirect_display') }}, which is not on the authorised list.{% if accounts and 'manage_web_assets' in permissions %} If the client authorises it, add it as a site.{% endif %}</p>{% if accounts and 'manage_web_assets' in permissions %}<a class="btn btn-secondary" href="{{ url_for('web.sites', client=client, prefill_url=item.get('redirect_url'), _anchor='add-asset') }}">Add this redirect target as an authorised site</a>{% endif %}{% endif %}</td><td>{{ item.get('product', '') }}</td><td>{{ item.get('versions', []) | join(', ') }}</td><td>{{ item.get('status', '') }}</td><td class="num">{{ item.get('retry_after', '') }}</td></tr>{% else %}<tr><td colspan="7">No entries need review.</td></tr>{% endfor %}</tbody></table>
-{% endcall %}
 {% endcall %}
 {% endif %}
 {% endblock %}

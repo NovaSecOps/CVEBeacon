@@ -35,7 +35,7 @@
 {% if section.primary_action == 'run' %}
 <form class="page-action-form" method="post" action="{{ url_for('web.run_job') }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="web-detect">
-<button class="btn" type="submit">Run detection</button>
+<button class="btn" type="submit">{{ section.primary_label | default('Run detection') }}</button>
 </form>
 {% elif section.primary_url and section.primary_label %}
 <a class="btn" href="{{ section.primary_url }}">{{ section.primary_label }}</a>
@@ -47,7 +47,7 @@
 {% set tabs = [
   {'label': 'Overview', 'url': url_for('web.index', client=client), 'current': section.page == 'overview'},
   {'label': 'Sites', 'url': url_for('web.sites', client=client), 'current': section.page == 'sites', 'count': counts.get('sites', 0), 'tone': 'neutral'},
-  {'label': 'Detection', 'url': url_for('web.index', client=client, _anchor='detection'), 'count': counts.get('detection', 0), 'tone': 'warning'},
+  {'label': 'Detection', 'url': url_for('web.detection', client=client), 'current': section.page == 'detection', 'count': counts.get('detection', 0), 'tone': 'warning'},
   {'label': 'Products', 'url': url_for('web.index', client=client, _anchor='detected-products'), 'count': counts.get('products', 0), 'tone': 'info'}
 ] %}
 {% if show_changes %}{% set tabs = tabs + [

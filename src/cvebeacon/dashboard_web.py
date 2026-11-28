@@ -825,15 +825,21 @@ def create_web_blueprint(config):
                 run_tone = "warning"
         can_manage = bool(g.accounts and "manage_web_assets" in g.permissions)
         section_primary_action = (
-            "run" if page == "overview" and client and document and document["assets"] and g.accounts
-            and "run" in g.permissions and available else "")
+            "run" if page in {"overview", "detection"} and client and document and document["assets"]
+            and g.accounts and "run" in g.permissions and available else "")
         section_primary_url, section_primary_label = "", ""
         if client and can_manage:
             section_primary_url = url_for("web.sites", client=client, _anchor="add-asset")
             section_primary_label = "Add site"
+        if section_primary_action:
+            section_primary_label = ("Detect web technologies" if page == "detection" else "Run detection")
         if page == "sites":
             section_description = ("Add, change and remove the sites this client has authorised you to check."
                                    if client else "Record the websites a client has authorised you to check.")
+        elif page == "detection":
+            section_description = (
+                "Run detection, check what the last run saved and review entries that need a person."
+                if client else "Run detection for a client and review saved detection entries.")
         elif client:
             section_description = (
                 f"{site_count} authorised site{'' if site_count == 1 else 's'}, "
@@ -854,14 +860,14 @@ def create_web_blueprint(config):
                     next_steps.append({
                         "state": "todo", "title": "Run the first detection",
                         "detail": "Detection is manual and has not run for this client.",
-                        "url": url_for("web.index", client=client, _anchor="detection"),
+                        "url": url_for("web.detection", client=client),
                         "action_label": "Run detection"})
                 if reviews:
                     next_steps.append({
                         "state": "attention",
                         "title": f"Review {len(reviews)} detection entr{'y' if len(reviews) == 1 else 'ies'}",
                         "detail": "Saved results include entries that need a person to decide.",
-                        "url": url_for("web.index", client=client, _anchor="detection"),
+                        "url": url_for("web.detection", client=client),
                         "action_label": "Review"})
                 if chips["ready"]:
                     next_steps.append({
@@ -893,7 +899,8 @@ def create_web_blueprint(config):
         has_client_inventory = bool(
             client and config.managed_inventory
             and (config.inventory_directory / f"{inventory_client_key(client)}.client").is_file())
-        template = "web_assets_sites.html" if page == "sites" else "web_assets.html"
+        template = {"sites": "web_assets_sites.html", "detection": "web_assets_detection.html"}.get(
+            page, "web_assets.html")
         return render_template(template, clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
@@ -971,6 +978,16 @@ def create_web_blueprint(config):
         try:
             return render(_canonical_client(config, client_label(label)) if label else "",
                           page="sites", prefill_url=prefill_url)
+        except (ConfigurationError, ValueError):
+            abort(400)
+
+    @blueprint.get("/detection")
+    @requires("view")
+    def detection():
+        label = _text(request.args, "client", limit=256)
+        try:
+            return render(_canonical_client(config, client_label(label)) if label else "",
+                          page="detection")
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -1416,9 +1433,9 @@ def create_web_blueprint(config):
             argv = build_command(config, action, client=document["client"])
             job = manager().submit(action, started_by=g.user.username, argv=argv)
         except (RunInProgress, JobQueueFull) as exc:
-            return render(client, error=str(exc), status=409)
+            return render(client, page="detection", error=str(exc), status=409)
         except (CVEBeaconError, ValueError, OSError) as exc:
-            return render(client, error=str(exc) if isinstance(exc, ConfigurationError)
+            return render(client, page="detection", error=str(exc) if isinstance(exc, ConfigurationError)
                           else "The web detection job could not be started", status=400)
         return redirect(url_for("operations.job_detail", job_id=job.id), code=303)
 
