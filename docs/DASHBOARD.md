@@ -104,19 +104,24 @@ Operations observes existing lock files without creating storage. Missing locks 
 ## Client web technology detection
 
 **Web assets** is its own section in the sidebar. **Overview** summarises the
-client's sites, detected products, latest detection and next actions. **Sites**
-holds the saved list, add and change forms and bulk import. **Detection** holds
-the plan and run controls, the latest run summary with its notes, the entries to
-review and the last detection job. **Products** holds the product summary,
-filters with active chips, the By site, By technology and By category views,
-the inventory and report-mark actions and the review hints. **Changes** links to
-the current content on Overview until that page is split out, and **Report**
-opens the technology report. The client switcher in the section header changes
-clients without returning to the landing page.
-`/web-assets/detection?client=...` is the Detection page and
-`/web-assets/products?client=...` is the Products page.
+client's sites, detected products, latest detection, inventory changes and next
+actions. **Sites** holds the saved list, add and change forms and bulk import.
+**Detection** holds the plan and run controls, the latest run summary with its
+notes, the entries to review and the last detection job. **Products** holds the
+product summary, filters with active chips, the By site, By technology and By
+category views, the inventory and report-mark actions and the review hints.
+**Changes** holds the inventory sync settings and the proposed additions,
+version changes and missing products. **Report** opens the technology report.
+The client switcher in the section header changes clients without returning to
+the landing page.
+`/web-assets/detection?client=...` is the Detection page,
+`/web-assets/products?client=...` is the Products page and
+`/web-assets/changes?client=...` is the Changes page.
 `/web-assets/overview?client=...` redirects to `/web-assets?client=...`, and an
 old product, view or filter query redirects to Products with the same values.
+Old `sync_page` and `sync_result` queries redirect to Changes. The Changes tab
+appears only while inventory sync is enabled for the client; otherwise Overview
+offers a small **Turn on inventory sync** link.
 Products opens **By site** with every site group collapsed by default; each
 summary shows the product count and the ready and needs-review badges. **By
 technology** aggregates one row per technology, and **By category** groups by
@@ -291,9 +296,15 @@ existing trimmed, case-folded client label.
 
 #### Inventory sync
 
-On **Web assets**, choose the client's mode under **Inventory sync**. **Default**
+On **Changes**, choose the client's mode under **Inventory sync**. **Default**
 uses **Configuration → Inventory**. The global default is **Off**. The
 **Changes** tab appears only while the client's mode is **Review** or **Auto**.
+The settings card shows whether the mode is a client override or the global
+default and whether automatic removal is on. Proposals are grouped into **New
+products** (Add or Ignore), **Version changes** (Update or Keep) and **Not
+detected** (Remove, Keep or Undo keep), with the counts and up to 500 proposals
+per page. Each group opens when it has proposals on the page. **Add** opens the
+normal inventory preview and returns to Changes after the product is saved.
 
 | Mode | What a rescan does |
 | --- | --- |
