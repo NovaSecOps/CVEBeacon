@@ -79,7 +79,7 @@
 {{ asset_fields(prefill_entry, document, 'add') }}<div class="form-actions"><button class="btn" type="submit" {% if not available %}disabled{% endif %}>Save with attestation</button></div></form>
 </details>
 {{ import_card(open=not document.assets) }}
-{% if document.assets or removed %}
+{% if document.assets or removed or saved_results %}
 <details class="disclosure danger-zone">
 <summary>Remove all sites and results</summary>
 <div class="card card-danger">

@@ -288,6 +288,7 @@ def test_file_upload_with_bom_is_accepted(web):
         content_type="multipart/form-data")
     assert response.status_code == 200 and "Save 1 site" in response.text
     assert "bom.example.com" in response.text
+    assert 'href="/web-assets/sites?client=Acme">Back</a>' in response.text
 
 
 def test_file_and_paste_together_are_refused(web):

@@ -47,6 +47,7 @@
             if (event.target && event.target.name === "pick") update();
         });
         update();
+        form.dataset.bulkReady = "true";
     }
 
     document.addEventListener("DOMContentLoaded", function () {

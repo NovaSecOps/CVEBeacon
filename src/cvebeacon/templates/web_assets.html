@@ -51,7 +51,7 @@
 </div>
 
 {% call card('Report', 'The technology report uses the latest saved snapshot.') %}
-<p>{% if snapshot %}{{ chips.technologies }} technolog{{ 'y' if chips.technologies == 1 else 'ies' }} in the saved snapshot from {{ watch_stamp(snapshot.generated_at) }}.{% else %}No saved snapshot is available yet.{% endif %}</p>
+<p>{% if snapshot %}{{ snapshot.record_count }} saved inventory record{{ '' if snapshot.record_count == 1 else 's' }} in the saved snapshot from {{ watch_stamp(snapshot.generated_at) }}.{% else %}No saved snapshot is available yet.{% endif %}</p>
 <a class="btn btn-secondary" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>
 {% endcall %}
 
