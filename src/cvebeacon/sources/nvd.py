@@ -13,6 +13,11 @@ from .common import as_float, cve_id, source_payload
 
 CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 CPE_URL = "https://services.nvd.nist.gov/rest/json/cpes/2.0"
+# A product-wide (wildcard-version) lookup can match thousands of CVEs. Keep
+# one bounded page so a version-less asset cannot drive an unbounded sync.
+MAX_WILDCARD_RESULTS = 2000
+EXACT_STATEMENT = "NVD returned this CVE for the exact CPE name"
+PRODUCT_WIDE_STATEMENT = "NVD returned this CVE for the product CPE across all versions"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +27,20 @@ class CPECandidate:
     part: str
     vendor: str
     product: str
+
+
+@dataclass(frozen=True, slots=True)
+class NVDResult:
+    """Records from one lookup and whether the caller's limit truncated them."""
+
+    records: tuple[tuple[Vulnerability, Evidence], ...] = ()
+    truncated: bool = False
+
+    def __iter__(self):
+        return iter(self.records)
+
+    def __len__(self) -> int:
+        return len(self.records)
 
 
 def _unescape(value: str) -> str:
@@ -104,20 +123,38 @@ class NVDSource:
         return result
 
     @source_payload("nvd")
-    def vulnerabilities(self, *, cpe_name: str) -> list[tuple[Vulnerability, Evidence]]:
+    def vulnerabilities(self, *, cpe_name: str | None = None, virtual_match: str | None = None,
+                        limit: int | None = None) -> NVDResult:
+        if (cpe_name is None) == (virtual_match is None):
+            raise SourceError("nvd", "one CVE lookup identity is required")
+        if virtual_match is not None:
+            # NVD accepts a wildcard version only through virtualMatchString, which
+            # cannot be combined with isVulnerable.
+            params = {"virtualMatchString": virtual_match}
+            statement = PRODUCT_WIDE_STATEMENT
+        else:
+            params = {"cpeName": cpe_name, "isVulnerable": ""}
+            statement = EXACT_STATEMENT
         found: list[tuple[Vulnerability, Evidence]] = []
-        for page in self._pages(CVE_URL, {"cpeName": cpe_name, "isVulnerable": ""}, 2000):
+        total = 0
+        truncated = False
+        for page in self._pages(CVE_URL, params, 2000):
+            total = page["totalResults"]
             for wrapped in page.get("vulnerabilities", []):
                 raw = wrapped.get("cve", {}) if isinstance(wrapped, dict) else {}
-                parsed = self.parse_cve(raw)
+                parsed = self.parse_cve(raw, statement=statement)
                 if parsed:
                     found.append(parsed)
                 else:
                     raise SourceError("nvd", "source returned a vulnerability without a valid identifier")
-        return found
+            if limit is not None and len(found) >= limit:
+                found = found[:limit]
+                truncated = total > len(found)
+                break
+        return NVDResult(tuple(found), truncated)
 
     @staticmethod
-    def parse_cve(raw: dict[str, Any]) -> tuple[Vulnerability, Evidence] | None:
+    def parse_cve(raw: dict[str, Any], *, statement: str = EXACT_STATEMENT) -> tuple[Vulnerability, Evidence] | None:
         identifier = cve_id(raw.get("id"))
         if not identifier:
             return None
@@ -139,7 +176,7 @@ class NVDSource:
             score, vector, str(version) if version else None, references=refs,
         )
         evidence = Evidence(
-            "nvd", "applicability_and_enrichment", "NVD returned this CVE for the exact CPE name",
+            "nvd", "applicability_and_enrichment", statement,
             f"{CVE_URL}?cveId={identifier}", raw.get("lastModified"),
             details={"configurations": raw.get("configurations", []), "affected": raw.get("affected", []), "metrics": metrics},
         )

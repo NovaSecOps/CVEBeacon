@@ -11,7 +11,7 @@ from cvebeacon.errors import SourceError, StateError
 from cvebeacon.identity import normalize_asset
 from cvebeacon.models import Asset, Applicability as A, Evidence, Finding, HealthStatus as H, QueryResult, SourceHealth, Vulnerability, utc_now
 from cvebeacon.package_query import alias_groups
-from cvebeacon.sources.osv import OSVResult
+from cvebeacon.sources.osv import ADVISORY_LIMIT_ERROR, OSVResult
 from cvebeacon.state import StateStore, material_fingerprint
 from test_osv import record
 
@@ -91,6 +91,54 @@ def test_disabled_required_source_is_unknown(tmp_path):
         value.osv.query_many = lambda _: pytest.fail("disabled source requested")
         result = value.scan([package()])[0]
     assert result.coverage == A.COVERAGE_UNKNOWN and result.source_health[0].status == H.DISABLED
+
+
+def test_osv_advisory_limit_degrades_package_coverage(tmp_path):
+    with engine(tmp_path) as query:
+        query.osv.query_many = lambda assets: {
+            asset.target_key: OSVResult((record(),), ADVISORY_LIMIT_ERROR, frozenset({record()["id"]}))
+            for asset in assets}
+        result = query.query_asset(package())
+    assert result.coverage is A.COVERAGE_UNKNOWN
+    assert result.coverage_reason == "required package source is incomplete"
+    assert any(health.source == "osv" and health.status is H.DEGRADED
+               and ADVISORY_LIMIT_ERROR in health.message for health in result.source_health)
+
+
+def commit_asset():
+    return Asset("commit", repository="https://example.invalid/repo", commit="a" * 40)
+
+
+def commit_record(repository):
+    value = record()
+    value["affected"][0]["ranges"] = [{"type": "GIT", "repo": repository,
+                                       "events": [{"introduced": "b" * 40}]}]
+    return value
+
+
+def test_commit_identity_keeps_exact_applicability(tmp_path):
+    value = commit_record(commit_asset().repository)
+    with engine(tmp_path, [value]) as query:
+        result = query.query_asset(commit_asset())
+    assert result.findings[0].applicability is A.AFFECTED
+    assert result.coverage is None and result.coverage_reason is None
+
+
+@pytest.mark.parametrize("repository,matched", [
+    ("https://example.invalid/repo", False),
+    ("https://example.invalid/other", True),
+])
+def test_commit_identity_without_exact_membership_stays_uncertain(tmp_path, repository, matched):
+    value = commit_record(repository)
+    with engine(tmp_path) as query:
+        query.osv.query_many = lambda assets: {
+            asset.target_key: OSVResult((value,), None,
+                                        frozenset({value["id"]}) if matched else frozenset())
+            for asset in assets}
+        result = query.query_asset(commit_asset())
+    assert result.findings[0].applicability is A.COVERAGE_UNKNOWN
+    assert result.coverage is A.COVERAGE_UNKNOWN
+    assert result.coverage_reason == "one or more package assessments require review"
 
 
 def test_grouping_changes_share_lookup_but_keep_local_metadata(tmp_path):

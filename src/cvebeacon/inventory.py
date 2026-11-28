@@ -71,6 +71,22 @@ def _normalized(value: Any) -> str:
     return text
 
 
+def normalize_version(value: Any) -> str:
+    """Strip a version and reject control-only text.
+
+    Surrounding whitespace is normalized before the version is kept, so a
+    legacy value padded with tabs or newlines still loads. A version may also
+    be blank because it is optional, so check the raw text when stripping
+    leaves nothing: a control-only value must stay rejected.
+    """
+    if value is not None and not isinstance(value, str):
+        raise ValueError("must be text; numeric, date, boolean and compound values cannot preserve inventory spelling")
+    text = (value or "").strip()
+    if any(unicodedata.category(char) in {"Cc", "Cs"} for char in text or value or ""):
+        raise ValueError("contains a control character")
+    return text
+
+
 def _resolve_records(root: Any, path: str | None) -> Any:
     current = root
     if path:
@@ -94,7 +110,7 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
         values: dict[str, str] = {}
         mapped = {name: columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
         advanced = any(row.get(mapped[name]) for name in ("purl", "cpe", "ecosystem", "commit"))
-        required = ("asset_id",) if advanced else CANONICAL_FIELDS
+        required = ("asset_id",) if advanced else ("asset_id", "vendor", "product")
         if any(mapped[name] not in row for name in required):
             issues.append(ValidationIssue("record is missing mapped fields", location))
             continue
@@ -109,7 +125,11 @@ def _validate_rows(rows: Iterable[tuple[str, Mapping[str, Any]]], columns: Mappi
                     raise ValueError("must be text; numeric, date, boolean and compound values cannot preserve inventory spelling")
                 # Exact package identifiers must not undergo compatibility
                 # Unicode normalization (which can change registry identity).
-                values[canonical] = _normalized(raw) if canonical in {"asset_id", "category", "system_id", "client"} or (not advanced and canonical in {"vendor", "product"}) else (raw or "").strip()
+                if canonical == "version":
+                    value = normalize_version(raw)
+                else:
+                    value = _normalized(raw) if canonical in {"asset_id", "category", "system_id", "client"} or (not advanced and canonical in {"vendor", "product"}) else (raw or "").strip()
+                values[canonical] = value
                 if "\x00" in values[canonical]:
                     raise ValueError("contains a null character")
             except (TypeError, ValueError) as exc:
@@ -199,7 +219,8 @@ def _xlsx_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[t
             )
         header_lookup = {name.casefold(): name for name in headers}
         mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
-        required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
+        advanced = any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit"))
+        required = ("asset_id",) if advanced else ("asset_id", "vendor", "product")
         missing = [mapped[name] for name in required if mapped[name].casefold() not in header_lookup]
         if missing and not unmapped:
             raise InventoryValidationError(
@@ -256,7 +277,8 @@ def _csv_rows(config: InventoryConfig, *, unmapped: bool = False) -> Iterable[tu
                 )
             header_lookup = {name.casefold(): name for name in headers}
             mapped = {name: config.columns.get(name, name) for name in CANONICAL_FIELDS + OPTIONAL_FIELDS}
-            required = ("asset_id",) if any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit")) else CANONICAL_FIELDS
+            advanced = any(mapped[name].casefold() in header_lookup for name in ("purl", "cpe", "ecosystem", "commit"))
+            required = ("asset_id",) if advanced else ("asset_id", "vendor", "product")
             missing = [mapped[name] for name in required if mapped[name].casefold() not in header_lookup]
             if missing and not unmapped:
                 raise InventoryValidationError(
