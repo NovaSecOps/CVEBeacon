@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -77,8 +78,8 @@ def card(text):
 
 
 def page(client, **query):
-    """The Overview page owns the inventory sync card until the Changes page."""
-    response = client.get("/web-assets", query_string={"client": "Acme", **query})
+    """The Changes page owns the inventory sync settings and proposals."""
+    response = client.get("/web-assets/changes", query_string={"client": "Acme", **query})
     assert response.status_code == 200, response.text
     return response.text
 
@@ -190,19 +191,47 @@ def test_review_add_update_remove_ignore_and_keep(blank):
     text = page(client)
     assert "New · 3" in card(text) and "Version changed · 1 → 2" in card(text)
     assert "Not detected since" in card(text) and managed_rows(config) == old
-    assert "Open changes" in text
-    assert "2 new, 2 updated, 1 missing" in text
-    assert "built-in method" not in text
+    assert text.count('<details class="product-group web-sync-group" open>') == 3
+    assert ('<span class="group-title">New products</span><span class="group-meta">2 changes</span>'
+            in text)
+    assert ('<span class="group-title">Version changes</span><span class="group-meta">2 changes</span>'
+            in text)
+    assert ('<span class="group-title">Not detected</span><span class="group-meta">1 change</span>'
+            in text)
+    assert "Page 1 of 1 · 500 changes per page · 5 changes waiting" in text
+    assert 'class="web-sync-product-cell" scope="col" role="columnheader">Product</th>' in text
+    assert 'class="web-sync-site-cell" scope="col" role="columnheader">Site</th>' in text
+    assert 'class="web-sync-change-cell" scope="col" role="columnheader">Change</th>' in text
+    assert 'class="web-sync-actions-cell" scope="col" role="columnheader">Actions</th>' in text
+    new_table = text.split('aria-label="New products changes"', 1)[1].split("</table>", 1)[0]
+    assert new_table.count('role="columnheader"') == 4
+    assert new_table.count('role="rowheader"') == 2
+    for row_markup in re.findall(r'<tr role="row">(.*?)</tr>', new_table, re.S)[1:]:
+        assert re.findall(r'headers="([^"]+)"', row_markup) == [
+            "sync-add-product", "sync-add-site", "sync-add-change", "sync-add-actions"]
+    assert 'class="btn btn-danger btn-small" name="action" value="remove"' in text
+    overview = client.get("/web-assets", query_string={"client": "Acme"}).text
+    assert "Open changes" in overview
+    assert "2 new, 2 updated, 1 missing" in overview
+    assert "built-in method" not in overview
 
     pick = selection(text, newest)
     proposed = client.post("/web-assets/inventory/preview", data={
         **pick, "pick": pick["asset_id"], "action": "sync-add", "client": "Acme", "csrf": csrf(client),
     })
     assert proposed.status_code == 200 and "To add (1)" in proposed.text
-    assert save_inventory(client, proposed).status_code == 303
+    assert 'href="/web-assets/changes?client=Acme">Back</a>' in proposed.text
+    saved = save_inventory(client, proposed)
+    assert saved.status_code == 303
+    assert urlsplit(saved.headers["Location"]).path == "/web-assets/changes"
+    assert "Products added" in client.get(saved.headers["Location"]).text
     for action, item in [("ignore", ignored), ("keep-version", kept), ("update", changed),
                          ("keep-removal", missing)]:
-        assert post(client, action, **selection(page(client), item)).status_code == 303
+        response = post(client, action, **selection(page(client), item))
+        assert response.status_code == 303
+        location = urlsplit(response.headers["Location"])
+        assert location.path == "/web-assets/changes"
+        assert parse_qs(location.query)["sync_result"] == [action]
     audit(users, '"mode":"web-sync-add"')
     audit(users, '"mode":"web-sync-update"')
     for action in ("ignore", "keep_version", "keep_removal"):
@@ -429,8 +458,17 @@ def test_keep_on_second_proposal_page_survives_deadline(blank, monkeypatch):
         first = page(client)
     last = product("sample-500", "1")
     assert "sync_page=2" in card(first) and last["asset_id"] not in card(first)
+    assert "Page 1 of 2 · 500 changes per page · 501 changes waiting" in card(first)
     second = page(client, sync_page=2)
-    assert post(client, "keep-removal", **selection(second, last)).status_code == 303
+    assert "Page 2 of 2 · 500 changes per page · 501 changes waiting" in card(second)
+    assert ("Not detected</span><span class=\"group-meta\">501 changes · 1 on this page</span>"
+            in card(second))
+    response = post(client, "keep-removal", sync_page="2", **selection(second, last))
+    assert response.status_code == 303
+    location = urlsplit(response.headers["Location"])
+    assert location.path == "/web-assets/changes"
+    assert parse_qs(location.query)["sync_page"] == ["2"]
+    assert parse_qs(location.query)["sync_result"] == ["keep-removal"]
     clock[0] += timedelta(days=30)
     page(client)
     assert managed_rows(config) == [rows[-1]]
@@ -679,7 +717,7 @@ def test_legacy_allowlists_have_independent_state_and_migrate_to_the_embedded_ow
     web_assets.replace_bytes(old_path, sync._encoded(state))
     for number, label in [(1, "Acme"), (2, legacy_label), (2, "Acme"), (3, legacy_label)]:
         run(config, number, client=label)
-        response = client.get("/web-assets", query_string={"client": label})
+        response = client.get("/web-assets/changes", query_string={"client": label})
         assert response.status_code == 200 and sync.STATE_WARNING not in response.text
     assert sync.state_path(config, "Acme") != sync.state_path(config, legacy_label)
     assert not old_path.exists()

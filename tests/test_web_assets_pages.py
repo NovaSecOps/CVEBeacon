@@ -36,7 +36,8 @@ def test_overview_and_sites_render_for_view_only_and_manage_users(web):
     grant(users, {"view"})
     login(client, "reader")
     for path in ("/web-assets?client=Acme", "/web-assets/sites?client=Acme",
-                 "/web-assets/detection?client=Acme", "/web-assets/products?client=Acme"):
+                 "/web-assets/detection?client=Acme", "/web-assets/products?client=Acme",
+                 "/web-assets/changes?client=Acme"):
         page = client.get(path)
         assert page.status_code == 200, page.text
     site_page = client.get("/web-assets/sites?client=Acme").text
@@ -48,6 +49,9 @@ def test_overview_and_sites_render_for_view_only_and_manage_users(web):
     products_page = client.get("/web-assets/products?client=Acme").text
     assert "Add selected to inventory" not in products_page
     assert "Mark selected as reported" not in products_page
+    changes_page = client.get("/web-assets/changes?client=Acme").text
+    assert "Save sync settings" not in changes_page
+    assert 'name="action" value="mode"' not in changes_page
 
     users.save_role("web-editor", {"view", "manage_web_assets"}, authorization=users.authenticate("admin", PASSWORD))
     users.edit_user("reader", role="web-editor", disabled=False,
@@ -62,6 +66,8 @@ def test_overview_and_sites_render_for_view_only_and_manage_users(web):
     assert "Remove all assets" not in overview
     assert client.get("/web-assets/detection?client=Acme").status_code == 200
     assert client.get("/web-assets/products?client=Acme").status_code == 200
+    assert client.get("/web-assets/changes?client=Acme").status_code == 200
+    assert "Save sync settings" not in client.get("/web-assets/changes?client=Acme").text
 
 
 def test_section_tabs_mark_exactly_one_current_page(web):
@@ -91,17 +97,65 @@ def test_section_tabs_mark_exactly_one_current_page(web):
 def test_changes_tab_and_summary_only_when_inventory_sync_is_on(web):
     config, _, _, client = web
     assert save(client).status_code == 303
-    overview = tab_markup(client.get("/web-assets?client=Acme").text)
-    assert ">Changes" not in overview
-    assert "Open changes" not in client.get("/web-assets?client=Acme").text
+    overview = client.get("/web-assets?client=Acme").text
+    assert ">Changes" not in tab_markup(overview)
+    assert "Open changes" not in overview
+    assert "Changes since the last scan" not in overview
+    assert ("/web-assets/changes?client=Acme#sync-settings" in overview
+            and "Turn on inventory sync" in overview)
+    assert "/web-assets/inventory/sync" not in overview
+    changes = client.get("/web-assets/changes?client=Acme").text
+    assert ">Changes" not in tab_markup(changes)
+    assert "Inventory sync" in changes and "Save sync settings" in changes
     response = client.post("/web-assets/inventory/sync", data={
         "csrf": csrf(client), "client": "Acme", "action": "mode", "mode": "review",
         "auto_remove": "default"})
     assert response.status_code == 303, response.text
+    assert urlsplit(response.headers["Location"]).path == "/web-assets/changes"
+    assert parse_qs(urlsplit(response.headers["Location"]).query)["sync_result"] == ["mode"]
+    assert "Inventory sync setting saved." in client.get(response.headers["Location"]).text
     page = client.get("/web-assets?client=Acme").text
-    assert ">Changes" in tab_markup(page)
+    tabs = tab_markup(page)
+    assert ">Changes" in tabs
+    assert re.search(r'href="/web-assets/changes\?client=Acme"', tabs)
     assert "Open changes" in page
+    assert 'href="/web-assets/changes?client=Acme"' in page
+    changes = client.get("/web-assets/changes?client=Acme").text
+    changes_tabs = tab_markup(changes)
+    assert changes_tabs.count('aria-current="page"') == 1
+    assert re.search(r'<a href="/web-assets/changes\?client=Acme"[^>]*aria-current="page">Changes', changes_tabs)
     assert config.managed_inventory
+
+
+def test_changes_page_owns_sync_settings_and_overview_keeps_a_summary(web):
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    assert client.post("/web-assets/inventory/sync", data={
+        "csrf": csrf(client), "client": "Acme", "action": "mode", "mode": "review",
+        "auto_remove": "default"}).status_code == 303
+    overview = client.get("/web-assets?client=Acme").text
+    summary = overview.split('id="inventory-sync"', 1)[1].split("Next steps", 1)[0]
+    assert 'href="/web-assets/changes?client=Acme"' in summary
+    assert "Open changes" in summary
+    assert "Changes since the last scan" not in overview
+    assert 'name="action" value="mode"' not in overview
+    changes = client.get("/web-assets/changes?client=Acme").text
+    assert "Mode: Review (client override)" in changes
+    assert "Automatic removal: off" in changes
+    assert 'name="action" value="mode"' in changes
+    assert 'action="/web-assets/inventory/sync"' in changes
+    assert 'name="mode"' in changes and 'name="auto_remove"' in changes
+    assert "Save sync settings" in changes
+    assert "What the modes mean" in changes
+    assert "Changes since the last scan" in changes
+
+
+def test_changes_without_a_client_shows_the_chooser(web):
+    _, _, _, client = web
+    page = client.get("/web-assets/changes")
+    assert page.status_code == 200 and "Choose a client" in page.text
+    assert 'action="/web-assets/changes"' in page.text
+    assert client.get("/web-assets/changes", query_string={"client": ""}).status_code == 200
 
 
 def test_sites_page_owns_the_site_forms_and_bulk_import(web):
@@ -196,14 +250,23 @@ def test_legacy_product_filter_and_notice_parameters_redirect_to_products(web):
         assert "Detected products" in page.text, query
 
 
-def test_sync_parameters_stay_on_overview_until_the_changes_page(web):
+def test_sync_parameters_redirect_to_changes(web):
     _, _, _, client = web
     assert save(client).status_code == 303
-    for query in ({"sync_page": "1"}, {"sync_result": "mode"}):
-        page = client.get("/web-assets", query_string={"client": "Acme", **query})
-        assert page.status_code == 200, (query, page.text)
+    for query, expected in (
+            ({"sync_page": "1"}, {"sync_page": ["1"]}),
+            ({"sync_result": "mode"}, {"sync_result": ["mode"]}),
+            ({"sync_page": "2", "sync_result": "update"},
+             {"sync_page": ["2"], "sync_result": ["update"]}),
+            ({"sync_page": "1", "unknown": "x"}, {"sync_page": ["1"]})):
+        response = client.get("/web-assets", query_string={"client": "Acme", **query})
+        assert response.status_code == 302, (query, response.text)
+        location = urlsplit(response.headers["Location"])
+        assert location.path == "/web-assets/changes", query
+        assert parse_qs(location.query) == {"client": ["Acme"], **expected}, query
+        page = client.get(response.headers["Location"])
+        assert page.status_code == 200 and "Choose a client" not in page.text, query
         assert "Changes since the last scan" in page.text, query
-        assert "Choose a client" not in page.text
 
 
 def test_sites_without_a_client_shows_the_chooser_not_an_error(web):
@@ -220,7 +283,8 @@ def test_client_chooser_opens_the_page_it_is_on(web):
     for page, destination in (("/web-assets", "/web-assets"),
                               ("/web-assets/sites", "/web-assets/sites"),
                               ("/web-assets/detection", "/web-assets/detection"),
-                              ("/web-assets/products", "/web-assets/products")):
+                              ("/web-assets/products", "/web-assets/products"),
+                              ("/web-assets/changes", "/web-assets/changes")):
         response = client.get(page)
         assert response.status_code == 200
         chooser = response.text.split("Choose a client", 1)[1].split("</section>", 1)[0]
@@ -232,7 +296,8 @@ def test_web_assets_pages_have_no_inline_script_or_style_and_load_bulk_script(we
     _, _, _, client = web
     assert save(client).status_code == 303
     for path in ("/web-assets?client=Acme", "/web-assets/sites?client=Acme",
-                 "/web-assets/detection?client=Acme", "/web-assets/products?client=Acme"):
+                 "/web-assets/detection?client=Acme", "/web-assets/products?client=Acme",
+                 "/web-assets/changes?client=Acme"):
         text = client.get(path).text
         assert not re.search(r"(?i)\sstyle\s*=", text)
         assert not re.search(r"(?is)<style\b", text)
@@ -615,6 +680,7 @@ def test_overview_alias_and_sites_reject_invalid_clients(web):
         "client": "Acme", "prefill_url": "not a URL"}).status_code == 400
     assert client.get("/web-assets/detection", query_string={"client": "x" * 200}).status_code == 400
     assert client.get("/web-assets/products", query_string={"client": "x" * 200}).status_code == 400
+    assert client.get("/web-assets/changes", query_string={"client": "x" * 200}).status_code == 400
 
 
 def seed_detection(config, *, run=None, reviews=()):
