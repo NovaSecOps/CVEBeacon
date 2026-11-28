@@ -17,7 +17,7 @@
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="{{ 'sync-add' if sync_token else 'selected' }}"><input type="hidden" name="revision" value="{{ revision }}"><input type="hidden" name="digest" value="{{ digest }}">
 {% if sync_token %}<input type="hidden" name="sync_token" value="{{ sync_token }}">{% endif %}
 {% for item, asset in rows %}<input type="hidden" name="pick" value="{{ item.asset_id }}"><input type="hidden" name="v-{{ item.asset_id }}" value="{{ asset.version }}">{% endfor %}
-<div class="form-actions">{{ button('Save to inventory') }}<a class="btn btn-secondary" href="{{ url_for('web.index', client=client) }}">Back</a></div></form>
+<div class="form-actions">{{ button('Save to inventory') }}<a class="btn btn-secondary" href="{{ url_for('web.products', client=client) }}">Back</a></div></form>
 {% else %}
 <p class="muted">Nothing can be added from this selection.</p>
 <div class="form-actions"><a class="btn btn-secondary" href="{{ url_for('web.index', client=client) }}">Back</a></div>

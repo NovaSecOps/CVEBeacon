@@ -117,7 +117,7 @@
     web-assets.js script hides and wires them; the server-side bulk actions work
     without it. Place inside the single form that owns the checkboxes. -#}
 {% macro bulk_select_controls(count_label='0 selected') %}
-<div class="bulk-select-controls"><button type="button" class="btn btn-secondary btn-small" data-bulk-select-all>Select all</button><button type="button" class="btn btn-secondary btn-small" data-bulk-clear>Clear</button><span class="muted" data-bulk-count aria-live="polite">{{ count_label }}</span></div>
+<div class="bulk-select-controls" data-bulk-controls><button type="button" class="btn btn-secondary btn-small" data-bulk-select-all>Select all</button><button type="button" class="btn btn-secondary btn-small" data-bulk-clear>Clear</button><span class="muted" data-bulk-count aria-live="polite">{{ count_label }}</span></div>
 {% endmacro %}
 
 {#- Section navigation. items: list of dicts {label,url,current,count,tone}.

@@ -81,6 +81,19 @@
                 }
             });
         }
+
+        // The section tabs scroll in one row on narrow screens. Keep the
+        // current page visible without scrolling the page itself.
+        var tabs = document.querySelector(".section-tabs");
+        var currentTab = tabs && tabs.querySelector('[aria-current="page"]');
+        if (currentTab) {
+            var left = currentTab.offsetLeft;
+            var right = left + currentTab.offsetWidth;
+            if (left < tabs.scrollLeft) tabs.scrollLeft = left;
+            else if (right > tabs.scrollLeft + tabs.clientWidth) {
+                tabs.scrollLeft = right - tabs.clientWidth;
+            }
+        }
     });
 
     // Optional confirmation: <form data-confirm="..."> or <button data-confirm="...">.

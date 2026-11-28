@@ -17,6 +17,7 @@
         var selectAll = form.querySelector("[data-bulk-select-all]");
         var clear = form.querySelector("[data-bulk-clear]");
         var count = form.querySelector("[data-bulk-count]");
+        var controls = form.querySelector("[data-bulk-controls]");
         if (!selectAll && !clear && !count) return;
 
         function update() {
@@ -47,6 +48,7 @@
             if (event.target && event.target.name === "pick") update();
         });
         update();
+        if (controls) controls.setAttribute("data-bulk-ready", "true");
     }
 
     document.addEventListener("DOMContentLoaded", function () {
