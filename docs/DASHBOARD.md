@@ -119,9 +119,11 @@ the landing page.
 `/web-assets/changes?client=...` is the Changes page.
 `/web-assets/overview?client=...` redirects to `/web-assets?client=...`, and an
 old product, view or filter query redirects to Products with the same values.
-Old `sync_page` and `sync_result` queries redirect to Changes. The Changes tab
-appears only while inventory sync is enabled for the client; otherwise Overview
-offers a small **Turn on inventory sync** link.
+Old `sync_page` and `sync_result` queries redirect to Changes while the client's
+sync mode is **Review** or **Auto**. The Changes tab appears only while
+inventory sync is enabled for the client; otherwise Overview offers a small
+**Turn on inventory sync** link, and Changes shows only its settings card. The
+old `#inventory-sync` bookmark on Overview opens Changes.
 Products opens **By site** with every site group collapsed by default; each
 summary shows the product count and the ready and needs-review badges. **By
 technology** aggregates one row per technology, and **By category** groups by
@@ -304,7 +306,12 @@ default and whether automatic removal is on. Proposals are grouped into **New
 products** (Add or Ignore), **Version changes** (Update or Keep) and **Not
 detected** (Remove, Keep or Undo keep), with the counts and up to 500 proposals
 per page. Each group opens when it has proposals on the page. **Add** opens the
-normal inventory preview and returns to Changes after the product is saved.
+normal inventory preview and returns to Changes after the product is saved, on
+the same proposal page.
+With **Off**, Changes shows only the settings card. Missing products keep their
+flags and **Remove**, **Keep** and **Undo keep** actions on Overview, where they
+remain reachable without the Changes tab. The rest of the sync setting still
+applies as the table below describes.
 
 | Mode | What a rescan does |
 | --- | --- |
@@ -313,8 +320,9 @@ normal inventory preview and returns to Changes after the product is saved.
 | Auto | Adds ready products and updates changed versions after a complete detection. The page shows the last automatic changes. |
 
 In every mode, a web-added product missing from two consecutive complete
-detections of its site gets a **Not detected since YYYY-MM-DD** badge in
-**Changes since the last scan**. It stays in the inventory and is still included
+detections of its site gets a **Not detected since YYYY-MM-DD** badge: in
+**Changes since the last scan** for Review or Auto, and in **Missing products**
+on Overview for Off. It stays in the inventory and is still included
 in CVE scans. With automatic removal off, someone must click **Remove** to
 remove it. **Keep** leaves it flagged in inventory and prevents automatic
 removal. **Undo keep** clears that decision.
